@@ -90,6 +90,28 @@ def _placeholder_png_writer(color=(1, 2, 3)):
     return fake_run
 
 
+def _write_placeholder_png(path, color=(4, 5, 6)):
+    """Writes a tiny real PNG straight to `path` — the Wayland D-Bus-based
+    backends don't shell out to anything `_placeholder_png_writer` could
+    intercept, so their tests need a file already sitting at the path/URI
+    the fake D-Bus reply points at.
+    """
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    image.fill(qRgb(*color))
+    image.save(path, "PNG")
+
+
+def _set_session_type(monkeypatch, session_type):
+    """Sets or unsets XDG_SESSION_TYPE, matching detect_session_type()'s
+    two ways of *not* being 'wayland': the env var set to something else,
+    or not set at all.
+    """
+    if session_type is None:
+        monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    else:
+        monkeypatch.setenv("XDG_SESSION_TYPE", session_type)
+
+
 def make_frame(
     image_size=(200, 100), logical_size=(200, 100), logical_origin=(0, 0)
 ) -> Frame:
@@ -558,3 +580,317 @@ class TestX11WindowGeometryProvider:
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
         monkeypatch.setattr(capture.shutil, "which", lambda b: "/usr/bin/wmctrl")
         assert provider.is_available() is False
+
+
+WAYLAND_ONLY_BACKENDS = [
+    capture.GrimBackend,
+    capture.PortalScreenshotBackend,
+    capture.GnomeShellHelperBackend,
+]
+
+NOT_WAYLAND_SESSION_TYPES = ["x11", None]  # None means XDG_SESSION_TYPE unset
+
+
+class TestWaylandBackendsRequireWaylandSession:
+    """Covers "Wayland backends report unavailable when detect_session_type()
+    is not 'wayland'" directly for each backend, rather than relying on one
+    shared assumption — with grim/D-Bus mocked as present so the session
+    type is provably the only thing gating availability here.
+    """
+
+    @pytest.mark.parametrize("backend_cls", WAYLAND_ONLY_BACKENDS)
+    @pytest.mark.parametrize("session_type", NOT_WAYLAND_SESSION_TYPES)
+    def test_unavailable_when_not_wayland(self, monkeypatch, backend_cls, session_type):
+        _set_session_type(monkeypatch, session_type)
+        monkeypatch.setattr(capture.shutil, "which", lambda b: f"/usr/bin/{b}")
+
+        assert backend_cls().is_available() is False
+
+
+class TestGrimBackend:
+    def test_unavailable_when_binary_missing(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: None)
+
+        backend = capture.GrimBackend()
+
+        assert backend.is_available() is False
+        assert "grim" in backend.unavailable_reason()
+
+    def test_unavailable_off_wayland_even_with_binary_present(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: f"/usr/bin/{b}")
+
+        backend = capture.GrimBackend()
+
+        assert backend.is_available() is False
+        assert backend.unavailable_reason() == "not a Wayland session"
+
+    def test_available_when_wayland_and_binary_present(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: f"/usr/bin/{b}")
+
+        backend = capture.GrimBackend()
+
+        assert backend.is_available() is True
+        assert backend.unavailable_reason() is None
+
+    def test_capture_invokes_grim_and_returns_a_frame(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        recorded_argv = []
+
+        def fake_run(argv, **kwargs):
+            recorded_argv.append(argv)
+            return _placeholder_png_writer()(argv, **kwargs)
+
+        monkeypatch.setattr(capture.subprocess, "run", fake_run)
+
+        frame = capture.GrimBackend().capture()
+
+        assert recorded_argv[0][0] == "grim"
+        assert recorded_argv[0][-1] != "grim"  # a real path argument, not just the binary
+        assert frame.logical_origin == QPointF(0, 0)
+        assert frame.logical_size == QSizeF(50, 40)
+        assert not frame.image.isNull()
+
+    def test_capture_cleans_up_its_temp_file_even_on_failure(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        seen_paths = []
+
+        def raising_run(argv, **kwargs):
+            seen_paths.append(argv[-1])
+            raise subprocess.CalledProcessError(1, argv)
+
+        monkeypatch.setattr(capture.subprocess, "run", raising_run)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            capture.GrimBackend().capture()
+
+        assert not os.path.exists(seen_paths[0])
+
+
+class TestPortalScreenshotBackend:
+    def test_is_available_only_under_wayland(self, monkeypatch):
+        backend = capture.PortalScreenshotBackend()
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        assert backend.is_available() is True
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        assert backend.is_available() is False
+
+    def test_unavailable_reason_matches_availability(self, monkeypatch):
+        backend = capture.PortalScreenshotBackend()
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        assert backend.unavailable_reason() is None
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        assert backend.unavailable_reason() == "not a Wayland session"
+
+    def test_subscribe_happens_before_send_request(self, monkeypatch, tmp_path):
+        # The acceptance criterion this backend exists for: a fast-replying
+        # portal's Response signal must never be able to arrive before this
+        # backend has started listening for it.
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        order = []
+
+        fake_filter_handle = Mock()
+        fake_filter_handle.queue = Mock()
+
+        def fake_subscribe(self, connection, request_path):
+            order.append("subscribe")
+            return fake_filter_handle
+
+        def fake_send_request(self, connection, handle_token):
+            order.append("send_request")
+
+        monkeypatch.setattr(capture.PortalScreenshotBackend, "_subscribe", fake_subscribe)
+        monkeypatch.setattr(
+            capture.PortalScreenshotBackend, "_send_request", fake_send_request
+        )
+
+        image_path = tmp_path / "shot.png"
+        _write_placeholder_png(str(image_path))
+        response = Mock(body=(0, {"uri": ("s", image_path.as_uri())}))
+        fake_connection = Mock(unique_name=":1.23")
+        fake_connection.recv_until_filtered = Mock(return_value=response)
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: fake_connection)
+
+        frame = capture.PortalScreenshotBackend().capture()
+
+        assert order == ["subscribe", "send_request"]
+        assert isinstance(frame, Frame)
+
+    def test_capture_builds_a_frame_from_the_response_signal(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        image_path = tmp_path / "shot.png"
+        _write_placeholder_png(str(image_path))
+        response = Mock(body=(0, {"uri": ("s", image_path.as_uri())}))
+
+        fake_connection = Mock(unique_name=":1.42")
+        fake_filter_handle = Mock()
+        fake_filter_handle.queue = Mock()
+        fake_connection.filter = Mock(return_value=fake_filter_handle)
+        fake_connection.recv_until_filtered = Mock(return_value=response)
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: fake_connection)
+
+        frame = capture.PortalScreenshotBackend().capture()
+
+        assert fake_connection.filter.called
+        assert fake_connection.send.called
+        assert fake_connection.close.called
+        assert frame.logical_origin == QPointF(0, 0)
+        assert frame.logical_size == QSizeF(50, 40)
+        assert not frame.image.isNull()
+
+    def test_capture_raises_when_response_code_is_nonzero(self, monkeypatch):
+        # response code 1 = user cancelled, 2 = other error. Either way
+        # `results` carries no "uri", so this must fail with a clear
+        # RuntimeError rather than a bare KeyError on results["uri"].
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+
+        response = Mock(body=(1, {}))
+        fake_connection = Mock(unique_name=":1.42")
+        fake_filter_handle = Mock()
+        fake_filter_handle.queue = Mock()
+        fake_connection.filter = Mock(return_value=fake_filter_handle)
+        fake_connection.recv_until_filtered = Mock(return_value=response)
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: fake_connection)
+
+        with pytest.raises(RuntimeError, match="response code 1"):
+            capture.PortalScreenshotBackend().capture()
+
+        assert fake_connection.close.called
+
+
+class TestGnomeShellHelperBackend:
+    def test_is_available_only_under_wayland(self, monkeypatch):
+        backend = capture.GnomeShellHelperBackend()
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        assert backend.is_available() is True
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        assert backend.is_available() is False
+
+    def test_unavailable_reason_matches_availability(self, monkeypatch):
+        backend = capture.GnomeShellHelperBackend()
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        assert backend.unavailable_reason() is None
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        assert backend.unavailable_reason() == "not a Wayland session"
+
+    def test_capture_returns_a_frame_when_screenshot_succeeds(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        def fake_send_and_get_reply(message):
+            # The filename this backend supplied is the call's last arg;
+            # write the placeholder there so the backend's own QImage load
+            # succeeds, exactly like the shell-out backends' fake_run does.
+            path = message.body[-1]
+            _write_placeholder_png(path)
+            return Mock(body=(True, path))
+
+        fake_connection = Mock()
+        fake_connection.send_and_get_reply = Mock(side_effect=fake_send_and_get_reply)
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: fake_connection)
+
+        frame = capture.GnomeShellHelperBackend().capture()
+
+        assert frame.logical_origin == QPointF(0, 0)
+        assert frame.logical_size == QSizeF(50, 40)
+        assert not frame.image.isNull()
+        assert fake_connection.close.called
+
+    def test_capture_raises_when_screenshot_reports_failure(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        fake_connection = Mock()
+        fake_connection.send_and_get_reply = Mock(return_value=Mock(body=(False, "")))
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: fake_connection)
+
+        with pytest.raises(RuntimeError):
+            capture.GnomeShellHelperBackend().capture()
+
+    def test_capture_cleans_up_its_temp_file_on_success_and_on_failure(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        seen_paths = []
+
+        def fake_send_and_get_reply_success(message):
+            path = message.body[-1]
+            seen_paths.append(path)
+            _write_placeholder_png(path)
+            return Mock(body=(True, path))
+
+        fake_connection = Mock()
+        fake_connection.send_and_get_reply = Mock(side_effect=fake_send_and_get_reply_success)
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: fake_connection)
+
+        capture.GnomeShellHelperBackend().capture()
+
+        assert not os.path.exists(seen_paths[0])
+
+        def fake_send_and_get_reply_failure(message):
+            path = message.body[-1]
+            seen_paths.append(path)
+            return Mock(body=(False, path))
+
+        fake_connection.send_and_get_reply = Mock(side_effect=fake_send_and_get_reply_failure)
+
+        with pytest.raises(RuntimeError):
+            capture.GnomeShellHelperBackend().capture()
+
+        assert not os.path.exists(seen_paths[1])
+
+
+class TestWaylandRegistryOrdering:
+    def test_registers_backends_in_the_required_order(self):
+        registry = capture.build_wayland_registry()
+
+        assert [backend.name() for backend in registry] == [
+            "grim",
+            "portal",
+            "gnome-shell-helper",
+        ]
+
+
+class TestWaylandRegistryFailover:
+    def test_capture_falls_through_past_failing_backends(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: f"/usr/bin/{b}")
+        good_frame = make_frame()
+        monkeypatch.setattr(
+            capture.GrimBackend, "capture", Mock(side_effect=RuntimeError("grim boom"))
+        )
+        monkeypatch.setattr(
+            capture.PortalScreenshotBackend,
+            "capture",
+            Mock(side_effect=RuntimeError("portal boom")),
+        )
+        monkeypatch.setattr(
+            capture.GnomeShellHelperBackend, "capture", Mock(return_value=good_frame)
+        )
+
+        registry = capture.build_wayland_registry()
+        frame = registry.capture()
+
+        assert frame is good_frame
