@@ -15,10 +15,14 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF
+from jeepney import DBusAddress, MatchRule, new_method_call
+from jeepney.io.blocking import open_dbus_connection
+
+from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF, QUrl
 from PyQt6.QtGui import QGuiApplication, QImage, QPainter
 
 
@@ -434,4 +438,257 @@ def build_x11_registry() -> BackendRegistry:
     registry.add(MaimBackend())
     registry.add(ImportBackend())
     registry.add(ScrotBackend())
+    return registry
+
+
+def _wayland_shell_backend_available(binary: str) -> tuple[bool, str | None]:
+    """Wayland counterpart of `_x11_shell_backend_available`.
+
+    Kept as its own function rather than generalized across session types —
+    Wayland's shell-out backend (grim) has different flags/output-selection
+    needs than the X11 tools, and CLAUDE.md scopes platform differences to
+    stay confined within this file, not necessarily into one shared helper.
+    """
+    if detect_session_type() != "wayland":
+        return False, "not a Wayland session"
+    if shutil.which(binary) is None:
+        return False, f"{binary} not found on PATH"
+    return True, None
+
+
+class GrimBackend(CaptureBackend):
+    """First in priority order: grim, the wlroots screenshot utility.
+
+    Run with no `-o`/`-g` it stitches every output into one image, which is
+    exactly the "whole virtual desktop in one shot" contract `Frame`
+    expects — logical geometry still comes from `_virtual_desktop_geometry()`
+    rather than grim's own output, since grim has no notion of Qt's logical
+    coordinate space, same reason `_ShellOutX11Backend` does that.
+    """
+
+    def name(self) -> str:
+        return "grim"
+
+    def is_available(self) -> bool:
+        available, _reason = _wayland_shell_backend_available("grim")
+        return available
+
+    def unavailable_reason(self) -> str | None:
+        _available, reason = _wayland_shell_backend_available("grim")
+        return reason
+
+    def capture(self) -> Frame:
+        virtual_rect = _virtual_desktop_geometry()
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.close()
+        path = tmp.name
+        try:
+            # grim owns nothing after the call returns; the tempfile is
+            # ours to create and remove, same as every X11 shell-out
+            # backend.
+            subprocess.run(["grim", path], check=True)
+            image = QImage(path)
+            if image.isNull():
+                raise RuntimeError("grim: produced an unreadable image")
+        finally:
+            os.remove(path)
+
+        return Frame(
+            image=image,
+            logical_origin=virtual_rect.topLeft(),
+            logical_size=virtual_rect.size(),
+        )
+
+
+class PortalScreenshotBackend(CaptureBackend):
+    """Second in priority order: xdg-desktop-portal's Screenshot method,
+    over the session bus via jeepney.
+
+    The portal's request/response handshake has a documented failure mode:
+    if the client sends the `Screenshot` call and only afterwards starts
+    listening for the `Request` object's `Response` signal, a fast-replying
+    portal's response can arrive in the gap and be missed forever. Avoiding
+    that is the entire reason `capture()` below computes the request path
+    and subscribes to it (`_subscribe`) *before* sending the request
+    (`_send_request`), rather than the more obvious "call, then wait for
+    reply" shape.
+    """
+
+    _BUS_NAME = "org.freedesktop.portal.Desktop"
+    _OBJECT_PATH = "/org/freedesktop/portal/desktop"
+    _INTERFACE = "org.freedesktop.portal.Screenshot"
+    _REQUEST_INTERFACE = "org.freedesktop.portal.Request"
+    _RESPONSE_TIMEOUT_SECONDS = 30
+
+    def name(self) -> str:
+        return "portal"
+
+    def is_available(self) -> bool:
+        # No D-Bus round-trip here: opening a connection isn't free, and
+        # is_available() is called by BackendRegistry.available() on every
+        # capture() attempt across the whole registry, not just this one.
+        return detect_session_type() == "wayland"
+
+    def unavailable_reason(self) -> str | None:
+        return None if self.is_available() else "not a Wayland session"
+
+    def _new_handle_token(self) -> str:
+        # Must be unique per request: reusing a token would collide with
+        # the Request object path of an earlier, possibly still-pending
+        # call from this same connection.
+        return f"snipux_{uuid.uuid4().hex}"
+
+    def _request_path(self, unique_name: str, handle_token: str) -> str:
+        # Per the xdg-desktop-portal spec, the Request object path is
+        # deterministic from the caller's unique bus name (':1.23' becomes
+        # '1_23') and the handle_token passed in the call's options — known
+        # before the call is sent, not extracted from its reply. That's
+        # what makes subscribing-before-sending possible at all.
+        sender = unique_name.lstrip(":").replace(".", "_")
+        return f"/org/freedesktop/portal/desktop/request/{sender}/{handle_token}"
+
+    def _subscribe(self, connection, request_path: str):
+        """Start listening for `request_path`'s `Response` signal.
+
+        Split out from `capture()` so a test can assert this runs strictly
+        before `_send_request()` — the ordering the portal's documented
+        failure mode depends on.
+        """
+        rule = MatchRule(
+            type="signal",
+            interface=self._REQUEST_INTERFACE,
+            member="Response",
+            path=request_path,
+        )
+        return connection.filter(rule)
+
+    def _send_request(self, connection, handle_token: str) -> None:
+        """Send the `Screenshot` method call. Must run after `_subscribe`."""
+        portal = DBusAddress(
+            self._OBJECT_PATH, bus_name=self._BUS_NAME, interface=self._INTERFACE
+        )
+        message = new_method_call(
+            portal,
+            "Screenshot",
+            "sa{sv}",
+            ("", {"handle_token": ("s", handle_token)}),
+        )
+        connection.send(message)
+
+    def capture(self) -> Frame:
+        virtual_rect = _virtual_desktop_geometry()
+
+        connection = open_dbus_connection(bus="SESSION")
+        try:
+            handle_token = self._new_handle_token()
+            request_path = self._request_path(connection.unique_name, handle_token)
+
+            # Subscribe before sending — see the class docstring. This
+            # ordering, not the D-Bus plumbing around it, is the point of
+            # this backend.
+            filter_handle = self._subscribe(connection, request_path)
+            try:
+                self._send_request(connection, handle_token)
+                response = connection.recv_until_filtered(
+                    filter_handle.queue, timeout=self._RESPONSE_TIMEOUT_SECONDS
+                )
+            finally:
+                filter_handle.close()
+
+            response_code, results = response.body
+            if response_code != 0:
+                # 0 = success, 1 = user cancelled (e.g. dismissed a
+                # permission/picker dialog), 2 = other error. Any non-zero
+                # code means `results` has no "uri" to read, so surface a
+                # clear failure here rather than letting a bare KeyError
+                # stand in for it below.
+                raise RuntimeError(
+                    f"portal: Screenshot request did not succeed (response code {response_code})"
+                )
+            uri = results["uri"][1]
+            image_path = QUrl(uri).toLocalFile()
+            image = QImage(image_path)
+            if image.isNull():
+                raise RuntimeError("portal: produced an unreadable image")
+        finally:
+            connection.close()
+
+        return Frame(
+            image=image,
+            logical_origin=virtual_rect.topLeft(),
+            logical_size=virtual_rect.size(),
+        )
+
+
+class GnomeShellHelperBackend(CaptureBackend):
+    """Third and last-resort fallback: GNOME Shell's own D-Bus screenshot
+    method, `org.gnome.Shell.Screenshot`.
+
+    Unlike the portal, this is a single synchronous method call with no
+    request/response-signal handshake, so no subscribe-before-send concern
+    applies here. Unlike the portal (which owns wherever it saves its
+    screenshot and hands back a URI we merely read), we supply `filename`
+    to this call ourselves — same as every `_ShellOutX11Backend` subclass
+    creating its own tempfile before shelling out — so it gets the same
+    tempfile/`finally`-cleanup treatment.
+    """
+
+    _BUS_NAME = "org.gnome.Shell"
+    _OBJECT_PATH = "/org/gnome/Shell"
+    _INTERFACE = "org.gnome.Shell"
+
+    def name(self) -> str:
+        return "gnome-shell-helper"
+
+    def is_available(self) -> bool:
+        return detect_session_type() == "wayland"
+
+    def unavailable_reason(self) -> str | None:
+        return None if self.is_available() else "not a Wayland session"
+
+    def capture(self) -> Frame:
+        virtual_rect = _virtual_desktop_geometry()
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.close()
+        path = tmp.name
+        try:
+            connection = open_dbus_connection(bus="SESSION")
+            try:
+                shell = DBusAddress(
+                    self._OBJECT_PATH, bus_name=self._BUS_NAME, interface=self._INTERFACE
+                )
+                message = new_method_call(
+                    shell, "Screenshot", "bbs", (False, False, path)
+                )
+                reply = connection.send_and_get_reply(message)
+            finally:
+                connection.close()
+
+            success, filename = reply.body
+            if not success:
+                # No backend after this one, so this surfaces to the
+                # caller wrapped in BackendRegistry.capture()'s CaptureError.
+                raise RuntimeError("gnome-shell-helper: Screenshot() reported failure")
+
+            image = QImage(filename)
+            if image.isNull():
+                raise RuntimeError("gnome-shell-helper: produced an unreadable image")
+        finally:
+            os.remove(path)
+
+        return Frame(
+            image=image,
+            logical_origin=virtual_rect.topLeft(),
+            logical_size=virtual_rect.size(),
+        )
+
+
+def build_wayland_registry() -> BackendRegistry:
+    """The real Wayland `BackendRegistry`: grim, portal, gnome-shell-helper."""
+    registry = BackendRegistry()
+    registry.add(GrimBackend())
+    registry.add(PortalScreenshotBackend())
+    registry.add(GnomeShellHelperBackend())
     return registry
