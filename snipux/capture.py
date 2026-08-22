@@ -11,11 +11,15 @@ tickets register real backends into. No real backend lives here yet.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import tempfile
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF
-from PyQt6.QtGui import QImage
+from PyQt6.QtGui import QGuiApplication, QImage, QPainter
 
 
 @dataclass
@@ -167,3 +171,267 @@ def detect_session_type() -> str:
     if session_type == "x11":
         return "x11"
     return "unknown"
+
+
+def _virtual_desktop_geometry() -> QRectF:
+    """Union of every screen's logical geometry, in absolute logical coords.
+
+    Same union-of-rects pattern `create_overlays()` uses in overlay.py,
+    extracted once here so the Qt-native and shell-out X11 backends below
+    don't each recompute it independently.
+    """
+    union: QRectF | None = None
+    for screen in QGuiApplication.screens():
+        geometry = QRectF(screen.geometry())
+        union = geometry if union is None else union.united(geometry)
+    return union if union is not None else QRectF()
+
+
+def _x11_shell_backend_available(binary: str) -> tuple[bool, str | None]:
+    """Shared "am I usable" check for every shell-out X11 backend.
+
+    Session type is checked before the binary so the reported reason is
+    the more useful one when both would fail — e.g. on Wayland with `maim`
+    installed, the reason should say "not an X11 session", not report a
+    missing binary that isn't actually the blocker.
+    """
+    if detect_session_type() != "x11":
+        return False, "not an X11 session"
+    if shutil.which(binary) is None:
+        return False, f"{binary} not found on PATH"
+    return True, None
+
+
+class QtNativeX11Backend(CaptureBackend):
+    """Captures via Qt's own `QScreen.grabWindow` — no process spawn.
+
+    Registered first: it costs nothing to check and spawns nothing to run,
+    so it's preferred over shelling out whenever it's usable.
+    """
+
+    def name(self) -> str:
+        return "qt-native"
+
+    def is_available(self) -> bool:
+        return detect_session_type() == "x11"
+
+    def unavailable_reason(self) -> str | None:
+        return None if self.is_available() else "not an X11 session"
+
+    def capture(self) -> Frame:
+        virtual_rect = _virtual_desktop_geometry()
+        origin = virtual_rect.topLeft()
+
+        # One session-wide ratio, taken from the primary screen, rather
+        # than each screen's own devicePixelRatio() — Frame/crop() can only
+        # represent a single scale factor for the whole image, so
+        # compositing per-screen ratios would get the canvas size right
+        # while silently misplacing/missizing whichever monitor doesn't
+        # match. GNOME/X11 scaling is session-wide in practice anyway; true
+        # per-monitor DPI on X11 would need a Frame-level model change,
+        # which is out of scope here.
+        ratio = QGuiApplication.primaryScreen().devicePixelRatio()
+
+        image = QImage(
+            round(virtual_rect.width() * ratio),
+            round(virtual_rect.height() * ratio),
+            QImage.Format.Format_RGB32,
+        )
+        image.fill(0)
+
+        painter = QPainter(image)
+        for screen in QGuiApplication.screens():
+            pixmap = screen.grabWindow(0)
+            geometry = QRectF(screen.geometry())
+            target = QRectF(
+                (geometry.x() - origin.x()) * ratio,
+                (geometry.y() - origin.y()) * ratio,
+                geometry.width() * ratio,
+                geometry.height() * ratio,
+            )
+            painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
+        # Closed before Frame() is constructed below, never left open
+        # across a read of the image it painted, per CLAUDE.md.
+        painter.end()
+
+        return Frame(image=image, logical_origin=origin, logical_size=virtual_rect.size())
+
+
+class _ShellOutX11Backend(CaptureBackend):
+    """Shared plumbing for capture backends that shell out to a screenshot
+    tool. Subclasses only supply a name, the binary to check for, and the
+    argv that writes a capture to a given path.
+    """
+
+    def __init__(self, backend_name: str, binary: str):
+        self._name = backend_name
+        self._binary = binary
+
+    def name(self) -> str:
+        return self._name
+
+    def is_available(self) -> bool:
+        available, _reason = _x11_shell_backend_available(self._binary)
+        return available
+
+    def unavailable_reason(self) -> str | None:
+        _available, reason = _x11_shell_backend_available(self._binary)
+        return reason
+
+    def _command(self, path: str) -> list[str]:
+        """The argv to run, writing the capture to `path`."""
+        raise NotImplementedError
+
+    def capture(self) -> Frame:
+        # These tools capture in X-server pixel space and have no notion of
+        # Qt's logical coordinate system, so the logical geometry to report
+        # comes from Qt, not from the tool's own output.
+        virtual_rect = _virtual_desktop_geometry()
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.close()
+        path = tmp.name
+        try:
+            # A missing binary here (rather than at is_available() time) is
+            # a TOCTOU race, not a "can't happen" — it still raises and lets
+            # BackendRegistry.capture() move on to the next backend.
+            subprocess.run(self._command(path), check=True)
+            image = QImage(path)
+            if image.isNull():
+                raise RuntimeError(f"{self._name}: produced an unreadable image")
+        finally:
+            os.remove(path)
+
+        return Frame(
+            image=image,
+            logical_origin=virtual_rect.topLeft(),
+            logical_size=virtual_rect.size(),
+        )
+
+
+class MaimBackend(_ShellOutX11Backend):
+    """Second in priority order: a lightweight, X11-only screenshot tool."""
+
+    def __init__(self):
+        super().__init__("maim", "maim")
+
+    def _command(self, path: str) -> list[str]:
+        return ["maim", path]
+
+
+class ImportBackend(_ShellOutX11Backend):
+    """Third in priority order: ImageMagick's `import`."""
+
+    def __init__(self):
+        super().__init__("import", "import")
+
+    def _command(self, path: str) -> list[str]:
+        # -window root is what makes this non-interactive; plain `import`
+        # waits for the user to click a target window/region.
+        return ["import", "-window", "root", path]
+
+
+class ScrotBackend(_ShellOutX11Backend):
+    """Fourth in priority order: scrot."""
+
+    def __init__(self):
+        super().__init__("scrot", "scrot")
+
+    def _command(self, path: str) -> list[str]:
+        return ["scrot", path]
+
+
+class X11WindowGeometryProvider:
+    """Real per-window geometry source for X11's window-selection mode.
+
+    Duck-types `overlay.GeometryProvider`'s shape (`is_available()`,
+    `window_at()`) without importing it, since `overlay.py` already imports
+    `Frame` from this module and importing back would create a cycle.
+    """
+
+    # overlay.py's window mode calls window_at() from mouseMoveEvent, i.e.
+    # at mouse-move frequency (easily 100+/s) while the user hovers looking
+    # for a window to click. Re-running `wmctrl` that often would make the
+    # hover-highlight stutter behind the cursor, so results are cached for
+    # a short interval instead of shelling out on every call. The window
+    # list changing (opened/closed/moved) mid-hover a few hundred
+    # milliseconds late is not something a user can perceive; a stale
+    # cursor is.
+    _CACHE_SECONDS = 0.2
+
+    def __init__(self):
+        self._cache: list[tuple[str, QRectF]] | None = None
+        self._cache_time: float | None = None
+
+    def list_windows(self) -> list[tuple[str, QRectF]]:
+        """(title, absolute logical rect) for every on-screen window.
+
+        One shelled-out `wmctrl -lG` call, not one process per window —
+        and not one process per call either, thanks to the short-lived
+        cache described above. Returns `[]` — not an exception — when
+        `wmctrl` is missing or fails, consistent with CLAUDE.md's "a
+        backend that fails must not stop the next one" applied to this
+        provider too.
+        """
+        now = time.monotonic()
+        if (
+            self._cache is not None
+            and self._cache_time is not None
+            and now - self._cache_time < self._CACHE_SECONDS
+        ):
+            return self._cache
+
+        windows = self._list_windows_uncached()
+        self._cache = windows
+        self._cache_time = now
+        return windows
+
+    def _list_windows_uncached(self) -> list[tuple[str, QRectF]]:
+        if shutil.which("wmctrl") is None:
+            return []
+        try:
+            result = subprocess.run(
+                ["wmctrl", "-lG"], check=True, capture_output=True, text=True
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return []
+
+        windows = []
+        for line in result.stdout.splitlines():
+            # Columns: id desktop x y width height host title... — capped
+            # split count so a title containing spaces survives intact
+            # instead of being chopped into extra fields.
+            fields = line.split(None, 7)
+            if len(fields) < 8:
+                continue
+            _win_id, _desktop, x, y, width, height, _host, title = fields
+            try:
+                rect = QRectF(float(x), float(y), float(width), float(height))
+            except ValueError:
+                continue
+            windows.append((title, rect))
+        return windows
+
+    def is_available(self) -> bool:
+        # Mirrors CaptureBackend.is_available()'s shape intentionally, per
+        # overlay.GeometryProvider's docstring.
+        return detect_session_type() == "x11" and shutil.which("wmctrl") is not None
+
+    def window_at(self, point: QPointF) -> QRectF | None:
+        # wmctrl -lG's output order isn't a guaranteed stacking order, so
+        # this is "first match", not "topmost match" — a real limitation,
+        # not a silent claim of correctness it can't back up.
+        for _title, rect in self.list_windows():
+            if rect.contains(point):
+                return rect
+        return None
+
+
+def build_x11_registry() -> BackendRegistry:
+    """The real X11 `BackendRegistry`: qt-native, maim, import, scrot."""
+    registry = BackendRegistry()
+    registry.add(QtNativeX11Backend())
+    registry.add(MaimBackend())
+    registry.add(ImportBackend())
+    registry.add(ScrotBackend())
+    return registry
