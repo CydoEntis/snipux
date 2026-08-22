@@ -6,7 +6,7 @@ from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
-from snipux.capture import Frame
+from snipux.capture import Frame, X11WindowGeometryProvider
 from snipux.overlay import (
     GeometryProvider,
     Overlay,
@@ -472,6 +472,40 @@ class TestWindowMode:
         confirmed.assert_called_once_with(
             QRectF(QPointF(start), QPointF(end)).normalized(), None
         )
+
+
+class TestX11WindowGeometryProviderIntegration:
+    """Proves the real X11 provider (not just the fake in TestWindowMode
+    above) satisfies Overlay's expectations end to end: a real `wmctrl -lG`
+    call, mocked, feeding straight into window-mode click handling.
+    """
+
+    WMCTRL_STDOUT = "0x1  0 30 30 50 50 host1 Some Window\n"
+    HIT_POINT = QPoint(50, 50)  # inside (30,30)-(80,80)
+
+    def test_click_on_a_listed_window_confirms_its_geometry(self, monkeypatch):
+        monkeypatch.setattr(
+            "snipux.capture.shutil.which", lambda binary: "/usr/bin/wmctrl"
+        )
+        monkeypatch.setattr(
+            "snipux.capture.subprocess.run",
+            lambda *a, **k: Mock(stdout=self.WMCTRL_STDOUT, returncode=0),
+        )
+        provider = X11WindowGeometryProvider()
+
+        frame = make_frame()
+        overlay = Overlay(
+            frame,
+            QRectF(0, 0, 200, 200),
+            mode=SelectionMode.WINDOW,
+            geometry_provider=provider,
+        )
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        confirmed.assert_called_once_with(QRectF(30, 30, 50, 50), None)
 
 
 class TestFullScreenMode:

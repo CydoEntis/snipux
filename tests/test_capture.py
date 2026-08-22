@@ -1,8 +1,14 @@
-from PyQt6.QtCore import QPointF, QRectF, QSizeF
-from PyQt6.QtGui import QImage, qRgb
+import os
+import subprocess
+from unittest.mock import Mock
+
+from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF
+from PyQt6.QtGui import QColor, QImage, QPixmap, qRgb
+from PyQt6.QtWidgets import QApplication
 
 import pytest
 
+import snipux.capture as capture
 from snipux.capture import (
     BackendRegistry,
     CaptureBackend,
@@ -10,6 +16,78 @@ from snipux.capture import (
     Frame,
     detect_session_type,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def qapp():
+    # QPixmap/QPainter (used by the Qt-native X11 backend and its test
+    # doubles below) crash without a live QGuiApplication, even offscreen —
+    # unlike plain QImage, which the rest of this file uses fine without one.
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+class _FakeScreen:
+    """Stand-in for QScreen exposing only what capture.py's X11 backends
+    call: geometry(), devicePixelRatio(), and grabWindow().
+    """
+
+    def __init__(self, geometry: QRect, ratio: float = 1.0):
+        self._geometry = geometry
+        self._ratio = ratio
+        self._pixmap = None
+
+    def geometry(self) -> QRect:
+        return self._geometry
+
+    def devicePixelRatio(self) -> float:
+        return self._ratio
+
+    def grabWindow(self, window_id):
+        # Built lazily (not in __init__) so a plain _FakeScreen used only
+        # for geometry math (e.g. TestVirtualDesktopGeometry) never touches
+        # QPixmap at all.
+        if self._pixmap is None:
+            self._pixmap = QPixmap(self._geometry.width(), self._geometry.height())
+            self._pixmap.fill(QColor(9, 9, 9))
+        return self._pixmap
+
+
+class _FakeQGuiApplication:
+    """Stand-in for the QGuiApplication class object itself.
+
+    capture.py calls `QGuiApplication.screens()` / `.primaryScreen()`
+    class-style, without instantiating; monkeypatching the module's
+    `QGuiApplication` name to *an instance* of this class works the same
+    way, since attribute lookup finds these bound methods either way.
+    """
+
+    def __init__(self, screens: list[_FakeScreen]):
+        self._screens = screens
+
+    def screens(self):
+        return self._screens
+
+    def primaryScreen(self):
+        return self._screens[0]
+
+
+def _placeholder_png_writer(color=(1, 2, 3)):
+    """A `subprocess.run` replacement for the shell-out backends: instead
+    of actually running a binary, writes a tiny real PNG to the path the
+    backend passed so the backend's own `QImage(path)` load succeeds.
+    """
+
+    def fake_run(argv, **kwargs):
+        path = argv[-1]
+        image = QImage(2, 2, QImage.Format.Format_RGB32)
+        image.fill(qRgb(*color))
+        image.save(path, "PNG")
+        return Mock(returncode=0)
+
+    return fake_run
 
 
 def make_frame(
@@ -171,3 +249,312 @@ class TestDetectSessionType:
     def test_other_value(self, monkeypatch):
         monkeypatch.setenv("XDG_SESSION_TYPE", "tty")
         assert detect_session_type() == "unknown"
+
+
+class TestVirtualDesktopGeometry:
+    def test_returns_union_of_screen_geometries(self, monkeypatch):
+        screens = [
+            _FakeScreen(QRect(0, 0, 800, 600)),
+            _FakeScreen(QRect(800, 0, 1024, 768)),
+        ]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        result = capture._virtual_desktop_geometry()
+
+        assert result == QRectF(0, 0, 1824, 768)
+
+    def test_qt_native_and_shell_out_backends_agree_on_the_geometry(self, monkeypatch):
+        # Per PLAN.md review point 3: both backend families must derive
+        # their logical origin/size from the same helper, not two
+        # independently-written union loops that could drift apart.
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        monkeypatch.setattr(capture.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        screens = [_FakeScreen(QRect(-100, 0, 300, 200))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        monkeypatch.setattr(capture.subprocess, "run", _placeholder_png_writer())
+
+        qt_frame = capture.QtNativeX11Backend().capture()
+        maim_frame = capture.MaimBackend().capture()
+
+        assert qt_frame.logical_origin == maim_frame.logical_origin == QPointF(-100, 0)
+        assert qt_frame.logical_size == maim_frame.logical_size == QSizeF(300, 200)
+
+
+class TestQtNativeX11Backend:
+    def test_is_available_only_under_x11(self, monkeypatch):
+        backend = capture.QtNativeX11Backend()
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        assert backend.is_available() is True
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        assert backend.is_available() is False
+
+    def test_unavailable_reason_matches_availability(self, monkeypatch):
+        backend = capture.QtNativeX11Backend()
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        assert backend.unavailable_reason() is None
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        assert backend.unavailable_reason() == "not an X11 session"
+
+    def test_capture_covers_the_union_of_all_screens(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        screens = [
+            _FakeScreen(QRect(0, 0, 100, 50)),
+            _FakeScreen(QRect(100, 0, 80, 50)),
+        ]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        frame = capture.QtNativeX11Backend().capture()
+
+        assert frame.logical_origin == QPointF(0, 0)
+        assert frame.logical_size == QSizeF(180, 50)
+        assert frame.image.width() == 180
+        assert frame.image.height() == 50
+        assert not frame.image.isNull()
+
+    def test_capture_uses_the_primary_screens_ratio_not_each_screens_own(self, monkeypatch):
+        # Locks in the "one session-wide ratio" design from PLAN.md's
+        # review point 1: the second screen's own 1x ratio must not leak
+        # into compositing just because it differs from the primary's.
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        screens = [
+            _FakeScreen(QRect(0, 0, 100, 50), ratio=2.0),
+            _FakeScreen(QRect(100, 0, 100, 50), ratio=1.0),
+        ]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        frame = capture.QtNativeX11Backend().capture()
+
+        # Virtual desktop is 200x50 logical; at the primary's 2x ratio the
+        # composited image should be uniformly 400x100.
+        assert frame.image.width() == 400
+        assert frame.image.height() == 100
+
+
+class TestShellOutX11Backends:
+    BACKENDS = [
+        (capture.MaimBackend, "maim"),
+        (capture.ImportBackend, "import"),
+        (capture.ScrotBackend, "scrot"),
+    ]
+
+    @pytest.mark.parametrize("backend_cls,binary", BACKENDS)
+    def test_unavailable_when_binary_missing(self, monkeypatch, backend_cls, binary):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: None)
+
+        backend = backend_cls()
+
+        assert backend.is_available() is False
+        assert binary in backend.unavailable_reason()
+
+    @pytest.mark.parametrize("backend_cls,binary", BACKENDS)
+    def test_unavailable_off_x11_even_with_binary_present(self, monkeypatch, backend_cls, binary):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: f"/usr/bin/{b}")
+
+        backend = backend_cls()
+
+        assert backend.is_available() is False
+        assert backend.unavailable_reason() == "not an X11 session"
+
+    @pytest.mark.parametrize("backend_cls,binary", BACKENDS)
+    def test_available_when_x11_and_binary_present(self, monkeypatch, backend_cls, binary):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: f"/usr/bin/{b}")
+
+        assert backend_cls().is_available() is True
+        assert backend_cls().unavailable_reason() is None
+
+    @pytest.mark.parametrize("backend_cls,binary", BACKENDS)
+    def test_capture_invokes_the_expected_binary_and_returns_a_frame(
+        self, monkeypatch, backend_cls, binary
+    ):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        recorded_argv = []
+
+        def fake_run(argv, **kwargs):
+            recorded_argv.append(argv)
+            return _placeholder_png_writer()(argv, **kwargs)
+
+        monkeypatch.setattr(capture.subprocess, "run", fake_run)
+
+        frame = backend_cls().capture()
+
+        assert recorded_argv[0][0] == binary
+        assert recorded_argv[0][-1] != binary  # a real path argument, not just the binary
+        assert frame.logical_origin == QPointF(0, 0)
+        assert frame.logical_size == QSizeF(50, 40)
+        assert not frame.image.isNull()
+
+    @pytest.mark.parametrize("backend_cls,binary", BACKENDS)
+    def test_capture_raises_when_the_tool_exits_nonzero(self, monkeypatch, backend_cls, binary):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        def raising_run(argv, **kwargs):
+            raise subprocess.CalledProcessError(1, argv)
+
+        monkeypatch.setattr(capture.subprocess, "run", raising_run)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            backend_cls().capture()
+
+    def test_capture_cleans_up_its_temp_file_even_on_failure(self, monkeypatch):
+        # Regression guard for the finally-block cleanup: a failing run
+        # must not leave the temp path behind.
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        seen_paths = []
+
+        def raising_run(argv, **kwargs):
+            seen_paths.append(argv[-1])
+            raise subprocess.CalledProcessError(1, argv)
+
+        monkeypatch.setattr(capture.subprocess, "run", raising_run)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            capture.MaimBackend().capture()
+
+        assert not os.path.exists(seen_paths[0])
+
+
+class TestX11RegistryOrdering:
+    def test_registers_backends_in_the_required_order(self):
+        registry = capture.build_x11_registry()
+
+        assert [backend.name() for backend in registry] == [
+            "qt-native",
+            "maim",
+            "import",
+            "scrot",
+        ]
+
+
+class TestX11RegistryFailover:
+    def test_capture_falls_through_past_failing_backends(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: f"/usr/bin/{b}")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        monkeypatch.setattr(
+            capture.QtNativeX11Backend,
+            "capture",
+            Mock(side_effect=RuntimeError("qt-native boom")),
+        )
+        monkeypatch.setattr(
+            capture.MaimBackend, "capture", Mock(side_effect=RuntimeError("maim boom"))
+        )
+        monkeypatch.setattr(capture.subprocess, "run", _placeholder_png_writer())
+
+        registry = capture.build_x11_registry()
+        frame = registry.capture()
+
+        assert isinstance(frame, Frame)
+
+
+class TestX11WindowGeometryProvider:
+    WMCTRL_STDOUT = (
+        "0x02c00003  0 1920 0   1024 768 host1 Firefox\n"
+        "0x02c00007  0 100  200 640  480 host1 Terminal — bash\n"
+    )
+
+    def test_list_windows_parses_titles_and_geometry(self, monkeypatch):
+        monkeypatch.setattr(capture.shutil, "which", lambda b: "/usr/bin/wmctrl")
+        monkeypatch.setattr(
+            capture.subprocess,
+            "run",
+            lambda *a, **k: Mock(stdout=self.WMCTRL_STDOUT, returncode=0),
+        )
+
+        windows = capture.X11WindowGeometryProvider().list_windows()
+
+        assert windows == [
+            ("Firefox", QRectF(1920, 0, 1024, 768)),
+            ("Terminal — bash", QRectF(100, 200, 640, 480)),
+        ]
+
+    def test_list_windows_is_empty_when_wmctrl_missing(self, monkeypatch):
+        monkeypatch.setattr(capture.shutil, "which", lambda b: None)
+
+        assert capture.X11WindowGeometryProvider().list_windows() == []
+
+    def test_list_windows_is_empty_when_wmctrl_fails(self, monkeypatch):
+        monkeypatch.setattr(capture.shutil, "which", lambda b: "/usr/bin/wmctrl")
+
+        def raising_run(*a, **k):
+            raise subprocess.CalledProcessError(1, ["wmctrl"])
+
+        monkeypatch.setattr(capture.subprocess, "run", raising_run)
+
+        assert capture.X11WindowGeometryProvider().list_windows() == []
+
+    def test_window_at_returns_the_containing_rect_or_none(self, monkeypatch):
+        monkeypatch.setattr(capture.shutil, "which", lambda b: "/usr/bin/wmctrl")
+        monkeypatch.setattr(
+            capture.subprocess,
+            "run",
+            lambda *a, **k: Mock(stdout=self.WMCTRL_STDOUT, returncode=0),
+        )
+        provider = capture.X11WindowGeometryProvider()
+
+        assert provider.window_at(QPointF(200, 300)) == QRectF(100, 200, 640, 480)
+        assert provider.window_at(QPointF(5, 5)) is None
+
+    def test_window_at_reuses_cached_list_within_the_cache_window(self, monkeypatch):
+        # overlay.py's window mode calls window_at() once per mouseMoveEvent
+        # — far more often than a process can be spawned and reaped — so a
+        # burst of calls close together in time must not spawn `wmctrl`
+        # more than once, or hover-highlight would stutter behind the
+        # cursor (see REVIEW.md).
+        monkeypatch.setattr(capture.shutil, "which", lambda b: "/usr/bin/wmctrl")
+        run = Mock(return_value=Mock(stdout=self.WMCTRL_STDOUT, returncode=0))
+        monkeypatch.setattr(capture.subprocess, "run", run)
+        clock = [100.0]
+        monkeypatch.setattr(capture.time, "monotonic", lambda: clock[0])
+        provider = capture.X11WindowGeometryProvider()
+
+        provider.window_at(QPointF(200, 300))
+        clock[0] += 0.05
+        provider.window_at(QPointF(5, 5))
+        clock[0] += 0.05
+        provider.window_at(QPointF(1920, 0))
+
+        assert run.call_count == 1
+
+    def test_list_windows_refetches_once_the_cache_expires(self, monkeypatch):
+        monkeypatch.setattr(capture.shutil, "which", lambda b: "/usr/bin/wmctrl")
+        run = Mock(return_value=Mock(stdout=self.WMCTRL_STDOUT, returncode=0))
+        monkeypatch.setattr(capture.subprocess, "run", run)
+        clock = [100.0]
+        monkeypatch.setattr(capture.time, "monotonic", lambda: clock[0])
+        provider = capture.X11WindowGeometryProvider()
+
+        provider.list_windows()
+        clock[0] += capture.X11WindowGeometryProvider._CACHE_SECONDS + 0.01
+        provider.list_windows()
+
+        assert run.call_count == 2
+
+    def test_is_available_requires_x11_and_the_binary(self, monkeypatch):
+        provider = capture.X11WindowGeometryProvider()
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: "/usr/bin/wmctrl")
+        assert provider.is_available() is True
+
+        monkeypatch.setattr(capture.shutil, "which", lambda b: None)
+        assert provider.is_available() is False
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setattr(capture.shutil, "which", lambda b: "/usr/bin/wmctrl")
+        assert provider.is_available() is False
