@@ -1,10 +1,12 @@
 import pytest
-from PyQt6.QtCore import QPointF, QSizeF
+from PyQt6.QtCore import QPoint, QPointF, QSizeF, Qt
 from PyQt6.QtGui import QColor, QImage, qRgb
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
-from snipux.editor import Canvas
+from snipux.editor import Canvas, Editor, Tool
+from snipux.shapes import Rectangle
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -141,3 +143,118 @@ class TestDegenerateImage:
         # gracefully (no ZeroDivisionError), not just return *some* value.
         result = canvas.image_to_widget(QPointF(0, 0))
         assert result == canvas._target_rect().topLeft()
+
+
+class TestDragAppendsShape:
+    def test_drag_with_tool_selected_appends_a_shape_of_that_type(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+        canvas.set_tool(Tool.RECTANGLE)
+        canvas.set_colour(QColor("red"))
+        canvas.set_stroke_width(4)
+
+        start = QPoint(10, 10)
+        end = QPoint(60, 40)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(canvas, end)
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
+
+        assert len(canvas.shapes) == 1
+        assert isinstance(canvas.shapes[0], Rectangle)
+
+    def test_no_tool_selected_is_a_no_op(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+        # set_tool never called: canvas starts with no tool armed.
+
+        start = QPoint(10, 10)
+        end = QPoint(60, 40)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(canvas, end)
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
+
+        assert len(canvas.shapes) == 0
+
+    def test_press_in_letterbox_margin_is_a_no_op(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(200, 200)  # image letterboxed; (5, 5) is margin, not image
+        canvas.set_tool(Tool.RECTANGLE)
+
+        # QPoint(0, 0) is QTest's own sentinel for "unspecified pos" (it
+        # falls back to the widget's center), so this uses (5, 5) instead
+        # to land in the margin unambiguously.
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
+        QTest.mouseMove(canvas, QPoint(8, 8))
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(8, 8))
+
+        assert len(canvas.shapes) == 0
+
+
+class TestToolbarControls:
+    def test_tool_actions_cover_every_tool_and_switching_updates_canvas(self):
+        frame = make_frame()
+        editor = Editor(frame)
+
+        assert set(editor.tool_actions) == set(Tool)
+        assert editor.canvas._tool is not None  # a usable default is armed
+
+        editor.tool_actions[Tool.RECTANGLE].trigger()
+
+        assert editor.canvas._tool is Tool.RECTANGLE
+        assert editor.tool_actions[Tool.RECTANGLE].isChecked()
+
+    def test_colour_swatch_click_sets_canvas_colour_with_no_dialog(self):
+        frame = make_frame()
+        editor = Editor(frame)
+        red = QColor("red")
+
+        editor.colour_buttons[red.name()].click()
+
+        assert editor.canvas._colour == red
+
+    def test_stroke_width_spinbox_updates_canvas(self):
+        frame = make_frame()
+        editor = Editor(frame)
+
+        editor.stroke_width_spinbox.setValue(9)
+
+        assert editor.canvas._stroke_width == 9
+
+
+class TestEditorGrabRectangleBorder:
+    def test_rectangle_border_shows_non_background_pixels(self):
+        frame = make_frame(image_size=(100, 60), fill_color=FILL_COLOR)
+        editor = Editor(frame)
+        editor.resize(300, 300)
+        editor.canvas.set_tool(Tool.RECTANGLE)
+        editor.canvas.set_colour(QColor(255, 0, 0))
+        editor.canvas.set_stroke_width(4)
+
+        start_image = QPointF(10, 10)
+        end_image = QPointF(80, 40)
+        start_widget = editor.canvas.image_to_widget(start_image).toPoint()
+        end_widget = editor.canvas.image_to_widget(end_image).toPoint()
+
+        QTest.mousePress(editor.canvas, Qt.MouseButton.LeftButton, pos=start_widget)
+        QTest.mouseMove(editor.canvas, end_widget)
+        QTest.mouseRelease(editor.canvas, Qt.MouseButton.LeftButton, pos=end_widget)
+
+        assert len(editor.canvas.shapes) == 1
+
+        # Border point in canvas-local coordinates, translated into
+        # Editor-local coordinates via canvas.pos() — Editor.grab() samples
+        # Editor's own widget, and the toolbar offsets the canvas within it,
+        # so reusing canvas-only coordinates against an editor grab would
+        # sample the wrong pixels (letterbox or toolbar, not the border).
+        border_canvas_local = editor.canvas.image_to_widget(QPointF(10, 25))
+        border_editor_local = border_canvas_local + QPointF(editor.canvas.pos())
+
+        rendered = editor.grab().toImage()
+        sampled = rendered.pixelColor(
+            round(border_editor_local.x()), round(border_editor_local.y())
+        )
+
+        assert sampled != QColor(FILL_COLOR)
