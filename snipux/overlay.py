@@ -14,12 +14,64 @@ spanning two monitors arithmetic rather than a special case.
 from __future__ import annotations
 
 import math
+from abc import ABC, abstractmethod
+from enum import Enum
 
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSizeF, pyqtSignal
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
 from snipux.capture import Frame
+
+
+class SelectionMode(Enum):
+    """How the overlay turns mouse input into a selection.
+
+    Chosen once before the overlay is shown (mirrors how the real app offers
+    a mode picker before freezing the screen) — never switched mid-drag.
+    """
+
+    RECTANGLE = "rectangle"
+    FREEFORM = "freeform"
+    WINDOW = "window"
+    FULL_SCREEN = "full_screen"
+
+
+class GeometryProvider(ABC):
+    """Source of per-window geometry for window-selection mode.
+
+    X11 can answer this; Wayland compositors generally cannot, per
+    CLAUDE.md's platform note. `is_available()` mirrors
+    `CaptureBackend.is_available()` in capture.py so the two "can this
+    platform do X" checks look the same everywhere they appear. It isn't
+    load-bearing for the mode-3 fallback itself — a per-point `window_at()
+    is None` already covers "no provider" and "no window here" alike — it's
+    exposed so a future mode picker can grey out window mode instead of
+    offering a dead option.
+    """
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Whether this platform can report window geometry at all."""
+
+    @abstractmethod
+    def window_at(self, point: QPointF) -> QRectF | None:
+        """Absolute logical rect of the window under `point`, or None."""
+
+
+class UnsupportedGeometryProvider(GeometryProvider):
+    """Default provider: reports no windows anywhere.
+
+    This is what makes window mode degrade to plain rectangle dragging
+    everywhere until a platform-specific provider (the X11 backend ticket)
+    is wired in.
+    """
+
+    def is_available(self) -> bool:
+        return False
+
+    def window_at(self, point: QPointF) -> QRectF | None:
+        return None
 
 
 class Overlay(QWidget):
@@ -31,7 +83,13 @@ class Overlay(QWidget):
     absolute logical virtual-desktop rects, never monitor-local ones.
     """
 
-    confirmed = pyqtSignal(QRectF)
+    # (bounds, exact_path_or_None). `object` carries the second slot because
+    # it must hold either a QPainterPath (freeform) or None (every other
+    # mode); PyQt passes arbitrary Python objects through `object`. A plain
+    # rectangle/window/full-screen selection is never modelled as a
+    # degenerate one-rectangle path — `None` says "this is just the bounds"
+    # plainly, instead of making every consumer special-case it.
+    confirmed = pyqtSignal(QRectF, object)
     cancelled = pyqtSignal()
 
     VEIL_COLOR = QColor(0, 0, 0, 120)
@@ -49,12 +107,22 @@ class Overlay(QWidget):
     # the pixel it is magnifying.
     MAGNIFIER_OFFSET = QPointF(20.0, 20.0)
 
-    def __init__(self, frame: Frame, monitor_geometry: QRectF, parent=None):
+    def __init__(
+        self,
+        frame: Frame,
+        monitor_geometry: QRectF,
+        parent=None,
+        mode: SelectionMode = SelectionMode.RECTANGLE,
+        geometry_provider: GeometryProvider | None = None,
+        virtual_desktop_rect: QRectF | None = None,
+    ):
         super().__init__(parent)
         self._monitor_geometry = QRectF(monitor_geometry)
         # Reuses Frame.crop()'s already-tested scaling/negative-origin
         # logic instead of re-deriving it here.
         self._monitor_frame = frame.crop(monitor_geometry)
+        self._mode = mode
+        self._geometry_provider = geometry_provider or UnsupportedGeometryProvider()
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -74,6 +142,19 @@ class Overlay(QWidget):
         self._cursor_pos: QPointF | None = None
         # Absolute-logical anchor of an in-progress left-button drag.
         self._drag_anchor: QPointF | None = None
+        # In-progress freeform path, absolute logical coords. None outside
+        # a freeform drag.
+        self._drag_path: QPainterPath | None = None
+        # Confirmed freeform path, the source of truth for "what pixels are
+        # actually inside" once a freeform drag has been confirmed. None in
+        # every other mode, and None during an in-progress freeform drag too
+        # (that's `_drag_path`), so a stale confirmed path never lingers
+        # across a new drag.
+        self._selection_path: QPainterPath | None = None
+        # Window rect a left-press landed on, remembered from press to
+        # release in window mode — a window click is a click, not a drag,
+        # for its entire duration, so this is captured once and only read.
+        self._window_hit_rect: QRectF | None = None
 
         self._size_label = QLabel(self)
         self._size_label.setStyleSheet(
@@ -81,6 +162,19 @@ class Overlay(QWidget):
             " padding: 2px 4px;"
         )
         self._size_label.hide()
+
+        if self._mode is SelectionMode.FULL_SCREEN:
+            # Full screen needs no drag: the whole virtual desktop (or, for
+            # an overlay built directly without going through
+            # create_overlays, this monitor alone) is selected from the
+            # first paint. Goes through set_selection (not a raw attribute
+            # write) so the label/veil are consistent immediately instead
+            # of only catching up on the next unrelated repaint.
+            self.set_selection(
+                virtual_desktop_rect
+                if virtual_desktop_rect is not None
+                else self._monitor_geometry
+            )
 
     # -- coordinate-space helpers -----------------------------------------
     # Every rect/point this widget touches is explicitly one of: absolute
@@ -219,14 +313,70 @@ class Overlay(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.RightButton:
-            # Immediate cancel, matching Escape's semantics; no drag starts.
+            # Immediate cancel, matching Escape's semantics; no drag starts,
+            # in every mode.
             self.cancelled.emit()
             return
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_anchor = self._to_absolute(event.position())
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        anchor = self._to_absolute(event.position())
+        self._drag_anchor = anchor
+
+        if self._mode is SelectionMode.FREEFORM:
+            self._drag_path = QPainterPath()
+            self._drag_path.moveTo(anchor)
+            # Something to show from the very first pixel, same as
+            # rectangle mode's live-drag feedback.
+            self.set_selection(QRectF(anchor, QSizeF(0, 0)))
+        elif self._mode is SelectionMode.WINDOW:
+            self._window_hit_rect = self._geometry_provider.window_at(anchor)
+            if self._window_hit_rect is not None:
+                # Clicking a window highlights that window's full rect
+                # before the button is even released.
+                self.set_selection(self._window_hit_rect)
+        # Rectangle / full screen: `_drag_anchor` alone is enough for their
+        # release-time logic, nothing else to record here.
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         self._cursor_pos = event.position()
+
+        if self._mode is SelectionMode.FULL_SCREEN:
+            # Selection state is never touched here so the veil hole and
+            # size label can't transiently shrink to a drag rect mid-move;
+            # the whole desktop was already selected at construction time.
+            self.update()
+            return
+
+        if self._mode is SelectionMode.FREEFORM:
+            if self._drag_path is not None:
+                self._drag_path.lineTo(self._to_absolute(event.position()))
+                # Through set_selection, not a raw attribute write, so the
+                # size label and veil hole live-update stroke by stroke.
+                self.set_selection(self._drag_path.boundingRect())
+            else:
+                self.update()
+            return
+
+        if self._mode is SelectionMode.WINDOW:
+            absolute_pos = self._to_absolute(event.position())
+            if self._drag_anchor is not None and self._window_hit_rect is not None:
+                # Press hit a window: a window click doesn't track the
+                # mouse, the hit rect is already showing from press time.
+                self.update()
+            elif self._drag_anchor is not None:
+                # Press missed every window: fall back to plain rectangle
+                # tracking, per the acceptance criterion.
+                self.set_selection(
+                    QRectF(self._drag_anchor, absolute_pos).normalized()
+                )
+            else:
+                # Plain hover: a miss actively clears any previously-shown
+                # preview instead of leaving it stuck.
+                self.set_selection(self._geometry_provider.window_at(absolute_pos))
+            return
+
+        # Rectangle.
         if self._drag_anchor is not None:
             absolute_pos = self._to_absolute(event.position())
             self.set_selection(QRectF(self._drag_anchor, absolute_pos).normalized())
@@ -240,6 +390,53 @@ class Overlay(QWidget):
         anchor = self._drag_anchor
         self._drag_anchor = None
         absolute_pos = self._to_absolute(event.position())
+
+        if self._mode is SelectionMode.FULL_SCREEN:
+            # No distance/misfire check at all: any release confirms the
+            # whole desktop, which was already selected at construction.
+            self.confirmed.emit(self._selection, None)
+            return
+
+        if self._mode is SelectionMode.FREEFORM:
+            path = self._drag_path
+            self._drag_path = None
+            # The release itself is a traced point, same as every
+            # intermediate move — omitting it would silently drop the final
+            # drag segment and let closeSubpath() cut straight from the
+            # last *moved-to* point back to the anchor instead.
+            path.lineTo(absolute_pos)
+            path.closeSubpath()
+            bounds = path.boundingRect()
+            # Measured by the traced path's own bounding-rect diagonal, not
+            # anchor-to-release distance: a closed-loop lasso back near its
+            # start point has a large bounding-rect diagonal even though its
+            # last pixel lands next to its first, so it isn't misfired away.
+            diagonal = math.hypot(bounds.width(), bounds.height())
+            if diagonal < QApplication.startDragDistance():
+                self.set_selection(None)
+                return
+            self._selection_path = path
+            self.set_selection(bounds)
+            self.confirmed.emit(bounds, path)
+            return
+
+        if self._mode is SelectionMode.WINDOW and self._window_hit_rect is not None:
+            rect = self._window_hit_rect
+            self._window_hit_rect = None
+            # Unconditional, no distance check, regardless of where the
+            # release happened: a window click is a click, not a drag, for
+            # its entire duration — the hit was captured at press time and
+            # is only read here, never re-queried.
+            self.set_selection(rect)
+            self.confirmed.emit(rect, None)
+            return
+
+        if self._mode is SelectionMode.WINDOW:
+            # No provider, or the press missed every window: fall through
+            # to the same distance-threshold rectangle logic below, which
+            # *is* the fallback the acceptance criterion asks for.
+            self._window_hit_rect = None
+
         delta = absolute_pos - anchor
         distance = math.hypot(delta.x(), delta.y())
 
@@ -251,19 +448,28 @@ class Overlay(QWidget):
 
         rect = QRectF(anchor, absolute_pos).normalized()
         self.set_selection(rect)
-        self.confirmed.emit(rect)
+        self.confirmed.emit(rect, None)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
             self.cancelled.emit()
         elif event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
             if self._selection is not None:
-                self.confirmed.emit(self._selection)
+                # `_selection_path` is None except right after a freeform
+                # drag has been confirmed by mouse release, so this carries
+                # the exact shape for a completed freeform selection and
+                # None for every other mode, same as a mouse-release confirm.
+                self.confirmed.emit(self._selection, self._selection_path)
         else:
             super().keyPressEvent(event)
 
 
-def create_overlays(frame: Frame, monitor_geometries: list[QRectF]) -> list[Overlay]:
+def create_overlays(
+    frame: Frame,
+    monitor_geometries: list[QRectF],
+    mode: SelectionMode = SelectionMode.RECTANGLE,
+    geometry_provider: GeometryProvider | None = None,
+) -> list[Overlay]:
     """Build one `Overlay` per monitor geometry.
 
     Geometries are absolute logical virtual-desktop rects, the same space
@@ -271,5 +477,23 @@ def create_overlays(frame: Frame, monitor_geometries: list[QRectF]) -> list[Over
     window — the caller is responsible for sourcing real geometries and
     showing the windows, which keeps this module testable with synthetic
     geometries offscreen.
+
+    A single `Overlay` only knows its own monitor's geometry, but "full
+    screen" means the union of every monitor, so that union is computed once
+    here and handed to each `Overlay` as `virtual_desktop_rect`.
     """
-    return [Overlay(frame, geometry) for geometry in monitor_geometries]
+    virtual_desktop_rect = None
+    for geometry in monitor_geometries:
+        virtual_desktop_rect = (
+            geometry if virtual_desktop_rect is None else virtual_desktop_rect.united(geometry)
+        )
+    return [
+        Overlay(
+            frame,
+            geometry,
+            mode=mode,
+            geometry_provider=geometry_provider,
+            virtual_desktop_rect=virtual_desktop_rect,
+        )
+        for geometry in monitor_geometries
+    ]
