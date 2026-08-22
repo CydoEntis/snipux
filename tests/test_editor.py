@@ -1,0 +1,143 @@
+import pytest
+from PyQt6.QtCore import QPointF, QSizeF
+from PyQt6.QtGui import QColor, QImage, qRgb
+from PyQt6.QtWidgets import QApplication
+
+from snipux.capture import Frame
+from snipux.editor import Canvas
+
+FILL_COLOR = qRgb(10, 20, 30)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def qapp():
+    # PyQt6 needs a live QApplication to construct any QWidget, even
+    # offscreen. Module-scoped so every test in this file shares one.
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def make_frame(image_size=(100, 60), fill_color=FILL_COLOR) -> Frame:
+    # Canvas only ever reads Frame.image, never Frame.logical_*, so
+    # logical_origin/logical_size are given arbitrary placeholder values
+    # rather than anything meaningful to this test.
+    image = QImage(*image_size, QImage.Format.Format_RGB32)
+    image.fill(fill_color)
+    return Frame(
+        image=image,
+        logical_origin=QPointF(0, 0),
+        logical_size=QSizeF(*image_size),
+    )
+
+
+class TestLetterbox:
+    def test_centered_and_letterboxed_when_widget_larger_than_image(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(200, 200)
+
+        rendered = canvas.grab().toImage()
+
+        target = canvas._target_rect()
+        assert target.width() == 100
+        assert target.height() == 60
+        # Equal margins on both sides of the shorter axis confirms centering.
+        assert target.left() == pytest.approx(50, abs=1)
+        assert target.top() == pytest.approx(70, abs=1)
+
+        center = target.center()
+        assert rendered.pixelColor(round(center.x()), round(center.y())) == QColor(FILL_COLOR)
+        # A widget corner is well outside the target rect for this geometry,
+        # so it must be showing the letterbox fill, not the image.
+        assert rendered.pixelColor(2, 2) != QColor(FILL_COLOR)
+
+
+class TestScaling:
+    def test_scales_down_preserving_aspect_when_widget_smaller_than_image(self):
+        frame = make_frame(image_size=(400, 200))
+        canvas = Canvas(frame)
+        canvas.resize(100, 100)
+
+        target = canvas._target_rect()
+
+        assert target.width() <= 100
+        assert target.height() <= 100
+        assert target.width() / target.height() == pytest.approx(400 / 200, rel=1e-6)
+        assert target.width() < 400  # actually scaled down, not clipped
+
+    def test_never_upscales_past_100_percent(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(500, 500)
+
+        target = canvas._target_rect()
+
+        # Scale pinned at 1.0: target size equals the image's own size,
+        # never grown to fill the larger widget.
+        assert target.width() == 100
+        assert target.height() == 60
+
+
+class TestRoundTrip:
+    @pytest.mark.parametrize("widget_size", [(500, 500), (100, 100)])
+    def test_round_trips_within_one_pixel(self, widget_size):
+        frame = make_frame(image_size=(400, 200))
+        canvas = Canvas(frame)
+        canvas.resize(*widget_size)
+
+        width, height = 400, 200
+        samples = [
+            QPointF(0, 0),
+            QPointF(width - 1, height - 1),
+            QPointF(width / 2, height / 2),
+        ]
+
+        for image_point in samples:
+            widget_point = canvas.image_to_widget(image_point)
+            round_tripped = canvas.widget_to_image(widget_point)
+            assert round_tripped is not None
+            assert abs(round_tripped.x() - image_point.x()) <= 1
+            assert abs(round_tripped.y() - image_point.y()) <= 1
+
+
+class TestMargin:
+    def test_widget_to_image_returns_none_in_letterbox_margin(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(200, 200)
+
+        # The image is centered well away from the widget's own corner at
+        # this geometry, so (0, 0) is squarely in the margin.
+        assert canvas.widget_to_image(QPointF(0, 0)) is None
+
+
+class TestGrabPixelMatch:
+    def test_grab_pixels_match_source_image(self):
+        frame = make_frame(image_size=(100, 60), fill_color=qRgb(200, 50, 90))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)  # scale == 1.0: no interpolation to fuzz the comparison
+
+        rendered = canvas.grab().toImage()
+
+        image_point = QPointF(40, 20)
+        widget_point = canvas.image_to_widget(image_point)
+        sampled = rendered.pixelColor(round(widget_point.x()), round(widget_point.y()))
+        expected = canvas.image.pixelColor(round(image_point.x()), round(image_point.y()))
+        assert sampled == expected
+
+
+class TestDegenerateImage:
+    def test_zero_size_image_does_not_raise(self):
+        frame = make_frame(image_size=(0, 0))
+        canvas = Canvas(frame)
+        canvas.resize(200, 200)
+
+        assert canvas._target_rect().width() == 0
+        assert canvas._target_rect().height() == 0
+        assert canvas.widget_to_image(QPointF(10, 10)) is None
+        # The case PLAN-REVIEW.md's first finding caught: this must degrade
+        # gracefully (no ZeroDivisionError), not just return *some* value.
+        result = canvas.image_to_widget(QPointF(0, 0))
+        assert result == canvas._target_rect().topLeft()
