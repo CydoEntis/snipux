@@ -2,12 +2,18 @@ from unittest.mock import Mock
 
 import pytest
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSizeF, Qt
-from PyQt6.QtGui import QColor, QImage, QPainter, qRgb
+from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
-from snipux.overlay import Overlay, create_overlays
+from snipux.overlay import (
+    GeometryProvider,
+    Overlay,
+    SelectionMode,
+    UnsupportedGeometryProvider,
+    create_overlays,
+)
 
 BASE_COLOR = qRgb(10, 20, 30)
 
@@ -224,7 +230,7 @@ class TestInteraction:
         cancelled.assert_called_once()
 
         QTest.keyClick(overlay, Qt.Key.Key_Return)
-        confirmed.assert_called_once_with(QRectF(10, 10, 20, 20))
+        confirmed.assert_called_once_with(QRectF(10, 10, 20, 20), None)
 
     def test_right_click_emits_cancelled(self):
         frame = make_frame()
@@ -265,3 +271,264 @@ class TestInteraction:
         emitted_rect = confirmed.call_args[0][0]
         assert emitted_rect.width() == margin
         assert emitted_rect.height() == margin
+        assert confirmed.call_args[0][1] is None
+
+
+class TestUnsupportedGeometryProvider:
+    def test_is_unavailable_and_reports_no_windows(self):
+        provider = UnsupportedGeometryProvider()
+
+        assert provider.is_available() is False
+        assert provider.window_at(QPointF(10, 10)) is None
+
+
+class TestFreeformMode:
+    # Traces a proper L-shape (not a triangle) so the excluded-corner
+    # assertion below is unambiguous: the notch at the top-right of the
+    # bounding box is nowhere near the polygon's own edges.
+    _STEM_TOP_LEFT = QPoint(20, 20)
+    _STEM_TOP_RIGHT = QPoint(60, 20)
+    _NOTCH_CORNER = QPoint(60, 80)
+    _FOOT_TOP_RIGHT = QPoint(100, 80)
+    _FOOT_BOTTOM_RIGHT = QPoint(100, 120)
+    _FOOT_BOTTOM_LEFT = QPoint(20, 120)  # release point; close() returns to start
+
+    def _trace_l_shape(self, overlay):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self._STEM_TOP_LEFT)
+        QTest.mouseMove(overlay, self._STEM_TOP_RIGHT)
+        QTest.mouseMove(overlay, self._NOTCH_CORNER)
+        QTest.mouseMove(overlay, self._FOOT_TOP_RIGHT)
+        QTest.mouseMove(overlay, self._FOOT_BOTTOM_RIGHT)
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, pos=self._FOOT_BOTTOM_LEFT
+        )
+
+    def test_confirms_bounds_and_excludes_pixels_outside_the_path(self):
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FREEFORM)
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        self._trace_l_shape(overlay)
+
+        confirmed.assert_called_once()
+        bounds, path = confirmed.call_args[0]
+        assert bounds == QRectF(20, 20, 80, 100)
+        assert isinstance(path, QPainterPath)
+        assert path.contains(QPointF(30, 30))  # inside the stem
+        assert path.contains(QPointF(80, 100))  # inside the foot
+        # Inside the bounding box, but in the notch the L cuts away.
+        assert not path.contains(QPointF(80, 40))
+
+    def test_size_label_live_updates_mid_drag(self):
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FREEFORM)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self._STEM_TOP_LEFT)
+        QTest.mouseMove(overlay, self._STEM_TOP_RIGHT)
+        QTest.mouseMove(overlay, self._NOTCH_CORNER)
+
+        # Bounding box of the path so far: (20,20) to (60,80).
+        assert overlay._size_label.text() == "40 × 60"
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=self._NOTCH_CORNER)
+
+    def test_press_release_with_no_movement_is_a_misfire(self):
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FREEFORM)
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        confirmed.assert_not_called()
+        assert overlay._selection is None
+
+    def test_closed_loop_back_near_start_still_confirms(self):
+        # Anchor-to-release distance would be tiny here; only the traced
+        # path's own bounding-rect diagonal should decide misfire or not.
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FREEFORM)
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        anchor = QPoint(20, 20)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=anchor)
+        QTest.mouseMove(overlay, QPoint(20, 120))
+        QTest.mouseMove(overlay, QPoint(100, 120))
+        QTest.mouseMove(overlay, QPoint(100, 20))
+        near_start = QPoint(22, 22)
+        QTest.mouseMove(overlay, near_start)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=near_start)
+
+        confirmed.assert_called_once()
+
+
+class _FakeWindowProvider(GeometryProvider):
+    """Reports one fixed window rect for points inside it, None elsewhere."""
+
+    def __init__(self, rect: QRectF):
+        self._rect = rect
+
+    def is_available(self) -> bool:
+        return True
+
+    def window_at(self, point: QPointF) -> QRectF | None:
+        return self._rect if self._rect.contains(point) else None
+
+
+class TestWindowMode:
+    WINDOW_RECT = QRectF(30, 30, 50, 50)  # covers points (30,30)-(80,80)
+    HIT_POINT = QPoint(50, 50)
+    MISS_POINT = QPoint(10, 10)
+
+    def test_click_on_a_window_confirms_it_immediately(self):
+        frame = make_frame()
+        overlay = Overlay(
+            frame,
+            QRectF(0, 0, 200, 200),
+            mode=SelectionMode.WINDOW,
+            geometry_provider=_FakeWindowProvider(self.WINDOW_RECT),
+        )
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        confirmed.assert_called_once_with(self.WINDOW_RECT, None)
+
+    def test_hover_previews_and_clears_on_miss(self):
+        frame = make_frame()
+        overlay = Overlay(
+            frame,
+            QRectF(0, 0, 200, 200),
+            mode=SelectionMode.WINDOW,
+            geometry_provider=_FakeWindowProvider(self.WINDOW_RECT),
+        )
+        # A hover-only move (no button held) is only delivered to a widget
+        # that has actually been shown and exposed; unlike a drag, there is
+        # no preceding press to establish that the widget is receiving
+        # mouse events.
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        QTest.mouseMove(overlay, self.HIT_POINT)
+        assert overlay._selection == self.WINDOW_RECT
+
+        QTest.mouseMove(overlay, self.MISS_POINT)
+        assert overlay._selection is None
+
+    def test_drag_from_a_miss_falls_back_to_rectangle(self):
+        frame = make_frame()
+        overlay = Overlay(
+            frame,
+            QRectF(0, 0, 200, 200),
+            mode=SelectionMode.WINDOW,
+            geometry_provider=_FakeWindowProvider(self.WINDOW_RECT),
+        )
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        end = QPoint(150, 150)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self.MISS_POINT)
+        QTest.mouseMove(overlay, end)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=end)
+
+        confirmed.assert_called_once_with(
+            QRectF(QPointF(self.MISS_POINT), QPointF(end)).normalized(), None
+        )
+
+    def test_press_on_hit_then_drag_away_still_confirms_the_window(self):
+        frame = make_frame()
+        overlay = Overlay(
+            frame,
+            QRectF(0, 0, 200, 200),
+            mode=SelectionMode.WINDOW,
+            geometry_provider=_FakeWindowProvider(self.WINDOW_RECT),
+        )
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        drift = QPoint(150, 150)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+        QTest.mouseMove(overlay, drift)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=drift)
+
+        confirmed.assert_called_once_with(self.WINDOW_RECT, None)
+
+    def test_without_a_provider_behaves_like_rectangle_mode(self):
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.WINDOW)
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        margin = QApplication.startDragDistance() + 10
+        start = QPoint(20, 20)
+        end = QPoint(20 + margin, 20 + margin)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(overlay, end)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=end)
+
+        confirmed.assert_called_once_with(
+            QRectF(QPointF(start), QPointF(end)).normalized(), None
+        )
+
+
+class TestFullScreenMode:
+    def test_selection_is_the_full_geometry_before_any_mouse_event(self):
+        frame = make_frame()
+        geometry = QRectF(0, 0, 200, 200)
+
+        overlay = Overlay(frame, geometry, mode=SelectionMode.FULL_SCREEN)
+
+        assert overlay._selection == geometry
+
+    def test_bare_click_confirms_with_no_drag(self):
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FULL_SCREEN)
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        confirmed.assert_called_once_with(QRectF(0, 0, 200, 200), None)
+
+    def test_selection_does_not_shrink_while_dragging(self):
+        frame = make_frame()
+        geometry = QRectF(0, 0, 200, 200)
+        overlay = Overlay(frame, geometry, mode=SelectionMode.FULL_SCREEN)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(100, 100))
+
+        assert overlay._selection == geometry
+        assert overlay._size_label.text() == "200 × 200"
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+
+    def test_create_overlays_selects_the_union_of_all_monitors(self):
+        image = QImage(400, 200, QImage.Format.Format_RGB32)
+        image.fill(BASE_COLOR)
+        frame = Frame(
+            image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(400, 200)
+        )
+        left = QRectF(0, 0, 200, 200)
+        right = QRectF(200, 0, 200, 200)
+
+        overlays = create_overlays(
+            frame, [left, right], mode=SelectionMode.FULL_SCREEN
+        )
+
+        union = QRectF(0, 0, 400, 200)
+        assert overlays[0]._selection == union
+        assert overlays[1]._selection == union
+
+        base_color = QColor(10, 20, 30)
+        for overlay in overlays:
+            rendered = overlay.grab().toImage()
+            # Avoids the top-left corner: the size-readout label paints its
+            # own (semi-transparent black) background there, which is
+            # unrelated to what this test is checking — that the veil
+            # itself has no dimmed hole anywhere.
+            for x, y in [(10, 190), (100, 100), (190, 190)]:
+                assert rendered.pixelColor(x, y) == base_color
