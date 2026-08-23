@@ -100,11 +100,19 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="snipux",
         description="A Windows Snipping Tool workalike for Linux.",
     )
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
         "--list-backends",
         action="store_true",
         help="print each registered capture backend's name, availability, "
         "and reason if unavailable",
+    )
+    group.add_argument(
+        "--snip",
+        action="store_true",
+        help="ask an already-running snipux instance to start a capture "
+        "(for binding to a key such as Print Screen); fails if no "
+        "instance is running",
     )
     return parser
 
@@ -127,10 +135,14 @@ def _print_backends(registry: BackendRegistry) -> None:
                 print(f"{backend.name()}: unavailable")
 
 
-def main(argv: list[str] | None = None, registry: BackendRegistry | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    registry: BackendRegistry | None = None,
+    transport: "Transport | None" = None,
+) -> int:
     """CLI entry point. Accepts an optional `registry` to stay testable
     without needing real backend availability on the machine running the
-    tests.
+    tests, and an optional `transport` (same DI shape) for `--snip`.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -145,6 +157,28 @@ def main(argv: list[str] | None = None, registry: BackendRegistry | None = None)
         return 0
 
     args = parser.parse_args(argv)
+
+    if args.snip:
+        # A trigger-and-exit path, same spirit as the rest of main(): it
+        # never starts an event loop. Only forward to an already-resident
+        # instance; if none is running, this call's own try_claim() just
+        # became the (empty) primary, which we deliberately abandon rather
+        # than growing into a full AppController here -- that would make
+        # the flag behave differently depending on timing, exactly what a
+        # keybinding must not do. The QLocalServer it created is not a
+        # leak: this process exits without ever calling listen() on it, so
+        # the next real launch's try_claim() finds nothing live and
+        # reclaims the name normally.
+        if transport is None:
+            transport = QLocalSocketTransport()
+        if transport.try_claim():
+            print(
+                "no snipux instance is running -- start it first",
+                file=sys.stderr,
+            )
+            return 1
+        transport.send_snip_request()
+        return 0
 
     if registry is None:
         registry = build_default_registry()
@@ -408,3 +442,18 @@ def run_resident_app(
 
     controller = AppController(registry, transport)
     return app.exec()
+
+
+def cli() -> int:
+    """The `console_scripts` entry point (`pyproject.toml` points
+    `snipux` at this).
+
+    A `console_scripts` entry point calls `module:function()` directly, so
+    it cannot execute an `if __name__ == "__main__":` block -- this
+    reproduces `__main__.py`'s dispatch rule (arguments present -> the
+    display-free CLI diagnostics in `main()`; none -> the resident,
+    tray-icon app) as an importable function instead.
+    """
+    if sys.argv[1:]:
+        return main()
+    return run_resident_app()
