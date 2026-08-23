@@ -253,6 +253,45 @@ class TestBackendRegistry:
 
         failures = excinfo.value.failures
         assert failures == [("first", first_error), ("second", second_error)]
+        assert str(excinfo.value) == "all capture backends failed: first: first boom; second: second boom"
+
+    def test_capture_names_a_wayland_package_when_no_backend_is_available(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        registry = BackendRegistry([FakeBackend("b", False, reason="not a Wayland session")])
+
+        with pytest.raises(CaptureError) as excinfo:
+            registry.capture()
+
+        assert excinfo.value.failures == []
+        message = str(excinfo.value)
+        assert message.startswith("no capture backend is available:")
+        assert not message.rstrip().endswith(":")
+        assert "grim" in message
+
+    def test_capture_names_an_x11_package_when_no_backend_is_available(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        registry = BackendRegistry([FakeBackend("b", False, reason="not an X11 session")])
+
+        with pytest.raises(CaptureError) as excinfo:
+            registry.capture()
+
+        assert excinfo.value.failures == []
+        message = str(excinfo.value)
+        assert message.startswith("no capture backend is available:")
+        assert not message.rstrip().endswith(":")
+        assert "maim" in message
+
+    def test_capture_still_names_a_package_when_session_type_is_unknown(self, monkeypatch):
+        monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+        registry = BackendRegistry([])
+
+        with pytest.raises(CaptureError) as excinfo:
+            registry.capture()
+
+        message = str(excinfo.value)
+        assert message.startswith("no capture backend is available:")
+        assert not message.rstrip().endswith(":")
+        assert "grim" in message and "maim" in message
 
 
 class TestDetectSessionType:
