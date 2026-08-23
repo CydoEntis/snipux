@@ -39,6 +39,7 @@ from snipux.capture import (
 from snipux.overlay import (
     GeometryProvider,
     Overlay,
+    SelectionMode,
     UnsupportedGeometryProvider,
     create_overlays,
 )
@@ -377,8 +378,30 @@ class AppController:
 
         self._tray_icon = QSystemTrayIcon(self._build_icon())
         menu = QMenu()
-        self.snip_action = menu.addAction("Snip")
-        self.snip_action.triggered.connect(self.start_capture)
+        # One item per SelectionMode, labelled for a user (never the enum
+        # name/value) rather than a single generic "Snip" entry, so every
+        # mode overlay.py already implements is actually reachable -- per
+        # the ticket, full-screen capture in particular had no way in at
+        # all before this. Each lambda takes no arguments so PyQt trims the
+        # `checked` bool `triggered` would otherwise pass, the same way the
+        # old single-item menu relied on start_capture() itself doing that
+        # trimming.
+        self.rectangle_action = menu.addAction("Rectangular Snip")
+        self.rectangle_action.triggered.connect(
+            lambda: self.start_capture(SelectionMode.RECTANGLE)
+        )
+        self.freeform_action = menu.addAction("Freeform Snip")
+        self.freeform_action.triggered.connect(
+            lambda: self.start_capture(SelectionMode.FREEFORM)
+        )
+        self.window_action = menu.addAction("Window Snip")
+        self.window_action.triggered.connect(
+            lambda: self.start_capture(SelectionMode.WINDOW)
+        )
+        self.full_screen_action = menu.addAction("Full-screen Snip")
+        self.full_screen_action.triggered.connect(
+            lambda: self.start_capture(SelectionMode.FULL_SCREEN)
+        )
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         self._tray_icon.setContextMenu(menu)
@@ -400,7 +423,12 @@ class AppController:
     def _real_monitor_geometries(self) -> list[QRectF]:
         return [QRectF(screen.geometry()) for screen in QGuiApplication.screens()]
 
-    def start_capture(self) -> None:
+    def start_capture(self, mode: SelectionMode = SelectionMode.RECTANGLE) -> None:
+        # Defaults to rectangle so every existing no-argument caller --
+        # the --snip transport listener wired below, and a forwarded
+        # request from a second launch -- keeps behaving exactly as before,
+        # per the ticket's acceptance criterion. Only the tray menu's own
+        # actions pass an explicit mode.
         if self._overlays:
             # A Snip request arrived mid-selection (tray double-click, or a
             # forwarded request from a second launch while already
@@ -431,7 +459,7 @@ class AppController:
             else self._real_monitor_geometries()
         )
         overlays = create_overlays(
-            frame, geometries, geometry_provider=self._geometry_provider
+            frame, geometries, mode=mode, geometry_provider=self._geometry_provider
         )
         for overlay in overlays:
             overlay.confirmed.connect(self._on_confirmed)
