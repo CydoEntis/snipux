@@ -9,6 +9,7 @@ from snipux import app
 from snipux.app import (
     AppController,
     Transport,
+    build_default_geometry_provider,
     build_default_registry,
     cli,
     copy_image_to_clipboard,
@@ -16,7 +17,15 @@ from snipux.app import (
     run_resident_app,
     save_image,
 )
-from snipux.capture import BackendRegistry, CaptureBackend, Frame
+from snipux.capture import (
+    BackendRegistry,
+    CaptureBackend,
+    Frame,
+    X11WindowGeometryProvider,
+    build_wayland_registry,
+    build_x11_registry,
+)
+from snipux.overlay import GeometryProvider, SelectionMode, UnsupportedGeometryProvider
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -96,10 +105,71 @@ def test_no_arguments_prints_usage_mentioning_list_backends(capsys):
     assert "--list-backends" in out
 
 
-def test_build_default_registry_starts_empty():
-    registry = build_default_registry()
+class TestBuildDefaultRegistry:
+    def test_returns_wayland_registry_when_session_type_is_wayland(self, monkeypatch):
+        monkeypatch.setattr(app, "detect_session_type", lambda: "wayland")
 
-    assert registry.available() == []
+        registry = build_default_registry()
+
+        assert [b.name() for b in registry] == [
+            b.name() for b in build_wayland_registry()
+        ]
+
+    def test_returns_x11_registry_when_session_type_is_x11(self, monkeypatch):
+        monkeypatch.setattr(app, "detect_session_type", lambda: "x11")
+
+        registry = build_default_registry()
+
+        assert [b.name() for b in registry] == [b.name() for b in build_x11_registry()]
+
+    def test_returns_both_registries_when_session_type_is_unknown(self, monkeypatch):
+        # Neither registry is preferred over the other here: every backend
+        # gates itself with its own is_available(), so offering both is how
+        # an unrecognised session type still finds whatever is actually
+        # installed instead of failing outright.
+        monkeypatch.setattr(app, "detect_session_type", lambda: "unknown")
+
+        registry = build_default_registry()
+
+        expected = [b.name() for b in build_wayland_registry()] + [
+            b.name() for b in build_x11_registry()
+        ]
+        assert [b.name() for b in registry] == expected
+
+
+class TestBuildDefaultGeometryProvider:
+    def test_returns_x11_window_geometry_provider_when_it_reports_available(
+        self, monkeypatch
+    ):
+        # A fake subclass, not a monkeypatched detect_session_type/wmctrl
+        # pair: X11WindowGeometryProvider.is_available() already has its
+        # own tests in test_capture.py, so this only needs to prove
+        # build_default_geometry_provider() *uses* that verdict, not
+        # re-derive it.
+        class AvailableProvider(X11WindowGeometryProvider):
+            def is_available(self):
+                return True
+
+        monkeypatch.setattr(app, "X11WindowGeometryProvider", AvailableProvider)
+
+        provider = build_default_geometry_provider()
+
+        assert isinstance(provider, AvailableProvider)
+
+    def test_returns_unsupported_geometry_provider_when_x11_provider_is_unavailable(
+        self, monkeypatch
+    ):
+        # Covers both Wayland and "X11 without wmctrl" at once, since
+        # is_available() is exactly what folds those two cases together.
+        class UnavailableProvider(X11WindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        monkeypatch.setattr(app, "X11WindowGeometryProvider", UnavailableProvider)
+
+        provider = build_default_geometry_provider()
+
+        assert isinstance(provider, UnsupportedGeometryProvider)
 
 
 def test_main_does_not_require_a_display():
@@ -309,6 +379,19 @@ class FakeCaptureBackend(CaptureBackend):
         return self._frame
 
 
+class FakeGeometryProvider(GeometryProvider):
+    """Stands in for `X11WindowGeometryProvider` in controller tests, so
+    they can assert on *identity* (this exact instance reached the
+    overlay) without depending on a real X11 session or `wmctrl`.
+    """
+
+    def is_available(self):
+        return True
+
+    def window_at(self, point):
+        return None
+
+
 class FailingCaptureBackend(CaptureBackend):
     def name(self):
         return "failing"
@@ -373,8 +456,13 @@ def make_controller():
     """
     controllers = []
 
-    def _make(registry, transport, monitor_geometries=None):
-        controller = AppController(registry, transport, monitor_geometries=monitor_geometries)
+    def _make(registry, transport, monitor_geometries=None, geometry_provider=None):
+        controller = AppController(
+            registry,
+            transport,
+            monitor_geometries=monitor_geometries,
+            geometry_provider=geometry_provider,
+        )
         controllers.append(controller)
         return controller
 
@@ -400,6 +488,49 @@ class TestAppControllerCapture:
 
         assert len(controller._overlays) == 2
         assert controller._editor is None
+        # The no-argument entry point still means rectangle mode -- the
+        # --snip forwarding path and the transport listener both call
+        # start_capture() with no argument and must keep this behaviour.
+        assert controller._overlays[0]._mode is SelectionMode.RECTANGLE
+
+    def test_start_capture_passes_the_controllers_geometry_provider_to_the_overlays(
+        self, make_controller
+    ):
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        provider = FakeGeometryProvider()
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+            geometry_provider=provider,
+        )
+
+        controller.start_capture()
+
+        # Identity, not just type: proves the *injected* provider reached
+        # the overlay rather than create_overlays()'s own default.
+        assert controller._overlays[0]._geometry_provider is provider
+
+    def test_start_capture_defaults_to_the_controllers_own_geometry_provider(
+        self, make_controller
+    ):
+        # No geometry_provider passed to make_controller: AppController
+        # must have already resolved its own default (build_default_
+        # geometry_provider(), typically UnsupportedGeometryProvider under
+        # the test environment's non-X11 session) rather than leaving
+        # create_overlays() to fall back to a *different* default of its
+        # own -- the acceptance criterion is that AppController always
+        # decides which provider is used, on every path.
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+
+        controller.start_capture()
+
+        assert controller._overlays[0]._geometry_provider is controller._geometry_provider
 
     def test_start_capture_is_a_noop_while_overlays_are_already_open(self, make_controller):
         registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
@@ -427,6 +558,33 @@ class TestAppControllerCapture:
 
         assert controller._overlays == []
         assert controller._editor is None
+
+    def test_failed_capture_reports_it_through_the_tray_icon(self, make_controller, monkeypatch):
+        registry = BackendRegistry([FailingCaptureBackend()])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller.start_capture()
+
+        assert len(calls) == 1
+        # The message body carries what actually failed, not a generic
+        # "something went wrong" -- CaptureError.__str__ already collects
+        # every backend's own failure per CLAUDE.md's "must not stop the
+        # next one" rule, so surfacing it here is free.
+        assert "failing" in calls[0][1]
+        assert "capture failed" in calls[0][1]
+
+        # The tray icon (and thus the resident process) is still alive and
+        # usable after the failure, not torn down by it.
+        assert controller.rectangle_action.text() == "Rectangular Snip"
+        controller.start_capture()  # must not raise a second time
 
     def test_confirming_a_selection_opens_exactly_one_editor_and_clears_overlays(
         self, make_controller
@@ -461,21 +619,36 @@ class TestAppControllerCapture:
 
 
 class TestAppControllerTrayMenu:
-    def test_tray_menu_offers_snip_and_quit(self, make_controller):
+    def test_tray_menu_offers_one_item_per_selection_mode_and_quit(self, make_controller):
         controller = make_controller(
             BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
         )
 
-        assert controller.snip_action.text() == "Snip"
+        # Labelled for a user, not by SelectionMode's own enum name/value
+        # ("WINDOW"/"window" etc must not leak into the menu text).
+        assert controller.rectangle_action.text() == "Rectangular Snip"
+        assert controller.freeform_action.text() == "Freeform Snip"
+        assert controller.window_action.text() == "Window Snip"
+        assert controller.full_screen_action.text() == "Full-screen Snip"
         assert controller.quit_action.text() == "Quit"
 
-    def test_snip_action_triggers_start_capture(self, make_controller):
+    @pytest.mark.parametrize(
+        "action_name, mode",
+        [
+            ("rectangle_action", SelectionMode.RECTANGLE),
+            ("freeform_action", SelectionMode.FREEFORM),
+            ("window_action", SelectionMode.WINDOW),
+            ("full_screen_action", SelectionMode.FULL_SCREEN),
+        ],
+    )
+    def test_each_menu_item_starts_a_capture_in_its_own_mode(
+        self, make_controller, action_name, mode
+    ):
         # Asserts on the real effect of triggering the action, not on
         # whether start_capture() was called via a monkeypatched instance
-        # attribute: the action's `triggered` signal is connected to the
-        # bound method at __init__ time, so replacing
-        # `controller.start_capture` afterwards would never be seen by an
-        # already-connected slot.
+        # attribute: the action's `triggered` signal is connected to a
+        # lambda at __init__ time, so replacing `controller.start_capture`
+        # afterwards would never be seen by an already-connected slot.
         registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
         controller = make_controller(
             registry,
@@ -483,9 +656,10 @@ class TestAppControllerTrayMenu:
             monitor_geometries=[QRectF(0, 0, 200, 200)],
         )
 
-        controller.snip_action.trigger()
+        getattr(controller, action_name).trigger()
 
         assert len(controller._overlays) == 1
+        assert controller._overlays[0]._mode is mode
 
     def test_quit_action_does_not_raise_with_no_running_event_loop(self, make_controller):
         # No test in this file ever calls .exec(), so QApplication.quit()

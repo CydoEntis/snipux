@@ -1,9 +1,8 @@
 """Controller, tray, and CLI entry point.
 
-This ticket only establishes the CLI skeleton and the `--list-backends`
-diagnostic — no real capture backends exist yet (those land in the X11 and
-Wayland tickets), and no overlay/editor exists yet either, so there is
-nothing meaningful for a bare invocation to do beyond print usage.
+`build_default_registry()` wires the real capture backends in, selecting
+`capture.py`'s X11 or Wayland registry (or both, on an unrecognised session
+type) by `detect_session_type()`.
 
 `copy_image_to_clipboard`/`save_image` also live here rather than in
 `editor.py`: this is the only one of the two modules with no existing reason
@@ -29,8 +28,21 @@ from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QImage, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from snipux.capture import BackendRegistry, CaptureError
-from snipux.overlay import Overlay, create_overlays
+from snipux.capture import (
+    BackendRegistry,
+    CaptureError,
+    X11WindowGeometryProvider,
+    build_wayland_registry,
+    build_x11_registry,
+    detect_session_type,
+)
+from snipux.overlay import (
+    GeometryProvider,
+    Overlay,
+    SelectionMode,
+    UnsupportedGeometryProvider,
+    create_overlays,
+)
 
 
 def copy_image_to_clipboard(image: QImage) -> None:
@@ -88,11 +100,43 @@ def save_image(image: QImage, directory: Path | str | None = None) -> Path:
 def build_default_registry() -> BackendRegistry:
     """Construct the `BackendRegistry` the real app uses.
 
-    Empty for now — no real `CaptureBackend` implementations exist yet.
-    Later tickets extend this by appending real backend instances; its
-    shape (a `BackendRegistry` with no arguments) does not change.
+    Selects by `detect_session_type()`: Wayland gets
+    `build_wayland_registry()`, X11 gets `build_x11_registry()`. An
+    unrecognised session type gets both, concatenated -- every backend
+    already gates itself with its own `is_available()`, so offering both
+    lets whatever is actually installed be found instead of failing
+    outright because the session type couldn't be determined.
     """
-    return BackendRegistry()
+    session_type = detect_session_type()
+    if session_type == "wayland":
+        return build_wayland_registry()
+    if session_type == "x11":
+        return build_x11_registry()
+
+    registry = BackendRegistry()
+    for backend in build_wayland_registry():
+        registry.add(backend)
+    for backend in build_x11_registry():
+        registry.add(backend)
+    return registry
+
+
+def build_default_geometry_provider() -> GeometryProvider:
+    """Construct the `GeometryProvider` the real app uses for window mode.
+
+    `X11WindowGeometryProvider` when its own `is_available()` says the
+    session is X11 with `wmctrl` on PATH; `UnsupportedGeometryProvider`
+    otherwise, so Wayland and a machine without `wmctrl` degrade to plain
+    rectangle dragging exactly as they do without a provider at all. The
+    choice is made here rather than in overlay.py so overlay.py never needs
+    to import anything wmctrl-specific — per CLAUDE.md, platform-specific
+    code stays confined to capture.py, and app.py is already the place that
+    picks between platform-specific implementations for `registry`.
+    """
+    provider = X11WindowGeometryProvider()
+    if provider.is_available():
+        return provider
+    return UnsupportedGeometryProvider()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -302,6 +346,7 @@ class AppController:
         registry: BackendRegistry,
         transport: Transport,
         monitor_geometries: list[QRectF] | None = None,
+        geometry_provider: GeometryProvider | None = None,
     ):
         # Must happen before any overlay/editor window is ever shown.
         # Without it, Qt's default behavior quits the whole application the
@@ -317,6 +362,15 @@ class AppController:
         # platform, mirroring the None -> "build the real thing" pattern
         # main() already uses for `registry`.
         self._monitor_geometries = monitor_geometries
+        # Same None -> "build the real thing" pattern as `monitor_geometries`
+        # above and `registry`/`transport` in main()/run_resident_app():
+        # tests inject a fake provider directly instead of depending on a
+        # real X11 session with wmctrl under an offscreen platform.
+        self._geometry_provider = (
+            geometry_provider
+            if geometry_provider is not None
+            else build_default_geometry_provider()
+        )
 
         self._overlays: list[Overlay] = []
         self._frame = None
@@ -324,8 +378,30 @@ class AppController:
 
         self._tray_icon = QSystemTrayIcon(self._build_icon())
         menu = QMenu()
-        self.snip_action = menu.addAction("Snip")
-        self.snip_action.triggered.connect(self.start_capture)
+        # One item per SelectionMode, labelled for a user (never the enum
+        # name/value) rather than a single generic "Snip" entry, so every
+        # mode overlay.py already implements is actually reachable -- per
+        # the ticket, full-screen capture in particular had no way in at
+        # all before this. Each lambda takes no arguments so PyQt trims the
+        # `checked` bool `triggered` would otherwise pass, the same way the
+        # old single-item menu relied on start_capture() itself doing that
+        # trimming.
+        self.rectangle_action = menu.addAction("Rectangular Snip")
+        self.rectangle_action.triggered.connect(
+            lambda: self.start_capture(SelectionMode.RECTANGLE)
+        )
+        self.freeform_action = menu.addAction("Freeform Snip")
+        self.freeform_action.triggered.connect(
+            lambda: self.start_capture(SelectionMode.FREEFORM)
+        )
+        self.window_action = menu.addAction("Window Snip")
+        self.window_action.triggered.connect(
+            lambda: self.start_capture(SelectionMode.WINDOW)
+        )
+        self.full_screen_action = menu.addAction("Full-screen Snip")
+        self.full_screen_action.triggered.connect(
+            lambda: self.start_capture(SelectionMode.FULL_SCREEN)
+        )
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         self._tray_icon.setContextMenu(menu)
@@ -347,7 +423,12 @@ class AppController:
     def _real_monitor_geometries(self) -> list[QRectF]:
         return [QRectF(screen.geometry()) for screen in QGuiApplication.screens()]
 
-    def start_capture(self) -> None:
+    def start_capture(self, mode: SelectionMode = SelectionMode.RECTANGLE) -> None:
+        # Defaults to rectangle so every existing no-argument caller --
+        # the --snip transport listener wired below, and a forwarded
+        # request from a second launch -- keeps behaving exactly as before,
+        # per the ticket's acceptance criterion. Only the tray menu's own
+        # actions pass an explicit mode.
         if self._overlays:
             # A Snip request arrived mid-selection (tray double-click, or a
             # forwarded request from a second launch while already
@@ -357,11 +438,19 @@ class AppController:
 
         try:
             frame = self._registry.capture()
-        except CaptureError:
+        except CaptureError as exc:
             # A failed capture must not take down the resident process,
             # same "a failure must not stop the rest" spirit CLAUDE.md
-            # states for backends, applied one level up here. Return to
-            # idle silently rather than raising.
+            # states for backends, applied one level up here -- but silently
+            # returning to idle left a Print Screen press with no feedback
+            # at all, indistinguishable from the key doing nothing. Reported
+            # through the existing tray icon rather than a new window, since
+            # the resident process otherwise never shows one.
+            self._tray_icon.showMessage(
+                "Snip failed",
+                str(exc),
+                QSystemTrayIcon.MessageIcon.Warning,
+            )
             return
 
         geometries = (
@@ -369,7 +458,9 @@ class AppController:
             if self._monitor_geometries is not None
             else self._real_monitor_geometries()
         )
-        overlays = create_overlays(frame, geometries)
+        overlays = create_overlays(
+            frame, geometries, mode=mode, geometry_provider=self._geometry_provider
+        )
         for overlay in overlays:
             overlay.confirmed.connect(self._on_confirmed)
             overlay.cancelled.connect(self._on_cancelled)
