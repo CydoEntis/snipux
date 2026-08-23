@@ -25,7 +25,7 @@ from snipux.capture import (
     build_wayland_registry,
     build_x11_registry,
 )
-from snipux.overlay import GeometryProvider, UnsupportedGeometryProvider
+from snipux.overlay import GeometryProvider, SelectionMode, UnsupportedGeometryProvider
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -488,6 +488,10 @@ class TestAppControllerCapture:
 
         assert len(controller._overlays) == 2
         assert controller._editor is None
+        # The no-argument entry point still means rectangle mode -- the
+        # --snip forwarding path and the transport listener both call
+        # start_capture() with no argument and must keep this behaviour.
+        assert controller._overlays[0]._mode is SelectionMode.RECTANGLE
 
     def test_start_capture_passes_the_controllers_geometry_provider_to_the_overlays(
         self, make_controller
@@ -579,7 +583,7 @@ class TestAppControllerCapture:
 
         # The tray icon (and thus the resident process) is still alive and
         # usable after the failure, not torn down by it.
-        assert controller.snip_action.text() == "Snip"
+        assert controller.rectangle_action.text() == "Rectangular Snip"
         controller.start_capture()  # must not raise a second time
 
     def test_confirming_a_selection_opens_exactly_one_editor_and_clears_overlays(
@@ -615,21 +619,36 @@ class TestAppControllerCapture:
 
 
 class TestAppControllerTrayMenu:
-    def test_tray_menu_offers_snip_and_quit(self, make_controller):
+    def test_tray_menu_offers_one_item_per_selection_mode_and_quit(self, make_controller):
         controller = make_controller(
             BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
         )
 
-        assert controller.snip_action.text() == "Snip"
+        # Labelled for a user, not by SelectionMode's own enum name/value
+        # ("WINDOW"/"window" etc must not leak into the menu text).
+        assert controller.rectangle_action.text() == "Rectangular Snip"
+        assert controller.freeform_action.text() == "Freeform Snip"
+        assert controller.window_action.text() == "Window Snip"
+        assert controller.full_screen_action.text() == "Full-screen Snip"
         assert controller.quit_action.text() == "Quit"
 
-    def test_snip_action_triggers_start_capture(self, make_controller):
+    @pytest.mark.parametrize(
+        "action_name, mode",
+        [
+            ("rectangle_action", SelectionMode.RECTANGLE),
+            ("freeform_action", SelectionMode.FREEFORM),
+            ("window_action", SelectionMode.WINDOW),
+            ("full_screen_action", SelectionMode.FULL_SCREEN),
+        ],
+    )
+    def test_each_menu_item_starts_a_capture_in_its_own_mode(
+        self, make_controller, action_name, mode
+    ):
         # Asserts on the real effect of triggering the action, not on
         # whether start_capture() was called via a monkeypatched instance
-        # attribute: the action's `triggered` signal is connected to the
-        # bound method at __init__ time, so replacing
-        # `controller.start_capture` afterwards would never be seen by an
-        # already-connected slot.
+        # attribute: the action's `triggered` signal is connected to a
+        # lambda at __init__ time, so replacing `controller.start_capture`
+        # afterwards would never be seen by an already-connected slot.
         registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
         controller = make_controller(
             registry,
@@ -637,9 +656,10 @@ class TestAppControllerTrayMenu:
             monitor_geometries=[QRectF(0, 0, 200, 200)],
         )
 
-        controller.snip_action.trigger()
+        getattr(controller, action_name).trigger()
 
         assert len(controller._overlays) == 1
+        assert controller._overlays[0]._mode is mode
 
     def test_quit_action_does_not_raise_with_no_running_event_loop(self, make_controller):
         # No test in this file ever calls .exec(), so QApplication.quit()
