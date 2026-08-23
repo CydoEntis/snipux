@@ -10,6 +10,7 @@ from snipux.app import (
     AppController,
     Transport,
     build_default_registry,
+    cli,
     copy_image_to_clipboard,
     main,
     run_resident_app,
@@ -233,6 +234,60 @@ class FakeTransport(Transport):
 
 def make_transport_state() -> dict:
     return {"claimed": False, "forwarded_requests": 0, "primary_on_request": None}
+
+
+class TestSnipFlag:
+    def test_forwards_to_an_already_running_instance(self):
+        state = make_transport_state()
+        state["claimed"] = True  # simulates a resident instance already running
+
+        exit_code = main(["--snip"], transport=FakeTransport(state))
+
+        assert exit_code == 0
+        assert state["forwarded_requests"] == 1
+
+    def test_reports_an_error_when_nothing_is_running(self, capsys):
+        state = make_transport_state()  # fresh: nothing resident yet
+
+        exit_code = main(["--snip"], transport=FakeTransport(state))
+
+        assert exit_code != 0
+        assert state["forwarded_requests"] == 0
+        captured = capsys.readouterr()
+        assert captured.err != ""
+        assert captured.out == ""
+
+    def test_mutually_exclusive_with_list_backends(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--snip", "--list-backends"])
+
+        assert excinfo.value.code != 0
+
+
+class TestCli:
+    def test_dispatches_to_main_when_given_arguments(self, monkeypatch):
+        monkeypatch.setattr(app.sys, "argv", ["snipux", "--list-backends"])
+        calls = []
+        monkeypatch.setattr(app, "main", lambda: calls.append("main"))
+        monkeypatch.setattr(
+            app, "run_resident_app", lambda: calls.append("run_resident_app")
+        )
+
+        cli()
+
+        assert calls == ["main"]
+
+    def test_dispatches_to_run_resident_app_when_given_none(self, monkeypatch):
+        monkeypatch.setattr(app.sys, "argv", ["snipux"])
+        calls = []
+        monkeypatch.setattr(app, "main", lambda: calls.append("main"))
+        monkeypatch.setattr(
+            app, "run_resident_app", lambda: calls.append("run_resident_app")
+        )
+
+        cli()
+
+        assert calls == ["run_resident_app"]
 
 
 class FakeCaptureBackend(CaptureBackend):
