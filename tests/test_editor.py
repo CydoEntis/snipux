@@ -411,6 +411,89 @@ def _drag_rectangle(canvas: Canvas, start: QPoint, end: QPoint) -> None:
     QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
 
 
+def _erase_at(canvas: Canvas, pos: QPoint) -> None:
+    canvas.set_tool(Tool.ERASER)
+    QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=pos)
+    QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=pos)
+
+
+class TestEraserTool:
+    def test_toolbar_offers_an_eraser_tool(self):
+        # The generic "every Tool member gets an action" coverage lives in
+        # TestToolbarControls; this pins the specific tool this ticket adds,
+        # including that armed it actually reaches Canvas like any other.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        assert Tool.ERASER in editor.tool_actions
+
+        editor.tool_actions[Tool.ERASER].trigger()
+
+        assert editor.canvas._tool is Tool.ERASER
+
+    def test_click_on_annotation_removes_only_that_shape(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(canvas, QPoint(40, 40), QPoint(50, 50))
+        assert len(canvas.shapes) == 2
+        kept = canvas.shapes[1]
+
+        # (5, 10) sits on the first rectangle's left border, well clear of
+        # the second rectangle's hit region.
+        _erase_at(canvas, QPoint(5, 10))
+
+        assert canvas.shapes == (kept,)
+
+    def test_click_on_empty_space_leaves_every_shape_in_place(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        all_shapes = canvas.shapes
+
+        _erase_at(canvas, QPoint(80, 50))  # nowhere near the rectangle's border
+
+        assert canvas.shapes == all_shapes
+
+    def test_overlapping_shapes_erase_removes_the_most_recently_drawn(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        # Two identically-placed rectangles: a click anywhere on their
+        # shared border hits both, so this is what actually exercises
+        # "most recently drawn wins" rather than distinguishing them by
+        # position.
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(25, 25))
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(25, 25))
+        first, second = canvas.shapes
+        assert first is not second
+
+        _erase_at(canvas, QPoint(5, 15))  # on the shared left border
+
+        assert canvas.shapes == (first,)
+
+    def test_erase_is_undoable_as_a_single_step(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(canvas, QPoint(40, 40), QPoint(50, 50))
+        all_shapes = canvas.shapes
+
+        _erase_at(canvas, QPoint(5, 10))
+        assert len(canvas.shapes) == 1
+
+        canvas.undo()
+
+        assert canvas.shapes == all_shapes
+
+
 class TestUndoRedo:
     def test_undo_after_three_shapes_removes_only_the_most_recent(self):
         frame = make_frame(image_size=(100, 60))
