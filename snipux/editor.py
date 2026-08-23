@@ -24,6 +24,7 @@ from PyQt6.QtGui import (
     QPainterPathStroker,
 )
 from PyQt6.QtWidgets import (
+    QColorDialog,
     QLineEdit,
     QSpinBox,
     QToolBar,
@@ -210,7 +211,12 @@ class Canvas(QWidget):
     `self.image.size()`) recomputed every call.
     """
 
-    DEFAULT_COLOUR = QColor(Qt.GlobalColor.black)
+    # Red, not black (SNX-25): black strokes on a dark capture (e.g. a
+    # terminal screenshot) are invisible until a colour is deliberately
+    # chosen, which read as "drawing is broken" rather than "pick a colour."
+    # Red is legible against both light and dark captures and is the
+    # conventional annotation colour, so it's a safe first mark either way.
+    DEFAULT_COLOUR = QColor(Qt.GlobalColor.red)
     DEFAULT_STROKE_WIDTH = 3
 
     # Emitted whenever _history/_history_index actually changes (a pushed
@@ -266,6 +272,15 @@ class Canvas(QWidget):
         rather than a bare attribute.
         """
         return tuple(self._shapes)
+
+    @property
+    def colour(self) -> QColor:
+        """The colour that will be used for the next annotation. A copy, not
+        the live QColor, for the same reason `shapes` returns a copy — so
+        Editor's colour-picker (SNX-25) can read the current colour to seed
+        the dialog without reaching into a private attribute.
+        """
+        return QColor(self._colour)
 
     def _push_history(self) -> None:
         """Commit the current (frame, shapes) as a new undo/redo entry.
@@ -585,10 +600,11 @@ class Editor(QWidget):
     where a click was silently a no-op. See `_position_over_snip`.
     """
 
-    # A fixed preset row, not a colour picker — per PLAN.md, a QColorDialog
-    # (or any modal) is out of scope for this ticket so no control here can
-    # ever block a test (or a user) on a dialog. The exact palette is an
-    # implementation detail, not an acceptance criterion.
+    # A small one-click preset row, kept alongside the full picker added by
+    # SNX-25 (see _build_colour_picker_action) rather than replaced by it —
+    # a modal is the right tool for an arbitrary colour, but a needless
+    # detour for the common case of "just pick a preset." The exact palette
+    # is an implementation detail, not an acceptance criterion.
     SWATCH_COLOURS = [
         QColor(Qt.GlobalColor.black),
         QColor(Qt.GlobalColor.red),
@@ -623,6 +639,7 @@ class Editor(QWidget):
         self._build_tool_actions(self.toolbar)
         self.colour_buttons: dict[str, QToolButton] = {}
         self._build_colour_swatches(self.toolbar)
+        self._build_colour_picker_action(self.toolbar)
         self.stroke_width_spinbox = self._build_stroke_width_control(self.toolbar)
         self._build_undo_redo_clear_actions(self.toolbar)
         self._build_copy_save_done_actions(self.toolbar)
@@ -638,7 +655,7 @@ class Editor(QWidget):
         default_tool = next(iter(Tool))
         self.tool_actions[default_tool].setChecked(True)
         self.canvas.set_tool(default_tool)
-        self.canvas.set_colour(self.SWATCH_COLOURS[0])
+        self.canvas.set_colour(Canvas.DEFAULT_COLOUR)
         self.canvas.set_stroke_width(self.stroke_width_spinbox.value())
 
         self._position_over_snip(frame)
@@ -700,6 +717,29 @@ class Editor(QWidget):
             )
             toolbar.addWidget(button)
             self.colour_buttons[colour.name()] = button
+
+    def _build_colour_picker_action(self, toolbar: QToolBar) -> None:
+        """A full colour picker for anything the preset swatches don't
+        cover, per SNX-25.
+
+        The QColorDialog itself is only ever constructed inside
+        `_pick_colour`, which nothing calls except this action's `triggered`
+        signal — so building the toolbar (including in every test that
+        merely constructs an Editor) can never pop a modal.
+        """
+        self.colour_picker_action = QAction("Custom Colour…", toolbar)
+        self.colour_picker_action.triggered.connect(self._pick_colour)
+        toolbar.addAction(self.colour_picker_action)
+
+    def _pick_colour(self) -> None:
+        # Seeded with the current colour so re-opening the dialog starts
+        # from where annotation is now, not from some fixed default.
+        # QColorDialog.getColor() returns an invalid QColor on Cancel
+        # (rather than raising or returning None), so isValid() is the
+        # correct "did the user actually choose something" check here.
+        colour = QColorDialog.getColor(self.canvas.colour, self, "Custom Colour")
+        if colour.isValid():
+            self.canvas.set_colour(colour)
 
     def _build_stroke_width_control(self, toolbar: QToolBar) -> QSpinBox:
         spinbox = QSpinBox(toolbar)
