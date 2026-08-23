@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#43443c; font-family:'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color:#e3ff4f; text-decoration:none; } a:hover { color:#eeff8f; }
+  @keyframes ants { to { stroke-dashoffset:-14; } }
+  @keyframes rise { from { opacity:0; transform:translate(-50%, 10px); } to { opacity:1; transform:translate(-50%, 0); } }
+  input[type=range] { -webkit-appearance:none; appearance:none; height:4px; border-radius:99px; background:rgba(255,255,255,.2); outline:none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:13px; height:13px; border-radius:50%; background:#f1f3e8; border:0; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,.5); }
+</style>
+</helmet>
+
+<div style="position:relative; width:100vw; height:100vh; overflow:hidden; background:#43443c; user-select:none">
+
+  <div style="position:absolute; inset:0; display:flex; font:400 14px/34px 'IBM Plex Mono'; color:#e8ead9">
+    <div style="width:196px; flex:none; background:#3b3c35; border-right:1px solid #4e5047; padding:58px 0 22px">
+      <div style="padding:0 18px 14px; font:500 11px/1 'IBM Plex Sans'; letter-spacing:.12em; text-transform:uppercase; color:#9a9d8c">Workspace</div>
+      <div style="padding:0 18px; font-size:13px; line-height:30px; color:#cdd0bd">
+        <div>projects</div>
+        <div>reading the code</div>
+        <div style="color:#e8ead9">daily-report</div>
+        <div>weekly-report</div>
+        <div>TODO.md</div>
+        <div style="opacity:.6">archive</div>
+      </div>
+    </div>
+    <div style="flex:1; min-width:0; padding:62px 30px 26px; overflow:hidden">
+      <div>blocks forever on the write that overflows it. agent stops mid-tool-call, run row still says <span style="color:#9fd2ff">running</span></div>
+      <div>after a crash — you also had twenty commits changing the source under a running process.</div>
+      <div style="height:34px"></div>
+      <div>23:41 · the source is 19 hours and 21 commits ahead of the build you have been driving all day.</div>
+      <div>tells us whether the stderr drain was the whole silent-death story.</div>
+      <div>one of them is a schema I would leave alone, plus six screens in the low 300s.</div>
+      <div style="height:34px"></div>
+      <div>findings from real use, not "it will not start". that is the right direction to be pointing.</div>
+      <div>what is left reads fine; what is untested is whether it survives a day of real driving.</div>
+      <div style="height:34px"></div>
+      <div style="color:#cdd0bd">~/.config/snipux/profiles/default.toml</div>
+      <div style="height:34px"></div>
+      <div>last thing I did today, before any refactor. that is what was queued last night.</div>
+      <div style="height:34px"></div>
+      <div>caught live:</div>
+      <div style="height:68px"></div>
+      <div>3m52s and the implement step started six minutes after the stderr fix, so it is still</div>
+      <div style="height:34px"></div>
+      <div style="color:#b9bcaa">fixed six bugs including the agent-stderr deadlock behind the silent run deaths.</div>
+    </div>
+  </div>
+
+  <sc-if value="{{ hints }}" hint-placeholder-val="{{ true }}">
+    <div style="position:absolute; left:0; right:0; top:0; height:44px; z-index:4; background:rgba(20,21,18,.5); display:flex; align-items:center; justify-content:center; gap:10px; font:400 12px/1 'IBM Plex Sans'; color:#d9dbcd; backdrop-filter:blur(3px)">
+      <span style="font-family:'IBM Plex Mono'; color:#fff">Esc</span> discard ink
+      <span style="color:rgba(255,255,255,.3)">·</span>
+      <span style="font-family:'IBM Plex Mono'; color:#fff">Enter</span> copy &amp; dismiss
+      <span style="color:rgba(255,255,255,.3)">·</span>
+      <span style="font-family:'IBM Plex Mono'; color:#fff">P H A R S T B E</span> pick a tool
+      <span style="color:rgba(255,255,255,.3)">·</span>
+      drag any edge to re-frame — the ink stays where you put it
+    </div>
+  </sc-if>
+
+  <div style="position:absolute; left:{{ sel.x }}px; top:{{ sel.y }}px; width:{{ sel.w }}px; height:{{ sel.h }}px; z-index:5; box-shadow:0 0 0 9999px {{ dimColor }}">
+    <div onPointerDown="{{ onDown }}" onPointerMove="{{ onMove }}" onPointerUp="{{ onUp }}" style="position:absolute; inset:0; overflow:hidden; touch-action:none; cursor:{{ cursor }}">
+      <div style="position:absolute; left:{{ ox }}px; top:{{ oy }}px; width:{{ view.w }}px; height:{{ view.h }}px">
+        <sc-for list="{{ blurs }}" as="m" hint-placeholder-count="0">
+          <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:{{ m.w }}px; height:{{ m.h }}px; border-radius:2px; backdrop-filter:{{ m.fx }}; background:rgba(120,120,130,.06); pointer-events:{{ m.pe }}"></div>
+        </sc-for>
+        <svg width="{{ view.w }}" height="{{ view.h }}" style="position:absolute; left:0; top:0; display:block; pointer-events:none">
+          <sc-for list="{{ pens }}" as="m" hint-placeholder-count="0">
+            <path d="{{ m.d }}" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" stroke-linecap="round" stroke-linejoin="round" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></path>
+          </sc-for>
+          <sc-for list="{{ rects }}" as="m" hint-placeholder-count="0">
+            <rect x="{{ m.x }}" y="{{ m.y }}" width="{{ m.w }}" height="{{ m.h }}" rx="3" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></rect>
+          </sc-for>
+          <sc-for list="{{ arrows }}" as="m" hint-placeholder-count="0">
+            <g onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}" opacity="{{ m.op }}">
+              <line x1="{{ m.x1 }}" y1="{{ m.y1 }}" x2="{{ m.hx }}" y2="{{ m.hy }}" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-linecap="round"></line>
+              <polygon points="{{ m.head }}" fill="{{ m.color }}"></polygon>
+            </g>
+          </sc-for>
+        </svg>
+        <sc-for list="{{ texts }}" as="m" hint-placeholder-count="0">
+          <div contentEditable="{{ true }}" suppressContentEditableWarning="{{ true }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; padding:3px 8px; border-radius:5px; background:rgba(12,14,18,.72); color:{{ m.color }}; font:600 {{ m.fs }}px/1.3 'IBM Plex Sans'; outline:none; white-space:nowrap; cursor:text; user-select:text; box-shadow:0 0 0 1px rgba(255,255,255,.16)">{{ m.text }}</div>
+        </sc-for>
+        <sc-for list="{{ steps }}" as="m" hint-placeholder-count="0">
+          <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:26px; height:26px; border-radius:50%; display:grid; place-items:center; background:{{ m.color }}; color:#15170e; font:600 13px/1 'IBM Plex Sans'; box-shadow:0 2px 8px rgba(0,0,0,.5), 0 0 0 2px rgba(255,255,255,.9); pointer-events:{{ m.pe }}">{{ m.n }}</div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="position:absolute; inset:0; pointer-events:none">
+      <svg width="{{ sel.w }}" height="{{ sel.h }}" style="position:absolute; left:0; top:0; display:block; overflow:visible">
+        <rect x="0.5" y="0.5" width="{{ sel.iw }}" height="{{ sel.ih }}" fill="none" stroke="rgba(255,255,255,.92)" stroke-width="1"></rect>
+        <rect x="0.5" y="0.5" width="{{ sel.iw }}" height="{{ sel.ih }}" fill="none" stroke="#1b1c16" stroke-width="1" stroke-dasharray="7 7" style="animation:ants .7s linear infinite"></rect>
+      </svg>
+      <div style="position:absolute; left:-2px; top:-2px; width:26px; height:26px; border-top:4px solid #fff; border-left:4px solid #fff; border-radius:3px 0 0 0"></div>
+      <div style="position:absolute; right:-2px; top:-2px; width:26px; height:26px; border-top:4px solid #fff; border-right:4px solid #fff; border-radius:0 3px 0 0"></div>
+      <div style="position:absolute; left:-2px; bottom:-2px; width:26px; height:26px; border-bottom:4px solid #fff; border-left:4px solid #fff; border-radius:0 0 0 3px"></div>
+      <div style="position:absolute; right:-2px; bottom:-2px; width:26px; height:26px; border-bottom:4px solid #fff; border-right:4px solid #fff; border-radius:0 0 3px 0"></div>
+
+      <div style="position:absolute; left:0; top:-38px; display:flex; align-items:center; gap:9px; padding:6px 11px; border-radius:8px; background:#e9ecf2; color:#12141a; font:600 12px/1 'IBM Plex Mono'; white-space:nowrap; box-shadow:0 8px 22px rgba(0,0,0,.45)">
+        {{ sel.w }} × {{ sel.h }}
+        <span style="color:#9ca3af">·</span>
+        <span style="font-weight:400; color:#4b5563">{{ markLabel }}</span>
+      </div>
+      <div style="position:absolute; right:0; top:-38px; display:flex; align-items:center; gap:7px; padding:6px 11px; border-radius:8px; background:rgba(20,21,18,.78); color:#e5e7d9; font:400 12px/1 'IBM Plex Sans'; white-space:nowrap; backdrop-filter:blur(4px)">
+        <dc-import name="Icon" glyph="pin" size="13" hint-size="13px,13px"></dc-import>Frozen
+      </div>
+    </div>
+
+    <div onPointerDown="{{ H.tl }}" title="Re-frame" style="position:absolute; left:-7px; top:-7px; width:20px; height:20px; cursor:nwse-resize; z-index:2"></div>
+    <div onPointerDown="{{ H.tr }}" title="Re-frame" style="position:absolute; right:-7px; top:-7px; width:20px; height:20px; cursor:nesw-resize; z-index:2"></div>
+    <div onPointerDown="{{ H.bl }}" title="Re-frame" style="position:absolute; left:-7px; bottom:-7px; width:20px; height:20px; cursor:nesw-resize; z-index:2"></div>
+    <div onPointerDown="{{ H.br }}" title="Re-frame" style="position:absolute; right:-7px; bottom:-7px; width:20px; height:20px; cursor:nwse-resize; z-index:2"></div>
+    <div onPointerDown="{{ H.t }}" title="Re-frame" style="position:absolute; left:50%; top:-5px; width:34px; height:9px; margin-left:-17px; background:#fff; border-radius:5px; cursor:ns-resize; z-index:2"></div>
+    <div onPointerDown="{{ H.b }}" title="Re-frame" style="position:absolute; left:50%; bottom:-5px; width:34px; height:9px; margin-left:-17px; background:#fff; border-radius:5px; cursor:ns-resize; z-index:2"></div>
+    <div onPointerDown="{{ H.l }}" title="Re-frame" style="position:absolute; left:-5px; top:50%; width:9px; height:34px; margin-top:-17px; background:#fff; border-radius:5px; cursor:ew-resize; z-index:2"></div>
+    <div onPointerDown="{{ H.r }}" title="Re-frame" style="position:absolute; right:-5px; top:50%; width:9px; height:34px; margin-top:-17px; background:#fff; border-radius:5px; cursor:ew-resize; z-index:2"></div>
+  </div>
+
+  <div style="position:absolute; left:{{ barLeft }}px; top:{{ barTop }}px; z-index:7; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; gap:8px">
+    <div style="display:flex; align-items:center; gap:3px; padding:7px 8px; border-radius:14px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); box-shadow:0 24px 50px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+      <button onClick="{{ toggleMode }}" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 12px; border-radius:10px; border:0; background:{{ chip }}; color:#15170e; font:600 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="filter:brightness(1.06)">
+        {{ mode }}<dc-import name="Icon" glyph="chevron" size="14" stroke="2" hint-size="14px,14px"></dc-import>
+      </button>
+      <div style="width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 6px"></div>
+      <button title="Pen — P" onClick="{{ T.pen }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ bg.pen }}; color:{{ fg.pen }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="pen" hint-size="18px,18px"></dc-import></button>
+      <button title="Highlighter — H" onClick="{{ T.highlighter }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ bg.highlighter }}; color:{{ fg.highlighter }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="highlighter" hint-size="18px,18px"></dc-import></button>
+      <button title="Arrow — A" onClick="{{ T.arrow }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ bg.arrow }}; color:{{ fg.arrow }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="arrow" hint-size="18px,18px"></dc-import></button>
+      <button title="Rectangle — R" onClick="{{ T.rect }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ bg.rect }}; color:{{ fg.rect }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="rect" hint-size="18px,18px"></dc-import></button>
+      <button title="Numbered step — S" onClick="{{ T.step }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ bg.step }}; color:{{ fg.step }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="step" hint-size="18px,18px"></dc-import></button>
+      <button title="Text — T" onClick="{{ T.text }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ bg.text }}; color:{{ fg.text }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="text" hint-size="18px,18px"></dc-import></button>
+      <button title="Blur / redact — B" onClick="{{ T.blur }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ bg.blur }}; color:{{ fg.blur }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="blur" hint-size="18px,18px"></dc-import></button>
+      <button title="Eraser — E" onClick="{{ T.eraser }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ bg.eraser }}; color:{{ fg.eraser }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="eraser" hint-size="18px,18px"></dc-import></button>
+      <div style="width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 6px"></div>
+      <button title="Undo — ⌘Z" onClick="{{ undo }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:{{ undoFg }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="undo" hint-size="18px,18px"></dc-import></button>
+      <button title="Redo — ⇧⌘Z" onClick="{{ redo }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:{{ redoFg }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="redo" hint-size="18px,18px"></dc-import></button>
+      <button title="Clear ink" onClick="{{ clear }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:#8f9689" style-hover="background:rgba(200,80,80,.22); color:#f5a3a3"><dc-import name="Icon" glyph="trash" hint-size="18px,18px"></dc-import></button>
+      <div style="width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 6px"></div>
+      <button title="Copy — Enter" onClick="{{ doCopy }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:#d7dacb" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="copy" hint-size="18px,18px"></dc-import></button>
+      <button title="Save to ~/Pictures" onClick="{{ doSave }}" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 13px; border-radius:10px; border:0; background:rgba(255,255,255,.1); color:#f1f3e8; font:600 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="background:rgba(255,255,255,.17)"><dc-import name="Icon" glyph="save" size="16" stroke="1.9" hint-size="16px,16px"></dc-import>Save</button>
+    </div>
+
+    <sc-if value="{{ isDraw }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex; align-items:center; gap:12px; padding:8px 12px; border-radius:12px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); box-shadow:0 18px 40px -14px rgba(0,0,0,.85); backdrop-filter:blur(16px)">
+        <div style="display:flex; align-items:center; gap:7px; padding:3px 9px 3px 6px; border-radius:8px; background:rgba(255,255,255,.08); color:#f1f3e8; font:500 12px 'IBM Plex Sans'; white-space:nowrap">
+          <dc-import name="Icon" glyph="{{ tool }}" size="14" hint-size="14px,14px"></dc-import>{{ toolName }}
+        </div>
+        <div style="width:1px; height:20px; background:rgba(255,255,255,.12)"></div>
+        <div style="display:flex; gap:6px">
+          <sc-for list="{{ swatches }}" as="s" hint-placeholder-count="7">
+            <button onClick="{{ s.pick }}" title="{{ s.name }}" style="width:22px; height:22px; padding:0; border-radius:7px; cursor:pointer; background:{{ s.hex }}; border:1px solid rgba(255,255,255,.2); box-shadow:{{ s.ring }}"></button>
+          </sc-for>
+          <button title="Custom colour" style="width:22px; height:22px; padding:0; border-radius:7px; cursor:pointer; border:1px dashed rgba(255,255,255,.32); background:transparent; color:#a8afa0; display:grid; place-items:center"><dc-import name="Icon" glyph="plus" size="12" hint-size="12px,12px"></dc-import></button>
+        </div>
+        <div style="width:1px; height:20px; background:rgba(255,255,255,.12)"></div>
+        <input type="range" min="1" max="26" value="{{ size }}" onChange="{{ setSize }}" style="width:104px">
+        <span style="min-width:34px; font:500 11px/1 'IBM Plex Mono'; color:#c6cab8; white-space:nowrap">{{ size }}px</span>
+        <div style="width:28px; height:28px; display:grid; place-items:center">
+          <div style="width:{{ dot }}px; height:{{ dot }}px; border-radius:50%; background:{{ color }}; opacity:{{ opv }}"></div>
+        </div>
+        <div style="width:1px; height:20px; background:rgba(255,255,255,.12)"></div>
+        <span style="font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">{{ hint }}</span>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isBlur }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex; align-items:center; gap:12px; padding:8px 12px; border-radius:12px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); box-shadow:0 18px 40px -14px rgba(0,0,0,.85); backdrop-filter:blur(16px)">
+        <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.35); border-radius:8px">
+          <button onClick="{{ setBlurMode }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 11.5px 'IBM Plex Sans'; background:{{ blurBg }}; color:{{ blurFg }}">Blur</button>
+          <button onClick="{{ setPixMode }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 11.5px 'IBM Plex Sans'; background:{{ pixBg }}; color:{{ pixFg }}">Pixelate</button>
+        </div>
+        <span style="font:400 11px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">Strength</span>
+        <input type="range" min="2" max="20" value="{{ strength }}" onChange="{{ setStrength }}" style="width:104px">
+        <span style="min-width:20px; font:500 11px/1 'IBM Plex Mono'; color:#c6cab8">{{ strength }}</span>
+        <span style="font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">{{ hint }}</span>
+      </div>
+    </sc-if>
+  </div>
+
+  <sc-if value="{{ modeOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; left:{{ menuLeft }}px; top:{{ menuTop }}px; z-index:9; width:262px; padding:6px; border-radius:12px; background:rgba(26,28,24,.97); border:1px solid rgba(255,255,255,.12); box-shadow:0 26px 60px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+      <sc-for list="{{ modes }}" as="m" hint-placeholder-count="4">
+        <button onClick="{{ m.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ m.bg }}; color:{{ m.fg }}" style-hover="background:rgba(255,255,255,.09)">
+          <dc-import name="Icon" glyph="{{ m.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+          <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+            <span style="font:500 12.5px/1 'IBM Plex Sans'">{{ m.label }}</span>
+            <span style="font:400 11px/1 'IBM Plex Sans'; color:#8f9689">{{ m.note }}</span>
+          </span>
+          <span style="opacity:{{ m.tick }}; color:{{ chip }}"><dc-import name="Icon" glyph="check" size="15" stroke="2" hint-size="15px,15px"></dc-import></span>
+        </button>
+      </sc-for>
+      <div style="height:1px; background:rgba(255,255,255,.1); margin:5px 4px"></div>
+      <button onClick="{{ cycleDelay }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:transparent; color:#a8afa0" style-hover="background:rgba(255,255,255,.09)">
+        <dc-import name="Icon" glyph="timer" size="16" hint-size="16px,16px"></dc-import>
+        <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'">Delay</span>
+        <span style="font:400 11.5px/1 'IBM Plex Mono'; color:#8f9689">{{ delay }}</span>
+      </button>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ hasToast }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; left:50%; bottom:34px; z-index:10; transform:translateX(-50%); display:flex; align-items:center; gap:9px; padding:10px 15px; border-radius:11px; background:rgba(233,236,242,.96); color:#12141a; font:500 12.5px/1 'IBM Plex Sans'; white-space:nowrap; box-shadow:0 20px 44px -12px rgba(0,0,0,.7); animation:rise .18s ease">
+      <dc-import name="Icon" glyph="{{ toastGlyph }}" size="15" stroke="2" hint-size="15px,15px"></dc-import>{{ toast }}
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;chipColor&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#e3ff4f&quot;,&quot;options&quot;:[&quot;#e3ff4f&quot;,&quot;#8b9bff&quot;,&quot;#2dd4bf&quot;,&quot;#f1f3e8&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Overlay&quot;},&quot;dim&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:62,&quot;min&quot;:30,&quot;max&quot;:85,&quot;step&quot;:1,&quot;unit&quot;:&quot;%&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Overlay&quot;},&quot;hints&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Overlay&quot;}}">
+const SW = [['#e3ff4f','Acid'],['#ef4444','Red'],['#38bdf8','Sky'],['#10b981','Emerald'],['#a855f7','Violet'],['#ffffff','White'],['#12141a','Ink']];
+const TOOLS = ['pen','highlighter','arrow','rect','step','text','blur','eraser'];
+const NAMES = { pen:'Pen', highlighter:'Highlighter', arrow:'Arrow', rect:'Rectangle', step:'Numbered step', text:'Text label', blur:'Blur / redact', eraser:'Eraser' };
+const HINTS = {
+  pen:'Drag to draw freehand',
+  highlighter:'Sweep over the line that matters',
+  arrow:'Drag from tail to head',
+  rect:'Drag to box something in',
+  step:'Click to drop the next number',
+  text:'Click, then type into the label',
+  blur:'Drag over anything private',
+  eraser:'Click a mark to remove it'
+};
+const DRAWY = ['pen','highlighter','arrow','rect','step','text'];
+const MODES = [['crop','Region','Drag any rectangle'],['window','Window','Snap to a window'],['monitor','Full screen','Whole display'],['pen','Freeform','Lasso an odd shape']];
+const KEYMAP = { p:'pen', h:'highlighter', a:'arrow', r:'rect', s:'step', t:'text', b:'blur', e:'eraser' };
+const DELAYS = ['Off', '3s', '5s', '10s'];
+const MIN_W = 200, MIN_H = 140;
+
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1440;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
+    const sel = { x: Math.round(vw * .105), y: Math.round(vh * .2), w: Math.round(vw * .72), h: Math.round(vh * .58) };
+    const cx = sel.x + sel.w * .42, cy = sel.y + sel.h * .3;
+    const loop = [], tail = [];
+    for (let i = 0; i <= 52; i++) { const t = i / 52 * Math.PI * 2.24 - 1.15; loop.push([cx + Math.cos(t) * sel.w * .095, cy + Math.sin(t) * sel.h * .14]); }
+    const lp = loop[loop.length - 1];
+    for (let i = 0; i <= 40; i++) { const t = i / 40; tail.push([lp[0] + t * sel.w * .21, lp[1] + t * sel.h * .32 + Math.sin(t * 3.1) * sel.h * .1]); }
+    const tp = tail[tail.length - 1];
+    for (let i = 1; i <= 30; i++) { const t = i / 30; tail.push([tp[0] - t * sel.w * .32, tp[1] + Math.sin(t * 2.4 + .4) * sel.h * .16 + t * sel.h * .04]); }
+    const round = a => a.map(q => [Math.round(q[0]), Math.round(q[1])]);
+    this.uid = 100;
+    this.state = {
+      view: { w: vw, h: vh }, sel,
+      tool: 'pen', color: '#e3ff4f', size: 5, alpha: 100, strength: 8, blurMode: 'blur',
+      mode: 'Region', modeOpen: false, delay: 'Off', toast: null, toastGlyph: 'check',
+      marks: [
+        { id: 'k1', type: 'pen', color: '#e3ff4f', size: 5, op: 1, pts: round(loop) },
+        { id: 'k2', type: 'pen', color: '#e3ff4f', size: 5, op: 1, pts: round(tail) }
+      ],
+      redo: []
+    };
+  }
+
+  componentDidMount() {
+    this.onResize = () => {
+      const w = window.innerWidth, h = window.innerHeight;
+      this.setState(st => ({
+        view: { w, h },
+        sel: {
+          x: Math.min(st.sel.x, Math.max(0, w - MIN_W)), y: Math.min(st.sel.y, Math.max(56, h - MIN_H)),
+          w: Math.min(st.sel.w, w - 20), h: Math.min(st.sel.h, h - 160)
+        }
+      }));
+    };
+    this.onKey = e => {
+      const tag = (e.target && e.target.tagName) || '';
+      if (tag === 'INPUT' || (e.target && e.target.isContentEditable)) return;
+      const k = e.key.toLowerCase();
+      if (e.metaKey || e.ctrlKey) {
+        if (k === 'z') { e.preventDefault(); e.shiftKey ? this.redo() : this.undo(); }
+        return;
+      }
+      if (k === 'escape') { e.preventDefault(); this.setState({ marks: [], redo: [], modeOpen: false }); this.toast('Ink discarded', 'trash'); return; }
+      if (k === 'enter') { e.preventDefault(); this.toast('Copied to clipboard', 'copy'); return; }
+      if (KEYMAP[k]) { e.preventDefault(); this.setState({ tool: KEYMAP[k], modeOpen: false }); }
+    };
+    window.addEventListener('resize', this.onResize);
+    window.addEventListener('keydown', this.onKey);
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('keydown', this.onKey);
+    if (this.tt) clearTimeout(this.tt);
+  }
+
+  toast(msg, glyph) {
+    this.setState({ toast: msg, toastGlyph: glyph || 'check' });
+    if (this.tt) clearTimeout(this.tt);
+    this.tt = setTimeout(() => this.setState({ toast: null }), 2000);
+  }
+
+  undo = () => this.setState(st => { const m = [...st.marks], last = m.pop(); return last ? { marks: m, redo: [...st.redo, last] } : null; });
+  redo = () => this.setState(st => { const r = [...st.redo], next = r.pop(); return next ? { marks: [...st.marks, next], redo: r } : null; });
+
+  pt(e) {
+    return [Math.round(e.clientX), Math.round(e.clientY)];
+  }
+
+  onDown = e => {
+    const st = this.state, t = st.tool;
+    if (t === 'eraser') return;
+    const [x, y] = this.pt(e);
+    const id = 'm' + (this.uid++);
+    const op = st.alpha / 100 * (t === 'highlighter' ? .34 : 1);
+    if (t === 'step') {
+      const n = st.marks.filter(m => m.type === 'step').length + 1;
+      this.setState({ marks: [...st.marks, { id, type: 'step', color: st.color, n, x: x - 13, y: y - 13 }], redo: [] });
+      return;
+    }
+    if (t === 'text') {
+      this.setState({ marks: [...st.marks, { id, type: 'text', color: st.color, fs: Math.max(12, st.size * 3), x, y, text: 'Label' }], redo: [] });
+      return;
+    }
+    let m;
+    if (t === 'pen' || t === 'highlighter') m = { id, type: t, color: st.color, size: Math.max(2, st.size * (t === 'highlighter' ? 3.5 : 1)), op, pts: [[x, y]] };
+    else if (t === 'blur') m = { id, type: 'blur', x, y, w: 0, h: 0, strength: st.strength, mode: st.blurMode };
+    else m = { id, type: t, color: st.color, size: st.size, op, x, y, w: 0, h: 0 };
+    this.drag = id;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+    this.setState({ marks: [...st.marks, m], redo: [] });
+  };
+
+  onMove = e => {
+    if (!this.drag) return;
+    const [x, y] = this.pt(e);
+    this.setState(st => ({
+      marks: st.marks.map(m => m.id !== this.drag ? m : (m.pts ? { ...m, pts: [...m.pts, [x, y]] } : { ...m, w: x - m.x, h: y - m.y }))
+    }));
+  };
+
+  onUp = () => {
+    if (!this.drag) return;
+    this.drag = null;
+    this.setState(st => ({ marks: st.marks.filter(m => m.pts ? m.pts.length > 1 : (Math.abs(m.w) > 3 || Math.abs(m.h) > 3 || m.type === 'step' || m.type === 'text')) }));
+  };
+
+  del(id) {
+    return e => { if (e && e.stopPropagation) e.stopPropagation(); this.setState(st => ({ marks: st.marks.filter(m => m.id !== id) })); };
+  }
+
+  resize(hx, hy) {
+    return e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const start = { ...this.state.sel }, sx = e.clientX, sy = e.clientY, view = this.state.view;
+      const mv = ev => {
+        let { x, y, w, h } = start;
+        const dx = ev.clientX - sx, dy = ev.clientY - sy;
+        if (hx === 'l') { x = start.x + dx; w = start.w - dx; }
+        if (hx === 'r') { w = start.w + dx; }
+        if (hy === 't') { y = start.y + dy; h = start.h - dy; }
+        if (hy === 'b') { h = start.h + dy; }
+        if (w < MIN_W) { if (hx === 'l') x = start.x + start.w - MIN_W; w = MIN_W; }
+        if (h < MIN_H) { if (hy === 't') y = start.y + start.h - MIN_H; h = MIN_H; }
+        x = Math.max(0, Math.min(x, view.w - MIN_W));
+        y = Math.max(52, Math.min(y, view.h - MIN_H - 40));
+        w = Math.min(w, view.w - x);
+        h = Math.min(h, view.h - y - 130);
+        this.setState({ sel: { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) } });
+      };
+      const up = () => { document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', up); };
+      document.addEventListener('pointermove', mv);
+      document.addEventListener('pointerup', up);
+    };
+  }
+
+  norm(m) { return { x: Math.min(m.x, m.x + m.w), y: Math.min(m.y, m.y + m.h), w: Math.abs(m.w), h: Math.abs(m.h) }; }
+
+  arrowGeom(m) {
+    const x1 = m.x, y1 = m.y, x2 = m.x + m.w, y2 = m.y + m.h;
+    const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+    const hl = Math.max(10, m.size * 3.4), hw = Math.max(7, m.size * 2.2);
+    const ux = dx / len, uy = dy / len, bx = x2 - ux * hl, by = y2 - uy * hl, px = -uy, py = ux;
+    return { x1, y1, hx: x2 - ux * hl * .55, hy: y2 - uy * hl * .55,
+      head: [x2 + ',' + y2, (bx + px * hw) + ',' + (by + py * hw), (bx - px * hw) + ',' + (by - py * hw)].join(' ') };
+  }
+
+  renderVals() {
+    const st = this.state, t = st.tool, sel = st.sel, view = st.view;
+    const pe = t === 'eraser' ? 'auto' : 'none';
+    const bg = {}, fg = {}, T = {};
+    TOOLS.forEach(k => {
+      bg[k] = t === k ? 'rgba(255,255,255,.16)' : 'transparent';
+      fg[k] = t === k ? '#f8faf0' : '#a8afa0';
+      T[k] = () => this.setState({ tool: k, modeOpen: false });
+    });
+    const mk = m => ({ ...m, pe, onDel: t === 'eraser' ? this.del(m.id) : null });
+    const of_ = ty => st.marks.filter(m => m.type === ty);
+    const barTop = Math.min(sel.y + sel.h + 18, view.h - 118);
+    const barLeft = Math.max(400, Math.min(sel.x + sel.w / 2, view.w - 400));
+    const menuUp = barTop > 300;
+    return {
+      view, sel: { ...sel, iw: Math.max(1, sel.w - 1), ih: Math.max(1, sel.h - 1) },
+      ox: -sel.x, oy: -sel.y,
+      chip: this.props.chipColor ?? '#e3ff4f',
+      dimColor: 'rgba(12,13,10,' + ((this.props.dim ?? 62) / 100) + ')',
+      hints: this.props.hints ?? true,
+      tool: t, toolName: NAMES[t], hint: HINTS[t], color: st.color, size: st.size, strength: st.strength,
+      dot: Math.max(4, Math.min(26, st.size * (t === 'highlighter' ? 3.5 : 1))), opv: st.alpha / 100,
+      cursor: t === 'eraser' ? 'pointer' : 'crosshair',
+      bg, fg, T,
+      markLabel: st.marks.length === 1 ? '1 mark' : st.marks.length + ' marks',
+      isDraw: DRAWY.indexOf(t) >= 0, isBlur: t === 'blur',
+      blurBg: st.blurMode === 'blur' ? 'rgba(255,255,255,.16)' : 'transparent', blurFg: st.blurMode === 'blur' ? '#f8faf0' : '#a8afa0',
+      pixBg: st.blurMode === 'pix' ? 'rgba(255,255,255,.16)' : 'transparent', pixFg: st.blurMode === 'pix' ? '#f8faf0' : '#a8afa0',
+      setBlurMode: () => this.setState({ blurMode: 'blur' }), setPixMode: () => this.setState({ blurMode: 'pix' }),
+      setSize: e => this.setState({ size: +e.target.value }),
+      setStrength: e => this.setState({ strength: +e.target.value }),
+      swatches: SW.map(([hex, name]) => ({ hex, name, key: hex, ring: st.color === hex ? '0 0 0 2px #1a1c18, 0 0 0 3.5px #f1f3e8' : 'none', pick: () => this.setState({ color: hex }) })),
+      undoFg: st.marks.length ? '#d7dacb' : '#5d6157', redoFg: st.redo.length ? '#d7dacb' : '#5d6157',
+      undo: this.undo, redo: this.redo,
+      clear: () => { this.setState({ marks: [], redo: [] }); this.toast('Ink cleared', 'trash'); },
+      doCopy: () => this.toast('Copied to clipboard', 'copy'),
+      doSave: () => this.toast('Saved to ~/Pictures/snipux', 'save'),
+      toast: st.toast, hasToast: !!st.toast, toastGlyph: st.toastGlyph,
+      mode: st.mode, modeOpen: st.modeOpen, delay: st.delay,
+      toggleMode: () => this.setState({ modeOpen: !st.modeOpen }),
+      cycleDelay: () => this.setState({ delay: DELAYS[(DELAYS.indexOf(st.delay) + 1) % DELAYS.length] }),
+      modes: MODES.map(([glyph, label, note]) => ({ key: label, glyph, label, note,
+        bg: st.mode === label ? 'rgba(255,255,255,.08)' : 'transparent',
+        fg: st.mode === label ? '#f8faf0' : '#a8afa0',
+        tick: st.mode === label ? 1 : 0,
+        pick: () => this.setState({ mode: label, modeOpen: false }) })),
+      barTop, barLeft,
+      menuLeft: Math.max(12, barLeft - 380), menuTop: menuUp ? barTop - 231 : barTop + 112,
+      onDown: this.onDown, onMove: this.onMove, onUp: this.onUp,
+      H: { tl: this.resize('l', 't'), tr: this.resize('r', 't'), bl: this.resize('l', 'b'), br: this.resize('r', 'b'),
+           t: this.resize('', 't'), b: this.resize('', 'b'), l: this.resize('l', ''), r: this.resize('r', '') },
+      pens: [...of_('pen'), ...of_('highlighter')].map(m => ({ ...mk(m), d: m.pts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ') })),
+      rects: of_('rect').map(m => ({ ...mk(m), ...this.norm(m) })),
+      arrows: of_('arrow').map(m => ({ ...mk(m), ...this.arrowGeom(m) })),
+      blurs: of_('blur').map(m => { const n = this.norm(m); return { ...mk(m), ...n, fx: m.mode === 'pix' ? 'blur(' + m.strength + 'px) contrast(1.7) saturate(1.3)' : 'blur(' + m.strength + 'px)' }; }),
+      texts: of_('text').map(m => ({ ...mk(m), fs: m.fs })),
+      steps: of_('step').map(m => mk(m))
+    };
+  }
+}
+</script>
+</body>
+</html>
