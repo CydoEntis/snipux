@@ -20,12 +20,17 @@ import datetime
 import shutil
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Callable
 
-from PyQt6.QtCore import QBuffer, QIODevice
-from PyQt6.QtGui import QGuiApplication, QImage
+from PyQt6.QtCore import QBuffer, QIODevice, QRectF
+from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QImage, QPixmap
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from snipux.capture import BackendRegistry
+from snipux.capture import BackendRegistry, CaptureError
+from snipux.overlay import Overlay, create_overlays
 
 
 def copy_image_to_clipboard(image: QImage) -> None:
@@ -150,3 +155,256 @@ def main(argv: list[str] | None = None, registry: BackendRegistry | None = None)
 
     parser.print_help()
     return 0
+
+
+# -- resident app: single instance, tray icon, capture -> overlay -> editor -
+#
+# Kept separate from main() above rather than repurposing bare `main([])`
+# for this: main() is pinned by the tests above to an immediate,
+# display-free return, and repurposing it would break them. `__main__.py`
+# dispatches to `run_resident_app()` only when invoked with no arguments.
+
+
+class Transport(ABC):
+    """Single-instance coordination and minimal cross-process signaling.
+
+    Same DI shape the codebase already uses for `BackendRegistry` (main's
+    `registry` param) and `GeometryProvider` (overlay.py) — a real
+    implementation for production, a fake one for tests, both satisfying
+    this shape and injected rather than constructed internally.
+    """
+
+    @abstractmethod
+    def try_claim(self) -> bool:
+        """Attempt to become the primary (resident) instance.
+
+        Returns True if this call is now the primary instance, False if
+        another instance already holds that role.
+        """
+
+    @abstractmethod
+    def send_snip_request(self) -> None:
+        """Ask the primary instance to run a capture. Called by a
+        non-primary launch, after its own `try_claim()` returned False.
+        """
+
+    @abstractmethod
+    def listen(self, on_request: Callable[[], None]) -> None:
+        """Primary-instance only: call `on_request` once for every snip
+        request a later, non-primary launch forwards.
+        """
+
+
+class QLocalSocketTransport(Transport):
+    """Real `Transport`, backed by `QtNetwork`'s `QLocalServer`/
+    `QLocalSocket` bound to a fixed, well-known server name.
+
+    Not a new dependency: `QtNetwork` ships inside the `PyQt6` wheel
+    alongside `QtCore`/`QtGui`/`QtWidgets`, the same way capture.py already
+    reaches `QtGui` without declaring it separately.
+
+    The protocol is deliberately minimal: a successful connection to the
+    server *is* the capture request — there is exactly one kind of request
+    today, so no framed message needs parsing.
+    """
+
+    SERVER_NAME = "snipux-resident"
+    _CONNECT_TIMEOUT_MS = 200
+
+    def __init__(self, server_name: str = SERVER_NAME):
+        self._server_name = server_name
+        self._server: QLocalServer | None = None
+
+    def try_claim(self) -> bool:
+        probe = QLocalSocket()
+        probe.connectToServer(self._server_name)
+        if probe.waitForConnected(self._CONNECT_TIMEOUT_MS):
+            # A live server answered: another instance already owns this
+            # name.
+            probe.disconnectFromServer()
+            return False
+
+        # No live server answered: become it. A stale socket file left
+        # behind by a crashed previous instance persists on disk on Linux
+        # after an unclean exit, and would otherwise make every future
+        # try_claim() falsely report "already running" forever — so this
+        # must run immediately before listen(), not deferred to shutdown,
+        # which may never run on a crash.
+        QLocalServer.removeServer(self._server_name)
+        self._server = QLocalServer()
+        self._server.listen(self._server_name)
+        return True
+
+    def send_snip_request(self) -> None:
+        socket = QLocalSocket()
+        socket.connectToServer(self._server_name)
+        socket.waitForConnected(self._CONNECT_TIMEOUT_MS)
+        socket.disconnectFromServer()
+
+    def listen(self, on_request: Callable[[], None]) -> None:
+        if self._server is None:
+            raise RuntimeError("listen() called before a successful try_claim()")
+
+        def _accept() -> None:
+            connection = self._server.nextPendingConnection()
+            if connection is not None:
+                connection.disconnectFromServer()
+            on_request()
+
+        self._server.newConnection.connect(_accept)
+
+
+class AppController:
+    """Owns the tray icon and the capture -> overlay -> editor wiring.
+
+    Built to be testable without ever calling `QApplication.exec()`:
+    nothing in `__init__` or its methods blocks, so `run_resident_app()` is
+    a thin wrapper that constructs one of these and calls `.exec()`, and
+    every test in test_app.py talks to the controller directly instead.
+    """
+
+    def __init__(
+        self,
+        registry: BackendRegistry,
+        transport: Transport,
+        monitor_geometries: list[QRectF] | None = None,
+    ):
+        # Must happen before any overlay/editor window is ever shown.
+        # Without it, Qt's default behavior quits the whole application the
+        # moment the last visible window closes — exactly what happens the
+        # first time an overlay is cancelled, which would kill the resident
+        # process on the very first cancel instead of returning it to idle.
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+
+        self._registry = registry
+        self._transport = transport
+        # None means "use real screen geometry"; tests inject synthetic
+        # rects instead of depending on real screens under an offscreen
+        # platform, mirroring the None -> "build the real thing" pattern
+        # main() already uses for `registry`.
+        self._monitor_geometries = monitor_geometries
+
+        self._overlays: list[Overlay] = []
+        self._frame = None
+        self._editor = None
+
+        self._tray_icon = QSystemTrayIcon(self._build_icon())
+        menu = QMenu()
+        self.snip_action = menu.addAction("Snip")
+        self.snip_action.triggered.connect(self.start_capture)
+        self.quit_action = menu.addAction("Quit")
+        self.quit_action.triggered.connect(self._quit)
+        self._tray_icon.setContextMenu(menu)
+        self._tray_icon.show()
+
+        self._transport.listen(self.start_capture)
+
+    def _build_icon(self) -> QIcon:
+        # No icon asset exists in this repo, and adding one would be
+        # unnecessary churn against CLAUDE.md's small, deliberate
+        # dependency list — built programmatically instead.
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(QColor(60, 110, 200))
+        return QIcon(pixmap)
+
+    def _quit(self) -> None:
+        QApplication.instance().quit()
+
+    def _real_monitor_geometries(self) -> list[QRectF]:
+        return [QRectF(screen.geometry()) for screen in QGuiApplication.screens()]
+
+    def start_capture(self) -> None:
+        if self._overlays:
+            # A Snip request arrived mid-selection (tray double-click, or a
+            # forwarded request from a second launch while already
+            # selecting) — no-op rather than stacking a second overlay set
+            # on top of the first.
+            return
+
+        try:
+            frame = self._registry.capture()
+        except CaptureError:
+            # A failed capture must not take down the resident process,
+            # same "a failure must not stop the rest" spirit CLAUDE.md
+            # states for backends, applied one level up here. Return to
+            # idle silently rather than raising.
+            return
+
+        geometries = (
+            self._monitor_geometries
+            if self._monitor_geometries is not None
+            else self._real_monitor_geometries()
+        )
+        overlays = create_overlays(frame, geometries)
+        for overlay in overlays:
+            overlay.confirmed.connect(self._on_confirmed)
+            overlay.cancelled.connect(self._on_cancelled)
+            overlay.show()
+        # Stored on self, not left as a local: a parentless widget is fair
+        # game for Python's GC to collect out from under the still-open
+        # window otherwise, a known PyQt foot-gun.
+        self._overlays = overlays
+        self._frame = frame
+
+    def _close_overlays(self) -> None:
+        # All of them, not just the one that emitted — create_overlays()
+        # makes one Overlay per monitor, and only one can end up confirming
+        # or cancelling a given drag.
+        for overlay in self._overlays:
+            overlay.close()
+        self._overlays = []
+
+    def _on_confirmed(self, rect: QRectF, path) -> None:
+        # Imported here, not at module level: editor.py imports
+        # copy_image_to_clipboard/save_image from this module, so importing
+        # Editor at the top of this file would be a circular import at
+        # load time. By the time a signal can fire, both modules are
+        # already fully loaded.
+        from snipux.editor import Editor
+
+        frame = self._frame
+        self._close_overlays()
+        self._frame = None
+
+        # The freeform `path` is accepted but unused: Editor/Canvas take a
+        # Frame only, and nothing in this ticket needs freeform-aware
+        # cropping.
+        cropped = frame.crop(rect)
+        self._editor = Editor(cropped)
+        self._editor.show()
+
+    def _on_cancelled(self) -> None:
+        self._close_overlays()
+        self._frame = None
+
+
+def run_resident_app(
+    registry: BackendRegistry | None = None, transport: Transport | None = None
+) -> int:
+    """The real, resident entry point: builds the `QApplication`, enforces
+    single-instance, and runs the event loop until Quit.
+
+    If another instance is already running, forwards a capture request to
+    it instead of starting a second tray icon, and returns immediately
+    without starting an event loop of its own.
+    """
+    # Reuse an already-running instance rather than unconditionally
+    # constructing one: PyQt raises if a second QApplication is built in a
+    # process that already has one, which is exactly the situation a test
+    # suite's shared, module-scoped QApplication fixture creates. Mirrors
+    # the same None-instance check the tests' own `qapp` fixture uses.
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    if registry is None:
+        registry = build_default_registry()
+    if transport is None:
+        transport = QLocalSocketTransport()
+
+    if not transport.try_claim():
+        transport.send_snip_request()
+        return 0
+
+    controller = AppController(registry, transport)
+    return app.exec()
