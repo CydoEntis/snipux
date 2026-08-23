@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from snipux.app import copy_image_to_clipboard, save_image
 from snipux.capture import Frame
 from snipux.shapes import (
     Arrow,
@@ -439,6 +440,12 @@ class Editor(QWidget):
         super().__init__(parent)
         self.canvas = Canvas(frame, self)
 
+        # Matches the Windows Snipping Tool workflow: the snip lands on the
+        # clipboard the instant it's confirmed, before any annotation is
+        # made — done here, right after Canvas is built and before any
+        # toolbar-building call, so no shape can exist yet when this runs.
+        copy_image_to_clipboard(frame.image)
+
         toolbar = QToolBar(self)
         self.tool_actions: dict[Tool, QAction] = {}
         self._build_tool_actions(toolbar)
@@ -554,7 +561,29 @@ class Editor(QWidget):
                 return True
         return super().eventFilter(watched, event)
 
+    def _save(self) -> None:
+        """Save the currently-rendered, annotated image — not the raw
+        capture — to the default location, without prompting for a name.
+        Built from Canvas's public `shapes` property (a confirmed-shapes
+        copy), not `Canvas._visible_shapes()`, which also includes an
+        in-progress drag: that's the paint-preview's concern, not the save
+        contract's.
+        """
+        rendered = render(self.canvas.image, list(self.canvas.shapes))
+        save_image(rendered)
+
     def keyPressEvent(self, event) -> None:
+        # Exact-equality modifier check, not bitwise, for the same reason
+        # _undo_redo_action uses one for Ctrl+Shift+Z: a bitwise "Control
+        # held" test would also match Ctrl+Shift+S, reserved for a possible
+        # future "save as" this ticket doesn't add.
+        if (
+            event.key() == Qt.Key.Key_S
+            and event.modifiers() == Qt.KeyboardModifier.ControlModifier
+        ):
+            self._save()
+            return
+
         action = self._undo_redo_action(event.key(), event.modifiers())
         if action == "redo":
             self.redo()
