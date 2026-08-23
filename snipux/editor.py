@@ -98,13 +98,18 @@ class _HistoryState:
 
 
 class Canvas(QWidget):
-    """Displays a `Frame`'s image centered, letterboxed, and never upscaled.
+    """Displays a `Frame`'s image at 1:1, filling the widget exactly.
 
     Built from a `Frame` (not a bare `QImage`), mirroring `Overlay` in
     overlay.py — the editor hands this whatever `Frame` the overlay
     confirmed (already cropped to the user's selection via `Frame.crop()`),
     and future tickets (crop tool, redraw-after-annotate) will want the
     `Frame`'s logical geometry, not just its pixels.
+
+    Per SNX-21, `Editor` sizes this widget to exactly the frame's logical
+    size (see `Editor._position_over_snip`), so there is no fit-to-widget
+    scaling or letterbox margin to compute here any more — a click always
+    lands on the image, never on dead space around it.
 
     Like `Overlay`'s `_to_local`/`_to_absolute`, coordinate-space helpers
     here are small, named, pure functions computed on demand from current
@@ -216,58 +221,66 @@ class Canvas(QWidget):
         self._stroke_width = stroke_width
 
     def _target_rect(self) -> QRectF:
-        """Where self.image is drawn in widget-local coordinates: centered,
-        scaled to fit self.rect() without exceeding 1.0 (never upscaled),
-        preserving aspect ratio. Recomputed from current widget size and
-        image size on every call — nothing cached to invalidate on resize.
+        """Where self.image is drawn in widget-local coordinates: the full
+        widget rect, filled exactly — no fit-to-size scaling, no centering,
+        no letterbox margin (removed per SNX-21; `Editor` now sizes this
+        widget to the frame's own logical size, so the image always fills
+        it exactly). Still degenerates to an empty rect for a zero-size
+        image, the one case "just fill the widget" can't sensibly mean
+        anything — widget_to_image/image_to_widget both lean on that to
+        keep dividing by self.image's dimensions safe. Recomputed from
+        current widget size on every call — nothing cached to invalidate on
+        resize.
         """
         image_size = self.image.size()
-        widget_size = self.size()
         if image_size.width() <= 0 or image_size.height() <= 0:
             return QRectF()  # degenerate image: nothing to draw, no target
-
-        scale = min(
-            widget_size.width() / image_size.width(),
-            widget_size.height() / image_size.height(),
-            1.0,  # the "never upscale past 100%" rule
-        )
-        target_w = image_size.width() * scale
-        target_h = image_size.height() * scale
-        x = (widget_size.width() - target_w) / 2
-        y = (widget_size.height() - target_h) / 2
-        return QRectF(x, y, target_w, target_h)
+        return QRectF(self.rect())
 
     def widget_to_image(self, point: QPointF) -> QPointF | None:
         """Widget-local point -> image-pixel point, or None if point falls
-        in the letterbox margin outside the drawn image.
+        outside the widget (and therefore outside the drawn image, which
+        now always fills the widget exactly).
+
+        Uses independent x/y scale factors, not one shared scalar, mirroring
+        Frame.crop()'s own reasoning in capture.py — nothing guarantees
+        _target_rect's aspect ratio matches self.image's exactly once
+        rounding is involved, so trusting a single axis's ratio for both
+        would be wrong on the other axis.
         """
         target = self._target_rect()
         if target.width() <= 0 or target.height() <= 0 or not target.contains(point):
             return None
-        scale = target.width() / self.image.width()
+        scale_x = target.width() / self.image.width()
+        scale_y = target.height() / self.image.height()
         local = point - target.topLeft()
-        return QPointF(local.x() / scale, local.y() / scale)
+        return QPointF(local.x() / scale_x, local.y() / scale_y)
 
     def image_to_widget(self, point: QPointF) -> QPointF:
         """Image-pixel point -> widget-local point. Total (no None case):
         callers hold image-space points that came from inside the image by
-        construction, unlike widget-space points which can land anywhere
-        including the margin.
+        construction, unlike widget-space points which can land anywhere.
 
         Guards the same degenerate-image case widget_to_image guards via
         _target_rect()'s 0x0 fallback, so this can't divide by zero the way
-        an unguarded version would (self.image.width() == 0 and
-        target.width() == 0.0 together, if this weren't checked first).
-        There's no meaningful scale to invert for an empty image, so this
-        returns target.topLeft() (itself (0, 0) in that case) rather than
-        raising — degrading the same way widget_to_image degrades to None,
-        just without a None case to return through.
+        an unguarded version would (self.image.width()/height() == 0 and
+        target.width()/height() == 0.0 together, if this weren't checked
+        first). There's no meaningful scale to invert for an empty image, so
+        this returns target.topLeft() (itself (0, 0) in that case) rather
+        than raising — degrading the same way widget_to_image degrades to
+        None, just without a None case to return through.
         """
         target = self._target_rect()
-        if target.width() <= 0 or target.height() <= 0 or self.image.width() <= 0:
+        if (
+            target.width() <= 0
+            or target.height() <= 0
+            or self.image.width() <= 0
+            or self.image.height() <= 0
+        ):
             return target.topLeft()
-        scale = target.width() / self.image.width()
-        return target.topLeft() + QPointF(point.x() * scale, point.y() * scale)
+        scale_x = target.width() / self.image.width()
+        scale_y = target.height() / self.image.height()
+        return target.topLeft() + QPointF(point.x() * scale_x, point.y() * scale_y)
 
     # -- drawing tools ----------------------------------------------------
     # In-progress-drag state, mouse handling, and painting all use image-
@@ -415,10 +428,13 @@ class Canvas(QWidget):
 class Editor(QWidget):
     """Outer window: a toolbar (tool, colour, stroke width) above `Canvas`.
 
-    The object the app will eventually construct instead of a bare `Canvas`
-    once a later ticket wires the whole capture-to-save flow together; this
-    ticket only adds the widget itself; nothing outside this module builds
-    one yet.
+    Frameless and always-on-top, like `Overlay` in overlay.py, and — per
+    SNX-21 — placed so `canvas` sits exactly over the screen region the
+    snip was captured from, at 1:1: without that, the window landed
+    wherever the window manager felt like putting an ordinary titled
+    window, sized by layout rather than by the snip, and `Canvas` scaled
+    the image down to fit whatever space that left, leaving dead margins
+    where a click was silently a no-op. See `_position_over_snip`.
     """
 
     # A fixed preset row, not a colour picker — per PLAN.md, a QColorDialog
@@ -446,17 +462,25 @@ class Editor(QWidget):
         # toolbar-building call, so no shape can exist yet when this runs.
         copy_image_to_clipboard(frame.image)
 
-        toolbar = QToolBar(self)
+        # Same flags Overlay uses for the same reason: an ordinary titled
+        # window is placed and sized by the window manager, not by us, and
+        # this window's whole point (per SNX-21) is sitting at an exact,
+        # self-chosen screen position.
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        )
+
+        self.toolbar = QToolBar(self)
         self.tool_actions: dict[Tool, QAction] = {}
-        self._build_tool_actions(toolbar)
+        self._build_tool_actions(self.toolbar)
         self.colour_buttons: dict[str, QToolButton] = {}
-        self._build_colour_swatches(toolbar)
-        self.stroke_width_spinbox = self._build_stroke_width_control(toolbar)
+        self._build_colour_swatches(self.toolbar)
+        self.stroke_width_spinbox = self._build_stroke_width_control(self.toolbar)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(toolbar)
+        layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
 
         # Start from a usable state (a tool armed, a colour and width set)
@@ -466,6 +490,39 @@ class Editor(QWidget):
         self.canvas.set_tool(default_tool)
         self.canvas.set_colour(self.SWATCH_COLOURS[0])
         self.canvas.set_stroke_width(self.stroke_width_spinbox.value())
+
+        self._position_over_snip(frame)
+
+    def _position_over_snip(self, frame: Frame) -> None:
+        """Size and place this window so `canvas` — not the window as a
+        whole — ends up covering exactly `frame.logical_origin` /
+        `frame.logical_size` on screen, per SNX-21's acceptance criteria.
+
+        `canvas` is fixed to the frame's own logical size so it draws the
+        image at 1:1 with no scaling and no letterbox margin (see
+        `Canvas._target_rect`). The toolbar sits *above* that region rather
+        than inside it — a toolbar docked over the snipped rect would cover
+        part of the very image it's editing, trading one dead-click margin
+        for another — so this window's own top edge is pushed up by the
+        toolbar's height and only canvas's top edge lands on
+        `logical_origin`.
+        """
+        self.canvas.setFixedSize(
+            round(frame.logical_size.width()), round(frame.logical_size.height())
+        )
+        toolbar_height = self.toolbar.sizeHint().height()
+        self.setGeometry(
+            round(frame.logical_origin.x()),
+            round(frame.logical_origin.y()) - toolbar_height,
+            round(frame.logical_size.width()),
+            round(frame.logical_size.height()) + toolbar_height,
+        )
+        # setGeometry() alone doesn't guarantee the layout has repositioned
+        # toolbar/canvas by the time this returns -- Qt normally does that
+        # lazily on the next paint/show. Forced here so canvas/toolbar
+        # geometry is correct immediately, since callers (and tests) may
+        # read it before this window is ever shown.
+        self.layout().activate()
 
     def _build_tool_actions(self, toolbar: QToolBar) -> None:
         group = QActionGroup(toolbar)
@@ -573,6 +630,15 @@ class Editor(QWidget):
         save_image(rendered)
 
     def keyPressEvent(self, event) -> None:
+        # Mirrors Overlay's own Escape handling in overlay.py: closes
+        # without calling _save(), same as cancelling a selection never
+        # emits `confirmed`. Checked first since it needs no modifier
+        # comparison and should win regardless of what else this method
+        # grows to handle.
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
+
         # Exact-equality modifier check, not bitwise, for the same reason
         # _undo_redo_action uses one for Ctrl+Shift+Z: a bitwise "Control
         # held" test would also match Ctrl+Shift+S, reserved for a possible

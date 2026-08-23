@@ -22,65 +22,19 @@ def qapp():
     return app
 
 
-def make_frame(image_size=(100, 60), fill_color=FILL_COLOR) -> Frame:
+def make_frame(image_size=(100, 60), fill_color=FILL_COLOR, logical_origin=None) -> Frame:
     # scale 1.0 (logical_size == image_size in pixels) so widget-local
     # coordinates line up with image pixels 1:1, including for the crop
     # tests, which read logical_origin/logical_size through apply_crop().
     image = QImage(*image_size, QImage.Format.Format_RGB32)
     image.fill(fill_color)
+    if logical_origin is None:
+        logical_origin = QPointF(0, 0)
     return Frame(
         image=image,
-        logical_origin=QPointF(0, 0),
+        logical_origin=logical_origin,
         logical_size=QSizeF(*image_size),
     )
-
-
-class TestLetterbox:
-    def test_centered_and_letterboxed_when_widget_larger_than_image(self):
-        frame = make_frame(image_size=(100, 60))
-        canvas = Canvas(frame)
-        canvas.resize(200, 200)
-
-        rendered = canvas.grab().toImage()
-
-        target = canvas._target_rect()
-        assert target.width() == 100
-        assert target.height() == 60
-        # Equal margins on both sides of the shorter axis confirms centering.
-        assert target.left() == pytest.approx(50, abs=1)
-        assert target.top() == pytest.approx(70, abs=1)
-
-        center = target.center()
-        assert rendered.pixelColor(round(center.x()), round(center.y())) == QColor(FILL_COLOR)
-        # A widget corner is well outside the target rect for this geometry,
-        # so it must be showing the letterbox fill, not the image.
-        assert rendered.pixelColor(2, 2) != QColor(FILL_COLOR)
-
-
-class TestScaling:
-    def test_scales_down_preserving_aspect_when_widget_smaller_than_image(self):
-        frame = make_frame(image_size=(400, 200))
-        canvas = Canvas(frame)
-        canvas.resize(100, 100)
-
-        target = canvas._target_rect()
-
-        assert target.width() <= 100
-        assert target.height() <= 100
-        assert target.width() / target.height() == pytest.approx(400 / 200, rel=1e-6)
-        assert target.width() < 400  # actually scaled down, not clipped
-
-    def test_never_upscales_past_100_percent(self):
-        frame = make_frame(image_size=(100, 60))
-        canvas = Canvas(frame)
-        canvas.resize(500, 500)
-
-        target = canvas._target_rect()
-
-        # Scale pinned at 1.0: target size equals the image's own size,
-        # never grown to fill the larger widget.
-        assert target.width() == 100
-        assert target.height() == 60
 
 
 class TestRoundTrip:
@@ -105,15 +59,18 @@ class TestRoundTrip:
             assert abs(round_tripped.y() - image_point.y()) <= 1
 
 
-class TestMargin:
-    def test_widget_to_image_returns_none_in_letterbox_margin(self):
+class TestOutsideWidget:
+    def test_widget_to_image_returns_none_outside_widget_bounds(self):
+        # No letterbox margin exists any more (SNX-21): _target_rect fills
+        # the widget exactly, so the only "outside the image" a point can be
+        # is genuinely outside the widget's own rect.
         frame = make_frame(image_size=(100, 60))
         canvas = Canvas(frame)
-        canvas.resize(200, 200)
+        canvas.resize(100, 60)
 
-        # The image is centered well away from the widget's own corner at
-        # this geometry, so (0, 0) is squarely in the margin.
-        assert canvas.widget_to_image(QPointF(0, 0)) is None
+        assert canvas.widget_to_image(QPointF(-1, -1)) is None
+        assert canvas.widget_to_image(QPointF(150, 30)) is None
+        assert canvas.widget_to_image(QPointF(50, 30)) is not None
 
 
 class TestGrabPixelMatch:
@@ -175,21 +132,6 @@ class TestDragAppendsShape:
         QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=start)
         QTest.mouseMove(canvas, end)
         QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
-
-        assert len(canvas.shapes) == 0
-
-    def test_press_in_letterbox_margin_is_a_no_op(self):
-        frame = make_frame(image_size=(100, 60))
-        canvas = Canvas(frame)
-        canvas.resize(200, 200)  # image letterboxed; (5, 5) is margin, not image
-        canvas.set_tool(Tool.RECTANGLE)
-
-        # QPoint(0, 0) is QTest's own sentinel for "unspecified pos" (it
-        # falls back to the widget's center), so this uses (5, 5) instead
-        # to land in the margin unambiguously.
-        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
-        QTest.mouseMove(canvas, QPoint(8, 8))
-        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(8, 8))
 
         assert len(canvas.shapes) == 0
 
@@ -708,3 +650,60 @@ class TestCtrlSSavesRenderedImage:
         )
 
         assert calls == []
+
+
+class TestWindowPlacement:
+    # SNX-21: the editor used to appear as an ordinary titled window wherever
+    # the window manager put it, sized by layout rather than by the snip --
+    # these pin the fix instead: frameless/always-on-top, and positioned so
+    # the image sits exactly over the screen region it was captured from.
+
+    def test_frameless_and_stays_on_top(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        flags = editor.windowFlags()
+        assert flags & Qt.WindowType.FramelessWindowHint
+        assert flags & Qt.WindowType.WindowStaysOnTopHint
+
+    def test_canvas_matches_image_size_and_sits_at_the_snips_logical_origin(self):
+        frame = make_frame(image_size=(100, 60), logical_origin=QPointF(300, 150))
+        editor = Editor(frame)
+
+        # 1:1, no scaling: the canvas's own size is exactly the captured
+        # image's size, not fit-to-window.
+        assert editor.canvas.size().width() == 100
+        assert editor.canvas.size().height() == 60
+
+        # It's the *canvas's* global position that must land on
+        # logical_origin, not the window's -- the toolbar sits above it (see
+        # below), so the window itself starts higher and is taller.
+        canvas_global_top_left = editor.canvas.mapToGlobal(QPoint(0, 0))
+        assert canvas_global_top_left == QPoint(300, 150)
+
+    def test_toolbar_sits_above_the_canvas_without_overlapping_it(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        # The toolbar occupies space strictly above the canvas within the
+        # window -- it must never dip into the rect the snipped image is
+        # drawn into, per the ticket's "does not cover the snipped image"
+        # criterion.
+        assert editor.toolbar.geometry().bottom() <= editor.canvas.geometry().top()
+
+
+class TestEscapeClosesWithoutSaving:
+    def test_escape_closes_the_editor_without_saving(self, monkeypatch):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.show()
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "save_image", lambda image: calls.append(image)
+        )
+
+        assert editor.isVisible()
+        QTest.keyClick(editor, Qt.Key.Key_Escape)
+
+        assert calls == []
+        assert not editor.isVisible()
