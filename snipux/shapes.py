@@ -18,9 +18,12 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import ClassVar
 
-from PyQt6.QtCore import Qt, QPointF, QRectF
+from PyQt6.QtCore import Qt, QPointF, QRect, QRectF, QSizeF
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPolygonF
+
+from snipux.capture import Frame
 
 
 @dataclass
@@ -168,6 +171,155 @@ class Ellipse(Shape):
         painter.drawEllipse(_rect_from_corners(self.start, self.end))
 
 
+def _rounded_pixel_rect(rect: QRectF) -> QRect:
+    """Round a normalized QRectF to a QRect the way Frame.crop() does
+    (capture.py): both edges rounded independently and width/height taken
+    as their difference, not width rounded on its own. Keeps crop/blur/
+    pixelate consistent with each other under fractional coordinates, for
+    the same tiling reason Frame.crop()'s docstring gives.
+    """
+    left = round(rect.left())
+    top = round(rect.top())
+    right = round(rect.right())
+    bottom = round(rect.bottom())
+    return QRect(left, top, right - left, bottom - top)
+
+
+def _clamped_pixel_rect(start: QPointF, end: QPointF, image: QImage) -> QRect | None:
+    """The image-pixel rect an obscuring shape should sample/replace, or
+    None if there's nothing to do.
+
+    None covers two cases: a degenerate rect (start == end, or any zero
+    width/height), which happens on every paintEvent of a fresh in-progress
+    drag before the user has moved the mouse; and a rect that rounds past
+    the image's own bounds, which QImage.copy() would otherwise pad with
+    undefined pixels rather than raise on — a silent-corruption risk, not
+    just an edge case, so it's clamped here rather than left to the caller.
+    """
+    rect = _rect_from_corners(start, end)
+    if rect.width() <= 0 or rect.height() <= 0:
+        return None
+    pixel_rect = _rounded_pixel_rect(rect).intersected(image.rect())
+    if pixel_rect.width() <= 0 or pixel_rect.height() <= 0:
+        return None
+    return pixel_rect
+
+
+@dataclass
+class ObscuringShape(Shape):
+    """Blur/Pixelate: shapes that replace already-rendered pixels rather
+    than paint onto a painter. Unlike every other Shape, correctness here
+    depends on reading pixels that reflect every shape drawn before this
+    one in the list — render() special-cases this base class, closing the
+    QPainter it was holding open before apply() runs and reopening a fresh
+    one afterwards, per CLAUDE.md's rule against reading a QPixmap/QImage
+    while a QPainter is still active on it.
+    """
+
+    start: QPointF = field(default_factory=QPointF)
+    end: QPointF = field(default_factory=QPointF)
+
+    # The one difference between Blur and Pixelate: which interpolation the
+    # final upscale uses. Smooth blends block edges into a blur; nearest
+    # neighbour keeps them hard, producing visible blocks. Overridden by
+    # each subclass rather than duplicating the rest of apply()'s pipeline.
+    # ClassVar so dataclass doesn't turn it into a per-instance __init__
+    # field — it's a per-type constant, not shape state.
+    _upscale_mode: ClassVar[Qt.TransformationMode] = Qt.TransformationMode.SmoothTransformation
+
+    def apply(self, image: QImage) -> QImage:
+        """Return a new QImage: `image` with this shape's rect replaced by
+        an obscured version. Does not mutate `image` in place, matching
+        the copy-on-write discipline render() itself follows.
+
+        Obscures by downscaling the sampled patch then scaling it back up;
+        the averaging a smooth downscale performs is what produces the
+        blur/pixelate effect, so no manual convolution and no numpy/Pillow/
+        OpenCV dependency, per CLAUDE.md.
+        """
+        pixel_rect = _clamped_pixel_rect(self.start, self.end, image)
+        if pixel_rect is None:
+            return image  # degenerate/out-of-bounds rect: no-op
+
+        patch = image.copy(pixel_rect)
+        small = patch.scaled(
+            max(1, pixel_rect.width() // _OBSCURE_DOWNSCALE_DIVISOR),
+            max(1, pixel_rect.height() // _OBSCURE_DOWNSCALE_DIVISOR),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        obscured = small.scaled(
+            pixel_rect.width(),
+            pixel_rect.height(),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            self._upscale_mode,
+        )
+
+        result = QImage(image)
+        painter = QPainter(result)
+        painter.drawImage(pixel_rect, obscured)
+        painter.end()  # closed before this apply() call returns the image
+        return result
+
+    def draw(self, painter: QPainter) -> None:
+        # Concrete (not abstract) only to satisfy Shape's own abstract
+        # draw() — render() never calls this for an ObscuringShape, it
+        # calls apply() instead. Raises rather than silently no-op-ing so a
+        # caller that bypasses render()'s isinstance check fails loudly.
+        raise NotImplementedError("ObscuringShape uses apply(), not draw()")
+
+
+# Sampled patch is downscaled to roughly this fraction before being scaled
+# back up; the averaging a smooth downscale performs is what produces the
+# blur, so the exact factor is an implementation detail, not a tuned
+# constant anything depends on.
+_OBSCURE_DOWNSCALE_DIVISOR = 8
+
+
+@dataclass
+class Blur(ObscuringShape):
+    """Obscures its rect by downscaling then upscaling with smooth
+    (bilinear) interpolation on both steps — the default `_upscale_mode`
+    ObscuringShape.apply() already uses, so nothing to override here beyond
+    the type itself.
+    """
+
+
+@dataclass
+class Pixelate(ObscuringShape):
+    """Obscures its rect the same way `Blur` does, except the final
+    upscale uses nearest-neighbour (`FastTransformation`) instead of
+    smooth interpolation, producing hard block edges — genuinely
+    distinguishable from `Blur`'s soft result over the same region.
+    """
+
+    _upscale_mode: ClassVar[Qt.TransformationMode] = Qt.TransformationMode.FastTransformation
+
+
+@dataclass
+class Crop(Shape):
+    """Live marquee for the crop tool: a dashed, unfilled rectangle.
+
+    Unlike every other two-point shape, a `Crop` is never appended to a
+    persistent shape list and render() never sees a committed one — it
+    only ever exists as Canvas's transient in-progress shape during a
+    drag, purely so the drag gets the same live-preview path as
+    Rectangle/Ellipse/etc. The actual crop is performed by `apply_crop()`
+    once the drag ends, which flattens and replaces the base image instead
+    of adding to the shape list — see its docstring.
+    """
+
+    start: QPointF = field(default_factory=QPointF)
+    end: QPointF = field(default_factory=QPointF)
+
+    def draw(self, painter: QPainter) -> None:
+        pen = self._pen()
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(_rect_from_corners(self.start, self.end))
+
+
 MIN_PIXEL_SIZE = 8
 FONT_SIZE_FACTOR = 4.0
 
@@ -255,6 +407,16 @@ def render(base_image: QImage, shapes: list[Shape]) -> QImage:
     mutate the StepMarker instances passed in, which is fine: the "never
     painted destructively" rule above is about not writing onto a live
     canvas pixmap, not about shape objects being immutable.
+
+    An `ObscuringShape` (`Blur`/`Pixelate`) samples already-rendered pixels
+    rather than painting onto a painter, so it gets different treatment
+    here: the active painter is closed before `apply()` runs (making every
+    shape drawn earlier in the list visible to it, since a painter left
+    open on `result` isn't guaranteed to have flushed pending strokes where
+    a plain pixel read would see them) and a fresh painter is reopened
+    afterwards for whatever shapes follow. This is the core of this
+    ticket's ordering guarantee — see shapes.py's module docstring and
+    CLAUDE.md.
     """
     result = QImage(base_image)
     painter = QPainter(result)
@@ -264,6 +426,54 @@ def render(base_image: QImage, shapes: list[Shape]) -> QImage:
         if isinstance(shape, StepMarker):
             step_counter += 1
             shape.number = step_counter
+        if isinstance(shape, ObscuringShape):
+            painter.end()
+            result = shape.apply(result)
+            painter = QPainter(result)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            continue
         shape.draw(painter)
     painter.end()
     return result
+
+
+def apply_crop(frame: Frame, shapes: list[Shape], crop_rect: QRectF) -> Frame:
+    """Flatten `shapes` onto `frame.image`, then replace it outright with
+    the pixels inside `crop_rect` (image-pixel coordinates, already
+    normalized by the caller).
+
+    Unlike every other shape, cropping isn't appended to a persistent shape
+    list — it flattens what exists (so an annotation half-covering the crop
+    region survives inside it) and produces a new base `Frame`, which is
+    why this is a plain function rather than a method on `Crop`. Callers
+    (Canvas.mouseReleaseEvent) are expected to clear their shape list after
+    calling this, since it's now baked into the returned Frame's image.
+    """
+    flattened = render(frame.image, shapes)
+
+    pixel_rect = _rounded_pixel_rect(crop_rect).intersected(flattened.rect())
+    if pixel_rect.width() <= 0 or pixel_rect.height() <= 0:
+        # QImage.copy() treats a null (0x0) QRect as "copy the whole
+        # image" rather than "copy nothing" — not what a degenerate crop
+        # means here, so this is constructed directly instead.
+        cropped_image = QImage()
+    else:
+        cropped_image = flattened.copy(pixel_rect)
+
+    # Inverts Frame.crop()'s own pixels-per-logical-unit scaling
+    # (capture.py, scale_x/scale_y) rather than re-deriving it, so a future
+    # fix to that scaling math only has to land in one place.
+    scale_x = frame.image.width() / frame.logical_size.width()
+    scale_y = frame.image.height() / frame.logical_size.height()
+    new_logical_origin = frame.logical_origin + QPointF(
+        pixel_rect.x() / scale_x, pixel_rect.y() / scale_y
+    )
+    new_logical_size = QSizeF(
+        pixel_rect.width() / scale_x, pixel_rect.height() / scale_y
+    )
+
+    return Frame(
+        image=cropped_image,
+        logical_origin=new_logical_origin,
+        logical_size=new_logical_size,
+    )

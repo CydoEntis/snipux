@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
 from snipux.editor import Canvas, Editor, Tool
-from snipux.shapes import Rectangle, StepMarker, Text
+from snipux.shapes import Blur, Pixelate, Rectangle, StepMarker, Text
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -22,9 +22,9 @@ def qapp():
 
 
 def make_frame(image_size=(100, 60), fill_color=FILL_COLOR) -> Frame:
-    # Canvas only ever reads Frame.image, never Frame.logical_*, so
-    # logical_origin/logical_size are given arbitrary placeholder values
-    # rather than anything meaningful to this test.
+    # scale 1.0 (logical_size == image_size in pixels) so widget-local
+    # coordinates line up with image pixels 1:1, including for the crop
+    # tests, which read logical_origin/logical_size through apply_crop().
     image = QImage(*image_size, QImage.Format.Format_RGB32)
     image.fill(fill_color)
     return Frame(
@@ -367,3 +367,95 @@ class TestTextPlacement:
 
         assert len(canvas.shapes) == 1
         assert canvas.shapes[0].text == "bye"
+
+
+class TestBlurPixelateDrag:
+    def test_blur_tool_drag_appends_a_blur_shape(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+        canvas.set_tool(Tool.BLUR)
+
+        start = QPoint(10, 10)
+        end = QPoint(60, 40)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(canvas, end)
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
+
+        assert len(canvas.shapes) == 1
+        assert isinstance(canvas.shapes[0], Blur)
+
+    def test_pixelate_tool_drag_appends_a_pixelate_shape(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+        canvas.set_tool(Tool.PIXELATE)
+
+        start = QPoint(10, 10)
+        end = QPoint(60, 40)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(canvas, end)
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
+
+        assert len(canvas.shapes) == 1
+        assert isinstance(canvas.shapes[0], Pixelate)
+
+    def test_blur_drag_survives_repeated_paint_events_mid_drag(self):
+        # paintEvent renders self._visible_shapes() (confirmed/in-progress)
+        # on every call, which for BLUR means render() applies a growing,
+        # possibly-degenerate Blur on every mouseMoveEvent — this must not
+        # raise.
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+        canvas.show()
+        canvas.set_tool(Tool.BLUR)
+
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        QTest.mouseMove(canvas, QPoint(10, 10))  # degenerate: no movement yet
+        QApplication.processEvents()
+        QTest.mouseMove(canvas, QPoint(50, 40))
+        QApplication.processEvents()
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(50, 40))
+
+        assert len(canvas.shapes) == 1
+
+
+class TestCropDrag:
+    def test_crop_drag_replaces_the_frame_and_clears_shapes(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+        # An existing annotation should be baked into the cropped image,
+        # not discarded — see apply_crop()'s docstring.
+        canvas.set_tool(Tool.RECTANGLE)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
+        QTest.mouseMove(canvas, QPoint(15, 15))
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(15, 15))
+        assert len(canvas.shapes) == 1
+
+        canvas.set_tool(Tool.CROP)
+        start = QPoint(10, 10)
+        end = QPoint(60, 40)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(canvas, end)
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
+
+        assert canvas.image.width() == 50
+        assert canvas.image.height() == 30
+        # Baked into the new base image, not carried forward as a shape.
+        assert len(canvas.shapes) == 0
+
+    def test_zero_area_crop_drag_is_a_no_op(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+        canvas.set_tool(Tool.CROP)
+
+        pos = QPoint(20, 20)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=pos)
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=pos)
+
+        assert canvas.image.width() == 100
+        assert canvas.image.height() == 60
+        assert len(canvas.shapes) == 0
