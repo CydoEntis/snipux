@@ -112,17 +112,41 @@ class CaptureBackend(ABC):
         """Grab the entire virtual desktop in a single shot."""
 
 
+def _missing_backend_advice() -> str:
+    """A package to suggest installing, chosen for the detected session type.
+
+    Session type is read fresh here (rather than threaded in from the
+    caller) so `CaptureError` can compute its own message from just the
+    failures list. Naming a session-specific package rather than every
+    known backend's matters: telling a Wayland user to install maim (an
+    X11-only tool) would send them chasing a fix that can't work for them.
+    """
+    session_type = detect_session_type()
+    if session_type == "wayland":
+        return "install grim (e.g. `sudo apt install grim`)"
+    if session_type == "x11":
+        return "install maim (e.g. `sudo apt install maim`)"
+    return "install grim for Wayland or maim for X11 (e.g. `sudo apt install grim maim`)"
+
+
 class CaptureError(Exception):
     """Raised by `BackendRegistry.capture()` when every backend fails.
 
     Carries every `(backend_name, exception)` pair collected along the way,
     not just the last one, so failures can be reported together per
     CLAUDE.md's "a capture backend that fails must not stop the next one"
-    rule.
+    rule. `failures` is empty specifically when no backend was even
+    available to try (a freshly installed machine with no capture tooling)
+    — that case gets its own message rather than falling through to "all
+    capture backends failed: " with nothing after the colon, since a
+    fresh-install user is exactly who this message needs to be useful for.
     """
 
     def __init__(self, failures: list[tuple[str, Exception]]):
         self.failures = failures
+        if not failures:
+            super().__init__(f"no capture backend is available: {_missing_backend_advice()}")
+            return
         summary = "; ".join(f"{name}: {exc}" for name, exc in failures)
         super().__init__(f"all capture backends failed: {summary}")
 
