@@ -22,65 +22,19 @@ def qapp():
     return app
 
 
-def make_frame(image_size=(100, 60), fill_color=FILL_COLOR) -> Frame:
+def make_frame(image_size=(100, 60), fill_color=FILL_COLOR, logical_origin=None) -> Frame:
     # scale 1.0 (logical_size == image_size in pixels) so widget-local
     # coordinates line up with image pixels 1:1, including for the crop
     # tests, which read logical_origin/logical_size through apply_crop().
     image = QImage(*image_size, QImage.Format.Format_RGB32)
     image.fill(fill_color)
+    if logical_origin is None:
+        logical_origin = QPointF(0, 0)
     return Frame(
         image=image,
-        logical_origin=QPointF(0, 0),
+        logical_origin=logical_origin,
         logical_size=QSizeF(*image_size),
     )
-
-
-class TestLetterbox:
-    def test_centered_and_letterboxed_when_widget_larger_than_image(self):
-        frame = make_frame(image_size=(100, 60))
-        canvas = Canvas(frame)
-        canvas.resize(200, 200)
-
-        rendered = canvas.grab().toImage()
-
-        target = canvas._target_rect()
-        assert target.width() == 100
-        assert target.height() == 60
-        # Equal margins on both sides of the shorter axis confirms centering.
-        assert target.left() == pytest.approx(50, abs=1)
-        assert target.top() == pytest.approx(70, abs=1)
-
-        center = target.center()
-        assert rendered.pixelColor(round(center.x()), round(center.y())) == QColor(FILL_COLOR)
-        # A widget corner is well outside the target rect for this geometry,
-        # so it must be showing the letterbox fill, not the image.
-        assert rendered.pixelColor(2, 2) != QColor(FILL_COLOR)
-
-
-class TestScaling:
-    def test_scales_down_preserving_aspect_when_widget_smaller_than_image(self):
-        frame = make_frame(image_size=(400, 200))
-        canvas = Canvas(frame)
-        canvas.resize(100, 100)
-
-        target = canvas._target_rect()
-
-        assert target.width() <= 100
-        assert target.height() <= 100
-        assert target.width() / target.height() == pytest.approx(400 / 200, rel=1e-6)
-        assert target.width() < 400  # actually scaled down, not clipped
-
-    def test_never_upscales_past_100_percent(self):
-        frame = make_frame(image_size=(100, 60))
-        canvas = Canvas(frame)
-        canvas.resize(500, 500)
-
-        target = canvas._target_rect()
-
-        # Scale pinned at 1.0: target size equals the image's own size,
-        # never grown to fill the larger widget.
-        assert target.width() == 100
-        assert target.height() == 60
 
 
 class TestRoundTrip:
@@ -105,15 +59,18 @@ class TestRoundTrip:
             assert abs(round_tripped.y() - image_point.y()) <= 1
 
 
-class TestMargin:
-    def test_widget_to_image_returns_none_in_letterbox_margin(self):
+class TestOutsideWidget:
+    def test_widget_to_image_returns_none_outside_widget_bounds(self):
+        # No letterbox margin exists any more (SNX-21): _target_rect fills
+        # the widget exactly, so the only "outside the image" a point can be
+        # is genuinely outside the widget's own rect.
         frame = make_frame(image_size=(100, 60))
         canvas = Canvas(frame)
-        canvas.resize(200, 200)
+        canvas.resize(100, 60)
 
-        # The image is centered well away from the widget's own corner at
-        # this geometry, so (0, 0) is squarely in the margin.
-        assert canvas.widget_to_image(QPointF(0, 0)) is None
+        assert canvas.widget_to_image(QPointF(-1, -1)) is None
+        assert canvas.widget_to_image(QPointF(150, 30)) is None
+        assert canvas.widget_to_image(QPointF(50, 30)) is not None
 
 
 class TestGrabPixelMatch:
@@ -178,21 +135,6 @@ class TestDragAppendsShape:
 
         assert len(canvas.shapes) == 0
 
-    def test_press_in_letterbox_margin_is_a_no_op(self):
-        frame = make_frame(image_size=(100, 60))
-        canvas = Canvas(frame)
-        canvas.resize(200, 200)  # image letterboxed; (5, 5) is margin, not image
-        canvas.set_tool(Tool.RECTANGLE)
-
-        # QPoint(0, 0) is QTest's own sentinel for "unspecified pos" (it
-        # falls back to the widget's center), so this uses (5, 5) instead
-        # to land in the margin unambiguously.
-        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
-        QTest.mouseMove(canvas, QPoint(8, 8))
-        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(8, 8))
-
-        assert len(canvas.shapes) == 0
-
 
 class TestToolbarControls:
     def test_tool_actions_cover_every_tool_and_switching_updates_canvas(self):
@@ -206,6 +148,68 @@ class TestToolbarControls:
 
         assert editor.canvas._tool is Tool.RECTANGLE
         assert editor.tool_actions[Tool.RECTANGLE].isChecked()
+
+    def test_common_tools_lead_the_main_row(self):
+        # SNX-26: pen, highlighter, eraser and crop are the tools the user
+        # actually reached for, so they -- and only they -- sit directly on
+        # the toolbar, in that order.
+        frame = make_frame()
+        editor = Editor(frame)
+        action_to_tool = {action: tool for tool, action in editor.tool_actions.items()}
+
+        main_row_tools = [
+            action_to_tool[action]
+            for action in editor.toolbar.actions()
+            if action in action_to_tool
+        ]
+
+        assert main_row_tools == [Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.CROP]
+
+    def test_remaining_tools_are_reachable_through_the_more_tools_menu(self):
+        # Not removed, not hidden -- just one click away instead of
+        # crowding the main row (per SNX-26's "no tool is to be removed").
+        frame = make_frame()
+        editor = Editor(frame)
+        action_to_tool = {action: tool for tool, action in editor.tool_actions.items()}
+        expected_secondary_tools = set(Tool) - set(Editor.PRIMARY_TOOLS)
+
+        menu_tools = {
+            action_to_tool[action]
+            for action in editor.more_tools_menu.actions()
+            if action in action_to_tool
+        }
+
+        assert menu_tools == expected_secondary_tools
+        # And none of them leaked into the main row alongside the primary four.
+        main_row_tools = {
+            action_to_tool[action]
+            for action in editor.toolbar.actions()
+            if action in action_to_tool
+        }
+        assert main_row_tools.isdisjoint(expected_secondary_tools)
+
+    def test_no_tool_label_displays_an_underscore(self):
+        # Tool.STEP_MARKER's raw enum value ("step_marker") must not leak
+        # into the UI verbatim.
+        frame = make_frame()
+        editor = Editor(frame)
+
+        for action in editor.tool_actions.values():
+            assert "_" not in action.text()
+        assert editor.tool_actions[Tool.STEP_MARKER].text() == "Step Marker"
+
+    def test_main_row_fits_without_overflow_at_the_editors_normal_width(self):
+        # 1920: a typical full-HD monitor width, same "normal" screen size
+        # test_capture.py's multi-monitor fixtures use elsewhere -- a stand-in
+        # for "a real capture," not a tiny fixture like the 100x60 default
+        # `make_frame()` most of this file uses. The eleven-action row this
+        # ticket replaced overflowed into QToolBar's own chevron on a real
+        # session; the trimmed-down main row (four tools, swatches, custom
+        # colour, stroke width, undo/redo/clear, copy/save/done) must not.
+        frame = make_frame(image_size=(1920, 1080))
+        editor = Editor(frame)
+
+        assert editor.toolbar.sizeHint().width() <= frame.image.width()
 
     def test_colour_swatch_click_sets_canvas_colour_with_no_dialog(self):
         frame = make_frame()
@@ -223,6 +227,90 @@ class TestToolbarControls:
         editor.stroke_width_spinbox.setValue(9)
 
         assert editor.canvas._stroke_width == 9
+
+
+class TestDefaultColour:
+    # SNX-25: black-by-default made the first strokes on a dark capture
+    # invisible, reading as "drawing is broken" rather than "pick a colour."
+
+    def test_default_annotation_colour_is_red_not_black(self):
+        frame = make_frame()
+        editor = Editor(frame)
+
+        assert editor.canvas._colour == QColor(Qt.GlobalColor.red)
+
+    def test_bare_canvas_also_defaults_to_red(self):
+        # Editor.__init__ sets the colour explicitly, but Canvas's own
+        # default (used whenever a caller builds one directly, as most of
+        # this file's tests do) must not silently regress back to black.
+        frame = make_frame()
+        canvas = Canvas(frame)
+
+        assert canvas._colour == QColor(Qt.GlobalColor.red)
+
+
+class TestColourPicker:
+    # SNX-25: swatches alone couldn't reach an arbitrary colour, and a
+    # QColorDialog was explicitly out of scope for the ticket that added
+    # them. This adds one, gated so it never opens on its own.
+
+    def test_toolbar_offers_a_colour_picker_action(self):
+        frame = make_frame()
+        editor = Editor(frame)
+
+        assert editor.colour_picker_action in editor.toolbar.actions()
+
+    def test_no_dialog_is_opened_while_constructing_the_editor(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            editor_module.QColorDialog,
+            "getColor",
+            staticmethod(lambda *args, **kwargs: calls.append((args, kwargs)) or QColor()),
+        )
+
+        Editor(make_frame())
+
+        assert calls == []
+
+    def test_picking_a_colour_becomes_the_colour_used_by_later_annotations(self, monkeypatch):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+        chosen = QColor(12, 34, 56)
+        monkeypatch.setattr(
+            editor_module.QColorDialog,
+            "getColor",
+            staticmethod(lambda *args, **kwargs: chosen),
+        )
+
+        editor.colour_picker_action.trigger()
+        assert editor.canvas._colour == chosen
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        assert editor.canvas.shapes[0].colour == chosen
+
+    def test_cancelling_the_dialog_leaves_the_colour_unchanged(self, monkeypatch):
+        frame = make_frame()
+        editor = Editor(frame)
+        red = QColor(editor.canvas._colour)
+        # QColorDialog.getColor() returns an invalid QColor on Cancel,
+        # rather than raising or returning None.
+        monkeypatch.setattr(
+            editor_module.QColorDialog,
+            "getColor",
+            staticmethod(lambda *args, **kwargs: QColor()),
+        )
+
+        editor.colour_picker_action.trigger()
+
+        assert editor.canvas._colour == red
+
+    def test_colour_swatches_are_still_offered_alongside_the_picker(self):
+        frame = make_frame()
+        editor = Editor(frame)
+
+        assert len(editor.colour_buttons) > 0
+        assert len(editor.colour_buttons) <= 5
 
 
 class TestEditorGrabRectangleBorder:
@@ -469,6 +557,89 @@ def _drag_rectangle(canvas: Canvas, start: QPoint, end: QPoint) -> None:
     QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
 
 
+def _erase_at(canvas: Canvas, pos: QPoint) -> None:
+    canvas.set_tool(Tool.ERASER)
+    QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=pos)
+    QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=pos)
+
+
+class TestEraserTool:
+    def test_toolbar_offers_an_eraser_tool(self):
+        # The generic "every Tool member gets an action" coverage lives in
+        # TestToolbarControls; this pins the specific tool this ticket adds,
+        # including that armed it actually reaches Canvas like any other.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        assert Tool.ERASER in editor.tool_actions
+
+        editor.tool_actions[Tool.ERASER].trigger()
+
+        assert editor.canvas._tool is Tool.ERASER
+
+    def test_click_on_annotation_removes_only_that_shape(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(canvas, QPoint(40, 40), QPoint(50, 50))
+        assert len(canvas.shapes) == 2
+        kept = canvas.shapes[1]
+
+        # (5, 10) sits on the first rectangle's left border, well clear of
+        # the second rectangle's hit region.
+        _erase_at(canvas, QPoint(5, 10))
+
+        assert canvas.shapes == (kept,)
+
+    def test_click_on_empty_space_leaves_every_shape_in_place(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        all_shapes = canvas.shapes
+
+        _erase_at(canvas, QPoint(80, 50))  # nowhere near the rectangle's border
+
+        assert canvas.shapes == all_shapes
+
+    def test_overlapping_shapes_erase_removes_the_most_recently_drawn(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        # Two identically-placed rectangles: a click anywhere on their
+        # shared border hits both, so this is what actually exercises
+        # "most recently drawn wins" rather than distinguishing them by
+        # position.
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(25, 25))
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(25, 25))
+        first, second = canvas.shapes
+        assert first is not second
+
+        _erase_at(canvas, QPoint(5, 15))  # on the shared left border
+
+        assert canvas.shapes == (first,)
+
+    def test_erase_is_undoable_as_a_single_step(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(canvas, QPoint(40, 40), QPoint(50, 50))
+        all_shapes = canvas.shapes
+
+        _erase_at(canvas, QPoint(5, 10))
+        assert len(canvas.shapes) == 1
+
+        canvas.undo()
+
+        assert canvas.shapes == all_shapes
+
+
 class TestUndoRedo:
     def test_undo_after_three_shapes_removes_only_the_most_recent(self):
         frame = make_frame(image_size=(100, 60))
@@ -636,6 +807,93 @@ class TestUndoRedo:
         assert len(editor.canvas.shapes) == 1
 
 
+class TestUndoRedoClearToolbarControls:
+    def test_undo_and_redo_actions_start_disabled(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        assert not editor.undo_action.isEnabled()
+        assert not editor.redo_action.isEnabled()
+
+    def test_actions_enable_and_disable_as_shapes_are_added_undone_and_redone(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        assert editor.undo_action.isEnabled()
+        assert not editor.redo_action.isEnabled()  # nothing ahead yet
+
+        editor.undo_action.trigger()
+        assert len(editor.canvas.shapes) == 0
+        assert not editor.undo_action.isEnabled()  # back at the starting state
+        assert editor.redo_action.isEnabled()
+
+        editor.redo_action.trigger()
+        assert len(editor.canvas.shapes) == 1
+        assert editor.undo_action.isEnabled()
+        assert not editor.redo_action.isEnabled()  # caught back up
+
+    def test_new_shape_after_undo_disables_redo_again(self):
+        # Mirrors TestUndoRedo.test_new_shape_after_undo_discards_the_stale_
+        # redo_entry: the stale redo entry is gone, so the control reflects
+        # that rather than staying enabled from before the new shape.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(editor.canvas, QPoint(20, 20), QPoint(30, 30))
+        editor.undo_action.trigger()
+        assert editor.redo_action.isEnabled()
+
+        _drag_rectangle(editor.canvas, QPoint(50, 5), QPoint(55, 10))
+
+        assert not editor.redo_action.isEnabled()
+
+    def test_clear_action_removes_every_shape_in_one_step(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(editor.canvas, QPoint(20, 20), QPoint(30, 30))
+        _drag_rectangle(editor.canvas, QPoint(35, 35), QPoint(45, 45))
+        all_three = editor.canvas.shapes
+        assert len(all_three) == 3
+
+        editor.clear_action.trigger()
+
+        assert editor.canvas.shapes == ()
+
+    def test_undo_after_clear_restores_every_shape_that_was_cleared(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(editor.canvas, QPoint(20, 20), QPoint(30, 30))
+        all_two = editor.canvas.shapes
+
+        editor.clear_action.trigger()
+        assert editor.canvas.shapes == ()
+
+        editor.undo_action.trigger()
+
+        assert editor.canvas.shapes == all_two
+
+    def test_clear_on_an_empty_canvas_is_a_no_op(self):
+        # No shapes to clear: must not push a history entry an undo could
+        # then "restore" nothing meaningful from.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        editor.canvas.clear()
+
+        assert editor.canvas.shapes == ()
+        assert not editor.undo_action.isEnabled()
+
+
 class TestCopyOnOpen:
     def test_opening_editor_copies_the_capture_before_any_annotation(self, monkeypatch):
         calls = []
@@ -708,3 +966,133 @@ class TestCtrlSSavesRenderedImage:
         )
 
         assert calls == []
+
+
+class TestCopySaveDoneToolbarControls:
+    def test_copy_action_copies_the_rendered_annotated_image_not_the_raw_capture(
+        self, monkeypatch
+    ):
+        frame = make_frame(image_size=(100, 60), fill_color=FILL_COLOR)
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+
+        start = QPoint(10, 10)
+        end = QPoint(60, 40)
+        editor.canvas.set_colour(QColor(255, 0, 0))
+        editor.canvas.set_stroke_width(4)
+        _drag_rectangle(editor.canvas, start, end)
+        assert len(editor.canvas.shapes) == 1
+
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+
+        editor.copy_action.trigger()
+
+        assert len(calls) == 1
+        copied = calls[0]
+        assert isinstance(copied, QImage)
+        # Same sampling point TestCtrlSSavesRenderedImage uses for the same
+        # rectangle shape, in the render() image-pixel space _copy() builds.
+        sample_point = (start.x(), (start.y() + end.y()) // 2)
+        assert copied.pixelColor(*sample_point) != editor.canvas.image.pixelColor(*sample_point)
+
+    def test_save_action_saves_the_rendered_annotated_image(self, monkeypatch):
+        frame = make_frame(image_size=(100, 60), fill_color=FILL_COLOR)
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(10, 10), QPoint(60, 40))
+        assert len(editor.canvas.shapes) == 1
+
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "save_image", lambda image: calls.append(image)
+        )
+
+        editor.save_action.trigger()
+
+        assert len(calls) == 1
+        assert isinstance(calls[0], QImage)
+
+    def test_done_action_closes_the_editor(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.show()
+        assert editor.isVisible()
+
+        editor.done_action.trigger()
+
+        assert not editor.isVisible()
+
+    def test_ctrl_s_still_saves_after_adding_the_toolbar_controls(self, monkeypatch):
+        # Pins the ticket's "existing Ctrl+S binding still saves" criterion
+        # against regressing once Save became reachable from the toolbar too.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "save_image", lambda image: calls.append(image)
+        )
+
+        QTest.keyClick(editor, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+
+        assert len(calls) == 1
+
+
+class TestWindowPlacement:
+    # SNX-21: the editor used to appear as an ordinary titled window wherever
+    # the window manager put it, sized by layout rather than by the snip --
+    # these pin the fix instead: frameless/always-on-top, and positioned so
+    # the image sits exactly over the screen region it was captured from.
+
+    def test_frameless_and_stays_on_top(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        flags = editor.windowFlags()
+        assert flags & Qt.WindowType.FramelessWindowHint
+        assert flags & Qt.WindowType.WindowStaysOnTopHint
+
+    def test_canvas_matches_image_size_and_sits_at_the_snips_logical_origin(self):
+        frame = make_frame(image_size=(100, 60), logical_origin=QPointF(300, 150))
+        editor = Editor(frame)
+
+        # 1:1, no scaling: the canvas's own size is exactly the captured
+        # image's size, not fit-to-window.
+        assert editor.canvas.size().width() == 100
+        assert editor.canvas.size().height() == 60
+
+        # It's the *canvas's* global position that must land on
+        # logical_origin, not the window's -- the toolbar sits above it (see
+        # below), so the window itself starts higher and is taller.
+        canvas_global_top_left = editor.canvas.mapToGlobal(QPoint(0, 0))
+        assert canvas_global_top_left == QPoint(300, 150)
+
+    def test_toolbar_sits_above_the_canvas_without_overlapping_it(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        # The toolbar occupies space strictly above the canvas within the
+        # window -- it must never dip into the rect the snipped image is
+        # drawn into, per the ticket's "does not cover the snipped image"
+        # criterion.
+        assert editor.toolbar.geometry().bottom() <= editor.canvas.geometry().top()
+
+
+class TestEscapeClosesWithoutSaving:
+    def test_escape_closes_the_editor_without_saving(self, monkeypatch):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.show()
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "save_image", lambda image: calls.append(image)
+        )
+
+        assert editor.isVisible()
+        QTest.keyClick(editor, Qt.Key.Key_Escape)
+
+        assert calls == []
+        assert not editor.isVisible()

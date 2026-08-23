@@ -14,10 +14,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QPainter
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
+    QColor,
+    QPainter,
+    QPainterPath,
+    QPainterPathStroker,
+)
 from PyQt6.QtWidgets import (
+    QColorDialog,
     QLineEdit,
+    QMenu,
     QSpinBox,
     QToolBar,
     QToolButton,
@@ -62,8 +71,20 @@ class Tool(Enum):
     BLUR = "blur"
     PIXELATE = "pixelate"
     CROP = "crop"
+    ERASER = "eraser"
     # Appended after the existing members, not inserted earlier: Editor.__init__
     # arms next(iter(Tool)) as the startup default, and that must stay PEN.
+
+
+def _tool_label(tool: Tool) -> str:
+    """Human-facing text for `tool`'s toolbar action.
+
+    `Tool.value` is a lowercase, underscore-separated identifier chosen for
+    the data model (STEP_MARKER = "step_marker"), not for display -- shown
+    as-is it reads like a variable name that leaked into the UI. This turns
+    any tool's value into an ordinary title-cased label instead, per SNX-26.
+    """
+    return tool.value.replace("_", " ").title()
 
 
 # One shape class per tool. The freehand tools (pen/highlighter) build from
@@ -84,6 +105,90 @@ _TWO_POINT_SHAPE_CLASSES = {
     Tool.CROP: Crop,
 }
 
+# Eraser hit-testing lives here, not in shapes.py: it's Canvas interaction
+# logic (deciding which shape a click lands on), not part of the annotation
+# data model or the flattening renderer those classes serve.
+#
+# A fixed image-pixel slack added on top of a shape's own stroke width, so a
+# thin 1px line or a precisely-placed point (Text, StepMarker) stays
+# genuinely clickable without requiring pixel-perfect aim.
+_ERASER_HIT_TOLERANCE = 6.0
+
+
+def _stroked(path: QPainterPath, width: float) -> QPainterPath:
+    stroker = QPainterPathStroker()
+    stroker.setWidth(width)
+    return stroker.createStroke(path)
+
+
+def _eraser_hit_path(shape: Shape) -> QPainterPath:
+    """The fillable region a click on `shape` must land in for the eraser to
+    pick it, in image-pixel coordinates.
+
+    Stroke-only shapes (pen/highlighter/line/arrow/rectangle/ellipse) hit-
+    test against their outline widened by stroke width plus
+    `_ERASER_HIT_TOLERANCE`, via `QPainterPathStroker` — mirroring what
+    render() actually paints. Clicking the empty interior of an unfilled
+    rectangle is clicking whatever is behind it, not the rectangle, so that
+    interior deliberately does not count as a hit.
+
+    Filled shapes (step markers, blur/pixelate patches) hit-test against
+    their actual filled area instead, since the whole area is visibly "the
+    annotation" there. Text hit-tests against a small fixed box around its
+    anchor point — good enough to pick it out without duplicating this
+    module's font-metrics sizing logic here.
+
+    Returns an empty path (never contains a point) for a shape type this
+    doesn't recognise, which is the safe default for an eraser: a shape it
+    can't reason about should never be silently removed.
+    """
+    path = QPainterPath()
+    stroke_width = max(shape.stroke_width, 1.0) + _ERASER_HIT_TOLERANCE
+
+    if isinstance(shape, (Pen, Highlighter)):
+        if not shape.points:
+            return path  # no segment yet to hit-test against
+        path.moveTo(shape.points[0])
+        for point in shape.points[1:]:
+            path.lineTo(point)
+        return _stroked(path, stroke_width)
+
+    if isinstance(shape, (Line, Arrow)):
+        path.moveTo(shape.start)
+        path.lineTo(shape.end)
+        return _stroked(path, stroke_width)
+
+    if isinstance(shape, (Rectangle, Ellipse)):
+        rect = QRectF(shape.start, shape.end).normalized()
+        if isinstance(shape, Rectangle):
+            path.addRect(rect)
+        else:
+            path.addEllipse(rect)
+        return _stroked(path, stroke_width)
+
+    if isinstance(shape, (Blur, Pixelate)):
+        path.addRect(QRectF(shape.start, shape.end).normalized())
+        return path
+
+    if isinstance(shape, StepMarker):
+        radius = max(StepMarker.MIN_RADIUS, shape.stroke_width * StepMarker.RADIUS_FACTOR)
+        path.addEllipse(shape.point, radius, radius)
+        return path
+
+    if isinstance(shape, Text):
+        half_extent = _ERASER_HIT_TOLERANCE + shape.stroke_width
+        path.addRect(
+            QRectF(
+                shape.point.x() - half_extent,
+                shape.point.y() - half_extent,
+                half_extent * 2,
+                half_extent * 2,
+            )
+        )
+        return path
+
+    return path
+
 
 @dataclass(frozen=True)
 class _HistoryState:
@@ -98,13 +203,18 @@ class _HistoryState:
 
 
 class Canvas(QWidget):
-    """Displays a `Frame`'s image centered, letterboxed, and never upscaled.
+    """Displays a `Frame`'s image at 1:1, filling the widget exactly.
 
     Built from a `Frame` (not a bare `QImage`), mirroring `Overlay` in
     overlay.py — the editor hands this whatever `Frame` the overlay
     confirmed (already cropped to the user's selection via `Frame.crop()`),
     and future tickets (crop tool, redraw-after-annotate) will want the
     `Frame`'s logical geometry, not just its pixels.
+
+    Per SNX-21, `Editor` sizes this widget to exactly the frame's logical
+    size (see `Editor._position_over_snip`), so there is no fit-to-widget
+    scaling or letterbox margin to compute here any more — a click always
+    lands on the image, never on dead space around it.
 
     Like `Overlay`'s `_to_local`/`_to_absolute`, coordinate-space helpers
     here are small, named, pure functions computed on demand from current
@@ -113,8 +223,19 @@ class Canvas(QWidget):
     `self.image.size()`) recomputed every call.
     """
 
-    DEFAULT_COLOUR = QColor(Qt.GlobalColor.black)
+    # Red, not black (SNX-25): black strokes on a dark capture (e.g. a
+    # terminal screenshot) are invisible until a colour is deliberately
+    # chosen, which read as "drawing is broken" rather than "pick a colour."
+    # Red is legible against both light and dark captures and is the
+    # conventional annotation colour, so it's a safe first mark either way.
+    DEFAULT_COLOUR = QColor(Qt.GlobalColor.red)
     DEFAULT_STROKE_WIDTH = 3
+
+    # Emitted whenever _history/_history_index actually changes (a pushed
+    # entry, or an undo/redo that moved the index) — never for a guarded
+    # no-op, so a toolbar listening for this to refresh Undo/Redo enabled
+    # state never redraws on a click that did nothing.
+    history_changed = pyqtSignal()
 
     def __init__(self, frame: Frame, parent=None):
         super().__init__(parent)
@@ -164,10 +285,19 @@ class Canvas(QWidget):
         """
         return tuple(self._shapes)
 
+    @property
+    def colour(self) -> QColor:
+        """The colour that will be used for the next annotation. A copy, not
+        the live QColor, for the same reason `shapes` returns a copy — so
+        Editor's colour-picker (SNX-25) can read the current colour to seed
+        the dialog without reaching into a private attribute.
+        """
+        return QColor(self._colour)
+
     def _push_history(self) -> None:
         """Commit the current (frame, shapes) as a new undo/redo entry.
 
-        Called at the four points below that actually mutate self._frame/
+        Called at the points below that actually mutate self._frame/
         self._shapes, and only once the mutation has happened — a no-op
         drag (degenerate crop, empty text, no tool armed) must stay a no-op
         for history too, not push a snapshot identical to the last one.
@@ -187,12 +317,22 @@ class Canvas(QWidget):
         del self._history[self._history_index + 1 :]  # drop stale redo entries
         self._history.append(_HistoryState(self._frame, tuple(self._shapes)))
         self._history_index += 1
+        self.history_changed.emit()
 
     def _restore_history_state(self) -> None:
         state = self._history[self._history_index]
         self._frame = state.frame
         self._shapes = list(state.shapes)
         self.update()
+        self.history_changed.emit()
+
+    @property
+    def can_undo(self) -> bool:
+        return self._history_index > 0
+
+    @property
+    def can_redo(self) -> bool:
+        return self._history_index < len(self._history) - 1
 
     def undo(self) -> None:
         if self._history_index == 0:
@@ -206,6 +346,22 @@ class Canvas(QWidget):
         self._history_index += 1
         self._restore_history_state()
 
+    def clear(self) -> None:
+        """Discard every confirmed annotation as a single undo step: one
+        undo() afterwards restores every shape that was live, per SNX-22.
+
+        A no-op when there's nothing to clear (mirrors the no-op guards
+        elsewhere that feed _push_history — a degenerate crop, empty text):
+        pushing an identical history entry would still count as a step to
+        undo through without changing anything, which is worse than not
+        offering the click at all.
+        """
+        if not self._shapes:
+            return
+        self._shapes = []
+        self._push_history()
+        self.update()
+
     def set_tool(self, tool: Tool | None) -> None:
         self._tool = tool
 
@@ -216,58 +372,66 @@ class Canvas(QWidget):
         self._stroke_width = stroke_width
 
     def _target_rect(self) -> QRectF:
-        """Where self.image is drawn in widget-local coordinates: centered,
-        scaled to fit self.rect() without exceeding 1.0 (never upscaled),
-        preserving aspect ratio. Recomputed from current widget size and
-        image size on every call — nothing cached to invalidate on resize.
+        """Where self.image is drawn in widget-local coordinates: the full
+        widget rect, filled exactly — no fit-to-size scaling, no centering,
+        no letterbox margin (removed per SNX-21; `Editor` now sizes this
+        widget to the frame's own logical size, so the image always fills
+        it exactly). Still degenerates to an empty rect for a zero-size
+        image, the one case "just fill the widget" can't sensibly mean
+        anything — widget_to_image/image_to_widget both lean on that to
+        keep dividing by self.image's dimensions safe. Recomputed from
+        current widget size on every call — nothing cached to invalidate on
+        resize.
         """
         image_size = self.image.size()
-        widget_size = self.size()
         if image_size.width() <= 0 or image_size.height() <= 0:
             return QRectF()  # degenerate image: nothing to draw, no target
-
-        scale = min(
-            widget_size.width() / image_size.width(),
-            widget_size.height() / image_size.height(),
-            1.0,  # the "never upscale past 100%" rule
-        )
-        target_w = image_size.width() * scale
-        target_h = image_size.height() * scale
-        x = (widget_size.width() - target_w) / 2
-        y = (widget_size.height() - target_h) / 2
-        return QRectF(x, y, target_w, target_h)
+        return QRectF(self.rect())
 
     def widget_to_image(self, point: QPointF) -> QPointF | None:
         """Widget-local point -> image-pixel point, or None if point falls
-        in the letterbox margin outside the drawn image.
+        outside the widget (and therefore outside the drawn image, which
+        now always fills the widget exactly).
+
+        Uses independent x/y scale factors, not one shared scalar, mirroring
+        Frame.crop()'s own reasoning in capture.py — nothing guarantees
+        _target_rect's aspect ratio matches self.image's exactly once
+        rounding is involved, so trusting a single axis's ratio for both
+        would be wrong on the other axis.
         """
         target = self._target_rect()
         if target.width() <= 0 or target.height() <= 0 or not target.contains(point):
             return None
-        scale = target.width() / self.image.width()
+        scale_x = target.width() / self.image.width()
+        scale_y = target.height() / self.image.height()
         local = point - target.topLeft()
-        return QPointF(local.x() / scale, local.y() / scale)
+        return QPointF(local.x() / scale_x, local.y() / scale_y)
 
     def image_to_widget(self, point: QPointF) -> QPointF:
         """Image-pixel point -> widget-local point. Total (no None case):
         callers hold image-space points that came from inside the image by
-        construction, unlike widget-space points which can land anywhere
-        including the margin.
+        construction, unlike widget-space points which can land anywhere.
 
         Guards the same degenerate-image case widget_to_image guards via
         _target_rect()'s 0x0 fallback, so this can't divide by zero the way
-        an unguarded version would (self.image.width() == 0 and
-        target.width() == 0.0 together, if this weren't checked first).
-        There's no meaningful scale to invert for an empty image, so this
-        returns target.topLeft() (itself (0, 0) in that case) rather than
-        raising — degrading the same way widget_to_image degrades to None,
-        just without a None case to return through.
+        an unguarded version would (self.image.width()/height() == 0 and
+        target.width()/height() == 0.0 together, if this weren't checked
+        first). There's no meaningful scale to invert for an empty image, so
+        this returns target.topLeft() (itself (0, 0) in that case) rather
+        than raising — degrading the same way widget_to_image degrades to
+        None, just without a None case to return through.
         """
         target = self._target_rect()
-        if target.width() <= 0 or target.height() <= 0 or self.image.width() <= 0:
+        if (
+            target.width() <= 0
+            or target.height() <= 0
+            or self.image.width() <= 0
+            or self.image.height() <= 0
+        ):
             return target.topLeft()
-        scale = target.width() / self.image.width()
-        return target.topLeft() + QPointF(point.x() * scale, point.y() * scale)
+        scale_x = target.width() / self.image.width()
+        scale_y = target.height() / self.image.height()
+        return target.topLeft() + QPointF(point.x() * scale_x, point.y() * scale_y)
 
     # -- drawing tools ----------------------------------------------------
     # In-progress-drag state, mouse handling, and painting all use image-
@@ -326,12 +490,36 @@ class Canvas(QWidget):
         finally:
             self._committing_text = False
 
+    def _shape_index_at(self, image_point: QPointF) -> int | None:
+        """The list index of the topmost shape a click lands on, or None.
+
+        Walks _shapes back to front so an overlap resolves to whichever
+        shape was drawn most recently — the one actually visible at that
+        pixel, per render()'s draw-order-is-paint-order contract. Returns an
+        index (not the shape itself) so the caller can remove the exact
+        instance hit even if an identical-valued shape appears earlier in
+        the list — dataclass equality would otherwise make list.remove()
+        ambiguous between them.
+        """
+        for index in range(len(self._shapes) - 1, -1, -1):
+            if _eraser_hit_path(self._shapes[index]).contains(image_point):
+                return index
+        return None
+
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton or self._tool is None:
             return
         image_point = self.widget_to_image(event.position())
         if image_point is None:
             return  # press landed in the letterbox margin: a no-op, like Overlay
+
+        if self._tool is Tool.ERASER:
+            index = self._shape_index_at(image_point)
+            if index is not None:
+                del self._shapes[index]
+                self._push_history()
+                self.update()
+            return  # erases on press, like STEP_MARKER; never arms a drag
 
         if self._tool is Tool.STEP_MARKER:
             self._shapes.append(
@@ -415,16 +603,26 @@ class Canvas(QWidget):
 class Editor(QWidget):
     """Outer window: a toolbar (tool, colour, stroke width) above `Canvas`.
 
-    The object the app will eventually construct instead of a bare `Canvas`
-    once a later ticket wires the whole capture-to-save flow together; this
-    ticket only adds the widget itself; nothing outside this module builds
-    one yet.
+    Frameless and always-on-top, like `Overlay` in overlay.py, and — per
+    SNX-21 — placed so `canvas` sits exactly over the screen region the
+    snip was captured from, at 1:1: without that, the window landed
+    wherever the window manager felt like putting an ordinary titled
+    window, sized by layout rather than by the snip, and `Canvas` scaled
+    the image down to fit whatever space that left, leaving dead margins
+    where a click was silently a no-op. See `_position_over_snip`.
+
+    Per SNX-26, the tool row is two tiers rather than eleven equal-weight
+    actions in one line: `PRIMARY_TOOLS` sits directly on the toolbar, and
+    everything else hangs off the "More Tools" button built alongside it in
+    `_build_tool_actions`. No tool is removed or made harder to use than a
+    second click — the split is presentation, not capability.
     """
 
-    # A fixed preset row, not a colour picker — per PLAN.md, a QColorDialog
-    # (or any modal) is out of scope for this ticket so no control here can
-    # ever block a test (or a user) on a dialog. The exact palette is an
-    # implementation detail, not an acceptance criterion.
+    # A small one-click preset row, kept alongside the full picker added by
+    # SNX-25 (see _build_colour_picker_action) rather than replaced by it —
+    # a modal is the right tool for an arbitrary colour, but a needless
+    # detour for the common case of "just pick a preset." The exact palette
+    # is an implementation detail, not an acceptance criterion.
     SWATCH_COLOURS = [
         QColor(Qt.GlobalColor.black),
         QColor(Qt.GlobalColor.red),
@@ -432,6 +630,12 @@ class Editor(QWidget):
         QColor(Qt.GlobalColor.blue),
         QColor(Qt.GlobalColor.yellow),
     ]
+
+    # The tools that were actually used once the toolbar overflowed on a
+    # real session (per SNX-26) plus pen, the default tool -- everything
+    # else moves into the "More Tools" menu instead of the main row. Order
+    # here is the order they appear in that row.
+    PRIMARY_TOOLS = (Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.CROP)
 
     MIN_STROKE_WIDTH = 1
     MAX_STROKE_WIDTH = 20
@@ -446,17 +650,28 @@ class Editor(QWidget):
         # toolbar-building call, so no shape can exist yet when this runs.
         copy_image_to_clipboard(frame.image)
 
-        toolbar = QToolBar(self)
+        # Same flags Overlay uses for the same reason: an ordinary titled
+        # window is placed and sized by the window manager, not by us, and
+        # this window's whole point (per SNX-21) is sitting at an exact,
+        # self-chosen screen position.
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        )
+
+        self.toolbar = QToolBar(self)
         self.tool_actions: dict[Tool, QAction] = {}
-        self._build_tool_actions(toolbar)
+        self._build_tool_actions(self.toolbar)
         self.colour_buttons: dict[str, QToolButton] = {}
-        self._build_colour_swatches(toolbar)
-        self.stroke_width_spinbox = self._build_stroke_width_control(toolbar)
+        self._build_colour_swatches(self.toolbar)
+        self._build_colour_picker_action(self.toolbar)
+        self.stroke_width_spinbox = self._build_stroke_width_control(self.toolbar)
+        self._build_undo_redo_clear_actions(self.toolbar)
+        self._build_copy_save_done_actions(self.toolbar)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(toolbar)
+        layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
 
         # Start from a usable state (a tool armed, a colour and width set)
@@ -464,14 +679,57 @@ class Editor(QWidget):
         default_tool = next(iter(Tool))
         self.tool_actions[default_tool].setChecked(True)
         self.canvas.set_tool(default_tool)
-        self.canvas.set_colour(self.SWATCH_COLOURS[0])
+        self.canvas.set_colour(Canvas.DEFAULT_COLOUR)
         self.canvas.set_stroke_width(self.stroke_width_spinbox.value())
 
+        self._position_over_snip(frame)
+
+    def _position_over_snip(self, frame: Frame) -> None:
+        """Size and place this window so `canvas` — not the window as a
+        whole — ends up covering exactly `frame.logical_origin` /
+        `frame.logical_size` on screen, per SNX-21's acceptance criteria.
+
+        `canvas` is fixed to the frame's own logical size so it draws the
+        image at 1:1 with no scaling and no letterbox margin (see
+        `Canvas._target_rect`). The toolbar sits *above* that region rather
+        than inside it — a toolbar docked over the snipped rect would cover
+        part of the very image it's editing, trading one dead-click margin
+        for another — so this window's own top edge is pushed up by the
+        toolbar's height and only canvas's top edge lands on
+        `logical_origin`.
+        """
+        self.canvas.setFixedSize(
+            round(frame.logical_size.width()), round(frame.logical_size.height())
+        )
+        toolbar_height = self.toolbar.sizeHint().height()
+        self.setGeometry(
+            round(frame.logical_origin.x()),
+            round(frame.logical_origin.y()) - toolbar_height,
+            round(frame.logical_size.width()),
+            round(frame.logical_size.height()) + toolbar_height,
+        )
+        # setGeometry() alone doesn't guarantee the layout has repositioned
+        # toolbar/canvas by the time this returns -- Qt normally does that
+        # lazily on the next paint/show. Forced here so canvas/toolbar
+        # geometry is correct immediately, since callers (and tests) may
+        # read it before this window is ever shown.
+        self.layout().activate()
+
     def _build_tool_actions(self, toolbar: QToolBar) -> None:
+        """Populate `self.tool_actions` with one QAction per `Tool` member —
+        every tool remains selectable and every action lands in the same
+        exclusive `QActionGroup`, whether it's placed directly on the
+        toolbar or inside the "More Tools" menu below. Qt doesn't care
+        which widget an action's `QAction` is displayed in for `.trigger()`
+        or the group's checked-state bookkeeping to work, so callers (and
+        tests) can keep addressing tools via `self.tool_actions[tool]`
+        exactly as before.
+        """
         group = QActionGroup(toolbar)
         group.setExclusive(True)
-        for tool in Tool:
-            action = QAction(tool.value.capitalize(), toolbar)
+
+        def build_action(tool: Tool) -> QAction:
+            action = QAction(_tool_label(tool), toolbar)
             action.setCheckable(True)
             # Default arg binds `tool` at definition time, not call time —
             # without it every action's handler would close over whichever
@@ -480,8 +738,27 @@ class Editor(QWidget):
                 lambda checked, tool=tool: self.canvas.set_tool(tool)
             )
             group.addAction(action)
-            toolbar.addAction(action)
             self.tool_actions[tool] = action
+            return action
+
+        for tool in self.PRIMARY_TOOLS:
+            toolbar.addAction(build_action(tool))
+
+        # Everything else stays reachable, just not in the main row: per
+        # SNX-26, eleven equal-weight actions plus the swatches and spin box
+        # overflowed into QToolBar's own chevron on a real capture.
+        self.more_tools_menu = QMenu("More Tools", toolbar)
+        for tool in Tool:
+            if tool in self.PRIMARY_TOOLS:
+                continue
+            self.more_tools_menu.addAction(build_action(tool))
+
+        self.more_tools_button = QToolButton(toolbar)
+        self.more_tools_button.setText("More Tools")
+        self.more_tools_button.setToolTip("More Tools")
+        self.more_tools_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more_tools_button.setMenu(self.more_tools_menu)
+        toolbar.addWidget(self.more_tools_button)
 
     def _build_colour_swatches(self, toolbar: QToolBar) -> None:
         for colour in self.SWATCH_COLOURS:
@@ -493,6 +770,29 @@ class Editor(QWidget):
             )
             toolbar.addWidget(button)
             self.colour_buttons[colour.name()] = button
+
+    def _build_colour_picker_action(self, toolbar: QToolBar) -> None:
+        """A full colour picker for anything the preset swatches don't
+        cover, per SNX-25.
+
+        The QColorDialog itself is only ever constructed inside
+        `_pick_colour`, which nothing calls except this action's `triggered`
+        signal — so building the toolbar (including in every test that
+        merely constructs an Editor) can never pop a modal.
+        """
+        self.colour_picker_action = QAction("Custom Colour…", toolbar)
+        self.colour_picker_action.triggered.connect(self._pick_colour)
+        toolbar.addAction(self.colour_picker_action)
+
+    def _pick_colour(self) -> None:
+        # Seeded with the current colour so re-opening the dialog starts
+        # from where annotation is now, not from some fixed default.
+        # QColorDialog.getColor() returns an invalid QColor on Cancel
+        # (rather than raising or returning None), so isValid() is the
+        # correct "did the user actually choose something" check here.
+        colour = QColorDialog.getColor(self.canvas.colour, self, "Custom Colour")
+        if colour.isValid():
+            self.canvas.set_colour(colour)
 
     def _build_stroke_width_control(self, toolbar: QToolBar) -> QSpinBox:
         spinbox = QSpinBox(toolbar)
@@ -517,6 +817,62 @@ class Editor(QWidget):
             if isinstance(child, QLineEdit):
                 child.installEventFilter(self)
         return spinbox
+
+    def _build_undo_redo_clear_actions(self, toolbar: QToolBar) -> None:
+        """Undo/Redo/Clear controls, per SNX-22: Canvas.undo()/redo() and
+        their Ctrl+Z/Ctrl+Shift+Z bindings already existed, but nothing in
+        the toolbar surfaced them — a user had no way to discover them short
+        of guessing the shortcut. Undo/Redo's enabled state is kept live via
+        Canvas.history_changed rather than computed once at build time, so a
+        user watching the toolbar sees exactly what Canvas.can_undo/
+        can_redo see, instead of a second copy of that logic drifting out of
+        sync with it.
+        """
+        toolbar.addSeparator()
+
+        self.undo_action = QAction("Undo", toolbar)
+        self.undo_action.triggered.connect(self.undo)
+        toolbar.addAction(self.undo_action)
+
+        self.redo_action = QAction("Redo", toolbar)
+        self.redo_action.triggered.connect(self.redo)
+        toolbar.addAction(self.redo_action)
+
+        self.clear_action = QAction("Clear", toolbar)
+        self.clear_action.triggered.connect(self.canvas.clear)
+        toolbar.addAction(self.clear_action)
+
+        self.canvas.history_changed.connect(self._update_undo_redo_actions)
+        self._update_undo_redo_actions()  # starting state: both disabled
+
+    def _update_undo_redo_actions(self) -> None:
+        self.undo_action.setEnabled(self.canvas.can_undo)
+        self.redo_action.setEnabled(self.canvas.can_redo)
+
+    def _build_copy_save_done_actions(self, toolbar: QToolBar) -> None:
+        """Copy/Save/Done controls, per SNX-24: `_save()` already existed
+        but was reachable only via Ctrl+S, and the auto-copy-on-open (see
+        `copy_image_to_clipboard` call above) fires once, before any
+        annotation exists — there was no toolbar-visible way to copy or
+        save the annotated result, or to finish beyond the window's own
+        (frameless, so effectively invisible) close affordance. Both Copy
+        and Save call through `_rendered_image()`, the same render() call
+        Ctrl+S already used, so every path acts on the same annotated
+        image; Done simply closes the window, same as Escape already does.
+        """
+        toolbar.addSeparator()
+
+        self.copy_action = QAction("Copy", toolbar)
+        self.copy_action.triggered.connect(self._copy)
+        toolbar.addAction(self.copy_action)
+
+        self.save_action = QAction("Save", toolbar)
+        self.save_action.triggered.connect(self._save)
+        toolbar.addAction(self.save_action)
+
+        self.done_action = QAction("Done", toolbar)
+        self.done_action.triggered.connect(self.close)
+        toolbar.addAction(self.done_action)
 
     def undo(self) -> None:
         self.canvas.undo()
@@ -561,18 +917,40 @@ class Editor(QWidget):
                 return True
         return super().eventFilter(watched, event)
 
-    def _save(self) -> None:
-        """Save the currently-rendered, annotated image — not the raw
-        capture — to the default location, without prompting for a name.
+    def _rendered_image(self):
+        """The currently-rendered, annotated image — not the raw capture.
+
         Built from Canvas's public `shapes` property (a confirmed-shapes
         copy), not `Canvas._visible_shapes()`, which also includes an
-        in-progress drag: that's the paint-preview's concern, not the save
-        contract's.
+        in-progress drag: that's the paint-preview's concern, not the
+        save/copy contract's. Shared by `_save()` and `_copy()` (SNX-24) so
+        both act on exactly the same image, per the ticket's acceptance
+        criteria.
         """
-        rendered = render(self.canvas.image, list(self.canvas.shapes))
-        save_image(rendered)
+        return render(self.canvas.image, list(self.canvas.shapes))
+
+    def _save(self) -> None:
+        """Save the currently-rendered, annotated image to the default
+        location, without prompting for a name."""
+        save_image(self._rendered_image())
+
+    def _copy(self) -> None:
+        """Place the currently-rendered, annotated image on the clipboard —
+        unlike the auto-copy in __init__, which runs once before any
+        annotation exists, this is callable any time after drawing to
+        re-copy the up-to-date result."""
+        copy_image_to_clipboard(self._rendered_image())
 
     def keyPressEvent(self, event) -> None:
+        # Mirrors Overlay's own Escape handling in overlay.py: closes
+        # without calling _save(), same as cancelling a selection never
+        # emits `confirmed`. Checked first since it needs no modifier
+        # comparison and should win regardless of what else this method
+        # grows to handle.
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
+
         # Exact-equality modifier check, not bitwise, for the same reason
         # _undo_redo_action uses one for Ctrl+Shift+Z: a bitwise "Control
         # held" test would also match Ctrl+Shift+S, reserved for a possible

@@ -85,8 +85,55 @@ if command -v snipux >/dev/null 2>&1; then
 else
     echo "Done. snipux is installed and listed in GNOME's application list,"
     echo "but $bin_dir is not on PATH in this shell (checked: command -v snipux)."
-    echo "The .desktop entry's Exec=snipux line and the Super+Shift+S binding"
-    echo "both need it resolvable in a graphical session too -- make sure"
-    echo "$bin_dir is on PATH there, e.g. by logging out and back in."
+    echo "The .desktop entry's Exec=snipux line needs it resolvable in a"
+    echo "graphical session too -- make sure $bin_dir is on PATH there, e.g."
+    echo "by logging out and back in."
 fi
-echo "Next: bind Super+Shift+S to it -- see docs/super-shift-s-gnome.md."
+
+# Bind Super+Shift+S to the launcher via GNOME's custom-keybindings
+# mechanism -- see docs/super-shift-s-gnome.md for what this does by hand
+# and how to undo it. The launcher's absolute path is used (not the bare
+# "snipux" name) because $bin_dir is not reliably on PATH in a graphical
+# GNOME session, as just checked above.
+media_keys_schema="org.gnome.settings-daemon.plugins.media-keys"
+slot_path="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/"
+slot_schema="$media_keys_schema.custom-keybinding:$slot_path"
+shortcut_bound=false
+
+if ! command -v gsettings >/dev/null 2>&1; then
+    echo "Note: gsettings not found -- cannot bind Super+Shift+S automatically."
+    echo "See docs/super-shift-s-gnome.md to bind it by hand."
+elif ! current_keybindings="$(gsettings get "$media_keys_schema" custom-keybindings 2>/dev/null)"; then
+    echo "Note: could not read GNOME's custom-keybindings list -- cannot bind"
+    echo "Super+Shift+S automatically. See docs/super-shift-s-gnome.md to bind it by hand."
+else
+    case "$current_keybindings" in
+        *"'$slot_path'"*)
+            # A previous run of this script already appended our slot --
+            # reuse it instead of adding a duplicate entry.
+            ;;
+        "@as []")
+            current_keybindings="['$slot_path']"
+            ;;
+        *)
+            # Splice our slot into the existing list rather than replacing
+            # it, so shortcuts the user set up by hand are kept.
+            current_keybindings="${current_keybindings%]}, '$slot_path']"
+            ;;
+    esac
+
+    if gsettings set "$media_keys_schema" custom-keybindings "$current_keybindings" \
+        && gsettings set "$slot_schema" name 'snipux' \
+        && gsettings set "$slot_schema" command "$launcher --snip" \
+        && gsettings set "$slot_schema" binding '<Super><Shift>s'
+    then
+        shortcut_bound=true
+    else
+        echo "Note: setting the GNOME shortcut failed -- cannot bind Super+Shift+S"
+        echo "automatically. See docs/super-shift-s-gnome.md to bind it by hand."
+    fi
+fi
+
+if [ "$shortcut_bound" = true ]; then
+    echo "Bound Super+Shift+S to run: $launcher --snip"
+fi
