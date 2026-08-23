@@ -11,9 +11,10 @@ colour, and stroke width.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QPainter
 from PyQt6.QtWidgets import (
     QLineEdit,
@@ -83,6 +84,18 @@ _TWO_POINT_SHAPE_CLASSES = {
 }
 
 
+@dataclass(frozen=True)
+class _HistoryState:
+    """One committed (frame, shapes) snapshot in Canvas's undo/redo stack.
+
+    Holds the same `Frame`/`Shape` objects that were live at commit time,
+    not copies — see Canvas._push_history's docstring for why that's safe.
+    """
+
+    frame: Frame
+    shapes: tuple[Shape, ...]
+
+
 class Canvas(QWidget):
     """Displays a `Frame`'s image centered, letterboxed, and never upscaled.
 
@@ -131,6 +144,12 @@ class Canvas(QWidget):
         # own hide() call causes) — see _commit_text.
         self._committing_text = False
 
+        # Undo/redo stack: entry zero is the empty-canvas starting state, not
+        # a special-cased "nothing to undo" sentinel — that's what makes
+        # undo()'s guard a plain index-zero check rather than an is-empty one.
+        self._history: list[_HistoryState] = [_HistoryState(self._frame, ())]
+        self._history_index = 0
+
     @property
     def image(self):
         return self._frame.image
@@ -143,6 +162,48 @@ class Canvas(QWidget):
         rather than a bare attribute.
         """
         return tuple(self._shapes)
+
+    def _push_history(self) -> None:
+        """Commit the current (frame, shapes) as a new undo/redo entry.
+
+        Called at the four points below that actually mutate self._frame/
+        self._shapes, and only once the mutation has happened — a no-op
+        drag (degenerate crop, empty text, no tool armed) must stay a no-op
+        for history too, not push a snapshot identical to the last one.
+
+        Stores the live `self._frame` object and a tuple of the live shape
+        objects, not deep copies. That's safe only because nothing mutates a
+        committed shape or frame afterwards: a dragged shape is built via
+        _new_in_progress_shape as a throwaway instance and nothing holds a
+        mutating reference to it once mouseReleaseEvent appends it;
+        apply_crop() (shapes.py) always builds a brand-new Frame rather than
+        writing through the old one. The one apparent exception is
+        StepMarker.number, which render() reassigns on every paint call —
+        but nothing ever trusts a stored .number, so a stale value from a
+        different history entry's last paint is always overwritten before
+        it's next drawn. See PLAN.md for the fuller argument.
+        """
+        del self._history[self._history_index + 1 :]  # drop stale redo entries
+        self._history.append(_HistoryState(self._frame, tuple(self._shapes)))
+        self._history_index += 1
+
+    def _restore_history_state(self) -> None:
+        state = self._history[self._history_index]
+        self._frame = state.frame
+        self._shapes = list(state.shapes)
+        self.update()
+
+    def undo(self) -> None:
+        if self._history_index == 0:
+            return  # already at the empty-canvas starting state
+        self._history_index -= 1
+        self._restore_history_state()
+
+    def redo(self) -> None:
+        if self._history_index >= len(self._history) - 1:
+            return  # nothing ahead: no undo has happened, or redo already caught up
+        self._history_index += 1
+        self._restore_history_state()
 
     def set_tool(self, tool: Tool | None) -> None:
         self._tool = tool
@@ -257,6 +318,7 @@ class Canvas(QWidget):
                         text=self._text_edit.text(),
                     )
                 )
+                self._push_history()
             self._text_edit.hide()
             self._pending_point = None
             self.update()
@@ -278,6 +340,7 @@ class Canvas(QWidget):
                     point=image_point,
                 )
             )
+            self._push_history()
             self.update()
             return  # one marker per click; never touches _in_progress_shape
 
@@ -322,10 +385,12 @@ class Canvas(QWidget):
             if crop_rect.width() > 0 and crop_rect.height() > 0:
                 self._frame = apply_crop(self._frame, self._shapes, crop_rect)
                 self._shapes = []
+                self._push_history()
             self.update()
             return
 
         self._shapes.append(shape)
+        self._push_history()
         self.update()
 
     def _visible_shapes(self) -> list[Shape]:
@@ -428,4 +493,72 @@ class Editor(QWidget):
         spinbox.setValue(Canvas.DEFAULT_STROKE_WIDTH)
         spinbox.valueChanged.connect(self.canvas.set_stroke_width)
         toolbar.addWidget(spinbox)
+
+        # The spinbox keeps Qt's default StrongFocus, and its internal
+        # QLineEdit claims Ctrl+Z/Ctrl+Shift+Z for its own (always-empty)
+        # text-undo history during Qt's ShortcutOverride pass — before a
+        # QKeyEvent would ever reach keyPressEvent below to bubble up from
+        # it. So "set a stroke width, then Ctrl+Z" would silently do nothing
+        # without this: installed on both the spinbox and its line-edit
+        # child, since production delivers the real key event to the line
+        # edit (the spinbox's focus proxy) while a test that targets the
+        # spinbox widget directly lands on the spinbox itself. The text
+        # tool's QLineEdit is deliberately left alone — Ctrl+Z undoing a
+        # keystroke there while it has focus is reasonable, not a bug.
+        spinbox.installEventFilter(self)
+        for child in spinbox.children():
+            if isinstance(child, QLineEdit):
+                child.installEventFilter(self)
         return spinbox
+
+    def undo(self) -> None:
+        self.canvas.undo()
+
+    def redo(self) -> None:
+        self.canvas.redo()
+
+    def _undo_redo_action(self, key, modifiers) -> str | None:
+        """Return "redo", "undo", or None for a given key/modifiers pair.
+        Shared by keyPressEvent and eventFilter so the two dispatch paths
+        can't drift.
+
+        Checks the Ctrl+Shift+Z case first: its modifier set includes
+        ControlModifier, so a bitwise "is Control held" check written before
+        the Shift check would swallow every redo as an undo. Exact equality
+        against the combined flag (not a bitwise subset test) is
+        load-bearing here, not a style choice.
+        """
+        if key != Qt.Key.Key_Z:
+            return None
+        if modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+            return "redo"
+        if modifiers == Qt.KeyboardModifier.ControlModifier:
+            return "undo"
+        return None
+
+    def eventFilter(self, watched, event) -> bool:
+        # Only the stroke-width spinbox (and its line-edit child) install
+        # this filter — see _build_stroke_width_control. Intercepting at
+        # ShortcutOverride, not KeyPress, is what lets this run before the
+        # line edit's own event() gets a chance to accept the key for its
+        # internal text-undo.
+        if event.type() == QEvent.Type.ShortcutOverride:
+            action = self._undo_redo_action(event.key(), event.modifiers())
+            if action == "redo":
+                event.accept()
+                self.redo()
+                return True
+            if action == "undo":
+                event.accept()
+                self.undo()
+                return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event) -> None:
+        action = self._undo_redo_action(event.key(), event.modifiers())
+        if action == "redo":
+            self.redo()
+        elif action == "undo":
+            self.undo()
+        else:
+            super().keyPressEvent(event)
