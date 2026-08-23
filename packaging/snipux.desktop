@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=snipux
+Comment=A Windows Snipping Tool workalike for Linux
+Exec=snipux
+Icon=org.gnome.Screenshot
+Categories=Graphics;Utility;
+Terminal=false
