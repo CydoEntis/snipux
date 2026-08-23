@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
 from snipux.editor import Canvas, Editor, Tool
-from snipux.shapes import Rectangle
+from snipux.shapes import Rectangle, StepMarker, Text
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -258,3 +258,112 @@ class TestEditorGrabRectangleBorder:
         )
 
         assert sampled != QColor(FILL_COLOR)
+
+
+class TestStepMarkerClickCommit:
+    def test_single_click_appends_one_step_marker(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+        canvas.set_tool(Tool.STEP_MARKER)
+
+        pos = QPoint(20, 20)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=pos)
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=pos)
+
+        assert len(canvas.shapes) == 1
+        assert isinstance(canvas.shapes[0], StepMarker)
+
+    def test_a_drag_after_the_click_does_not_add_a_second_shape(self):
+        # STEP_MARKER commits on press and never sets _in_progress_shape, so
+        # a subsequent move/release from the same gesture must be a no-op —
+        # the existing mouseMoveEvent/mouseReleaseEvent guards on
+        # _in_progress_shape being None already cover this without change.
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+        canvas.set_tool(Tool.STEP_MARKER)
+
+        start = QPoint(20, 20)
+        end = QPoint(60, 40)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(canvas, end)
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
+
+        assert len(canvas.shapes) == 1
+
+
+class TestTextPlacement:
+    # canvas.show() (and QApplication.processEvents() after each focus
+    # change) is needed here, unlike the drag-based tool tests above: Qt
+    # only honours setFocus()/clearFocus() on a widget whose ancestor chain
+    # is actually shown, and this suite's editingFinished-based commit path
+    # depends on real focus changes, not just synthesized key events.
+
+    def test_click_type_and_return_commits_one_text_shape(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+        canvas.show()
+        canvas.set_tool(Tool.TEXT)
+
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        QApplication.processEvents()
+        assert canvas._text_edit is not None
+        assert not canvas._text_edit.isHidden()
+
+        QTest.keyClicks(canvas._text_edit, "hello")
+        QTest.keyClick(canvas._text_edit, Qt.Key.Key_Return)
+
+        assert len(canvas.shapes) == 1
+        shape = canvas.shapes[0]
+        assert isinstance(shape, Text)
+        assert shape.text == "hello"
+        assert canvas._text_edit.isHidden()
+
+    def test_return_commits_exactly_once(self):
+        # Regression test: editingFinished fires once for Enter and again
+        # when _commit_text's own hide() call drops the field's focus.
+        # Without the re-entrancy guard, a single Enter press would append
+        # the same Text shape twice.
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+        canvas.show()
+        canvas.set_tool(Tool.TEXT)
+
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        QApplication.processEvents()
+        QTest.keyClicks(canvas._text_edit, "hi")
+        QTest.keyClick(canvas._text_edit, Qt.Key.Key_Return)
+
+        assert len(canvas.shapes) == 1
+
+    def test_empty_text_produces_no_shape(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+        canvas.show()
+        canvas.set_tool(Tool.TEXT)
+
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        QApplication.processEvents()
+        QTest.keyClick(canvas._text_edit, Qt.Key.Key_Return)
+
+        assert len(canvas.shapes) == 0
+
+    def test_focus_loss_commits_text(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+        canvas.show()
+        canvas.set_tool(Tool.TEXT)
+
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        QApplication.processEvents()
+        QTest.keyClicks(canvas._text_edit, "bye")
+        canvas._text_edit.clearFocus()  # simulates "click elsewhere"
+        QApplication.processEvents()
+
+        assert len(canvas.shapes) == 1
+        assert canvas.shapes[0].text == "bye"

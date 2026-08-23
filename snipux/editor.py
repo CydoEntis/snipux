@@ -4,9 +4,9 @@ Per CLAUDE.md's one architectural rule, everything here is ordinary drawing
 on the frozen `Frame` the overlay already captured and cropped — no code
 path in this module asks the compositor for pixels. `Canvas` displays that
 frozen image, maps between widget-local and image-pixel coordinates, and
-(as of this ticket) owns the shape list and mouse handling for the six
-drawing tools defined in `shapes.py`; `Editor` wraps it with a toolbar for
-picking a tool, colour, and stroke width.
+owns the shape list and mouse handling for the drawing and markup tools
+defined in `shapes.py`; `Editor` wraps it with a toolbar for picking a tool,
+colour, and stroke width.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from enum import Enum
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QPainter
 from PyQt6.QtWidgets import (
+    QLineEdit,
     QSpinBox,
     QToolBar,
     QToolButton,
@@ -32,6 +33,8 @@ from snipux.shapes import (
     Pen,
     Rectangle,
     Shape,
+    StepMarker,
+    Text,
     render,
 )
 
@@ -48,6 +51,8 @@ class Tool(Enum):
     LINE = "line"
     RECTANGLE = "rectangle"
     ELLIPSE = "ellipse"
+    TEXT = "text"
+    STEP_MARKER = "step_marker"
 
 
 # One shape class per tool. The freehand tools (pen/highlighter) build from
@@ -101,6 +106,18 @@ class Canvas(QWidget):
         # drags. Lives outside self._shapes until mouseReleaseEvent commits
         # it, so a paintEvent mid-drag can show it without it being final.
         self._in_progress_shape: Shape | None = None
+
+        # Text placement: unlike every other tool, text commits from a
+        # QLineEdit rather than a drag (see mousePressEvent/_commit_text).
+        # Created lazily on first use and reused after, per PLAN.md.
+        self._text_edit: QLineEdit | None = None
+        self._pending_point: QPointF | None = None
+        self._pending_colour: QColor | None = None
+        self._pending_stroke_width: float | None = None
+        # Guards against QLineEdit.editingFinished firing twice for a single
+        # Enter press (once for Enter, once for the focus loss _commit_text's
+        # own hide() call causes) — see _commit_text.
+        self._committing_text = False
 
     @property
     def image(self):
@@ -201,12 +218,68 @@ class Canvas(QWidget):
             )
         return None  # no tool armed
 
+    def _ensure_text_edit(self) -> QLineEdit:
+        if self._text_edit is None:
+            self._text_edit = QLineEdit(self)
+            self._text_edit.hide()
+            self._text_edit.editingFinished.connect(self._commit_text)
+        return self._text_edit
+
+    def _commit_text(self) -> None:
+        # Re-entrancy guard, not a signal disconnect: hide() below drops the
+        # field's focus and re-triggers editingFinished synchronously. The
+        # flag is already True at that point, so the re-entrant call returns
+        # here before touching self._shapes again. A disconnect would need
+        # an explicit reconnect (easy to forget, and the field is reused
+        # across placements) so this needs none.
+        if self._committing_text:
+            return
+        self._committing_text = True
+        try:
+            if self._text_edit.text():
+                self._shapes.append(
+                    Text(
+                        colour=self._pending_colour,
+                        stroke_width=self._pending_stroke_width,
+                        point=self._pending_point,
+                        text=self._text_edit.text(),
+                    )
+                )
+            self._text_edit.hide()
+            self._pending_point = None
+            self.update()
+        finally:
+            self._committing_text = False
+
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton or self._tool is None:
             return
         image_point = self.widget_to_image(event.position())
         if image_point is None:
             return  # press landed in the letterbox margin: a no-op, like Overlay
+
+        if self._tool is Tool.STEP_MARKER:
+            self._shapes.append(
+                StepMarker(
+                    colour=QColor(self._colour),
+                    stroke_width=self._stroke_width,
+                    point=image_point,
+                )
+            )
+            self.update()
+            return  # one marker per click; never touches _in_progress_shape
+
+        if self._tool is Tool.TEXT:
+            self._pending_point = image_point
+            self._pending_colour = QColor(self._colour)
+            self._pending_stroke_width = self._stroke_width
+            text_edit = self._ensure_text_edit()
+            text_edit.clear()
+            text_edit.move(event.position().toPoint())
+            text_edit.show()
+            text_edit.setFocus()
+            return  # commits later via editingFinished, not here
+
         self._in_progress_shape = self._new_in_progress_shape(image_point)
 
     def mouseMoveEvent(self, event) -> None:
