@@ -1,4 +1,4 @@
-# Binding Print Screen to snipux on GNOME
+# Binding Super+Shift+S to snipux on GNOME
 
 Binding a key is the desktop's job, not the application's — snipux never
 grabs keys globally (see `docs/SPEC.md`, "Resident process and hotkey"). This
@@ -10,6 +10,15 @@ does not start the resident process itself. Install snipux and make sure it
 is running (e.g. via the desktop entry, or `snipux` from a terminal) before
 you bind the key, otherwise the first press after login will report that no
 instance is running instead of taking a snip.
+
+## Why Super+Shift+S
+
+snipux exists to restore the Windows Snipping Tool workflow, and that
+workflow's muscle memory is Windows key + Shift + S. On Linux the key
+labelled with the Windows logo is called **Super**, so the GNOME binding
+string for that combination is `<Super><Shift>s`. It also does not collide
+with anything: GNOME itself binds Print for its own screenshot UI, so
+Super+Shift+S stays out of its way entirely.
 
 ## 1. Install first
 
@@ -53,18 +62,27 @@ gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/or
 
 gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ command 'snipux --snip'
 
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ binding 'Print'
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ binding '<Super><Shift>s'
 ```
 
 `command` must be exactly `snipux --snip` — that is the flag `snipux/app.py`
 parses to forward a capture request to the resident instance. `binding` is
-`Print`, GNOME's keysym name for the Print Screen key.
+`<Super><Shift>s`, GNOME's keysym string for Super (the key labelled with the
+Windows logo) plus Shift plus S — the same combination Windows Snipping Tool
+uses.
 
 ## 4. Try it
 
-Press Print Screen. If snipux is running, the screen freezes into the
+Press Super+Shift+S. If snipux is running, the screen freezes into the
 selection overlay. If instead nothing happens, check that snipux is running
 and that `snipux --snip` succeeds when run by hand from a terminal.
+
+## Prefer Print Screen instead?
+
+If you'd rather bind Print Screen — note GNOME also uses it for its own
+screenshot UI, so binding it here means overriding that — set `binding` to
+`'Print'` in step 3 instead of `'<Super><Shift>s'`. Everything else in this
+page is unchanged.
 
 ## Note
 
