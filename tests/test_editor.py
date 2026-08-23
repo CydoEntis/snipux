@@ -822,6 +822,79 @@ class TestCtrlSSavesRenderedImage:
         assert calls == []
 
 
+class TestCopySaveDoneToolbarControls:
+    def test_copy_action_copies_the_rendered_annotated_image_not_the_raw_capture(
+        self, monkeypatch
+    ):
+        frame = make_frame(image_size=(100, 60), fill_color=FILL_COLOR)
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+
+        start = QPoint(10, 10)
+        end = QPoint(60, 40)
+        editor.canvas.set_colour(QColor(255, 0, 0))
+        editor.canvas.set_stroke_width(4)
+        _drag_rectangle(editor.canvas, start, end)
+        assert len(editor.canvas.shapes) == 1
+
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+
+        editor.copy_action.trigger()
+
+        assert len(calls) == 1
+        copied = calls[0]
+        assert isinstance(copied, QImage)
+        # Same sampling point TestCtrlSSavesRenderedImage uses for the same
+        # rectangle shape, in the render() image-pixel space _copy() builds.
+        sample_point = (start.x(), (start.y() + end.y()) // 2)
+        assert copied.pixelColor(*sample_point) != editor.canvas.image.pixelColor(*sample_point)
+
+    def test_save_action_saves_the_rendered_annotated_image(self, monkeypatch):
+        frame = make_frame(image_size=(100, 60), fill_color=FILL_COLOR)
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(10, 10), QPoint(60, 40))
+        assert len(editor.canvas.shapes) == 1
+
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "save_image", lambda image: calls.append(image)
+        )
+
+        editor.save_action.trigger()
+
+        assert len(calls) == 1
+        assert isinstance(calls[0], QImage)
+
+    def test_done_action_closes_the_editor(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.show()
+        assert editor.isVisible()
+
+        editor.done_action.trigger()
+
+        assert not editor.isVisible()
+
+    def test_ctrl_s_still_saves_after_adding_the_toolbar_controls(self, monkeypatch):
+        # Pins the ticket's "existing Ctrl+S binding still saves" criterion
+        # against regressing once Save became reachable from the toolbar too.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "save_image", lambda image: calls.append(image)
+        )
+
+        QTest.keyClick(editor, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+
+        assert len(calls) == 1
+
+
 class TestWindowPlacement:
     # SNX-21: the editor used to appear as an ordinary titled window wherever
     # the window manager put it, sized by layout rather than by the snip --

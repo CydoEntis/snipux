@@ -625,6 +625,7 @@ class Editor(QWidget):
         self._build_colour_swatches(self.toolbar)
         self.stroke_width_spinbox = self._build_stroke_width_control(self.toolbar)
         self._build_undo_redo_clear_actions(self.toolbar)
+        self._build_copy_save_done_actions(self.toolbar)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -755,6 +756,31 @@ class Editor(QWidget):
         self.undo_action.setEnabled(self.canvas.can_undo)
         self.redo_action.setEnabled(self.canvas.can_redo)
 
+    def _build_copy_save_done_actions(self, toolbar: QToolBar) -> None:
+        """Copy/Save/Done controls, per SNX-24: `_save()` already existed
+        but was reachable only via Ctrl+S, and the auto-copy-on-open (see
+        `copy_image_to_clipboard` call above) fires once, before any
+        annotation exists — there was no toolbar-visible way to copy or
+        save the annotated result, or to finish beyond the window's own
+        (frameless, so effectively invisible) close affordance. Both Copy
+        and Save call through `_rendered_image()`, the same render() call
+        Ctrl+S already used, so every path acts on the same annotated
+        image; Done simply closes the window, same as Escape already does.
+        """
+        toolbar.addSeparator()
+
+        self.copy_action = QAction("Copy", toolbar)
+        self.copy_action.triggered.connect(self._copy)
+        toolbar.addAction(self.copy_action)
+
+        self.save_action = QAction("Save", toolbar)
+        self.save_action.triggered.connect(self._save)
+        toolbar.addAction(self.save_action)
+
+        self.done_action = QAction("Done", toolbar)
+        self.done_action.triggered.connect(self.close)
+        toolbar.addAction(self.done_action)
+
     def undo(self) -> None:
         self.canvas.undo()
 
@@ -798,16 +824,29 @@ class Editor(QWidget):
                 return True
         return super().eventFilter(watched, event)
 
-    def _save(self) -> None:
-        """Save the currently-rendered, annotated image — not the raw
-        capture — to the default location, without prompting for a name.
+    def _rendered_image(self):
+        """The currently-rendered, annotated image — not the raw capture.
+
         Built from Canvas's public `shapes` property (a confirmed-shapes
         copy), not `Canvas._visible_shapes()`, which also includes an
-        in-progress drag: that's the paint-preview's concern, not the save
-        contract's.
+        in-progress drag: that's the paint-preview's concern, not the
+        save/copy contract's. Shared by `_save()` and `_copy()` (SNX-24) so
+        both act on exactly the same image, per the ticket's acceptance
+        criteria.
         """
-        rendered = render(self.canvas.image, list(self.canvas.shapes))
-        save_image(rendered)
+        return render(self.canvas.image, list(self.canvas.shapes))
+
+    def _save(self) -> None:
+        """Save the currently-rendered, annotated image to the default
+        location, without prompting for a name."""
+        save_image(self._rendered_image())
+
+    def _copy(self) -> None:
+        """Place the currently-rendered, annotated image on the clipboard —
+        unlike the auto-copy in __init__, which runs once before any
+        annotation exists, this is callable any time after drawing to
+        re-copy the up-to-date result."""
+        copy_image_to_clipboard(self._rendered_image())
 
     def keyPressEvent(self, event) -> None:
         # Mirrors Overlay's own Escape handling in overlay.py: closes
