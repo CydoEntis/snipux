@@ -64,7 +64,7 @@ verifiable in an Ubuntu VM.
 11. **Tray-resident background process**, so a hotkey reaches an already-warm
     application rather than paying process startup on every snip.
 12. **Packaging:** desktop entry, install script, and instructions for binding
-    the Print Screen key on GNOME.
+    Super+Shift+S to it on GNOME.
 
 ## Requirements by area
 
@@ -122,7 +122,7 @@ verifiable in an Ubuntu VM.
 - Process startup is roughly a third of a second, which is perceptible on every
   single snip. The application therefore runs resident with a tray icon and the
   hotkey reaches the warm process.
-- Binding Print Screen is the desktop's job, not the application's. Ship the
+- Binding the hotkey is the desktop's job, not the application's. Ship the
   instructions; do not attempt to grab keys globally.
 
 ## Non-goals for milestone 1
@@ -155,7 +155,7 @@ screenshot tool that pulls in a numerical stack has made a bad trade.
 
 ## Definition of done for milestone 1
 
-On an Ubuntu VM, from a cold boot: the tray icon is present, Print Screen
+On an Ubuntu VM, from a cold boot: the tray icon is present, Super+Shift+S
 freezes the screen, a dragged rectangle opens in the editor with the image
 already on the clipboard, an arrow and a blur can be drawn on it, and Ctrl+S
 writes a PNG. On both a Wayland session and an X11 session.

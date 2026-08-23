@@ -79,14 +79,14 @@ cp "$script_dir/snipux.desktop" "$applications_dir/snipux.desktop"
 # *graphical* GNOME session (as opposed to the login shell this script runs
 # under) depends on how the display manager builds the session environment.
 # Check rather than assume, so a broken PATH shows up here instead of as a
-# silently dead tray icon / Print Screen binding later.
+# silently dead tray icon / Super+Shift+S binding later.
 if command -v snipux >/dev/null 2>&1; then
     echo "Done. snipux is on PATH and listed in GNOME's application list."
 else
     echo "Done. snipux is installed and listed in GNOME's application list,"
     echo "but $bin_dir is not on PATH in this shell (checked: command -v snipux)."
-    echo "The .desktop entry's Exec=snipux line and the Print Screen binding"
+    echo "The .desktop entry's Exec=snipux line and the Super+Shift+S binding"
     echo "both need it resolvable in a graphical session too -- make sure"
     echo "$bin_dir is on PATH there, e.g. by logging out and back in."
 fi
-echo "Next: bind Print Screen to it -- see docs/print-screen-gnome.md."
+echo "Next: bind Super+Shift+S to it -- see docs/super-shift-s-gnome.md."
