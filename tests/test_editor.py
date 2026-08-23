@@ -459,3 +459,177 @@ class TestCropDrag:
         assert canvas.image.width() == 100
         assert canvas.image.height() == 60
         assert len(canvas.shapes) == 0
+
+
+def _drag_rectangle(canvas: Canvas, start: QPoint, end: QPoint) -> None:
+    canvas.set_tool(Tool.RECTANGLE)
+    QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=start)
+    QTest.mouseMove(canvas, end)
+    QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=end)
+
+
+class TestUndoRedo:
+    def test_undo_after_three_shapes_removes_only_the_most_recent(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(canvas, QPoint(20, 20), QPoint(30, 30))
+        _drag_rectangle(canvas, QPoint(35, 35), QPoint(45, 45))
+        assert len(canvas.shapes) == 3
+        first_two = canvas.shapes[:2]
+
+        canvas.undo()
+
+        assert len(canvas.shapes) == 2
+        assert canvas.shapes == first_two
+
+    def test_redo_after_undo_restores_the_exact_shape_removed(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(canvas, QPoint(20, 20), QPoint(30, 30))
+        _drag_rectangle(canvas, QPoint(35, 35), QPoint(45, 45))
+        all_three = canvas.shapes
+        removed = all_three[2]
+
+        canvas.undo()
+        canvas.redo()
+
+        assert canvas.shapes == all_three
+        assert canvas.shapes[2] is removed
+
+    def test_new_shape_after_undo_discards_the_stale_redo_entry(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(canvas, QPoint(20, 20), QPoint(30, 30))
+        canvas.undo()
+        assert len(canvas.shapes) == 1
+
+        _drag_rectangle(canvas, QPoint(50, 5), QPoint(55, 10))
+        assert len(canvas.shapes) == 2
+        new_second_shape = canvas.shapes[1]
+
+        # The discarded redo entry (the original second rectangle) must be
+        # gone: redo() has nothing ahead to step to, so it's a no-op, not a
+        # jump back to the shape that was undone.
+        canvas.redo()
+
+        assert len(canvas.shapes) == 2
+        assert canvas.shapes[1] is new_second_shape
+
+    def test_undo_after_crop_restores_pre_crop_image_and_annotations(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        pre_crop_frame = canvas._frame
+        pre_crop_shapes = canvas.shapes
+        assert len(pre_crop_shapes) == 1
+
+        canvas.set_tool(Tool.CROP)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        QTest.mouseMove(canvas, QPoint(60, 40))
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 40))
+        assert canvas.image.width() == 50
+        assert len(canvas.shapes) == 0  # flattened into the cropped image
+
+        canvas.undo()
+
+        assert canvas._frame is pre_crop_frame
+        assert canvas.image.width() == 100
+        assert canvas.image.height() == 60
+        assert canvas.shapes == pre_crop_shapes
+
+    def test_undo_redo_step_exactly_one_action_at_a_time(self):
+        frame = make_frame(image_size=(100, 60))
+        canvas = Canvas(frame)
+        canvas.resize(100, 60)
+
+        _drag_rectangle(canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(canvas, QPoint(20, 20), QPoint(30, 30))
+        _drag_rectangle(canvas, QPoint(35, 35), QPoint(45, 45))
+
+        canvas.undo()
+        assert len(canvas.shapes) == 2
+        canvas.undo()
+        assert len(canvas.shapes) == 1
+        canvas.undo()
+        assert len(canvas.shapes) == 0
+        canvas.undo()  # already at the start: stays a no-op, doesn't raise
+        assert len(canvas.shapes) == 0
+
+        canvas.redo()
+        assert len(canvas.shapes) == 1
+        canvas.redo()
+        assert len(canvas.shapes) == 2
+        canvas.redo()
+        assert len(canvas.shapes) == 3
+        canvas.redo()  # already caught up: a no-op, doesn't raise
+        assert len(canvas.shapes) == 3
+
+    def test_editor_undo_redo_delegate_to_canvas(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        assert len(editor.canvas.shapes) == 1
+
+        editor.undo()
+        assert len(editor.canvas.shapes) == 0
+
+        editor.redo()
+        assert len(editor.canvas.shapes) == 1
+
+    def test_ctrl_z_triggers_undo_and_ctrl_shift_z_triggers_redo(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        assert len(editor.canvas.shapes) == 1
+
+        QTest.keyClick(editor, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        assert len(editor.canvas.shapes) == 0
+
+        QTest.keyClick(
+            editor,
+            Qt.Key.Key_Z,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+        assert len(editor.canvas.shapes) == 1
+
+    def test_ctrl_z_undoes_a_shape_while_the_stroke_width_control_has_focus(self):
+        # Regression test for REVIEW.md: the stroke-width QSpinBox keeps
+        # Qt's default StrongFocus, and its internal QLineEdit claims
+        # Ctrl+Z/Ctrl+Shift+Z for its own text-undo before the key event
+        # would ever reach Editor.keyPressEvent to bubble up from it. Unlike
+        # the test above, this sends the key event straight to the spinbox
+        # (not to editor) so it actually exercises that dispatch path.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        assert len(editor.canvas.shapes) == 1
+
+        editor.stroke_width_spinbox.setFocus()
+        QTest.keyClick(
+            editor.stroke_width_spinbox, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier
+        )
+        assert len(editor.canvas.shapes) == 0
+
+        QTest.keyClick(
+            editor.stroke_width_spinbox,
+            Qt.Key.Key_Z,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+        assert len(editor.canvas.shapes) == 1
