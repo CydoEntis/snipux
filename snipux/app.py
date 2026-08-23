@@ -1,9 +1,8 @@
 """Controller, tray, and CLI entry point.
 
-This ticket only establishes the CLI skeleton and the `--list-backends`
-diagnostic — no real capture backends exist yet (those land in the X11 and
-Wayland tickets), and no overlay/editor exists yet either, so there is
-nothing meaningful for a bare invocation to do beyond print usage.
+`build_default_registry()` wires the real capture backends in, selecting
+`capture.py`'s X11 or Wayland registry (or both, on an unrecognised session
+type) by `detect_session_type()`.
 
 `copy_image_to_clipboard`/`save_image` also live here rather than in
 `editor.py`: this is the only one of the two modules with no existing reason
@@ -29,7 +28,13 @@ from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QImage, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from snipux.capture import BackendRegistry, CaptureError
+from snipux.capture import (
+    BackendRegistry,
+    CaptureError,
+    build_wayland_registry,
+    build_x11_registry,
+    detect_session_type,
+)
 from snipux.overlay import Overlay, create_overlays
 
 
@@ -88,11 +93,25 @@ def save_image(image: QImage, directory: Path | str | None = None) -> Path:
 def build_default_registry() -> BackendRegistry:
     """Construct the `BackendRegistry` the real app uses.
 
-    Empty for now — no real `CaptureBackend` implementations exist yet.
-    Later tickets extend this by appending real backend instances; its
-    shape (a `BackendRegistry` with no arguments) does not change.
+    Selects by `detect_session_type()`: Wayland gets
+    `build_wayland_registry()`, X11 gets `build_x11_registry()`. An
+    unrecognised session type gets both, concatenated -- every backend
+    already gates itself with its own `is_available()`, so offering both
+    lets whatever is actually installed be found instead of failing
+    outright because the session type couldn't be determined.
     """
-    return BackendRegistry()
+    session_type = detect_session_type()
+    if session_type == "wayland":
+        return build_wayland_registry()
+    if session_type == "x11":
+        return build_x11_registry()
+
+    registry = BackendRegistry()
+    for backend in build_wayland_registry():
+        registry.add(backend)
+    for backend in build_x11_registry():
+        registry.add(backend)
+    return registry
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -357,11 +376,19 @@ class AppController:
 
         try:
             frame = self._registry.capture()
-        except CaptureError:
+        except CaptureError as exc:
             # A failed capture must not take down the resident process,
             # same "a failure must not stop the rest" spirit CLAUDE.md
-            # states for backends, applied one level up here. Return to
-            # idle silently rather than raising.
+            # states for backends, applied one level up here -- but silently
+            # returning to idle left a Print Screen press with no feedback
+            # at all, indistinguishable from the key doing nothing. Reported
+            # through the existing tray icon rather than a new window, since
+            # the resident process otherwise never shows one.
+            self._tray_icon.showMessage(
+                "Snip failed",
+                str(exc),
+                QSystemTrayIcon.MessageIcon.Warning,
+            )
             return
 
         geometries = (
