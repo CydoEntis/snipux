@@ -4,6 +4,7 @@ from PyQt6.QtGui import QColor, QImage, qRgb
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
+from snipux import editor as editor_module
 from snipux.capture import Frame
 from snipux.editor import Canvas, Editor, Tool
 from snipux.shapes import Blur, Pixelate, Rectangle, StepMarker, Text
@@ -633,3 +634,77 @@ class TestUndoRedo:
             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
         )
         assert len(editor.canvas.shapes) == 1
+
+
+class TestCopyOnOpen:
+    def test_opening_editor_copies_the_capture_before_any_annotation(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        frame = make_frame(image_size=(100, 60))
+
+        editor = Editor(frame)
+
+        assert len(calls) == 1
+        assert calls[0] is frame.image
+        # Proves "before any annotation," not just "at some point": nothing
+        # above the copy call in __init__ could have added a shape, but this
+        # confirms it rather than trusting call order by inspection.
+        assert editor.canvas.shapes == ()
+
+
+class TestCtrlSSavesRenderedImage:
+    def test_ctrl_s_saves_the_rendered_annotated_image_not_the_raw_capture(
+        self, monkeypatch
+    ):
+        frame = make_frame(image_size=(100, 60), fill_color=FILL_COLOR)
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)  # scale == 1.0: widget-local == image-pixel
+
+        start = QPoint(10, 10)
+        end = QPoint(60, 40)
+        editor.canvas.set_colour(QColor(255, 0, 0))
+        editor.canvas.set_stroke_width(4)
+        _drag_rectangle(editor.canvas, start, end)
+        assert len(editor.canvas.shapes) == 1
+
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "save_image", lambda image: calls.append(image)
+        )
+
+        QTest.keyClick(editor, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+
+        assert len(calls) == 1
+        saved = calls[0]
+        assert isinstance(saved, QImage)
+
+        # Sample the rectangle's own left border in image-pixel space (mid-
+        # height, at the drag's own start.x(), mirroring the border point
+        # TestEditorGrabRectangleBorder samples for the same rectangle
+        # shape) — not a widget-local point reused from that grab-based
+        # test, since `saved` is render()'s image-space output, not a
+        # widget grab. Sampling the wrong space here would silently land in
+        # the letterboxed background and pass for the wrong reason.
+        sample_point = (start.x(), (start.y() + end.y()) // 2)
+        assert saved.pixelColor(*sample_point) != editor.canvas.image.pixelColor(*sample_point)
+
+    def test_ctrl_shift_s_does_not_trigger_save(self, monkeypatch):
+        # Reserved for a possible future "save as": must not half-match the
+        # plain Ctrl+S save, same reasoning _undo_redo_action uses to keep
+        # Ctrl+Shift+Z from being swallowed as a plain Ctrl+Z.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "save_image", lambda image: calls.append(image)
+        )
+
+        QTest.keyClick(
+            editor,
+            Qt.Key.Key_S,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        assert calls == []
