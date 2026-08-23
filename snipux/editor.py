@@ -27,14 +27,18 @@ from PyQt6.QtWidgets import (
 from snipux.capture import Frame
 from snipux.shapes import (
     Arrow,
+    Blur,
+    Crop,
     Ellipse,
     Highlighter,
     Line,
     Pen,
+    Pixelate,
     Rectangle,
     Shape,
     StepMarker,
     Text,
+    apply_crop,
     render,
 )
 
@@ -53,6 +57,11 @@ class Tool(Enum):
     ELLIPSE = "ellipse"
     TEXT = "text"
     STEP_MARKER = "step_marker"
+    BLUR = "blur"
+    PIXELATE = "pixelate"
+    CROP = "crop"
+    # Appended after the existing members, not inserted earlier: Editor.__init__
+    # arms next(iter(Tool)) as the startup default, and that must stay PEN.
 
 
 # One shape class per tool. The freehand tools (pen/highlighter) build from
@@ -68,6 +77,9 @@ _TWO_POINT_SHAPE_CLASSES = {
     Tool.LINE: Line,
     Tool.RECTANGLE: Rectangle,
     Tool.ELLIPSE: Ellipse,
+    Tool.BLUR: Blur,
+    Tool.PIXELATE: Pixelate,
+    Tool.CROP: Crop,
 }
 
 
@@ -299,6 +311,20 @@ class Canvas(QWidget):
             return
         shape = self._in_progress_shape
         self._in_progress_shape = None
+
+        if isinstance(shape, Crop):
+            # Crop doesn't join the shape list like every other tool: it
+            # flattens what's there and replaces the base image outright —
+            # see apply_crop()'s docstring. A degenerate drag (no area) is a
+            # no-op rather than replacing the frame with an empty image,
+            # same spirit as the letterbox-margin no-ops above.
+            crop_rect = QRectF(shape.start, shape.end).normalized()
+            if crop_rect.width() > 0 and crop_rect.height() > 0:
+                self._frame = apply_crop(self._frame, self._shapes, crop_rect)
+                self._shapes = []
+            self.update()
+            return
+
         self._shapes.append(shape)
         self.update()
 
