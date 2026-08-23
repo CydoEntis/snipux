@@ -167,6 +167,90 @@ class TestToolbarControls:
         assert editor.canvas._stroke_width == 9
 
 
+class TestDefaultColour:
+    # SNX-25: black-by-default made the first strokes on a dark capture
+    # invisible, reading as "drawing is broken" rather than "pick a colour."
+
+    def test_default_annotation_colour_is_red_not_black(self):
+        frame = make_frame()
+        editor = Editor(frame)
+
+        assert editor.canvas._colour == QColor(Qt.GlobalColor.red)
+
+    def test_bare_canvas_also_defaults_to_red(self):
+        # Editor.__init__ sets the colour explicitly, but Canvas's own
+        # default (used whenever a caller builds one directly, as most of
+        # this file's tests do) must not silently regress back to black.
+        frame = make_frame()
+        canvas = Canvas(frame)
+
+        assert canvas._colour == QColor(Qt.GlobalColor.red)
+
+
+class TestColourPicker:
+    # SNX-25: swatches alone couldn't reach an arbitrary colour, and a
+    # QColorDialog was explicitly out of scope for the ticket that added
+    # them. This adds one, gated so it never opens on its own.
+
+    def test_toolbar_offers_a_colour_picker_action(self):
+        frame = make_frame()
+        editor = Editor(frame)
+
+        assert editor.colour_picker_action in editor.toolbar.actions()
+
+    def test_no_dialog_is_opened_while_constructing_the_editor(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            editor_module.QColorDialog,
+            "getColor",
+            staticmethod(lambda *args, **kwargs: calls.append((args, kwargs)) or QColor()),
+        )
+
+        Editor(make_frame())
+
+        assert calls == []
+
+    def test_picking_a_colour_becomes_the_colour_used_by_later_annotations(self, monkeypatch):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+        chosen = QColor(12, 34, 56)
+        monkeypatch.setattr(
+            editor_module.QColorDialog,
+            "getColor",
+            staticmethod(lambda *args, **kwargs: chosen),
+        )
+
+        editor.colour_picker_action.trigger()
+        assert editor.canvas._colour == chosen
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        assert editor.canvas.shapes[0].colour == chosen
+
+    def test_cancelling_the_dialog_leaves_the_colour_unchanged(self, monkeypatch):
+        frame = make_frame()
+        editor = Editor(frame)
+        red = QColor(editor.canvas._colour)
+        # QColorDialog.getColor() returns an invalid QColor on Cancel,
+        # rather than raising or returning None.
+        monkeypatch.setattr(
+            editor_module.QColorDialog,
+            "getColor",
+            staticmethod(lambda *args, **kwargs: QColor()),
+        )
+
+        editor.colour_picker_action.trigger()
+
+        assert editor.canvas._colour == red
+
+    def test_colour_swatches_are_still_offered_alongside_the_picker(self):
+        frame = make_frame()
+        editor = Editor(frame)
+
+        assert len(editor.colour_buttons) > 0
+        assert len(editor.colour_buttons) <= 5
+
+
 class TestEditorGrabRectangleBorder:
     def test_rectangle_border_shows_non_background_pixels(self):
         frame = make_frame(image_size=(100, 60), fill_color=FILL_COLOR)
