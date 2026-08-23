@@ -578,6 +578,93 @@ class TestUndoRedo:
         assert len(editor.canvas.shapes) == 1
 
 
+class TestUndoRedoClearToolbarControls:
+    def test_undo_and_redo_actions_start_disabled(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        assert not editor.undo_action.isEnabled()
+        assert not editor.redo_action.isEnabled()
+
+    def test_actions_enable_and_disable_as_shapes_are_added_undone_and_redone(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        assert editor.undo_action.isEnabled()
+        assert not editor.redo_action.isEnabled()  # nothing ahead yet
+
+        editor.undo_action.trigger()
+        assert len(editor.canvas.shapes) == 0
+        assert not editor.undo_action.isEnabled()  # back at the starting state
+        assert editor.redo_action.isEnabled()
+
+        editor.redo_action.trigger()
+        assert len(editor.canvas.shapes) == 1
+        assert editor.undo_action.isEnabled()
+        assert not editor.redo_action.isEnabled()  # caught back up
+
+    def test_new_shape_after_undo_disables_redo_again(self):
+        # Mirrors TestUndoRedo.test_new_shape_after_undo_discards_the_stale_
+        # redo_entry: the stale redo entry is gone, so the control reflects
+        # that rather than staying enabled from before the new shape.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(editor.canvas, QPoint(20, 20), QPoint(30, 30))
+        editor.undo_action.trigger()
+        assert editor.redo_action.isEnabled()
+
+        _drag_rectangle(editor.canvas, QPoint(50, 5), QPoint(55, 10))
+
+        assert not editor.redo_action.isEnabled()
+
+    def test_clear_action_removes_every_shape_in_one_step(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(editor.canvas, QPoint(20, 20), QPoint(30, 30))
+        _drag_rectangle(editor.canvas, QPoint(35, 35), QPoint(45, 45))
+        all_three = editor.canvas.shapes
+        assert len(all_three) == 3
+
+        editor.clear_action.trigger()
+
+        assert editor.canvas.shapes == ()
+
+    def test_undo_after_clear_restores_every_shape_that_was_cleared(self):
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+        editor.canvas.resize(100, 60)
+
+        _drag_rectangle(editor.canvas, QPoint(5, 5), QPoint(15, 15))
+        _drag_rectangle(editor.canvas, QPoint(20, 20), QPoint(30, 30))
+        all_two = editor.canvas.shapes
+
+        editor.clear_action.trigger()
+        assert editor.canvas.shapes == ()
+
+        editor.undo_action.trigger()
+
+        assert editor.canvas.shapes == all_two
+
+    def test_clear_on_an_empty_canvas_is_a_no_op(self):
+        # No shapes to clear: must not push a history entry an undo could
+        # then "restore" nothing meaningful from.
+        frame = make_frame(image_size=(100, 60))
+        editor = Editor(frame)
+
+        editor.canvas.clear()
+
+        assert editor.canvas.shapes == ()
+        assert not editor.undo_action.isEnabled()
+
+
 class TestCopyOnOpen:
     def test_opening_editor_copies_the_capture_before_any_annotation(self, monkeypatch):
         calls = []

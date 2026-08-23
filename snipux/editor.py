@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QPainter
 from PyQt6.QtWidgets import (
     QLineEdit,
@@ -121,6 +121,12 @@ class Canvas(QWidget):
     DEFAULT_COLOUR = QColor(Qt.GlobalColor.black)
     DEFAULT_STROKE_WIDTH = 3
 
+    # Emitted whenever _history/_history_index actually changes (a pushed
+    # entry, or an undo/redo that moved the index) — never for a guarded
+    # no-op, so a toolbar listening for this to refresh Undo/Redo enabled
+    # state never redraws on a click that did nothing.
+    history_changed = pyqtSignal()
+
     def __init__(self, frame: Frame, parent=None):
         super().__init__(parent)
         self._frame = frame
@@ -192,12 +198,22 @@ class Canvas(QWidget):
         del self._history[self._history_index + 1 :]  # drop stale redo entries
         self._history.append(_HistoryState(self._frame, tuple(self._shapes)))
         self._history_index += 1
+        self.history_changed.emit()
 
     def _restore_history_state(self) -> None:
         state = self._history[self._history_index]
         self._frame = state.frame
         self._shapes = list(state.shapes)
         self.update()
+        self.history_changed.emit()
+
+    @property
+    def can_undo(self) -> bool:
+        return self._history_index > 0
+
+    @property
+    def can_redo(self) -> bool:
+        return self._history_index < len(self._history) - 1
 
     def undo(self) -> None:
         if self._history_index == 0:
@@ -210,6 +226,22 @@ class Canvas(QWidget):
             return  # nothing ahead: no undo has happened, or redo already caught up
         self._history_index += 1
         self._restore_history_state()
+
+    def clear(self) -> None:
+        """Discard every confirmed annotation as a single undo step: one
+        undo() afterwards restores every shape that was live, per SNX-22.
+
+        A no-op when there's nothing to clear (mirrors the no-op guards
+        elsewhere that feed _push_history — a degenerate crop, empty text):
+        pushing an identical history entry would still count as a step to
+        undo through without changing anything, which is worse than not
+        offering the click at all.
+        """
+        if not self._shapes:
+            return
+        self._shapes = []
+        self._push_history()
+        self.update()
 
     def set_tool(self, tool: Tool | None) -> None:
         self._tool = tool
@@ -476,6 +508,7 @@ class Editor(QWidget):
         self.colour_buttons: dict[str, QToolButton] = {}
         self._build_colour_swatches(self.toolbar)
         self.stroke_width_spinbox = self._build_stroke_width_control(self.toolbar)
+        self._build_undo_redo_clear_actions(self.toolbar)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -574,6 +607,37 @@ class Editor(QWidget):
             if isinstance(child, QLineEdit):
                 child.installEventFilter(self)
         return spinbox
+
+    def _build_undo_redo_clear_actions(self, toolbar: QToolBar) -> None:
+        """Undo/Redo/Clear controls, per SNX-22: Canvas.undo()/redo() and
+        their Ctrl+Z/Ctrl+Shift+Z bindings already existed, but nothing in
+        the toolbar surfaced them — a user had no way to discover them short
+        of guessing the shortcut. Undo/Redo's enabled state is kept live via
+        Canvas.history_changed rather than computed once at build time, so a
+        user watching the toolbar sees exactly what Canvas.can_undo/
+        can_redo see, instead of a second copy of that logic drifting out of
+        sync with it.
+        """
+        toolbar.addSeparator()
+
+        self.undo_action = QAction("Undo", toolbar)
+        self.undo_action.triggered.connect(self.undo)
+        toolbar.addAction(self.undo_action)
+
+        self.redo_action = QAction("Redo", toolbar)
+        self.redo_action.triggered.connect(self.redo)
+        toolbar.addAction(self.redo_action)
+
+        self.clear_action = QAction("Clear", toolbar)
+        self.clear_action.triggered.connect(self.canvas.clear)
+        toolbar.addAction(self.clear_action)
+
+        self.canvas.history_changed.connect(self._update_undo_redo_actions)
+        self._update_undo_redo_actions()  # starting state: both disabled
+
+    def _update_undo_redo_actions(self) -> None:
+        self.undo_action.setEnabled(self.canvas.can_undo)
+        self.redo_action.setEnabled(self.canvas.can_redo)
 
     def undo(self) -> None:
         self.canvas.undo()
