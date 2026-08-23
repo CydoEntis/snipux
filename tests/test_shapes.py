@@ -1,6 +1,6 @@
 import pytest
 from PyQt6.QtCore import QPointF
-from PyQt6.QtGui import QColor, QImage, qRgb
+from PyQt6.QtGui import QColor, QFontMetrics, QImage, qRgb
 from PyQt6.QtWidgets import QApplication
 
 from snipux.shapes import (
@@ -10,6 +10,8 @@ from snipux.shapes import (
     Line,
     Pen,
     Rectangle,
+    StepMarker,
+    Text,
     render,
 )
 
@@ -73,6 +75,20 @@ class TestShapeFields:
         assert shape.colour == RED
         assert shape.stroke_width == 2
 
+    def test_text_stores_colour_stroke_width_and_text(self):
+        shape = Text(
+            colour=RED, stroke_width=3, point=QPointF(5, 5), text="hello"
+        )
+        assert shape.colour == RED
+        assert shape.stroke_width == 3
+        assert shape.text == "hello"
+
+    def test_step_marker_stores_colour_and_stroke_width(self):
+        shape = StepMarker(colour=RED, stroke_width=3, point=QPointF(5, 5))
+        assert shape.colour == RED
+        assert shape.stroke_width == 3
+        assert shape.number == 0  # not meaningful until a render() pass
+
 
 class TestRender:
     def test_does_not_mutate_base_image(self):
@@ -113,6 +129,16 @@ class TestRender:
         # Same rect drawn twice: the later shape in the list wins at the
         # overlapping border pixel, proving draw order is respected.
         assert result.pixelColor(10, 40) == BLUE
+
+    def test_draws_text_and_step_marker_in_list_order(self):
+        base = make_image()
+        text = Text(colour=RED, stroke_width=4, point=QPointF(10, 50), text="hi")
+        marker = StepMarker(colour=BLUE, stroke_width=4, point=QPointF(50, 50))
+
+        result = render(base, [text, marker])
+
+        assert result.pixelColor(50, 50) == BLUE  # marker centre: filled badge
+        assert result != base
 
 
 class TestHighlighterVsPen:
@@ -161,3 +187,84 @@ class TestArrowVsLine:
 
         assert arrow_result.pixelColor(probe_x, probe_y) != QColor(BACKGROUND)
         assert line_result.pixelColor(probe_x, probe_y) == QColor(BACKGROUND)
+
+
+class TestTextRendering:
+    def test_empty_text_is_a_no_op(self):
+        base = make_image()
+
+        result = render(base, [Text(colour=RED, stroke_width=4, point=QPointF(10, 50), text="")])
+
+        assert result == base
+
+    def test_stroke_width_changes_rendered_glyph_size(self):
+        # Regression test for the "setFont was never called" bug PLAN.md
+        # flags: without painter.setFont(font), drawText silently uses the
+        # painter's default font and every Text renders at one fixed size
+        # regardless of stroke width, with no exception to mark the mistake.
+        thin = Text(colour=RED, stroke_width=2, point=QPointF(0, 0), text="X")
+        thick = Text(colour=RED, stroke_width=20, point=QPointF(0, 0), text="X")
+
+        thin_metrics = QFontMetrics(thin._font())
+        thick_metrics = QFontMetrics(thick._font())
+
+        assert thick_metrics.horizontalAdvance("X") > thin_metrics.horizontalAdvance("X")
+
+    def test_draws_the_glyph_at_point_in_the_shapes_colour(self):
+        base = make_image()
+        point = QPointF(10, 60)
+        text = Text(colour=RED, stroke_width=20, point=point, text="X")
+
+        result = render(base, [text])
+
+        # drawText's `point` is the text baseline, so the glyph is painted in
+        # a box above and to the right of it, not at `point` itself. Scan
+        # that box rather than one exact pixel — antialiasing means the
+        # precise glyph shape isn't guaranteed pixel-for-pixel across font
+        # backends, but a correct setPen(colour)/setFont(font)/point offset
+        # must paint *some* pixel in the box, and in the shape's own colour.
+        metrics = QFontMetrics(text._font())
+        xs = range(int(point.x()), int(point.x()) + metrics.horizontalAdvance("X"))
+        ys = range(int(point.y()) - metrics.ascent(), int(point.y()))
+        painted = [result.pixelColor(x, y) for x in xs for y in ys]
+
+        assert any(p != QColor(BACKGROUND) for p in painted)
+        assert any(p == RED for p in painted)
+
+
+class TestStepMarkerRendering:
+    def test_renders_a_filled_badge(self):
+        base = make_image()
+        marker = StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50))
+
+        result = render(base, [marker])
+
+        assert result.pixelColor(50, 50) == RED
+
+
+class TestStepMarkerNumbering:
+    def test_numbers_markers_sequentially_in_list_order(self):
+        base = make_image()
+        markers = [
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50)),
+        ]
+
+        render(base, markers)
+
+        assert [marker.number for marker in markers] == [1, 2, 3]
+
+    def test_renumbers_after_an_earlier_marker_is_removed(self):
+        base = make_image()
+        markers = [
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50)),
+        ]
+        render(base, markers)
+
+        survivors = markers[1:]  # drop the first, as if the user removed it
+        render(base, survivors)
+
+        assert [marker.number for marker in survivors] == [1, 2]

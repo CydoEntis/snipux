@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from PyQt6.QtCore import Qt, QPointF, QRectF
-from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPolygonF
 
 
 @dataclass
@@ -168,6 +168,77 @@ class Ellipse(Shape):
         painter.drawEllipse(_rect_from_corners(self.start, self.end))
 
 
+MIN_PIXEL_SIZE = 8
+FONT_SIZE_FACTOR = 4.0
+
+
+def _font_for_stroke_width(stroke_width: float) -> QFont:
+    """A `QFont` sized from `stroke_width`, floored so the default stroke
+    width (3) never rounds down to an illegible or 0px font. Shared by
+    `Text` and `StepMarker` — both derive glyph size from stroke width the
+    same way, per PLAN.md ("any monotonic mapping with a floor is fine").
+    """
+    font = QFont()
+    font.setPixelSize(max(MIN_PIXEL_SIZE, round(stroke_width * FONT_SIZE_FACTOR)))
+    return font
+
+
+@dataclass
+class Text(Shape):
+    """A string drawn at a single image-pixel point, in the shape's colour.
+
+    Font size is derived from stroke_width rather than stored separately —
+    there is no independent "text size" concept for this ticket, only the
+    stroke-width control the toolbar already exposes for every other tool.
+    """
+
+    text: str = ""
+    point: QPointF = field(default_factory=QPointF)
+
+    def _font(self) -> QFont:
+        return _font_for_stroke_width(self.stroke_width)
+
+    def draw(self, painter: QPainter) -> None:
+        if not self.text:
+            return  # an empty string is a no-op, not an error: see PLAN.md
+        painter.setPen(QPen(self.colour))
+        painter.setFont(self._font())
+        painter.drawText(self.point, self.text)
+
+
+@dataclass
+class StepMarker(Shape):
+    """A filled numbered badge. `number` is assigned by render(), not at
+    construction — see render()'s docstring for why.
+    """
+
+    RADIUS_FACTOR = 4.0
+    MIN_RADIUS = 10
+    BADGE_TEXT_COLOUR = QColor(Qt.GlobalColor.white)
+
+    point: QPointF = field(default_factory=QPointF)
+    number: int = 0
+
+    def _font(self) -> QFont:
+        return _font_for_stroke_width(self.stroke_width)
+
+    def draw(self, painter: QPainter) -> None:
+        radius = max(self.MIN_RADIUS, self.stroke_width * self.RADIUS_FACTOR)
+        rect = QRectF(
+            self.point.x() - radius,
+            self.point.y() - radius,
+            radius * 2,
+            radius * 2,
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.colour)
+        painter.drawEllipse(rect)
+
+        painter.setPen(QPen(self.BADGE_TEXT_COLOUR))
+        painter.setFont(self._font())
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(self.number))
+
+
 def render(base_image: QImage, shapes: list[Shape]) -> QImage:
     """Flatten `shapes` onto a copy of `base_image`, in list order.
 
@@ -176,11 +247,23 @@ def render(base_image: QImage, shapes: list[Shape]) -> QImage:
     is also what makes "never mutates base_image" hold. The QPainter is
     closed (`.end()`) before the copy is returned, per CLAUDE.md's rule
     against reading a pixmap while a QPainter is still open on it.
+
+    StepMarker numbers aren't stored durably; they're recomputed from list
+    order on every call. That makes "renumber after an earlier one is
+    removed" fall out for free — there is no stale "my number is N" to find
+    and fix up, just whatever list order render() sees this time. This does
+    mutate the StepMarker instances passed in, which is fine: the "never
+    painted destructively" rule above is about not writing onto a live
+    canvas pixmap, not about shape objects being immutable.
     """
     result = QImage(base_image)
     painter = QPainter(result)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    step_counter = 0
     for shape in shapes:
+        if isinstance(shape, StepMarker):
+            step_counter += 1
+            shape.number = step_counter
         shape.draw(painter)
     painter.end()
     return result
