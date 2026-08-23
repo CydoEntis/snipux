@@ -16,7 +16,13 @@ from snipux.app import (
     run_resident_app,
     save_image,
 )
-from snipux.capture import BackendRegistry, CaptureBackend, Frame
+from snipux.capture import (
+    BackendRegistry,
+    CaptureBackend,
+    Frame,
+    build_wayland_registry,
+    build_x11_registry,
+)
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -96,10 +102,36 @@ def test_no_arguments_prints_usage_mentioning_list_backends(capsys):
     assert "--list-backends" in out
 
 
-def test_build_default_registry_starts_empty():
-    registry = build_default_registry()
+class TestBuildDefaultRegistry:
+    def test_returns_wayland_registry_when_session_type_is_wayland(self, monkeypatch):
+        monkeypatch.setattr(app, "detect_session_type", lambda: "wayland")
 
-    assert registry.available() == []
+        registry = build_default_registry()
+
+        assert [b.name() for b in registry] == [
+            b.name() for b in build_wayland_registry()
+        ]
+
+    def test_returns_x11_registry_when_session_type_is_x11(self, monkeypatch):
+        monkeypatch.setattr(app, "detect_session_type", lambda: "x11")
+
+        registry = build_default_registry()
+
+        assert [b.name() for b in registry] == [b.name() for b in build_x11_registry()]
+
+    def test_returns_both_registries_when_session_type_is_unknown(self, monkeypatch):
+        # Neither registry is preferred over the other here: every backend
+        # gates itself with its own is_available(), so offering both is how
+        # an unrecognised session type still finds whatever is actually
+        # installed instead of failing outright.
+        monkeypatch.setattr(app, "detect_session_type", lambda: "unknown")
+
+        registry = build_default_registry()
+
+        expected = [b.name() for b in build_wayland_registry()] + [
+            b.name() for b in build_x11_registry()
+        ]
+        assert [b.name() for b in registry] == expected
 
 
 def test_main_does_not_require_a_display():
@@ -427,6 +459,33 @@ class TestAppControllerCapture:
 
         assert controller._overlays == []
         assert controller._editor is None
+
+    def test_failed_capture_reports_it_through_the_tray_icon(self, make_controller, monkeypatch):
+        registry = BackendRegistry([FailingCaptureBackend()])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller.start_capture()
+
+        assert len(calls) == 1
+        # The message body carries what actually failed, not a generic
+        # "something went wrong" -- CaptureError.__str__ already collects
+        # every backend's own failure per CLAUDE.md's "must not stop the
+        # next one" rule, so surfacing it here is free.
+        assert "failing" in calls[0][1]
+        assert "capture failed" in calls[0][1]
+
+        # The tray icon (and thus the resident process) is still alive and
+        # usable after the failure, not torn down by it.
+        assert controller.snip_action.text() == "Snip"
+        controller.start_capture()  # must not raise a second time
 
     def test_confirming_a_selection_opens_exactly_one_editor_and_clears_overlays(
         self, make_controller
