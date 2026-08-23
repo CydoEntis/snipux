@@ -3,13 +3,45 @@
 Binding a key is the desktop's job, not the application's — snipux never
 grabs keys globally (see `docs/SPEC.md`, "Resident process and hotkey"). This
 page is the entire mechanism: there is no code-side fallback, and once the
-binding below is set up GNOME runs `snipux --snip` for you.
+binding is set up GNOME runs `snipux --snip` for you.
 
 `--snip` asks an *already-running* snipux instance to start a capture; it
 does not start the resident process itself. Install snipux and make sure it
 is running (e.g. via the desktop entry, or `snipux` from a terminal) before
-you bind the key, otherwise the first press after login will report that no
-instance is running instead of taking a snip.
+you use the shortcut, otherwise the first press after login will report that
+no instance is running instead of taking a snip.
+
+## `packaging/install.sh` does this for you
+
+As of the last step of install, `install.sh` runs exactly the mechanism
+below itself: it appends a `custom-keybindings` slot named `snipux`, sets its
+`command` to the installed launcher's *absolute* path plus `--snip` (not the
+bare `snipux` name — `~/.local/bin` is not reliably on `PATH` in a graphical
+GNOME session, which the script checks and warns about separately), and sets
+its `binding` to `<Super><Shift>s`. It reads the existing
+`custom-keybindings` list first and appends to it, so any shortcuts you
+already had configured are kept. Re-running `install.sh` reuses the same
+`snipux` slot rather than adding a second one.
+
+If `gsettings` isn't available, or setting the shortcut otherwise fails,
+`install.sh` says so and leaves the tool installed and usable — it does not
+fail the install. Follow the manual steps below in that case.
+
+**To undo the automatic binding**, remove the `snipux` slot from the list and
+reset its keys:
+
+```sh
+# Drop '/org/.../custom-keybindings/snipux/' from the list, keeping any
+# other entries -- e.g. if it's the only one:
+gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "[]"
+
+gsettings reset org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ name
+gsettings reset org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ command
+gsettings reset org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ binding
+```
+
+The rest of this page describes the same mechanism by hand, for other
+desktops or if you'd rather not have install.sh touch GNOME settings at all.
 
 ## Why Super+Shift+S
 
