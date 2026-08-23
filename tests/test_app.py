@@ -9,6 +9,7 @@ from snipux import app
 from snipux.app import (
     AppController,
     Transport,
+    build_default_geometry_provider,
     build_default_registry,
     cli,
     copy_image_to_clipboard,
@@ -20,9 +21,11 @@ from snipux.capture import (
     BackendRegistry,
     CaptureBackend,
     Frame,
+    X11WindowGeometryProvider,
     build_wayland_registry,
     build_x11_registry,
 )
+from snipux.overlay import GeometryProvider, UnsupportedGeometryProvider
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -132,6 +135,41 @@ class TestBuildDefaultRegistry:
             b.name() for b in build_x11_registry()
         ]
         assert [b.name() for b in registry] == expected
+
+
+class TestBuildDefaultGeometryProvider:
+    def test_returns_x11_window_geometry_provider_when_it_reports_available(
+        self, monkeypatch
+    ):
+        # A fake subclass, not a monkeypatched detect_session_type/wmctrl
+        # pair: X11WindowGeometryProvider.is_available() already has its
+        # own tests in test_capture.py, so this only needs to prove
+        # build_default_geometry_provider() *uses* that verdict, not
+        # re-derive it.
+        class AvailableProvider(X11WindowGeometryProvider):
+            def is_available(self):
+                return True
+
+        monkeypatch.setattr(app, "X11WindowGeometryProvider", AvailableProvider)
+
+        provider = build_default_geometry_provider()
+
+        assert isinstance(provider, AvailableProvider)
+
+    def test_returns_unsupported_geometry_provider_when_x11_provider_is_unavailable(
+        self, monkeypatch
+    ):
+        # Covers both Wayland and "X11 without wmctrl" at once, since
+        # is_available() is exactly what folds those two cases together.
+        class UnavailableProvider(X11WindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        monkeypatch.setattr(app, "X11WindowGeometryProvider", UnavailableProvider)
+
+        provider = build_default_geometry_provider()
+
+        assert isinstance(provider, UnsupportedGeometryProvider)
 
 
 def test_main_does_not_require_a_display():
@@ -341,6 +379,19 @@ class FakeCaptureBackend(CaptureBackend):
         return self._frame
 
 
+class FakeGeometryProvider(GeometryProvider):
+    """Stands in for `X11WindowGeometryProvider` in controller tests, so
+    they can assert on *identity* (this exact instance reached the
+    overlay) without depending on a real X11 session or `wmctrl`.
+    """
+
+    def is_available(self):
+        return True
+
+    def window_at(self, point):
+        return None
+
+
 class FailingCaptureBackend(CaptureBackend):
     def name(self):
         return "failing"
@@ -405,8 +456,13 @@ def make_controller():
     """
     controllers = []
 
-    def _make(registry, transport, monitor_geometries=None):
-        controller = AppController(registry, transport, monitor_geometries=monitor_geometries)
+    def _make(registry, transport, monitor_geometries=None, geometry_provider=None):
+        controller = AppController(
+            registry,
+            transport,
+            monitor_geometries=monitor_geometries,
+            geometry_provider=geometry_provider,
+        )
         controllers.append(controller)
         return controller
 
@@ -432,6 +488,45 @@ class TestAppControllerCapture:
 
         assert len(controller._overlays) == 2
         assert controller._editor is None
+
+    def test_start_capture_passes_the_controllers_geometry_provider_to_the_overlays(
+        self, make_controller
+    ):
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        provider = FakeGeometryProvider()
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+            geometry_provider=provider,
+        )
+
+        controller.start_capture()
+
+        # Identity, not just type: proves the *injected* provider reached
+        # the overlay rather than create_overlays()'s own default.
+        assert controller._overlays[0]._geometry_provider is provider
+
+    def test_start_capture_defaults_to_the_controllers_own_geometry_provider(
+        self, make_controller
+    ):
+        # No geometry_provider passed to make_controller: AppController
+        # must have already resolved its own default (build_default_
+        # geometry_provider(), typically UnsupportedGeometryProvider under
+        # the test environment's non-X11 session) rather than leaving
+        # create_overlays() to fall back to a *different* default of its
+        # own -- the acceptance criterion is that AppController always
+        # decides which provider is used, on every path.
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+
+        controller.start_capture()
+
+        assert controller._overlays[0]._geometry_provider is controller._geometry_provider
 
     def test_start_capture_is_a_noop_while_overlays_are_already_open(self, make_controller):
         registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])

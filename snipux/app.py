@@ -31,11 +31,17 @@ from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from snipux.capture import (
     BackendRegistry,
     CaptureError,
+    X11WindowGeometryProvider,
     build_wayland_registry,
     build_x11_registry,
     detect_session_type,
 )
-from snipux.overlay import Overlay, create_overlays
+from snipux.overlay import (
+    GeometryProvider,
+    Overlay,
+    UnsupportedGeometryProvider,
+    create_overlays,
+)
 
 
 def copy_image_to_clipboard(image: QImage) -> None:
@@ -112,6 +118,24 @@ def build_default_registry() -> BackendRegistry:
     for backend in build_x11_registry():
         registry.add(backend)
     return registry
+
+
+def build_default_geometry_provider() -> GeometryProvider:
+    """Construct the `GeometryProvider` the real app uses for window mode.
+
+    `X11WindowGeometryProvider` when its own `is_available()` says the
+    session is X11 with `wmctrl` on PATH; `UnsupportedGeometryProvider`
+    otherwise, so Wayland and a machine without `wmctrl` degrade to plain
+    rectangle dragging exactly as they do without a provider at all. The
+    choice is made here rather than in overlay.py so overlay.py never needs
+    to import anything wmctrl-specific — per CLAUDE.md, platform-specific
+    code stays confined to capture.py, and app.py is already the place that
+    picks between platform-specific implementations for `registry`.
+    """
+    provider = X11WindowGeometryProvider()
+    if provider.is_available():
+        return provider
+    return UnsupportedGeometryProvider()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -321,6 +345,7 @@ class AppController:
         registry: BackendRegistry,
         transport: Transport,
         monitor_geometries: list[QRectF] | None = None,
+        geometry_provider: GeometryProvider | None = None,
     ):
         # Must happen before any overlay/editor window is ever shown.
         # Without it, Qt's default behavior quits the whole application the
@@ -336,6 +361,15 @@ class AppController:
         # platform, mirroring the None -> "build the real thing" pattern
         # main() already uses for `registry`.
         self._monitor_geometries = monitor_geometries
+        # Same None -> "build the real thing" pattern as `monitor_geometries`
+        # above and `registry`/`transport` in main()/run_resident_app():
+        # tests inject a fake provider directly instead of depending on a
+        # real X11 session with wmctrl under an offscreen platform.
+        self._geometry_provider = (
+            geometry_provider
+            if geometry_provider is not None
+            else build_default_geometry_provider()
+        )
 
         self._overlays: list[Overlay] = []
         self._frame = None
@@ -396,7 +430,9 @@ class AppController:
             if self._monitor_geometries is not None
             else self._real_monitor_geometries()
         )
-        overlays = create_overlays(frame, geometries)
+        overlays = create_overlays(
+            frame, geometries, geometry_provider=self._geometry_provider
+        )
         for overlay in overlays:
             overlay.confirmed.connect(self._on_confirmed)
             overlay.cancelled.connect(self._on_cancelled)
