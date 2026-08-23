@@ -15,7 +15,14 @@ from dataclasses import dataclass
 from enum import Enum
 
 from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QPainter
+from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
+    QColor,
+    QPainter,
+    QPainterPath,
+    QPainterPathStroker,
+)
 from PyQt6.QtWidgets import (
     QLineEdit,
     QSpinBox,
@@ -62,6 +69,7 @@ class Tool(Enum):
     BLUR = "blur"
     PIXELATE = "pixelate"
     CROP = "crop"
+    ERASER = "eraser"
     # Appended after the existing members, not inserted earlier: Editor.__init__
     # arms next(iter(Tool)) as the startup default, and that must stay PEN.
 
@@ -83,6 +91,90 @@ _TWO_POINT_SHAPE_CLASSES = {
     Tool.PIXELATE: Pixelate,
     Tool.CROP: Crop,
 }
+
+# Eraser hit-testing lives here, not in shapes.py: it's Canvas interaction
+# logic (deciding which shape a click lands on), not part of the annotation
+# data model or the flattening renderer those classes serve.
+#
+# A fixed image-pixel slack added on top of a shape's own stroke width, so a
+# thin 1px line or a precisely-placed point (Text, StepMarker) stays
+# genuinely clickable without requiring pixel-perfect aim.
+_ERASER_HIT_TOLERANCE = 6.0
+
+
+def _stroked(path: QPainterPath, width: float) -> QPainterPath:
+    stroker = QPainterPathStroker()
+    stroker.setWidth(width)
+    return stroker.createStroke(path)
+
+
+def _eraser_hit_path(shape: Shape) -> QPainterPath:
+    """The fillable region a click on `shape` must land in for the eraser to
+    pick it, in image-pixel coordinates.
+
+    Stroke-only shapes (pen/highlighter/line/arrow/rectangle/ellipse) hit-
+    test against their outline widened by stroke width plus
+    `_ERASER_HIT_TOLERANCE`, via `QPainterPathStroker` — mirroring what
+    render() actually paints. Clicking the empty interior of an unfilled
+    rectangle is clicking whatever is behind it, not the rectangle, so that
+    interior deliberately does not count as a hit.
+
+    Filled shapes (step markers, blur/pixelate patches) hit-test against
+    their actual filled area instead, since the whole area is visibly "the
+    annotation" there. Text hit-tests against a small fixed box around its
+    anchor point — good enough to pick it out without duplicating this
+    module's font-metrics sizing logic here.
+
+    Returns an empty path (never contains a point) for a shape type this
+    doesn't recognise, which is the safe default for an eraser: a shape it
+    can't reason about should never be silently removed.
+    """
+    path = QPainterPath()
+    stroke_width = max(shape.stroke_width, 1.0) + _ERASER_HIT_TOLERANCE
+
+    if isinstance(shape, (Pen, Highlighter)):
+        if not shape.points:
+            return path  # no segment yet to hit-test against
+        path.moveTo(shape.points[0])
+        for point in shape.points[1:]:
+            path.lineTo(point)
+        return _stroked(path, stroke_width)
+
+    if isinstance(shape, (Line, Arrow)):
+        path.moveTo(shape.start)
+        path.lineTo(shape.end)
+        return _stroked(path, stroke_width)
+
+    if isinstance(shape, (Rectangle, Ellipse)):
+        rect = QRectF(shape.start, shape.end).normalized()
+        if isinstance(shape, Rectangle):
+            path.addRect(rect)
+        else:
+            path.addEllipse(rect)
+        return _stroked(path, stroke_width)
+
+    if isinstance(shape, (Blur, Pixelate)):
+        path.addRect(QRectF(shape.start, shape.end).normalized())
+        return path
+
+    if isinstance(shape, StepMarker):
+        radius = max(StepMarker.MIN_RADIUS, shape.stroke_width * StepMarker.RADIUS_FACTOR)
+        path.addEllipse(shape.point, radius, radius)
+        return path
+
+    if isinstance(shape, Text):
+        half_extent = _ERASER_HIT_TOLERANCE + shape.stroke_width
+        path.addRect(
+            QRectF(
+                shape.point.x() - half_extent,
+                shape.point.y() - half_extent,
+                half_extent * 2,
+                half_extent * 2,
+            )
+        )
+        return path
+
+    return path
 
 
 @dataclass(frozen=True)
@@ -178,7 +270,7 @@ class Canvas(QWidget):
     def _push_history(self) -> None:
         """Commit the current (frame, shapes) as a new undo/redo entry.
 
-        Called at the four points below that actually mutate self._frame/
+        Called at the points below that actually mutate self._frame/
         self._shapes, and only once the mutation has happened — a no-op
         drag (degenerate crop, empty text, no tool armed) must stay a no-op
         for history too, not push a snapshot identical to the last one.
@@ -371,12 +463,36 @@ class Canvas(QWidget):
         finally:
             self._committing_text = False
 
+    def _shape_index_at(self, image_point: QPointF) -> int | None:
+        """The list index of the topmost shape a click lands on, or None.
+
+        Walks _shapes back to front so an overlap resolves to whichever
+        shape was drawn most recently — the one actually visible at that
+        pixel, per render()'s draw-order-is-paint-order contract. Returns an
+        index (not the shape itself) so the caller can remove the exact
+        instance hit even if an identical-valued shape appears earlier in
+        the list — dataclass equality would otherwise make list.remove()
+        ambiguous between them.
+        """
+        for index in range(len(self._shapes) - 1, -1, -1):
+            if _eraser_hit_path(self._shapes[index]).contains(image_point):
+                return index
+        return None
+
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton or self._tool is None:
             return
         image_point = self.widget_to_image(event.position())
         if image_point is None:
             return  # press landed in the letterbox margin: a no-op, like Overlay
+
+        if self._tool is Tool.ERASER:
+            index = self._shape_index_at(image_point)
+            if index is not None:
+                del self._shapes[index]
+                self._push_history()
+                self.update()
+            return  # erases on press, like STEP_MARKER; never arms a drag
 
         if self._tool is Tool.STEP_MARKER:
             self._shapes.append(
