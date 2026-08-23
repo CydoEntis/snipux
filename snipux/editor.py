@@ -26,6 +26,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QColorDialog,
     QLineEdit,
+    QMenu,
     QSpinBox,
     QToolBar,
     QToolButton,
@@ -73,6 +74,17 @@ class Tool(Enum):
     ERASER = "eraser"
     # Appended after the existing members, not inserted earlier: Editor.__init__
     # arms next(iter(Tool)) as the startup default, and that must stay PEN.
+
+
+def _tool_label(tool: Tool) -> str:
+    """Human-facing text for `tool`'s toolbar action.
+
+    `Tool.value` is a lowercase, underscore-separated identifier chosen for
+    the data model (STEP_MARKER = "step_marker"), not for display -- shown
+    as-is it reads like a variable name that leaked into the UI. This turns
+    any tool's value into an ordinary title-cased label instead, per SNX-26.
+    """
+    return tool.value.replace("_", " ").title()
 
 
 # One shape class per tool. The freehand tools (pen/highlighter) build from
@@ -598,6 +610,12 @@ class Editor(QWidget):
     window, sized by layout rather than by the snip, and `Canvas` scaled
     the image down to fit whatever space that left, leaving dead margins
     where a click was silently a no-op. See `_position_over_snip`.
+
+    Per SNX-26, the tool row is two tiers rather than eleven equal-weight
+    actions in one line: `PRIMARY_TOOLS` sits directly on the toolbar, and
+    everything else hangs off the "More Tools" button built alongside it in
+    `_build_tool_actions`. No tool is removed or made harder to use than a
+    second click — the split is presentation, not capability.
     """
 
     # A small one-click preset row, kept alongside the full picker added by
@@ -612,6 +630,12 @@ class Editor(QWidget):
         QColor(Qt.GlobalColor.blue),
         QColor(Qt.GlobalColor.yellow),
     ]
+
+    # The tools that were actually used once the toolbar overflowed on a
+    # real session (per SNX-26) plus pen, the default tool -- everything
+    # else moves into the "More Tools" menu instead of the main row. Order
+    # here is the order they appear in that row.
+    PRIMARY_TOOLS = (Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.CROP)
 
     MIN_STROKE_WIDTH = 1
     MAX_STROKE_WIDTH = 20
@@ -692,10 +716,20 @@ class Editor(QWidget):
         self.layout().activate()
 
     def _build_tool_actions(self, toolbar: QToolBar) -> None:
+        """Populate `self.tool_actions` with one QAction per `Tool` member —
+        every tool remains selectable and every action lands in the same
+        exclusive `QActionGroup`, whether it's placed directly on the
+        toolbar or inside the "More Tools" menu below. Qt doesn't care
+        which widget an action's `QAction` is displayed in for `.trigger()`
+        or the group's checked-state bookkeeping to work, so callers (and
+        tests) can keep addressing tools via `self.tool_actions[tool]`
+        exactly as before.
+        """
         group = QActionGroup(toolbar)
         group.setExclusive(True)
-        for tool in Tool:
-            action = QAction(tool.value.capitalize(), toolbar)
+
+        def build_action(tool: Tool) -> QAction:
+            action = QAction(_tool_label(tool), toolbar)
             action.setCheckable(True)
             # Default arg binds `tool` at definition time, not call time —
             # without it every action's handler would close over whichever
@@ -704,8 +738,27 @@ class Editor(QWidget):
                 lambda checked, tool=tool: self.canvas.set_tool(tool)
             )
             group.addAction(action)
-            toolbar.addAction(action)
             self.tool_actions[tool] = action
+            return action
+
+        for tool in self.PRIMARY_TOOLS:
+            toolbar.addAction(build_action(tool))
+
+        # Everything else stays reachable, just not in the main row: per
+        # SNX-26, eleven equal-weight actions plus the swatches and spin box
+        # overflowed into QToolBar's own chevron on a real capture.
+        self.more_tools_menu = QMenu("More Tools", toolbar)
+        for tool in Tool:
+            if tool in self.PRIMARY_TOOLS:
+                continue
+            self.more_tools_menu.addAction(build_action(tool))
+
+        self.more_tools_button = QToolButton(toolbar)
+        self.more_tools_button.setText("More Tools")
+        self.more_tools_button.setToolTip("More Tools")
+        self.more_tools_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more_tools_button.setMenu(self.more_tools_menu)
+        toolbar.addWidget(self.more_tools_button)
 
     def _build_colour_swatches(self, toolbar: QToolBar) -> None:
         for colour in self.SWATCH_COLOURS:

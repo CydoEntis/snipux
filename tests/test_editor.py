@@ -149,6 +149,68 @@ class TestToolbarControls:
         assert editor.canvas._tool is Tool.RECTANGLE
         assert editor.tool_actions[Tool.RECTANGLE].isChecked()
 
+    def test_common_tools_lead_the_main_row(self):
+        # SNX-26: pen, highlighter, eraser and crop are the tools the user
+        # actually reached for, so they -- and only they -- sit directly on
+        # the toolbar, in that order.
+        frame = make_frame()
+        editor = Editor(frame)
+        action_to_tool = {action: tool for tool, action in editor.tool_actions.items()}
+
+        main_row_tools = [
+            action_to_tool[action]
+            for action in editor.toolbar.actions()
+            if action in action_to_tool
+        ]
+
+        assert main_row_tools == [Tool.PEN, Tool.HIGHLIGHTER, Tool.ERASER, Tool.CROP]
+
+    def test_remaining_tools_are_reachable_through_the_more_tools_menu(self):
+        # Not removed, not hidden -- just one click away instead of
+        # crowding the main row (per SNX-26's "no tool is to be removed").
+        frame = make_frame()
+        editor = Editor(frame)
+        action_to_tool = {action: tool for tool, action in editor.tool_actions.items()}
+        expected_secondary_tools = set(Tool) - set(Editor.PRIMARY_TOOLS)
+
+        menu_tools = {
+            action_to_tool[action]
+            for action in editor.more_tools_menu.actions()
+            if action in action_to_tool
+        }
+
+        assert menu_tools == expected_secondary_tools
+        # And none of them leaked into the main row alongside the primary four.
+        main_row_tools = {
+            action_to_tool[action]
+            for action in editor.toolbar.actions()
+            if action in action_to_tool
+        }
+        assert main_row_tools.isdisjoint(expected_secondary_tools)
+
+    def test_no_tool_label_displays_an_underscore(self):
+        # Tool.STEP_MARKER's raw enum value ("step_marker") must not leak
+        # into the UI verbatim.
+        frame = make_frame()
+        editor = Editor(frame)
+
+        for action in editor.tool_actions.values():
+            assert "_" not in action.text()
+        assert editor.tool_actions[Tool.STEP_MARKER].text() == "Step Marker"
+
+    def test_main_row_fits_without_overflow_at_the_editors_normal_width(self):
+        # 1920: a typical full-HD monitor width, same "normal" screen size
+        # test_capture.py's multi-monitor fixtures use elsewhere -- a stand-in
+        # for "a real capture," not a tiny fixture like the 100x60 default
+        # `make_frame()` most of this file uses. The eleven-action row this
+        # ticket replaced overflowed into QToolBar's own chevron on a real
+        # session; the trimmed-down main row (four tools, swatches, custom
+        # colour, stroke width, undo/redo/clear, copy/save/done) must not.
+        frame = make_frame(image_size=(1920, 1080))
+        editor = Editor(frame)
+
+        assert editor.toolbar.sizeHint().width() <= frame.image.width()
+
     def test_colour_swatch_click_sets_canvas_colour_with_no_dialog(self):
         frame = make_frame()
         editor = Editor(frame)
