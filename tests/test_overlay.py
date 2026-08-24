@@ -392,6 +392,43 @@ class TestFreeformMode:
         confirmed.assert_not_called()
         assert overlay._selection is None
 
+    def test_veil_is_painted_outside_the_path_not_the_bounding_box(self):
+        # SNX-49 AC: the scrim inverts against the lasso itself, so a point
+        # inside the L's own bounding box but in the notch it cuts away
+        # (unlike test_confirms_bounds_and_excludes_pixels_outside_the_path's
+        # plain path.contains() check) must still read as dimmed, not as
+        # the undimmed base colour a bounding-box-only hole would show.
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FREEFORM)
+
+        self._trace_l_shape(overlay)
+
+        rendered = overlay.grab().toImage()
+        base_color = QColor(10, 20, 30)
+        assert rendered.pixelColor(30, 30) == base_color  # inside the stem
+        assert rendered.pixelColor(80, 100) == base_color  # inside the foot
+        assert rendered.pixelColor(80, 40) != base_color  # in the notch: dimmed
+
+    def test_veil_follows_the_path_live_mid_drag(self):
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FREEFORM)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self._STEM_TOP_LEFT)
+        QTest.mouseMove(overlay, self._STEM_TOP_RIGHT)
+        QTest.mouseMove(overlay, self._NOTCH_CORNER)
+        # Traced so far: (20,20) -> (60,20) -> (60,80), an open path whose
+        # bounding box is (20,20)-(60,80). Qt implicitly closes an open
+        # path for filling purposes (a straight line from (60,80) back to
+        # (20,20)), so (25, 75) sits inside that bounding box but on the far
+        # side of that implicit closing edge -- outside the filled shape.
+
+        rendered = overlay.grab().toImage()
+        base_color = QColor(10, 20, 30)
+        assert rendered.pixelColor(30, 30) == base_color  # inside the traced shape
+        assert rendered.pixelColor(25, 75) != base_color  # in the bbox, outside it: dimmed
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=self._NOTCH_CORNER)
+
     def test_closed_loop_back_near_start_still_confirms(self):
         # Anchor-to-release distance would be tiny here; only the traced
         # path's own bounding-rect diagonal should decide misfire or not.
@@ -674,6 +711,29 @@ class TestOverlayWindow:
         assert sampled.red() == pytest.approx(expected.red(), abs=2)
         assert sampled.green() == pytest.approx(expected.green(), abs=2)
         assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
+
+    def test_freeform_scrim_inverts_against_the_path_not_the_bounding_box(self):
+        # SNX-49 AC: an L-shaped path whose bounding box is (20,20)-(100,120)
+        # -- the notch cut out of its top-right must stay dimmed even
+        # though it sits squarely inside that bounding box.
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        path = QPainterPath()
+        path.moveTo(QPointF(20, 20))
+        path.lineTo(QPointF(60, 20))
+        path.lineTo(QPointF(60, 80))
+        path.lineTo(QPointF(100, 80))
+        path.lineTo(QPointF(100, 120))
+        path.lineTo(QPointF(20, 120))
+        path.closeSubpath()
+        overlay.set_selection(QRect(20, 20, 80, 100), path=path)
+
+        rendered = overlay.grab().toImage()
+        base_color = QColor(10, 20, 30)
+
+        assert rendered.pixelColor(30, 30) == base_color  # inside the stem
+        assert rendered.pixelColor(80, 100) == base_color  # inside the foot
+        assert rendered.pixelColor(80, 40) != base_color  # in the notch: dimmed
 
     def test_no_selection_dims_the_whole_window(self):
         frame = make_frame()
@@ -3506,6 +3566,187 @@ class TestCaptureModeFullScreenIntegration:
         overlay.add_mark(_mark())
 
         assert len(overlay.marks) == 1
+
+
+class TestCaptureModeFreeformIntegration:
+    """SNX-49 AC: picking Freeform in the popover arms press-drag-release
+    lasso tracing. Release confirms the traced path (closing it for the
+    user if they didn't), sets `_selection` to its bounding box -- same as
+    every other mode, so the selection frame/handles/chips/bar stay
+    re-framable and annotatable exactly as before -- and stores the exact
+    path as `_selection_path` for the scrim/export to key off separately.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    FREEFORM_LABEL = tokens.CAPTURE_MODES[3][0]
+
+    # The same L-shape `TestFreeformMode` traces for `Overlay` above --
+    # reused here so the excluded-notch assertions below rest on that
+    # class's own already-proven path.contains() geometry rather than
+    # re-derived coordinates.
+    _STEM_TOP_LEFT = QPoint(20, 20)
+    _STEM_TOP_RIGHT = QPoint(60, 20)
+    _NOTCH_CORNER = QPoint(60, 80)
+    _FOOT_TOP_RIGHT = QPoint(100, 80)
+    _FOOT_BOTTOM_RIGHT = QPoint(100, 120)
+    _FOOT_BOTTOM_LEFT = QPoint(20, 120)  # release point; never returns to the anchor
+
+    def _overlay(self, size=(200, 200)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 50, 50))  # a prior selection to clear
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _pick_freeform_mode(self, overlay):
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(
+            overlay._popover._rows[self.FREEFORM_LABEL], Qt.MouseButton.LeftButton
+        )
+
+    def _trace_l_shape(self, overlay):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self._STEM_TOP_LEFT)
+        QTest.mouseMove(overlay, self._STEM_TOP_RIGHT)
+        QTest.mouseMove(overlay, self._NOTCH_CORNER)
+        QTest.mouseMove(overlay, self._FOOT_TOP_RIGHT)
+        QTest.mouseMove(overlay, self._FOOT_BOTTOM_RIGHT)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=self._FOOT_BOTTOM_LEFT)
+
+    def test_picking_freeform_arms_picking_and_clears_the_prior_selection(self):
+        overlay = self._overlay()
+
+        self._pick_freeform_mode(overlay)
+
+        assert overlay._picking_freeform
+        assert overlay._selection is None
+
+    def test_drag_traces_a_lasso_and_confirms_its_bounds_on_release(self):
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+
+        self._trace_l_shape(overlay)
+
+        assert not overlay._picking_freeform
+        assert overlay._selection == QRect(20, 20, 80, 100)
+        assert isinstance(overlay._selection_path, QPainterPath)
+        assert overlay._selection_path.contains(QPointF(30, 30))  # inside the stem
+        assert overlay._selection_path.contains(QPointF(80, 100))  # inside the foot
+        assert not overlay._selection_path.contains(QPointF(80, 40))  # in the notch
+
+    def test_unclosed_lasso_is_closed_for_the_user_on_release(self):
+        # The release point (_FOOT_BOTTOM_LEFT) never returns to the press
+        # anchor (_STEM_TOP_LEFT) -- if the loop weren't closed for the
+        # user, the region between the two along the L's own open edge
+        # wouldn't be part of the filled path at all.
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+
+        self._trace_l_shape(overlay)
+
+        assert overlay._selection_path.contains(QPointF(21, 100))
+
+    def test_release_below_threshold_is_a_misfire_and_leaves_picking_armed(self):
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert overlay._picking_freeform
+        assert overlay._selection is None
+
+    def test_selection_from_freeform_can_be_annotated(self):
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+        self._trace_l_shape(overlay)
+
+        overlay.add_mark(_mark())
+
+        assert len(overlay.marks) == 1
+
+    def test_resizing_a_freeform_selection_reverts_it_to_a_plain_rectangle(self):
+        # The path was traced against the *original* bounding box; a
+        # handle drag has no way to reshape it to match a dragged edge, so
+        # re-framing silently drops the path rather than leaving a now-stale
+        # one behind -- see `OverlayWindow.set_selection`'s own docstring.
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+        self._trace_l_shape(overlay)
+        press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+        target = QPoint(150, press.y())
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, target)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=target)
+
+        assert overlay._selection_path is None
+
+
+class TestFreeformExport:
+    """SNX-49 AC: the exported image is cropped to the lasso's bounding box
+    with the pixels outside the path fully transparent, in a format
+    (`QImage`, later written as PNG by `app.save_image`) that preserves
+    that transparency.
+    """
+
+    def _overlay_with_triangular_lasso(self):
+        # A right triangle within a square bounding box: (10,10)-(10,60) up
+        # the left edge, (10,60)-(60,60) along the bottom, and the
+        # hypotenuse (60,60)-(10,10) closing it -- so a point near the
+        # bounding box's excluded top-right corner is unambiguously outside
+        # the path while its own centre is unambiguously inside.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        path = QPainterPath()
+        path.moveTo(QPointF(10, 10))
+        path.lineTo(QPointF(10, 60))
+        path.lineTo(QPointF(60, 60))
+        path.closeSubpath()
+        overlay.set_selection(QRect(10, 10, 50, 50), path=path)
+        return overlay
+
+    def test_pixels_outside_the_path_are_fully_transparent(self):
+        overlay = self._overlay_with_triangular_lasso()
+
+        rendered = overlay.rendered_image()
+
+        # `rendered` is already cropped to the selection's own (10,10)
+        # top-left, so these are that crop's local pixel coordinates --
+        # (15,55)/(45,15) in the pre-crop, window-local space the path
+        # itself is defined in, shifted back by the selection's origin.
+        assert rendered.pixelColor(5, 45).alpha() == 255  # inside the triangle
+        assert rendered.pixelColor(35, 5).alpha() == 0  # excluded corner
+
+    def test_cropped_to_the_bounding_box_size(self):
+        overlay = self._overlay_with_triangular_lasso()
+
+        rendered = overlay.rendered_image()
+
+        assert rendered.size() == QSize(50, 50)
+
+    def test_non_freeform_selections_stay_fully_opaque(self):
+        # No regression: a plain rectangular selection (no `_selection_path`)
+        # must not suddenly pick up an alpha channel it never had before.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(10, 10, 50, 50))
+
+        rendered = overlay.rendered_image()
+
+        assert rendered.pixelColor(15, 15).alpha() == 255
+
+    def test_saved_png_preserves_the_transparency(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        overlay = self._overlay_with_triangular_lasso()
+
+        path = overlay.save()
+
+        saved = QImage(str(path))
+        assert saved.pixelColor(5, 45).alpha() == 255
+        assert saved.pixelColor(35, 5).alpha() == 0
 
 
 def _mark(start=(10, 10), end=(20, 20)):
