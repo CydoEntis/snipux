@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QColorDialog,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSlider,
     QWidget,
@@ -3464,3 +3465,289 @@ class TestHintHUDExcludedFromExport:
         without_hud = overlay.rendered_image()
 
         assert with_hud == without_hud
+
+
+class TestKeyboardToolShortcuts:
+    """SNX-47 AC: 'each letter in tokens.SHORTCUTS selects its tool.'"""
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        return overlay
+
+    @pytest.mark.parametrize("letter,tool", list(tokens.SHORTCUTS.items()))
+    def test_letter_selects_its_tool(self, letter, tool):
+        overlay = self._overlay()
+        key = getattr(Qt.Key, f"Key_{letter}")
+
+        QTest.keyClick(overlay, key)
+
+        assert overlay._bar.active_tool == tool
+
+    def test_selecting_eraser_by_key_arms_it_same_as_a_click(self):
+        # Mirrors test_clicking_the_eraser_tool_button_arms_the_eraser --
+        # a shortcut has to produce the same _on_tool_selected side effect
+        # a button click does, not just move the active-tool highlight.
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_E)
+
+        assert overlay._eraser_active
+
+    def test_switching_tool_by_key_disarms_the_eraser(self):
+        overlay = self._overlay()
+        QTest.keyClick(overlay, Qt.Key.Key_E)
+        assert overlay._eraser_active
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert not overlay._eraser_active
+        assert overlay._bar.active_tool == "pen"
+
+
+class TestKeyboardUndoRedo:
+    """SNX-47 AC: 'Ctrl+Z undoes and Ctrl+Shift+Z redoes.'"""
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        return overlay
+
+    def test_ctrl_z_undoes_the_newest_mark(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+        assert overlay.marks == ()
+        assert overlay.can_redo
+
+    def test_ctrl_shift_z_redoes_the_undone_mark(self):
+        overlay = self._overlay()
+        mark = overlay.marks[0]
+        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        assert overlay.marks == ()
+
+        QTest.keyClick(
+            overlay,
+            Qt.Key.Key_Z,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        assert overlay.marks == (mark,)
+
+
+class TestKeyboardEnter:
+    """SNX-47 AC: 'Enter copies to the clipboard and dismisses the
+    overlay.'
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, with_selection=True):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        if with_selection:
+            overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_enter_copies_the_flattened_selection_and_closes(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(80, 80))
+        )
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert len(calls) == 1
+        assert calls[0].pixelColor(20, 50) == self.RED
+        assert not overlay.isVisible()
+
+    def test_enter_key_variant_also_dismisses(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Enter)
+
+        assert not overlay.isVisible()
+
+    def test_enter_without_a_selection_does_nothing(self, monkeypatch):
+        # Mirrors Overlay's own Enter guard above -- nothing to flatten or
+        # copy without a selection yet.
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay(with_selection=False)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert calls == []
+        assert overlay.isVisible()
+
+
+class TestKeyboardEscapeTwoStage:
+    """SNX-47 AC: 'Esc with marks present discards them and toasts, and Esc
+    with no marks present closes the overlay without capturing.' The
+    two-stage split itself is the decision docs/design/overlay-redesign.md's
+    keyboard table leaves to this ticket.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_first_escape_with_ink_discards_it_and_toasts_without_closing(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay.marks == ()
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Ink discarded"
+        assert overlay.isVisible()
+
+    def test_second_escape_with_nothing_left_closes_without_capturing(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # first stage: discards the mark
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # second stage: nothing left, closes
+
+        assert not overlay.isVisible()
+        assert calls == []  # never captured
+
+    def test_escape_with_no_ink_at_all_closes_on_the_first_press(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay.isVisible()
+
+
+class TestKeyboardShortcutSuppression:
+    """SNX-47 AC: 'none of these keys fire while a text label is being
+    edited or a slider has focus, and the key reaches the focused widget
+    instead.'
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        return overlay
+
+    def test_tool_letter_does_not_fire_while_a_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert overlay._bar.active_tool is None
+
+    def test_tool_letter_does_not_fire_while_a_text_label_is_focused(self):
+        # No text-label editor is wired into OverlayWindow yet (a later
+        # ticket, per the class docstring) -- shapes.Text's own docstring
+        # names QLineEdit as that widget, mirroring editor.py's
+        # Canvas._ensure_text_edit, so a bare QLineEdit stands in for it
+        # here.
+        overlay = self._overlay()
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert overlay._bar.active_tool is None
+
+    def test_undo_does_not_fire_while_a_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+        assert len(overlay.marks) == 1
+
+    def test_escape_does_not_discard_while_a_text_label_is_focused(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert len(overlay.marks) == 1
+
+    def test_enter_does_not_copy_or_close_while_a_slider_has_focus(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert calls == []
+        assert overlay.isVisible()
+
+    def test_slider_still_handles_its_own_arrow_key_once_focused(self):
+        # The other half of the AC: "a slider being nudged with the arrow
+        # keys must keep them." Delivered straight to the slider, the way
+        # a real key press would once it actually holds focus -- proving
+        # OverlayWindow's own suppression above never has to get involved
+        # for the slider's own keys to keep working.
+        overlay = self._overlay()
+        slider = overlay._tray._slider
+        slider.setFocus()
+        original = slider.value()
+
+        QTest.keyClick(slider, Qt.Key.Key_Right)
+
+        assert slider.value() == original + slider.singleStep()
+
+    def test_text_label_still_receives_typed_letters_once_focused(self):
+        overlay = self._overlay()
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(label, "P")
+
+        assert label.text() == "P"
