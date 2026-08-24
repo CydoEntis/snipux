@@ -28,6 +28,7 @@ from snipux.overlay import (
     OverlayWindow,
     SelectionMode,
     SettingsTray,
+    Toast,
     UnsupportedGeometryProvider,
     _BlurModeWell,
     _CaptureModeRow,
@@ -1466,6 +1467,84 @@ class TestSave:
         assert saved.pixelColor(5, 20) == self.RED  # the rectangle's left border
 
 
+class TestToast:
+    """SNX-45: the standalone `Toast` widget -- content, positioning and
+    the single-instance-replaces-and-restarts-the-timer behaviour the
+    spec's "Toast" section describes. `TestOverlayWindowToasts` below
+    covers the four callers (`copy`/`save`/`clear`/`discard`) that drive
+    this widget through `OverlayWindow._show_toast`.
+    """
+
+    def test_show_message_sets_the_icon_and_the_text(self):
+        toast = Toast()
+
+        toast.show_message("copy", "Copied to clipboard", QSize(800, 600))
+
+        assert toast._text_label.text() == "Copied to clipboard"
+        assert not toast._icon_label.pixmap().isNull()
+        assert toast.isVisible()
+
+    def test_show_message_positions_bottom_centre_of_the_given_window_size(self):
+        toast = Toast()
+        window_size = QSize(800, 600)
+
+        toast.show_message("save", "Saved to ~/Pictures/snipux", window_size)
+
+        size = toast.sizeHint()
+        expected_left = round((window_size.width() - size.width()) / 2)
+        expected_top = round(
+            window_size.height() - tokens.Metric.TOAST_BOTTOM - size.height()
+        )
+        assert toast.geometry().left() == expected_left
+        assert toast.geometry().top() == expected_top
+
+    def test_dismiss_timer_interval_matches_tokens_toast_ms(self):
+        toast = Toast()
+
+        toast.show_message("trash", "Ink cleared", QSize(400, 300))
+
+        assert toast._timer.interval() == tokens.Metric.TOAST_MS
+        assert toast._timer.isSingleShot()
+        assert toast._timer.isActive()
+
+    def test_toast_dismisses_itself_once_the_timer_fires(self):
+        # Simulated rather than waited for real -- TOAST_MS is 2 real
+        # seconds, and `overlay._advance_ants`/`_ants_timer` tests above
+        # already establish the pattern of driving a QTimer's own slot
+        # directly instead of blocking the suite on it.
+        toast = Toast()
+        toast.show_message("copy", "Copied to clipboard", QSize(400, 300))
+        assert toast.isVisible()
+
+        toast._timer.timeout.emit()
+
+        assert not toast.isVisible()
+
+    def test_a_second_message_replaces_the_first_rather_than_stacking(self):
+        toast = Toast()
+        toast.show_message("copy", "Copied to clipboard", QSize(400, 300))
+
+        toast.show_message("save", "Saved to ~/Pictures/snipux", QSize(400, 300))
+
+        # One widget, its content overwritten -- not a second Toast
+        # instance sitting behind or beside the first.
+        assert toast._text_label.text() == "Saved to ~/Pictures/snipux"
+        assert toast.isVisible()
+
+    def test_a_second_message_restarts_the_dismiss_timer(self):
+        toast = Toast()
+        toast.show_message("copy", "Copied to clipboard", QSize(400, 300))
+        first_timer = toast._timer
+
+        toast.show_message("save", "Saved to ~/Pictures/snipux", QSize(400, 300))
+
+        # The same QTimer instance, still running -- QTimer.start() on an
+        # already-active timer resets its remaining time, which is what
+        # "restarts the timer" means here rather than a fresh timer object.
+        assert toast._timer is first_timer
+        assert toast._timer.isActive()
+
+
 class TestFloatingBarComposition:
     """SNX-40: the bar carries the capture chip, eight tool buttons, undo,
     redo, clear, copy and save, separated by dividers, in the order
@@ -1864,6 +1943,117 @@ class TestFloatingBarIntegration:
         QTest.mouseClick(overlay._bar._save_button, Qt.MouseButton.LeftButton)
 
         assert (tmp_path / "Pictures" / "snipux").exists()
+
+
+class TestOverlayWindowToasts:
+    """SNX-45: `copy`/`save`/`clear`/`discard` each toast the message and
+    glyph docs/design/overlay-redesign.md's "Toast" section names, through
+    the same `_toast` instance -- `TestToast` above covers that widget's
+    own content/positioning/timer behaviour in isolation.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, size=(200, 200)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, *size))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_copy_shows_the_copied_to_clipboard_toast(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        overlay = self._overlay()
+
+        overlay.copy()
+
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Copied to clipboard"
+
+    def test_save_shows_the_saved_toast(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        overlay = self._overlay()
+
+        overlay.save()
+
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Saved to ~/Pictures/snipux"
+
+    def test_clear_shows_the_ink_cleared_toast(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        overlay.clear()
+
+        assert overlay.marks == ()
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Ink cleared"
+
+    def test_discard_shows_the_ink_discarded_toast_and_empties_the_ink_layer(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        overlay.discard()
+
+        assert overlay.marks == ()
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Ink discarded"
+
+    def test_a_toast_raised_while_the_first_is_showing_replaces_it(self):
+        overlay = self._overlay()
+
+        overlay.clear()
+        assert overlay._toast._text_label.text() == "Ink cleared"
+        overlay.discard()
+
+        # Still the one `_toast` instance -- its message overwritten, not a
+        # second toast stacked alongside the first.
+        assert overlay._toast._text_label.text() == "Ink discarded"
+
+    def test_toast_stays_hidden_while_the_overlay_itself_is_not_shown(self, monkeypatch):
+        # Mirrors test_bar_stays_hidden_and_unpainted_while_the_overlay_itself_is_not_shown
+        # above: none of this file's other OverlayWindow pixel tests call
+        # .show() before grab()ing, so a toast triggered by any of the four
+        # actions below must not become a real, paintable child widget.
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+
+        overlay.copy()
+        overlay.clear()
+        overlay.discard()
+
+        assert not overlay._toast.isVisible()
+
+
+class TestToastExcludedFromExport:
+    """SNX-45 AC: 'a toast never appears in the exported image.'"""
+
+    def test_rendered_image_is_unaffected_by_a_toast_shown_over_it(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        size = (600, 600)
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        # The selection spans the whole window, including the toast's own
+        # bottom-centre screen position -- a leak would show up there as a
+        # pixel-colour mismatch against the frame's own base colour.
+        overlay.set_selection(QRect(0, 0, *size))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        overlay.copy()
+        assert overlay._toast.isVisible()  # actually on screen, not a no-op
+
+        rendered = overlay.rendered_image()
+
+        toast_center = overlay._toast.geometry().center()
+        assert rendered.pixelColor(toast_center) == QColor(10, 20, 30)
 
 
 class TestSettingsTrayVisibility:

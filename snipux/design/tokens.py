@@ -54,6 +54,7 @@ class Color:
 
     # Toast
     TOAST_BG        = "#e9ecf2"   # at 96% alpha
+    TOAST_BG_ALPHA  = 0.96
     TOAST_FG        = "#12141a"
 
     # Step badge ring (annotation tool, not chrome)

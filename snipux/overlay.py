@@ -2067,6 +2067,111 @@ class CaptureModePopover(QWidget):
         painter.end()
 
 
+# ---------------------------------------------------------------------------
+# Toast (SNX-45)
+# ---------------------------------------------------------------------------
+
+
+class Toast(QWidget):
+    """The overlay redesign's toast: bottom centre, above everything, per
+    docs/design/overlay-redesign.md's "Toast" section.
+
+    A real child widget of `OverlayWindow`, built and positioned the same
+    way `FloatingBar`/`SettingsTray`/`CaptureModePopover` are -- never
+    painted inside `OverlayWindow.paintEvent`, which is what the spec means
+    by "chrome painted over the overlay rather than something drawn into
+    the frame": `OverlayWindow.rendered_image` flattens `_marks` onto the
+    frame's own pixmap via `shapes.render_selection` and never touches this
+    widget (or any other chrome) at all, so a toast can never end up in an
+    export regardless of whether it happens to be on screen at the moment
+    `copy`/`save` is called.
+
+    There is only ever one toast, per the spec's "a new toast replaces the
+    old one and restarts the timer" -- `show_message` overwrites whatever
+    the previous call was showing and restarts `_timer` rather than a
+    caller stacking a second widget, since this class is itself the single
+    instance `OverlayWindow` keeps as `_toast`.
+    """
+
+    _ICON_SIZE = 15
+    # Prose-only spacing between the glyph and the message, like
+    # `_ToolPill`/`_FROZEN_INNER_GAP`'s own un-tokenized gaps elsewhere in
+    # this file.
+    _GAP = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        metric = design.tokens.Metric
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(
+            metric.TOAST_PAD_H, metric.TOAST_PAD_V, metric.TOAST_PAD_H, metric.TOAST_PAD_V
+        )
+        layout.setSpacing(self._GAP)
+
+        self._icon_label = QLabel(self)
+        self._icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(self._icon_label)
+
+        self._text_label = QLabel(self)
+        self._text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        font = QFont(design.font_families().ui)
+        size, weight = design.tokens.Font.TOAST
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight(weight))
+        self._text_label.setFont(font)
+        self._text_label.setStyleSheet(f"color: {design.color('TOAST_FG').name()};")
+        layout.addWidget(self._text_label)
+
+        # Single-shot, restarted (not re-created) by every show_message
+        # call -- QTimer.start() on an already-running timer resets its
+        # remaining time, which is exactly the spec's "restarts the timer"
+        # rather than letting an earlier call's dismissal fire early.
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(metric.TOAST_MS)
+        self._timer.timeout.connect(self.hide)
+
+        self.hide()
+
+    def show_message(self, icon_name: str, text: str, window_size: QSize) -> None:
+        """Show `text` next to `icon_name`'s glyph, positioned at the
+        bottom centre of `window_size`, and (re)start the `TOAST_MS`
+        auto-dismiss timer.
+
+        Updates this same widget's content rather than creating a new one
+        -- there is only ever one toast on screen, per the class docstring
+        -- so a second call while the first is still showing both replaces
+        the message and restarts the timer in one step.
+        """
+        metric = design.tokens.Metric
+        pixmap = design.icon(icon_name, design.color("TOAST_FG")).pixmap(
+            self._ICON_SIZE, self._ICON_SIZE
+        )
+        self._icon_label.setPixmap(pixmap)
+        self._text_label.setText(text)
+
+        size = self.sizeHint()
+        left = (window_size.width() - size.width()) / 2
+        top = window_size.height() - metric.TOAST_BOTTOM - size.height()
+        self.setGeometry(round(left), round(top), size.width(), size.height())
+
+        self.show()
+        self.raise_()  # "above everything" -- including the bar and trays
+        self._timer.start()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.Metric
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("TOAST_BG"))
+        painter.drawRoundedRect(QRectF(self.rect()), metric.TOAST_RADIUS, metric.TOAST_RADIUS)
+        painter.end()
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -2113,7 +2218,12 @@ class OverlayWindow(QWidget):
     that will read `_capture_mode` once they exist, same as `_blur_mode`
     above sits unread until its own ticket. `mousePressEvent` closes the
     popover on any click that lands outside it, without touching
-    `_capture_mode`.
+    `_capture_mode`. SNX-45 (this ticket) adds `Toast` (`_toast`), the
+    single instance `_show_toast` shows for `copy`/`save`/`clear`/
+    `discard` -- the last of those four not itself wired to Esc yet, per
+    `discard`'s own docstring -- gated on `self.isVisible()` the same way
+    `_bar` already is, so it never paints into this window's own many
+    pixel-sampling tests.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -2292,6 +2402,13 @@ class OverlayWindow(QWidget):
         self._popover.delayChanged.connect(self._on_delay_changed)
         self._bar.captureChipClicked.connect(self._toggle_capture_popover)
 
+        # The toast (SNX-45): the single `Toast` instance `copy`/`save`/
+        # `clear`/`discard` below all share -- see `_show_toast` for the
+        # `self.isVisible()` gate that keeps it from painting into this
+        # window's own many pixel-sampling tests, none of which call
+        # `.show()`, the same reason `_sync_bar_visibility` gates `_bar`.
+        self._toast = Toast(self)
+
     def set_selection(self, rect: QRect | None) -> None:
         """Set the current selection (window coordinates) and repaint."""
         self._selection = rect
@@ -2439,6 +2556,22 @@ class OverlayWindow(QWidget):
         self._bar.set_undo_enabled(self.can_undo)
         self._bar.set_redo_enabled(self.can_redo)
 
+    # -- toast (SNX-45) ------------------------------------------------------
+
+    def _show_toast(self, icon_name: str, text: str) -> None:
+        """Show `_toast` for `icon_name`/`text`, gated on `self.isVisible()`.
+
+        Mirrors `_sync_bar_visibility`'s own guard on `_bar`: a child
+        widget's `.show()` call is enough to make Qt paint it into a
+        `grab()` of this window regardless of whether this window itself
+        was ever shown, and none of this file's many other pixel-sampling
+        tests call `.show()` first -- so a toast triggered by copy()/
+        save()/clear()/discard() must stay off screen until this window
+        actually is, same as the bar/tray/popover already do.
+        """
+        if self.isVisible():
+            self._toast.show_message(icon_name, text, self.size())
+
     def add_mark(self, shape: Shape) -> None:
         """Append `shape` to the ink layer and repaint.
 
@@ -2507,13 +2640,36 @@ class OverlayWindow(QWidget):
         self.update()
 
     def clear(self) -> None:
-        """Discard every mark and both stacks in a single step.
+        """Discard every mark and both stacks in a single step, and toast
+        `Ink cleared`.
 
         Per the spec: "Clear-ink empties both and toasts" -- and clearing
         is explicitly *not* itself undoable, unlike an ordinary undo/redo
         entry: the cleared marks are dropped outright rather than pushed
         onto `_redo`, so a subsequent undo() has nothing left to pop and
         cannot bring them back.
+        """
+        self._empty_marks()
+        self._show_toast("trash", "Ink cleared")
+
+    def discard(self) -> None:
+        """Discard every mark and both stacks, and toast `Ink discarded`.
+
+        Same underlying effect as `clear()` -- per the spec's keyboard
+        table, "Esc -- discard all ink, toast Ink discarded" -- but its own
+        method and toast message, since Esc's wording is deliberately
+        distinct from the floating bar's own clear-ink button. Wiring Esc
+        to actually call this is the keyboard-shortcuts ticket named in
+        TODO.md's "PR 3" list, not this one; this method exists now so that
+        ticket only has to wire a key, not add the behaviour.
+        """
+        self._empty_marks()
+        self._show_toast("trash", "Ink discarded")
+
+    def _empty_marks(self) -> None:
+        """The shared body of `clear()`/`discard()`: empty `_marks` and
+        `_redo` and resync the bar's undo/redo buttons, without deciding
+        which toast (if any) to show -- that choice is each caller's own.
         """
         self._marks = []
         self._redo = []
@@ -2599,12 +2755,13 @@ class OverlayWindow(QWidget):
     # `AppController._on_confirmed` defers importing `Editor`.
 
     def copy(self) -> None:
-        """Flatten the marks present *right now* onto the selection's crop
-        and place the result on the clipboard.
+        """Flatten the marks present *right now* onto the selection's crop,
+        place the result on the clipboard, and toast `Copied to clipboard`.
         """
         from snipux.app import copy_image_to_clipboard
 
         copy_image_to_clipboard(self.rendered_image())
+        self._show_toast("copy", "Copied to clipboard")
 
     # Subdirectory of ~/Pictures saves land in -- per the spec's "Save
     # writes a timestamped PNG to ~/Pictures/snipux, creating the
@@ -2616,12 +2773,15 @@ class OverlayWindow(QWidget):
     def save(self) -> Path:
         """Flatten the marks present *right now* onto the selection's crop
         and write it as a timestamped PNG under ~/Pictures/snipux, creating
-        that directory if it doesn't exist yet. Returns the path written.
+        that directory if it doesn't exist yet. Returns the path written,
+        and toasts `Saved to ~/Pictures/snipux`.
         """
         from snipux.app import save_image
 
         directory = Path.home() / "Pictures" / self.SAVE_SUBDIRECTORY
-        return save_image(self.rendered_image(), directory)
+        path = save_image(self.rendered_image(), directory)
+        self._show_toast("save", f"Saved to ~/Pictures/{self.SAVE_SUBDIRECTORY}")
+        return path
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -2640,6 +2800,7 @@ class OverlayWindow(QWidget):
         self._bar.hide()
         self._tray.hide()
         self._popover.hide()
+        self._toast.hide()
 
     def _advance_ants(self) -> None:
         """Advance the dashed stroke's offset by one animation frame.
