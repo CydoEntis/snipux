@@ -28,6 +28,22 @@ If `gsettings` isn't available, or setting the shortcut otherwise fails,
 `install.sh` says so and leaves the tool installed and usable — it does not
 fail the install. Follow the manual steps below in that case.
 
+`install.sh` also writes a copy of `packaging/snipux.desktop` into
+`~/.config/autostart/` (creating the directory if needed) — the
+freedesktop-standard location GNOME (and every other compliant desktop)
+reads at login to bring applications back automatically, so the binding
+above still has something to talk to after a reboot without you doing
+anything by hand. Re-running `install.sh` just overwrites the same
+filename, so this never produces a second entry.
+
+Finally, `install.sh` starts snipux itself at the end of a successful
+install, so the keybinding works immediately rather than only after the
+next login. It skips this — printing that it could not start the app,
+rather than failing the install — on a machine with no graphical session
+(neither `DISPLAY` nor `WAYLAND_DISPLAY` set), and it leaves an
+already-running instance alone rather than starting a second one or
+nudging it into an unwanted capture.
+
 **To undo the automatic binding**, remove the `snipux` slot from the list and
 reset its keys:
 
