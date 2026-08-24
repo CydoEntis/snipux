@@ -149,9 +149,9 @@ def _build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--snip",
         action="store_true",
-        help="ask an already-running snipux instance to start a capture "
-        "(for binding to a key such as Print Screen); fails if no "
-        "instance is running",
+        help="ask an already-running snipux instance to start a capture, "
+        "starting one first if none is running yet (for binding to a "
+        "key such as Print Screen)",
     )
     return parser
 
@@ -198,24 +198,23 @@ def main(
     args = parser.parse_args(argv)
 
     if args.snip:
-        # A trigger-and-exit path, same spirit as the rest of main(): it
-        # never starts an event loop. Only forward to an already-resident
-        # instance; if none is running, this call's own try_claim() just
-        # became the (empty) primary, which we deliberately abandon rather
-        # than growing into a full AppController here -- that would make
-        # the flag behave differently depending on timing, exactly what a
-        # keybinding must not do. The QLocalServer it created is not a
-        # leak: this process exits without ever calling listen() on it, so
-        # the next real launch's try_claim() finds nothing live and
-        # reclaims the name normally.
+        # Forward to an already-resident instance when there is one. When
+        # there isn't, this call's own try_claim() just became the primary
+        # -- and, unlike before, it stays that way: it becomes the resident
+        # instance itself and shows the overlay immediately, the same as if
+        # it had forwarded to one that was already running. Abandoning the
+        # claim here (the previous behaviour) is what made Super+Shift+S
+        # depend on invisible state the user has no way to see (SNX-53):
+        # nothing starts a resident instance on its own, so the very first
+        # press after login -- or after any crash -- did nothing at all,
+        # silently, because whoever pressed it had no way to know one
+        # wasn't already running.
         if transport is None:
             transport = QLocalSocketTransport()
         if transport.try_claim():
-            print(
-                "no snipux instance is running -- start it first",
-                file=sys.stderr,
-            )
-            return 1
+            if registry is None:
+                registry = build_default_registry()
+            return _become_resident(registry, transport, start_capture_immediately=True)
         transport.send_snip_request()
         return 0
 
@@ -234,8 +233,11 @@ def main(
 #
 # Kept separate from main() above rather than repurposing bare `main([])`
 # for this: main() is pinned by the tests above to an immediate,
-# display-free return, and repurposing it would break them. `__main__.py`
-# dispatches to `run_resident_app()` only when invoked with no arguments.
+# display-free return for every path except `--snip` becoming primary
+# (which needs this same resident machinery -- see `_become_resident()`
+# below), and repurposing all of main() for it would break the other,
+# still-immediate paths' tests. `__main__.py` dispatches to
+# `run_resident_app()` only when invoked with no arguments.
 
 
 class Transport(ABC):
@@ -305,7 +307,16 @@ class QLocalSocketTransport(Transport):
         # which may never run on a crash.
         QLocalServer.removeServer(self._server_name)
         self._server = QLocalServer()
-        self._server.listen(self._server_name)
+        if not self._server.listen(self._server_name):
+            # Lost a race with another process's try_claim() landing
+            # between our probe above and this listen() call — two presses
+            # of the same keybinding in quick succession with nothing
+            # running hit exactly this race. Whichever of us binds first
+            # wins; the loser must report False, not True, or both would go
+            # on to become primary and a second tray icon/overlay would
+            # start.
+            self._server = None
+            return False
         return True
 
     def send_snip_request(self) -> None:
@@ -370,6 +381,16 @@ class AppController:
 
         self._overlay: OverlayWindow | None = None
 
+        # Stock Ubuntu GNOME shows no legacy tray icon at all without the
+        # AppIndicator extension: calling show() unconditionally left the
+        # app resident -- holding the single-instance claim -- with no
+        # icon, no menu, and no way to quit it except pkill (SNX-54). The
+        # tray icon and menu are still built either way (showMessage() on
+        # the icon is still a usable, if invisible, notification sink, and
+        # the menu costs nothing unshown), but show() itself is gated on
+        # this check.
+        self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+
         self._tray_icon = QSystemTrayIcon(self._build_icon())
         menu = QMenu()
         # A single Snip item, not one per SelectionMode: OverlayWindow's own
@@ -383,7 +404,20 @@ class AppController:
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         self._tray_icon.setContextMenu(menu)
-        self._tray_icon.show()
+
+        if self._tray_available:
+            self._tray_icon.show()
+        else:
+            # Told once, on stdout, rather than left to be discovered by
+            # `ps`/pkill: the keybinding (--snip) is still the way in with
+            # no tray, but quitting needs a real answer now that there's no
+            # Quit menu item visible to click.
+            print(
+                "No system tray detected -- snipux will run without a tray "
+                "icon or menu. It is still listening for snip requests "
+                "(e.g. via `snipux --snip`, typically bound to a key); to "
+                "quit it, kill this process."
+            )
 
         self._transport.listen(self.start_capture)
 
@@ -424,12 +458,18 @@ class AppController:
             # returning to idle left a Print Screen press with no feedback
             # at all, indistinguishable from the key doing nothing. Reported
             # through the existing tray icon rather than a new window, since
-            # the resident process otherwise never shows one.
-            self._tray_icon.showMessage(
-                "Snip failed",
-                str(exc),
-                QSystemTrayIcon.MessageIcon.Warning,
-            )
+            # the resident process otherwise never shows one -- except a
+            # balloon message has nowhere to appear when there's no tray
+            # icon shown to hang it off of (SNX-54), so that case falls
+            # back to stdout instead of calling showMessage() into a void.
+            if self._tray_available:
+                self._tray_icon.showMessage(
+                    "Snip failed",
+                    str(exc),
+                    QSystemTrayIcon.MessageIcon.Warning,
+                )
+            else:
+                print(f"Snip failed: {exc}")
             return
 
         geometries = (
@@ -458,15 +498,27 @@ class AppController:
         self._overlay = overlay
 
 
-def run_resident_app(
-    registry: BackendRegistry | None = None, transport: Transport | None = None
+def _become_resident(
+    registry: BackendRegistry,
+    transport: Transport,
+    start_capture_immediately: bool = False,
 ) -> int:
-    """The real, resident entry point: builds the `QApplication`, enforces
-    single-instance, and runs the event loop until Quit.
+    """Build the `QApplication`/`AppController` and run the event loop.
 
-    If another instance is already running, forwards a capture request to
-    it instead of starting a second tray icon, and returns immediately
-    without starting an event loop of its own.
+    Assumes `transport.try_claim()` has already returned True for
+    `transport` -- calling try_claim() a second time on the same transport
+    would have it probe its own not-yet-listening state and misreport
+    itself as not primary, so becoming primary is always a precondition
+    here rather than something this function repeats.
+
+    Shared by `run_resident_app()` (a bare `snipux` launch) and `main()`'s
+    `--snip` path when nothing was resident yet: refusing to start one
+    there made whether Super+Shift+S did anything at all depend on
+    invisible state the user had no way to see (SNX-53). Whether the
+    overlay opens right away is what tells the two callers apart -- a bare
+    launch opens idle to the tray, a `--snip` launch that just became
+    primary shows the overlay immediately, the same as if it had forwarded
+    to an instance that was already up.
     """
     # Reuse an already-running instance rather than unconditionally
     # constructing one: PyQt raises if a second QApplication is built in a
@@ -477,6 +529,22 @@ def run_resident_app(
     if app is None:
         app = QApplication(sys.argv)
 
+    controller = AppController(registry, transport)
+    if start_capture_immediately:
+        controller.start_capture()
+    return app.exec()
+
+
+def run_resident_app(
+    registry: BackendRegistry | None = None, transport: Transport | None = None
+) -> int:
+    """The real, resident entry point: builds the `QApplication`, enforces
+    single-instance, and runs the event loop until Quit.
+
+    If another instance is already running, forwards a capture request to
+    it instead of starting a second tray icon, and returns immediately
+    without starting an event loop of its own.
+    """
     if registry is None:
         registry = build_default_registry()
     if transport is None:
@@ -486,8 +554,7 @@ def run_resident_app(
         transport.send_snip_request()
         return 0
 
-    controller = AppController(registry, transport)
-    return app.exec()
+    return _become_resident(registry, transport)
 
 
 def cli() -> int:
