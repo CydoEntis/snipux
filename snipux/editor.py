@@ -22,6 +22,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPainterPathStroker,
+    QPen,
 )
 from PyQt6.QtWidgets import (
     QColorDialog,
@@ -30,7 +31,6 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QToolBar,
     QToolButton,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -616,6 +616,20 @@ class Editor(QWidget):
     everything else hangs off the "More Tools" button built alongside it in
     `_build_tool_actions`. No tool is removed or made harder to use than a
     second click — the split is presentation, not capability.
+
+    Per SNX-28, `canvas` being pixel-identical to the live desktop beneath
+    it (same pixels, no frame, no shadow) made the edit surface invisible on
+    a real session — a user could not tell where the snip ended and the
+    live desktop began. This window now spans the whole virtual desktop
+    (`desktop_frame`'s geometry, not just the snip's) rather than being
+    sized tightly around toolbar+canvas, so there is real screen area
+    outside the snip for `paintEvent` to dim — the same veil `Overlay`
+    paints outside the selection rect during selection, reused here so
+    selecting and editing look consistent rather than introducing a new
+    idiom. `canvas` and `toolbar` are positioned as plain children (not a
+    layout) at their exact spot within that larger window, and paint over
+    the dimmed background completely, so the veil is never actually visible
+    through them.
     """
 
     # A small one-click preset row, kept alongside the full picker added by
@@ -640,9 +654,29 @@ class Editor(QWidget):
     MIN_STROKE_WIDTH = 1
     MAX_STROKE_WIDTH = 20
 
-    def __init__(self, frame: Frame, parent=None):
+    # Same alpha/colour Overlay.VEIL_COLOR uses in overlay.py (not imported
+    # from there -- reusing the RGBA value is what keeps selection and
+    # editing looking consistent, not sharing the symbol). Painted outside
+    # `_snip_local_rect` in `paintEvent`.
+    VEIL_COLOR = QColor(0, 0, 0, 120)
+    # White reads clearly against both a bright and a dark capture sitting
+    # right at the snip's own edge, unlike a fixed hue (e.g. Overlay's red
+    # crosshair) which can vanish against a same-hued screenshot.
+    BORDER_COLOR = QColor(255, 255, 255)
+    BORDER_WIDTH = 2
+
+    def __init__(self, frame: Frame, desktop_frame: Frame | None = None, parent=None):
         super().__init__(parent)
         self.canvas = Canvas(frame, self)
+
+        # None means "no wider desktop to dim" -- `frame` doubles as its own
+        # desktop, so `_position_over_snip` below sizes this window tightly
+        # around toolbar+canvas exactly as it did before SNX-28, with no
+        # margin to paint a veil into. Every real caller (AppController)
+        # passes the actual, uncropped capture; this default only matters
+        # for the many existing callers (tests, mostly) that construct an
+        # Editor from a snip alone.
+        self._desktop_frame = desktop_frame if desktop_frame is not None else frame
 
         # Matches the Windows Snipping Tool workflow: the snip lands on the
         # clipboard the instant it's confirmed, before any annotation is
@@ -668,11 +702,12 @@ class Editor(QWidget):
         self._build_undo_redo_clear_actions(self.toolbar)
         self._build_copy_save_done_actions(self.toolbar)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas)
+        # No layout (SNX-28 removed the QVBoxLayout this used to be): the
+        # window now spans the whole desktop, not just toolbar+canvas, and a
+        # layout has no way to leave the rest of that window as a dimmable
+        # margin around two widgets it's meant to fill exactly. toolbar and
+        # canvas are positioned as plain children instead, in
+        # `_position_over_snip` below.
 
         # Start from a usable state (a tool armed, a colour and width set)
         # rather than requiring a click before the first drag does anything.
@@ -682,12 +717,14 @@ class Editor(QWidget):
         self.canvas.set_colour(Canvas.DEFAULT_COLOUR)
         self.canvas.set_stroke_width(self.stroke_width_spinbox.value())
 
-        self._position_over_snip(frame)
+        self._position_over_snip(frame, self._desktop_frame)
 
-    def _position_over_snip(self, frame: Frame) -> None:
-        """Size and place this window so `canvas` — not the window as a
-        whole — ends up covering exactly `frame.logical_origin` /
-        `frame.logical_size` on screen, per SNX-21's acceptance criteria.
+    def _position_over_snip(self, frame: Frame, desktop_frame: Frame) -> None:
+        """Size and place this window so `canvas` ends up covering exactly
+        `frame.logical_origin`/`frame.logical_size` on screen at 1:1 (per
+        SNX-21), while the window itself spans the whole of
+        `desktop_frame.logical_origin`/`logical_size` (per SNX-28) so
+        `paintEvent` has real desktop area outside the snip to dim.
 
         `canvas` is fixed to the frame's own logical size so it draws the
         image at 1:1 with no scaling and no letterbox margin (see
@@ -695,25 +732,101 @@ class Editor(QWidget):
         than inside it — a toolbar docked over the snipped rect would cover
         part of the very image it's editing, trading one dead-click margin
         for another — so this window's own top edge is pushed up by the
-        toolbar's height and only canvas's top edge lands on
-        `logical_origin`.
+        toolbar's height above `desktop_frame`'s top, same reasoning SNX-21
+        applied to the snip's own top before the window covered the whole
+        desktop.
+
+        `self._snip_local_rect`/`self._desktop_local_rect` (window-local
+        logical coordinates) are stashed for `paintEvent` to paint the veil
+        and border against, computed once here rather than re-derived from
+        widget geometry on every paint — mirrors why `Canvas._target_rect`
+        is the only geometry Canvas ever needs, just cached instead of
+        recomputed, since (unlike Canvas) this window's size is fixed once
+        and never resized afterward.
         """
         self.canvas.setFixedSize(
             round(frame.logical_size.width()), round(frame.logical_size.height())
         )
         toolbar_height = self.toolbar.sizeHint().height()
+
+        window_left = round(desktop_frame.logical_origin.x())
+        window_top = round(desktop_frame.logical_origin.y()) - toolbar_height
         self.setGeometry(
-            round(frame.logical_origin.x()),
-            round(frame.logical_origin.y()) - toolbar_height,
-            round(frame.logical_size.width()),
-            round(frame.logical_size.height()) + toolbar_height,
+            window_left,
+            window_top,
+            round(desktop_frame.logical_size.width()),
+            round(desktop_frame.logical_size.height()) + toolbar_height,
         )
-        # setGeometry() alone doesn't guarantee the layout has repositioned
-        # toolbar/canvas by the time this returns -- Qt normally does that
-        # lazily on the next paint/show. Forced here so canvas/toolbar
-        # geometry is correct immediately, since callers (and tests) may
-        # read it before this window is ever shown.
-        self.layout().activate()
+
+        self._snip_local_rect = QRectF(
+            round(frame.logical_origin.x()) - window_left,
+            round(frame.logical_origin.y()) - window_top,
+            round(frame.logical_size.width()),
+            round(frame.logical_size.height()),
+        )
+        self._desktop_local_rect = QRectF(
+            round(desktop_frame.logical_origin.x()) - window_left,
+            toolbar_height,
+            round(desktop_frame.logical_size.width()),
+            round(desktop_frame.logical_size.height()),
+        )
+
+        # Canvas sits exactly on the snip; the toolbar matches the snip's
+        # own width (not the whole, possibly much wider, window) and sits
+        # directly above it -- same relationship SNX-21 established, just
+        # positioned as plain children now instead of via a layout that
+        # would otherwise stretch to fill this larger window.
+        snip_left = round(self._snip_local_rect.left())
+        snip_top = round(self._snip_local_rect.top())
+        self.canvas.move(snip_left, snip_top)
+        self.toolbar.setFixedWidth(round(self._snip_local_rect.width()))
+        self.toolbar.move(snip_left, snip_top - toolbar_height)
+        self.toolbar.resize(self.toolbar.sizeHint().width(), toolbar_height)
+
+    def paintEvent(self, event) -> None:
+        """Paints the desktop this window spans, dimmed everywhere outside
+        the snip, with a border marking the snip's edge -- per SNX-28.
+
+        `canvas`/`toolbar` are ordinary child widgets, painted after this
+        (Qt always paints children on top of their parent), so they cover
+        whatever this draws underneath them completely; the veil and border
+        are never actually visible through either one, and neither is ever
+        part of `canvas.image` or `_rendered_image()`'s output, so they
+        never leak into a copy or save.
+        """
+        painter = QPainter(self)
+        # The base fill covers any window area outside `desktop_frame`
+        # itself (the toolbar-height strip its top edge is pushed up by,
+        # per `_position_over_snip`) -- there are no real desktop pixels to
+        # show there, so it just joins the dimmed veil painted next.
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        painter.drawImage(self._desktop_local_rect, self._desktop_frame.image)
+        self._paint_veil(painter)
+        self._paint_border(painter)
+        painter.end()  # never left open across a pixmap read, per CLAUDE.md
+
+    def _paint_veil(self, painter: QPainter) -> None:
+        """Dims everywhere outside `_snip_local_rect` in one even-odd fill —
+        same technique `Overlay._paint_veil` uses in overlay.py for the same
+        reason: one call can't disagree with itself at the hole's edge the
+        way a separate "dim, then punch a hole" pass could.
+        """
+        widget_rect = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRect(widget_rect)
+        snip_rect = self._snip_local_rect.intersected(widget_rect)
+        if not snip_rect.isEmpty():
+            path.addRect(snip_rect)
+        path.setFillRule(Qt.FillRule.OddEvenFill)
+        painter.fillPath(path, self.VEIL_COLOR)
+
+    def _paint_border(self, painter: QPainter) -> None:
+        """Outlines the snip's edge so it reads as a distinct surface from
+        the dimmed desktop around it, not just a slightly-brighter patch."""
+        pen = QPen(self.BORDER_COLOR, self.BORDER_WIDTH)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self._snip_local_rect)
 
     def _build_tool_actions(self, toolbar: QToolBar) -> None:
         """Populate `self.tool_actions` with one QAction per `Tool` member —

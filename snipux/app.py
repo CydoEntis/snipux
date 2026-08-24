@@ -495,7 +495,12 @@ class AppController:
         # Frame only, and nothing in this ticket needs freeform-aware
         # cropping.
         cropped = frame.crop(rect)
-        self._editor = Editor(cropped)
+        # `frame` (the whole virtual-desktop capture, not just the snip) is
+        # passed as `desktop_frame` too, per SNX-28: it's what lets Editor
+        # dim the screen area outside the snip using real desktop pixels
+        # already in hand, the same veil Overlay paints during selection,
+        # rather than asking the compositor for anything a second time.
+        self._editor = Editor(cropped, frame)
         self._editor.show()
 
     def _on_cancelled(self) -> None:
