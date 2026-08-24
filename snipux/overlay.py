@@ -996,8 +996,8 @@ class FloatingBar(QWidget):
 # colour and stroke are not controls until the user is holding something
 # that draws, which is what keeps the bar itself at eleven groups instead of
 # growing a twelfth for settings that only sometimes apply. tokens.DRAW_TOOLS
-# names the tools that get *this* tray; blur gets a different one (a later
-# ticket) and the eraser gets none at all.
+# names the tools that get *this* tray; blur gets a different one --
+# `BlurTray` below (SNX-42) -- and the eraser gets none at all.
 
 
 class _ToolPill(QWidget):
@@ -1215,7 +1215,7 @@ class SettingsTray(QWidget):
 
     Visible only once `set_tool` is called with a member of
     `tokens.DRAW_TOOLS` -- every other tool (blur, whose own strength/mode
-    tray is a later ticket, and the eraser, which gets no tray at all)
+    tray is `BlurTray` below, and the eraser, which gets no tray at all)
     hides this one outright, per the spec: "colour and stroke are not
     controls until the user is holding something that draws."
 
@@ -1377,6 +1377,250 @@ class SettingsTray(QWidget):
         self._preview.set_preview(QColor(self._colour), diameter)
 
 
+# ---------------------------------------------------------------------------
+# Blur tray (SNX-42)
+# ---------------------------------------------------------------------------
+# docs/design/overlay-redesign.md's "Settings tray" section, "Blur tray"
+# paragraph, is the authority here. It replaces `SettingsTray` outright
+# rather than sitting alongside it -- neither colour nor stroke means
+# anything to an obscuring shape -- with a two-segment Blur/Pixelate toggle,
+# a strength slider/readout and the tool hint. The active segment is the
+# state that decides which of shapes.py's two `ObscuringShape` subclasses a
+# blur drag commits, once that drag-handling itself lands in a later ticket
+# -- mirroring how `SettingsTray`'s colour/stroke already sit unread by any
+# drawing code until their own tool wiring arrives (see `OverlayWindow`'s
+# docstring).
+
+
+class _SegmentButton(QPushButton):
+    """One half of the blur tray's Blur/Pixelate toggle, per the reference's
+    computed `blurBg`/`blurFg` (and `pixBg`/`pixFg`) pair: transparent fill
+    and `ICON_IDLE` text when idle, `ICON_ACTIVE_BG` fill and `ICON_ACTIVE`
+    text when this segment is the tray's current `blur_mode`. A flat
+    `QPushButton` recoloured by stylesheet, the same approach
+    `_CustomColorButton` already uses for its single-state border -- there's
+    only ever one fill/text pair active at a time here, so a hand-painted
+    `paintEvent` (as `_SwatchButton` needs for its two-ring selected state)
+    would be more machinery than this control needs.
+    """
+
+    # Prose-only literals from the reference's inline styles for the two
+    # segment buttons ("padding:6px 11px; border-radius:6px; font:500
+    # 11.5px") -- not tokens.Metric/Font entries, same convention
+    # OverlayWindow's own _CORNER_BRACKET_OFFSET and friends already follow.
+    _RADIUS = 6
+    _PAD_V = 6
+    _PAD_H = 11
+    _FONT_PX = 11.5
+    _FONT_WEIGHT = 500
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setFlat(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        font = QFont(design.font_families().ui)
+        font.setPixelSize(round(self._FONT_PX))
+        font.setWeight(QFont.Weight(self._FONT_WEIGHT))
+        self.setFont(font)
+        self._active = False
+        self._refresh()
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        self._refresh()
+
+    def _refresh(self) -> None:
+        if self._active:
+            bg = design.color("ICON_ACTIVE_BG")
+            fg = design.color("ICON_ACTIVE")
+        else:
+            bg = QColor(0, 0, 0, 0)
+            fg = design.color("ICON_IDLE")
+        self.setStyleSheet(
+            "QPushButton { border: none; border-radius: %dpx; padding: %dpx %dpx;"
+            " background: rgba(%d, %d, %d, %s); color: %s; }"
+            % (
+                self._RADIUS,
+                self._PAD_V,
+                self._PAD_H,
+                bg.red(),
+                bg.green(),
+                bg.blue(),
+                bg.alphaF(),
+                fg.name(),
+            )
+        )
+
+
+class _BlurModeWell(QWidget):
+    """The inset well the two segment buttons sit in -- `#000000` at 35%
+    alpha, radius 8, 2px padding and gap, per the spec's "in a #000000 35%
+    inset well." Paints its own translucent fill the same way `_ToolPill`
+    does, rather than a stylesheet, since a stylesheet fill here would also
+    have to survive being a parent of two more heavily-styled children.
+    """
+
+    _BG_ALPHA = 0.35
+    _RADIUS = 8
+    _PAD = 2
+    _GAP = 2
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(self._PAD, self._PAD, self._PAD, self._PAD)
+        layout.setSpacing(self._GAP)
+
+        self.blur_button = _SegmentButton("Blur", self)
+        layout.addWidget(self.blur_button)
+        self.pixelate_button = _SegmentButton("Pixelate", self)
+        layout.addWidget(self.pixelate_button)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = QColor("#000000")
+        bg.setAlphaF(self._BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
+        painter.end()
+
+
+class BlurTray(QWidget):
+    """The overlay redesign's blur tray: the Blur/Pixelate toggle, a
+    strength slider/readout and the tool hint, per
+    docs/design/overlay-redesign.md's "Blur tray" paragraph.
+
+    Shown in place of `SettingsTray` -- never alongside it -- while the
+    bar's active tool is `'blur'`; see `OverlayWindow._sync_tray_visibility`.
+    Unlike `SettingsTray`, there is only ever one tool this tray applies to,
+    so it carries no `set_tool` of its own.
+    """
+
+    blurModeChanged = pyqtSignal(str)
+    strengthChanged = pyqtSignal(int)
+
+    # The reference's strength readout is a narrower `min-width:20px` than
+    # SettingsTray's own 34px -- a plain number ("8") never runs as wide as
+    # a stroke's "26px" -- so this is its own literal, not
+    # SettingsTray._READOUT_MIN_W reused.
+    _READOUT_MIN_W = 20
+
+    # The "Strength" label's own font, per the reference's "font:400 11px" --
+    # distinct from tokens.Font.TRAY_HINT (11.5px), which the hint text at
+    # the tray's far end still uses.
+    _STRENGTH_LABEL_PX = 11
+    _STRENGTH_LABEL_WEIGHT = 400
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        metric = design.tokens.Metric
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(
+            metric.TRAY_PAD_H, metric.TRAY_PAD_V, metric.TRAY_PAD_H, metric.TRAY_PAD_V
+        )
+        layout.setSpacing(metric.TRAY_GAP)
+
+        # No dividers in this tray, unlike SettingsTray -- the reference's
+        # own isBlur markup never places one between the well, the strength
+        # controls and the hint, just the same 12px flex gap throughout.
+        self._blur_mode: str = "blur"
+        self._strength: int = metric.BLUR_DEFAULT
+
+        self._well = _BlurModeWell(self)
+        self._well.blur_button.clicked.connect(lambda: self.set_blur_mode("blur"))
+        self._well.pixelate_button.clicked.connect(lambda: self.set_blur_mode("pix"))
+        layout.addWidget(self._well)
+
+        self._strength_label = QLabel("Strength", self)
+        label_font = QFont(design.font_families().ui)
+        label_font.setPixelSize(self._STRENGTH_LABEL_PX)
+        label_font.setWeight(QFont.Weight(self._STRENGTH_LABEL_WEIGHT))
+        self._strength_label.setFont(label_font)
+        self._strength_label.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
+        layout.addWidget(self._strength_label)
+
+        self._slider = QSlider(Qt.Orientation.Horizontal, self)
+        self._slider.setRange(metric.BLUR_MIN, metric.BLUR_MAX)
+        self._slider.setValue(self._strength)
+        self._slider.setFixedWidth(metric.SLIDER_W)
+        self._slider.valueChanged.connect(self.set_strength)
+        layout.addWidget(self._slider)
+
+        self._readout = QLabel(self)
+        self._readout.setMinimumWidth(self._READOUT_MIN_W)
+        font = QFont(design.font_families().mono)
+        size, weight = design.tokens.Font.READOUT
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight(weight))
+        self._readout.setFont(font)
+        self._readout.setStyleSheet(f"color: {design.color('TEXT_READOUT').name()};")
+        layout.addWidget(self._readout)
+
+        self._hint = QLabel(self)
+        hint_font = QFont(design.font_families().ui)
+        size, weight = design.tokens.Font.TRAY_HINT
+        hint_font.setPixelSize(round(size))
+        hint_font.setWeight(QFont.Weight(weight))
+        self._hint.setFont(hint_font)
+        self._hint.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
+        self._hint.setText(design.tokens.TOOL_HINTS.get("blur", ""))
+        layout.addWidget(self._hint)
+
+        self._select_segment(self._blur_mode)
+        self._refresh_readout()
+
+    # -- state ---------------------------------------------------------
+
+    @property
+    def blur_mode(self) -> str:
+        return self._blur_mode
+
+    @property
+    def strength(self) -> int:
+        return self._strength
+
+    def set_blur_mode(self, mode: str) -> None:
+        """Set the active segment -- `'blur'` or `'pix'` -- deselecting the
+        other one so exactly one always reads as active, per the spec's
+        "exactly one segment reads as active." This is the state that
+        decides which of shapes.py's `Blur`/`Pixelate` a drag commits, per
+        the spec's "the toggle chooses which of the two obscuring shapes a
+        drag commits."
+        """
+        self._blur_mode = mode
+        self._select_segment(mode)
+        self.blurModeChanged.emit(mode)
+
+    def set_strength(self, strength: int) -> None:
+        """Set the current blur strength, clamped to `tokens.Metric`'s
+        `BLUR_MIN`/`BLUR_MAX` range, and refresh the readout.
+        """
+        metric = design.tokens.Metric
+        strength = max(metric.BLUR_MIN, min(strength, metric.BLUR_MAX))
+        self._strength = strength
+        if self._slider.value() != strength:
+            self._slider.setValue(strength)
+        self._refresh_readout()
+        self.strengthChanged.emit(strength)
+
+    def _select_segment(self, mode: str) -> None:
+        self._well.blur_button.set_active(mode == "blur")
+        self._well.pixelate_button.set_active(mode == "pix")
+
+    def _refresh_readout(self) -> None:
+        self._readout.setText(str(self._strength))
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -1399,15 +1643,21 @@ class OverlayWindow(QWidget):
     exist. SNX-40 adds `FloatingBar` itself as a real child widget (`_bar`),
     wired to `undo`/`redo`/`clear`/`copy`/`save` and to `set_eraser_active`,
     and kept positioned under `_selection` by `_sync_bar_visibility`.
-    SNX-41 (this ticket) adds `SettingsTray` (`_tray`), shown and positioned
-    under the bar by `_sync_tray_visibility` only while the bar's active
-    tool is one of `tokens.DRAW_TOOLS` -- the eraser (and, for now, blur,
-    whose own tray is a later ticket) gets none -- and tracks the colour/
-    stroke it emits as `_ink_colour`/`_stroke_width` for a later ticket's
-    drawing tools to read. The drawing-tool mouse handling that would
-    actually call `add_mark` from a live drag -- for every tool but the
-    eraser, which SNX-38 already wired end to end -- is still a later
-    ticket in the same arc.
+    SNX-41 adds `SettingsTray` (`_tray`), shown and positioned under the
+    bar by `_sync_tray_visibility` only while the bar's active tool is one
+    of `tokens.DRAW_TOOLS` -- the eraser gets none -- and tracks the
+    colour/stroke it emits as `_ink_colour`/`_stroke_width` for a later
+    ticket's drawing tools to read. SNX-42 (this ticket) adds `BlurTray`
+    (`_blur_tray`) alongside it: `_sync_tray_visibility` shows at most one
+    of the two, `_blur_tray` while the active tool is `'blur'`, per the
+    spec's "It replaces the colour and stroke tray rather than sitting
+    alongside it" -- and tracks the toggle/slider it emits as
+    `_blur_mode`/`_blur_strength`, the same way `_tray` does for colour and
+    stroke. The drawing-tool mouse handling that would actually call
+    `add_mark` from a live drag -- for every tool but the eraser, which
+    SNX-38 already wired end to end -- is still a later ticket in the same
+    arc; `_blur_mode` is what that ticket reads to decide which of
+    shapes.py's `Blur`/`Pixelate` a blur drag commits.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -1541,6 +1791,21 @@ class OverlayWindow(QWidget):
         self._tray.colourChanged.connect(self._on_ink_colour_changed)
         self._tray.strokeChanged.connect(self._on_stroke_width_changed)
 
+        # The blur tray (SNX-42): `_tray`'s replacement, not its
+        # companion, while the active tool is 'blur' -- see
+        # `_sync_tray_visibility`, which shows at most one of the two.
+        # `_blur_mode`/`_blur_strength` are tracked the same way
+        # `_ink_colour`/`_stroke_width` are above -- unread by any drawing
+        # code until the later ticket that wires a live blur drag to
+        # actually call `add_mark` reads them to decide which of
+        # shapes.py's Blur/Pixelate to commit.
+        self._blur_mode: str = "blur"
+        self._blur_strength: int = design.tokens.Metric.BLUR_DEFAULT
+        self._blur_tray = BlurTray(self)
+        self._blur_tray.hide()
+        self._blur_tray.blurModeChanged.connect(self._on_blur_mode_changed)
+        self._blur_tray.strengthChanged.connect(self._on_blur_strength_changed)
+
     def set_selection(self, rect: QRect | None) -> None:
         """Set the current selection (window coordinates) and repaint."""
         self._selection = rect
@@ -1569,6 +1834,16 @@ class OverlayWindow(QWidget):
     def _on_stroke_width_changed(self, stroke: int) -> None:
         self._stroke_width = stroke
 
+    def _on_blur_mode_changed(self, mode: str) -> None:
+        """Track the blur tray's active segment -- 'blur' or 'pix' -- for
+        the still-later ticket that wires a live blur drag to read it when
+        deciding which of shapes.py's Blur/Pixelate to commit.
+        """
+        self._blur_mode = mode
+
+    def _on_blur_strength_changed(self, strength: int) -> None:
+        self._blur_strength = strength
+
     def _sync_bar_visibility(self) -> None:
         """Show/hide and reposition the floating bar to match `_selection`.
 
@@ -1587,34 +1862,55 @@ class OverlayWindow(QWidget):
         else:
             self._bar.hide()
             self._tray.hide()
+            self._blur_tray.hide()
 
     def _sync_tray_visibility(self) -> None:
-        """Show/hide and reposition the settings tray under the bar.
+        """Show/hide and reposition whichever settings tray -- draw or
+        blur -- matches the bar's active tool, keeping the other hidden.
+
+        At most one of `_tray`/`_blur_tray` is ever visible at once, per
+        the spec's "It replaces the colour and stroke tray rather than
+        sitting alongside it" -- neither colour nor stroke means anything
+        to an obscuring shape, so blur gets `_blur_tray` in `_tray`'s place
+        rather than a row added to it.
 
         Gated on the bar's own visibility rather than re-checking
         `_selection`/`self.isVisible()` directly -- the bar is already the
         single source of truth for "is this window's chrome allowed to be
-        on screen right now," and the tray sits directly below it, so
+        on screen right now," and the trays sit directly below it, so
         piggybacking on that check is what keeps the two from being able to
         disagree.
         """
         tool = self._bar.active_tool
-        if self._bar.isVisible() and tool in design.tokens.DRAW_TOOLS:
+        if not self._bar.isVisible():
+            self._tray.hide()
+            self._blur_tray.hide()
+            return
+
+        if tool in design.tokens.DRAW_TOOLS:
+            self._blur_tray.hide()
             self._tray.set_tool(tool)
-            self._reposition_tray()
+            self._reposition_tray(self._tray)
+        elif tool == "blur":
+            self._tray.hide()
+            self._blur_tray.show()
+            self._reposition_tray(self._blur_tray)
         else:
             self._tray.hide()
+            self._blur_tray.hide()
 
-    def _reposition_tray(self) -> None:
-        """Centre the tray under the bar, `TRAY_OFFSET_Y` below it -- per
-        the spec's "Sits 8px below the bar, centred on it."
+    def _reposition_tray(self, tray: QWidget) -> None:
+        """Centre `tray` under the bar, `TRAY_OFFSET_Y` below it -- per the
+        spec's "Sits 8px below the bar, centred on it." Shared by `_tray`
+        and `_blur_tray`, which `_sync_tray_visibility` never shows at the
+        same time.
         """
         metric = design.tokens.Metric
         bar_geometry = self._bar.geometry()
-        size = self._tray.sizeHint()
+        size = tray.sizeHint()
         center_x = bar_geometry.center().x()
         top = bar_geometry.bottom() + metric.TRAY_OFFSET_Y
-        self._tray.setGeometry(
+        tray.setGeometry(
             round(center_x - size.width() / 2), round(top), size.width(), size.height()
         )
 
