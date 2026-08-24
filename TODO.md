@@ -1,19 +1,28 @@
-# Next: the overlay redesign
+# Next: try the redesign on real hardware
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
+
+The overlay redesign is **built and merged** — SNX-30 through SNX-52, four
+pull requests (#11–#14). It has never been run on a real screen.
 
 Spec: `docs/design/overlay-redesign.md` (open
 `docs/design/Snipux Overlay.dc.html` in Chrome — it is interactive and is the
 behavioural authority). Tokens: `snipux/design/tokens.py`.
 
-## Resume with
+## What to do next
 
-    punch work SNX-30
+Install on the VM and use it for ten minutes:
 
-Five tickets, SNX-30..SNX-34, one integration branch, worked in order.
+    bash packaging/install.sh
+    snipux            # or Super+Shift+S
 
-## Two deviations from the handoff — deliberate, do not revert
+Everything below the line is a guess until that happens. All 540 tests run
+with `QT_QPA_PLATFORM=offscreen`, which paints without a compositor — so
+nothing in this repo has yet proven the overlay looks right, sits at the
+right size, or lands on top of other windows on a live Wayland session.
+
+## Three deviations from the handoff — deliberate, do not revert
 
 **Capture never uses `QScreen.grabWindow(0)`.** The spec says to; it returns
 black on Wayland, which is the entire reason `capture.py` has a portal backend
@@ -25,31 +34,35 @@ unsnippable, and those are core uses. The bar and chips are positioned relative
 to the selection, so a small selection is only a layout problem, not a broken
 one.
 
-## Still to write — 13 tickets, not yet in Linear
-
-**PR 2 — tools & ink** (5)
-Pen/highlighter/arrow/rect to the design's geometry (highlighter x3.5 at 34%
-alpha; arrow head maths) · step badges and text labels · blur and pixelate with
-strength, destructive on export · eraser hit-testing, topmost mark wins ·
-undo/redo/clear semantics plus the copy/save pipeline to `~/Pictures/snipux`.
-
-**PR 3 — chrome & modes** (8)
-Floating bar · settings tray, visible only while a drawing tool is held · blur
-tray variant · dimension chip and Frozen pill · capture-mode popover and delay ·
-toasts · top hint HUD · keyboard shortcuts with suppression while text or a
-slider has focus. Then Window, Full-screen and Freeform modes.
+**Text labels commit in two stages, not on the click.** The spec says a click
+drops a label. A click opens a focused editor; the mark lands when the text is
+finished, and an empty label is discarded. Committing on the click alone would
+leave an empty chip behind every stray click.
 
 ## Known, unticketed
 
-`BackendRegistry.capture()` reports an empty failure list as
-`no capture backend is available` — good — but the wording was written before
-anyone had seen it on a bare machine. Worth re-reading after the redesign.
+**`overlay.py` is 4,475 lines.** It is one coherent widget tree — the window,
+the bar, both trays, the popover, the HUD, the toast and every custom button —
+but it is now by far the biggest file here, and this codebase is meant to stay
+readable. Splitting the chrome widgets into `snipux/chrome.py` is the obvious
+first cut, and worth doing before the next feature lands on top of it.
 
-IBM Plex is not vendored; SNX-30 falls back to a system family. Drop the OFL
-`.ttf` files into `snipux/design/fonts/` to get the intended type.
+**Esc is two-stage** — first press discards ink, second closes the overlay with
+no capture. That was a decision the spec left open. It reads well in a test and
+may feel wrong in the hand; it is a one-line change either way.
+
+IBM Plex is not vendored, so the app falls back to a system sans and mono. Drop
+the OFL `.ttf` files into `snipux/design/fonts/` to get the intended type — the
+loader already looks for them.
+
+`BackendRegistry.capture()` reports an empty failure list as
+`no capture backend is available`, which was written before anyone had seen it
+on a bare machine.
 
 ## What has never been tested
 
-Anything on a machine that is not the VirtualBox VM. In particular: multiple
-monitors, fractional scaling, and X11. The work box on Monday is the first
-real test of all three.
+Anything on a machine that is not the VirtualBox VM: **multiple monitors,
+fractional scaling, and X11**. The work box is the first real test of all three.
+
+Freeform, Window, Full screen and the capture delay have never been run against
+a live compositor either — only against a synthetic frame.
