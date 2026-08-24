@@ -4,14 +4,20 @@ import pytest
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSizeF, Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 from snipux.capture import Frame, X11WindowGeometryProvider
+from snipux.design import color as design_color
+from snipux.design import tokens
+from snipux.shapes import Rectangle
 from snipux.overlay import (
     GeometryProvider,
+    Handle,
     Overlay,
+    OverlayWindow,
     SelectionMode,
     UnsupportedGeometryProvider,
+    _HANDLE_CURSORS,
     create_overlays,
 )
 
@@ -37,6 +43,20 @@ def make_frame(
         image=image,
         logical_origin=QPointF(*logical_origin),
         logical_size=QSizeF(*logical_size),
+    )
+
+
+def _blend(base: QColor, fg: QColor) -> QColor:
+    """Plain-Python src-over compositing of `fg` (with its own alpha) atop
+    an opaque `base`, to compute what the scrim should look like without
+    depending on Qt's own compositor -- what TestOverlayWindow's scrim test
+    checks its render against.
+    """
+    a = fg.alphaF()
+    return QColor(
+        round(base.red() * (1 - a) + fg.red() * a),
+        round(base.green() * (1 - a) + fg.green() * a),
+        round(base.blue() * (1 - a) + fg.blue() * a),
     )
 
 
@@ -566,3 +586,544 @@ class TestFullScreenMode:
             # itself has no dimmed hole anywhere.
             for x, y in [(10, 190), (100, 100), (190, 190)]:
                 assert rendered.pixelColor(x, y) == base_color
+
+
+class TestOverlayWindow:
+    """The redesign's shell (SNX-31): a single window over the whole
+    virtual desktop, not one per monitor -- see OverlayWindow's docstring
+    for how this differs from `Overlay` above.
+    """
+
+    def test_frameless_always_on_top_and_covers_the_virtual_desktop(self):
+        frame = make_frame(
+            image_size=(300, 200), logical_size=(300, 200), logical_origin=(50, 20)
+        )
+
+        overlay = OverlayWindow(frame)
+
+        flags = overlay.windowFlags()
+        assert flags & Qt.WindowType.FramelessWindowHint
+        assert flags & Qt.WindowType.WindowStaysOnTopHint
+        assert overlay.geometry() == QRect(50, 20, 300, 200)
+
+    def test_paints_the_captured_frame_as_the_background(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(70, 70) == QColor(10, 20, 30)
+
+    def test_selection_is_undimmed_at_1_to_1(self):
+        # image_size == logical_size (no scaling), so the undimmed hole
+        # should show exactly the base colour, pixel for pixel. Sampled
+        # away from the corners/edges (since SNX-32's frame chrome now
+        # legitimately paints over those, per the "frame stroke, handles"
+        # layer in the spec's layer list) -- this test is about the
+        # interior, not the frame, which TestCornerBrackets/TestEdgeHandles
+        # cover.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        rendered = overlay.grab().toImage()
+
+        for x, y in [(60, 60), (75, 75), (90, 90)]:
+            assert rendered.pixelColor(x, y) == QColor(10, 20, 30)
+
+    def test_scrim_outside_selection_uses_the_dim_token_colour_and_alpha(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        rendered = overlay.grab().toImage()
+        expected = _blend(QColor(10, 20, 30), design_color("DIM"))
+        sampled = rendered.pixelColor(10, 10)
+
+        # Small tolerance for Qt's own (premultiplied-alpha) rounding vs.
+        # the plain-float blend computed in _blend above.
+        assert sampled.red() == pytest.approx(expected.red(), abs=2)
+        assert sampled.green() == pytest.approx(expected.green(), abs=2)
+        assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
+
+    def test_no_selection_dims_the_whole_window(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+
+        rendered = overlay.grab().toImage()
+        base_color = QColor(10, 20, 30)
+
+        for x, y in [(10, 10), (100, 100), (190, 190)]:
+            assert rendered.pixelColor(x, y) != base_color
+
+    def test_selection_is_held_in_window_not_absolute_coordinates(self):
+        # logical_origin != (0, 0) simulates a monitor away from the
+        # virtual desktop's own top-left. If the selection were (mis)read
+        # as an absolute virtual-desktop rect -- the way `Overlay` above
+        # uses it -- this window-local selection would land nowhere near
+        # (0, 0) inside this widget and the corner would stay dimmed.
+        frame = make_frame(
+            image_size=(200, 200), logical_size=(200, 200), logical_origin=(500, 300)
+        )
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 50, 50))
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(10, 10) == QColor(10, 20, 30)
+
+    def test_scrim_is_painted_by_the_widget_itself_not_a_child_widget(self):
+        # Per the spec: a translucent child stacked over the whole window
+        # would sit above the ink layer and eat its mouse events, so
+        # nothing here should be a child widget covering the window.
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+
+        assert overlay.findChildren(QWidget) == []
+
+
+class TestOverlayWindowMarks:
+    """SNX-34: marks live in this window's own coordinates and are clipped
+    to the selection at paint time -- never made selection-relative, and
+    never deleted just because a re-frame currently hides them.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _mark(self, start, end, colour=None):
+        return Rectangle(
+            colour=colour or self.RED, stroke_width=6, start=QPointF(*start), end=QPointF(*end)
+        )
+
+    def test_add_mark_stores_it_unmodified_in_window_coordinates(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        mark = self._mark((30, 30), (50, 50))
+
+        overlay.add_mark(mark)
+
+        # Same object, same points -- add_mark never rewrites them relative
+        # to the selection, which is the whole point of this coordinate
+        # convention per the class/module docstrings.
+        assert overlay.marks == (mark,)
+        assert overlay.marks[0].start == QPointF(30, 30)
+
+    def test_marks_is_a_snapshot_not_a_view_of_the_live_list(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+
+        snapshot = overlay.marks
+        overlay.add_mark(self._mark((20, 20), (30, 30)))
+
+        assert len(snapshot) == 1  # unaffected by the add_mark() call after it
+        assert len(overlay.marks) == 2
+
+    def test_paints_a_mark_inside_the_selection(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(self._mark((20, 20), (80, 80)))
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(20, 50) == self.RED  # left border
+
+    def test_mark_outside_the_selection_is_clipped_not_painted(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(100, 100, 50, 50))
+        overlay.add_mark(self._mark((10, 10), (30, 30)))
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(20, 20) != self.RED
+
+    def test_mark_reappears_once_the_selection_grows_back_over_it(self):
+        # The mark was never deleted by the clip above -- it was only
+        # hidden -- so widening the selection back over it must show it
+        # again with no further calls into the ink layer.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(100, 100, 50, 50))
+        overlay.add_mark(self._mark((10, 10), (30, 30)))
+        overlay.grab()  # one paint pass while hidden by the narrow selection
+
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(10, 20) == self.RED  # left border
+
+    def test_reframing_leaves_a_mark_over_the_same_content(self):
+        # A mark drawn inside the selection must stay over the same pixels
+        # after the selection is re-framed -- the whole reason ink moved out
+        # of selection-relative coordinates. Growing the selection (same
+        # top-left) must not shift where the mark's own left border paints.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 100, 100))
+        overlay.add_mark(self._mark((20, 20), (40, 40)))
+
+        before = overlay.grab().toImage().pixelColor(20, 30)
+
+        overlay.set_selection(QRect(0, 0, 150, 150))
+        after = overlay.grab().toImage().pixelColor(20, 30)
+
+        assert before == self.RED
+        assert after == self.RED
+
+    def test_rendered_image_positions_marks_by_the_selection_origin(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 100, 100))
+        overlay.add_mark(self._mark((60, 60), (90, 90)))
+
+        result = overlay.rendered_image()
+
+        assert result.width() == 100
+        assert result.height() == 100
+        # (60, 60) in window coordinates is (10, 10) inside the crop.
+        assert result.pixelColor(10, 20) == self.RED
+
+
+class TestSelectionStroke:
+    """SNX-32: the two coincident 1px strokes -- solid white under an
+    animated dashed dark one -- that make the marching ants.
+    """
+
+    def test_uses_the_dash_pattern_and_colours_from_tokens(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(10, 10, 50, 50))
+
+        solid, dashed = overlay._stroke_pens()
+
+        assert solid.color() == design_color("SEL_STROKE")
+        assert solid.widthF() == tokens.Metric.SEL_STROKE_W
+        assert dashed.color() == design_color("SEL_ANTS")
+        assert dashed.dashPattern() == list(tokens.Metric.ANTS_DASH)
+        assert dashed.dashOffset() == 0.0
+
+    def test_renders_both_the_solid_and_dashed_layers(self):
+        # Sampled in the gap between the corner bracket and the edge handle
+        # (computed from their own geometry, not a hardcoded pixel), so this
+        # is reading pure stroke -- not the opaque white chrome painted over
+        # it elsewhere on the same edge.
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 100, 80))
+
+        bracket_right = round(overlay._bracket_path(Handle.TOP_LEFT).boundingRect().right())
+        handle_left = round(overlay._edge_handle_rect(Handle.TOP).left())
+        assert bracket_right < handle_left  # otherwise there's no gap to sample
+
+        rendered = overlay.grab().toImage()
+        row = [
+            rendered.pixelColor(x, 50).getRgb()[:3]
+            for x in range(bracket_right, handle_left)
+        ]
+
+        white = design_color("SEL_STROKE")
+        dark = design_color("SEL_ANTS")
+        # Not exact-equality: the white layer blends with the frozen frame
+        # underneath at 92% alpha (SEL_STROKE_ALPHA), so only the dark,
+        # fully-opaque dash colour survives compositing unchanged.
+        assert any(c[0] > white.red() - 40 for c in row), row  # a light/white sample
+        assert any(abs(c[0] - dark.red()) < 5 for c in row), row  # a dark sample
+
+    def test_ants_offset_advances_each_tick_and_wraps_at_the_dash_cycle(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(10, 10, 50, 50))
+        cycle = sum(tokens.Metric.ANTS_DASH)
+
+        offsets = [overlay._dash_offset]
+        for _ in range(cycle * 3):
+            overlay._advance_ants()
+            offsets.append(overlay._dash_offset)
+
+        assert offsets[1] != offsets[0]
+        assert all(0 <= o < cycle for o in offsets)
+        # The pen actually used for painting picks up the new offset too --
+        # advancing state that nothing reads would be a silent no-op.
+        assert overlay._stroke_pens()[1].dashOffset() == overlay._dash_offset
+
+    def test_ants_timer_runs_only_while_the_overlay_is_visible(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(10, 10, 50, 50))
+
+        assert not overlay._ants_timer.isActive()
+
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._ants_timer.isActive()
+
+        overlay.hide()
+        assert not overlay._ants_timer.isActive()
+
+
+class TestCornerBrackets:
+    """SNX-32: the L-shaped corner brackets, which double as the corner
+    handles' only visible chrome.
+    """
+
+    SEL = QRect(50, 50, 100, 80)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SEL)
+        return overlay
+
+    @pytest.mark.parametrize(
+        "handle",
+        [Handle.TOP_LEFT, Handle.TOP_RIGHT, Handle.BOTTOM_LEFT, Handle.BOTTOM_RIGHT],
+    )
+    def test_bracket_bounds_are_the_arm_length_straddling_the_corner(self, handle):
+        overlay = self._overlay()
+        sel = QRectF(self.SEL)
+        offset = overlay._CORNER_BRACKET_OFFSET
+        length = tokens.Metric.CORNER_LEN
+
+        bounds = overlay._bracket_path(handle).boundingRect()
+
+        assert bounds.width() == pytest.approx(length)
+        assert bounds.height() == pytest.approx(length)
+        expected_left = sel.left() - offset if "left" in handle.value else sel.right() + offset - length
+        expected_top = sel.top() - offset if "top" in handle.value else sel.bottom() + offset - length
+        assert bounds.left() == pytest.approx(expected_left)
+        assert bounds.top() == pytest.approx(expected_top)
+
+    def test_bracket_arms_are_painted_at_the_token_thickness(self):
+        # Along the top-left bracket's horizontal arm, a row inside the
+        # bracket's box should be solid white for exactly CORNER_W pixels
+        # before falling back to the (dimmed) background.
+        overlay = self._overlay()
+        rendered = overlay.grab().toImage()
+
+        box_left = round(overlay._bracket_path(Handle.TOP_LEFT).boundingRect().left())
+        white_rows = 0
+        for y in range(box_left, box_left + tokens.Metric.CORNER_LEN):
+            # Sample a column comfortably inside the arm's length, away from
+            # the rounded tip and the inner elbow.
+            if rendered.pixelColor(self.SEL.left() + 15, y) == QColor(255, 255, 255):
+                white_rows += 1
+        assert white_rows == tokens.Metric.CORNER_W
+
+
+class TestEdgeHandles:
+    """SNX-32: the rounded bar handle centred on each edge."""
+
+    SEL = QRect(50, 50, 100, 80)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SEL)
+        return overlay
+
+    def test_dimensions_match_tokens_and_are_centred_on_the_edge(self):
+        overlay = self._overlay()
+        sel = QRectF(self.SEL)
+        long_, short = tokens.Metric.HANDLE_LONG, tokens.Metric.HANDLE_SHORT
+
+        top = overlay._edge_handle_rect(Handle.TOP)
+        assert (top.width(), top.height()) == (long_, short)
+        assert top.center().x() == pytest.approx(sel.center().x())
+
+        left = overlay._edge_handle_rect(Handle.LEFT)
+        assert (left.width(), left.height()) == (short, long_)
+        assert left.center().y() == pytest.approx(sel.center().y())
+
+    def test_handle_is_painted_white_at_its_centre(self):
+        overlay = self._overlay()
+        rendered = overlay.grab().toImage()
+
+        for handle in (Handle.TOP, Handle.BOTTOM, Handle.LEFT, Handle.RIGHT):
+            center = overlay._edge_handle_rect(handle).center()
+            sampled = rendered.pixelColor(round(center.x()), round(center.y()))
+            assert sampled == QColor(255, 255, 255), handle
+
+
+class TestHandleCursors:
+    """SNX-32: hovering a handle previews the direction it resizes in."""
+
+    SEL = QRect(50, 50, 100, 80)
+
+    def _shown_overlay(self):
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SEL)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    @pytest.mark.parametrize(
+        "point, handle",
+        [
+            (QPoint(50, 50), Handle.TOP_LEFT),
+            (QPoint(150, 50), Handle.TOP_RIGHT),
+            (QPoint(50, 130), Handle.BOTTOM_LEFT),
+            (QPoint(150, 130), Handle.BOTTOM_RIGHT),
+            (QPoint(100, 50), Handle.TOP),
+            (QPoint(100, 130), Handle.BOTTOM),
+            (QPoint(50, 90), Handle.LEFT),
+            (QPoint(150, 90), Handle.RIGHT),
+        ],
+    )
+    def test_cursor_matches_the_handles_resize_direction(self, point, handle):
+        overlay = self._shown_overlay()
+
+        QTest.mouseMove(overlay, point)
+
+        assert overlay.cursor().shape() == _HANDLE_CURSORS[handle]
+
+    def test_cursor_resets_away_from_any_handle(self):
+        overlay = self._shown_overlay()
+
+        QTest.mouseMove(overlay, QPoint(50, 50))
+        assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor
+
+        QTest.mouseMove(overlay, QPoint(100, 90))  # deep inside the selection
+        assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+
+class TestReframing:
+    """SNX-33: dragging a handle re-frames the live selection, per
+    docs/design/overlay-redesign.md's "Re-framing" section -- with the
+    ticket's one deliberate deviation from that spec: the minimum size is
+    16x16 (`tokens.Metric.SEL_MIN_W/H`), not the spec's 200x140.
+    """
+
+    def _overlay(self, size=(400, 400)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        return overlay
+
+    def _drag(self, overlay, press_pos, move_pos):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press_pos)
+        QTest.mouseMove(overlay, move_pos)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=move_pos)
+
+    def test_dragging_an_edge_handle_moves_only_that_edge(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._edge_handle_rect(Handle.TOP).center().toPoint()
+
+        self._drag(overlay, press, QPoint(175, 60))
+
+        sel = overlay._selection
+        # Top moved to the drag target; every other edge -- in particular
+        # the opposite (bottom) edge -- is exactly where it started.
+        assert (sel.x(), sel.y()) == (100, 60)
+        assert (sel.width(), sel.height()) == (150, 140)
+
+    def test_dragging_a_corner_moves_both_its_edges_opposite_corner_fixed(self):
+        # A generous window, so the floating-bar clamp (covered on its own
+        # below) doesn't also kick in here and muddy what this test is
+        # checking.
+        overlay = self._overlay(size=(500, 500))
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.BOTTOM_RIGHT).center().toPoint()
+
+        self._drag(overlay, press, QPoint(320, 280))
+
+        sel = overlay._selection
+        # Top-left corner (the anchor for a bottom-right drag) is untouched.
+        assert (sel.x(), sel.y()) == (100, 100)
+        assert (sel.width(), sel.height()) == (220, 180)
+
+    def test_drag_cannot_shrink_below_the_minimum_size_in_tokens(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+
+        # Dragged well past the left (anchor) edge, which would invert the
+        # rect if nothing stopped it.
+        self._drag(overlay, press, QPoint(50, 150))
+
+        sel = overlay._selection
+        assert sel.x() == 100  # anchor edge never moved
+        assert sel.width() == tokens.Metric.SEL_MIN_W == 16
+
+    def test_drag_keeps_the_selection_clear_of_the_left_and_top_edges(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        self._drag(overlay, press, QPoint(-50, -50))
+
+        sel = overlay._selection
+        assert sel.x() == 0  # x >= 0
+        assert sel.y() == 52  # y >= 52, clear of the hint HUD
+
+    def test_drag_keeps_the_selection_inside_the_window(self):
+        overlay = self._overlay(size=(400, 400))
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.BOTTOM_RIGHT).center().toPoint()
+
+        self._drag(overlay, press, QPoint(900, 900))
+
+        sel = overlay._selection
+        assert sel.x() + sel.width() <= overlay.width()
+        assert sel.y() + sel.height() <= overlay.height()
+        # The floating-bar clamp is the tighter of the two bottom bounds
+        # here, so it's the one actually reached.
+        assert sel.y() + sel.height() == overlay.height() - overlay._BAR_ROOM
+
+    def test_bar_room_clamp_gives_way_to_the_minimum_rather_than_the_reverse(self):
+        # A selection already pinned near the bottom of a short window: the
+        # floating-bar clamp alone would force the selection below the
+        # minimum height. Per the ticket, the minimum wins -- the bar-room
+        # clamp is skipped rather than shrinking the selection further.
+        overlay = self._overlay(size=(200, 200))
+        overlay.set_selection(QRect(20, 170, 100, 16))
+        bar_limit = overlay.height() - overlay._BAR_ROOM
+        assert bar_limit < 170 + tokens.Metric.SEL_MIN_H  # the clamp would conflict
+        press = overlay._edge_handle_rect(Handle.BOTTOM).center().toPoint()
+
+        self._drag(overlay, press, QPoint(70, 195))
+
+        sel = overlay._selection
+        assert sel.y() == 170  # anchor (top) never moved
+        assert sel.height() == 25  # 195 - 170, not clamped down to bar_limit
+        assert sel.y() + sel.height() > bar_limit
+
+
+class TestHandlePressDoesNotStartAStroke:
+    """SNX-33: "Handle presses must not start a stroke -- stop event
+    propagation at the handle." OverlayWindow has no drawing/ink of its own
+    yet (a later ticket), so this asserts the boundary the spec calls for:
+    a handle hit is consumed as a resize and nothing else, while a miss
+    leaves no resize state behind for a future stroke-start to trip over.
+    """
+
+    def _overlay(self):
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 100, 80))
+        return overlay
+
+    def test_press_on_a_handle_starts_a_resize_not_a_stroke(self):
+        overlay = self._overlay()
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+
+        assert overlay._active_handle is Handle.TOP_LEFT
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=press)
+        assert overlay._active_handle is None
+
+    def test_press_away_from_every_handle_starts_no_resize(self):
+        overlay = self._overlay()
+        original = QRect(overlay._selection)
+
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 90)
+        )  # deep inside the selection, nowhere near a handle
+
+        assert overlay._active_handle is None
+        assert overlay._selection == original
