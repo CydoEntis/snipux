@@ -7,17 +7,25 @@ destructive editing, and correct blur/pixelate later, and it is what lets the
 same shape list back both the editor's live preview and, eventually, the
 final saved image.
 
-Every coordinate stored on a `Shape` is in **image-pixel** coordinates — the
-same space `Canvas.widget_to_image` produces — never widget-local or logical
-screen coordinates. Per CLAUDE.md's coordinate-space convention, this is
-stated once here rather than re-derived per shape.
+`Shape` itself is coordinate-space agnostic — just a bag of `QPointF`s a
+`QPainter` draws — but each of its two callers commits to one space and never
+mixes them within itself: `Canvas` (editor.py) stores **image-pixel**
+coordinates, the same space `Canvas.widget_to_image` produces. `OverlayWindow`
+(overlay.py) stores **overlay-window** coordinates instead — local to that
+widget's own top-left, the same space its `_selection` already lives in — per
+docs/design/overlay-redesign.md's "Ink lives in screen coordinates": marks
+never move when the selection is re-framed, only the clip rect drawn over
+them does. `render_selection()` below is what bridges that second convention
+back to image-pixel space, once, at export. Per CLAUDE.md's coordinate-space
+convention, each caller's choice is stated once here rather than re-derived
+per shape.
 """
 
 from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import ClassVar
 
 from PyQt6.QtCore import Qt, QPointF, QRect, QRectF, QSizeF
@@ -28,7 +36,8 @@ from snipux.capture import Frame
 
 @dataclass
 class Shape(ABC):
-    """Base of the annotation data model. Coordinates are image-pixel space.
+    """Base of the annotation data model. Coordinates are in whichever space
+    the caller committed to — see the module docstring.
 
     Plain dataclasses, not QWidget/QPainter subclasses, so instances stay
     trivially testable and (de)serializable for the later undo/redo ticket.
@@ -477,3 +486,61 @@ def apply_crop(frame: Frame, shapes: list[Shape], crop_rect: QRectF) -> Frame:
         logical_origin=new_logical_origin,
         logical_size=new_logical_size,
     )
+
+
+def _transformed(shape: Shape, map_point) -> Shape:
+    """Return a copy of `shape` with every point passed through `map_point`
+    (a `QPointF -> QPointF` callable). `shape` itself is left untouched.
+
+    Dispatches on field name rather than shape type: every shape class ink
+    can be made of stores its geometry under one of exactly three names —
+    `points` (Pen/Highlighter), `start`/`end` (Line/Arrow/Rectangle/Ellipse/
+    ObscuringShape/Crop) or `point` (Text/StepMarker) — so a future shape
+    class needs no matching update here as long as it reuses one of those
+    names, which every existing one already does.
+    """
+    if hasattr(shape, "points"):
+        return replace(shape, points=[map_point(point) for point in shape.points])
+    if hasattr(shape, "start") and hasattr(shape, "end"):
+        return replace(shape, start=map_point(shape.start), end=map_point(shape.end))
+    if hasattr(shape, "point"):
+        return replace(shape, point=map_point(shape.point))
+    raise TypeError(f"don't know how to translate a {type(shape).__name__}")
+
+
+def render_selection(frame: Frame, shapes: list[Shape], selection: QRectF) -> QImage:
+    """Export the annotated selection as a flattened `QImage`.
+
+    `selection` and every point in `shapes` are in overlay-window
+    coordinates — local to `frame`'s own top-left, the same space
+    `OverlayWindow` keeps its selection and ink layer in (see this module's
+    docstring) — never in the absolute virtual-desktop space
+    `frame.logical_origin`/`Frame.crop()` use, or in `frame.image`'s own
+    pixel space, which can differ from both under display scaling.
+
+    This is the one translation docs/design/overlay-redesign.md's "Ink
+    lives in screen coordinates" describes ("Export then translates by the
+    selection origin once, at the point the image is produced"): `selection`
+    is offset back onto `frame.logical_origin` for `Frame.crop()`'s sake,
+    then every mark is shifted by `-selection`'s own origin and scaled by
+    the crop's own image-pixels-per-logical-unit ratio — the same ratio
+    `Frame.crop()` derives internally — before `render()` flattens them onto
+    the cropped pixels. A mark whose points land outside the cropped image's
+    bounds is simply never painted there, which is what keeps this
+    consistent with the live ink layer's clip-rect behaviour without this
+    function needing its own explicit clip.
+    """
+    cropped = frame.crop(selection.translated(frame.logical_origin))
+
+    logical_width = cropped.logical_size.width()
+    logical_height = cropped.logical_size.height()
+    scale_x = cropped.image.width() / logical_width if logical_width else 1.0
+    scale_y = cropped.image.height() / logical_height if logical_height else 1.0
+    origin = selection.topLeft()
+
+    def to_cropped_pixel(point: QPointF) -> QPointF:
+        local = point - origin
+        return QPointF(local.x() * scale_x, local.y() * scale_y)
+
+    mapped_shapes = [_transformed(shape, to_cropped_pixel) for shape in shapes]
+    return render(cropped.image, mapped_shapes)

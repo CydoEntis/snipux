@@ -19,6 +19,7 @@ from snipux.shapes import (
     _OBSCURE_DOWNSCALE_DIVISOR,
     apply_crop,
     render,
+    render_selection,
 )
 
 BACKGROUND = qRgb(255, 255, 255)
@@ -474,3 +475,96 @@ class TestApplyCrop:
 
         assert result.image.width() == 0
         assert result.image.height() == 0
+
+
+class TestRenderSelection:
+    """SNX-34: the export path for OverlayWindow's ink layer. Unlike
+    apply_crop (used by the old editor.py Canvas), the shapes passed in here
+    are in overlay-window coordinates -- local to `frame`'s own top-left,
+    the same space `selection` is in -- not already matching the base
+    image's own pixel space.
+    """
+
+    def _frame(self, image_size=(200, 200), logical_size=None, logical_origin=(0, 0)):
+        image = make_image(size=image_size)
+        logical_size = logical_size or QSizeF(*image_size)
+        return Frame(
+            image=image,
+            logical_origin=QPointF(*logical_origin),
+            logical_size=logical_size,
+        )
+
+    def test_positions_a_mark_at_its_window_coordinates_inside_the_selection(self):
+        frame = self._frame(image_size=(300, 300))
+        # A mark drawn well inside a selection whose own top-left is (50, 50).
+        mark = Rectangle(
+            colour=RED, stroke_width=6, start=QPointF(60, 60), end=QPointF(120, 120)
+        )
+        selection = QRectF(50, 50, 100, 100)
+
+        result = render_selection(frame, [mark], selection)
+
+        assert result.width() == 100
+        assert result.height() == 100
+        # (60, 60) in window coordinates is (10, 10) once selection's own
+        # origin is translated away -- this is the ticket's one translation.
+        assert result.pixelColor(10, 40) == RED  # left border
+
+    def test_mark_outside_the_selection_is_not_painted(self):
+        frame = self._frame(image_size=(300, 300))
+        mark = Rectangle(
+            colour=RED, stroke_width=6, start=QPointF(10, 10), end=QPointF(30, 30)
+        )
+        selection = QRectF(50, 50, 100, 100)
+
+        result = render_selection(frame, [mark], selection)
+
+        # A mark that never falls inside the exported crop leaves it exactly
+        # as an un-annotated crop would look -- present, never deleted, just
+        # not painted this time (mirrors OverlayWindow's live clip).
+        assert result == frame.crop(selection).image
+
+    def test_selection_origin_is_translated_only_once(self):
+        # A window whose own origin is away from (0, 0) (a monitor left of
+        # the virtual desktop's primary) must not double-apply that offset:
+        # a mark's position within the exported crop depends only on where
+        # it sits relative to `selection`, not on `frame.logical_origin`.
+        frame = self._frame(image_size=(300, 300), logical_origin=(500, 300))
+        mark = Rectangle(
+            colour=RED, stroke_width=6, start=QPointF(60, 60), end=QPointF(120, 120)
+        )
+        selection = QRectF(50, 50, 100, 100)
+
+        result = render_selection(frame, [mark], selection)
+
+        assert result.pixelColor(10, 40) == RED
+
+    def test_scales_marks_into_image_pixel_space_under_display_scaling(self):
+        # image is 2x logical: a mark's window-coordinate point must land at
+        # twice its logical offset in the exported pixels, the same ratio
+        # Frame.crop() itself derives.
+        frame = self._frame(image_size=(200, 200), logical_size=QSizeF(100, 100))
+        mark = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(40, 40)
+        )
+        selection = QRectF(0, 0, 100, 100)
+
+        result = render_selection(frame, [mark], selection)
+
+        assert result.width() == 200
+        assert result.height() == 200
+        assert result.pixelColor(20, 50) == RED  # left border at 2x scale
+
+    def test_bakes_marks_in_draw_order_like_render(self):
+        frame = self._frame(image_size=(100, 100))
+        first = Rectangle(
+            colour=RED, stroke_width=6, start=QPointF(10, 10), end=QPointF(70, 70)
+        )
+        second = Rectangle(
+            colour=BLUE, stroke_width=6, start=QPointF(10, 10), end=QPointF(70, 70)
+        )
+        selection = QRectF(0, 0, 100, 100)
+
+        result = render_selection(frame, [first, second], selection)
+
+        assert result.pixelColor(10, 40) == BLUE
