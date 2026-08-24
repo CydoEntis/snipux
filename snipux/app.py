@@ -381,6 +381,16 @@ class AppController:
 
         self._overlay: OverlayWindow | None = None
 
+        # Stock Ubuntu GNOME shows no legacy tray icon at all without the
+        # AppIndicator extension: calling show() unconditionally left the
+        # app resident -- holding the single-instance claim -- with no
+        # icon, no menu, and no way to quit it except pkill (SNX-54). The
+        # tray icon and menu are still built either way (showMessage() on
+        # the icon is still a usable, if invisible, notification sink, and
+        # the menu costs nothing unshown), but show() itself is gated on
+        # this check.
+        self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+
         self._tray_icon = QSystemTrayIcon(self._build_icon())
         menu = QMenu()
         # A single Snip item, not one per SelectionMode: OverlayWindow's own
@@ -394,7 +404,20 @@ class AppController:
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         self._tray_icon.setContextMenu(menu)
-        self._tray_icon.show()
+
+        if self._tray_available:
+            self._tray_icon.show()
+        else:
+            # Told once, on stdout, rather than left to be discovered by
+            # `ps`/pkill: the keybinding (--snip) is still the way in with
+            # no tray, but quitting needs a real answer now that there's no
+            # Quit menu item visible to click.
+            print(
+                "No system tray detected -- snipux will run without a tray "
+                "icon or menu. It is still listening for snip requests "
+                "(e.g. via `snipux --snip`, typically bound to a key); to "
+                "quit it, kill this process."
+            )
 
         self._transport.listen(self.start_capture)
 
@@ -435,12 +458,18 @@ class AppController:
             # returning to idle left a Print Screen press with no feedback
             # at all, indistinguishable from the key doing nothing. Reported
             # through the existing tray icon rather than a new window, since
-            # the resident process otherwise never shows one.
-            self._tray_icon.showMessage(
-                "Snip failed",
-                str(exc),
-                QSystemTrayIcon.MessageIcon.Warning,
-            )
+            # the resident process otherwise never shows one -- except a
+            # balloon message has nowhere to appear when there's no tray
+            # icon shown to hang it off of (SNX-54), so that case falls
+            # back to stdout instead of calling showMessage() into a void.
+            if self._tray_available:
+                self._tray_icon.showMessage(
+                    "Snip failed",
+                    str(exc),
+                    QSystemTrayIcon.MessageIcon.Warning,
+                )
+            else:
+                print(f"Snip failed: {exc}")
             return
 
         geometries = (
