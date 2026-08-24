@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -746,7 +747,8 @@ class _PillButton(QPushButton):
         # child QLabel sitting on top of it.
         icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        text_label = QLabel(text, self)
+        self._text_label = QLabel(text, self)
+        text_label = self._text_label
         text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         font = QFont(design.font_families().ui)
         size, weight = design.tokens.Font.CHIP_LABEL
@@ -757,6 +759,14 @@ class _PillButton(QPushButton):
 
         for widget in (text_label, icon_label) if icon_after else (icon_label, text_label):
             layout.addWidget(widget)
+
+    def set_text(self, text: str) -> None:
+        """Update the pill's own label -- used by the capture chip (SNX-44)
+        to name whichever mode the popover has selected, per the
+        reference's `{{ mode }}` binding on the chip button itself. Save's
+        own `_PillButton` never calls this; its label is fixed.
+        """
+        self._text_label.setText(text)
 
 
 class _Divider(QWidget):
@@ -904,6 +914,16 @@ class FloatingBar(QWidget):
             pad_right=13,
             tooltip="Save",
         )
+
+    # -- capture mode (SNX-44) --------------------------------------------
+
+    def set_capture_mode(self, label: str) -> None:
+        """Update the chip's own label to `label`, per the reference's
+        `{{ mode }}` binding on the chip button itself -- the chip always
+        names whichever capture mode is current, not just its own "Region"
+        default from `_build_capture_chip`.
+        """
+        self._chip.set_text(label)
 
     # -- tool selection --------------------------------------------------
 
@@ -1622,6 +1642,431 @@ class BlurTray(QWidget):
         self._readout.setText(str(self._strength))
 
 
+# ---------------------------------------------------------------------------
+# Capture-mode popover (SNX-44)
+# ---------------------------------------------------------------------------
+# docs/design/overlay-redesign.md's "Capture-mode popover" section is the
+# authority here, cross-checked against the reference's own `renderVals()`
+# (`menuUp = barTop > 300`, `cycleDelay`, `modes.map`) for anything the prose
+# leaves implicit -- e.g. that the chip's own label follows `st.mode`, not
+# just its "Region" construction default. The chip is a mode selector, not
+# an action: per the ticket, only Region does anything past recording the
+# pick -- Window, Full screen and Freeform are separate tickets that will
+# read `OverlayWindow._capture_mode` once they land.
+
+
+class _CaptureModeRow(QPushButton):
+    """One row of the popover: glyph, a two-line label/note, and a check
+    mark for whichever mode is currently selected, per the spec's rows
+    bullet. Hand-painted background -- like `_SwatchButton`'s ring -- since
+    a hovered *and* selected row needs the hover fill to win, which a
+    stylesheet's static rule can't express.
+    """
+
+    _ICON_SIZE = 16
+    _CHECK_SIZE = 15
+    _GAP = 10
+    _LABEL_GAP = 2
+    # Prose-only literals from the spec's "hover `#ffffff` at 9%" /
+    # "Selected row background `#ffffff` at 8%" -- not tokens.Color entries,
+    # same convention `_ToolPill._BG_ALPHA`/`_BlurModeWell._BG_ALPHA` already
+    # follow for a one-off fill no other control shares.
+    _HOVER_BG_ALPHA = 0.09
+    _SELECTED_BG_ALPHA = 0.08
+
+    def __init__(self, mode_label: str, icon_name: str, note: str, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFlat(True)
+        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
+
+        self._icon_name = icon_name
+        self._selected = False
+        self._bg_alpha: float | None = None
+
+        metric = design.tokens.Metric
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(
+            metric.MENU_ROW_PAD_H,
+            metric.MENU_ROW_PAD_V,
+            metric.MENU_ROW_PAD_H,
+            metric.MENU_ROW_PAD_V,
+        )
+        layout.setSpacing(self._GAP)
+
+        self._icon_label = QLabel(self)
+        self._icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(self._icon_label)
+
+        text_column = QVBoxLayout()
+        text_column.setContentsMargins(0, 0, 0, 0)
+        text_column.setSpacing(self._LABEL_GAP)
+
+        self._label = QLabel(mode_label, self)
+        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        label_font = QFont(design.font_families().ui)
+        size, weight = design.tokens.Font.MENU_LABEL
+        label_font.setPixelSize(round(size))
+        label_font.setWeight(QFont.Weight(weight))
+        self._label.setFont(label_font)
+        text_column.addWidget(self._label)
+
+        note_label = QLabel(note, self)
+        note_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        note_font = QFont(design.font_families().ui)
+        size, weight = design.tokens.Font.MENU_NOTE
+        note_font.setPixelSize(round(size))
+        note_font.setWeight(QFont.Weight(weight))
+        note_label.setFont(note_font)
+        note_label.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
+        text_column.addWidget(note_label)
+
+        layout.addLayout(text_column, 1)
+
+        self._check = QLabel(self)
+        self._check.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._check.setPixmap(
+            design.icon("check", design.color("ACCENT")).pixmap(
+                self._CHECK_SIZE, self._CHECK_SIZE
+            )
+        )
+        self._check.setVisible(False)
+        layout.addWidget(self._check)
+
+        self._refresh()
+
+    @property
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, selected: bool) -> None:
+        """Mark this row as the current capture mode -- the check glyph and
+        the `ICON_ACTIVE` label/icon colour both follow `_selected`, per
+        the spec's "a check glyph... for the selected row."
+        """
+        self._selected = selected
+        self._refresh()
+
+    def _refresh(self, hovered: bool | None = None) -> None:
+        if hovered is None:
+            hovered = self.underMouse()
+        # Hover wins over the selected fill when both apply -- every row,
+        # including the current mode's own, still needs to read as
+        # clickable while the pointer is over it.
+        if hovered:
+            self._bg_alpha = self._HOVER_BG_ALPHA
+        elif self._selected:
+            self._bg_alpha = self._SELECTED_BG_ALPHA
+        else:
+            self._bg_alpha = None
+
+        fg = design.color("ICON_ACTIVE") if self._selected else design.color("ICON_IDLE")
+        self._label.setStyleSheet(f"color: {fg.name()};")
+        self._icon_label.setPixmap(
+            design.icon(self._icon_name, fg).pixmap(self._ICON_SIZE, self._ICON_SIZE)
+        )
+        self._check.setVisible(self._selected)
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._refresh(hovered=True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._refresh(hovered=False)
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        if self._bg_alpha is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = QColor("#ffffff")
+        bg.setAlphaF(self._bg_alpha)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        metric = design.tokens.Metric
+        painter.drawRoundedRect(
+            QRectF(self.rect()), metric.MENU_ROW_RADIUS, metric.MENU_ROW_RADIUS
+        )
+        painter.end()
+
+
+class _DelayRow(QPushButton):
+    """The popover's delay row: a timer glyph, the word "Delay", and the
+    current value right-aligned -- per the spec's "Delay" paragraph. No
+    selected state (unlike `_CaptureModeRow`): the row itself *is* the
+    control, and there is nothing else in the popover it could read as
+    selected relative to.
+    """
+
+    _ICON_SIZE = 16
+    _GAP = 10
+    _HOVER_BG_ALPHA = 0.09  # same one-off fill _CaptureModeRow's hover uses
+    # "mono 11.5px `#8f9689`" -- the closest tokens.Font entry, MENU_NOTE,
+    # is 11.0px and already spoken for by the mode rows' own notes, so this
+    # stays a local literal per `BlurTray._STRENGTH_LABEL_PX`'s convention.
+    _VALUE_PX = 11.5
+    _VALUE_WEIGHT = 400
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFlat(True)
+        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
+
+        self._hovered = False
+
+        metric = design.tokens.Metric
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(
+            metric.MENU_ROW_PAD_H,
+            metric.MENU_ROW_PAD_V,
+            metric.MENU_ROW_PAD_H,
+            metric.MENU_ROW_PAD_V,
+        )
+        layout.setSpacing(self._GAP)
+
+        icon_label = QLabel(self)
+        icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        icon_label.setPixmap(
+            design.icon("timer", design.color("ICON_IDLE")).pixmap(
+                self._ICON_SIZE, self._ICON_SIZE
+            )
+        )
+        layout.addWidget(icon_label)
+
+        label = QLabel("Delay", self)
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        label_font = QFont(design.font_families().ui)
+        size, weight = design.tokens.Font.MENU_LABEL
+        label_font.setPixelSize(round(size))
+        label_font.setWeight(QFont.Weight(weight))
+        label.setFont(label_font)
+        label.setStyleSheet(f"color: {design.color('ICON_IDLE').name()};")
+        layout.addWidget(label, 1)
+
+        self._value = QLabel(self)
+        self._value.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        value_font = QFont(design.font_families().mono)
+        value_font.setPixelSize(round(self._VALUE_PX))
+        value_font.setWeight(QFont.Weight(self._VALUE_WEIGHT))
+        self._value.setFont(value_font)
+        self._value.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
+        layout.addWidget(self._value)
+
+    def set_value(self, text: str) -> None:
+        self._value.setText(text)
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        if not self._hovered:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = QColor("#ffffff")
+        bg.setAlphaF(self._HOVER_BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        metric = design.tokens.Metric
+        painter.drawRoundedRect(
+            QRectF(self.rect()), metric.MENU_ROW_RADIUS, metric.MENU_ROW_RADIUS
+        )
+        painter.end()
+
+
+class _MenuSeparator(QWidget):
+    """The 1px rule between the mode rows and the delay row, per the
+    spec's "a 1px `#ffffff` 10% separator with 5px/4px margins." A fixed-
+    height widget that paints its line inset from its own edges, mirroring
+    how `_Divider` fixes its own size rather than leaning on layout
+    margins for a hairline.
+    """
+
+    _MARGIN_V = 5
+    _MARGIN_H = 4
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self._MARGIN_V * 2 + 1)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        # BAR_BORDER is the same #ffffff/10% pair the spec's separator
+        # uses -- reused rather than re-typed, the same precedent
+        # FloatingBar._build_save_button already sets for BAR_BORDER.
+        painter.fillRect(
+            self._MARGIN_H,
+            self._MARGIN_V,
+            self.width() - 2 * self._MARGIN_H,
+            1,
+            design.color("BAR_BORDER"),
+        )
+        painter.end()
+
+
+class CaptureModePopover(QWidget):
+    """The overlay redesign's capture-mode popover: `tokens.CAPTURE_MODES`
+    as a list of rows, a separator, then the delay row -- per
+    docs/design/overlay-redesign.md's "Capture-mode popover" section.
+
+    A real child widget of `OverlayWindow`, built the same way
+    `FloatingBar`/`SettingsTray` are -- opened and positioned by
+    `OverlayWindow._toggle_capture_popover`, never painted in its own
+    `paintEvent`. Picking a row only records the choice and closes the
+    popover; Window, Full screen and Freeform don't do anything past that
+    yet -- they're separate tickets in the same arc `_bar`'s tool buttons
+    already follow (see `OverlayWindow._on_tool_selected`'s docstring).
+    """
+
+    modeSelected = pyqtSignal(str)
+    delayChanged = pyqtSignal(str)
+
+    # The README gives this literal directly ("if bar top > 300px") rather
+    # than as a tokens.Metric entry -- same convention FloatingBar's own
+    # _TOP_MAX_FROM_BOTTOM already follows for a prose-only constant.
+    _UP_THRESHOLD = 300
+
+    # Same #1a1c18 BAR_BG already names, at the popover's own 97% rather
+    # than the bar's 93% -- no tokens.Color entry carries that exact alpha,
+    # so it's a local literal rather than a one-off *_ALPHA sibling added
+    # for a single caller.
+    _BG_ALPHA = 0.97
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        metric = design.tokens.Metric
+        # Fixed, not just flowed from its rows' natural width -- the spec
+        # gives the popover an exact "262px wide," and `reposition` below
+        # positions off that same literal rather than a sizeHint that could
+        # drift from what actually gets painted.
+        self.setFixedWidth(metric.MENU_W)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD
+        )
+        layout.setSpacing(0)
+
+        self._mode: str = design.tokens.CAPTURE_MODES[0][0]
+        self._delay: str = design.tokens.DELAYS[0]
+
+        self._rows: dict[str, _CaptureModeRow] = {}
+        for label, icon_name, note in design.tokens.CAPTURE_MODES:
+            row = _CaptureModeRow(label, icon_name, note, self)
+            row.clicked.connect(lambda checked=False, m=label: self._on_row_clicked(m))
+            self._rows[label] = row
+            layout.addWidget(row)
+
+        layout.addWidget(_MenuSeparator(self))
+
+        self._delay_row = _DelayRow(self)
+        self._delay_row.clicked.connect(self._on_delay_clicked)
+        layout.addWidget(self._delay_row)
+
+        self._select_row(self._mode)
+        self._delay_row.set_value(self._delay)
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def delay(self) -> str:
+        return self._delay
+
+    def set_mode(self, mode: str) -> None:
+        """Mark `mode`'s row checked without emitting `modeSelected` or
+        closing the popover -- for a future caller seeding the popover from
+        elsewhere, mirroring the split `FloatingBar.set_active_tool` keeps
+        from its own `_on_tool_clicked`.
+        """
+        self._mode = mode
+        self._select_row(mode)
+
+    def _select_row(self, mode: str) -> None:
+        for label, row in self._rows.items():
+            row.set_selected(label == mode)
+
+    def _on_row_clicked(self, mode: str) -> None:
+        """Record `mode` and close the popover, per the spec's "picking a
+        row records that mode and closes the popover." Modes past Region
+        are separate tickets -- this never itself starts a window hover-
+        highlight or a freeform lasso, only the recording.
+        """
+        self.set_mode(mode)
+        self.modeSelected.emit(mode)
+        self.hide()
+
+    def _on_delay_clicked(self) -> None:
+        """Cycle to the next `tokens.DELAYS` value, wrapping past the last
+        back to the first -- per the spec's "Clicking cycles Off -> 3s ->
+        5s -> 10s -> Off." Unlike a mode row, this leaves the popover open,
+        mirroring the reference's own `cycleDelay`, which never touches
+        `modeOpen`.
+        """
+        delays = design.tokens.DELAYS
+        index = delays.index(self._delay)
+        self._delay = delays[(index + 1) % len(delays)]
+        self._delay_row.set_value(self._delay)
+        self.delayChanged.emit(self._delay)
+
+    def reposition(self, bar_geometry: QRect, window_size: QSize) -> None:
+        """Position the popover against `bar_geometry` (`FloatingBar`'s own
+        geometry, already in this widget's parent's coordinate space), per
+        the spec's rule: "if bar top > 300px, place the popover at
+        bar_top - popover_height - 8; otherwise place it below the bar."
+        Horizontally centred on the bar and clamped inside `window_size`,
+        mirroring `OverlayWindow._reposition_tray`'s own centring.
+        """
+        metric = design.tokens.Metric
+        width = metric.MENU_W
+        height = self.sizeHint().height()
+
+        center_x = bar_geometry.center().x()
+        left = center_x - width / 2
+        left = max(0, min(left, window_size.width() - width))
+
+        if bar_geometry.top() > self._UP_THRESHOLD:
+            top = bar_geometry.top() - height - metric.MENU_OFFSET
+        else:
+            top = bar_geometry.bottom() + metric.MENU_OFFSET
+
+        self.setGeometry(round(left), round(top), width, height)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.Metric
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        bg = QColor(design.tokens.Color.BAR_BG)
+        bg.setAlphaF(self._BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+
+        # DIVIDER is the same #ffffff/12% pair the spec's popover border
+        # uses -- reused rather than re-typed, the same precedent
+        # FloatingBar._build_save_button sets for BAR_BORDER.
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.color("DIVIDER"))
+        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.end()
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -1658,7 +2103,17 @@ class OverlayWindow(QWidget):
     `add_mark` from a live drag -- for every tool but the eraser, which
     SNX-38 already wired end to end -- is still a later ticket in the same
     arc; `_blur_mode` is what that ticket reads to decide which of
-    shapes.py's `Blur`/`Pixelate` a blur drag commits.
+    shapes.py's `Blur`/`Pixelate` a blur drag commits. SNX-44 (this ticket)
+    adds `CaptureModePopover` (`_popover`), opened by the bar's capture
+    chip (`FloatingBar.captureChipClicked`) via `_toggle_capture_popover`
+    and positioned by the popover's own `reposition` against `_bar`'s
+    geometry. Picking a row tracks `_capture_mode` and updates the chip's
+    own label to match, per the spec's "the chip is a mode selector, not
+    an action" -- Window, Full screen and Freeform are separate tickets
+    that will read `_capture_mode` once they exist, same as `_blur_mode`
+    above sits unread until its own ticket. `mousePressEvent` closes the
+    popover on any click that lands outside it, without touching
+    `_capture_mode`.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -1822,6 +2277,21 @@ class OverlayWindow(QWidget):
         self._blur_tray.blurModeChanged.connect(self._on_blur_mode_changed)
         self._blur_tray.strengthChanged.connect(self._on_blur_strength_changed)
 
+        # The capture-mode popover (SNX-44): opened from the bar's chip
+        # click via `_toggle_capture_popover`, positioned by the popover's
+        # own `reposition` against `_bar`'s geometry. `_capture_mode`/
+        # `_delay` start at `tokens.CAPTURE_MODES`/`tokens.DELAYS`' own
+        # first entries -- the same "unread until a later ticket" state
+        # `_ink_colour`/`_blur_mode` above already are, except for the chip
+        # label itself, which `_on_capture_mode_selected` keeps in sync.
+        self._capture_mode: str = design.tokens.CAPTURE_MODES[0][0]
+        self._delay: str = design.tokens.DELAYS[0]
+        self._popover = CaptureModePopover(self)
+        self._popover.hide()
+        self._popover.modeSelected.connect(self._on_capture_mode_selected)
+        self._popover.delayChanged.connect(self._on_delay_changed)
+        self._bar.captureChipClicked.connect(self._toggle_capture_popover)
+
     def set_selection(self, rect: QRect | None) -> None:
         """Set the current selection (window coordinates) and repaint."""
         self._selection = rect
@@ -1860,6 +2330,40 @@ class OverlayWindow(QWidget):
     def _on_blur_strength_changed(self, strength: int) -> None:
         self._blur_strength = strength
 
+    # -- capture-mode popover (SNX-44) --------------------------------------
+
+    def _toggle_capture_popover(self) -> None:
+        """Open/close the capture-mode popover from the bar's chip click,
+        per the spec's "The chip is a mode selector... Opens the popover."
+
+        A second click while it's already open closes it again, mirroring
+        the reference's own `toggleMode: () => this.setState({ modeOpen:
+        !st.modeOpen })` -- there is no other way to close it from the chip
+        itself once it's open.
+        """
+        if self._popover.isVisible():
+            self._popover.hide()
+            return
+        self._popover.reposition(self._bar.geometry(), self.size())
+        self._popover.show()
+        self._popover.raise_()
+
+    def _on_capture_mode_selected(self, mode: str) -> None:
+        """Track the popover's chosen capture mode and update the chip's
+        own label to match, per the reference's `{{ mode }}` binding on
+        the chip button itself.
+
+        Per the ticket, only Region does anything past this -- Window,
+        Full screen and Freeform are separate tickets that will read
+        `_capture_mode` once they exist, the same way `_blur_mode` above
+        sits unread until its own drawing ticket lands.
+        """
+        self._capture_mode = mode
+        self._bar.set_capture_mode(mode)
+
+    def _on_delay_changed(self, delay: str) -> None:
+        self._delay = delay
+
     def _sync_bar_visibility(self) -> None:
         """Show/hide and reposition the floating bar to match `_selection`.
 
@@ -1879,6 +2383,7 @@ class OverlayWindow(QWidget):
             self._bar.hide()
             self._tray.hide()
             self._blur_tray.hide()
+            self._popover.hide()
 
     def _sync_tray_visibility(self) -> None:
         """Show/hide and reposition whichever settings tray -- draw or
@@ -2134,6 +2639,7 @@ class OverlayWindow(QWidget):
         self._ants_timer.stop()
         self._bar.hide()
         self._tray.hide()
+        self._popover.hide()
 
     def _advance_ants(self) -> None:
         """Advance the dashed stroke's offset by one animation frame.
@@ -2152,6 +2658,16 @@ class OverlayWindow(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._popover.isVisible() and not self._popover.geometry().contains(
+            event.position().toPoint()
+        ):
+            # Per the spec's "clicking outside the popover closes it
+            # without changing the mode": the click is consumed by the
+            # dismissal alone and returns here, rather than falling through
+            # to the handle/eraser logic below, so it can't also start a
+            # resize or an erase underneath the popover in the same press.
+            self._popover.hide()
             return
         handle = self._handle_at(event.position())
         if handle is None:
