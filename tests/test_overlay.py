@@ -4,7 +4,7 @@ import pytest
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
+from PyQt6.QtWidgets import QApplication, QColorDialog, QPushButton, QSlider, QWidget
 
 import snipux.app as app_module
 from snipux.capture import Frame, X11WindowGeometryProvider
@@ -18,10 +18,15 @@ from snipux.overlay import (
     Overlay,
     OverlayWindow,
     SelectionMode,
+    SettingsTray,
     UnsupportedGeometryProvider,
+    _CustomColorButton,
     _Divider,
     _HANDLE_CURSORS,
+    _PreviewDot,
+    _SwatchButton,
     _TOOL_SHORTCUT_KEYS,
+    _ToolPill,
     _tool_label,
     create_overlays,
 )
@@ -1845,3 +1850,387 @@ class TestFloatingBarIntegration:
         QTest.mouseClick(overlay._bar._save_button, Qt.MouseButton.LeftButton)
 
         assert (tmp_path / "Pictures" / "snipux").exists()
+
+
+class TestSettingsTrayVisibility:
+    """SNX-41: 'colour and stroke are not controls until the user is
+    holding something that draws' -- the tray's whole reason for existing.
+    """
+
+    @pytest.mark.parametrize("tool", tokens.DRAW_TOOLS)
+    def test_shown_for_every_draw_tool(self, tool):
+        tray = SettingsTray()
+
+        tray.set_tool(tool)
+
+        assert tray.isVisible()
+
+    def test_hidden_for_the_eraser(self):
+        tray = SettingsTray()
+        tray.set_tool("pen")
+        assert tray.isVisible()
+
+        tray.set_tool("eraser")
+
+        assert not tray.isVisible()
+
+    def test_hidden_for_blur(self):
+        # Blur gets its own strength/mode tray, per the spec -- a later
+        # ticket. Until that exists, blur is simply not a tokens.DRAW_TOOLS
+        # member, so this tray hides for it exactly like the eraser.
+        tray = SettingsTray()
+        tray.set_tool("pen")
+
+        tray.set_tool("blur")
+
+        assert not tray.isVisible()
+
+
+class TestSettingsTrayComposition:
+    """SNX-41: the tray carries the active-tool pill, the ink swatches, a
+    custom-colour button, a stroke slider, a readout, a preview dot and a
+    hint -- separated by dividers, per the spec's "Settings tray" table.
+    """
+
+    def test_contains_one_swatch_per_ink_swatch_token(self):
+        tray = SettingsTray()
+
+        assert list(tray._swatch_buttons.keys()) == [hex for _name, hex in tokens.INK_SWATCHES]
+
+    def test_contains_the_custom_colour_button(self):
+        tray = SettingsTray()
+
+        assert isinstance(tray._custom_button, _CustomColorButton)
+
+    def test_three_dividers_separate_the_four_groups(self):
+        tray = SettingsTray()
+
+        assert len(tray.findChildren(_Divider)) == 3
+
+    def test_contains_the_slider_readout_and_preview_dot(self):
+        tray = SettingsTray()
+
+        assert isinstance(tray._slider, QSlider)
+        assert tray._readout is not None
+        assert isinstance(tray._preview, _PreviewDot)
+
+    def test_pill_names_the_active_tool(self):
+        tray = SettingsTray()
+
+        tray.set_tool("arrow")
+
+        assert tray._pill._text_label.text() == _tool_label("arrow")
+
+    def test_hint_matches_the_active_tools_token_hint(self):
+        tray = SettingsTray()
+
+        tray.set_tool("rect")
+
+        assert tray._hint.text() == tokens.TOOL_HINTS["rect"]
+
+    def test_slider_range_matches_the_stroke_tokens(self):
+        tray = SettingsTray()
+
+        assert tray._slider.minimum() == tokens.Metric.STROKE_MIN
+        assert tray._slider.maximum() == tokens.Metric.STROKE_MAX
+
+    def test_default_stroke_matches_the_token_default(self):
+        tray = SettingsTray()
+
+        assert tray.stroke == tokens.Metric.STROKE_DEFAULT
+        assert tray._slider.value() == tokens.Metric.STROKE_DEFAULT
+
+    def test_default_colour_is_the_first_ink_swatch(self):
+        tray = SettingsTray()
+
+        assert tray.colour == tokens.INK_SWATCHES[0][1]
+
+
+class TestSettingsTraySwatchSelection:
+    """SNX-41: 'the selected swatch is drawn with the double ring the spec
+    describes, and picking one changes the colour new marks are drawn in.'
+    """
+
+    def test_default_swatch_is_selected(self):
+        tray = SettingsTray()
+
+        default_hex = tokens.INK_SWATCHES[0][1]
+        assert tray._swatch_buttons[default_hex].is_selected
+        assert all(
+            not button.is_selected
+            for hex_colour, button in tray._swatch_buttons.items()
+            if hex_colour != default_hex
+        )
+
+    def test_clicking_a_swatch_selects_it_and_deselects_the_rest(self):
+        tray = SettingsTray()
+        _name, target_hex = tokens.INK_SWATCHES[2]
+
+        QTest.mouseClick(tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
+
+        assert tray._swatch_buttons[target_hex].is_selected
+        assert tray.colour == target_hex
+        assert all(
+            not button.is_selected
+            for hex_colour, button in tray._swatch_buttons.items()
+            if hex_colour != target_hex
+        )
+
+    def test_clicking_a_swatch_emits_colour_changed(self):
+        tray = SettingsTray()
+        received = Mock()
+        tray.colourChanged.connect(received)
+        _name, target_hex = tokens.INK_SWATCHES[1]
+
+        QTest.mouseClick(tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with(target_hex)
+
+    def test_unselected_swatch_paints_only_its_own_flat_colour(self):
+        # No ring at all for a swatch that isn't the selected one -- this
+        # is the negative case the double-ring test below leans on.
+        tray = SettingsTray()
+        _name, hex_colour = tokens.INK_SWATCHES[3]
+        button = tray._swatch_buttons[hex_colour]
+        button.resize(button.sizeHint())
+
+        rendered = button.grab().toImage()
+        center = rendered.pixelColor(button.width() // 2, button.height() // 2)
+
+        assert (center.red(), center.green(), center.blue()) == QColor(hex_colour).getRgb()[:3]
+
+    def test_selected_swatch_paints_the_double_ring(self):
+        tray = SettingsTray()
+        _name, hex_colour = tokens.INK_SWATCHES[0]
+        button = tray._swatch_buttons[hex_colour]
+        button.set_selected(True)
+        button.resize(button.sizeHint())
+
+        rendered = button.grab().toImage()
+        center = rendered.pixelColor(button.width() // 2, button.height() // 2)
+        # The outermost pixel: the light ring painted flush against the
+        # button's own edge, at mid-height so it falls on the ring's flat
+        # side rather than its rounded corner.
+        edge = rendered.pixelColor(0, button.height() // 2)
+
+        assert (center.red(), center.green(), center.blue()) == QColor(hex_colour).getRgb()[:3]
+        assert (edge.red(), edge.green(), edge.blue()) == QColor(
+            tokens.Color.TEXT_PRIMARY
+        ).getRgb()[:3]
+
+
+class TestSettingsTrayCustomColour:
+    """SNX-41: 'the custom-colour button opens a colour dialog and the
+    colour it returns becomes the current ink colour.'
+    """
+
+    def test_click_opens_the_colour_dialog_seeded_with_the_current_colour(self, monkeypatch):
+        tray = SettingsTray()
+        seen = []
+        monkeypatch.setattr(
+            QColorDialog,
+            "getColor",
+            staticmethod(lambda initial, *a, **k: seen.append(initial) or QColor()),
+        )
+
+        QTest.mouseClick(tray._custom_button, Qt.MouseButton.LeftButton)
+
+        assert seen == [QColor(tray.colour)]
+
+    def test_a_valid_returned_colour_becomes_the_current_ink_colour(self, monkeypatch):
+        tray = SettingsTray()
+        chosen = QColor("#336699")
+        monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: chosen))
+
+        QTest.mouseClick(tray._custom_button, Qt.MouseButton.LeftButton)
+
+        assert tray.colour == chosen.name()
+        # No swatch reads as selected once the colour is a custom one that
+        # doesn't match any of them.
+        assert not any(button.is_selected for button in tray._swatch_buttons.values())
+
+    def test_cancelling_the_dialog_leaves_the_colour_unchanged(self, monkeypatch):
+        tray = SettingsTray()
+        original = tray.colour
+        # QColorDialog.getColor() returns an invalid QColor on Cancel.
+        monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor()))
+
+        QTest.mouseClick(tray._custom_button, Qt.MouseButton.LeftButton)
+
+        assert tray.colour == original
+
+
+class TestSettingsTrayStrokeReadout:
+    """SNX-41: 'the stroke readout has a minimum width so the tray does
+    not change width as the number does.'
+    """
+
+    def test_readout_has_the_specs_minimum_width(self):
+        tray = SettingsTray()
+
+        assert tray._readout.minimumWidth() == SettingsTray._READOUT_MIN_W
+
+    def test_readout_shows_the_default_stroke(self):
+        tray = SettingsTray()
+
+        assert tray._readout.text() == f"{tokens.Metric.STROKE_DEFAULT}px"
+
+    def test_moving_the_slider_updates_the_readout(self):
+        tray = SettingsTray()
+
+        tray._slider.setValue(17)
+
+        assert tray._readout.text() == "17px"
+        assert tray.stroke == 17
+
+    def test_moving_the_slider_emits_stroke_changed(self):
+        tray = SettingsTray()
+        received = Mock()
+        tray.strokeChanged.connect(received)
+
+        tray._slider.setValue(9)
+
+        received.assert_called_once_with(9)
+
+    def test_set_stroke_clamps_to_the_token_range(self):
+        tray = SettingsTray()
+
+        tray.set_stroke(tokens.Metric.STROKE_MAX + 50)
+        assert tray.stroke == tokens.Metric.STROKE_MAX
+
+        tray.set_stroke(tokens.Metric.STROKE_MIN - 50)
+        assert tray.stroke == tokens.Metric.STROKE_MIN
+
+
+class TestSettingsTrayPreviewDot:
+    """SNX-41: 'the preview dot shows the current colour at the current
+    stroke, multiplied for the highlighter and clamped to the token
+    range.'
+    """
+
+    def test_preview_matches_colour_and_stroke_for_a_plain_tool(self):
+        tray = SettingsTray()
+        tray.set_tool("pen")
+
+        tray.set_colour(tokens.INK_SWATCHES[4][1])
+        tray.set_stroke(10)
+
+        assert tray._preview._colour == QColor(tokens.INK_SWATCHES[4][1])
+        assert tray._preview._diameter == 10
+
+    def test_preview_diameter_is_multiplied_for_the_highlighter(self):
+        tray = SettingsTray()
+        tray.set_tool("highlighter")
+
+        tray.set_stroke(4)
+
+        assert tray._preview._diameter == pytest.approx(4 * tokens.Metric.HIGHLIGHT_MULT)
+
+    def test_preview_diameter_is_clamped_to_the_stroke_token_range(self):
+        tray = SettingsTray()
+        tray.set_tool("highlighter")
+
+        # 4 * HIGHLIGHT_MULT (3.5) == 14, well inside range; a stroke near
+        # the top of the range multiplied by 3.5 blows past STROKE_MAX and
+        # must clamp down to it rather than overflowing the 28px box.
+        tray.set_stroke(tokens.Metric.STROKE_MAX)
+
+        assert tray._preview._diameter == tokens.Metric.STROKE_MAX
+
+    def test_switching_back_to_a_plain_tool_drops_the_multiplier(self):
+        tray = SettingsTray()
+        tray.set_tool("highlighter")
+        tray.set_stroke(6)
+        assert tray._preview._diameter == pytest.approx(6 * tokens.Metric.HIGHLIGHT_MULT)
+
+        tray.set_tool("pen")
+
+        assert tray._preview._diameter == 6
+
+
+class TestSettingsTrayOverlayIntegration:
+    """SNX-41: the tray wired into `OverlayWindow`, positioned under the
+    bar and shown only while the bar's active tool draws -- mirroring how
+    SNX-40 wired `FloatingBar` in.
+    """
+
+    def _overlay(self, size=(1600, 1000)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def test_tray_shown_and_positioned_once_a_draw_tool_is_picked(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        assert overlay._tray.isVisible()
+        expected_top = overlay._bar.geometry().bottom() + tokens.Metric.TRAY_OFFSET_Y
+        assert overlay._tray.geometry().top() == expected_top
+        # abs=1: the bar's and tray's own sizeHint widths can differ in
+        # parity, the same one-pixel rounding TestFloatingBarPositioning
+        # already tolerates for the same reason.
+        assert overlay._tray.geometry().center().x() == pytest.approx(
+            overlay._bar.geometry().center().x(), abs=1
+        )
+
+    def test_tray_hidden_for_the_eraser(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        assert overlay._tray.isVisible()
+
+        QTest.mouseClick(overlay._bar._tool_buttons["eraser"], Qt.MouseButton.LeftButton)
+
+        assert not overlay._tray.isVisible()
+
+    def test_tray_hides_when_the_selection_is_cleared(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        assert overlay._tray.isVisible()
+
+        overlay.set_selection(None)
+
+        assert not overlay._tray.isVisible()
+
+    def test_tray_stays_hidden_while_the_overlay_itself_is_not_shown(self):
+        # Same guarantee TestFloatingBarIntegration establishes for `_bar`:
+        # none of this file's pixel-sampling OverlayWindow tests call
+        # .show(), so neither child widget may start painting into a
+        # grab() they didn't ask for.
+        overlay = self._overlay(size=(200, 200))
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        overlay._on_tool_selected("pen")
+
+        assert not overlay._tray.isVisible()
+
+    def test_picking_a_swatch_updates_the_overlays_ink_colour(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        _name, target_hex = tokens.INK_SWATCHES[3]
+
+        QTest.mouseClick(overlay._tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
+
+        assert overlay._ink_colour == target_hex
+
+    def test_moving_the_stroke_slider_updates_the_overlays_stroke_width(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        overlay._tray._slider.setValue(21)
+
+        assert overlay._stroke_width == 21
