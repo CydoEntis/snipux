@@ -787,6 +787,108 @@ class TestOverlayWindowMarks:
         assert result.pixelColor(10, 20) == self.RED
 
 
+class TestEraserTool:
+    """SNX-38: per-shape hit-testing itself lives on `Shape` (shapes.py --
+    see TestShapeHitTest in test_shapes.py); this class covers how
+    OverlayWindow wires that into a click, and the eraser's own
+    single-slot undo.
+    """
+
+    RED = QColor(255, 0, 0)
+    BLUE = QColor(0, 0, 255)
+
+    def _mark(self, start, end, colour=None):
+        return Rectangle(
+            colour=colour or self.RED, stroke_width=6, start=QPointF(*start), end=QPointF(*end)
+        )
+
+    def _overlay(self, selection=QRect(0, 0, 200, 200)):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_click_with_eraser_active_removes_the_topmost_hit_mark(self):
+        overlay = self._overlay()
+        bottom = self._mark((20, 20), (80, 80), colour=self.RED)
+        top = self._mark((20, 20), (80, 80), colour=self.BLUE)  # coincides with `bottom`
+        overlay.add_mark(bottom)
+        overlay.add_mark(top)
+        overlay.set_eraser_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 50))
+
+        # Both marks sit under the click; only the last-drawn (topmost) one
+        # is gone -- draw order, per the ticket, not add order coincidence.
+        assert overlay.marks == (bottom,)
+
+    def test_click_with_eraser_inactive_removes_nothing(self):
+        overlay = self._overlay()
+        mark = self._mark((20, 20), (80, 80))
+        overlay.add_mark(mark)
+        # set_eraser_active is never called: default state is inactive.
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 50))
+
+        assert overlay.marks == (mark,)
+
+    def test_click_on_empty_space_with_eraser_active_removes_nothing_and_does_not_raise(self):
+        overlay = self._overlay()
+        mark = self._mark((20, 20), (80, 80))
+        overlay.add_mark(mark)
+        overlay.set_eraser_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(150, 150))
+
+        assert overlay.marks == (mark,)
+
+    def test_erase_at_returns_none_on_a_miss(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((20, 20), (80, 80)))
+
+        assert overlay.erase_at(QPointF(150, 150)) is None
+        assert len(overlay.marks) == 1
+
+    def test_undo_erase_restores_the_mark_at_its_original_position(self):
+        overlay = self._overlay()
+        first = self._mark((10, 10), (30, 30))
+        second = self._mark((40, 40), (60, 60))
+        third = self._mark((70, 70), (90, 90))
+        overlay.add_mark(first)
+        overlay.add_mark(second)
+        overlay.add_mark(third)
+
+        erased = overlay.erase_at(QPointF(40, 50))  # `second`'s left border
+
+        assert erased is second
+        assert overlay.marks == (first, third)
+
+        overlay.undo_erase()
+
+        # Restored between `first` and `third`, its original draw-order
+        # position -- not appended to the end.
+        assert overlay.marks == (first, second, third)
+
+    def test_undo_erase_is_a_no_op_with_nothing_to_restore(self):
+        overlay = self._overlay()
+        mark = self._mark((20, 20), (80, 80))
+        overlay.add_mark(mark)
+
+        overlay.undo_erase()  # nothing has been erased yet
+
+        assert overlay.marks == (mark,)
+
+    def test_cursor_is_a_pointer_over_the_selection_while_the_eraser_is_active(self):
+        overlay = self._overlay(selection=QRect(50, 50, 100, 80))
+        overlay.set_eraser_active(True)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        QTest.mouseMove(overlay, QPoint(100, 90))  # deep inside the selection
+
+        assert overlay.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
 class TestSelectionStroke:
     """SNX-32: the two coincident 1px strokes -- solid white under an
     animated dashed dark one -- that make the marching ants.
@@ -987,6 +1089,19 @@ class TestHandleCursors:
         assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor
 
         QTest.mouseMove(overlay, QPoint(100, 90))  # deep inside the selection
+        # Not a handle, but still inside the selection: crosshair, per
+        # docs/design/overlay-redesign.md's "Selection frame" cursor table
+        # ("crosshair for every tool except the eraser") -- SNX-38 gives
+        # this class its first non-handle cursor state.
+        assert overlay.cursor().shape() == Qt.CursorShape.CrossCursor
+
+    def test_cursor_resets_to_arrow_outside_the_selection(self):
+        overlay = self._shown_overlay()
+
+        QTest.mouseMove(overlay, QPoint(50, 50))
+        assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor
+
+        QTest.mouseMove(overlay, QPoint(10, 10))  # outside the selection entirely
         assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
 
 

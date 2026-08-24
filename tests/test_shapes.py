@@ -933,3 +933,109 @@ class TestRenderSelection:
         result = render_selection(frame, [first, second], selection)
 
         assert result.pixelColor(10, 40) == BLUE
+
+
+class TestShapeHitTest:
+    """SNX-38: each shape's own answer to "does this point land on me,"
+    which OverlayWindow's eraser (erase_at, overlay.py) uses to pick the
+    topmost mark under a click. Shape is coordinate-space agnostic (see
+    the module docstring), so these points aren't asserted to be any
+    particular image/window space -- just whichever space a given test's
+    shape happens to use.
+    """
+
+    def test_pen_with_fewer_than_two_points_is_never_hit(self):
+        # No segment exists yet to hit-test against -- a bare click, not a
+        # drag, never reaches a second mouseMoveEvent to append one.
+        pen = Pen(colour=RED, stroke_width=4, points=[QPointF(10, 10)])
+
+        assert pen.hit_test(QPointF(10, 10)) is False
+
+    def test_pen_hits_along_its_polyline(self):
+        pen = Pen(
+            colour=RED, stroke_width=4,
+            points=[QPointF(0, 0), QPointF(50, 0), QPointF(50, 50)],
+        )
+
+        assert pen.hit_test(QPointF(25, 0)) is True  # midpoint of the first segment
+        assert pen.hit_test(QPointF(50, 25)) is True  # midpoint of the second segment
+        assert pen.hit_test(QPointF(200, 200)) is False
+
+    def test_highlighter_hit_test_uses_its_own_widened_stroke(self):
+        # Highlighter widens its painted stroke to stroke_width x
+        # HIGHLIGHT_MULT (its own _pen() override) -- a point that misses a
+        # same-stroke-width Pen must still hit an identically-placed
+        # Highlighter, since _stroke_hit_test reads the width from _pen()
+        # rather than stroke_width directly.
+        points = [QPointF(0, 0), QPointF(100, 0)]
+        pen = Pen(colour=RED, stroke_width=2, points=list(points))
+        highlighter = Highlighter(colour=RED, stroke_width=2, points=list(points))
+        off_line_point = QPointF(50, 6)  # 6px above the shared line
+
+        assert pen.hit_test(off_line_point) is False
+        assert highlighter.hit_test(off_line_point) is True
+
+    def test_thin_line_still_hits_within_the_tolerance(self):
+        # AC: "a hit test on a stroked shape allows for the stroke width,
+        # so a click on a thin line still hits it" -- a 1px-wide line's
+        # actual painted width alone (0.5px either side) would never catch
+        # an ordinary click; HIT_TOLERANCE is what makes it clickable.
+        line = Line(colour=RED, stroke_width=1, start=QPointF(0, 20), end=QPointF(100, 20))
+
+        assert line.hit_test(QPointF(50, 20)) is True  # dead centre
+        assert line.hit_test(QPointF(50, 22)) is True  # 2px off, within tolerance
+        assert line.hit_test(QPointF(50, 60)) is False  # well clear of the line
+
+    def test_arrow_hits_along_its_shaft(self):
+        arrow = Arrow(colour=RED, stroke_width=3, start=QPointF(0, 0), end=QPointF(100, 0))
+
+        assert arrow.hit_test(QPointF(50, 0)) is True
+        assert arrow.hit_test(QPointF(50, 60)) is False
+
+    def test_rectangle_hits_its_border_not_its_interior(self):
+        rect = Rectangle(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(60, 60))
+
+        assert rect.hit_test(QPointF(10, 35)) is True  # left border
+        assert rect.hit_test(QPointF(35, 35)) is False  # empty interior: not a hit
+        assert rect.hit_test(QPointF(200, 200)) is False
+
+    def test_ellipse_hits_its_border_not_its_interior(self):
+        ellipse = Ellipse(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(100, 60))
+
+        assert ellipse.hit_test(QPointF(50, 0)) is True  # top of the ellipse's border
+        assert ellipse.hit_test(QPointF(50, 30)) is False  # centre: empty interior
+
+    def test_blur_and_pixelate_hit_their_whole_filled_rect(self):
+        blur = Blur(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(60, 60))
+        pixelate = Pixelate(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(60, 60)
+        )
+
+        for shape in (blur, pixelate):
+            # Interior counts here, unlike a stroke-only shape: the whole
+            # patch is visibly "the annotation."
+            assert shape.hit_test(QPointF(35, 35)) is True
+            assert shape.hit_test(QPointF(200, 200)) is False
+
+    def test_step_marker_hits_within_its_radius(self):
+        marker = StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50), number=1)
+
+        assert marker.hit_test(QPointF(50, 50)) is True  # centre
+        assert marker.hit_test(QPointF(50 + StepMarker.RADIUS - 1, 50)) is True  # just inside
+        assert marker.hit_test(QPointF(200, 200)) is False
+
+    def test_text_hits_near_its_anchor_point(self):
+        text = Text(colour=RED, stroke_width=4, point=QPointF(50, 50), text="hi")
+
+        assert text.hit_test(QPointF(50, 50)) is True
+        assert text.hit_test(QPointF(500, 500)) is False
+
+    def test_unrecognised_shape_is_never_hit(self):
+        # Crop never joins a persistent mark list (see its own docstring),
+        # so it's never actually eraser-hit-tested in practice -- but this
+        # exercises the base class's safe default: a shape type without its
+        # own hit_test override is simply never a hit, even for a point
+        # that falls squarely inside its geometry.
+        crop = Crop(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(100, 100))
+
+        assert crop.hit_test(QPointF(50, 50)) is False
