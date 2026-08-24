@@ -1,24 +1,51 @@
 from unittest.mock import Mock
 
 import pytest
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSizeF, Qt
-from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, qRgb
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt
+from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QColorDialog,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSlider,
+    QWidget,
+)
 
 import snipux.app as app_module
 from snipux.capture import Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
+from snipux.design import font_families
 from snipux.design import tokens
 from snipux.shapes import Rectangle
 from snipux.overlay import (
+    BlurTray,
+    CaptureModePopover,
+    FloatingBar,
     GeometryProvider,
     Handle,
+    HintHUD,
     Overlay,
     OverlayWindow,
     SelectionMode,
+    SettingsTray,
+    Toast,
     UnsupportedGeometryProvider,
+    _BlurModeWell,
+    _CaptureModeRow,
+    _CustomColorButton,
+    _DelayRow,
+    _Divider,
     _HANDLE_CURSORS,
+    _MenuSeparator,
+    _PreviewDot,
+    _SegmentButton,
+    _SwatchButton,
+    _TOOL_SHORTCUT_KEYS,
+    _ToolPill,
+    _tool_label,
     create_overlays,
 )
 
@@ -675,13 +702,18 @@ class TestOverlayWindow:
         assert rendered.pixelColor(10, 10) == QColor(10, 20, 30)
 
     def test_scrim_is_painted_by_the_widget_itself_not_a_child_widget(self):
-        # Per the spec: a translucent child stacked over the whole window
-        # would sit above the ink layer and eat its mouse events, so
-        # nothing here should be a child widget covering the window.
+        # Per the spec: a translucent child stacked over the *whole window*
+        # would sit above the ink layer and eat its mouse events, so no
+        # child widget's geometry may cover the full window rect -- unlike
+        # SNX-31, when this assertion was last "no children at all," SNX-40
+        # gives this window a legitimate child (the floating bar), which is
+        # exactly why the check now has to be about coverage, not count.
         frame = make_frame()
         overlay = OverlayWindow(frame)
+        window_rect = QRect(overlay.rect())
 
-        assert overlay.findChildren(QWidget) == []
+        for child in overlay.findChildren(QWidget):
+            assert not child.geometry().contains(window_rect), child
 
 
 class TestOverlayWindowMarks:
@@ -1436,3 +1468,2286 @@ class TestSave:
 
         saved = QImage(str(path))
         assert saved.pixelColor(5, 20) == self.RED  # the rectangle's left border
+
+
+class TestToast:
+    """SNX-45: the standalone `Toast` widget -- content, positioning and
+    the single-instance-replaces-and-restarts-the-timer behaviour the
+    spec's "Toast" section describes. `TestOverlayWindowToasts` below
+    covers the four callers (`copy`/`save`/`clear`/`discard`) that drive
+    this widget through `OverlayWindow._show_toast`.
+    """
+
+    def test_show_message_sets_the_icon_and_the_text(self):
+        toast = Toast()
+
+        toast.show_message("copy", "Copied to clipboard", QSize(800, 600))
+
+        assert toast._text_label.text() == "Copied to clipboard"
+        assert not toast._icon_label.pixmap().isNull()
+        assert toast.isVisible()
+
+    def test_show_message_positions_bottom_centre_of_the_given_window_size(self):
+        toast = Toast()
+        window_size = QSize(800, 600)
+
+        toast.show_message("save", "Saved to ~/Pictures/snipux", window_size)
+
+        size = toast.sizeHint()
+        expected_left = round((window_size.width() - size.width()) / 2)
+        expected_top = round(
+            window_size.height() - tokens.Metric.TOAST_BOTTOM - size.height()
+        )
+        assert toast.geometry().left() == expected_left
+        assert toast.geometry().top() == expected_top
+
+    def test_dismiss_timer_interval_matches_tokens_toast_ms(self):
+        toast = Toast()
+
+        toast.show_message("trash", "Ink cleared", QSize(400, 300))
+
+        assert toast._timer.interval() == tokens.Metric.TOAST_MS
+        assert toast._timer.isSingleShot()
+        assert toast._timer.isActive()
+
+    def test_toast_dismisses_itself_once_the_timer_fires(self):
+        # Simulated rather than waited for real -- TOAST_MS is 2 real
+        # seconds, and `overlay._advance_ants`/`_ants_timer` tests above
+        # already establish the pattern of driving a QTimer's own slot
+        # directly instead of blocking the suite on it.
+        toast = Toast()
+        toast.show_message("copy", "Copied to clipboard", QSize(400, 300))
+        assert toast.isVisible()
+
+        toast._timer.timeout.emit()
+
+        assert not toast.isVisible()
+
+    def test_a_second_message_replaces_the_first_rather_than_stacking(self):
+        toast = Toast()
+        toast.show_message("copy", "Copied to clipboard", QSize(400, 300))
+
+        toast.show_message("save", "Saved to ~/Pictures/snipux", QSize(400, 300))
+
+        # One widget, its content overwritten -- not a second Toast
+        # instance sitting behind or beside the first.
+        assert toast._text_label.text() == "Saved to ~/Pictures/snipux"
+        assert toast.isVisible()
+
+    def test_a_second_message_restarts_the_dismiss_timer(self):
+        toast = Toast()
+        toast.show_message("copy", "Copied to clipboard", QSize(400, 300))
+        first_timer = toast._timer
+
+        toast.show_message("save", "Saved to ~/Pictures/snipux", QSize(400, 300))
+
+        # The same QTimer instance, still running -- QTimer.start() on an
+        # already-active timer resets its remaining time, which is what
+        # "restarts the timer" means here rather than a fresh timer object.
+        assert toast._timer is first_timer
+        assert toast._timer.isActive()
+
+
+class TestFloatingBarComposition:
+    """SNX-40: the bar carries the capture chip, eight tool buttons, undo,
+    redo, clear, copy and save, separated by dividers, in the order
+    docs/design/overlay-redesign.md's "Floating bar" table gives -- built
+    from real QPushButtons rather than painted, so tooltips and hover come
+    for free (TestFloatingBarTooltips below covers the tooltip half).
+    """
+
+    def test_contains_one_button_per_control_in_the_spec_table(self):
+        bar = FloatingBar()
+
+        buttons = bar.findChildren(QPushButton)
+
+        # 1 capture chip + 8 tools + undo/redo/clear + copy/save == 14, per
+        # the table's numbered rows 1, 3-10, 12-14, 16-17.
+        assert len(buttons) == 14
+
+    def test_tool_buttons_cover_every_tokens_tool_in_order(self):
+        bar = FloatingBar()
+
+        assert list(bar._tool_buttons.keys()) == tokens.TOOLS
+
+    def test_three_dividers_separate_the_four_groups(self):
+        bar = FloatingBar()
+
+        assert len(bar.findChildren(_Divider)) == 3
+
+    def test_undo_redo_clear_copy_save_are_all_present(self):
+        bar = FloatingBar()
+
+        assert bar._undo_button is not None
+        assert bar._redo_button is not None
+        assert bar._clear_button is not None
+        assert bar._copy_button is not None
+        assert bar._save_button is not None
+
+    def test_bar_is_not_painted_inside_overlaywindows_paintevent(self):
+        # The acceptance criterion's other half: OverlayWindow's own paint
+        # pass draws the frame/scrim/ink/stroke/handles only -- see its
+        # paintEvent -- and never touches `_bar` at all; the bar paints
+        # itself, as a sibling layer Qt composites on top afterwards.
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+
+        assert isinstance(overlay._bar, FloatingBar)
+        assert overlay._bar.parent() is overlay
+
+
+class TestFloatingBarFill:
+    """SNX-40: 'the fill is 93% alpha, not 93% widget opacity, or the
+    glyphs wash out' -- the ticket's own callout of the easy mistake.
+    Verified on the rendered pixel *alpha channel*, which
+    WA_TranslucentBackground preserves through `grab()` -- the same
+    technique TestOverlayWindow's DIM-scrim test uses, just reading the
+    alpha component instead of blending against a known backdrop.
+    """
+
+    def test_background_pixel_is_painted_at_the_token_alpha(self):
+        bar = FloatingBar()
+        bar.resize(bar.sizeHint())
+
+        rendered = bar.grab().toImage()
+        # Top padding strip, mid-width: inside the rounded fill but above
+        # every button, so this is background only.
+        pixel = rendered.pixelColor(bar.width() // 2, 2)
+
+        expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
+        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
+        assert (pixel.red(), pixel.green(), pixel.blue()) == QColor(
+            tokens.Color.BAR_BG
+        ).getRgb()[:3]
+
+    def test_glyph_pixels_stay_fully_opaque_over_the_translucent_fill(self):
+        # Painting the whole widget at reduced *opacity* (the mistake the
+        # README warns about) would leave every glyph pixel translucent
+        # too, at the same ~237/255 alpha as the background. Scans the pen
+        # button's whole rect rather than one predicted pixel, since the
+        # icon is a stroke outline -- most of the button is transparent
+        # background, and only the stroke itself needs to prove opaque.
+        # A tool button, not undo/redo: those start disabled, and a
+        # disabled glyph is deliberately its own (still opaque, just
+        # different-coloured) case -- see TestFloatingBarUndoRedo below.
+        bar = FloatingBar()
+        bar.resize(bar.sizeHint())
+
+        rendered = bar.grab().toImage()
+        rect = bar._tool_buttons["pen"].geometry()
+        alphas = [
+            rendered.pixelColor(x, y).alpha()
+            for x in range(rect.left(), rect.right())
+            for y in range(rect.top(), rect.bottom())
+        ]
+
+        assert max(alphas) == 255
+
+
+class TestFloatingBarPositioning:
+    """SNX-40: 'the bar is centred under the selection and clamped so it
+    stays fully on screen when the selection is dragged low', per the
+    spec's "Floating bar" clamp rule.
+    """
+
+    def test_centres_under_the_selection_with_room_to_spare(self):
+        bar = FloatingBar()
+        selection = QRect(400, 200, 200, 150)  # bottom edge at y=350
+        bounds = QSize(1600, 1000)
+
+        bar.reposition(selection, bounds)
+
+        assert bar.geometry().center().x() == pytest.approx(
+            selection.center().x(), abs=1
+        )
+        # QRectF, not QRect.bottom(): the latter is inclusive
+        # (top + height - 1), the same one-pixel trap `_bracket_path`
+        # documents elsewhere in overlay.py.
+        expected_top = QRectF(selection).bottom() + tokens.Metric.BAR_OFFSET_Y
+        assert bar.geometry().top() == expected_top
+
+    def test_top_clamps_so_the_bar_cannot_leave_a_short_window(self):
+        bounds = QSize(1600, 400)
+        # Natural position (bottom + BAR_OFFSET_Y) would land past the
+        # window's own bottom edge.
+        selection = QRect(400, 350, 200, 40)
+        bar = FloatingBar()
+
+        bar.reposition(selection, bounds)
+
+        assert bar.geometry().top() == bounds.height() - FloatingBar._TOP_MAX_FROM_BOTTOM
+        assert bar.geometry().bottom() <= bounds.height()
+
+    def test_centre_clamps_away_from_the_left_screen_edge(self):
+        bar = FloatingBar()
+        bounds = QSize(1600, 1000)
+        selection = QRect(0, 200, 50, 50)  # centre x = 25, far left
+
+        bar.reposition(selection, bounds)
+
+        # abs=1: the bar's own width (sizeHint) is odd, so an exact
+        # BAR_MIN_EDGE centre can land the integer geometry a pixel off
+        # either side of it -- the same rounding TestReframing tolerates
+        # elsewhere in this file for the same reason.
+        assert bar.geometry().center().x() == pytest.approx(tokens.Metric.BAR_MIN_EDGE, abs=1)
+
+    def test_centre_clamps_away_from_the_right_screen_edge(self):
+        bar = FloatingBar()
+        bounds = QSize(1600, 1000)
+        selection = QRect(1580, 200, 15, 50)  # centre x near the right edge
+
+        bar.reposition(selection, bounds)
+
+        expected = bounds.width() - tokens.Metric.BAR_MIN_EDGE
+        assert bar.geometry().center().x() == pytest.approx(expected, abs=1)
+
+
+class TestFloatingBarActiveTool:
+    """SNX-40: 'exactly one tool reads as active at a time.'"""
+
+    def test_clicking_a_tool_makes_it_the_only_active_one(self):
+        bar = FloatingBar()
+
+        QTest.mouseClick(bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        assert bar.active_tool == "pen"
+        assert bar._tool_buttons["pen"].is_active
+        assert all(
+            not button.is_active
+            for name, button in bar._tool_buttons.items()
+            if name != "pen"
+        )
+
+    def test_selecting_a_second_tool_deactivates_the_first(self):
+        bar = FloatingBar()
+        QTest.mouseClick(bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(bar._tool_buttons["arrow"], Qt.MouseButton.LeftButton)
+
+        assert bar.active_tool == "arrow"
+        assert not bar._tool_buttons["pen"].is_active
+        assert bar._tool_buttons["arrow"].is_active
+
+    def test_clicking_a_tool_emits_tool_selected(self):
+        bar = FloatingBar()
+        received = Mock()
+        bar.toolSelected.connect(received)
+
+        QTest.mouseClick(bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with("blur")
+
+
+class TestFloatingBarUndoRedo:
+    """SNX-40: 'undo and redo take the disabled colour when their stack is
+    empty' -- implemented as a real QWidget.setEnabled(False), per the
+    README's own "disabled is better" preference (see _IconButton).
+    """
+
+    def test_undo_and_redo_start_disabled(self):
+        bar = FloatingBar()
+
+        assert not bar._undo_button.isEnabled()
+        assert not bar._redo_button.isEnabled()
+
+    def test_set_undo_enabled_toggles_the_button(self):
+        bar = FloatingBar()
+
+        bar.set_undo_enabled(True)
+        assert bar._undo_button.isEnabled()
+
+        bar.set_undo_enabled(False)
+        assert not bar._undo_button.isEnabled()
+
+    def test_set_redo_enabled_toggles_the_button(self):
+        bar = FloatingBar()
+
+        bar.set_redo_enabled(True)
+        assert bar._redo_button.isEnabled()
+
+    def test_disabled_undo_glyph_uses_the_disabled_token_colour(self):
+        # Checked on the button's own QIcon rather than a full bar grab():
+        # a raster SVG this small never quite reaches alpha==255 at any one
+        # pixel (soft antialiasing on a 1.55px stroke), so the strongest
+        # -coverage pixel -- not a fully-opaque one -- is the closest this
+        # icon gets to "solid", and that is enough to prove which colour it
+        # was painted, independent of whatever the bar composites it over.
+        bar = FloatingBar()
+
+        pixmap = bar._undo_button.icon().pixmap(
+            tokens.Metric.ICON, tokens.Metric.ICON, QIcon.Mode.Disabled
+        )
+        image = pixmap.toImage()
+        strongest = max(
+            (image.pixelColor(x, y) for x in range(image.width()) for y in range(image.height())),
+            key=lambda c: c.alpha(),
+        )
+
+        expected = QColor(tokens.Color.ICON_DISABLED)
+        assert strongest.red() == pytest.approx(expected.red(), abs=2)
+        assert strongest.green() == pytest.approx(expected.green(), abs=2)
+        assert strongest.blue() == pytest.approx(expected.blue(), abs=2)
+
+
+class TestFloatingBarTooltips:
+    """SNX-40: 'each button has a tooltip naming the control and its
+    shortcut.'
+    """
+
+    @pytest.mark.parametrize("tool", tokens.TOOLS)
+    def test_tool_button_tooltip_names_the_control_and_its_shortcut(self, tool):
+        bar = FloatingBar()
+
+        tooltip = bar._tool_buttons[tool].toolTip()
+
+        assert tooltip == f"{_tool_label(tool)} — {_TOOL_SHORTCUT_KEYS[tool]}"
+
+    def test_undo_tooltip_names_the_control_and_its_shortcut(self):
+        bar = FloatingBar()
+
+        assert bar._undo_button.toolTip() == f"Undo — {FloatingBar.UNDO_SHORTCUT}"
+
+    def test_redo_tooltip_names_the_control_and_its_shortcut(self):
+        bar = FloatingBar()
+
+        assert bar._redo_button.toolTip() == f"Redo — {FloatingBar.REDO_SHORTCUT}"
+
+    def test_every_button_has_a_non_empty_tooltip(self):
+        bar = FloatingBar()
+
+        for button in bar.findChildren(QPushButton):
+            assert button.toolTip()
+
+
+class TestFloatingBarIntegration:
+    """SNX-40: the bar wired into `OverlayWindow` -- a real child widget
+    positioned under the live selection, driving the same
+    undo/redo/clear/copy/save/eraser API SNX-38/39 already built.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, size=(1600, 1000)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def test_bar_becomes_visible_and_positioned_once_the_overlay_is_shown(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        selection = QRect(400, 200, 200, 150)
+        overlay.set_selection(selection)
+
+        assert overlay._bar.isVisible()
+        # QRectF, not selection.bottom(): QRect.bottom() is inclusive
+        # (top + height - 1), same one-pixel trap `_bracket_path` already
+        # documents elsewhere in overlay.py.
+        expected_top = QRectF(selection).bottom() + tokens.Metric.BAR_OFFSET_Y
+        assert overlay._bar.geometry().top() == expected_top
+
+    def test_bar_hides_again_once_the_selection_is_cleared(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        assert overlay._bar.isVisible()
+
+        overlay.set_selection(None)
+
+        assert not overlay._bar.isVisible()
+
+    def test_bar_stays_hidden_and_unpainted_while_the_overlay_itself_is_not_shown(self):
+        # None of this file's other OverlayWindow pixel tests ever call
+        # .show() before grab()ing -- this is the guarantee that keeps the
+        # bar from starting to paint over whatever they sample once it
+        # exists as a real child widget.
+        overlay = self._overlay(size=(200, 200))
+
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        assert not overlay._bar.isVisible()
+
+    def test_undo_button_click_undoes_the_newest_mark(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(0, 0, 1600, 1000))
+        overlay.add_mark(
+            Rectangle(
+                colour=self.RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(30, 30)
+            )
+        )
+        assert overlay._bar._undo_button.isEnabled()
+
+        QTest.mouseClick(overlay._bar._undo_button, Qt.MouseButton.LeftButton)
+
+        assert overlay.marks == ()
+        assert not overlay._bar._undo_button.isEnabled()
+
+    def test_redo_button_click_restores_the_undone_mark(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(0, 0, 1600, 1000))
+        mark = Rectangle(
+            colour=self.RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(30, 30)
+        )
+        overlay.add_mark(mark)
+        overlay.undo()
+        assert overlay._bar._redo_button.isEnabled()
+
+        QTest.mouseClick(overlay._bar._redo_button, Qt.MouseButton.LeftButton)
+
+        assert overlay.marks == (mark,)
+
+    def test_clear_button_click_empties_the_ink_layer(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(0, 0, 1600, 1000))
+        overlay.add_mark(
+            Rectangle(
+                colour=self.RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(30, 30)
+            )
+        )
+
+        QTest.mouseClick(overlay._bar._clear_button, Qt.MouseButton.LeftButton)
+
+        assert overlay.marks == ()
+
+    def test_clicking_the_eraser_tool_button_arms_the_eraser(self):
+        overlay = self._overlay()
+
+        QTest.mouseClick(overlay._bar._tool_buttons["eraser"], Qt.MouseButton.LeftButton)
+
+        assert overlay._eraser_active
+
+    def test_clicking_a_different_tool_disarms_the_eraser(self):
+        overlay = self._overlay()
+        QTest.mouseClick(overlay._bar._tool_buttons["eraser"], Qt.MouseButton.LeftButton)
+        assert overlay._eraser_active
+
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        assert not overlay._eraser_active
+
+    def test_copy_button_click_copies_the_current_marks(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay(size=(200, 200))
+        overlay.set_selection(QRect(0, 0, 200, 200))
+
+        QTest.mouseClick(overlay._bar._copy_button, Qt.MouseButton.LeftButton)
+
+        assert len(calls) == 1
+
+    def test_save_button_click_writes_a_file(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        overlay = self._overlay(size=(50, 50))
+        overlay.set_selection(QRect(0, 0, 50, 50))
+
+        QTest.mouseClick(overlay._bar._save_button, Qt.MouseButton.LeftButton)
+
+        assert (tmp_path / "Pictures" / "snipux").exists()
+
+
+class TestOverlayWindowToasts:
+    """SNX-45: `copy`/`save`/`clear`/`discard` each toast the message and
+    glyph docs/design/overlay-redesign.md's "Toast" section names, through
+    the same `_toast` instance -- `TestToast` above covers that widget's
+    own content/positioning/timer behaviour in isolation.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, size=(200, 200)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, *size))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_copy_shows_the_copied_to_clipboard_toast(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        overlay = self._overlay()
+
+        overlay.copy()
+
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Copied to clipboard"
+
+    def test_save_shows_the_saved_toast(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        overlay = self._overlay()
+
+        overlay.save()
+
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Saved to ~/Pictures/snipux"
+
+    def test_clear_shows_the_ink_cleared_toast(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        overlay.clear()
+
+        assert overlay.marks == ()
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Ink cleared"
+
+    def test_discard_shows_the_ink_discarded_toast_and_empties_the_ink_layer(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        overlay.discard()
+
+        assert overlay.marks == ()
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Ink discarded"
+
+    def test_a_toast_raised_while_the_first_is_showing_replaces_it(self):
+        overlay = self._overlay()
+
+        overlay.clear()
+        assert overlay._toast._text_label.text() == "Ink cleared"
+        overlay.discard()
+
+        # Still the one `_toast` instance -- its message overwritten, not a
+        # second toast stacked alongside the first.
+        assert overlay._toast._text_label.text() == "Ink discarded"
+
+    def test_toast_stays_hidden_while_the_overlay_itself_is_not_shown(self, monkeypatch):
+        # Mirrors test_bar_stays_hidden_and_unpainted_while_the_overlay_itself_is_not_shown
+        # above: none of this file's other OverlayWindow pixel tests call
+        # .show() before grab()ing, so a toast triggered by any of the four
+        # actions below must not become a real, paintable child widget.
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+
+        overlay.copy()
+        overlay.clear()
+        overlay.discard()
+
+        assert not overlay._toast.isVisible()
+
+
+class TestToastExcludedFromExport:
+    """SNX-45 AC: 'a toast never appears in the exported image.'"""
+
+    def test_rendered_image_is_unaffected_by_a_toast_shown_over_it(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        size = (600, 600)
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        # The selection spans the whole window, including the toast's own
+        # bottom-centre screen position -- a leak would show up there as a
+        # pixel-colour mismatch against the frame's own base colour.
+        overlay.set_selection(QRect(0, 0, *size))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        overlay.copy()
+        assert overlay._toast.isVisible()  # actually on screen, not a no-op
+
+        rendered = overlay.rendered_image()
+
+        toast_center = overlay._toast.geometry().center()
+        assert rendered.pixelColor(toast_center) == QColor(10, 20, 30)
+
+
+class TestSettingsTrayVisibility:
+    """SNX-41: 'colour and stroke are not controls until the user is
+    holding something that draws' -- the tray's whole reason for existing.
+    """
+
+    @pytest.mark.parametrize("tool", tokens.DRAW_TOOLS)
+    def test_shown_for_every_draw_tool(self, tool):
+        tray = SettingsTray()
+
+        tray.set_tool(tool)
+
+        assert tray.isVisible()
+
+    def test_hidden_for_the_eraser(self):
+        tray = SettingsTray()
+        tray.set_tool("pen")
+        assert tray.isVisible()
+
+        tray.set_tool("eraser")
+
+        assert not tray.isVisible()
+
+    def test_hidden_for_blur(self):
+        # Blur gets its own strength/mode tray (BlurTray, SNX-42) in this
+        # one's place -- 'blur' is simply not a tokens.DRAW_TOOLS member,
+        # so this tray hides for it exactly like the eraser.
+        tray = SettingsTray()
+        tray.set_tool("pen")
+
+        tray.set_tool("blur")
+
+        assert not tray.isVisible()
+
+
+class TestSettingsTrayComposition:
+    """SNX-41: the tray carries the active-tool pill, the ink swatches, a
+    custom-colour button, a stroke slider, a readout, a preview dot and a
+    hint -- separated by dividers, per the spec's "Settings tray" table.
+    """
+
+    def test_contains_one_swatch_per_ink_swatch_token(self):
+        tray = SettingsTray()
+
+        assert list(tray._swatch_buttons.keys()) == [hex for _name, hex in tokens.INK_SWATCHES]
+
+    def test_contains_the_custom_colour_button(self):
+        tray = SettingsTray()
+
+        assert isinstance(tray._custom_button, _CustomColorButton)
+
+    def test_three_dividers_separate_the_four_groups(self):
+        tray = SettingsTray()
+
+        assert len(tray.findChildren(_Divider)) == 3
+
+    def test_contains_the_slider_readout_and_preview_dot(self):
+        tray = SettingsTray()
+
+        assert isinstance(tray._slider, QSlider)
+        assert tray._readout is not None
+        assert isinstance(tray._preview, _PreviewDot)
+
+    def test_pill_names_the_active_tool(self):
+        tray = SettingsTray()
+
+        tray.set_tool("arrow")
+
+        assert tray._pill._text_label.text() == _tool_label("arrow")
+
+    def test_hint_matches_the_active_tools_token_hint(self):
+        tray = SettingsTray()
+
+        tray.set_tool("rect")
+
+        assert tray._hint.text() == tokens.TOOL_HINTS["rect"]
+
+    def test_slider_range_matches_the_stroke_tokens(self):
+        tray = SettingsTray()
+
+        assert tray._slider.minimum() == tokens.Metric.STROKE_MIN
+        assert tray._slider.maximum() == tokens.Metric.STROKE_MAX
+
+    def test_default_stroke_matches_the_token_default(self):
+        tray = SettingsTray()
+
+        assert tray.stroke == tokens.Metric.STROKE_DEFAULT
+        assert tray._slider.value() == tokens.Metric.STROKE_DEFAULT
+
+    def test_default_colour_is_the_first_ink_swatch(self):
+        tray = SettingsTray()
+
+        assert tray.colour == tokens.INK_SWATCHES[0][1]
+
+
+class TestSettingsTraySwatchSelection:
+    """SNX-41: 'the selected swatch is drawn with the double ring the spec
+    describes, and picking one changes the colour new marks are drawn in.'
+    """
+
+    def test_default_swatch_is_selected(self):
+        tray = SettingsTray()
+
+        default_hex = tokens.INK_SWATCHES[0][1]
+        assert tray._swatch_buttons[default_hex].is_selected
+        assert all(
+            not button.is_selected
+            for hex_colour, button in tray._swatch_buttons.items()
+            if hex_colour != default_hex
+        )
+
+    def test_clicking_a_swatch_selects_it_and_deselects_the_rest(self):
+        tray = SettingsTray()
+        _name, target_hex = tokens.INK_SWATCHES[2]
+
+        QTest.mouseClick(tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
+
+        assert tray._swatch_buttons[target_hex].is_selected
+        assert tray.colour == target_hex
+        assert all(
+            not button.is_selected
+            for hex_colour, button in tray._swatch_buttons.items()
+            if hex_colour != target_hex
+        )
+
+    def test_clicking_a_swatch_emits_colour_changed(self):
+        tray = SettingsTray()
+        received = Mock()
+        tray.colourChanged.connect(received)
+        _name, target_hex = tokens.INK_SWATCHES[1]
+
+        QTest.mouseClick(tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with(target_hex)
+
+    def test_unselected_swatch_paints_only_its_own_flat_colour(self):
+        # No ring at all for a swatch that isn't the selected one -- this
+        # is the negative case the double-ring test below leans on.
+        tray = SettingsTray()
+        _name, hex_colour = tokens.INK_SWATCHES[3]
+        button = tray._swatch_buttons[hex_colour]
+        button.resize(button.sizeHint())
+
+        rendered = button.grab().toImage()
+        center = rendered.pixelColor(button.width() // 2, button.height() // 2)
+
+        assert (center.red(), center.green(), center.blue()) == QColor(hex_colour).getRgb()[:3]
+
+    def test_selected_swatch_paints_the_double_ring(self):
+        tray = SettingsTray()
+        _name, hex_colour = tokens.INK_SWATCHES[0]
+        button = tray._swatch_buttons[hex_colour]
+        button.set_selected(True)
+        button.resize(button.sizeHint())
+
+        rendered = button.grab().toImage()
+        center = rendered.pixelColor(button.width() // 2, button.height() // 2)
+        # The outermost pixel: the light ring painted flush against the
+        # button's own edge, at mid-height so it falls on the ring's flat
+        # side rather than its rounded corner.
+        edge = rendered.pixelColor(0, button.height() // 2)
+
+        assert (center.red(), center.green(), center.blue()) == QColor(hex_colour).getRgb()[:3]
+        assert (edge.red(), edge.green(), edge.blue()) == QColor(
+            tokens.Color.TEXT_PRIMARY
+        ).getRgb()[:3]
+
+
+class TestSettingsTrayCustomColour:
+    """SNX-41: 'the custom-colour button opens a colour dialog and the
+    colour it returns becomes the current ink colour.'
+    """
+
+    def test_click_opens_the_colour_dialog_seeded_with_the_current_colour(self, monkeypatch):
+        tray = SettingsTray()
+        seen = []
+        monkeypatch.setattr(
+            QColorDialog,
+            "getColor",
+            staticmethod(lambda initial, *a, **k: seen.append(initial) or QColor()),
+        )
+
+        QTest.mouseClick(tray._custom_button, Qt.MouseButton.LeftButton)
+
+        assert seen == [QColor(tray.colour)]
+
+    def test_a_valid_returned_colour_becomes_the_current_ink_colour(self, monkeypatch):
+        tray = SettingsTray()
+        chosen = QColor("#336699")
+        monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: chosen))
+
+        QTest.mouseClick(tray._custom_button, Qt.MouseButton.LeftButton)
+
+        assert tray.colour == chosen.name()
+        # No swatch reads as selected once the colour is a custom one that
+        # doesn't match any of them.
+        assert not any(button.is_selected for button in tray._swatch_buttons.values())
+
+    def test_cancelling_the_dialog_leaves_the_colour_unchanged(self, monkeypatch):
+        tray = SettingsTray()
+        original = tray.colour
+        # QColorDialog.getColor() returns an invalid QColor on Cancel.
+        monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor()))
+
+        QTest.mouseClick(tray._custom_button, Qt.MouseButton.LeftButton)
+
+        assert tray.colour == original
+
+
+class TestSettingsTrayStrokeReadout:
+    """SNX-41: 'the stroke readout has a minimum width so the tray does
+    not change width as the number does.'
+    """
+
+    def test_readout_has_the_specs_minimum_width(self):
+        tray = SettingsTray()
+
+        assert tray._readout.minimumWidth() == SettingsTray._READOUT_MIN_W
+
+    def test_readout_shows_the_default_stroke(self):
+        tray = SettingsTray()
+
+        assert tray._readout.text() == f"{tokens.Metric.STROKE_DEFAULT}px"
+
+    def test_moving_the_slider_updates_the_readout(self):
+        tray = SettingsTray()
+
+        tray._slider.setValue(17)
+
+        assert tray._readout.text() == "17px"
+        assert tray.stroke == 17
+
+    def test_moving_the_slider_emits_stroke_changed(self):
+        tray = SettingsTray()
+        received = Mock()
+        tray.strokeChanged.connect(received)
+
+        tray._slider.setValue(9)
+
+        received.assert_called_once_with(9)
+
+    def test_set_stroke_clamps_to_the_token_range(self):
+        tray = SettingsTray()
+
+        tray.set_stroke(tokens.Metric.STROKE_MAX + 50)
+        assert tray.stroke == tokens.Metric.STROKE_MAX
+
+        tray.set_stroke(tokens.Metric.STROKE_MIN - 50)
+        assert tray.stroke == tokens.Metric.STROKE_MIN
+
+
+class TestSettingsTrayPreviewDot:
+    """SNX-41: 'the preview dot shows the current colour at the current
+    stroke, multiplied for the highlighter and clamped to the token
+    range.'
+    """
+
+    def test_preview_matches_colour_and_stroke_for_a_plain_tool(self):
+        tray = SettingsTray()
+        tray.set_tool("pen")
+
+        tray.set_colour(tokens.INK_SWATCHES[4][1])
+        tray.set_stroke(10)
+
+        assert tray._preview._colour == QColor(tokens.INK_SWATCHES[4][1])
+        assert tray._preview._diameter == 10
+
+    def test_preview_diameter_is_multiplied_for_the_highlighter(self):
+        tray = SettingsTray()
+        tray.set_tool("highlighter")
+
+        tray.set_stroke(4)
+
+        assert tray._preview._diameter == pytest.approx(4 * tokens.Metric.HIGHLIGHT_MULT)
+
+    def test_preview_diameter_is_clamped_to_the_stroke_token_range(self):
+        tray = SettingsTray()
+        tray.set_tool("highlighter")
+
+        # 4 * HIGHLIGHT_MULT (3.5) == 14, well inside range; a stroke near
+        # the top of the range multiplied by 3.5 blows past STROKE_MAX and
+        # must clamp down to it rather than overflowing the 28px box.
+        tray.set_stroke(tokens.Metric.STROKE_MAX)
+
+        assert tray._preview._diameter == tokens.Metric.STROKE_MAX
+
+    def test_switching_back_to_a_plain_tool_drops_the_multiplier(self):
+        tray = SettingsTray()
+        tray.set_tool("highlighter")
+        tray.set_stroke(6)
+        assert tray._preview._diameter == pytest.approx(6 * tokens.Metric.HIGHLIGHT_MULT)
+
+        tray.set_tool("pen")
+
+        assert tray._preview._diameter == 6
+
+
+class TestSettingsTrayOverlayIntegration:
+    """SNX-41: the tray wired into `OverlayWindow`, positioned under the
+    bar and shown only while the bar's active tool draws -- mirroring how
+    SNX-40 wired `FloatingBar` in.
+    """
+
+    def _overlay(self, size=(1600, 1000)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def test_tray_shown_and_positioned_once_a_draw_tool_is_picked(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        assert overlay._tray.isVisible()
+        expected_top = overlay._bar.geometry().bottom() + tokens.Metric.TRAY_OFFSET_Y
+        assert overlay._tray.geometry().top() == expected_top
+        # abs=1: the bar's and tray's own sizeHint widths can differ in
+        # parity, the same one-pixel rounding TestFloatingBarPositioning
+        # already tolerates for the same reason.
+        assert overlay._tray.geometry().center().x() == pytest.approx(
+            overlay._bar.geometry().center().x(), abs=1
+        )
+
+    def test_tray_hidden_for_the_eraser(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        assert overlay._tray.isVisible()
+
+        QTest.mouseClick(overlay._bar._tool_buttons["eraser"], Qt.MouseButton.LeftButton)
+
+        assert not overlay._tray.isVisible()
+
+    def test_tray_hides_when_the_selection_is_cleared(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        assert overlay._tray.isVisible()
+
+        overlay.set_selection(None)
+
+        assert not overlay._tray.isVisible()
+
+    def test_tray_stays_hidden_while_the_overlay_itself_is_not_shown(self):
+        # Same guarantee TestFloatingBarIntegration establishes for `_bar`:
+        # none of this file's pixel-sampling OverlayWindow tests call
+        # .show(), so neither child widget may start painting into a
+        # grab() they didn't ask for.
+        overlay = self._overlay(size=(200, 200))
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        overlay._on_tool_selected("pen")
+
+        assert not overlay._tray.isVisible()
+
+    def test_picking_a_swatch_updates_the_overlays_ink_colour(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        _name, target_hex = tokens.INK_SWATCHES[3]
+
+        QTest.mouseClick(overlay._tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
+
+        assert overlay._ink_colour == target_hex
+
+    def test_moving_the_stroke_slider_updates_the_overlays_stroke_width(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        overlay._tray._slider.setValue(21)
+
+        assert overlay._stroke_width == 21
+
+
+class TestBlurTrayComposition:
+    """SNX-42: the blur tray replaces SettingsTray's colour/stroke controls
+    with a Blur/Pixelate toggle, a strength slider/readout and the hint --
+    per docs/design/overlay-redesign.md's "Blur tray" paragraph.
+    """
+
+    def test_contains_the_mode_well_with_both_segments(self):
+        tray = BlurTray()
+
+        assert isinstance(tray._well, _BlurModeWell)
+        assert isinstance(tray._well.blur_button, _SegmentButton)
+        assert isinstance(tray._well.pixelate_button, _SegmentButton)
+
+    def test_contains_the_slider_and_readout(self):
+        tray = BlurTray()
+
+        assert isinstance(tray._slider, QSlider)
+        assert tray._readout is not None
+
+    def test_hint_matches_the_blur_tools_token_hint(self):
+        tray = BlurTray()
+
+        assert tray._hint.text() == tokens.TOOL_HINTS["blur"]
+
+    def test_slider_range_matches_the_blur_tokens(self):
+        tray = BlurTray()
+
+        assert tray._slider.minimum() == tokens.Metric.BLUR_MIN
+        assert tray._slider.maximum() == tokens.Metric.BLUR_MAX
+
+    def test_default_strength_matches_the_token_default(self):
+        tray = BlurTray()
+
+        assert tray.strength == tokens.Metric.BLUR_DEFAULT
+        assert tray._slider.value() == tokens.Metric.BLUR_DEFAULT
+
+    def test_default_blur_mode_is_blur(self):
+        tray = BlurTray()
+
+        assert tray.blur_mode == "blur"
+
+
+class TestBlurTraySegmentToggle:
+    """SNX-42: 'the two-segment toggle chooses between blur and pixelate,
+    and exactly one segment reads as active,' and 'the segment that is
+    active decides which obscuring shape a drag commits.'
+    """
+
+    def test_blur_segment_is_active_by_default(self):
+        tray = BlurTray()
+
+        assert tray._well.blur_button.is_active
+        assert not tray._well.pixelate_button.is_active
+
+    def test_clicking_pixelate_activates_it_and_deactivates_blur(self):
+        tray = BlurTray()
+
+        QTest.mouseClick(tray._well.pixelate_button, Qt.MouseButton.LeftButton)
+
+        assert tray.blur_mode == "pix"
+        assert tray._well.pixelate_button.is_active
+        assert not tray._well.blur_button.is_active
+
+    def test_clicking_blur_after_pixelate_activates_it_and_deactivates_pixelate(self):
+        tray = BlurTray()
+        QTest.mouseClick(tray._well.pixelate_button, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(tray._well.blur_button, Qt.MouseButton.LeftButton)
+
+        assert tray.blur_mode == "blur"
+        assert tray._well.blur_button.is_active
+        assert not tray._well.pixelate_button.is_active
+
+    def test_clicking_a_segment_emits_blur_mode_changed(self):
+        tray = BlurTray()
+        received = Mock()
+        tray.blurModeChanged.connect(received)
+
+        QTest.mouseClick(tray._well.pixelate_button, Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with("pix")
+
+
+class TestBlurTrayStrengthReadout:
+    """SNX-42: 'the strength slider covers the range in tokens.py and
+    starts at the token default' and 'the readout shows the current
+    strength and has a minimum width so the tray does not reflow.'
+    """
+
+    def test_readout_has_a_minimum_width(self):
+        tray = BlurTray()
+
+        assert tray._readout.minimumWidth() == BlurTray._READOUT_MIN_W
+
+    def test_readout_shows_the_default_strength(self):
+        tray = BlurTray()
+
+        assert tray._readout.text() == str(tokens.Metric.BLUR_DEFAULT)
+
+    def test_moving_the_slider_updates_the_readout(self):
+        tray = BlurTray()
+
+        tray._slider.setValue(15)
+
+        assert tray._readout.text() == "15"
+        assert tray.strength == 15
+
+    def test_moving_the_slider_emits_strength_changed(self):
+        tray = BlurTray()
+        received = Mock()
+        tray.strengthChanged.connect(received)
+
+        tray._slider.setValue(12)
+
+        received.assert_called_once_with(12)
+
+    def test_set_strength_clamps_to_the_token_range(self):
+        tray = BlurTray()
+
+        tray.set_strength(tokens.Metric.BLUR_MAX + 50)
+        assert tray.strength == tokens.Metric.BLUR_MAX
+
+        tray.set_strength(tokens.Metric.BLUR_MIN - 50)
+        assert tray.strength == tokens.Metric.BLUR_MIN
+
+
+class TestBlurTrayOverlayIntegration:
+    """SNX-42: the blur tray wired into OverlayWindow, shown in place of
+    SettingsTray -- never alongside it -- while the bar's active tool is
+    'blur', mirroring how SNX-41 wired SettingsTray in.
+    """
+
+    def _overlay(self, size=(1600, 1000)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def test_blur_tray_shown_and_positioned_once_blur_is_picked(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+
+        assert overlay._blur_tray.isVisible()
+        assert not overlay._tray.isVisible()
+        expected_top = overlay._bar.geometry().bottom() + tokens.Metric.TRAY_OFFSET_Y
+        assert overlay._blur_tray.geometry().top() == expected_top
+        assert overlay._blur_tray.geometry().center().x() == pytest.approx(
+            overlay._bar.geometry().center().x(), abs=1
+        )
+
+    def test_draw_tray_replaces_blur_tray_when_switching_back(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+        assert overlay._blur_tray.isVisible()
+
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        assert overlay._tray.isVisible()
+        assert not overlay._blur_tray.isVisible()
+
+    def test_blur_tray_hidden_for_the_eraser(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+        assert overlay._blur_tray.isVisible()
+
+        QTest.mouseClick(overlay._bar._tool_buttons["eraser"], Qt.MouseButton.LeftButton)
+
+        assert not overlay._blur_tray.isVisible()
+        assert not overlay._tray.isVisible()
+
+    def test_blur_tray_hides_when_the_selection_is_cleared(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+        assert overlay._blur_tray.isVisible()
+
+        overlay.set_selection(None)
+
+        assert not overlay._blur_tray.isVisible()
+
+    def test_blur_tray_stays_hidden_while_the_overlay_itself_is_not_shown(self):
+        # Same guarantee TestSettingsTrayOverlayIntegration establishes for
+        # `_tray`: none of this file's pixel-sampling OverlayWindow tests
+        # call .show(), so `_blur_tray` may not start painting into a
+        # grab() it wasn't asked for either.
+        overlay = self._overlay(size=(200, 200))
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        overlay._on_tool_selected("blur")
+
+        assert not overlay._blur_tray.isVisible()
+
+    def test_toggling_the_segment_updates_the_overlays_blur_mode(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+        assert overlay._blur_mode == "blur"
+
+        QTest.mouseClick(overlay._blur_tray._well.pixelate_button, Qt.MouseButton.LeftButton)
+
+        assert overlay._blur_mode == "pix"
+
+    def test_moving_the_strength_slider_updates_the_overlays_blur_strength(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+
+        overlay._blur_tray._slider.setValue(17)
+
+        assert overlay._blur_strength == 17
+
+
+class TestCaptureModePopoverComposition:
+    """SNX-44: the popover carries one row per `tokens.CAPTURE_MODES` entry,
+    a separator, then the delay row -- per docs/design/overlay-redesign.md's
+    "Capture-mode popover" section.
+    """
+
+    def test_contains_one_row_per_capture_mode_token_in_order(self):
+        popover = CaptureModePopover()
+
+        expected = [label for label, _icon, _note in tokens.CAPTURE_MODES]
+        assert list(popover._rows.keys()) == expected
+
+    def test_contains_the_separator_and_delay_row(self):
+        popover = CaptureModePopover()
+
+        assert len(popover.findChildren(_MenuSeparator)) == 1
+        assert isinstance(popover._delay_row, _DelayRow)
+
+    def test_default_delay_is_the_first_delay_token(self):
+        popover = CaptureModePopover()
+
+        assert popover.delay == tokens.DELAYS[0]
+        assert popover._delay_row._value.text() == tokens.DELAYS[0]
+
+    def test_row_label_and_note_match_their_capture_mode_token(self):
+        popover = CaptureModePopover()
+        label, _icon, note = tokens.CAPTURE_MODES[1]
+
+        row = popover._rows[label]
+
+        assert row._label.text() == label
+        assert note in [child.text() for child in row.findChildren(QLabel)]
+
+
+class TestCaptureModePopoverSelection:
+    """SNX-44: 'the selected row is marked with a check and picking a row
+    records that mode and closes the popover.'
+    """
+
+    def test_first_capture_mode_is_selected_by_default(self):
+        popover = CaptureModePopover()
+
+        default_label = tokens.CAPTURE_MODES[0][0]
+        assert popover.mode == default_label
+        assert popover._rows[default_label].is_selected
+        assert all(
+            not row.is_selected
+            for label, row in popover._rows.items()
+            if label != default_label
+        )
+
+    def test_clicking_a_row_selects_it_and_deselects_the_rest(self):
+        popover = CaptureModePopover()
+        target_label = tokens.CAPTURE_MODES[2][0]
+
+        QTest.mouseClick(popover._rows[target_label], Qt.MouseButton.LeftButton)
+
+        assert popover.mode == target_label
+        assert popover._rows[target_label].is_selected
+        assert all(
+            not row.is_selected
+            for label, row in popover._rows.items()
+            if label != target_label
+        )
+
+    def test_clicking_a_row_emits_mode_selected(self):
+        popover = CaptureModePopover()
+        received = Mock()
+        popover.modeSelected.connect(received)
+        target_label = tokens.CAPTURE_MODES[1][0]
+
+        QTest.mouseClick(popover._rows[target_label], Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with(target_label)
+
+    def test_clicking_a_row_closes_the_popover(self):
+        popover = CaptureModePopover()
+        popover.show()
+        target_label = tokens.CAPTURE_MODES[3][0]
+
+        QTest.mouseClick(popover._rows[target_label], Qt.MouseButton.LeftButton)
+
+        assert not popover.isVisible()
+
+    def test_unselected_row_shows_no_check(self):
+        # isHidden(), not isVisible(): this popover is never shown here, and
+        # isVisible() always reads False for a child of an unshown top-level
+        # widget regardless of its own setVisible() call -- isHidden()
+        # reflects the widget's own explicit show/hide state instead.
+        popover = CaptureModePopover()
+
+        other_label = tokens.CAPTURE_MODES[1][0]
+
+        assert popover._rows[other_label]._check.isHidden()
+
+    def test_selected_row_shows_the_check(self):
+        popover = CaptureModePopover()
+
+        default_label = tokens.CAPTURE_MODES[0][0]
+        assert not popover._rows[default_label]._check.isHidden()
+
+
+class TestCaptureModePopoverDelay:
+    """SNX-44: 'the delay row cycles through tokens.DELAYS in order and
+    wraps back to the first value.'
+    """
+
+    def test_clicking_the_delay_row_cycles_through_every_token_in_order(self):
+        popover = CaptureModePopover()
+
+        for expected in tokens.DELAYS[1:]:
+            QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+            assert popover.delay == expected
+            assert popover._delay_row._value.text() == expected
+
+    def test_cycling_past_the_last_delay_wraps_to_the_first(self):
+        popover = CaptureModePopover()
+        for _ in range(len(tokens.DELAYS) - 1):
+            QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+        assert popover.delay == tokens.DELAYS[-1]
+
+        QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+
+        assert popover.delay == tokens.DELAYS[0]
+
+    def test_clicking_the_delay_row_emits_delay_changed(self):
+        popover = CaptureModePopover()
+        received = Mock()
+        popover.delayChanged.connect(received)
+
+        QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with(tokens.DELAYS[1])
+
+    def test_clicking_the_delay_row_does_not_close_the_popover(self):
+        popover = CaptureModePopover()
+        popover.show()
+
+        QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+
+        assert popover.isVisible()
+
+    def test_clicking_the_delay_row_does_not_change_the_capture_mode(self):
+        popover = CaptureModePopover()
+
+        QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+
+        assert popover.mode == tokens.CAPTURE_MODES[0][0]
+
+
+class TestCaptureModePopoverPositioning:
+    """SNX-44: 'the popover opens above the bar when there is room above it
+    and below the bar when there is not,' per the spec's rule: "if bar top
+    > 300px, place the popover at bar_top - popover_height - 8; otherwise
+    place it below the bar."
+    """
+
+    def test_opens_above_the_bar_when_bar_top_is_past_the_threshold(self):
+        popover = CaptureModePopover()
+        bar_geometry = QRect(200, 400, 600, 48)
+        assert bar_geometry.top() > CaptureModePopover._UP_THRESHOLD
+
+        popover.reposition(bar_geometry, QSize(1600, 1000))
+
+        expected_top = (
+            bar_geometry.top() - popover.geometry().height() - tokens.Metric.MENU_OFFSET
+        )
+        assert popover.geometry().top() == expected_top
+        assert popover.geometry().bottom() < bar_geometry.top()
+
+    def test_opens_below_the_bar_when_bar_top_is_at_or_under_the_threshold(self):
+        popover = CaptureModePopover()
+        bar_geometry = QRect(200, 250, 600, 48)
+        assert bar_geometry.top() <= CaptureModePopover._UP_THRESHOLD
+
+        popover.reposition(bar_geometry, QSize(1600, 1000))
+
+        expected_top = bar_geometry.bottom() + tokens.Metric.MENU_OFFSET
+        assert popover.geometry().top() == expected_top
+        assert popover.geometry().top() > bar_geometry.bottom() - 1
+
+    def test_width_matches_the_menu_width_token(self):
+        popover = CaptureModePopover()
+
+        popover.reposition(QRect(200, 250, 600, 48), QSize(1600, 1000))
+
+        assert popover.geometry().width() == tokens.Metric.MENU_W
+
+    def test_horizontal_position_clamps_inside_the_window(self):
+        popover = CaptureModePopover()
+        bar_geometry = QRect(0, 250, 50, 48)  # far left, narrow bar
+
+        popover.reposition(bar_geometry, QSize(1600, 1000))
+
+        assert popover.geometry().left() >= 0
+        assert popover.geometry().right() <= 1600
+
+
+class TestCaptureModePopoverOverlayIntegration:
+    """SNX-44: the popover wired into `OverlayWindow` -- opened from the
+    bar's capture chip and closed either by picking a row or by clicking
+    outside it, mirroring how SNX-40/41/42 wired `FloatingBar`/the trays in.
+    """
+
+    def _overlay(self, size=(1600, 1000)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def test_clicking_the_chip_opens_the_popover(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        assert overlay._popover.isVisible()
+
+    def test_clicking_the_chip_again_closes_the_popover(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        assert overlay._popover.isVisible()
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        assert not overlay._popover.isVisible()
+
+    def test_popover_opens_above_the_bar_when_the_selection_sits_low(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        # A low selection pushes the bar well past the 300px threshold.
+        overlay.set_selection(QRect(400, 700, 200, 150))
+        assert overlay._bar.geometry().top() > CaptureModePopover._UP_THRESHOLD
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        assert overlay._popover.geometry().bottom() < overlay._bar.geometry().top()
+
+    def test_popover_opens_below_the_bar_when_the_selection_sits_high(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        # A high selection keeps the bar's top at or under the threshold.
+        overlay.set_selection(QRect(400, 50, 200, 150))
+        assert overlay._bar.geometry().top() <= CaptureModePopover._UP_THRESHOLD
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        assert overlay._popover.geometry().top() > overlay._bar.geometry().bottom() - 1
+
+    def test_picking_a_mode_records_it_and_updates_the_chip_label(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        target_label = tokens.CAPTURE_MODES[1][0]
+
+        QTest.mouseClick(overlay._popover._rows[target_label], Qt.MouseButton.LeftButton)
+
+        assert overlay._capture_mode == target_label
+        assert overlay._bar._chip._text_label.text() == target_label
+        assert not overlay._popover.isVisible()
+
+    def test_cycling_the_delay_row_updates_the_overlays_delay(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._popover._delay_row, Qt.MouseButton.LeftButton)
+
+        assert overlay._delay == tokens.DELAYS[1]
+
+    def test_clicking_outside_the_popover_closes_it_without_changing_the_mode(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        assert overlay._popover.isVisible()
+        original_mode = overlay._capture_mode
+
+        # A point on the frozen desktop, far from both the popover and any
+        # other chrome -- the top-left corner is always clear of both.
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(2, 2))
+
+        assert not overlay._popover.isVisible()
+        assert overlay._capture_mode == original_mode
+
+    def test_popover_hides_when_the_overlay_is_hidden(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        assert overlay._popover.isVisible()
+
+        overlay.hide()
+
+        assert not overlay._popover.isVisible()
+
+    def test_popover_hides_when_the_selection_is_cleared(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        assert overlay._popover.isVisible()
+
+        overlay.set_selection(None)
+
+        assert not overlay._popover.isVisible()
+
+
+def _mark(start=(10, 10), end=(20, 20)):
+    return Rectangle(
+        colour=QColor(255, 0, 0), stroke_width=4, start=QPointF(*start), end=QPointF(*end)
+    )
+
+
+class TestDimensionChipText:
+    """SNX-43: the dimension chip's text -- the selection's *logical* size,
+    and the mark-count pluralisation rule ("1 mark" singular, "N marks"
+    otherwise) -- per docs/design/overlay-redesign.md's "Chips above the
+    selection".
+    """
+
+    def _overlay(self, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(100, 100, 300, 150))
+        return overlay
+
+    def test_reads_the_selection_size(self):
+        overlay = self._overlay()
+
+        size_text, _ = overlay._dimension_chip_texts()
+
+        assert size_text == "300 × 150"
+
+    def test_reads_logical_size_not_physical_pixels_under_scaling(self):
+        # The image is 2x the logical size -- a devicePixelRatio-2 display
+        # -- so a read of the frame's own pixel geometry (rather than the
+        # window-local logical `_selection` this window already keeps, per
+        # the class docstring) would double every number here.
+        frame = make_frame(image_size=(1200, 800), logical_size=(600, 400))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 200, 120))
+
+        size_text, _ = overlay._dimension_chip_texts()
+
+        assert size_text == "200 × 120"
+
+    def test_zero_marks_reads_plural(self):
+        overlay = self._overlay()
+
+        _, mark_text = overlay._dimension_chip_texts()
+
+        assert mark_text == "0 marks"
+
+    def test_exactly_one_mark_reads_singular(self):
+        overlay = self._overlay()
+        overlay.add_mark(_mark())
+
+        _, mark_text = overlay._dimension_chip_texts()
+
+        assert mark_text == "1 mark"
+
+    def test_two_marks_reads_plural(self):
+        overlay = self._overlay()
+        overlay.add_mark(_mark())
+        overlay.add_mark(_mark())
+
+        _, mark_text = overlay._dimension_chip_texts()
+
+        assert mark_text == "2 marks"
+
+    def test_undoing_back_to_one_mark_returns_to_singular(self):
+        # The count is read fresh every call (see the method's own
+        # docstring), so it has to follow the mark count back down, not
+        # just up.
+        overlay = self._overlay()
+        overlay.add_mark(_mark())
+        overlay.add_mark(_mark())
+
+        overlay.undo()
+
+        _, mark_text = overlay._dimension_chip_texts()
+        assert mark_text == "1 mark"
+
+
+class TestDimensionChipLiveUpdate:
+    """SNX-43 AC: 'the chip updates live while the selection is being
+    resized.'
+    """
+
+    def test_text_reflects_the_in_progress_drag_before_release(self):
+        frame = make_frame(image_size=(500, 500), logical_size=(500, 500))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        before, _ = overlay._dimension_chip_texts()
+        assert before == "150 × 100"
+        press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, QPoint(300, 150))  # still mid-drag, no release yet
+
+        mid_drag, _ = overlay._dimension_chip_texts()
+        assert mid_drag == "200 × 100"
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(300, 150))
+
+
+class TestDimensionChipGeometry:
+    """SNX-43 AC: 'the dimension chip is left-aligned to the selection's
+    left edge... above the selection's top edge.'
+    """
+
+    def _overlay(self, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(120, 200, 260, 140))
+        return overlay
+
+    def test_left_aligned_to_the_selections_left_edge(self):
+        overlay = self._overlay()
+
+        rect = overlay._dimension_chip_rect()
+
+        assert rect.left() == pytest.approx(overlay._selection.left())
+
+    def test_sits_the_token_offset_above_the_selections_top_edge(self):
+        overlay = self._overlay()
+
+        rect = overlay._dimension_chip_rect()
+
+        assert rect.top() == pytest.approx(
+            overlay._selection.top() - tokens.Metric.CHIP_OFFSET_Y
+        )
+
+    def test_grows_to_fit_a_longer_mark_count_reading(self):
+        overlay = self._overlay()
+        narrow = overlay._dimension_chip_rect()
+        for _ in range(20):
+            overlay.add_mark(_mark())
+
+        wide = overlay._dimension_chip_rect()
+
+        assert wide.width() > narrow.width()
+        # Still left-aligned to the same edge -- only the right edge grows.
+        assert wide.left() == pytest.approx(narrow.left())
+
+
+class TestFrozenPillGeometry:
+    """SNX-43 AC: 'the Frozen pill is right-aligned to its right edge...
+    above the selection's top edge.'
+    """
+
+    def _overlay(self, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(120, 200, 260, 140))
+        return overlay
+
+    def test_right_aligned_to_the_selections_right_edge(self):
+        overlay = self._overlay()
+        sel = QRectF(overlay._selection)  # QRect.right() is inclusive; QRectF's isn't
+
+        rect = overlay._frozen_pill_rect()
+
+        assert rect.right() == pytest.approx(sel.right())
+
+    def test_sits_the_token_offset_above_the_selections_top_edge(self):
+        overlay = self._overlay()
+
+        rect = overlay._frozen_pill_rect()
+
+        assert rect.top() == pytest.approx(
+            overlay._selection.top() - tokens.Metric.CHIP_OFFSET_Y
+        )
+
+    def test_sits_at_the_same_height_as_the_dimension_chip(self):
+        overlay = self._overlay()
+
+        assert overlay._frozen_pill_rect().top() == pytest.approx(
+            overlay._dimension_chip_rect().top()
+        )
+
+
+class TestChipsPixels:
+    """SNX-43: both chips actually paint their token-coloured fill."""
+
+    def _overlay(self, size=(900, 900)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        # Wide enough that the two chips -- one left-aligned to the
+        # selection, one right-aligned -- never overlap regardless of which
+        # mono/sans family design.font_families() falls back to when IBM
+        # Plex isn't bundled (a wider fallback glyph could otherwise widen
+        # the dimension chip enough to reach under the Frozen pill's own
+        # sample point).
+        overlay.set_selection(QRect(150, 200, 500, 120))
+        return overlay
+
+    def test_dimension_chip_paints_its_light_background(self):
+        overlay = self._overlay()
+        sample = overlay._dimension_chip_rect().center().toPoint()
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(sample) == design_color("CHIP_LIGHT_BG")
+
+    def test_frozen_pill_paints_its_dark_background_at_the_token_alpha(self):
+        overlay = self._overlay()
+        rect = overlay._frozen_pill_rect()
+        # Near the right edge, past where the pin icon/label are painted, so
+        # this samples the plain fill rather than a glyph pixel.
+        sample = QPoint(round(rect.right() - 3), round(rect.center().y()))
+
+        rendered = overlay.grab().toImage()
+        # The pill sits above the selection, i.e. over the *scrim*, not the
+        # bare frame -- so the base this blends onto is itself already
+        # DIM-blended, same as the scrim's own token colour/alpha.
+        scrimmed = _blend(QColor(10, 20, 30), design_color("DIM"))
+        expected = _blend(scrimmed, design_color("CHIP_DARK_BG"))
+        sampled = rendered.pixelColor(sample)
+
+        assert sampled.red() == pytest.approx(expected.red(), abs=2)
+        assert sampled.green() == pytest.approx(expected.green(), abs=2)
+        assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
+
+
+class TestChipsExcludedFromExport:
+    """SNX-43 AC: 'neither chip appears in the exported image.'"""
+
+    def _overlay(self, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(150, 200, 200, 120))
+        return overlay
+
+    def test_rendered_image_size_matches_the_selection_not_the_chips(self):
+        overlay = self._overlay()
+
+        rendered = overlay.rendered_image()
+
+        # Both chips sit outside the selection rect (above its top edge);
+        # if either had leaked into the export, the flattened image would
+        # be taller than the plain selection instead of exactly its size.
+        assert (rendered.width(), rendered.height()) == (200, 120)
+
+    def test_rendered_image_pixels_match_the_frames_own_colour(self):
+        overlay = self._overlay()
+
+        rendered = overlay.rendered_image()
+
+        base = QColor(10, 20, 30)
+        for x, y in [(0, 0), (199, 0), (0, 119), (199, 119), (100, 60)]:
+            assert rendered.pixelColor(x, y) == base
+
+
+class TestHintHUDComposition:
+    """SNX-46: the standalone `HintHUD` widget's content -- the exact hint
+    line from docs/design/overlay-redesign.md's "Top hint HUD" section, with
+    key names (`Esc`, `Enter`, the eight tool shortcuts) set apart from the
+    surrounding prose by family and colour, per "Key names are mono in pure
+    white."
+    """
+
+    def test_reads_the_full_hint_line(self):
+        hud = HintHUD()
+
+        text = "".join(label.text() for label in hud.findChildren(QLabel))
+
+        assert text == (
+            "Esc discard ink · Enter copy & dismiss · "
+            "P H A R S T B E pick a tool · drag any edge to re-frame "
+            "— the ink stays where you put it"
+        )
+
+    def test_key_segments_cover_esc_enter_and_every_tool_shortcut_in_order(self):
+        hud = HintHUD()
+
+        key_texts = [text for text, is_key in hud._segments() if is_key]
+
+        assert key_texts == [
+            "Esc",
+            "Enter",
+            " ".join(_TOOL_SHORTCUT_KEYS[tool] for tool in tokens.TOOLS),
+        ]
+
+    def test_key_segments_are_set_in_the_mono_family_at_pure_white(self):
+        hud = HintHUD()
+        labels = {label.text(): label for label in hud.findChildren(QLabel)}
+        mono = font_families().mono
+        key_colour = design_color("HUD_KEY").name()
+
+        for text, is_key in hud._segments():
+            if is_key:
+                label = labels[text]
+                assert label.font().family() == mono
+                assert label.styleSheet() == f"color: {key_colour};"
+
+    def test_prose_segments_are_set_in_the_ui_family_at_the_muted_hud_colour(self):
+        hud = HintHUD()
+        labels = {label.text(): label for label in hud.findChildren(QLabel)}
+        ui = font_families().ui
+        prose_colour = design_color("HUD_TEXT").name()
+
+        for text, is_key in hud._segments():
+            if not is_key:
+                label = labels[text]
+                assert label.font().family() == ui
+                assert label.styleSheet() == f"color: {prose_colour};"
+
+    def test_key_colour_reads_brighter_than_the_prose_colour(self):
+        # "Key names are mono in pure white" against the surrounding
+        # prose's own muted colour -- checked as a plain luminance
+        # comparison rather than hard-coding "white", so this stays true
+        # even if HUD_KEY/HUD_TEXT's exact hexes ever change.
+        key = design_color("HUD_KEY")
+        prose = design_color("HUD_TEXT")
+
+        assert key.lightness() > prose.lightness()
+
+    def test_height_matches_the_token(self):
+        hud = HintHUD()
+
+        assert hud.height() == tokens.Metric.HUD_H
+
+
+class TestHintHUDFill:
+    """SNX-46: the bar's own translucent fill -- `HUD_BG` at
+    `HUD_BG_ALPHA` -- same convention as `TestFloatingBarFill`'s callout for
+    the floating bar's own "alpha, not opacity" fill.
+    """
+
+    def test_background_pixel_is_painted_at_the_token_alpha(self):
+        hud = HintHUD()
+        # Wider than the hint line's own sizeHint, so the stretches on
+        # either side of the centred text leave real background-only room
+        # to sample near an edge.
+        hud.resize(hud.sizeHint().width() + 400, tokens.Metric.HUD_H)
+
+        rendered = hud.grab().toImage()
+        pixel = rendered.pixelColor(2, 2)
+
+        expected_alpha = round(tokens.Color.HUD_BG_ALPHA * 255)
+        expected_rgb = QColor(tokens.Color.HUD_BG).getRgb()[:3]
+        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
+        # abs=1, not exact equality: a 50%-alpha fill's premultiplied RGB
+        # can round either way, the same one-off drift TestOverlayWindow's
+        # own DIM-scrim test (_blend) already tolerates for the same reason.
+        for sampled, expected in zip(
+            (pixel.red(), pixel.green(), pixel.blue()), expected_rgb
+        ):
+            assert sampled == pytest.approx(expected, abs=1)
+
+
+class TestHintHUDOverlayIntegration:
+    """SNX-46: `HintHUD` wired into `OverlayWindow` as `_hud`, behind the
+    `hints` preference the spec's "Top hint HUD" section puts it behind --
+    default on -- and gated on this window's own visibility the same way
+    `_bar`/`_toast` already are (`TestFloatingBarIntegration`/
+    `TestOverlayWindowToasts` above document why).
+    """
+
+    def _overlay(self, size=(800, 600), **kwargs):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame, **kwargs)
+
+    def test_hints_enabled_defaults_to_true(self):
+        overlay = self._overlay()
+
+        assert overlay.hints_enabled
+
+    def test_hud_becomes_visible_once_the_overlay_is_shown(self):
+        overlay = self._overlay()
+
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        assert overlay._hud.isVisible()
+
+    def test_hud_spans_the_full_window_width_at_the_token_height(self):
+        overlay = self._overlay(size=(800, 600))
+
+        assert overlay._hud.geometry() == QRect(0, 0, 800, tokens.Metric.HUD_H)
+
+    def test_hud_stays_hidden_while_the_overlay_itself_is_not_shown(self):
+        # Mirrors
+        # test_bar_stays_hidden_and_unpainted_while_the_overlay_itself_is_not_shown:
+        # none of this file's other OverlayWindow pixel tests call .show()
+        # before grab()ing, so the HUD -- default on -- must not leak into
+        # any of them just because it exists as a real child widget now.
+        overlay = self._overlay()
+
+        assert not overlay._hud.isVisible()
+
+    def test_set_hints_enabled_false_hides_the_hud_immediately(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._hud.isVisible()
+
+        overlay.set_hints_enabled(False)
+
+        assert not overlay._hud.isVisible()
+        assert not overlay.hints_enabled
+
+    def test_set_hints_enabled_true_shows_it_again(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_hints_enabled(False)
+        assert not overlay._hud.isVisible()
+
+        overlay.set_hints_enabled(True)
+
+        assert overlay._hud.isVisible()
+
+    def test_constructor_can_start_with_the_preference_off(self):
+        overlay = self._overlay(hints_enabled=False)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        assert not overlay.hints_enabled
+        assert not overlay._hud.isVisible()
+
+    def test_hud_hides_again_once_the_overlay_itself_is_hidden(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._hud.isVisible()
+
+        overlay.hide()
+
+        assert not overlay._hud.isVisible()
+
+
+class TestReframingClearsTheShownHUD:
+    """SNX-46 AC: 'the selection cannot be dragged up underneath the HUD
+    while it is shown.' SNX-33's own `_TOP_CLEARANCE` (52) already reserved
+    this room ahead of the HUD existing -- this asserts the two actually
+    agree, per the ticket's "the HUD and that constraint have to agree,"
+    rather than just trusting the arithmetic in each one's comments.
+    """
+
+    def test_top_clearance_constant_is_at_least_the_huds_own_height(self):
+        assert OverlayWindow._TOP_CLEARANCE >= tokens.Metric.HUD_H
+
+    def test_dragging_the_top_left_corner_off_screen_stops_clear_of_the_visible_hud(self):
+        frame = make_frame(image_size=(400, 400), logical_size=(400, 400))
+        overlay = OverlayWindow(frame)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._hud.isVisible()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, QPoint(-50, -50))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(-50, -50))
+
+        # QRect.bottom() is inclusive (top + height - 1) -- the same trap
+        # `_bracket_path`/`FloatingBarIntegration` already document -- so
+        # the clamped selection's top must clear it, not just equal it.
+        assert overlay._selection.y() > overlay._hud.geometry().bottom()
+
+
+class TestHintHUDExcludedFromExport:
+    """SNX-46 AC: 'the HUD never appears in the exported image.'"""
+
+    def test_rendered_image_is_identical_whether_or_not_the_hud_is_shown(self):
+        size = (400, 400)
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(52, 52, 200, 150))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._hud.isVisible()  # actually on screen, not a no-op
+
+        with_hud = overlay.rendered_image()
+
+        overlay.set_hints_enabled(False)
+        assert not overlay._hud.isVisible()
+
+        without_hud = overlay.rendered_image()
+
+        assert with_hud == without_hud
+
+
+class TestKeyboardToolShortcuts:
+    """SNX-47 AC: 'each letter in tokens.SHORTCUTS selects its tool.'"""
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        return overlay
+
+    @pytest.mark.parametrize("letter,tool", list(tokens.SHORTCUTS.items()))
+    def test_letter_selects_its_tool(self, letter, tool):
+        overlay = self._overlay()
+        key = getattr(Qt.Key, f"Key_{letter}")
+
+        QTest.keyClick(overlay, key)
+
+        assert overlay._bar.active_tool == tool
+
+    def test_selecting_eraser_by_key_arms_it_same_as_a_click(self):
+        # Mirrors test_clicking_the_eraser_tool_button_arms_the_eraser --
+        # a shortcut has to produce the same _on_tool_selected side effect
+        # a button click does, not just move the active-tool highlight.
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_E)
+
+        assert overlay._eraser_active
+
+    def test_switching_tool_by_key_disarms_the_eraser(self):
+        overlay = self._overlay()
+        QTest.keyClick(overlay, Qt.Key.Key_E)
+        assert overlay._eraser_active
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert not overlay._eraser_active
+        assert overlay._bar.active_tool == "pen"
+
+
+class TestKeyboardUndoRedo:
+    """SNX-47 AC: 'Ctrl+Z undoes and Ctrl+Shift+Z redoes.'"""
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        return overlay
+
+    def test_ctrl_z_undoes_the_newest_mark(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+        assert overlay.marks == ()
+        assert overlay.can_redo
+
+    def test_ctrl_shift_z_redoes_the_undone_mark(self):
+        overlay = self._overlay()
+        mark = overlay.marks[0]
+        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        assert overlay.marks == ()
+
+        QTest.keyClick(
+            overlay,
+            Qt.Key.Key_Z,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        assert overlay.marks == (mark,)
+
+
+class TestKeyboardEnter:
+    """SNX-47 AC: 'Enter copies to the clipboard and dismisses the
+    overlay.'
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, with_selection=True):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        if with_selection:
+            overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_enter_copies_the_flattened_selection_and_closes(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(80, 80))
+        )
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert len(calls) == 1
+        assert calls[0].pixelColor(20, 50) == self.RED
+        assert not overlay.isVisible()
+
+    def test_enter_key_variant_also_dismisses(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Enter)
+
+        assert not overlay.isVisible()
+
+    def test_enter_without_a_selection_does_nothing(self, monkeypatch):
+        # Mirrors Overlay's own Enter guard above -- nothing to flatten or
+        # copy without a selection yet.
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay(with_selection=False)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert calls == []
+        assert overlay.isVisible()
+
+
+class TestKeyboardEscapeTwoStage:
+    """SNX-47 AC: 'Esc with marks present discards them and toasts, and Esc
+    with no marks present closes the overlay without capturing.' The
+    two-stage split itself is the decision docs/design/overlay-redesign.md's
+    keyboard table leaves to this ticket.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_first_escape_with_ink_discards_it_and_toasts_without_closing(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay.marks == ()
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Ink discarded"
+        assert overlay.isVisible()
+
+    def test_second_escape_with_nothing_left_closes_without_capturing(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # first stage: discards the mark
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # second stage: nothing left, closes
+
+        assert not overlay.isVisible()
+        assert calls == []  # never captured
+
+    def test_escape_with_no_ink_at_all_closes_on_the_first_press(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay.isVisible()
+
+
+class TestKeyboardShortcutSuppression:
+    """SNX-47 AC: 'none of these keys fire while a text label is being
+    edited or a slider has focus, and the key reaches the focused widget
+    instead.'
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        return overlay
+
+    def test_tool_letter_does_not_fire_while_a_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert overlay._bar.active_tool is None
+
+    def test_tool_letter_does_not_fire_while_a_text_label_is_focused(self):
+        # No text-label editor is wired into OverlayWindow yet (a later
+        # ticket, per the class docstring) -- shapes.Text's own docstring
+        # names QLineEdit as that widget, mirroring editor.py's
+        # Canvas._ensure_text_edit, so a bare QLineEdit stands in for it
+        # here.
+        overlay = self._overlay()
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert overlay._bar.active_tool is None
+
+    def test_undo_does_not_fire_while_a_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+        assert len(overlay.marks) == 1
+
+    def test_escape_does_not_discard_while_a_text_label_is_focused(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert len(overlay.marks) == 1
+
+    def test_enter_does_not_copy_or_close_while_a_slider_has_focus(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert calls == []
+        assert overlay.isVisible()
+
+    def test_slider_still_handles_its_own_arrow_key_once_focused(self):
+        # The other half of the AC: "a slider being nudged with the arrow
+        # keys must keep them." Delivered straight to the slider, the way
+        # a real key press would once it actually holds focus -- proving
+        # OverlayWindow's own suppression above never has to get involved
+        # for the slider's own keys to keep working.
+        overlay = self._overlay()
+        slider = overlay._tray._slider
+        slider.setFocus()
+        original = slider.value()
+
+        QTest.keyClick(slider, Qt.Key.Key_Right)
+
+        assert slider.value() == original + slider.singleStep()
+
+    def test_text_label_still_receives_typed_letters_once_focused(self):
+        overlay = self._overlay()
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(label, "P")
+
+        assert label.text() == "P"
