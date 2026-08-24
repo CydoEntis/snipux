@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QColorDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSlider,
     QVBoxLayout,
@@ -583,6 +584,14 @@ def _l_bracket_local_path(length: float, thickness: float, radius: float) -> QPa
 # key by tool name instead of every button re-scanning the forward mapping.
 _TOOL_SHORTCUT_KEYS = {tool: key for key, tool in design.tokens.SHORTCUTS.items()}
 
+# tokens.SHORTCUTS keyed by Qt.Key code rather than letter (SNX-47), so
+# OverlayWindow.keyPressEvent can look a QKeyEvent.key() up directly instead
+# of going through event.text() -- which depends on locale/shift state in a
+# way a letter's key code never does.
+_SHORTCUT_KEY_CODES = {
+    getattr(Qt.Key, f"Key_{letter}"): tool for letter, tool in design.tokens.SHORTCUTS.items()
+}
+
 
 def _tool_label(tool: str) -> str:
     """Human-facing text for a `tokens.TOOLS` entry.
@@ -928,6 +937,16 @@ class FloatingBar(QWidget):
     # -- tool selection --------------------------------------------------
 
     def _on_tool_clicked(self, tool: str) -> None:
+        self.select_tool(tool)
+
+    def select_tool(self, tool: str) -> None:
+        """Public equivalent of clicking `tool`'s own button: the same
+        active-tool bookkeeping and `toolSelected` emission a click
+        produces. `OverlayWindow.keyPressEvent`'s tool-letter shortcuts
+        (SNX-47) call this rather than reaching for the private
+        `_on_tool_clicked` -- a shortcut and a click are two ways to reach
+        the same state change, not two copies of it that could drift apart.
+        """
         self.set_active_tool(tool)
         self.toolSelected.emit(tool)
 
@@ -2311,16 +2330,20 @@ class OverlayWindow(QWidget):
     that will read `_capture_mode` once they exist, same as `_blur_mode`
     above sits unread until its own ticket. `mousePressEvent` closes the
     popover on any click that lands outside it, without touching
-    `_capture_mode`. SNX-45 (this ticket) adds `Toast` (`_toast`), the
-    single instance `_show_toast` shows for `copy`/`save`/`clear`/
-    `discard` -- the last of those four not itself wired to Esc yet, per
-    `discard`'s own docstring -- gated on `self.isVisible()` the same way
-    `_bar` already is, so it never paints into this window's own many
-    pixel-sampling tests. SNX-46 (this ticket) adds `HintHUD` (`_hud`),
-    gated on both `self.isVisible()` (same reason as `_bar`/`_toast`) and
-    `_hints_enabled` -- the preference the spec's "Top hint HUD" section
-    puts it behind, default on, toggled via `set_hints_enabled` -- via
-    `_sync_hud_visibility`.
+    `_capture_mode`. SNX-45 adds `Toast` (`_toast`), the single instance
+    `_show_toast` shows for `copy`/`save`/`clear`/`discard`, gated on
+    `self.isVisible()` the same way `_bar` already is, so it never paints
+    into this window's own many pixel-sampling tests. SNX-46 adds `HintHUD`
+    (`_hud`), gated on both `self.isVisible()` (same reason as `_bar`/
+    `_toast`) and `_hints_enabled` -- the preference the spec's "Top hint
+    HUD" section puts it behind, default on, toggled via
+    `set_hints_enabled` -- via `_sync_hud_visibility`. SNX-47 (this ticket)
+    adds `keyPressEvent`: tool letters from `tokens.SHORTCUTS`, Ctrl+Z /
+    Ctrl+Shift+Z for undo/redo, Enter to copy-and-dismiss, and the
+    two-stage Esc (`_handle_escape`) the spec leaves for us to decide --
+    finally wiring `discard()` up to a key, per that method's own
+    docstring. All of it is suppressed while a slider or a text-editing
+    widget has focus (`_shortcuts_suppressed`).
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -2805,10 +2828,9 @@ class OverlayWindow(QWidget):
         Same underlying effect as `clear()` -- per the spec's keyboard
         table, "Esc -- discard all ink, toast Ink discarded" -- but its own
         method and toast message, since Esc's wording is deliberately
-        distinct from the floating bar's own clear-ink button. Wiring Esc
-        to actually call this is the keyboard-shortcuts ticket named in
-        TODO.md's "PR 3" list, not this one; this method exists now so that
-        ticket only has to wire a key, not add the behaviour.
+        distinct from the floating bar's own clear-ink button. Called by
+        `_handle_escape` (SNX-47) as the first stage of Esc's two-stage
+        behaviour, whenever there is ink present to discard.
         """
         self._empty_marks()
         self._show_toast("trash", "Ink discarded")
@@ -2952,6 +2974,88 @@ class OverlayWindow(QWidget):
         self._popover.hide()
         self._toast.hide()
         self._hud.hide()
+
+    # -- keyboard shortcuts (SNX-47) -----------------------------------------
+    # docs/design/overlay-redesign.md's "Keyboard" table is the authority: a
+    # tool letter from tokens.SHORTCUTS, Ctrl+Z / Ctrl+Shift+Z for undo/redo,
+    # Enter to copy-and-dismiss, and Esc, whose second stage the table
+    # explicitly leaves for us to decide -- see _handle_escape. All of it is
+    # suppressed outright while a text label or a slider has focus, per the
+    # table's own closing line -- see _shortcuts_suppressed.
+
+    def _shortcuts_suppressed(self) -> bool:
+        """True while keyboard focus is on a widget these shortcuts must
+        leave alone: a slider (either tray's stroke/strength control) or a
+        text-editing widget -- `QLineEdit` is what the text tool's own label
+        editor will be, per `shapes.Text`'s docstring, mirroring editor.py's
+        `Canvas._ensure_text_edit`; checking for it now means this method
+        doesn't have to change again once a later ticket wires the text
+        tool's drag up to actually create one.
+
+        `self.focusWidget()`, not the process-wide `QApplication.
+        focusWidget()`, is enough here: every widget these shortcuts must
+        yield to lives inside this window, and `QWidget.focusWidget()`
+        reports a child that's been given focus via `setFocus()` regardless
+        of whether this window itself is ever shown -- which is what lets a
+        test give a tray's slider focus without a real, visible window.
+        """
+        focus = self.focusWidget()
+        return isinstance(focus, (QSlider, QLineEdit))
+
+    def _handle_escape(self) -> None:
+        """Two-stage Esc -- the decision the spec leaves to us: "in the real
+        app decide whether Esc should also dismiss the overlay, and if so
+        make it two-stage (ink first, then close)." While any ink is
+        present, the first press only discards it (`discard()`, which
+        toasts "Ink discarded") and leaves the overlay open so re-framing
+        can continue; once there is nothing left to discard, the next press
+        closes the overlay without capturing -- `Overlay`'s own Escape
+        above is unconditional cancel because it has no ink to lose first.
+        """
+        if self._marks:
+            self.discard()
+        else:
+            self.close()
+
+    def keyPressEvent(self, event) -> None:
+        if self._shortcuts_suppressed():
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        modifiers = event.modifiers()
+
+        # Exact-equality modifier check, not bitwise: Ctrl+Shift+Z's
+        # modifier set includes ControlModifier, so a bitwise "is Control
+        # held" test would swallow every redo as an undo. Same trap
+        # editor.py's own `_undo_redo_action` docstring documents.
+        if key == Qt.Key.Key_Z and modifiers == (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        ):
+            self.redo()
+            return
+        if key == Qt.Key.Key_Z and modifiers == Qt.KeyboardModifier.ControlModifier:
+            self.undo()
+            return
+
+        if key == Qt.Key.Key_Escape:
+            self._handle_escape()
+            return
+
+        if key in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+            # Mirrors Overlay's own Enter handling above: nothing to copy
+            # (and dismiss) without a selection yet.
+            if self._selection is not None:
+                self.copy()
+                self.close()
+            return
+
+        tool = _SHORTCUT_KEY_CODES.get(key)
+        if tool is not None:
+            self._bar.select_tool(tool)
+            return
+
+        super().keyPressEvent(event)
 
     def _advance_ants(self) -> None:
         """Advance the dashed stroke's offset by one animation frame.
