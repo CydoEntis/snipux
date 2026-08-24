@@ -314,10 +314,16 @@ class ObscuringShape(Shape):
     QPainter it was holding open before apply() runs and reopening a fresh
     one afterwards, per CLAUDE.md's rule against reading a QPixmap/QImage
     while a QPainter is still active on it.
+
+    `strength` is the tray's Strength slider (docs/design/overlay-redesign.md's
+    "Blur tray"), range `Metric.BLUR_MIN`-`Metric.BLUR_MAX`, defaulting to
+    `Metric.BLUR_DEFAULT` here so a shape built without the tray (tests,
+    programmatic callers) still gets the same effect the UI defaults to.
     """
 
     start: QPointF = field(default_factory=QPointF)
     end: QPointF = field(default_factory=QPointF)
+    strength: int = design.tokens.Metric.BLUR_DEFAULT
 
     # The one difference between Blur and Pixelate: which interpolation the
     # final upscale uses. Smooth blends block edges into a blur; nearest
@@ -332,10 +338,16 @@ class ObscuringShape(Shape):
         an obscured version. Does not mutate `image` in place, matching
         the copy-on-write discipline render() itself follows.
 
-        Obscures by downscaling the sampled patch then scaling it back up;
-        the averaging a smooth downscale performs is what produces the
-        blur/pixelate effect, so no manual convolution and no numpy/Pillow/
-        OpenCV dependency, per CLAUDE.md.
+        Obscures by downscaling the sampled patch to `1/strength` then
+        scaling it back up — per docs/design/overlay-redesign.md's "blur"
+        entry. `drawImage()` below replaces the rect's pixels outright
+        rather than drawing a translucent effect over the original
+        content, which is what makes this destructive: the source pixels
+        are gone from the returned image, not merely covered, so they
+        cannot be recovered from the export. The averaging a smooth
+        downscale performs is what produces the blur/pixelate effect, so
+        no manual convolution and no numpy/Pillow/OpenCV dependency, per
+        CLAUDE.md.
         """
         pixel_rect = _clamped_pixel_rect(self.start, self.end, image)
         if pixel_rect is None:
@@ -343,8 +355,8 @@ class ObscuringShape(Shape):
 
         patch = image.copy(pixel_rect)
         small = patch.scaled(
-            max(1, pixel_rect.width() // _OBSCURE_DOWNSCALE_DIVISOR),
-            max(1, pixel_rect.height() // _OBSCURE_DOWNSCALE_DIVISOR),
+            max(1, pixel_rect.width() // self.strength),
+            max(1, pixel_rect.height() // self.strength),
             Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -367,13 +379,6 @@ class ObscuringShape(Shape):
         # calls apply() instead. Raises rather than silently no-op-ing so a
         # caller that bypasses render()'s isinstance check fails loudly.
         raise NotImplementedError("ObscuringShape uses apply(), not draw()")
-
-
-# Sampled patch is downscaled to roughly this fraction before being scaled
-# back up; the averaging a smooth downscale performs is what produces the
-# blur, so the exact factor is an implementation detail, not a tuned
-# constant anything depends on.
-_OBSCURE_DOWNSCALE_DIVISOR = 8
 
 
 @dataclass

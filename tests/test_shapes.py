@@ -18,7 +18,6 @@ from snipux.shapes import (
     Rectangle,
     StepMarker,
     Text,
-    _OBSCURE_DOWNSCALE_DIVISOR,
     apply_crop,
     finalize_mark,
     next_step_number,
@@ -506,6 +505,24 @@ class TestObscuringShapeFields:
         assert shape.colour == RED
         assert shape.stroke_width == 3
 
+    def test_blur_defaults_strength_to_the_token_default(self):
+        shape = Blur(colour=RED, stroke_width=3, start=QPointF(0, 0), end=QPointF(10, 10))
+        assert shape.strength == Metric.BLUR_DEFAULT
+
+    def test_pixelate_defaults_strength_to_the_token_default(self):
+        shape = Pixelate(colour=RED, stroke_width=3, start=QPointF(0, 0), end=QPointF(10, 10))
+        assert shape.strength == Metric.BLUR_DEFAULT
+
+    def test_strength_takes_an_explicit_value_within_the_token_range(self):
+        shape = Pixelate(
+            colour=RED,
+            stroke_width=3,
+            start=QPointF(0, 0),
+            end=QPointF(10, 10),
+            strength=Metric.BLUR_MAX,
+        )
+        assert shape.strength == Metric.BLUR_MAX
+
     def test_obscuring_shape_draw_raises(self):
         # render() must never call draw() on one of these — it dispatches
         # to apply() instead (see TestBlurOrdering below). This pins that
@@ -578,26 +595,73 @@ class TestBlurOrdering:
         assert result != base  # the whole rect was processed, not skipped
         assert result.pixelColor(39, 39) != base.pixelColor(39, 39)
 
+    def test_rect_extending_past_the_frame_is_clamped_not_raised(self):
+        # A drag that starts inside the frame and is released past its
+        # edge (or a shape translated there, see render_selection) must be
+        # clamped to the frame rather than blowing up on QImage.copy()'s
+        # undefined padding for an out-of-bounds rect.
+        base = make_gradient_image(size=(40, 40))
+        blur = Blur(colour=RED, stroke_width=4, start=QPointF(20, 20), end=QPointF(200, 200))
+
+        result = render(base, [blur])  # must not raise
+
+        assert result != base
+        # The far corner of the clamped rect, at the frame's own edge, was
+        # obscured...
+        assert result.pixelColor(39, 39) != base.pixelColor(39, 39)
+        # ...and the shape's clamp did nothing to pixels outside its rect.
+        assert result.pixelColor(5, 5) == base.pixelColor(5, 5)
+
 
 class TestPixelateBlocky:
     def test_uniform_within_a_block_varies_across_blocks(self):
         size = 80
+        strength = Metric.BLUR_DEFAULT
         base = make_gradient_image(size=(size, size))
         pixelate = Pixelate(
-            colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(size, size)
+            colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(size, size),
+            strength=strength,
         )
 
         result = render(base, [pixelate])
 
-        # Block width is derived from the divisor rather than hardcoded, so
-        # retuning _OBSCURE_DOWNSCALE_DIVISOR (an implementation detail, see
-        # shapes.py) doesn't break this test's premise.
-        block_width = size // (size // _OBSCURE_DOWNSCALE_DIVISOR)
+        # Block width is derived from the shape's own strength rather than
+        # hardcoded, so retuning BLUR_DEFAULT doesn't break this test's
+        # premise.
+        block_width = size // (size // strength)
         # Two pixels a couple of px apart inside block 0 must match...
         assert result.pixelColor(1, 40) == result.pixelColor(3, 40)
         # ...but a pixel a full block away is not required to, and for this
         # gradient does not.
         assert result.pixelColor(1, 40) != result.pixelColor(block_width + 1, 40)
+
+    def test_higher_strength_downsamples_to_wider_blocks(self):
+        # "downsamples by the strength" (docs/design/overlay-redesign.md's
+        # "blur" entry): a higher strength means a smaller intermediate
+        # image and so coarser, wider blocks once scaled back up.
+        size = 80
+        base = make_gradient_image(size=(size, size))
+        low = Pixelate(
+            colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(size, size),
+            strength=Metric.BLUR_MIN,
+        )
+        high = Pixelate(
+            colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(size, size),
+            strength=Metric.BLUR_MAX,
+        )
+
+        low_result = render(QImage(base), [low])
+        high_result = render(QImage(base), [high])
+
+        low_block_width = size // (size // Metric.BLUR_MIN)
+        high_block_width = size // (size // Metric.BLUR_MAX)
+        assert high_block_width > low_block_width
+        # A pixel just past the low-strength block boundary already
+        # changed colour for `low`, but the coarser `high` block still
+        # spans it, so its two neighbouring blocks read as still equal.
+        probe_a, probe_b = 1, low_block_width + 1
+        assert low_result.pixelColor(probe_a, 40) != low_result.pixelColor(probe_b, 40)
+        assert high_result.pixelColor(probe_a, 40) == high_result.pixelColor(probe_b, 40)
 
     def test_pixelate_distinguishable_from_blur_over_same_region(self):
         blur_base = make_gradient_image(size=(80, 80))
