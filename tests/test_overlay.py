@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 import snipux.app as app_module
 from snipux.capture import Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
+from snipux.design import font_families
 from snipux.design import tokens
 from snipux.shapes import Rectangle
 from snipux.overlay import (
@@ -24,6 +25,7 @@ from snipux.overlay import (
     FloatingBar,
     GeometryProvider,
     Handle,
+    HintHUD,
     Overlay,
     OverlayWindow,
     SelectionMode,
@@ -3231,3 +3233,234 @@ class TestChipsExcludedFromExport:
         base = QColor(10, 20, 30)
         for x, y in [(0, 0), (199, 0), (0, 119), (199, 119), (100, 60)]:
             assert rendered.pixelColor(x, y) == base
+
+
+class TestHintHUDComposition:
+    """SNX-46: the standalone `HintHUD` widget's content -- the exact hint
+    line from docs/design/overlay-redesign.md's "Top hint HUD" section, with
+    key names (`Esc`, `Enter`, the eight tool shortcuts) set apart from the
+    surrounding prose by family and colour, per "Key names are mono in pure
+    white."
+    """
+
+    def test_reads_the_full_hint_line(self):
+        hud = HintHUD()
+
+        text = "".join(label.text() for label in hud.findChildren(QLabel))
+
+        assert text == (
+            "Esc discard ink · Enter copy & dismiss · "
+            "P H A R S T B E pick a tool · drag any edge to re-frame "
+            "— the ink stays where you put it"
+        )
+
+    def test_key_segments_cover_esc_enter_and_every_tool_shortcut_in_order(self):
+        hud = HintHUD()
+
+        key_texts = [text for text, is_key in hud._segments() if is_key]
+
+        assert key_texts == [
+            "Esc",
+            "Enter",
+            " ".join(_TOOL_SHORTCUT_KEYS[tool] for tool in tokens.TOOLS),
+        ]
+
+    def test_key_segments_are_set_in_the_mono_family_at_pure_white(self):
+        hud = HintHUD()
+        labels = {label.text(): label for label in hud.findChildren(QLabel)}
+        mono = font_families().mono
+        key_colour = design_color("HUD_KEY").name()
+
+        for text, is_key in hud._segments():
+            if is_key:
+                label = labels[text]
+                assert label.font().family() == mono
+                assert label.styleSheet() == f"color: {key_colour};"
+
+    def test_prose_segments_are_set_in_the_ui_family_at_the_muted_hud_colour(self):
+        hud = HintHUD()
+        labels = {label.text(): label for label in hud.findChildren(QLabel)}
+        ui = font_families().ui
+        prose_colour = design_color("HUD_TEXT").name()
+
+        for text, is_key in hud._segments():
+            if not is_key:
+                label = labels[text]
+                assert label.font().family() == ui
+                assert label.styleSheet() == f"color: {prose_colour};"
+
+    def test_key_colour_reads_brighter_than_the_prose_colour(self):
+        # "Key names are mono in pure white" against the surrounding
+        # prose's own muted colour -- checked as a plain luminance
+        # comparison rather than hard-coding "white", so this stays true
+        # even if HUD_KEY/HUD_TEXT's exact hexes ever change.
+        key = design_color("HUD_KEY")
+        prose = design_color("HUD_TEXT")
+
+        assert key.lightness() > prose.lightness()
+
+    def test_height_matches_the_token(self):
+        hud = HintHUD()
+
+        assert hud.height() == tokens.Metric.HUD_H
+
+
+class TestHintHUDFill:
+    """SNX-46: the bar's own translucent fill -- `HUD_BG` at
+    `HUD_BG_ALPHA` -- same convention as `TestFloatingBarFill`'s callout for
+    the floating bar's own "alpha, not opacity" fill.
+    """
+
+    def test_background_pixel_is_painted_at_the_token_alpha(self):
+        hud = HintHUD()
+        # Wider than the hint line's own sizeHint, so the stretches on
+        # either side of the centred text leave real background-only room
+        # to sample near an edge.
+        hud.resize(hud.sizeHint().width() + 400, tokens.Metric.HUD_H)
+
+        rendered = hud.grab().toImage()
+        pixel = rendered.pixelColor(2, 2)
+
+        expected_alpha = round(tokens.Color.HUD_BG_ALPHA * 255)
+        expected_rgb = QColor(tokens.Color.HUD_BG).getRgb()[:3]
+        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
+        # abs=1, not exact equality: a 50%-alpha fill's premultiplied RGB
+        # can round either way, the same one-off drift TestOverlayWindow's
+        # own DIM-scrim test (_blend) already tolerates for the same reason.
+        for sampled, expected in zip(
+            (pixel.red(), pixel.green(), pixel.blue()), expected_rgb
+        ):
+            assert sampled == pytest.approx(expected, abs=1)
+
+
+class TestHintHUDOverlayIntegration:
+    """SNX-46: `HintHUD` wired into `OverlayWindow` as `_hud`, behind the
+    `hints` preference the spec's "Top hint HUD" section puts it behind --
+    default on -- and gated on this window's own visibility the same way
+    `_bar`/`_toast` already are (`TestFloatingBarIntegration`/
+    `TestOverlayWindowToasts` above document why).
+    """
+
+    def _overlay(self, size=(800, 600), **kwargs):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame, **kwargs)
+
+    def test_hints_enabled_defaults_to_true(self):
+        overlay = self._overlay()
+
+        assert overlay.hints_enabled
+
+    def test_hud_becomes_visible_once_the_overlay_is_shown(self):
+        overlay = self._overlay()
+
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        assert overlay._hud.isVisible()
+
+    def test_hud_spans_the_full_window_width_at_the_token_height(self):
+        overlay = self._overlay(size=(800, 600))
+
+        assert overlay._hud.geometry() == QRect(0, 0, 800, tokens.Metric.HUD_H)
+
+    def test_hud_stays_hidden_while_the_overlay_itself_is_not_shown(self):
+        # Mirrors
+        # test_bar_stays_hidden_and_unpainted_while_the_overlay_itself_is_not_shown:
+        # none of this file's other OverlayWindow pixel tests call .show()
+        # before grab()ing, so the HUD -- default on -- must not leak into
+        # any of them just because it exists as a real child widget now.
+        overlay = self._overlay()
+
+        assert not overlay._hud.isVisible()
+
+    def test_set_hints_enabled_false_hides_the_hud_immediately(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._hud.isVisible()
+
+        overlay.set_hints_enabled(False)
+
+        assert not overlay._hud.isVisible()
+        assert not overlay.hints_enabled
+
+    def test_set_hints_enabled_true_shows_it_again(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_hints_enabled(False)
+        assert not overlay._hud.isVisible()
+
+        overlay.set_hints_enabled(True)
+
+        assert overlay._hud.isVisible()
+
+    def test_constructor_can_start_with_the_preference_off(self):
+        overlay = self._overlay(hints_enabled=False)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        assert not overlay.hints_enabled
+        assert not overlay._hud.isVisible()
+
+    def test_hud_hides_again_once_the_overlay_itself_is_hidden(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._hud.isVisible()
+
+        overlay.hide()
+
+        assert not overlay._hud.isVisible()
+
+
+class TestReframingClearsTheShownHUD:
+    """SNX-46 AC: 'the selection cannot be dragged up underneath the HUD
+    while it is shown.' SNX-33's own `_TOP_CLEARANCE` (52) already reserved
+    this room ahead of the HUD existing -- this asserts the two actually
+    agree, per the ticket's "the HUD and that constraint have to agree,"
+    rather than just trusting the arithmetic in each one's comments.
+    """
+
+    def test_top_clearance_constant_is_at_least_the_huds_own_height(self):
+        assert OverlayWindow._TOP_CLEARANCE >= tokens.Metric.HUD_H
+
+    def test_dragging_the_top_left_corner_off_screen_stops_clear_of_the_visible_hud(self):
+        frame = make_frame(image_size=(400, 400), logical_size=(400, 400))
+        overlay = OverlayWindow(frame)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._hud.isVisible()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, QPoint(-50, -50))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(-50, -50))
+
+        # QRect.bottom() is inclusive (top + height - 1) -- the same trap
+        # `_bracket_path`/`FloatingBarIntegration` already document -- so
+        # the clamped selection's top must clear it, not just equal it.
+        assert overlay._selection.y() > overlay._hud.geometry().bottom()
+
+
+class TestHintHUDExcludedFromExport:
+    """SNX-46 AC: 'the HUD never appears in the exported image.'"""
+
+    def test_rendered_image_is_identical_whether_or_not_the_hud_is_shown(self):
+        size = (400, 400)
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(52, 52, 200, 150))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._hud.isVisible()  # actually on screen, not a no-op
+
+        with_hud = overlay.rendered_image()
+
+        overlay.set_hints_enabled(False)
+        assert not overlay._hud.isVisible()
+
+        without_hud = overlay.rendered_image()
+
+        assert with_hud == without_hud
