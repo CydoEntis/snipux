@@ -1,13 +1,15 @@
 import pytest
-from PyQt6.QtCore import QPointF, QRectF, QSizeF
+from PyQt6.QtCore import Qt, QPointF, QRectF, QSizeF
 from PyQt6.QtGui import QColor, QFontMetrics, QImage, QPainter, qRgb
 from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
+from snipux.design.tokens import Metric
 from snipux.shapes import (
     Arrow,
     Blur,
     Crop,
+    DROP_THRESHOLD,
     Ellipse,
     Highlighter,
     Line,
@@ -18,6 +20,7 @@ from snipux.shapes import (
     Text,
     _OBSCURE_DOWNSCALE_DIVISOR,
     apply_crop,
+    finalize_mark,
     render,
     render_selection,
 )
@@ -187,6 +190,44 @@ class TestHighlighterVsPen:
         assert highlighter_pixel.blue() > pen_pixel.blue()
 
 
+class TestHighlighterGeometry:
+    def test_pen_uses_round_caps_and_joins(self):
+        shape = Highlighter(colour=RED, stroke_width=8, points=[QPointF(0, 0)])
+        pen = shape._pen()
+        assert pen.capStyle() == Qt.PenCapStyle.RoundCap
+        assert pen.joinStyle() == Qt.PenJoinStyle.RoundJoin
+
+    def test_strokes_at_the_stroke_width_times_tokens_multiplier(self):
+        base = make_image()
+        stroke_width = 4
+        points = [QPointF(10, 50), QPointF(90, 50)]
+
+        result = render(
+            base, [Highlighter(colour=RED, stroke_width=stroke_width, points=points)]
+        )
+
+        # Band half-width per Metric.HIGHLIGHT_MULT: just inside it must be
+        # painted, just outside it must still be the untouched background --
+        # pinning the *token-derived* width rather than the old fixed one.
+        half_width = stroke_width * Metric.HIGHLIGHT_MULT / 2
+        inside_y = 50 - int(half_width) + 1
+        outside_y = 50 - int(half_width) - 3
+
+        assert result.pixelColor(50, inside_y) != QColor(BACKGROUND)
+        assert result.pixelColor(50, outside_y) == QColor(BACKGROUND)
+
+    def test_blends_at_tokens_alpha(self):
+        base = make_image(fill_color=BACKGROUND)
+        points = [QPointF(10, 50), QPointF(90, 50)]
+
+        result = render(base, [Highlighter(colour=RED, stroke_width=4, points=points)])
+
+        # RED over white background at Metric.HIGHLIGHT_ALPHA: the
+        # background-only channels settle at 255 * (1 - alpha).
+        expected_green = round(255 * (1 - Metric.HIGHLIGHT_ALPHA))
+        assert result.pixelColor(50, 50).green() == pytest.approx(expected_green, abs=5)
+
+
 class TestArrowVsLine:
     def test_arrow_has_a_visible_head_line_does_not(self):
         start = QPointF(10, 50)
@@ -208,6 +249,38 @@ class TestArrowVsLine:
 
         assert arrow_result.pixelColor(probe_x, probe_y) != QColor(BACKGROUND)
         assert line_result.pixelColor(probe_x, probe_y) == QColor(BACKGROUND)
+
+
+class TestArrowHeadGeometry:
+    def test_head_size_scales_with_stroke_width(self):
+        start = QPointF(10, 50)
+        end = QPointF(90, 50)
+        # Inside the thick arrow's head flare, but outside both the thin
+        # arrow's (much smaller) head and its hairline shaft.
+        probe_x, probe_y = 60, 60
+
+        thin_result = render(
+            make_image(), [Arrow(colour=RED, stroke_width=1, start=start, end=end)]
+        )
+        thick_result = render(
+            make_image(), [Arrow(colour=RED, stroke_width=10, start=start, end=end)]
+        )
+
+        assert thin_result.pixelColor(probe_x, probe_y) == QColor(BACKGROUND)
+        assert thick_result.pixelColor(probe_x, probe_y) != QColor(BACKGROUND)
+
+    def test_shaft_stops_short_and_does_not_poke_through_the_tip(self):
+        base = make_image()
+        # A thick shaft: if drawn all the way to `end` (rather than
+        # stopping short by SHAFT_STOP_FRACTION of the head length), the
+        # pen's own round cap would bulge out past the head's own apex --
+        # which sits exactly at `end`, an infinitesimal point with no
+        # rasterized width of its own.
+        arrow = Arrow(colour=RED, stroke_width=10, start=QPointF(10, 50), end=QPointF(90, 50))
+
+        result = render(base, [arrow])
+
+        assert result.pixelColor(93, 50) == QColor(BACKGROUND)
 
 
 class TestTextRendering:
@@ -323,22 +396,24 @@ class TestBlurOrdering:
         # The ordering property this ticket exists for: a Blur later in the
         # shape list must obscure whatever was already drawn, not the
         # untouched base image. Proven by rendering the *same* Blur rect in
-        # two lists — one with a Rectangle drawn first, one without — in
+        # two lists — one with a solid stroke drawn first, one without — in
         # the same render() call each time, and showing the results differ
-        # at a pixel inside the blur.
-        rect = Rectangle(
+        # at a pixel inside the blur. A thick Pen line, not a Rectangle: a
+        # rounded-rect stroke this wide relative to the shape no longer
+        # reliably fills its own interior (SNX-35), where a plain polyline
+        # stroke still does.
+        stroke = Pen(
             colour=RED,
-            stroke_width=300,  # wildly thick: the "border" fills the whole rect
-            start=QPointF(0, 0),
-            end=QPointF(100, 100),
+            stroke_width=300,  # wildly thick: covers the whole image
+            points=[QPointF(0, 50), QPointF(100, 50)],
         )
         blur = Blur(colour=RED, stroke_width=4, start=QPointF(20, 20), end=QPointF(80, 80))
 
-        with_rectangle = render(make_image(), [rect, blur])
+        with_stroke = render(make_image(), [stroke, blur])
         blur_alone = render(make_image(), [blur])
 
         probe = (50, 50)
-        assert with_rectangle.pixelColor(*probe) != blur_alone.pixelColor(*probe)
+        assert with_stroke.pixelColor(*probe) != blur_alone.pixelColor(*probe)
 
     def test_does_not_mutate_base_image(self):
         base = make_gradient_image()
@@ -406,6 +481,101 @@ class TestPixelateBlocky:
         assert blur_result != pixelate_result
 
 
+class TestRectangleGeometry:
+    def test_is_unfilled(self):
+        base = make_image()
+        rect = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(70, 70)
+        )
+
+        result = render(base, [rect])
+
+        assert result.pixelColor(40, 40) == QColor(BACKGROUND)  # interior: untouched
+
+    def test_corners_are_rounded(self):
+        base = make_image()
+        # A thin stroke, so the rounded arc's own width doesn't eat the
+        # margin this assertion depends on.
+        rect = Rectangle(
+            colour=RED, stroke_width=1, start=QPointF(10, 10), end=QPointF(50, 50)
+        )
+
+        result = render(base, [rect])
+
+        # The exact top-left corner sits farther from the rounded arc's
+        # centre than the straight edge does from its own path, so a sharp
+        # corner would be at least as covered as the edge -- the rounded
+        # one leaves it markedly *less* covered instead. Compared via the
+        # green channel (RED blended with a white background: 255 where
+        # nothing is painted, lower the more opaque red coverage a pixel
+        # got) rather than exact equality, since antialiasing at a 1px
+        # stroke leaves both pixels partially covered, not binary.
+        corner_coverage = result.pixelColor(10, 10).green()
+        edge_coverage = result.pixelColor(10, 30).green()
+        assert corner_coverage > edge_coverage + 50
+
+
+class TestFinalizeMark:
+    def test_freehand_with_one_point_is_discarded(self):
+        pen = Pen(colour=RED, stroke_width=4, points=[QPointF(10, 10)])
+        highlighter = Highlighter(colour=RED, stroke_width=4, points=[QPointF(10, 10)])
+
+        assert finalize_mark(pen) is None
+        assert finalize_mark(highlighter) is None
+
+    def test_freehand_with_multiple_points_survives_unchanged(self):
+        pen = Pen(colour=RED, stroke_width=4, points=[QPointF(10, 10), QPointF(20, 20)])
+
+        assert finalize_mark(pen) is pen
+
+    def test_shape_smaller_than_the_drop_threshold_in_both_axes_is_discarded(self):
+        tiny = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(10, 10),
+            end=QPointF(10 + DROP_THRESHOLD, 10 + DROP_THRESHOLD),
+        )
+
+        assert finalize_mark(tiny) is None
+
+    def test_shape_past_the_threshold_in_only_one_axis_survives(self):
+        # A deliberate horizontal drag: zero height, well past the
+        # threshold in width -- must not be treated as a stray click.
+        horizontal = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 10)
+        )
+        vertical_arrow = Arrow(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(10, 50)
+        )
+
+        assert finalize_mark(horizontal) is not None
+        assert finalize_mark(vertical_arrow) is vertical_arrow
+
+    def test_rectangle_dragged_up_left_is_normalised_on_release(self):
+        dragged_up_left = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10)
+        )
+
+        result = finalize_mark(dragged_up_left)
+
+        assert result.start == QPointF(10, 10)
+        assert result.end == QPointF(50, 50)
+
+    def test_arrow_direction_is_preserved_not_normalised(self):
+        # Unlike Rectangle, an Arrow dragged "backwards" (tail bottom-right,
+        # head top-left) must keep start=tail/end=head -- normalising its
+        # corners the way Rectangle's are would silently flip the arrow.
+        arrow = Arrow(colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10))
+
+        result = finalize_mark(arrow)
+
+        assert result.start == QPointF(50, 50)
+        assert result.end == QPointF(10, 10)
+
+    def test_other_shapes_commit_unchanged(self):
+        text = Text(colour=RED, stroke_width=4, point=QPointF(5, 5), text="hi")
+
+        assert finalize_mark(text) is text
+
+
 class TestCropShape:
     def test_crop_stores_colour_and_stroke_width(self):
         shape = Crop(colour=RED, stroke_width=2, start=QPointF(0, 0), end=QPointF(10, 10))
@@ -442,14 +612,14 @@ class TestApplyCrop:
 
     def test_bakes_in_annotations_before_cropping(self):
         frame = self._frame(image_size=(100, 100))
-        # A rectangle straddling the crop boundary, thick enough to paint
+        # A stroke straddling the crop boundary, thick enough to paint
         # solidly at (25, 25) crop-relative == (35, 35) image-absolute.
-        rect = Rectangle(
-            colour=RED, stroke_width=100, start=QPointF(20, 20), end=QPointF(50, 50)
+        mark = Pen(
+            colour=RED, stroke_width=100, points=[QPointF(20, 20), QPointF(50, 50)]
         )
         crop_rect = QRectF(10, 10, 40, 40)
 
-        result = apply_crop(frame, [rect], crop_rect)
+        result = apply_crop(frame, [mark], crop_rect)
 
         assert result.image.pixelColor(25, 25) == RED
 
