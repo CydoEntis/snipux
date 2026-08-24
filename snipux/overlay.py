@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from enum import Enum
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSizeF, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPainterPath, QPen, QTransform
@@ -557,10 +558,18 @@ class OverlayWindow(QWidget):
     adds the ink layer itself: `_marks` are stored and painted in this
     widget's own window coordinates, clipped to the selection, per
     docs/design/overlay-redesign.md's "Ink lives in screen coordinates" --
-    so re-framing moves the clip over marks that never move themselves. The
-    floating bar and the drawing-tool mouse handling that would actually
-    call `add_mark` from a live drag are still later tickets in the same
-    arc; this class exists so they have a shell to attach to.
+    so re-framing moves the clip over marks that never move themselves.
+    SNX-38 adds the eraser: `erase_at`/`undo_erase`, hit-testing marks via
+    `Shape.hit_test` only while `set_eraser_active` has armed it, per the
+    spec's "Marks become hit-testable only while the eraser is active."
+    SNX-39 adds the general undo/redo/clear stack over `_marks` itself
+    (`undo`/`redo`/`clear`, distinct from the eraser's own single-slot
+    `undo_erase`) plus `copy`/`save`, which render `_marks` fresh at the
+    moment they're called -- replacing the old editor.py flow's bug of
+    copying the un-annotated capture once, before any annotation could
+    exist. The floating bar and the drawing-tool mouse handling that would
+    actually call `add_mark` from a live drag are still later tickets in
+    the same arc; this class exists so they have a shell to attach to.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -640,6 +649,25 @@ class OverlayWindow(QWidget):
         # the selection, per the class docstring. Paint order is the list
         # order, mirroring shapes.py's render().
         self._marks: list[Shape] = []
+        # Redo stack (SNX-39): whole marks popped off the *end* of `_marks`
+        # by undo(), in the order undo() popped them -- so redo() popping
+        # this list's own end and appending back to `_marks` restores each
+        # one to exactly the draw-order position it was undone from. Never
+        # touched by erase_at/undo_erase, which is its own single-slot undo
+        # scoped to the eraser tool alone -- see that pair's docstrings.
+        self._redo: list[Shape] = []
+
+        # Eraser tool state (SNX-38). False until a caller (the floating
+        # bar's eraser button, a later ticket) arms it via
+        # set_eraser_active -- marks are only ever hit-tested while this is
+        # True, per docs/design/overlay-redesign.md's "Drawing": "hit-
+        # testable only while the eraser is active," so ordinary drawing
+        # never pays for it.
+        self._eraser_active = False
+        # (index, shape) most recently removed by erase_at, restorable via
+        # undo_erase() -- see its own docstring. None once nothing has been
+        # erased yet, or once undo_erase() has already consumed it.
+        self._erased_mark: tuple[int, Shape] | None = None
 
         self._dash_offset = 0.0
         self._ants_timer = QTimer(self)
@@ -659,8 +687,14 @@ class OverlayWindow(QWidget):
         never translated to be relative to the selection. That is what lets
         a re-frame leave every mark exactly where it was drawn: only the
         selection's clip rect moves, per the class docstring.
+
+        Clears the redo stack (SNX-39): per docs/design/overlay-redesign.md's
+        "Undo / redo", "any new mark clears the redo stack" -- a mark
+        committed after an undo makes whatever was undone unreachable by
+        redo again, same as any ordinary undo/redo history.
         """
         self._marks.append(shape)
+        self._redo.clear()
         self.update()
 
     @property
@@ -668,6 +702,115 @@ class OverlayWindow(QWidget):
         """Ink layer contents, in paint order. A copy, not the live list,
         mirroring `Canvas.shapes` in editor.py."""
         return tuple(self._marks)
+
+    # -- undo / redo / clear (SNX-39) --------------------------------------
+    # Two stacks of whole marks, per docs/design/overlay-redesign.md's
+    # "Undo / redo": undo pops the newest mark off `_marks` onto `_redo`;
+    # redo pops it back. Both are plain end-of-list push/pop, which is what
+    # keeps a redone mark landing at exactly the draw-order position it was
+    # undone from -- there is no index bookkeeping to get wrong.
+
+    @property
+    def can_undo(self) -> bool:
+        return bool(self._marks)
+
+    @property
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def undo(self) -> None:
+        """Move the newest mark from the ink layer to the redo stack.
+
+        A no-op with nothing to undo -- mirrors `Canvas.undo`'s guard in
+        editor.py, just against `_marks` being empty rather than a history
+        index, since this class keeps no separate history list.
+        """
+        if not self._marks:
+            return
+        self._redo.append(self._marks.pop())
+        self.update()
+
+    def redo(self) -> None:
+        """Move the newest undone mark from the redo stack back onto the
+        ink layer, at the same position in draw order it was undone from.
+
+        A no-op with nothing to redo -- either nothing has been undone yet,
+        or a mark committed since (see `add_mark`) already cleared the
+        stack.
+        """
+        if not self._redo:
+            return
+        self._marks.append(self._redo.pop())
+        self.update()
+
+    def clear(self) -> None:
+        """Discard every mark and both stacks in a single step.
+
+        Per the spec: "Clear-ink empties both and toasts" -- and clearing
+        is explicitly *not* itself undoable, unlike an ordinary undo/redo
+        entry: the cleared marks are dropped outright rather than pushed
+        onto `_redo`, so a subsequent undo() has nothing left to pop and
+        cannot bring them back.
+        """
+        self._marks = []
+        self._redo = []
+        self.update()
+
+    def set_eraser_active(self, active: bool) -> None:
+        """Arm/disarm the eraser tool (SNX-38).
+
+        While active, a plain left-click inside the selection that doesn't
+        land on a resize handle removes the topmost mark under the cursor
+        instead of being a no-op -- see mousePressEvent -- and the cursor
+        over the selection switches from the drawing crosshair to a
+        pointer, per docs/design/overlay-redesign.md's "Selection frame"
+        cursor table ("crosshair for every tool except the eraser, which
+        is pointer") -- see mouseMoveEvent.
+        """
+        self._eraser_active = active
+
+    def erase_at(self, point: QPointF) -> Shape | None:
+        """Remove and return the topmost mark under `point` (this widget's
+        own window coordinates -- the same space `_marks` lives in), or
+        None if nothing is there.
+
+        Walks `_marks` back to front, mirroring `_paint_marks`'s (and
+        render()'s) own draw-order-is-paint-order contract, so an overlap
+        resolves to whichever mark is actually visible at that pixel --
+        per docs/design/overlay-redesign.md's "Drawing": "a click deletes
+        the topmost mark under the cursor." A miss removes nothing and
+        raises nothing: not every click lands on ink, and that is not an
+        error.
+
+        The removed (index, shape) pair is stashed for undo_erase() to
+        restore at the same list position it was removed from -- see that
+        method's own docstring. A later erase_at call overwrites it, same
+        as this tool has only ever removed one mark at a time.
+        """
+        for index in range(len(self._marks) - 1, -1, -1):
+            if self._marks[index].hit_test(point):
+                shape = self._marks.pop(index)
+                self._erased_mark = (index, shape)
+                self.update()
+                return shape
+        return None
+
+    def undo_erase(self) -> None:
+        """Restore the mark most recently removed by erase_at to its
+        original position in draw order.
+
+        A no-op if nothing has been erased since the last erase_at/
+        undo_erase call -- this is a single slot of undo scoped to the
+        eraser tool itself, not the general multi-action undo/redo stack
+        docs/design/overlay-redesign.md's "Undo / redo" section describes,
+        which is a later ticket's concern.
+        """
+        if self._erased_mark is None:
+            return
+        index, shape = self._erased_mark
+        self._marks.insert(index, shape)
+        self._erased_mark = None
+        self.update()
 
     def rendered_image(self) -> QImage:
         """The final exported image: `_marks` flattened onto the current
@@ -679,6 +822,42 @@ class OverlayWindow(QWidget):
         if self._selection is None:
             raise ValueError("no selection to export")
         return render_selection(self._frame, self._marks, QRectF(self._selection))
+
+    # -- copy / save (SNX-39) ----------------------------------------------
+    # Both render fresh from `rendered_image()` at the moment they're
+    # called, which is the actual fix this ticket makes: the old editor.py
+    # flow (Editor.__init__) copied the raw, un-annotated capture to the
+    # clipboard exactly once, before any annotation could exist, so the
+    # clipboard never reflected marks made afterwards. Neither method
+    # imports from app.py at module level -- app.py imports this module at
+    # its own top level (to build overlays), so a top-level import back
+    # would be circular; deferred here the same way
+    # `AppController._on_confirmed` defers importing `Editor`.
+
+    def copy(self) -> None:
+        """Flatten the marks present *right now* onto the selection's crop
+        and place the result on the clipboard.
+        """
+        from snipux.app import copy_image_to_clipboard
+
+        copy_image_to_clipboard(self.rendered_image())
+
+    # Subdirectory of ~/Pictures saves land in -- per the spec's "Save
+    # writes a timestamped PNG to ~/Pictures/snipux, creating the
+    # directory." `app.save_image`'s own default (bare ~/Pictures, used by
+    # editor.py's still-existing Editor) doesn't know about this
+    # subdirectory, so it's supplied here rather than changed there.
+    SAVE_SUBDIRECTORY = "snipux"
+
+    def save(self) -> Path:
+        """Flatten the marks present *right now* onto the selection's crop
+        and write it as a timestamped PNG under ~/Pictures/snipux, creating
+        that directory if it doesn't exist yet. Returns the path written.
+        """
+        from snipux.app import save_image
+
+        directory = Path.home() / "Pictures" / self.SAVE_SUBDIRECTORY
+        return save_image(self.rendered_image(), directory)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -711,8 +890,17 @@ class OverlayWindow(QWidget):
             return
         handle = self._handle_at(event.position())
         if handle is None:
-            # Ink lives on a later ticket. Nothing to do here yet, but a
-            # miss falling through to this no-op -- rather than the handle
+            if (
+                self._eraser_active
+                and self._selection is not None
+                and QRectF(self._selection).contains(event.position())
+            ):
+                # No drag, per the spec's "Drawing": "eraser -- no drag." A
+                # miss (nothing under the cursor) is already a safe no-op
+                # inside erase_at itself.
+                self.erase_at(event.position())
+            # Every other tool's stroke-start is still a later ticket.
+            # Falling through to this no-op -- rather than the handle
             # branch below -- is exactly what "stop event propagation at
             # the handle" needs from this method: a future stroke-start
             # only ever gets reached when a handle wasn't hit.
@@ -730,6 +918,18 @@ class OverlayWindow(QWidget):
             handle = self._handle_at(event.position())
         if handle is not None:
             self.setCursor(_HANDLE_CURSORS[handle])
+        elif self._selection is not None and QRectF(self._selection).contains(
+            event.position()
+        ):
+            # Per docs/design/overlay-redesign.md's "Selection frame":
+            # inside the selection, every tool shows a crosshair except the
+            # eraser, which shows a pointer (SNX-38) -- so the cursor
+            # itself reads as "click to remove" rather than "drag to draw."
+            self.setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if self._eraser_active
+                else Qt.CursorShape.CrossCursor
+            )
         else:
             self.unsetCursor()
         super().mouseMoveEvent(event)

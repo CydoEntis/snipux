@@ -1,13 +1,15 @@
 import pytest
-from PyQt6.QtCore import QPointF, QRectF, QSizeF
-from PyQt6.QtGui import QColor, QFontMetrics, QImage, QPainter, qRgb
+from PyQt6.QtCore import Qt, QPointF, QRectF, QSizeF
+from PyQt6.QtGui import QColor, QFontMetrics, QFontMetricsF, QImage, QPainter, qRgb
 from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
+from snipux.design.tokens import Color, Font, Metric
 from snipux.shapes import (
     Arrow,
     Blur,
     Crop,
+    DROP_THRESHOLD,
     Ellipse,
     Highlighter,
     Line,
@@ -16,8 +18,9 @@ from snipux.shapes import (
     Rectangle,
     StepMarker,
     Text,
-    _OBSCURE_DOWNSCALE_DIVISOR,
     apply_crop,
+    finalize_mark,
+    next_step_number,
     render,
     render_selection,
 )
@@ -108,7 +111,7 @@ class TestShapeFields:
         shape = StepMarker(colour=RED, stroke_width=3, point=QPointF(5, 5))
         assert shape.colour == RED
         assert shape.stroke_width == 3
-        assert shape.number == 0  # not meaningful until a render() pass
+        assert shape.number == 0  # not meaningful until assigned by next_step_number()
 
 
 class TestRender:
@@ -187,6 +190,44 @@ class TestHighlighterVsPen:
         assert highlighter_pixel.blue() > pen_pixel.blue()
 
 
+class TestHighlighterGeometry:
+    def test_pen_uses_round_caps_and_joins(self):
+        shape = Highlighter(colour=RED, stroke_width=8, points=[QPointF(0, 0)])
+        pen = shape._pen()
+        assert pen.capStyle() == Qt.PenCapStyle.RoundCap
+        assert pen.joinStyle() == Qt.PenJoinStyle.RoundJoin
+
+    def test_strokes_at_the_stroke_width_times_tokens_multiplier(self):
+        base = make_image()
+        stroke_width = 4
+        points = [QPointF(10, 50), QPointF(90, 50)]
+
+        result = render(
+            base, [Highlighter(colour=RED, stroke_width=stroke_width, points=points)]
+        )
+
+        # Band half-width per Metric.HIGHLIGHT_MULT: just inside it must be
+        # painted, just outside it must still be the untouched background --
+        # pinning the *token-derived* width rather than the old fixed one.
+        half_width = stroke_width * Metric.HIGHLIGHT_MULT / 2
+        inside_y = 50 - int(half_width) + 1
+        outside_y = 50 - int(half_width) - 3
+
+        assert result.pixelColor(50, inside_y) != QColor(BACKGROUND)
+        assert result.pixelColor(50, outside_y) == QColor(BACKGROUND)
+
+    def test_blends_at_tokens_alpha(self):
+        base = make_image(fill_color=BACKGROUND)
+        points = [QPointF(10, 50), QPointF(90, 50)]
+
+        result = render(base, [Highlighter(colour=RED, stroke_width=4, points=points)])
+
+        # RED over white background at Metric.HIGHLIGHT_ALPHA: the
+        # background-only channels settle at 255 * (1 - alpha).
+        expected_green = round(255 * (1 - Metric.HIGHLIGHT_ALPHA))
+        assert result.pixelColor(50, 50).green() == pytest.approx(expected_green, abs=5)
+
+
 class TestArrowVsLine:
     def test_arrow_has_a_visible_head_line_does_not(self):
         start = QPointF(10, 50)
@@ -210,6 +251,38 @@ class TestArrowVsLine:
         assert line_result.pixelColor(probe_x, probe_y) == QColor(BACKGROUND)
 
 
+class TestArrowHeadGeometry:
+    def test_head_size_scales_with_stroke_width(self):
+        start = QPointF(10, 50)
+        end = QPointF(90, 50)
+        # Inside the thick arrow's head flare, but outside both the thin
+        # arrow's (much smaller) head and its hairline shaft.
+        probe_x, probe_y = 60, 60
+
+        thin_result = render(
+            make_image(), [Arrow(colour=RED, stroke_width=1, start=start, end=end)]
+        )
+        thick_result = render(
+            make_image(), [Arrow(colour=RED, stroke_width=10, start=start, end=end)]
+        )
+
+        assert thin_result.pixelColor(probe_x, probe_y) == QColor(BACKGROUND)
+        assert thick_result.pixelColor(probe_x, probe_y) != QColor(BACKGROUND)
+
+    def test_shaft_stops_short_and_does_not_poke_through_the_tip(self):
+        base = make_image()
+        # A thick shaft: if drawn all the way to `end` (rather than
+        # stopping short by SHAFT_STOP_FRACTION of the head length), the
+        # pen's own round cap would bulge out past the head's own apex --
+        # which sits exactly at `end`, an infinitesimal point with no
+        # rasterized width of its own.
+        arrow = Arrow(colour=RED, stroke_width=10, start=QPointF(10, 50), end=QPointF(90, 50))
+
+        result = render(base, [arrow])
+
+        assert result.pixelColor(93, 50) == QColor(BACKGROUND)
+
+
 class TestTextRendering:
     def test_empty_text_is_a_no_op(self):
         base = make_image()
@@ -217,6 +290,17 @@ class TestTextRendering:
         result = render(base, [Text(colour=RED, stroke_width=4, point=QPointF(10, 50), text="")])
 
         assert result == base
+
+    def test_font_size_uses_the_tokens_formula(self):
+        # max(TEXT_FONT_SIZE_MIN, stroke_width * TEXT_FONT_SIZE_FACTOR), per
+        # docs/design/overlay-redesign.md's "Drawing": "Font size max(12,
+        # stroke x 3)" -- this is a different floor/factor than the
+        # pre-redesign shared helper StepMarker also used to use.
+        floored = Text(colour=RED, stroke_width=1, point=QPointF(0, 0), text="X")
+        scaled = Text(colour=RED, stroke_width=10, point=QPointF(0, 0), text="X")
+
+        assert floored._font().pixelSize() == Text.TEXT_FONT_SIZE_MIN
+        assert scaled._font().pixelSize() == round(10 * Text.TEXT_FONT_SIZE_FACTOR)
 
     def test_stroke_width_changes_rendered_glyph_size(self):
         # Regression test for the "setFont was never called" bug PLAN.md
@@ -231,26 +315,61 @@ class TestTextRendering:
 
         assert thick_metrics.horizontalAdvance("X") > thin_metrics.horizontalAdvance("X")
 
-    def test_draws_the_glyph_at_point_in_the_shapes_colour(self):
+    def test_draws_the_glyph_inside_the_chip_in_the_shapes_colour(self):
+        # `point` is the chip's top-left corner (image-pixel space), not a
+        # text baseline -- the pre-redesign version of this class drew
+        # straight onto `point`, with no background chip at all.
         base = make_image()
-        point = QPointF(10, 60)
+        point = QPointF(10, 10)
         text = Text(colour=RED, stroke_width=20, point=point, text="X")
 
         result = render(base, [text])
 
-        # drawText's `point` is the text baseline, so the glyph is painted in
-        # a box above and to the right of it, not at `point` itself. Scan
-        # that box rather than one exact pixel — antialiasing means the
-        # precise glyph shape isn't guaranteed pixel-for-pixel across font
-        # backends, but a correct setPen(colour)/setFont(font)/point offset
-        # must paint *some* pixel in the box, and in the shape's own colour.
-        metrics = QFontMetrics(text._font())
-        xs = range(int(point.x()), int(point.x()) + metrics.horizontalAdvance("X"))
-        ys = range(int(point.y()) - metrics.ascent(), int(point.y()))
+        metrics = QFontMetricsF(text._font())
+        pad_h = Metric.TEXT_LABEL_PAD_H
+        pad_v = Metric.TEXT_LABEL_PAD_V
+        xs = range(int(point.x() + pad_h), int(point.x() + pad_h + metrics.horizontalAdvance("X")))
+        ys = range(int(point.y() + pad_v), int(point.y() + pad_v + metrics.height()))
         painted = [result.pixelColor(x, y) for x in xs for y in ys]
 
-        assert any(p != QColor(BACKGROUND) for p in painted)
         assert any(p == RED for p in painted)
+
+    def test_chip_background_matches_tokens_colour_and_alpha(self):
+        base = make_image(fill_color=BACKGROUND)
+        point = QPointF(10, 10)
+        text = Text(colour=RED, stroke_width=4, point=point, text="Hello")
+
+        result = render(base, [text])
+
+        # A couple of pixels in from the top-left corner: inside the
+        # rounded corner's own arc (TEXT_LABEL_RADIUS=5) but well short of
+        # the padding (TEXT_LABEL_PAD_H/_V) that keeps the glyph itself
+        # away from this pixel -- chip fill only, no ring, no text.
+        probe = result.pixelColor(int(point.x()) + 3, int(point.y()) + 3)
+        assert probe != QColor(BACKGROUND)
+
+        background = QColor(Color.TEXT_LABEL_BG)
+        alpha = Color.TEXT_LABEL_BG_ALPHA
+        expected_green = round(background.green() * alpha + 255 * (1 - alpha))
+        assert probe.green() == pytest.approx(expected_green, abs=5)
+
+    def test_chip_corners_are_rounded(self):
+        base = make_image()
+        point = QPointF(10, 10)
+        text = Text(colour=RED, stroke_width=4, point=point, text="Hello")
+        metrics = QFontMetricsF(text._font())
+        chip_width = metrics.horizontalAdvance("Hello") + Metric.TEXT_LABEL_PAD_H * 2
+
+        result = render(base, [text])
+
+        # The exact top-left corner sits outside TEXT_LABEL_RADIUS's arc and
+        # stays untouched background; a point on the flat top edge, well
+        # clear of either corner, is fully covered chip fill.
+        corner = result.pixelColor(int(point.x()), int(point.y()))
+        edge = result.pixelColor(int(point.x() + chip_width / 2), int(point.y()))
+
+        assert corner == QColor(BACKGROUND)
+        assert edge != QColor(BACKGROUND)
 
 
 class TestStepMarkerRendering:
@@ -262,33 +381,117 @@ class TestStepMarkerRendering:
 
         assert result.pixelColor(50, 50) == RED
 
+    def test_diameter_is_fixed_regardless_of_stroke_width(self):
+        # STEP_D is a constant in the design, unlike every drawing tool --
+        # a thin and a thick stroke must produce the exact same badge size.
+        thin = StepMarker(colour=RED, stroke_width=1, point=QPointF(50, 50))
+        thick = StepMarker(colour=RED, stroke_width=20, point=QPointF(50, 50))
+
+        thin_result = render(make_image(), [thin])
+        thick_result = render(make_image(), [thick])
+
+        radius = Metric.STEP_D / 2
+        inside = (50 + round(radius) - 2, 50)
+        # Clear of the shadow's own spread too (see
+        # test_has_a_soft_drop_shadow_below_the_badge), not just the fill.
+        outside = (50 + round(radius) + 8, 50)
+
+        assert thin_result.pixelColor(*inside) != QColor(BACKGROUND)
+        assert thick_result.pixelColor(*inside) != QColor(BACKGROUND)
+        assert thin_result.pixelColor(*outside) == QColor(BACKGROUND)
+        assert thick_result.pixelColor(*outside) == QColor(BACKGROUND)
+
+    def test_has_a_ring_distinct_from_the_fill(self):
+        base = make_image()
+        marker = StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50))
+
+        result = render(base, [marker])
+
+        radius = Metric.STEP_D / 2
+        # Right at the circle's own edge (the ring straddles it) versus
+        # solidly inside the fill -- the ring's white must show through
+        # distinctly from the plain ink-coloured interior.
+        ring_pixel = result.pixelColor(50 + round(radius) - 1, 50)
+        fill_pixel = result.pixelColor(50, 50)
+
+        assert ring_pixel != fill_pixel
+
+    def test_has_a_soft_drop_shadow_below_the_badge(self):
+        base = make_image()
+        marker = StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50))
+
+        result = render(base, [marker])
+
+        radius = Metric.STEP_D / 2
+        # Below the badge, outside the ring, is within the shadow's own
+        # offset+spread reach -- must be darkened relative to untouched
+        # background. The mirrored point above stays untouched, proving the
+        # shadow is offset downward rather than a uniform halo around it.
+        below = result.pixelColor(50, 50 + round(radius) + 2)
+        above = result.pixelColor(50, 50 - round(radius) - 8)
+
+        assert below != QColor(BACKGROUND)
+        assert above == QColor(BACKGROUND)
+
+    def test_badge_text_colour_and_font_come_from_tokens(self):
+        assert StepMarker.BADGE_TEXT_COLOUR == QColor(Color.ACCENT_FG)
+
+        marker = StepMarker(colour=RED, stroke_width=1, point=QPointF(0, 0))
+        font = marker._font()
+        size, weight = Font.STEP_BADGE
+
+        assert font.pixelSize() == round(size)
+        assert font.weight() == weight
+
+    def test_font_size_is_fixed_regardless_of_stroke_width(self):
+        # Unlike Text, the badge numeral doesn't derive its size from
+        # stroke_width at all -- it's a fixed tokens.Font.STEP_BADGE size.
+        thin = StepMarker(colour=RED, stroke_width=1, point=QPointF(0, 0))
+        thick = StepMarker(colour=RED, stroke_width=20, point=QPointF(0, 0))
+
+        assert thin._font().pixelSize() == thick._font().pixelSize()
+
 
 class TestStepMarkerNumbering:
-    def test_numbers_markers_sequentially_in_list_order(self):
+    def test_next_step_number_starts_at_one(self):
+        assert next_step_number([]) == 1
+
+    def test_next_step_number_counts_only_step_markers(self):
+        shapes = [
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10), number=1),
+            Rectangle(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(5, 5)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30), number=2),
+        ]
+
+        assert next_step_number(shapes) == 3
+
+    def test_render_does_not_mutate_stored_numbers(self):
         base = make_image()
         markers = [
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10)),
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30)),
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10), number=1),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30), number=2),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50), number=3),
         ]
 
         render(base, markers)
 
         assert [marker.number for marker in markers] == [1, 2, 3]
 
-    def test_renumbers_after_an_earlier_marker_is_removed(self):
+    def test_does_not_renumber_after_an_earlier_marker_is_removed(self):
+        # Per docs/design/overlay-redesign.md's "Drawing": numbering is
+        # count(existing steps) + 1 at creation, and deliberately does not
+        # renumber after a delete -- matches the prototype.
         base = make_image()
         markers = [
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10)),
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30)),
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10), number=1),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30), number=2),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50), number=3),
         ]
-        render(base, markers)
 
         survivors = markers[1:]  # drop the first, as if the user removed it
         render(base, survivors)
 
-        assert [marker.number for marker in survivors] == [1, 2]
+        assert [marker.number for marker in survivors] == [2, 3]
 
 
 class TestObscuringShapeFields:
@@ -301,6 +504,24 @@ class TestObscuringShapeFields:
         shape = Pixelate(colour=RED, stroke_width=3, start=QPointF(0, 0), end=QPointF(10, 10))
         assert shape.colour == RED
         assert shape.stroke_width == 3
+
+    def test_blur_defaults_strength_to_the_token_default(self):
+        shape = Blur(colour=RED, stroke_width=3, start=QPointF(0, 0), end=QPointF(10, 10))
+        assert shape.strength == Metric.BLUR_DEFAULT
+
+    def test_pixelate_defaults_strength_to_the_token_default(self):
+        shape = Pixelate(colour=RED, stroke_width=3, start=QPointF(0, 0), end=QPointF(10, 10))
+        assert shape.strength == Metric.BLUR_DEFAULT
+
+    def test_strength_takes_an_explicit_value_within_the_token_range(self):
+        shape = Pixelate(
+            colour=RED,
+            stroke_width=3,
+            start=QPointF(0, 0),
+            end=QPointF(10, 10),
+            strength=Metric.BLUR_MAX,
+        )
+        assert shape.strength == Metric.BLUR_MAX
 
     def test_obscuring_shape_draw_raises(self):
         # render() must never call draw() on one of these — it dispatches
@@ -323,22 +544,24 @@ class TestBlurOrdering:
         # The ordering property this ticket exists for: a Blur later in the
         # shape list must obscure whatever was already drawn, not the
         # untouched base image. Proven by rendering the *same* Blur rect in
-        # two lists — one with a Rectangle drawn first, one without — in
+        # two lists — one with a solid stroke drawn first, one without — in
         # the same render() call each time, and showing the results differ
-        # at a pixel inside the blur.
-        rect = Rectangle(
+        # at a pixel inside the blur. A thick Pen line, not a Rectangle: a
+        # rounded-rect stroke this wide relative to the shape no longer
+        # reliably fills its own interior (SNX-35), where a plain polyline
+        # stroke still does.
+        stroke = Pen(
             colour=RED,
-            stroke_width=300,  # wildly thick: the "border" fills the whole rect
-            start=QPointF(0, 0),
-            end=QPointF(100, 100),
+            stroke_width=300,  # wildly thick: covers the whole image
+            points=[QPointF(0, 50), QPointF(100, 50)],
         )
         blur = Blur(colour=RED, stroke_width=4, start=QPointF(20, 20), end=QPointF(80, 80))
 
-        with_rectangle = render(make_image(), [rect, blur])
+        with_stroke = render(make_image(), [stroke, blur])
         blur_alone = render(make_image(), [blur])
 
         probe = (50, 50)
-        assert with_rectangle.pixelColor(*probe) != blur_alone.pixelColor(*probe)
+        assert with_stroke.pixelColor(*probe) != blur_alone.pixelColor(*probe)
 
     def test_does_not_mutate_base_image(self):
         base = make_gradient_image()
@@ -372,26 +595,73 @@ class TestBlurOrdering:
         assert result != base  # the whole rect was processed, not skipped
         assert result.pixelColor(39, 39) != base.pixelColor(39, 39)
 
+    def test_rect_extending_past_the_frame_is_clamped_not_raised(self):
+        # A drag that starts inside the frame and is released past its
+        # edge (or a shape translated there, see render_selection) must be
+        # clamped to the frame rather than blowing up on QImage.copy()'s
+        # undefined padding for an out-of-bounds rect.
+        base = make_gradient_image(size=(40, 40))
+        blur = Blur(colour=RED, stroke_width=4, start=QPointF(20, 20), end=QPointF(200, 200))
+
+        result = render(base, [blur])  # must not raise
+
+        assert result != base
+        # The far corner of the clamped rect, at the frame's own edge, was
+        # obscured...
+        assert result.pixelColor(39, 39) != base.pixelColor(39, 39)
+        # ...and the shape's clamp did nothing to pixels outside its rect.
+        assert result.pixelColor(5, 5) == base.pixelColor(5, 5)
+
 
 class TestPixelateBlocky:
     def test_uniform_within_a_block_varies_across_blocks(self):
         size = 80
+        strength = Metric.BLUR_DEFAULT
         base = make_gradient_image(size=(size, size))
         pixelate = Pixelate(
-            colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(size, size)
+            colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(size, size),
+            strength=strength,
         )
 
         result = render(base, [pixelate])
 
-        # Block width is derived from the divisor rather than hardcoded, so
-        # retuning _OBSCURE_DOWNSCALE_DIVISOR (an implementation detail, see
-        # shapes.py) doesn't break this test's premise.
-        block_width = size // (size // _OBSCURE_DOWNSCALE_DIVISOR)
+        # Block width is derived from the shape's own strength rather than
+        # hardcoded, so retuning BLUR_DEFAULT doesn't break this test's
+        # premise.
+        block_width = size // (size // strength)
         # Two pixels a couple of px apart inside block 0 must match...
         assert result.pixelColor(1, 40) == result.pixelColor(3, 40)
         # ...but a pixel a full block away is not required to, and for this
         # gradient does not.
         assert result.pixelColor(1, 40) != result.pixelColor(block_width + 1, 40)
+
+    def test_higher_strength_downsamples_to_wider_blocks(self):
+        # "downsamples by the strength" (docs/design/overlay-redesign.md's
+        # "blur" entry): a higher strength means a smaller intermediate
+        # image and so coarser, wider blocks once scaled back up.
+        size = 80
+        base = make_gradient_image(size=(size, size))
+        low = Pixelate(
+            colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(size, size),
+            strength=Metric.BLUR_MIN,
+        )
+        high = Pixelate(
+            colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(size, size),
+            strength=Metric.BLUR_MAX,
+        )
+
+        low_result = render(QImage(base), [low])
+        high_result = render(QImage(base), [high])
+
+        low_block_width = size // (size // Metric.BLUR_MIN)
+        high_block_width = size // (size // Metric.BLUR_MAX)
+        assert high_block_width > low_block_width
+        # A pixel just past the low-strength block boundary already
+        # changed colour for `low`, but the coarser `high` block still
+        # spans it, so its two neighbouring blocks read as still equal.
+        probe_a, probe_b = 1, low_block_width + 1
+        assert low_result.pixelColor(probe_a, 40) != low_result.pixelColor(probe_b, 40)
+        assert high_result.pixelColor(probe_a, 40) == high_result.pixelColor(probe_b, 40)
 
     def test_pixelate_distinguishable_from_blur_over_same_region(self):
         blur_base = make_gradient_image(size=(80, 80))
@@ -404,6 +674,101 @@ class TestPixelateBlocky:
         )
 
         assert blur_result != pixelate_result
+
+
+class TestRectangleGeometry:
+    def test_is_unfilled(self):
+        base = make_image()
+        rect = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(70, 70)
+        )
+
+        result = render(base, [rect])
+
+        assert result.pixelColor(40, 40) == QColor(BACKGROUND)  # interior: untouched
+
+    def test_corners_are_rounded(self):
+        base = make_image()
+        # A thin stroke, so the rounded arc's own width doesn't eat the
+        # margin this assertion depends on.
+        rect = Rectangle(
+            colour=RED, stroke_width=1, start=QPointF(10, 10), end=QPointF(50, 50)
+        )
+
+        result = render(base, [rect])
+
+        # The exact top-left corner sits farther from the rounded arc's
+        # centre than the straight edge does from its own path, so a sharp
+        # corner would be at least as covered as the edge -- the rounded
+        # one leaves it markedly *less* covered instead. Compared via the
+        # green channel (RED blended with a white background: 255 where
+        # nothing is painted, lower the more opaque red coverage a pixel
+        # got) rather than exact equality, since antialiasing at a 1px
+        # stroke leaves both pixels partially covered, not binary.
+        corner_coverage = result.pixelColor(10, 10).green()
+        edge_coverage = result.pixelColor(10, 30).green()
+        assert corner_coverage > edge_coverage + 50
+
+
+class TestFinalizeMark:
+    def test_freehand_with_one_point_is_discarded(self):
+        pen = Pen(colour=RED, stroke_width=4, points=[QPointF(10, 10)])
+        highlighter = Highlighter(colour=RED, stroke_width=4, points=[QPointF(10, 10)])
+
+        assert finalize_mark(pen) is None
+        assert finalize_mark(highlighter) is None
+
+    def test_freehand_with_multiple_points_survives_unchanged(self):
+        pen = Pen(colour=RED, stroke_width=4, points=[QPointF(10, 10), QPointF(20, 20)])
+
+        assert finalize_mark(pen) is pen
+
+    def test_shape_smaller_than_the_drop_threshold_in_both_axes_is_discarded(self):
+        tiny = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(10, 10),
+            end=QPointF(10 + DROP_THRESHOLD, 10 + DROP_THRESHOLD),
+        )
+
+        assert finalize_mark(tiny) is None
+
+    def test_shape_past_the_threshold_in_only_one_axis_survives(self):
+        # A deliberate horizontal drag: zero height, well past the
+        # threshold in width -- must not be treated as a stray click.
+        horizontal = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 10)
+        )
+        vertical_arrow = Arrow(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(10, 50)
+        )
+
+        assert finalize_mark(horizontal) is not None
+        assert finalize_mark(vertical_arrow) is vertical_arrow
+
+    def test_rectangle_dragged_up_left_is_normalised_on_release(self):
+        dragged_up_left = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10)
+        )
+
+        result = finalize_mark(dragged_up_left)
+
+        assert result.start == QPointF(10, 10)
+        assert result.end == QPointF(50, 50)
+
+    def test_arrow_direction_is_preserved_not_normalised(self):
+        # Unlike Rectangle, an Arrow dragged "backwards" (tail bottom-right,
+        # head top-left) must keep start=tail/end=head -- normalising its
+        # corners the way Rectangle's are would silently flip the arrow.
+        arrow = Arrow(colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10))
+
+        result = finalize_mark(arrow)
+
+        assert result.start == QPointF(50, 50)
+        assert result.end == QPointF(10, 10)
+
+    def test_other_shapes_commit_unchanged(self):
+        text = Text(colour=RED, stroke_width=4, point=QPointF(5, 5), text="hi")
+
+        assert finalize_mark(text) is text
 
 
 class TestCropShape:
@@ -442,14 +807,14 @@ class TestApplyCrop:
 
     def test_bakes_in_annotations_before_cropping(self):
         frame = self._frame(image_size=(100, 100))
-        # A rectangle straddling the crop boundary, thick enough to paint
+        # A stroke straddling the crop boundary, thick enough to paint
         # solidly at (25, 25) crop-relative == (35, 35) image-absolute.
-        rect = Rectangle(
-            colour=RED, stroke_width=100, start=QPointF(20, 20), end=QPointF(50, 50)
+        mark = Pen(
+            colour=RED, stroke_width=100, points=[QPointF(20, 20), QPointF(50, 50)]
         )
         crop_rect = QRectF(10, 10, 40, 40)
 
-        result = apply_crop(frame, [rect], crop_rect)
+        result = apply_crop(frame, [mark], crop_rect)
 
         assert result.image.pixelColor(25, 25) == RED
 
@@ -568,3 +933,109 @@ class TestRenderSelection:
         result = render_selection(frame, [first, second], selection)
 
         assert result.pixelColor(10, 40) == BLUE
+
+
+class TestShapeHitTest:
+    """SNX-38: each shape's own answer to "does this point land on me,"
+    which OverlayWindow's eraser (erase_at, overlay.py) uses to pick the
+    topmost mark under a click. Shape is coordinate-space agnostic (see
+    the module docstring), so these points aren't asserted to be any
+    particular image/window space -- just whichever space a given test's
+    shape happens to use.
+    """
+
+    def test_pen_with_fewer_than_two_points_is_never_hit(self):
+        # No segment exists yet to hit-test against -- a bare click, not a
+        # drag, never reaches a second mouseMoveEvent to append one.
+        pen = Pen(colour=RED, stroke_width=4, points=[QPointF(10, 10)])
+
+        assert pen.hit_test(QPointF(10, 10)) is False
+
+    def test_pen_hits_along_its_polyline(self):
+        pen = Pen(
+            colour=RED, stroke_width=4,
+            points=[QPointF(0, 0), QPointF(50, 0), QPointF(50, 50)],
+        )
+
+        assert pen.hit_test(QPointF(25, 0)) is True  # midpoint of the first segment
+        assert pen.hit_test(QPointF(50, 25)) is True  # midpoint of the second segment
+        assert pen.hit_test(QPointF(200, 200)) is False
+
+    def test_highlighter_hit_test_uses_its_own_widened_stroke(self):
+        # Highlighter widens its painted stroke to stroke_width x
+        # HIGHLIGHT_MULT (its own _pen() override) -- a point that misses a
+        # same-stroke-width Pen must still hit an identically-placed
+        # Highlighter, since _stroke_hit_test reads the width from _pen()
+        # rather than stroke_width directly.
+        points = [QPointF(0, 0), QPointF(100, 0)]
+        pen = Pen(colour=RED, stroke_width=2, points=list(points))
+        highlighter = Highlighter(colour=RED, stroke_width=2, points=list(points))
+        off_line_point = QPointF(50, 6)  # 6px above the shared line
+
+        assert pen.hit_test(off_line_point) is False
+        assert highlighter.hit_test(off_line_point) is True
+
+    def test_thin_line_still_hits_within_the_tolerance(self):
+        # AC: "a hit test on a stroked shape allows for the stroke width,
+        # so a click on a thin line still hits it" -- a 1px-wide line's
+        # actual painted width alone (0.5px either side) would never catch
+        # an ordinary click; HIT_TOLERANCE is what makes it clickable.
+        line = Line(colour=RED, stroke_width=1, start=QPointF(0, 20), end=QPointF(100, 20))
+
+        assert line.hit_test(QPointF(50, 20)) is True  # dead centre
+        assert line.hit_test(QPointF(50, 22)) is True  # 2px off, within tolerance
+        assert line.hit_test(QPointF(50, 60)) is False  # well clear of the line
+
+    def test_arrow_hits_along_its_shaft(self):
+        arrow = Arrow(colour=RED, stroke_width=3, start=QPointF(0, 0), end=QPointF(100, 0))
+
+        assert arrow.hit_test(QPointF(50, 0)) is True
+        assert arrow.hit_test(QPointF(50, 60)) is False
+
+    def test_rectangle_hits_its_border_not_its_interior(self):
+        rect = Rectangle(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(60, 60))
+
+        assert rect.hit_test(QPointF(10, 35)) is True  # left border
+        assert rect.hit_test(QPointF(35, 35)) is False  # empty interior: not a hit
+        assert rect.hit_test(QPointF(200, 200)) is False
+
+    def test_ellipse_hits_its_border_not_its_interior(self):
+        ellipse = Ellipse(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(100, 60))
+
+        assert ellipse.hit_test(QPointF(50, 0)) is True  # top of the ellipse's border
+        assert ellipse.hit_test(QPointF(50, 30)) is False  # centre: empty interior
+
+    def test_blur_and_pixelate_hit_their_whole_filled_rect(self):
+        blur = Blur(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(60, 60))
+        pixelate = Pixelate(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(60, 60)
+        )
+
+        for shape in (blur, pixelate):
+            # Interior counts here, unlike a stroke-only shape: the whole
+            # patch is visibly "the annotation."
+            assert shape.hit_test(QPointF(35, 35)) is True
+            assert shape.hit_test(QPointF(200, 200)) is False
+
+    def test_step_marker_hits_within_its_radius(self):
+        marker = StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50), number=1)
+
+        assert marker.hit_test(QPointF(50, 50)) is True  # centre
+        assert marker.hit_test(QPointF(50 + StepMarker.RADIUS - 1, 50)) is True  # just inside
+        assert marker.hit_test(QPointF(200, 200)) is False
+
+    def test_text_hits_near_its_anchor_point(self):
+        text = Text(colour=RED, stroke_width=4, point=QPointF(50, 50), text="hi")
+
+        assert text.hit_test(QPointF(50, 50)) is True
+        assert text.hit_test(QPointF(500, 500)) is False
+
+    def test_unrecognised_shape_is_never_hit(self):
+        # Crop never joins a persistent mark list (see its own docstring),
+        # so it's never actually eraser-hit-tested in practice -- but this
+        # exercises the base class's safe default: a shape type without its
+        # own hit_test override is simply never a hit, even for a point
+        # that falls squarely inside its geometry.
+        crop = Crop(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(100, 100))
+
+        assert crop.hit_test(QPointF(50, 50)) is False
