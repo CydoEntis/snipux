@@ -23,6 +23,7 @@ class Color:
     ICON_DISABLED   = "#5d6157"
     ICON_NEUTRAL    = "#d7dacb"   # copy button, always enabled
     DANGER_BG       = "#c85050"   # at 22% alpha, clear-ink hover
+    DANGER_BG_ALPHA = 0.22
     DANGER_FG       = "#f5a3a3"
 
     # Text on chrome
