@@ -21,6 +21,7 @@ from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSizeF, pyqtSignal
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
+from snipux import design
 from snipux.capture import Frame
 
 
@@ -462,6 +463,93 @@ class Overlay(QWidget):
                 self.confirmed.emit(self._selection, self._selection_path)
         else:
             super().keyPressEvent(event)
+
+
+class OverlayWindow(QWidget):
+    """The overlay redesign's shell: one frameless window spanning the whole
+    virtual desktop, per docs/design/overlay-redesign.md.
+
+    This is the first slice of the five-ticket redesign arc (SNX-31, see
+    TODO.md) -- background frame and dim scrim only. Selection framing
+    (marching ants, handles), ink, the floating bar and the rest of the
+    chrome are later tickets in the same arc; this class exists so they have
+    a shell to attach to.
+
+    Unlike `Overlay` above -- one instance per monitor, selection kept in
+    absolute logical virtual-desktop coordinates so per-monitor crops tile
+    correctly -- this is a *single* window covering the whole desktop, and
+    per the spec's state table (`sel: QRect # window coords`) its selection
+    is kept in window coordinates: local to this widget's own top-left, not
+    the virtual desktop's. `frame` is expected to be a single capture
+    already spanning every monitor -- what `BackendRegistry.capture()`
+    returns -- not a per-monitor crop.
+
+    Per CLAUDE.md's one architectural rule, the compositor is asked for
+    pixels exactly once, upstream in `capture.py`; the frame handed in here
+    is already frozen, and the spec's own deviation note applies: this never
+    uses `QScreen.grabWindow(0)`, which returns black on Wayland.
+    """
+
+    def __init__(self, frame: Frame, parent=None):
+        super().__init__(parent)
+        self._frame = frame
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        )
+        # The frame's own logical origin/size *is* the virtual desktop's
+        # bounds -- a full capture already spans every monitor, so no union
+        # of screen geometries needs computing here the way create_overlays()
+        # does for the per-monitor Overlay above.
+        self.setGeometry(
+            round(frame.logical_origin.x()),
+            round(frame.logical_origin.y()),
+            round(frame.logical_size.width()),
+            round(frame.logical_size.height()),
+        )
+
+        # Window coordinates, per the class docstring -- None until a
+        # selection ticket (SNX-32+) sets one.
+        self._selection: QRect | None = None
+
+    def set_selection(self, rect: QRect | None) -> None:
+        """Set the current selection (window coordinates) and repaint."""
+        self._selection = rect
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        # Layer 1: the frozen frame, full window. This is also what keeps
+        # the selection "undimmed and at 1:1": the scrim below punches a
+        # hole out of this exact drawImage call rather than compositing a
+        # second one, so the hole shows precisely these pixels, untouched.
+        painter.drawImage(QRectF(self.rect()), self._frame.image)
+        self._paint_scrim(painter)
+        painter.end()
+
+    def _paint_scrim(self, painter: QPainter) -> None:
+        """Layer 2: dim everything outside the selection.
+
+        Painted here, in this widget's own paintEvent, rather than as a
+        translucent child widget stacked over the whole window -- per the
+        spec, a full-window child would sit above the (future) ink layer in
+        z-order and eat its mouse events. A single even-odd fill dims the
+        window and punches the selection out in one call, so there's no
+        separate "dim then punch a hole" step that could disagree with this
+        one at the selection's edge.
+        """
+        widget_rect = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRect(widget_rect)
+        if self._selection is not None:
+            local_selection = QRectF(self._selection).intersected(widget_rect)
+            if not local_selection.isEmpty():
+                path.addRect(local_selection)
+        path.setFillRule(Qt.FillRule.OddEvenFill)
+        # design.color() resolves tokens.Color.DIM + DIM_ALPHA together, per
+        # its own docstring's "a colour and its alpha are never applied
+        # separately" -- the literal is not re-typed here.
+        painter.fillPath(path, design.color("DIM"))
 
 
 def create_overlays(
