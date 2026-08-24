@@ -8,12 +8,15 @@ from PyQt6.QtWidgets import QApplication, QWidget
 
 from snipux.capture import Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
+from snipux.design import tokens
 from snipux.overlay import (
     GeometryProvider,
+    Handle,
     Overlay,
     OverlayWindow,
     SelectionMode,
     UnsupportedGeometryProvider,
+    _HANDLE_CURSORS,
     create_overlays,
 )
 
@@ -613,14 +616,19 @@ class TestOverlayWindow:
 
     def test_selection_is_undimmed_at_1_to_1(self):
         # image_size == logical_size (no scaling), so the undimmed hole
-        # should show exactly the base colour, pixel for pixel.
+        # should show exactly the base colour, pixel for pixel. Sampled
+        # away from the corners/edges (since SNX-32's frame chrome now
+        # legitimately paints over those, per the "frame stroke, handles"
+        # layer in the spec's layer list) -- this test is about the
+        # interior, not the frame, which TestCornerBrackets/TestEdgeHandles
+        # cover.
         frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
         overlay = OverlayWindow(frame)
         overlay.set_selection(QRect(50, 50, 50, 50))
 
         rendered = overlay.grab().toImage()
 
-        for x, y in [(51, 51), (75, 75), (98, 98)]:
+        for x, y in [(60, 60), (75, 75), (90, 90)]:
             assert rendered.pixelColor(x, y) == QColor(10, 20, 30)
 
     def test_scrim_outside_selection_uses_the_dim_token_colour_and_alpha(self):
@@ -672,3 +680,206 @@ class TestOverlayWindow:
         overlay = OverlayWindow(frame)
 
         assert overlay.findChildren(QWidget) == []
+
+
+class TestSelectionStroke:
+    """SNX-32: the two coincident 1px strokes -- solid white under an
+    animated dashed dark one -- that make the marching ants.
+    """
+
+    def test_uses_the_dash_pattern_and_colours_from_tokens(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(10, 10, 50, 50))
+
+        solid, dashed = overlay._stroke_pens()
+
+        assert solid.color() == design_color("SEL_STROKE")
+        assert solid.widthF() == tokens.Metric.SEL_STROKE_W
+        assert dashed.color() == design_color("SEL_ANTS")
+        assert dashed.dashPattern() == list(tokens.Metric.ANTS_DASH)
+        assert dashed.dashOffset() == 0.0
+
+    def test_renders_both_the_solid_and_dashed_layers(self):
+        # Sampled in the gap between the corner bracket and the edge handle
+        # (computed from their own geometry, not a hardcoded pixel), so this
+        # is reading pure stroke -- not the opaque white chrome painted over
+        # it elsewhere on the same edge.
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 100, 80))
+
+        bracket_right = round(overlay._bracket_path(Handle.TOP_LEFT).boundingRect().right())
+        handle_left = round(overlay._edge_handle_rect(Handle.TOP).left())
+        assert bracket_right < handle_left  # otherwise there's no gap to sample
+
+        rendered = overlay.grab().toImage()
+        row = [
+            rendered.pixelColor(x, 50).getRgb()[:3]
+            for x in range(bracket_right, handle_left)
+        ]
+
+        white = design_color("SEL_STROKE")
+        dark = design_color("SEL_ANTS")
+        # Not exact-equality: the white layer blends with the frozen frame
+        # underneath at 92% alpha (SEL_STROKE_ALPHA), so only the dark,
+        # fully-opaque dash colour survives compositing unchanged.
+        assert any(c[0] > white.red() - 40 for c in row), row  # a light/white sample
+        assert any(abs(c[0] - dark.red()) < 5 for c in row), row  # a dark sample
+
+    def test_ants_offset_advances_each_tick_and_wraps_at_the_dash_cycle(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(10, 10, 50, 50))
+        cycle = sum(tokens.Metric.ANTS_DASH)
+
+        offsets = [overlay._dash_offset]
+        for _ in range(cycle * 3):
+            overlay._advance_ants()
+            offsets.append(overlay._dash_offset)
+
+        assert offsets[1] != offsets[0]
+        assert all(0 <= o < cycle for o in offsets)
+        # The pen actually used for painting picks up the new offset too --
+        # advancing state that nothing reads would be a silent no-op.
+        assert overlay._stroke_pens()[1].dashOffset() == overlay._dash_offset
+
+    def test_ants_timer_runs_only_while_the_overlay_is_visible(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(10, 10, 50, 50))
+
+        assert not overlay._ants_timer.isActive()
+
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert overlay._ants_timer.isActive()
+
+        overlay.hide()
+        assert not overlay._ants_timer.isActive()
+
+
+class TestCornerBrackets:
+    """SNX-32: the L-shaped corner brackets, which double as the corner
+    handles' only visible chrome.
+    """
+
+    SEL = QRect(50, 50, 100, 80)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SEL)
+        return overlay
+
+    @pytest.mark.parametrize(
+        "handle",
+        [Handle.TOP_LEFT, Handle.TOP_RIGHT, Handle.BOTTOM_LEFT, Handle.BOTTOM_RIGHT],
+    )
+    def test_bracket_bounds_are_the_arm_length_straddling_the_corner(self, handle):
+        overlay = self._overlay()
+        sel = QRectF(self.SEL)
+        offset = overlay._CORNER_BRACKET_OFFSET
+        length = tokens.Metric.CORNER_LEN
+
+        bounds = overlay._bracket_path(handle).boundingRect()
+
+        assert bounds.width() == pytest.approx(length)
+        assert bounds.height() == pytest.approx(length)
+        expected_left = sel.left() - offset if "left" in handle.value else sel.right() + offset - length
+        expected_top = sel.top() - offset if "top" in handle.value else sel.bottom() + offset - length
+        assert bounds.left() == pytest.approx(expected_left)
+        assert bounds.top() == pytest.approx(expected_top)
+
+    def test_bracket_arms_are_painted_at_the_token_thickness(self):
+        # Along the top-left bracket's horizontal arm, a row inside the
+        # bracket's box should be solid white for exactly CORNER_W pixels
+        # before falling back to the (dimmed) background.
+        overlay = self._overlay()
+        rendered = overlay.grab().toImage()
+
+        box_left = round(overlay._bracket_path(Handle.TOP_LEFT).boundingRect().left())
+        white_rows = 0
+        for y in range(box_left, box_left + tokens.Metric.CORNER_LEN):
+            # Sample a column comfortably inside the arm's length, away from
+            # the rounded tip and the inner elbow.
+            if rendered.pixelColor(self.SEL.left() + 15, y) == QColor(255, 255, 255):
+                white_rows += 1
+        assert white_rows == tokens.Metric.CORNER_W
+
+
+class TestEdgeHandles:
+    """SNX-32: the rounded bar handle centred on each edge."""
+
+    SEL = QRect(50, 50, 100, 80)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SEL)
+        return overlay
+
+    def test_dimensions_match_tokens_and_are_centred_on_the_edge(self):
+        overlay = self._overlay()
+        sel = QRectF(self.SEL)
+        long_, short = tokens.Metric.HANDLE_LONG, tokens.Metric.HANDLE_SHORT
+
+        top = overlay._edge_handle_rect(Handle.TOP)
+        assert (top.width(), top.height()) == (long_, short)
+        assert top.center().x() == pytest.approx(sel.center().x())
+
+        left = overlay._edge_handle_rect(Handle.LEFT)
+        assert (left.width(), left.height()) == (short, long_)
+        assert left.center().y() == pytest.approx(sel.center().y())
+
+    def test_handle_is_painted_white_at_its_centre(self):
+        overlay = self._overlay()
+        rendered = overlay.grab().toImage()
+
+        for handle in (Handle.TOP, Handle.BOTTOM, Handle.LEFT, Handle.RIGHT):
+            center = overlay._edge_handle_rect(handle).center()
+            sampled = rendered.pixelColor(round(center.x()), round(center.y()))
+            assert sampled == QColor(255, 255, 255), handle
+
+
+class TestHandleCursors:
+    """SNX-32: hovering a handle previews the direction it resizes in."""
+
+    SEL = QRect(50, 50, 100, 80)
+
+    def _shown_overlay(self):
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SEL)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    @pytest.mark.parametrize(
+        "point, handle",
+        [
+            (QPoint(50, 50), Handle.TOP_LEFT),
+            (QPoint(150, 50), Handle.TOP_RIGHT),
+            (QPoint(50, 130), Handle.BOTTOM_LEFT),
+            (QPoint(150, 130), Handle.BOTTOM_RIGHT),
+            (QPoint(100, 50), Handle.TOP),
+            (QPoint(100, 130), Handle.BOTTOM),
+            (QPoint(50, 90), Handle.LEFT),
+            (QPoint(150, 90), Handle.RIGHT),
+        ],
+    )
+    def test_cursor_matches_the_handles_resize_direction(self, point, handle):
+        overlay = self._shown_overlay()
+
+        QTest.mouseMove(overlay, point)
+
+        assert overlay.cursor().shape() == _HANDLE_CURSORS[handle]
+
+    def test_cursor_resets_away_from_any_handle(self):
+        overlay = self._shown_overlay()
+
+        QTest.mouseMove(overlay, QPoint(50, 50))
+        assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor
+
+        QTest.mouseMove(overlay, QPoint(100, 90))  # deep inside the selection
+        assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
