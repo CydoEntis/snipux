@@ -5,11 +5,12 @@
 type) by `detect_session_type()`.
 
 `copy_image_to_clipboard`/`save_image` also live here rather than in
-`editor.py`: this is the only one of the two modules with no existing reason
-to avoid `subprocess`/`shutil`/filesystem code (`capture.py` already owns
-that pattern for backends; `editor.py` is scoped to widget/painting code).
-`app.py` has no reason to import `editor.py`, so `editor.py` importing these
-two functions from here stays one-directional.
+`overlay.py`: this is the module with no existing reason to avoid
+`subprocess`/`shutil`/filesystem code (`capture.py` already owns that
+pattern for backends; `overlay.py` is scoped to widget/painting code).
+`app.py` has no reason to import `overlay.py`'s `OverlayWindow.copy`/`save`,
+so `overlay.py` importing these two functions from here (deferred, to avoid
+a circular import) stays one-directional.
 """
 
 from __future__ import annotations
@@ -36,13 +37,7 @@ from snipux.capture import (
     build_x11_registry,
     detect_session_type,
 )
-from snipux.overlay import (
-    GeometryProvider,
-    Overlay,
-    SelectionMode,
-    UnsupportedGeometryProvider,
-    create_overlays,
-)
+from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
 
 
 def copy_image_to_clipboard(image: QImage) -> None:
@@ -235,7 +230,7 @@ def main(
     return 0
 
 
-# -- resident app: single instance, tray icon, capture -> overlay -> editor -
+# -- resident app: single instance, tray icon, capture -> overlay --------
 #
 # Kept separate from main() above rather than repurposing bare `main([])`
 # for this: main() is pinned by the tests above to an immediate,
@@ -333,7 +328,7 @@ class QLocalSocketTransport(Transport):
 
 
 class AppController:
-    """Owns the tray icon and the capture -> overlay -> editor wiring.
+    """Owns the tray icon and the capture -> overlay wiring.
 
     Built to be testable without ever calling `QApplication.exec()`:
     nothing in `__init__` or its methods blocks, so `run_resident_app()` is
@@ -348,11 +343,12 @@ class AppController:
         monitor_geometries: list[QRectF] | None = None,
         geometry_provider: GeometryProvider | None = None,
     ):
-        # Must happen before any overlay/editor window is ever shown.
-        # Without it, Qt's default behavior quits the whole application the
-        # moment the last visible window closes — exactly what happens the
-        # first time an overlay is cancelled, which would kill the resident
-        # process on the very first cancel instead of returning it to idle.
+        # Must happen before any overlay window is ever shown. Without it,
+        # Qt's default behavior quits the whole application the moment the
+        # last visible window closes — exactly what happens the first time
+        # an overlay is dismissed without ink, which would kill the
+        # resident process on the very first dismissal instead of
+        # returning it to idle.
         QApplication.instance().setQuitOnLastWindowClosed(False)
 
         self._registry = registry
@@ -372,36 +368,18 @@ class AppController:
             else build_default_geometry_provider()
         )
 
-        self._overlays: list[Overlay] = []
-        self._frame = None
-        self._editor = None
+        self._overlay: OverlayWindow | None = None
 
         self._tray_icon = QSystemTrayIcon(self._build_icon())
         menu = QMenu()
-        # One item per SelectionMode, labelled for a user (never the enum
-        # name/value) rather than a single generic "Snip" entry, so every
-        # mode overlay.py already implements is actually reachable -- per
-        # the ticket, full-screen capture in particular had no way in at
-        # all before this. Each lambda takes no arguments so PyQt trims the
-        # `checked` bool `triggered` would otherwise pass, the same way the
-        # old single-item menu relied on start_capture() itself doing that
-        # trimming.
-        self.rectangle_action = menu.addAction("Rectangular Snip")
-        self.rectangle_action.triggered.connect(
-            lambda: self.start_capture(SelectionMode.RECTANGLE)
-        )
-        self.freeform_action = menu.addAction("Freeform Snip")
-        self.freeform_action.triggered.connect(
-            lambda: self.start_capture(SelectionMode.FREEFORM)
-        )
-        self.window_action = menu.addAction("Window Snip")
-        self.window_action.triggered.connect(
-            lambda: self.start_capture(SelectionMode.WINDOW)
-        )
-        self.full_screen_action = menu.addAction("Full-screen Snip")
-        self.full_screen_action.triggered.connect(
-            lambda: self.start_capture(SelectionMode.FULL_SCREEN)
-        )
+        # A single Snip item, not one per SelectionMode: OverlayWindow's own
+        # capture-mode popover (CaptureModePopover, opened from its floating
+        # bar's chip) is what picks Region/Window/Full screen/Freeform now,
+        # so the tray no longer needs a separate entry point for each -- the
+        # old per-mode menu existed only because the previous Overlay/Editor
+        # pair couldn't change mode once a selection was already open.
+        self.snip_action = menu.addAction("Snip")
+        self.snip_action.triggered.connect(self.start_capture)
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         self._tray_icon.setContextMenu(menu)
@@ -423,17 +401,18 @@ class AppController:
     def _real_monitor_geometries(self) -> list[QRectF]:
         return [QRectF(screen.geometry()) for screen in QGuiApplication.screens()]
 
-    def start_capture(self, mode: SelectionMode = SelectionMode.RECTANGLE) -> None:
-        # Defaults to rectangle so every existing no-argument caller --
-        # the --snip transport listener wired below, and a forwarded
-        # request from a second launch -- keeps behaving exactly as before,
-        # per the ticket's acceptance criterion. Only the tray menu's own
-        # actions pass an explicit mode.
-        if self._overlays:
+    def start_capture(self) -> None:
+        # No mode parameter: unlike the old per-monitor Overlay, a single
+        # OverlayWindow starts in Region and lets its own capture-mode
+        # popover switch to Window/Full screen/Freeform after the fact, so
+        # every caller here -- the tray's own Snip action, the --snip
+        # transport listener wired below, and a forwarded request from a
+        # second launch -- needs no mode of its own to pass in.
+        if self._overlay is not None and self._overlay.isVisible():
             # A Snip request arrived mid-selection (tray double-click, or a
             # forwarded request from a second launch while already
-            # selecting) — no-op rather than stacking a second overlay set
-            # on top of the first.
+            # selecting) — no-op rather than opening a second overlay on
+            # top of the first.
             return
 
         try:
@@ -458,54 +437,25 @@ class AppController:
             if self._monitor_geometries is not None
             else self._real_monitor_geometries()
         )
-        overlays = create_overlays(
-            frame, geometries, mode=mode, geometry_provider=self._geometry_provider
+        overlay = OverlayWindow(
+            frame,
+            geometry_provider=self._geometry_provider,
+            monitor_geometries=geometries,
+            # So a delayed capture (SNX-50's re-grab) and Window/Full
+            # screen mode inside the overlay itself have the same registry
+            # the initial capture above used, rather than an inert default
+            # that could never actually re-capture anything.
+            registry=self._registry,
         )
-        for overlay in overlays:
-            overlay.confirmed.connect(self._on_confirmed)
-            overlay.cancelled.connect(self._on_cancelled)
-            overlay.show()
         # Stored on self, not left as a local: a parentless widget is fair
         # game for Python's GC to collect out from under the still-open
-        # window otherwise, a known PyQt foot-gun.
-        self._overlays = overlays
-        self._frame = frame
-
-    def _close_overlays(self) -> None:
-        # All of them, not just the one that emitted — create_overlays()
-        # makes one Overlay per monitor, and only one can end up confirming
-        # or cancelling a given drag.
-        for overlay in self._overlays:
-            overlay.close()
-        self._overlays = []
-
-    def _on_confirmed(self, rect: QRectF, path) -> None:
-        # Imported here, not at module level: editor.py imports
-        # copy_image_to_clipboard/save_image from this module, so importing
-        # Editor at the top of this file would be a circular import at
-        # load time. By the time a signal can fire, both modules are
-        # already fully loaded.
-        from snipux.editor import Editor
-
-        frame = self._frame
-        self._close_overlays()
-        self._frame = None
-
-        # The freeform `path` is accepted but unused: Editor/Canvas take a
-        # Frame only, and nothing in this ticket needs freeform-aware
-        # cropping.
-        cropped = frame.crop(rect)
-        # `frame` (the whole virtual-desktop capture, not just the snip) is
-        # passed as `desktop_frame` too, per SNX-28: it's what lets Editor
-        # dim the screen area outside the snip using real desktop pixels
-        # already in hand, the same veil Overlay paints during selection,
-        # rather than asking the compositor for anything a second time.
-        self._editor = Editor(cropped, frame)
-        self._editor.show()
-
-    def _on_cancelled(self) -> None:
-        self._close_overlays()
-        self._frame = None
+        # window otherwise, a known PyQt foot-gun. OverlayWindow manages
+        # its own dismissal (Esc, Enter-to-copy, the bar's Copy/Save) and
+        # closes itself; nothing here needs to be told when that happens,
+        # since the next start_capture() call just replaces this reference
+        # once .isVisible() reports the old one gone.
+        overlay.show()
+        self._overlay = overlay
 
 
 def run_resident_app(
