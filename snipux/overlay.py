@@ -22,6 +22,7 @@ from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, QTim
 from PyQt6.QtGui import (
     QColor,
     QFont,
+    QFontMetricsF,
     QIcon,
     QImage,
     QMouseEvent,
@@ -1697,6 +1698,21 @@ class OverlayWindow(QWidget):
     _TOP_CLEARANCE = 52  # keeps the selection clear of the top hint HUD
     _BAR_ROOM = 130  # keeps room below the selection for the floating bar
 
+    # Chips above the selection (SNX-43), per docs/design/overlay-redesign.md's
+    # "Chips above the selection" section: the reference gives these as
+    # literal CSS values (`padding:6px 11px`, `border-radius:8px`, a 9px/7px
+    # flex `gap`) rather than tokens.Metric entries -- same convention as the
+    # corner bracket/edge handle constants above. tokens.Metric.CHIP_OFFSET_Y
+    # is the one shared value that *is* tokenized, since both chips read it.
+    _CHIP_RADIUS = 8
+    _CHIP_PAD_V = 6
+    _CHIP_PAD_H = 11
+    _CHIP_INNER_GAP = 9    # dimension chip: gap between size / dot / mark count
+    _CHIP_DOT = "·"   # the reference's bare "·" between size and mark count
+    _FROZEN_INNER_GAP = 7  # frozen pill: gap between the pin icon and its label
+    _FROZEN_ICON_SIZE = 13
+    _FROZEN_LABEL = "Frozen"
+
     def __init__(self, frame: Frame, parent=None):
         super().__init__(parent)
         self._frame = frame
@@ -2271,6 +2287,14 @@ class OverlayWindow(QWidget):
             self._paint_selection_stroke(painter)
             self._paint_corner_brackets(painter)
             self._paint_edge_handles(painter)
+            # Chips (SNX-43): last in the "selection" layer's paint order,
+            # per the README's "undimmed pixmap, ink layer, frame stroke,
+            # handles, chips" -- and never part of `rendered_image()`'s own
+            # export path, which flattens `_marks` onto the frame directly
+            # and never calls this method, so neither chip can leak into a
+            # save/copy.
+            self._paint_dimension_chip(painter)
+            self._paint_frozen_pill(painter)
         painter.end()
 
     def _paint_marks(self, painter: QPainter) -> None:
@@ -2470,6 +2494,161 @@ class OverlayWindow(QWidget):
         for handle in _EDGE_HANDLES:
             rect = self._edge_handle_rect(handle)
             painter.drawRoundedRect(rect, self._EDGE_HANDLE_RADIUS, self._EDGE_HANDLE_RADIUS)
+
+    # -- chips above the selection (SNX-43) ---------------------------------
+
+    def _chip_font(self, spec: tuple[float, int], family: str) -> QFont:
+        """A QFont at `spec`'s (pixel size, weight) in `family`.
+
+        Built fresh rather than cached: both the rect-computing helpers
+        below and their paint counterparts need one, and building it twice
+        from the same `tokens.Font` entry is what keeps the size a rect was
+        measured against and the size actually painted from ever drifting
+        apart -- there's no cached QFont either could go stale against.
+        """
+        size, weight = spec
+        font = QFont(family)
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight(weight))
+        return font
+
+    def _dimension_chip_texts(self) -> tuple[str, str]:
+        """(`"1040 × 560"`, `"2 marks"`/`"1 mark"`) for the dimension chip.
+
+        Recomputed from live state on every call -- never cached -- which is
+        what makes the chip "update live while the selection is being
+        resized" (the acceptance criterion): paintEvent calls this fresh on
+        every repaint, and a resize drag, add_mark, undo, redo, clear or
+        erase_at all end in `self.update()`, so the next paint always reads
+        the current selection size and mark count. The mark count is
+        singular at exactly one and plural otherwise, per the README's
+        "1 mark" / "2 marks".
+
+        Width/height come from `self._selection`, already this widget's own
+        window-local *logical* pixels (see the class docstring) -- never
+        `self._frame.image`'s larger pixel size. That's what keeps this
+        correct on a display with device pixel ratio above one, per the
+        README's HiDPI note: "the dimension chip should report logical
+        selection size."
+        """
+        width = round(self._selection.width())
+        height = round(self._selection.height())
+        count = len(self._marks)
+        unit = "mark" if count == 1 else "marks"
+        return f"{width} × {height}", f"{count} {unit}"
+
+    def _dimension_chip_rect(self) -> QRectF:
+        """Bounding rect of the dimension chip, in window coordinates:
+        left-aligned to the selection's left edge, its own top edge
+        `CHIP_OFFSET_Y` above the selection's top edge -- per the README's
+        "left:0; top:-38px" -- sized to fit its current text exactly, the
+        same way `_bracket_path`/`_edge_handle_rect` above expose their
+        geometry separately from painting it.
+        """
+        metric = design.tokens.Metric
+        sel = QRectF(self._selection)
+        size_text, mark_text = self._dimension_chip_texts()
+        mono = design.font_families().mono
+        size_fm = QFontMetricsF(self._chip_font(design.tokens.Font.DIM_CHIP, mono))
+        mute_fm = QFontMetricsF(self._chip_font(design.tokens.Font.DIM_CHIP_MUTE, mono))
+
+        content_width = (
+            size_fm.horizontalAdvance(size_text)
+            + self._CHIP_INNER_GAP
+            + mute_fm.horizontalAdvance(self._CHIP_DOT)
+            + self._CHIP_INNER_GAP
+            + mute_fm.horizontalAdvance(mark_text)
+        )
+        content_height = max(size_fm.height(), mute_fm.height())
+        width = content_width + 2 * self._CHIP_PAD_H
+        height = content_height + 2 * self._CHIP_PAD_V
+        return QRectF(sel.left(), sel.top() - metric.CHIP_OFFSET_Y, width, height)
+
+    def _frozen_pill_rect(self) -> QRectF:
+        """Bounding rect of the Frozen pill, in window coordinates:
+        right-aligned to the selection's right edge, its own top edge
+        `CHIP_OFFSET_Y` above the selection's top edge -- per the README's
+        "right:0; top:-38px" -- sized to fit the pin icon and its label.
+        """
+        metric = design.tokens.Metric
+        sel = QRectF(self._selection)
+        ui = design.font_families().ui
+        fm = QFontMetricsF(self._chip_font(design.tokens.Font.FROZEN, ui))
+
+        content_width = (
+            self._FROZEN_ICON_SIZE
+            + self._FROZEN_INNER_GAP
+            + fm.horizontalAdvance(self._FROZEN_LABEL)
+        )
+        content_height = max(self._FROZEN_ICON_SIZE, fm.height())
+        width = content_width + 2 * self._CHIP_PAD_H
+        height = content_height + 2 * self._CHIP_PAD_V
+        top = sel.top() - metric.CHIP_OFFSET_Y
+        return QRectF(sel.right() - width, top, width, height)
+
+    def _paint_dimension_chip(self, painter: QPainter) -> None:
+        """The left-hand chip: `WIDTH × HEIGHT`, a muted middot, then the
+        mark count -- singular at one, per docs/design/overlay-redesign.md's
+        "Chips above the selection".
+        """
+        mono = design.font_families().mono
+        size_text, mark_text = self._dimension_chip_texts()
+        size_font = self._chip_font(design.tokens.Font.DIM_CHIP, mono)
+        mute_font = self._chip_font(design.tokens.Font.DIM_CHIP_MUTE, mono)
+        size_fm = QFontMetricsF(size_font)
+        mute_fm = QFontMetricsF(mute_font)
+
+        rect = self._dimension_chip_rect()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("CHIP_LIGHT_BG"))
+        painter.drawRoundedRect(rect, self._CHIP_RADIUS, self._CHIP_RADIUS)
+
+        # Both fonts share the same 12px pixel size (only the weight
+        # differs), so a single baseline -- derived from the size text's own
+        # ascent -- keeps every segment sitting on the same line rather than
+        # each drawText computing (and risking disagreeing on) its own.
+        baseline = rect.top() + self._CHIP_PAD_V + size_fm.ascent()
+        x = rect.left() + self._CHIP_PAD_H
+
+        painter.setFont(size_font)
+        painter.setPen(design.color("CHIP_LIGHT_FG"))
+        painter.drawText(QPointF(x, baseline), size_text)
+        x += size_fm.horizontalAdvance(size_text) + self._CHIP_INNER_GAP
+
+        painter.setFont(mute_font)
+        painter.setPen(design.color("CHIP_DOT"))
+        painter.drawText(QPointF(x, baseline), self._CHIP_DOT)
+        x += mute_fm.horizontalAdvance(self._CHIP_DOT) + self._CHIP_INNER_GAP
+
+        painter.setPen(design.color("CHIP_LIGHT_MUTE"))
+        painter.drawText(QPointF(x, baseline), mark_text)
+
+    def _paint_frozen_pill(self, painter: QPainter) -> None:
+        """The right-hand pill: a pin glyph then the word "Frozen", telling
+        the user the desktop behind the overlay is a still frame, not the
+        live screen -- docs/design/overlay-redesign.md's "Overlay window"
+        section.
+        """
+        ui = design.font_families().ui
+        font = self._chip_font(design.tokens.Font.FROZEN, ui)
+        fm = QFontMetricsF(font)
+
+        rect = self._frozen_pill_rect()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("CHIP_DARK_BG"))
+        painter.drawRoundedRect(rect, self._CHIP_RADIUS, self._CHIP_RADIUS)
+
+        icon_size = self._FROZEN_ICON_SIZE
+        icon_x = rect.left() + self._CHIP_PAD_H
+        icon_y = rect.top() + (rect.height() - icon_size) / 2
+        pixmap = design.icon("pin", design.color("CHIP_DARK_FG")).pixmap(icon_size, icon_size)
+        painter.drawPixmap(QPointF(icon_x, icon_y), pixmap)
+
+        text_x = icon_x + icon_size + self._FROZEN_INNER_GAP
+        baseline = rect.top() + (rect.height() - fm.height()) / 2 + fm.ascent()
+        painter.setFont(font)
+        painter.setPen(design.color("CHIP_DARK_FG"))
+        painter.drawText(QPointF(text_x, baseline), self._FROZEN_LABEL)
 
 
 def create_overlays(
