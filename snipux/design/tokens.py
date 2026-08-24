@@ -47,7 +47,9 @@ class Color:
     CHIP_LIGHT_BG   = "#e9ecf2"
     CHIP_LIGHT_FG   = "#12141a"
     CHIP_LIGHT_MUTE = "#4b5563"
-    CHIP_DARK_BG    = "#141512"   # at 78% alpha
+    CHIP_DOT        = "#9ca3af"   # the middot between size and mark count
+    CHIP_DARK_BG    = "#141512"
+    CHIP_DARK_BG_ALPHA = 0.78
     CHIP_DARK_FG    = "#e5e7d9"
 
     # Toast
@@ -86,6 +88,7 @@ class Font:
     READOUT       = (11.0, 500)   # "5px", mono
     DIM_CHIP      = (12.0, 600)   # "1040 × 560", mono
     DIM_CHIP_MUTE = (12.0, 400)   # "2 marks", mono
+    FROZEN        = (12.0, 400)   # "Frozen" pill label, sans
     HUD           = (12.0, 400)   # top hint bar
     MENU_LABEL    = (12.5, 500)
     MENU_NOTE     = (11.0, 400)

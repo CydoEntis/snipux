@@ -2463,3 +2463,250 @@ class TestBlurTrayOverlayIntegration:
         overlay._blur_tray._slider.setValue(17)
 
         assert overlay._blur_strength == 17
+
+
+def _mark(start=(10, 10), end=(20, 20)):
+    return Rectangle(
+        colour=QColor(255, 0, 0), stroke_width=4, start=QPointF(*start), end=QPointF(*end)
+    )
+
+
+class TestDimensionChipText:
+    """SNX-43: the dimension chip's text -- the selection's *logical* size,
+    and the mark-count pluralisation rule ("1 mark" singular, "N marks"
+    otherwise) -- per docs/design/overlay-redesign.md's "Chips above the
+    selection".
+    """
+
+    def _overlay(self, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(100, 100, 300, 150))
+        return overlay
+
+    def test_reads_the_selection_size(self):
+        overlay = self._overlay()
+
+        size_text, _ = overlay._dimension_chip_texts()
+
+        assert size_text == "300 × 150"
+
+    def test_reads_logical_size_not_physical_pixels_under_scaling(self):
+        # The image is 2x the logical size -- a devicePixelRatio-2 display
+        # -- so a read of the frame's own pixel geometry (rather than the
+        # window-local logical `_selection` this window already keeps, per
+        # the class docstring) would double every number here.
+        frame = make_frame(image_size=(1200, 800), logical_size=(600, 400))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 200, 120))
+
+        size_text, _ = overlay._dimension_chip_texts()
+
+        assert size_text == "200 × 120"
+
+    def test_zero_marks_reads_plural(self):
+        overlay = self._overlay()
+
+        _, mark_text = overlay._dimension_chip_texts()
+
+        assert mark_text == "0 marks"
+
+    def test_exactly_one_mark_reads_singular(self):
+        overlay = self._overlay()
+        overlay.add_mark(_mark())
+
+        _, mark_text = overlay._dimension_chip_texts()
+
+        assert mark_text == "1 mark"
+
+    def test_two_marks_reads_plural(self):
+        overlay = self._overlay()
+        overlay.add_mark(_mark())
+        overlay.add_mark(_mark())
+
+        _, mark_text = overlay._dimension_chip_texts()
+
+        assert mark_text == "2 marks"
+
+    def test_undoing_back_to_one_mark_returns_to_singular(self):
+        # The count is read fresh every call (see the method's own
+        # docstring), so it has to follow the mark count back down, not
+        # just up.
+        overlay = self._overlay()
+        overlay.add_mark(_mark())
+        overlay.add_mark(_mark())
+
+        overlay.undo()
+
+        _, mark_text = overlay._dimension_chip_texts()
+        assert mark_text == "1 mark"
+
+
+class TestDimensionChipLiveUpdate:
+    """SNX-43 AC: 'the chip updates live while the selection is being
+    resized.'
+    """
+
+    def test_text_reflects_the_in_progress_drag_before_release(self):
+        frame = make_frame(image_size=(500, 500), logical_size=(500, 500))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        before, _ = overlay._dimension_chip_texts()
+        assert before == "150 × 100"
+        press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, QPoint(300, 150))  # still mid-drag, no release yet
+
+        mid_drag, _ = overlay._dimension_chip_texts()
+        assert mid_drag == "200 × 100"
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(300, 150))
+
+
+class TestDimensionChipGeometry:
+    """SNX-43 AC: 'the dimension chip is left-aligned to the selection's
+    left edge... above the selection's top edge.'
+    """
+
+    def _overlay(self, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(120, 200, 260, 140))
+        return overlay
+
+    def test_left_aligned_to_the_selections_left_edge(self):
+        overlay = self._overlay()
+
+        rect = overlay._dimension_chip_rect()
+
+        assert rect.left() == pytest.approx(overlay._selection.left())
+
+    def test_sits_the_token_offset_above_the_selections_top_edge(self):
+        overlay = self._overlay()
+
+        rect = overlay._dimension_chip_rect()
+
+        assert rect.top() == pytest.approx(
+            overlay._selection.top() - tokens.Metric.CHIP_OFFSET_Y
+        )
+
+    def test_grows_to_fit_a_longer_mark_count_reading(self):
+        overlay = self._overlay()
+        narrow = overlay._dimension_chip_rect()
+        for _ in range(20):
+            overlay.add_mark(_mark())
+
+        wide = overlay._dimension_chip_rect()
+
+        assert wide.width() > narrow.width()
+        # Still left-aligned to the same edge -- only the right edge grows.
+        assert wide.left() == pytest.approx(narrow.left())
+
+
+class TestFrozenPillGeometry:
+    """SNX-43 AC: 'the Frozen pill is right-aligned to its right edge...
+    above the selection's top edge.'
+    """
+
+    def _overlay(self, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(120, 200, 260, 140))
+        return overlay
+
+    def test_right_aligned_to_the_selections_right_edge(self):
+        overlay = self._overlay()
+        sel = QRectF(overlay._selection)  # QRect.right() is inclusive; QRectF's isn't
+
+        rect = overlay._frozen_pill_rect()
+
+        assert rect.right() == pytest.approx(sel.right())
+
+    def test_sits_the_token_offset_above_the_selections_top_edge(self):
+        overlay = self._overlay()
+
+        rect = overlay._frozen_pill_rect()
+
+        assert rect.top() == pytest.approx(
+            overlay._selection.top() - tokens.Metric.CHIP_OFFSET_Y
+        )
+
+    def test_sits_at_the_same_height_as_the_dimension_chip(self):
+        overlay = self._overlay()
+
+        assert overlay._frozen_pill_rect().top() == pytest.approx(
+            overlay._dimension_chip_rect().top()
+        )
+
+
+class TestChipsPixels:
+    """SNX-43: both chips actually paint their token-coloured fill."""
+
+    def _overlay(self, size=(900, 900)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        # Wide enough that the two chips -- one left-aligned to the
+        # selection, one right-aligned -- never overlap regardless of which
+        # mono/sans family design.font_families() falls back to when IBM
+        # Plex isn't bundled (a wider fallback glyph could otherwise widen
+        # the dimension chip enough to reach under the Frozen pill's own
+        # sample point).
+        overlay.set_selection(QRect(150, 200, 500, 120))
+        return overlay
+
+    def test_dimension_chip_paints_its_light_background(self):
+        overlay = self._overlay()
+        sample = overlay._dimension_chip_rect().center().toPoint()
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(sample) == design_color("CHIP_LIGHT_BG")
+
+    def test_frozen_pill_paints_its_dark_background_at_the_token_alpha(self):
+        overlay = self._overlay()
+        rect = overlay._frozen_pill_rect()
+        # Near the right edge, past where the pin icon/label are painted, so
+        # this samples the plain fill rather than a glyph pixel.
+        sample = QPoint(round(rect.right() - 3), round(rect.center().y()))
+
+        rendered = overlay.grab().toImage()
+        # The pill sits above the selection, i.e. over the *scrim*, not the
+        # bare frame -- so the base this blends onto is itself already
+        # DIM-blended, same as the scrim's own token colour/alpha.
+        scrimmed = _blend(QColor(10, 20, 30), design_color("DIM"))
+        expected = _blend(scrimmed, design_color("CHIP_DARK_BG"))
+        sampled = rendered.pixelColor(sample)
+
+        assert sampled.red() == pytest.approx(expected.red(), abs=2)
+        assert sampled.green() == pytest.approx(expected.green(), abs=2)
+        assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
+
+
+class TestChipsExcludedFromExport:
+    """SNX-43 AC: 'neither chip appears in the exported image.'"""
+
+    def _overlay(self, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(150, 200, 200, 120))
+        return overlay
+
+    def test_rendered_image_size_matches_the_selection_not_the_chips(self):
+        overlay = self._overlay()
+
+        rendered = overlay.rendered_image()
+
+        # Both chips sit outside the selection rect (above its top edge);
+        # if either had leaked into the export, the flattened image would
+        # be taller than the plain selection instead of exactly its size.
+        assert (rendered.width(), rendered.height()) == (200, 120)
+
+    def test_rendered_image_pixels_match_the_frames_own_colour(self):
+        overlay = self._overlay()
+
+        rendered = overlay.rendered_image()
+
+        base = QColor(10, 20, 30)
+        for x, y in [(0, 0), (199, 0), (0, 119), (199, 119), (100, 60)]:
+            assert rendered.pixelColor(x, y) == base
