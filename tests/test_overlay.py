@@ -4,12 +4,14 @@ import pytest
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSizeF, Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 from snipux.capture import Frame, X11WindowGeometryProvider
+from snipux.design import color as design_color
 from snipux.overlay import (
     GeometryProvider,
     Overlay,
+    OverlayWindow,
     SelectionMode,
     UnsupportedGeometryProvider,
     create_overlays,
@@ -37,6 +39,20 @@ def make_frame(
         image=image,
         logical_origin=QPointF(*logical_origin),
         logical_size=QSizeF(*logical_size),
+    )
+
+
+def _blend(base: QColor, fg: QColor) -> QColor:
+    """Plain-Python src-over compositing of `fg` (with its own alpha) atop
+    an opaque `base`, to compute what the scrim should look like without
+    depending on Qt's own compositor -- what TestOverlayWindow's scrim test
+    checks its render against.
+    """
+    a = fg.alphaF()
+    return QColor(
+        round(base.red() * (1 - a) + fg.red() * a),
+        round(base.green() * (1 - a) + fg.green() * a),
+        round(base.blue() * (1 - a) + fg.blue() * a),
     )
 
 
@@ -566,3 +582,93 @@ class TestFullScreenMode:
             # itself has no dimmed hole anywhere.
             for x, y in [(10, 190), (100, 100), (190, 190)]:
                 assert rendered.pixelColor(x, y) == base_color
+
+
+class TestOverlayWindow:
+    """The redesign's shell (SNX-31): a single window over the whole
+    virtual desktop, not one per monitor -- see OverlayWindow's docstring
+    for how this differs from `Overlay` above.
+    """
+
+    def test_frameless_always_on_top_and_covers_the_virtual_desktop(self):
+        frame = make_frame(
+            image_size=(300, 200), logical_size=(300, 200), logical_origin=(50, 20)
+        )
+
+        overlay = OverlayWindow(frame)
+
+        flags = overlay.windowFlags()
+        assert flags & Qt.WindowType.FramelessWindowHint
+        assert flags & Qt.WindowType.WindowStaysOnTopHint
+        assert overlay.geometry() == QRect(50, 20, 300, 200)
+
+    def test_paints_the_captured_frame_as_the_background(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(70, 70) == QColor(10, 20, 30)
+
+    def test_selection_is_undimmed_at_1_to_1(self):
+        # image_size == logical_size (no scaling), so the undimmed hole
+        # should show exactly the base colour, pixel for pixel.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        rendered = overlay.grab().toImage()
+
+        for x, y in [(51, 51), (75, 75), (98, 98)]:
+            assert rendered.pixelColor(x, y) == QColor(10, 20, 30)
+
+    def test_scrim_outside_selection_uses_the_dim_token_colour_and_alpha(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        rendered = overlay.grab().toImage()
+        expected = _blend(QColor(10, 20, 30), design_color("DIM"))
+        sampled = rendered.pixelColor(10, 10)
+
+        # Small tolerance for Qt's own (premultiplied-alpha) rounding vs.
+        # the plain-float blend computed in _blend above.
+        assert sampled.red() == pytest.approx(expected.red(), abs=2)
+        assert sampled.green() == pytest.approx(expected.green(), abs=2)
+        assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
+
+    def test_no_selection_dims_the_whole_window(self):
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+
+        rendered = overlay.grab().toImage()
+        base_color = QColor(10, 20, 30)
+
+        for x, y in [(10, 10), (100, 100), (190, 190)]:
+            assert rendered.pixelColor(x, y) != base_color
+
+    def test_selection_is_held_in_window_not_absolute_coordinates(self):
+        # logical_origin != (0, 0) simulates a monitor away from the
+        # virtual desktop's own top-left. If the selection were (mis)read
+        # as an absolute virtual-desktop rect -- the way `Overlay` above
+        # uses it -- this window-local selection would land nowhere near
+        # (0, 0) inside this widget and the corner would stay dimmed.
+        frame = make_frame(
+            image_size=(200, 200), logical_size=(200, 200), logical_origin=(500, 300)
+        )
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 50, 50))
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(10, 10) == QColor(10, 20, 30)
+
+    def test_scrim_is_painted_by_the_widget_itself_not_a_child_widget(self):
+        # Per the spec: a translucent child stacked over the whole window
+        # would sit above the (future) ink layer and eat its mouse events,
+        # so nothing here should be a child widget covering the window.
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+
+        assert overlay.findChildren(QWidget) == []
