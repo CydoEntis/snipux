@@ -1,10 +1,10 @@
 import pytest
 from PyQt6.QtCore import Qt, QPointF, QRectF, QSizeF
-from PyQt6.QtGui import QColor, QFontMetrics, QImage, QPainter, qRgb
+from PyQt6.QtGui import QColor, QFontMetrics, QFontMetricsF, QImage, QPainter, qRgb
 from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
-from snipux.design.tokens import Metric
+from snipux.design.tokens import Color, Font, Metric
 from snipux.shapes import (
     Arrow,
     Blur,
@@ -21,6 +21,7 @@ from snipux.shapes import (
     _OBSCURE_DOWNSCALE_DIVISOR,
     apply_crop,
     finalize_mark,
+    next_step_number,
     render,
     render_selection,
 )
@@ -111,7 +112,7 @@ class TestShapeFields:
         shape = StepMarker(colour=RED, stroke_width=3, point=QPointF(5, 5))
         assert shape.colour == RED
         assert shape.stroke_width == 3
-        assert shape.number == 0  # not meaningful until a render() pass
+        assert shape.number == 0  # not meaningful until assigned by next_step_number()
 
 
 class TestRender:
@@ -291,6 +292,17 @@ class TestTextRendering:
 
         assert result == base
 
+    def test_font_size_uses_the_tokens_formula(self):
+        # max(TEXT_FONT_SIZE_MIN, stroke_width * TEXT_FONT_SIZE_FACTOR), per
+        # docs/design/overlay-redesign.md's "Drawing": "Font size max(12,
+        # stroke x 3)" -- this is a different floor/factor than the
+        # pre-redesign shared helper StepMarker also used to use.
+        floored = Text(colour=RED, stroke_width=1, point=QPointF(0, 0), text="X")
+        scaled = Text(colour=RED, stroke_width=10, point=QPointF(0, 0), text="X")
+
+        assert floored._font().pixelSize() == Text.TEXT_FONT_SIZE_MIN
+        assert scaled._font().pixelSize() == round(10 * Text.TEXT_FONT_SIZE_FACTOR)
+
     def test_stroke_width_changes_rendered_glyph_size(self):
         # Regression test for the "setFont was never called" bug PLAN.md
         # flags: without painter.setFont(font), drawText silently uses the
@@ -304,26 +316,61 @@ class TestTextRendering:
 
         assert thick_metrics.horizontalAdvance("X") > thin_metrics.horizontalAdvance("X")
 
-    def test_draws_the_glyph_at_point_in_the_shapes_colour(self):
+    def test_draws_the_glyph_inside_the_chip_in_the_shapes_colour(self):
+        # `point` is the chip's top-left corner (image-pixel space), not a
+        # text baseline -- the pre-redesign version of this class drew
+        # straight onto `point`, with no background chip at all.
         base = make_image()
-        point = QPointF(10, 60)
+        point = QPointF(10, 10)
         text = Text(colour=RED, stroke_width=20, point=point, text="X")
 
         result = render(base, [text])
 
-        # drawText's `point` is the text baseline, so the glyph is painted in
-        # a box above and to the right of it, not at `point` itself. Scan
-        # that box rather than one exact pixel — antialiasing means the
-        # precise glyph shape isn't guaranteed pixel-for-pixel across font
-        # backends, but a correct setPen(colour)/setFont(font)/point offset
-        # must paint *some* pixel in the box, and in the shape's own colour.
-        metrics = QFontMetrics(text._font())
-        xs = range(int(point.x()), int(point.x()) + metrics.horizontalAdvance("X"))
-        ys = range(int(point.y()) - metrics.ascent(), int(point.y()))
+        metrics = QFontMetricsF(text._font())
+        pad_h = Metric.TEXT_LABEL_PAD_H
+        pad_v = Metric.TEXT_LABEL_PAD_V
+        xs = range(int(point.x() + pad_h), int(point.x() + pad_h + metrics.horizontalAdvance("X")))
+        ys = range(int(point.y() + pad_v), int(point.y() + pad_v + metrics.height()))
         painted = [result.pixelColor(x, y) for x in xs for y in ys]
 
-        assert any(p != QColor(BACKGROUND) for p in painted)
         assert any(p == RED for p in painted)
+
+    def test_chip_background_matches_tokens_colour_and_alpha(self):
+        base = make_image(fill_color=BACKGROUND)
+        point = QPointF(10, 10)
+        text = Text(colour=RED, stroke_width=4, point=point, text="Hello")
+
+        result = render(base, [text])
+
+        # A couple of pixels in from the top-left corner: inside the
+        # rounded corner's own arc (TEXT_LABEL_RADIUS=5) but well short of
+        # the padding (TEXT_LABEL_PAD_H/_V) that keeps the glyph itself
+        # away from this pixel -- chip fill only, no ring, no text.
+        probe = result.pixelColor(int(point.x()) + 3, int(point.y()) + 3)
+        assert probe != QColor(BACKGROUND)
+
+        background = QColor(Color.TEXT_LABEL_BG)
+        alpha = Color.TEXT_LABEL_BG_ALPHA
+        expected_green = round(background.green() * alpha + 255 * (1 - alpha))
+        assert probe.green() == pytest.approx(expected_green, abs=5)
+
+    def test_chip_corners_are_rounded(self):
+        base = make_image()
+        point = QPointF(10, 10)
+        text = Text(colour=RED, stroke_width=4, point=point, text="Hello")
+        metrics = QFontMetricsF(text._font())
+        chip_width = metrics.horizontalAdvance("Hello") + Metric.TEXT_LABEL_PAD_H * 2
+
+        result = render(base, [text])
+
+        # The exact top-left corner sits outside TEXT_LABEL_RADIUS's arc and
+        # stays untouched background; a point on the flat top edge, well
+        # clear of either corner, is fully covered chip fill.
+        corner = result.pixelColor(int(point.x()), int(point.y()))
+        edge = result.pixelColor(int(point.x() + chip_width / 2), int(point.y()))
+
+        assert corner == QColor(BACKGROUND)
+        assert edge != QColor(BACKGROUND)
 
 
 class TestStepMarkerRendering:
@@ -335,33 +382,117 @@ class TestStepMarkerRendering:
 
         assert result.pixelColor(50, 50) == RED
 
+    def test_diameter_is_fixed_regardless_of_stroke_width(self):
+        # STEP_D is a constant in the design, unlike every drawing tool --
+        # a thin and a thick stroke must produce the exact same badge size.
+        thin = StepMarker(colour=RED, stroke_width=1, point=QPointF(50, 50))
+        thick = StepMarker(colour=RED, stroke_width=20, point=QPointF(50, 50))
+
+        thin_result = render(make_image(), [thin])
+        thick_result = render(make_image(), [thick])
+
+        radius = Metric.STEP_D / 2
+        inside = (50 + round(radius) - 2, 50)
+        # Clear of the shadow's own spread too (see
+        # test_has_a_soft_drop_shadow_below_the_badge), not just the fill.
+        outside = (50 + round(radius) + 8, 50)
+
+        assert thin_result.pixelColor(*inside) != QColor(BACKGROUND)
+        assert thick_result.pixelColor(*inside) != QColor(BACKGROUND)
+        assert thin_result.pixelColor(*outside) == QColor(BACKGROUND)
+        assert thick_result.pixelColor(*outside) == QColor(BACKGROUND)
+
+    def test_has_a_ring_distinct_from_the_fill(self):
+        base = make_image()
+        marker = StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50))
+
+        result = render(base, [marker])
+
+        radius = Metric.STEP_D / 2
+        # Right at the circle's own edge (the ring straddles it) versus
+        # solidly inside the fill -- the ring's white must show through
+        # distinctly from the plain ink-coloured interior.
+        ring_pixel = result.pixelColor(50 + round(radius) - 1, 50)
+        fill_pixel = result.pixelColor(50, 50)
+
+        assert ring_pixel != fill_pixel
+
+    def test_has_a_soft_drop_shadow_below_the_badge(self):
+        base = make_image()
+        marker = StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50))
+
+        result = render(base, [marker])
+
+        radius = Metric.STEP_D / 2
+        # Below the badge, outside the ring, is within the shadow's own
+        # offset+spread reach -- must be darkened relative to untouched
+        # background. The mirrored point above stays untouched, proving the
+        # shadow is offset downward rather than a uniform halo around it.
+        below = result.pixelColor(50, 50 + round(radius) + 2)
+        above = result.pixelColor(50, 50 - round(radius) - 8)
+
+        assert below != QColor(BACKGROUND)
+        assert above == QColor(BACKGROUND)
+
+    def test_badge_text_colour_and_font_come_from_tokens(self):
+        assert StepMarker.BADGE_TEXT_COLOUR == QColor(Color.ACCENT_FG)
+
+        marker = StepMarker(colour=RED, stroke_width=1, point=QPointF(0, 0))
+        font = marker._font()
+        size, weight = Font.STEP_BADGE
+
+        assert font.pixelSize() == round(size)
+        assert font.weight() == weight
+
+    def test_font_size_is_fixed_regardless_of_stroke_width(self):
+        # Unlike Text, the badge numeral doesn't derive its size from
+        # stroke_width at all -- it's a fixed tokens.Font.STEP_BADGE size.
+        thin = StepMarker(colour=RED, stroke_width=1, point=QPointF(0, 0))
+        thick = StepMarker(colour=RED, stroke_width=20, point=QPointF(0, 0))
+
+        assert thin._font().pixelSize() == thick._font().pixelSize()
+
 
 class TestStepMarkerNumbering:
-    def test_numbers_markers_sequentially_in_list_order(self):
+    def test_next_step_number_starts_at_one(self):
+        assert next_step_number([]) == 1
+
+    def test_next_step_number_counts_only_step_markers(self):
+        shapes = [
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10), number=1),
+            Rectangle(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(5, 5)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30), number=2),
+        ]
+
+        assert next_step_number(shapes) == 3
+
+    def test_render_does_not_mutate_stored_numbers(self):
         base = make_image()
         markers = [
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10)),
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30)),
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10), number=1),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30), number=2),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50), number=3),
         ]
 
         render(base, markers)
 
         assert [marker.number for marker in markers] == [1, 2, 3]
 
-    def test_renumbers_after_an_earlier_marker_is_removed(self):
+    def test_does_not_renumber_after_an_earlier_marker_is_removed(self):
+        # Per docs/design/overlay-redesign.md's "Drawing": numbering is
+        # count(existing steps) + 1 at creation, and deliberately does not
+        # renumber after a delete -- matches the prototype.
         base = make_image()
         markers = [
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10)),
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30)),
-            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50)),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(10, 10), number=1),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(30, 30), number=2),
+            StepMarker(colour=RED, stroke_width=4, point=QPointF(50, 50), number=3),
         ]
-        render(base, markers)
 
         survivors = markers[1:]  # drop the first, as if the user removed it
         render(base, survivors)
 
-        assert [marker.number for marker in survivors] == [1, 2]
+        assert [marker.number for marker in survivors] == [2, 3]
 
 
 class TestObscuringShapeFields:
