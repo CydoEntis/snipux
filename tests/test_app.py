@@ -373,6 +373,14 @@ class TestSnipFlag:
         # capture failure into something indistinguishable from the key
         # doing nothing.
         monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        # Forces the "tray exists" branch regardless of the machine running
+        # the tests (see the equivalent note on
+        # test_failed_capture_reports_it_through_the_tray_icon above); the
+        # no-tray fallback for this same failure path is covered separately
+        # by TestNoSystemTray below.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
         calls = []
         monkeypatch.setattr(
             QSystemTrayIcon,
@@ -691,6 +699,14 @@ class TestAppControllerCapture:
         assert controller._overlay is None
 
     def test_failed_capture_reports_it_through_the_tray_icon(self, make_controller, monkeypatch):
+        # Forces the "tray exists" branch regardless of what the machine
+        # actually running the tests reports (typically False under the
+        # offscreen platform tests run under) -- this test is specifically
+        # about the tray-reporting path; the no-tray fallback has its own
+        # test below.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
         registry = BackendRegistry([FailingCaptureBackend()])
         controller = make_controller(
             registry,
@@ -760,6 +776,118 @@ class TestAppControllerTrayMenu:
         )
 
         controller.quit_action.trigger()
+
+
+class TestNoSystemTray:
+    """SNX-54: `QSystemTrayIcon.isSystemTrayAvailable()` is what decides
+    whether the tray icon is actually shown -- exercised here by faking
+    both outcomes directly (per the ticket's own acceptance criterion),
+    rather than depending on whatever the machine running the suite
+    happens to report. That matters in practice too: under the offscreen
+    platform this whole file runs under, it reports False, which is why
+    the tray-reporting tests above force it True instead of relying on the
+    ambient value.
+    """
+
+    def test_tray_icon_is_shown_when_a_tray_is_available(self, make_controller, monkeypatch):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        assert controller._tray_icon.isVisible() is True
+
+    def test_tray_icon_is_not_shown_when_no_tray_is_available(self, make_controller, monkeypatch):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        assert controller._tray_icon.isVisible() is False
+
+    def test_prints_once_on_stdout_when_no_tray_is_available(
+        self, make_controller, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+
+        make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        out = capsys.readouterr().out
+        assert out.count("No system tray") == 1
+        # Must actually say how to quit, not just that there's no icon --
+        # with the tray's own Quit menu item invisible, this is the only
+        # place that answer is ever given to the user.
+        assert "quit" in out.lower()
+
+    def test_says_nothing_when_a_tray_is_available(self, make_controller, monkeypatch, capsys):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+
+        make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        out = capsys.readouterr().out
+        assert "No system tray" not in out
+
+    def test_app_still_responds_to_a_snip_request_with_no_tray_available(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+
+        controller.start_capture()
+
+        assert isinstance(controller._overlay, OverlayWindow)
+
+    def test_capture_failure_is_still_reported_on_stdout_with_no_tray_available(
+        self, make_controller, monkeypatch, capsys
+    ):
+        # AC: "a capture failure is still reported to the user when there
+        # is no tray to show a balloon message in" -- showMessage() has
+        # nowhere to appear on an icon that was never shown, so this must
+        # not silently swallow the failure instead.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+        registry = BackendRegistry([FailingCaptureBackend()])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        capsys.readouterr()  # discard the "no tray available" notice from __init__
+        show_message_calls = []
+        monkeypatch.setattr(
+            controller._tray_icon,
+            "showMessage",
+            lambda *args, **kwargs: show_message_calls.append(args),
+        )
+
+        controller.start_capture()
+
+        out = capsys.readouterr().out
+        assert "failing" in out
+        assert "capture failed" in out
+        assert show_message_calls == []
 
 
 class TestRunResidentApp:
