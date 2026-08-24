@@ -2371,7 +2371,7 @@ class OverlayWindow(QWidget):
     two-stage Esc (`_handle_escape`) the spec leaves for us to decide --
     finally wiring `discard()` up to a key, per that method's own
     docstring. All of it is suppressed while a slider or a text-editing
-    widget has focus (`_shortcuts_suppressed`). SNX-52 (this ticket) is
+    widget has focus (`_shortcuts_suppressed`). SNX-52 was
     what the "still a later ticket" note above `_on_tool_selected` used to
     point at: `mousePressEvent` now dispatches a press that misses every
     handle and lands inside the selection -- with the eraser disarmed --
@@ -2384,7 +2384,25 @@ class OverlayWindow(QWidget):
     committed mark always takes its colour/stroke from `_ink_colour`/
     `_stroke_width` and, for blur, its shape class and strength from
     `_blur_mode`/`_blur_strength` -- the same tray-tracked state prior
-    tickets already left ready to be read.
+    tickets already left ready to be read. SNX-48 (this ticket) makes
+    `_capture_mode` do something once it names Window or Full screen,
+    instead of sitting unread the way `_on_capture_mode_selected`'s own
+    docstring used to say it would: `_enter_window_mode` arms
+    `_picking_window`, which `mouseMoveEvent`/`mousePressEvent` check
+    ahead of the resize/stroke dispatch above so a hover previews the
+    window under the cursor (`_geometry_provider.window_at`, the same
+    `GeometryProvider` `Overlay` already takes) and a click snaps
+    `_selection` to it (`_confirm_window_pick`); `_select_full_screen`
+    sets `_selection` to whichever of `_monitor_geometries` contains the
+    cursor's last known position immediately, no click needed past
+    picking the row. Either way the result is handed to `set_selection`
+    like any other -- nothing downstream distinguishes a mode-produced
+    selection from a dragged one, which is what makes it re-framable and
+    annotatable the same way. A `GeometryProvider` that reports itself
+    unavailable (`UnsupportedGeometryProvider`, same as `Overlay`'s own
+    default) must not leave Window mode looking chosen but inert: it
+    toasts an explanation and falls back to Region instead, per the
+    ticket's own acceptance criterion.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -2439,9 +2457,33 @@ class OverlayWindow(QWidget):
     _FROZEN_ICON_SIZE = 13
     _FROZEN_LABEL = "Frozen"
 
-    def __init__(self, frame: Frame, parent=None, hints_enabled: bool = True):
+    def __init__(
+        self,
+        frame: Frame,
+        parent=None,
+        hints_enabled: bool = True,
+        geometry_provider: GeometryProvider | None = None,
+        monitor_geometries: list[QRectF] | None = None,
+    ):
         super().__init__(parent)
         self._frame = frame
+
+        # SNX-48: sourced for Window/Full screen capture-mode handling
+        # below, mirroring `Overlay`'s own constructor args of the same
+        # names. `_geometry_provider` defaults the same way `Overlay`'s
+        # does -- `UnsupportedGeometryProvider` reports no windows
+        # anywhere, which is what makes Window mode degrade instead of
+        # needing a None-check at every call site. `_monitor_geometries`
+        # defaults to the frame's own full span (there is no per-monitor
+        # split to make without one) so a single-monitor caller -- every
+        # test in this file included -- gets a correct Full screen
+        # selection without having to pass one in.
+        self._geometry_provider = geometry_provider or UnsupportedGeometryProvider()
+        self._monitor_geometries = (
+            list(monitor_geometries)
+            if monitor_geometries
+            else [QRectF(frame.logical_origin, frame.logical_size)]
+        )
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -2464,6 +2506,25 @@ class OverlayWindow(QWidget):
         # Window coordinates, per the class docstring -- None until
         # set_selection is called.
         self._selection: QRect | None = None
+
+        # SNX-48: last-known pointer position over the frozen desktop
+        # itself (window-local logical coords, the same space `_selection`
+        # lives in) -- tracked from ordinary mouse-move events the same
+        # way `Overlay._cursor_pos` is, rather than ever calling
+        # `QCursor.pos()`, so `_select_full_screen` can answer "which
+        # display is the cursor on" without this widget reaching for
+        # global cursor state no test can control offscreen. None until
+        # the first move.
+        self._cursor_pos: QPointF | None = None
+        # True from the moment Window mode is armed (`_enter_window_mode`)
+        # until a click lands on a window (`_confirm_window_pick`), per
+        # the spec's "hover highlights the window under the cursor...
+        # click accepts it." While armed, `mousePressEvent`/
+        # `mouseMoveEvent` dispatch to the Window-picking branch ahead of
+        # the resize-handle/stroke logic below, the same "handled here,
+        # nothing else runs" shape `_active_handle`/`_eraser_active`
+        # already use for their own presses.
+        self._picking_window = False
 
         # Handle currently being dragged (SNX-33 re-framing), and the
         # selection as it stood the moment that drag started. The anchor is
@@ -2671,13 +2732,130 @@ class OverlayWindow(QWidget):
         own label to match, per the reference's `{{ mode }}` binding on
         the chip button itself.
 
-        Per the ticket, only Region does anything past this -- Window,
-        Full screen and Freeform are separate tickets that will read
-        `_capture_mode` once they exist, the same way `_blur_mode` above
-        sits unread until its own drawing ticket lands.
+        SNX-48 makes Window and Full screen actually do something past
+        the label update: `_enter_window_mode` arms hover-preview/click-
+        to-snap picking, `_select_full_screen` snaps `_selection`
+        immediately. Freeform is still a separate ticket, the same way
+        `_blur_mode` above sat unread until its own drawing ticket
+        landed. Whatever picking was in progress for a previous mode is
+        disarmed unconditionally first -- switching away from Window
+        mid-pick must not leave `_picking_window` stuck armed underneath
+        whatever the newly-picked mode does instead.
         """
+        self._picking_window = False
         self._capture_mode = mode
         self._bar.set_capture_mode(mode)
+
+        if mode == "Window":  # design.tokens.CAPTURE_MODES[1][0]
+            self._enter_window_mode()
+        elif mode == "Full screen":  # design.tokens.CAPTURE_MODES[2][0]
+            self._select_full_screen()
+
+    # -- Window / Full screen capture modes (SNX-48) -------------------------
+    # docs/design/overlay-redesign.md's "Capture modes" section is the
+    # authority: "Window -- hover highlights the window under the cursor
+    # (snap the selection to its frame); click accepts it. Then annotation
+    # proceeds identically" and "Full screen -- selection = the whole
+    # display." Both mirror `Overlay`'s own WINDOW/FULL_SCREEN handling
+    # above, but hand their result to this window's own `set_selection`
+    # instead of emitting `confirmed` into a separate editor -- the whole
+    # point of this ticket is that the result stays open for re-framing
+    # and in-place annotation exactly like a dragged selection.
+
+    def _enter_window_mode(self) -> None:
+        """Arm Window-mode picking, or -- per the ticket's acceptance
+        criterion -- tell the user and fall back to Region if this
+        platform has no `GeometryProvider` that can answer at all.
+
+        A silent no-op here (the trap `UnsupportedGeometryProvider`'s own
+        docstring warns "isn't load-bearing for the mode-3 fallback
+        itself" against) would leave the chip reading "Window" for a mode
+        that can never produce anything -- indistinguishable from a bug.
+        Instead this toasts an explanation and reverts `_capture_mode`,
+        the chip label, and the popover's own selected row back to
+        Region, mirroring `CaptureModePopover.set_mode`'s own "seeding
+        the popover from elsewhere" use case.
+        """
+        if not self._geometry_provider.is_available():
+            self._show_toast("window", "Window capture isn't available on this session")
+            fallback = design.tokens.CAPTURE_MODES[0][0]  # "Region"
+            self._capture_mode = fallback
+            self._bar.set_capture_mode(fallback)
+            self._popover.set_mode(fallback)
+            return
+        self._picking_window = True
+        # Whatever was selected before (if anything) is not a Window-mode
+        # preview and must not linger on screen while the user hasn't
+        # hovered a window yet -- mirrors `Overlay`'s own hover branch,
+        # which likewise clears on a miss rather than leaving a stale rect.
+        self.set_selection(None)
+
+    def _confirm_window_pick(self, pos: QPointF) -> None:
+        """Snap `_selection` to the window under `pos` (this widget's own
+        window-local coordinates) and disarm picking. Only ever reached
+        from `mousePressEvent` while `_picking_window` is armed.
+
+        A miss leaves `_picking_window` armed and `_selection` as the
+        last hover left it (already `None`, per `mouseMoveEvent`'s own
+        miss handling below) -- the user can simply move and click again,
+        rather than one mis-click ending the mode for good.
+        """
+        rect = self._geometry_provider.window_at(self._to_absolute(pos))
+        if rect is None:
+            return
+        self._picking_window = False
+        self.set_selection(self._to_local_rect(rect).toRect())
+
+    def _select_full_screen(self) -> None:
+        """Set `_selection` to the whole display the cursor is on, per
+        the spec's "Full screen -- selection = the whole display" and
+        this ticket's cursor-aware acceptance criterion. Snaps
+        immediately -- no drag, no click needed past picking the row.
+
+        Falls back to this window's own centre when the cursor has never
+        moved over the frozen desktop yet (`_cursor_pos` is still
+        `None`) -- a real overlay is always shown full-screen under the
+        pointer, so this only matters for a caller (a test, or the very
+        first popover interaction) that never issued a prior move.
+        """
+        cursor = (
+            self._cursor_pos
+            if self._cursor_pos is not None
+            else QPointF(self.width() / 2, self.height() / 2)
+        )
+        rect = self._monitor_at(self._to_absolute(cursor))
+        self.set_selection(self._to_local_rect(rect).toRect())
+
+    def _monitor_at(self, absolute_point: QPointF) -> QRectF:
+        """The `_monitor_geometries` entry containing `absolute_point`
+        (absolute logical virtual-desktop coordinates), or the frame's
+        own full span if none does -- a point can land outside every
+        known monitor only when `_monitor_geometries` wasn't supplied
+        accurately, and the whole capture is the only sane rect left to
+        offer rather than raising.
+        """
+        for geometry in self._monitor_geometries:
+            if geometry.contains(absolute_point):
+                return geometry
+        return QRectF(self._frame.logical_origin, self._frame.logical_size)
+
+    def _to_absolute(self, local_point: QPointF) -> QPointF:
+        """This widget's own window-local logical point -> absolute
+        logical virtual-desktop point -- the space `GeometryProvider`/
+        `_monitor_geometries` both use, the same conversion `Overlay.
+        _to_absolute` performs for its own (differently-anchored) local
+        space.
+        """
+        return local_point + self._frame.logical_origin
+
+    def _to_local_rect(self, absolute_rect: QRectF) -> QRectF:
+        """Absolute logical virtual-desktop rect -> this widget's own
+        window-local logical rect -- the inverse of `_to_absolute`,
+        applied to a rect rather than a point for `_confirm_window_pick`/
+        `_select_full_screen`, whose `GeometryProvider`/
+        `_monitor_geometries` results both arrive in absolute coordinates.
+        """
+        return QRectF(absolute_rect.topLeft() - self._frame.logical_origin, absolute_rect.size())
 
     def _on_delay_changed(self, delay: str) -> None:
         self._delay = delay
@@ -3151,6 +3329,12 @@ class OverlayWindow(QWidget):
             # resize or an erase underneath the popover in the same press.
             self._popover.hide()
             return
+        if self._picking_window:
+            # A press while armed is always a pick, never a resize or a
+            # stroke -- returns unconditionally, the same "stop event
+            # propagation" rule the handle branch below already follows.
+            self._confirm_window_pick(event.position())
+            return
         handle = self._handle_at(event.position())
         if handle is None:
             if self._selection is not None and QRectF(self._selection).contains(
@@ -3302,6 +3486,24 @@ class OverlayWindow(QWidget):
             self._committing_text = False
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        # SNX-48: tracked on every move regardless of mode, so
+        # `_select_full_screen` always has a recent position to answer
+        # "which display is the cursor on" from -- see its own docstring
+        # for why this beats `QCursor.pos()`.
+        self._cursor_pos = event.position()
+
+        if self._picking_window:
+            # Live preview while armed: a hit sets `_selection` to that
+            # window's rect, a miss clears it -- mirrors `Overlay`'s own
+            # "a miss actively clears any previously-shown preview instead
+            # of leaving it stuck." None of the resize/stroke/cursor logic
+            # below applies while picking, so this returns unconditionally.
+            rect = self._geometry_provider.window_at(self._to_absolute(event.position()))
+            self.set_selection(self._to_local_rect(rect).toRect() if rect is not None else None)
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            super().mouseMoveEvent(event)
+            return
+
         if self._in_progress_shape is not None:
             self._extend_stroke(event.position())
         if self._active_handle is not None:
