@@ -1081,6 +1081,128 @@ class TestWindowPlacement:
         assert editor.toolbar.geometry().bottom() <= editor.canvas.geometry().top()
 
 
+class TestDimmedVeilAndBorder:
+    # SNX-28: canvas used to be pixel-identical to the live desktop beneath
+    # it -- same pixels, no frame, no border, no shadow -- so a user could
+    # not tell where the snip ended and the live desktop began, and drew
+    # strokes believing they were off the snip when they were on it.
+    # Overlay already solves the same problem during selection by dimming
+    # everywhere outside the selected rect; these pin the same treatment
+    # here, plus a border, without either leaking into a copy or save.
+
+    DESKTOP_FILL = qRgb(220, 220, 220)
+    SNIP_FILL = qRgb(10, 20, 30)
+
+    def _make_editor(self) -> Editor:
+        # The desktop is much bigger than the snip and offset from its
+        # origin, so a sampled "outside the snip" point can't accidentally
+        # land on the snip by coincidence.
+        desktop_frame = make_frame(
+            image_size=(400, 300), fill_color=self.DESKTOP_FILL, logical_origin=QPointF(0, 0)
+        )
+        snip_frame = make_frame(
+            image_size=(100, 60), fill_color=self.SNIP_FILL, logical_origin=QPointF(150, 120)
+        )
+        return Editor(snip_frame, desktop_frame)
+
+    def test_area_outside_the_snip_is_visibly_dimmed(self):
+        editor = self._make_editor()
+        rendered = editor.grab().toImage()
+
+        point = editor._desktop_local_rect.topLeft() + QPointF(5, 5)
+        assert not editor._snip_local_rect.contains(point)  # genuinely outside the snip
+        sampled = rendered.pixelColor(round(point.x()), round(point.y()))
+
+        raw = QColor(self.DESKTOP_FILL)
+        assert sampled != raw  # not the raw, undimmed desktop pixel
+        # A veil darkens rather than recolours: every channel is at or
+        # below the raw fill's own.
+        assert sampled.red() <= raw.red()
+        assert sampled.green() <= raw.green()
+        assert sampled.blue() <= raw.blue()
+
+    def test_snip_pixels_are_undimmed_and_exact(self):
+        editor = self._make_editor()
+        rendered = editor.grab().toImage()
+
+        image_point = QPointF(50, 30)
+        widget_point = editor.canvas.image_to_widget(image_point) + QPointF(editor.canvas.pos())
+        sampled = rendered.pixelColor(round(widget_point.x()), round(widget_point.y()))
+
+        assert sampled == QColor(self.SNIP_FILL)
+
+    def test_a_border_marks_the_snips_edge(self):
+        editor = self._make_editor()
+        rendered = editor.grab().toImage()
+
+        snip_rect = editor._snip_local_rect
+        # Just outside the snip's left edge -- outside canvas (so nothing
+        # painted on top of it), one pixel clear of the boundary line.
+        border_point = QPoint(round(snip_rect.left()) - 1, round(snip_rect.center().y()))
+        sampled = rendered.pixelColor(border_point)
+
+        assert sampled == editor.BORDER_COLOR
+
+    def test_toolbar_remains_legible_against_the_dimmed_backdrop(self):
+        editor = self._make_editor()
+        rendered = editor.grab().toImage()
+
+        dimmed_point = editor._desktop_local_rect.topLeft() + QPointF(5, 5)
+        dimmed_pixel = rendered.pixelColor(round(dimmed_point.x()), round(dimmed_point.y()))
+
+        toolbar_center = editor.toolbar.geometry().center()
+        toolbar_pixel = rendered.pixelColor(toolbar_center)
+
+        # The toolbar is an ordinary opaque child widget painted on top of
+        # the veil, not a transparent one the dimmed backdrop shows through
+        # -- proven here by it not sharing the dimmed area's own colour.
+        assert toolbar_pixel != dimmed_pixel
+
+    def test_dimming_and_border_are_absent_from_the_saved_image(self, monkeypatch):
+        editor = self._make_editor()
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "save_image", lambda image: calls.append(image)
+        )
+
+        editor.save_action.trigger()
+
+        assert len(calls) == 1
+        saved = calls[0]
+        # Exactly the snip's own size, not the (much larger) desktop this
+        # window now spans -- a save/copy that picked up any dimmed margin
+        # or border would be bigger than the raw capture.
+        assert saved.size() == editor.canvas.image.size()
+        assert saved.pixelColor(0, 0) == QColor(self.SNIP_FILL)
+        assert saved.pixelColor(saved.width() - 1, saved.height() - 1) == QColor(self.SNIP_FILL)
+
+    def test_dimming_and_border_are_absent_from_the_copied_image(self, monkeypatch):
+        editor = self._make_editor()
+        calls = []
+        monkeypatch.setattr(
+            editor_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+
+        editor.copy_action.trigger()
+
+        assert len(calls) == 1
+        copied = calls[0]
+        assert copied.size() == editor.canvas.image.size()
+        assert copied.pixelColor(0, 0) == QColor(self.SNIP_FILL)
+
+    def test_no_desktop_frame_given_dims_nothing(self):
+        # The many existing single-argument Editor(frame) callers (this
+        # file's other test classes among them) get exactly SNX-21's
+        # tightly-sized window back, with no desktop area to dim -- passing
+        # no `desktop_frame` must not be a behaviour change for them.
+        frame = make_frame(image_size=(100, 60), fill_color=self.SNIP_FILL)
+        editor = Editor(frame)
+
+        assert editor._desktop_local_rect == editor._snip_local_rect
+        assert editor.size().width() == 100
+        assert editor.size().height() == 60 + editor.toolbar.sizeHint().height()
+
+
 class TestEscapeClosesWithoutSaving:
     def test_escape_closes_the_editor_without_saving(self, monkeypatch):
         frame = make_frame(image_size=(100, 60))
