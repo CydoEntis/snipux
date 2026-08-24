@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 import snipux.app as app_module
-from snipux.capture import Frame, X11WindowGeometryProvider
+from snipux.capture import BackendRegistry, CaptureBackend, Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
 from snipux.design import font_families
 from snipux.design import tokens
@@ -23,6 +23,7 @@ from snipux.shapes import Arrow, Blur, Highlighter, Pen, Pixelate, Rectangle, St
 from snipux.overlay import (
     BlurTray,
     CaptureModePopover,
+    DelayCountdown,
     FloatingBar,
     GeometryProvider,
     Handle,
@@ -3683,6 +3684,204 @@ class TestCaptureModeFreeformIntegration:
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=target)
 
         assert overlay._selection_path is None
+
+
+class _FakeCaptureBackend(CaptureBackend):
+    """Unlike a `Mock`, this returns a real, distinguishable `Frame` --
+    for proving a delayed re-capture's frame came from *this* backend
+    rather than merely that `capture()` was called at all. Mirrors
+    `test_app.py`'s own `FakeCaptureBackend`.
+    """
+
+    def __init__(self, frame: Frame):
+        self._frame = frame
+
+    def name(self) -> str:
+        return "fake"
+
+    def is_available(self) -> bool:
+        return True
+
+    def capture(self) -> Frame:
+        return self._frame
+
+
+class _FailingCaptureBackend(CaptureBackend):
+    def name(self) -> str:
+        return "failing"
+
+    def is_available(self) -> bool:
+        return True
+
+    def capture(self) -> Frame:
+        raise RuntimeError("capture failed")
+
+
+class TestCaptureModeDelayIntegration:
+    """SNX-50 AC: picking a mode in the popover while `_delay` isn't `Off`
+    hides `OverlayWindow` before any wait begins, shows a countdown while
+    it's gone, re-grabs through `_registry` -- the same `BackendRegistry`
+    the first frame came through, per CLAUDE.md's one architectural rule
+    applying to this grab exactly as it does to the first -- and re-opens
+    over the fresh frame with the tool/colour/stroke the user had chosen.
+    A delay of `Off` (the default `tokens.DELAYS[0]`) does none of that.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    REGION_LABEL = tokens.CAPTURE_MODES[0][0]
+    FREEFORM_LABEL = tokens.CAPTURE_MODES[3][0]
+
+    def _overlay(self, registry=None, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame, registry=registry)
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _open_popover_and_set_delay(self, overlay, delay_clicks=1):
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        for _ in range(delay_clicks):
+            QTest.mouseClick(overlay._popover._delay_row, Qt.MouseButton.LeftButton)
+
+    def _confirm_mode(self, overlay, label):
+        QTest.mouseClick(overlay._popover._rows[label], Qt.MouseButton.LeftButton)
+
+    def test_confirming_a_mode_with_a_delay_hides_the_overlay_before_the_wait_begins(self):
+        overlay = self._overlay()
+        self._open_popover_and_set_delay(overlay)  # DELAYS[1] == "3s"
+        assert overlay._delay == tokens.DELAYS[1]
+
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        assert not overlay.isVisible()
+        # The wait itself hasn't elapsed at all yet -- this isn't "hidden
+        # eventually," it's hidden synchronously, before the first tick.
+        assert overlay._delay_remaining == 3
+
+    def test_a_countdown_is_visible_while_the_overlay_is_hidden(self):
+        overlay = self._overlay()
+        self._open_popover_and_set_delay(overlay)
+
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        assert not overlay.isVisible()
+        assert overlay._countdown.isVisible()
+        assert overlay._countdown._label.text() == "3"
+
+    def test_countdown_ticks_down_once_per_second_elapsed(self):
+        overlay = self._overlay()
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        overlay._delay_timer.timeout.emit()
+        assert overlay._countdown._label.text() == "2"
+        overlay._delay_timer.timeout.emit()
+        assert overlay._countdown._label.text() == "1"
+
+    def test_after_the_wait_a_fresh_frame_is_captured_through_the_registry(self):
+        original_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        regrabbed_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FakeCaptureBackend(regrabbed_frame)])
+        overlay = OverlayWindow(original_frame, registry=registry)
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        # Identity, not just equal content: this must be the frame the
+        # fake backend handed back through `_registry.capture()`, never
+        # the original `frame` the constructor was given.
+        assert overlay._frame is regrabbed_frame
+        assert overlay._frame is not original_frame
+
+    def test_the_overlay_reopens_once_the_countdown_reaches_zero(self):
+        regrabbed_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FakeCaptureBackend(regrabbed_frame)])
+        overlay = self._overlay(registry=registry)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay.isVisible()
+        assert not overlay._countdown.isVisible()
+        # The stale selection described the *old* content; it's cleared
+        # rather than carried over onto the new frame's pixels.
+        assert overlay._selection is None
+
+    def test_reopened_overlay_keeps_the_tool_colour_and_stroke_the_user_chose(self):
+        regrabbed_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FakeCaptureBackend(regrabbed_frame)])
+        overlay = self._overlay(registry=registry)
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        _name, target_hex = tokens.INK_SWATCHES[3]
+        QTest.mouseClick(overlay._tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
+        overlay._tray._slider.setValue(21)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay._bar.active_tool == "pen"
+        assert overlay._ink_colour == target_hex
+        assert overlay._stroke_width == 21
+
+    def test_delayed_freeform_pick_still_arms_lasso_tracing_on_the_new_frame(self):
+        # The picked mode isn't forgotten across the wait -- Window/Full
+        # screen/Freeform still do their own thing against the fresh
+        # frame, same as they would with no delay at all.
+        regrabbed_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FakeCaptureBackend(regrabbed_frame)])
+        overlay = self._overlay(registry=registry)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.FREEFORM_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay._picking_freeform
+
+    def test_failed_regrab_restores_the_old_frame_and_toasts_instead_of_crashing(self):
+        original_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FailingCaptureBackend()])
+        overlay = OverlayWindow(original_frame, registry=registry)
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay.isVisible()
+        assert overlay._frame is original_frame
+        assert overlay._toast.isVisible()
+        assert "capture failed" in overlay._toast._text_label.text()
+
+    def test_delay_off_captures_immediately_with_no_hide_or_countdown(self):
+        overlay = self._overlay()
+        assert overlay._delay == tokens.DELAYS[0]  # "Off", the default
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        self._confirm_mode(overlay, self.FREEFORM_LABEL)
+
+        assert overlay.isVisible()
+        assert overlay._countdown is None
+        # Freeform's own immediate arming (SNX-49) still ran -- proving this
+        # went through the ordinary dispatch path, not a delay that just
+        # happened to finish instantly.
+        assert overlay._picking_freeform
 
 
 class TestFreeformExport:
