@@ -53,6 +53,15 @@ class Color:
     TOAST_BG        = "#e9ecf2"   # at 96% alpha
     TOAST_FG        = "#12141a"
 
+    # Step badge ring (annotation tool, not chrome)
+    STEP_RING       = "#ffffff"   # opaque -- unlike the chrome whites above
+
+    # Text label chip (annotation tool, not chrome)
+    TEXT_LABEL_BG        = "#0c0e12"   # at 72% alpha
+    TEXT_LABEL_BG_ALPHA  = 0.72
+    TEXT_LABEL_RING      = "#ffffff"   # at 16% alpha
+    TEXT_LABEL_RING_ALPHA = 0.16
+
 # Ink swatches, in bar order. First entry is the default.
 INK_SWATCHES = [
     ("Acid",    "#e3ff4f"),
@@ -143,6 +152,11 @@ class Metric:
 
     # Annotation defaults
     STEP_D           = 26
+    STEP_RING_W      = 2
+    TEXT_LABEL_RADIUS = 5
+    TEXT_LABEL_PAD_V = 3
+    TEXT_LABEL_PAD_H = 8
+    TEXT_LABEL_RING_W = 1
     HIGHLIGHT_MULT   = 3.5        # stroke width multiplier for the highlighter
     HIGHLIGHT_ALPHA  = 0.34
     STROKE_MIN       = 1

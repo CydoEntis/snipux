@@ -50,6 +50,7 @@ from snipux.shapes import (
     StepMarker,
     Text,
     apply_crop,
+    next_step_number,
     render,
 )
 
@@ -171,12 +172,20 @@ def _eraser_hit_path(shape: Shape) -> QPainterPath:
         return path
 
     if isinstance(shape, StepMarker):
-        radius = max(StepMarker.MIN_RADIUS, shape.stroke_width * StepMarker.RADIUS_FACTOR)
-        path.addEllipse(shape.point, radius, radius)
+        # Fixed at StepMarker.RADIUS (tokens.py's STEP_D / 2), not
+        # stroke-derived -- mirrors StepMarker.draw()'s own sizing
+        # (shapes.py), which the badge no longer scales off stroke_width for
+        # either.
+        path.addEllipse(shape.point, StepMarker.RADIUS, StepMarker.RADIUS)
         return path
 
     if isinstance(shape, Text):
-        half_extent = _ERASER_HIT_TOLERANCE + shape.stroke_width
+        # A generous fixed box around the click point rather than measuring
+        # the actual chip (shapes.py's Text.draw() now paints a background
+        # chip below-right of `point`, not a bare glyph at it) -- good
+        # enough to pick the label out without duplicating font-metrics
+        # sizing logic here, same spirit as this method's own docstring.
+        half_extent = _ERASER_HIT_TOLERANCE + shape.stroke_width * Text.TEXT_FONT_SIZE_FACTOR
         path.addRect(
             QRectF(
                 shape.point.x() - half_extent,
@@ -308,11 +317,11 @@ class Canvas(QWidget):
         _new_in_progress_shape as a throwaway instance and nothing holds a
         mutating reference to it once mouseReleaseEvent appends it;
         apply_crop() (shapes.py) always builds a brand-new Frame rather than
-        writing through the old one. The one apparent exception is
-        StepMarker.number, which render() reassigns on every paint call —
-        but nothing ever trusts a stored .number, so a stale value from a
-        different history entry's last paint is always overwritten before
-        it's next drawn. See PLAN.md for the fuller argument.
+        writing through the old one. StepMarker.number is assigned once,
+        by next_step_number(), at the point below that appends the marker,
+        and render() never touches it again — so a stored StepMarker is as
+        immutable as every other committed shape. See PLAN.md for the
+        fuller argument.
         """
         del self._history[self._history_index + 1 :]  # drop stale redo entries
         self._history.append(_HistoryState(self._frame, tuple(self._shapes)))
@@ -459,6 +468,14 @@ class Canvas(QWidget):
     def _ensure_text_edit(self) -> QLineEdit:
         if self._text_edit is None:
             self._text_edit = QLineEdit(self)
+            # Grey hint text, not a seeded value: per
+            # docs/design/overlay-redesign.md's "Drawing", a label is
+            # "seeded with Label" and focused so typing can start straight
+            # away, but committing with nothing typed must still discard it
+            # (see _commit_text's `if self._text_edit.text():` guard) --
+            # only a placeholder, rather than real pre-filled text, makes
+            # both of those true at once.
+            self._text_edit.setPlaceholderText("Label")
             self._text_edit.hide()
             self._text_edit.editingFinished.connect(self._commit_text)
         return self._text_edit
@@ -527,6 +544,11 @@ class Canvas(QWidget):
                     colour=QColor(self._colour),
                     stroke_width=self._stroke_width,
                     point=image_point,
+                    # Assigned once, here, at creation -- never renumbered
+                    # afterwards. See next_step_number()'s own docstring
+                    # (shapes.py) for why that's what keeps a surviving
+                    # badge's number stable after an earlier one is deleted.
+                    number=next_step_number(self._shapes),
                 )
             )
             self._push_history()

@@ -29,7 +29,16 @@ from dataclasses import dataclass, field, replace
 from typing import ClassVar
 
 from PyQt6.QtCore import Qt, QPointF, QRect, QRectF, QSizeF
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPolygonF
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPolygonF,
+)
 
 from snipux import design
 from snipux.capture import Frame
@@ -411,75 +420,189 @@ class Crop(Shape):
         painter.drawRect(_rect_from_corners(self.start, self.end))
 
 
-MIN_PIXEL_SIZE = 8
-FONT_SIZE_FACTOR = 4.0
-
-
-def _font_for_stroke_width(stroke_width: float) -> QFont:
-    """A `QFont` sized from `stroke_width`, floored so the default stroke
-    width (3) never rounds down to an illegible or 0px font. Shared by
-    `Text` and `StepMarker` — both derive glyph size from stroke width the
-    same way, per PLAN.md ("any monotonic mapping with a floor is fine").
-    """
-    font = QFont()
-    font.setPixelSize(max(MIN_PIXEL_SIZE, round(stroke_width * FONT_SIZE_FACTOR)))
-    return font
-
-
 @dataclass
 class Text(Shape):
-    """A string drawn at a single image-pixel point, in the shape's colour.
+    """An editable label — a click, not a drag — drawn as a background chip
+    with the string in the shape's own ink colour on top, per
+    docs/design/overlay-redesign.md's "Drawing".
 
-    Font size is derived from stroke_width rather than stored separately —
+    `point` is the chip's top-left corner (image-pixel space) — the same
+    corner the live `QLineEdit` in `Canvas.mousePressEvent` (editor.py) is
+    moved to on click — not a text baseline the way this class drew it
+    before the redesign.
+
+    Font size is derived from stroke_width (`max(TEXT_FONT_SIZE_MIN,
+    stroke_width * TEXT_FONT_SIZE_FACTOR)`) rather than stored separately —
     there is no independent "text size" concept for this ticket, only the
     stroke-width control the toolbar already exposes for every other tool.
+    Chrome (background, corner radius, padding, ring) comes from tokens.py
+    and is fixed regardless of stroke_width — only the type inside it
+    scales.
     """
+
+    # Design gives this formula directly ("Font size max(12, stroke x 3)"),
+    # not a tokens.py entry — same precedent as Arrow's HEAD_LENGTH_MIN/
+    # FACTOR above, which also come from prose in the design doc rather
+    # than the token dump.
+    TEXT_FONT_SIZE_MIN = 12
+    TEXT_FONT_SIZE_FACTOR = 3.0
 
     text: str = ""
     point: QPointF = field(default_factory=QPointF)
 
     def _font(self) -> QFont:
-        return _font_for_stroke_width(self.stroke_width)
+        font = QFont()
+        font.setPixelSize(
+            max(
+                self.TEXT_FONT_SIZE_MIN,
+                round(self.stroke_width * self.TEXT_FONT_SIZE_FACTOR),
+            )
+        )
+        return font
 
     def draw(self, painter: QPainter) -> None:
         if not self.text:
             return  # an empty string is a no-op, not an error: see PLAN.md
+
+        font = self._font()
+        metrics = QFontMetricsF(font)
+        pad_h = design.tokens.Metric.TEXT_LABEL_PAD_H
+        pad_v = design.tokens.Metric.TEXT_LABEL_PAD_V
+        chip = QRectF(
+            self.point.x(),
+            self.point.y(),
+            metrics.horizontalAdvance(self.text) + pad_h * 2,
+            metrics.height() + pad_v * 2,
+        )
+        radius = design.tokens.Metric.TEXT_LABEL_RADIUS
+
+        # Background then ring, each its own drawRoundedRect call at the
+        # same geometry -- a stroked pen straddles the fill's edge rather
+        # than sitting flush outside it, which is what gives the ring its
+        # visible width instead of being swallowed by the fill.
+        background = QColor(design.tokens.Color.TEXT_LABEL_BG)
+        background.setAlphaF(design.tokens.Color.TEXT_LABEL_BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(background)
+        painter.drawRoundedRect(chip, radius, radius)
+
+        ring_colour = QColor(design.tokens.Color.TEXT_LABEL_RING)
+        ring_colour.setAlphaF(design.tokens.Color.TEXT_LABEL_RING_ALPHA)
+        ring_pen = QPen(ring_colour)
+        ring_pen.setWidthF(design.tokens.Metric.TEXT_LABEL_RING_W)
+        painter.setPen(ring_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(chip, radius, radius)
+
         painter.setPen(QPen(self.colour))
-        painter.setFont(self._font())
-        painter.drawText(self.point, self.text)
+        painter.setFont(font)
+        painter.drawText(
+            QPointF(chip.left() + pad_h, chip.top() + pad_v + metrics.ascent()),
+            self.text,
+        )
 
 
 @dataclass
 class StepMarker(Shape):
-    """A filled numbered badge. `number` is assigned by render(), not at
-    construction — see render()'s docstring for why.
+    """A filled numbered badge — a click, not a drag.
+
+    `number` is assigned once, by `next_step_number()` below, at the point
+    the badge is created — never recomputed afterwards. `render()` just
+    paints whatever `number` this instance already carries. That is what
+    makes "delete step 2, and 1/3 keep their own numbers"
+    (docs/design/overlay-redesign.md's "Drawing": "does not renumber after
+    a delete, matches the prototype") fall out for free: there is no
+    list-order recomputation left anywhere to disagree with a badge's
+    original number.
+
+    Diameter, ring and numeral style all come from tokens.py — `STEP_D`,
+    `STEP_RING`/`STEP_RING_W` and `Font.STEP_BADGE`/`Color.ACCENT_FG` — and
+    are fixed regardless of `stroke_width`, unlike every drawing tool. The
+    design gives the badge a constant size on purpose: a step counter that
+    grew every time the user picked a thicker pen would be a strange
+    reading experience.
     """
 
-    RADIUS_FACTOR = 4.0
-    MIN_RADIUS = 10
-    BADGE_TEXT_COLOUR = QColor(Qt.GlobalColor.white)
+    # Qt has no per-shape blur outside a QGraphicsScene (see tokens.Shadow's
+    # own docstring, which is about widget-level chrome, not ink flattened
+    # onto a QImage) -- so the "soft drop shadow" the design calls for is
+    # faked with a handful of concentric, decreasingly-opaque circles rather
+    # than pulling in a blur dependency for one shape.
+    _SHADOW_LAYERS = 4
+    _SHADOW_OFFSET_Y = 3.0
+    _SHADOW_SPREAD = 5.0
+    _SHADOW_MAX_ALPHA = 0.30
+
+    BADGE_TEXT_COLOUR = QColor(design.tokens.Color.ACCENT_FG)
+    # Exposed as a class attribute (not just inlined in _rect()) so callers
+    # outside this module -- editor.py's eraser hit-testing chief among
+    # them -- can hit-test the exact same circle draw() paints without
+    # re-deriving it from tokens.py themselves.
+    RADIUS = design.tokens.Metric.STEP_D / 2
 
     point: QPointF = field(default_factory=QPointF)
     number: int = 0
 
     def _font(self) -> QFont:
-        return _font_for_stroke_width(self.stroke_width)
+        size, weight = design.tokens.Font.STEP_BADGE
+        font = QFont()
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight(weight))
+        return font
+
+    def _rect(self) -> QRectF:
+        radius = self.RADIUS
+        return QRectF(
+            self.point.x() - radius, self.point.y() - radius, radius * 2, radius * 2
+        )
+
+    def _draw_shadow(self, painter: QPainter, rect: QRectF) -> None:
+        painter.setPen(Qt.PenStyle.NoPen)
+        for layer in range(self._SHADOW_LAYERS, 0, -1):
+            # Outermost layer first (biggest, faintest) so each inner layer
+            # paints over it rather than the reverse -- otherwise a fainter
+            # outer ellipse would be visible on top of a stronger inner one.
+            grown = self._SHADOW_SPREAD * layer / self._SHADOW_LAYERS
+            alpha = self._SHADOW_MAX_ALPHA * (1 - (layer - 1) / self._SHADOW_LAYERS)
+            shadow_colour = QColor(0, 0, 0)
+            shadow_colour.setAlphaF(alpha)
+            painter.setBrush(shadow_colour)
+            painter.drawEllipse(
+                rect.adjusted(-grown, -grown, grown, grown).translated(
+                    0, self._SHADOW_OFFSET_Y
+                )
+            )
 
     def draw(self, painter: QPainter) -> None:
-        radius = max(self.MIN_RADIUS, self.stroke_width * self.RADIUS_FACTOR)
-        rect = QRectF(
-            self.point.x() - radius,
-            self.point.y() - radius,
-            radius * 2,
-            radius * 2,
-        )
+        rect = self._rect()
+
+        self._draw_shadow(painter, rect)
+
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self.colour)
+        painter.drawEllipse(rect)
+
+        ring_pen = QPen(QColor(design.tokens.Color.STEP_RING))
+        ring_pen.setWidthF(design.tokens.Metric.STEP_RING_W)
+        painter.setPen(ring_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(rect)
 
         painter.setPen(QPen(self.BADGE_TEXT_COLOUR))
         painter.setFont(self._font())
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(self.number))
+
+
+def next_step_number(shapes: list[Shape]) -> int:
+    """The number a newly placed `StepMarker` should get: one higher than
+    how many `StepMarker`s are already in `shapes`.
+
+    Callers (`Canvas.mousePressEvent` in editor.py) assign this once, at
+    creation, and never touch `.number` again — see `StepMarker`'s own
+    docstring for why that is what keeps surviving badges' numbers stable
+    after an earlier one is deleted.
+    """
+    return sum(1 for shape in shapes if isinstance(shape, StepMarker)) + 1
 
 
 def render(base_image: QImage, shapes: list[Shape]) -> QImage:
@@ -491,13 +614,12 @@ def render(base_image: QImage, shapes: list[Shape]) -> QImage:
     closed (`.end()`) before the copy is returned, per CLAUDE.md's rule
     against reading a pixmap while a QPainter is still open on it.
 
-    StepMarker numbers aren't stored durably; they're recomputed from list
-    order on every call. That makes "renumber after an earlier one is
-    removed" fall out for free — there is no stale "my number is N" to find
-    and fix up, just whatever list order render() sees this time. This does
-    mutate the StepMarker instances passed in, which is fine: the "never
-    painted destructively" rule above is about not writing onto a live
-    canvas pixmap, not about shape objects being immutable.
+    StepMarker numbers are assigned once, by `next_step_number()`, at the
+    point a badge is created — this function never touches `.number`, just
+    paints whatever each StepMarker already carries. That is what makes
+    "delete step 2, and 1/3 keep their own numbers" hold: there is no
+    list-order recomputation here that could disagree with a badge's
+    original number. See StepMarker's own docstring.
 
     An `ObscuringShape` (`Blur`/`Pixelate`) samples already-rendered pixels
     rather than painting onto a painter, so it gets different treatment
@@ -512,11 +634,7 @@ def render(base_image: QImage, shapes: list[Shape]) -> QImage:
     result = QImage(base_image)
     painter = QPainter(result)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    step_counter = 0
     for shape in shapes:
-        if isinstance(shape, StepMarker):
-            step_counter += 1
-            shape.number = step_counter
         if isinstance(shape, ObscuringShape):
             painter.end()
             result = shape.apply(result)
