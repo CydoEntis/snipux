@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QApplication, QWidget
 from snipux.capture import Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
 from snipux.design import tokens
+from snipux.shapes import Rectangle
 from snipux.overlay import (
     GeometryProvider,
     Handle,
@@ -674,12 +675,116 @@ class TestOverlayWindow:
 
     def test_scrim_is_painted_by_the_widget_itself_not_a_child_widget(self):
         # Per the spec: a translucent child stacked over the whole window
-        # would sit above the (future) ink layer and eat its mouse events,
-        # so nothing here should be a child widget covering the window.
+        # would sit above the ink layer and eat its mouse events, so
+        # nothing here should be a child widget covering the window.
         frame = make_frame()
         overlay = OverlayWindow(frame)
 
         assert overlay.findChildren(QWidget) == []
+
+
+class TestOverlayWindowMarks:
+    """SNX-34: marks live in this window's own coordinates and are clipped
+    to the selection at paint time -- never made selection-relative, and
+    never deleted just because a re-frame currently hides them.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _mark(self, start, end, colour=None):
+        return Rectangle(
+            colour=colour or self.RED, stroke_width=6, start=QPointF(*start), end=QPointF(*end)
+        )
+
+    def test_add_mark_stores_it_unmodified_in_window_coordinates(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        mark = self._mark((30, 30), (50, 50))
+
+        overlay.add_mark(mark)
+
+        # Same object, same points -- add_mark never rewrites them relative
+        # to the selection, which is the whole point of this coordinate
+        # convention per the class/module docstrings.
+        assert overlay.marks == (mark,)
+        assert overlay.marks[0].start == QPointF(30, 30)
+
+    def test_marks_is_a_snapshot_not_a_view_of_the_live_list(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+
+        snapshot = overlay.marks
+        overlay.add_mark(self._mark((20, 20), (30, 30)))
+
+        assert len(snapshot) == 1  # unaffected by the add_mark() call after it
+        assert len(overlay.marks) == 2
+
+    def test_paints_a_mark_inside_the_selection(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(self._mark((20, 20), (80, 80)))
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(20, 50) == self.RED  # left border
+
+    def test_mark_outside_the_selection_is_clipped_not_painted(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(100, 100, 50, 50))
+        overlay.add_mark(self._mark((10, 10), (30, 30)))
+
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(20, 20) != self.RED
+
+    def test_mark_reappears_once_the_selection_grows_back_over_it(self):
+        # The mark was never deleted by the clip above -- it was only
+        # hidden -- so widening the selection back over it must show it
+        # again with no further calls into the ink layer.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(100, 100, 50, 50))
+        overlay.add_mark(self._mark((10, 10), (30, 30)))
+        overlay.grab()  # one paint pass while hidden by the narrow selection
+
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        rendered = overlay.grab().toImage()
+
+        assert rendered.pixelColor(10, 20) == self.RED  # left border
+
+    def test_reframing_leaves_a_mark_over_the_same_content(self):
+        # A mark drawn inside the selection must stay over the same pixels
+        # after the selection is re-framed -- the whole reason ink moved out
+        # of selection-relative coordinates. Growing the selection (same
+        # top-left) must not shift where the mark's own left border paints.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 100, 100))
+        overlay.add_mark(self._mark((20, 20), (40, 40)))
+
+        before = overlay.grab().toImage().pixelColor(20, 30)
+
+        overlay.set_selection(QRect(0, 0, 150, 150))
+        after = overlay.grab().toImage().pixelColor(20, 30)
+
+        assert before == self.RED
+        assert after == self.RED
+
+    def test_rendered_image_positions_marks_by_the_selection_origin(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 100, 100))
+        overlay.add_mark(self._mark((60, 60), (90, 90)))
+
+        result = overlay.rendered_image()
+
+        assert result.width() == 100
+        assert result.height() == 100
+        # (60, 60) in window coordinates is (10, 10) inside the crop.
+        assert result.pixelColor(10, 20) == self.RED
 
 
 class TestSelectionStroke:

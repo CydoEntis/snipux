@@ -18,11 +18,12 @@ from abc import ABC, abstractmethod
 from enum import Enum
 
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSizeF, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen, QTransform
+from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPainterPath, QPen, QTransform
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
 from snipux import design
 from snipux.capture import Frame
+from snipux.shapes import ObscuringShape, Shape, StepMarker, render_selection
 
 
 class SelectionMode(Enum):
@@ -550,11 +551,16 @@ class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
 
-    SNX-31 built the background frame and dim scrim; SNX-32 (this ticket)
-    adds the selection frame -- the marching-ants stroke, corner brackets
-    and edge handles. Ink, the floating bar and the rest of the chrome are
-    still later tickets in the same arc; this class exists so they have a
-    shell to attach to.
+    SNX-31 built the background frame and dim scrim; SNX-32 added the
+    selection frame -- the marching-ants stroke, corner brackets and edge
+    handles; SNX-33 made that selection re-frameable. SNX-34 (this ticket)
+    adds the ink layer itself: `_marks` are stored and painted in this
+    widget's own window coordinates, clipped to the selection, per
+    docs/design/overlay-redesign.md's "Ink lives in screen coordinates" --
+    so re-framing moves the clip over marks that never move themselves. The
+    floating bar and the drawing-tool mouse handling that would actually
+    call `add_mark` from a live drag are still later tickets in the same
+    arc; this class exists so they have a shell to attach to.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -629,6 +635,12 @@ class OverlayWindow(QWidget):
         self._active_handle: Handle | None = None
         self._resize_anchor: QRect | None = None
 
+        # The ink layer (SNX-34): overlay-window coordinates, the same
+        # space `_selection` lives in above -- never translated relative to
+        # the selection, per the class docstring. Paint order is the list
+        # order, mirroring shapes.py's render().
+        self._marks: list[Shape] = []
+
         self._dash_offset = 0.0
         self._ants_timer = QTimer(self)
         self._ants_timer.setInterval(self._ANTS_TIMER_INTERVAL_MS)
@@ -638,6 +650,35 @@ class OverlayWindow(QWidget):
         """Set the current selection (window coordinates) and repaint."""
         self._selection = rect
         self.update()
+
+    def add_mark(self, shape: Shape) -> None:
+        """Append `shape` to the ink layer and repaint.
+
+        `shape`'s points must already be in this widget's own window
+        coordinates -- the same space mouse events and `_selection` use --
+        never translated to be relative to the selection. That is what lets
+        a re-frame leave every mark exactly where it was drawn: only the
+        selection's clip rect moves, per the class docstring.
+        """
+        self._marks.append(shape)
+        self.update()
+
+    @property
+    def marks(self) -> tuple[Shape, ...]:
+        """Ink layer contents, in paint order. A copy, not the live list,
+        mirroring `Canvas.shapes` in editor.py."""
+        return tuple(self._marks)
+
+    def rendered_image(self) -> QImage:
+        """The final exported image: `_marks` flattened onto the current
+        selection's crop of the frozen frame, translated from window
+        coordinates to the cropped image's own origin exactly once -- see
+        `shapes.render_selection` and docs/design/overlay-redesign.md's
+        "Ink lives in screen coordinates".
+        """
+        if self._selection is None:
+            raise ValueError("no selection to export")
+        return render_selection(self._frame, self._marks, QRectF(self._selection))
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -770,6 +811,10 @@ class OverlayWindow(QWidget):
         painter.drawImage(QRectF(self.rect()), self._frame.image)
         self._paint_scrim(painter)
         if self._selection is not None:
+            # Ink before the stroke/handles, matching the design's layer
+            # order within the selection: "undimmed pixmap, ink layer,
+            # frame stroke, handles, chips".
+            self._paint_marks(painter)
             # Smooths the dashed diagonal-adjacent stroke and the rounded
             # bracket/handle corners; the scrim above is a flat axis-aligned
             # fill and doesn't need it.
@@ -778,6 +823,40 @@ class OverlayWindow(QWidget):
             self._paint_corner_brackets(painter)
             self._paint_edge_handles(painter)
         painter.end()
+
+    def _paint_marks(self, painter: QPainter) -> None:
+        """The ink layer: `_marks`, clipped to the selection.
+
+        Marks are stored in this widget's own window coordinates -- the
+        same space `_selection` lives in (see the class docstring) -- so a
+        re-frame never touches a mark's own points, only where the clip
+        rect sits over them. A mark whose points fall outside the clip
+        simply isn't painted this frame; it stays in `_marks` and reappears
+        the instant the selection grows back over it. Per
+        docs/design/overlay-redesign.md's "Ink lives in screen
+        coordinates": "in Qt just `painter.setClipRect(sel)` before drawing
+        marks."
+        """
+        if not self._marks:
+            return
+        painter.save()
+        painter.setClipRect(QRectF(self._selection))
+        step_counter = 0
+        for shape in self._marks:
+            if isinstance(shape, StepMarker):
+                step_counter += 1
+                shape.number = step_counter
+            if isinstance(shape, ObscuringShape):
+                # Obscuring marks sample the frozen frame's own pixels
+                # rather than paint onto a painter (see
+                # shapes.ObscuringShape.draw()) -- compositing those live
+                # against a resizable selection is a later ticket's
+                # concern, same as the tool that would create them.
+                # render_selection() (export) still handles them correctly,
+                # via render()'s own special-casing.
+                continue
+            shape.draw(painter)
+        painter.restore()
 
     def _paint_scrim(self, painter: QPainter) -> None:
         """Layer 2: dim everything outside the selection.
