@@ -493,6 +493,16 @@ _CORNER_HANDLES = (
 )
 _EDGE_HANDLES = (Handle.TOP, Handle.BOTTOM, Handle.LEFT, Handle.RIGHT)
 
+# Which edge(s) a handle drags. A corner handle frees the two perpendicular
+# edges that meet at it; an edge handle frees just its own. Every other edge
+# is the anchor for that handle's drag and is never written during it -- this
+# is what "the opposite edge/corner stays anchored" (the re-framing
+# acceptance criteria) reduces to in _resize_selection below.
+_LEFT_HANDLES = (Handle.TOP_LEFT, Handle.BOTTOM_LEFT, Handle.LEFT)
+_RIGHT_HANDLES = (Handle.TOP_RIGHT, Handle.BOTTOM_RIGHT, Handle.RIGHT)
+_TOP_HANDLES = (Handle.TOP_LEFT, Handle.TOP_RIGHT, Handle.TOP)
+_BOTTOM_HANDLES = (Handle.BOTTOM_LEFT, Handle.BOTTOM_RIGHT, Handle.BOTTOM)
+
 # nwse-resize / nesw-resize on corners, ns-resize / ew-resize on edges, per
 # the README's "Selection frame" section.
 _HANDLE_CURSORS = {
@@ -577,6 +587,13 @@ class OverlayWindow(QWidget):
     _EDGE_HANDLE_RADIUS = 5
     _CORNER_HIT_OFFSET = 7
 
+    # Re-framing clamps (SNX-33), likewise given by the README's "Re-framing"
+    # prose as plain pixel values rather than a tokens.Metric entry -- the
+    # minimum size itself *is* tokenized (SEL_MIN_W/H below), since that one
+    # the ticket explicitly overrides from the spec's default.
+    _TOP_CLEARANCE = 52  # keeps the selection clear of the top hint HUD
+    _BAR_ROOM = 130  # keeps room below the selection for the floating bar
+
     def __init__(self, frame: Frame, parent=None):
         super().__init__(parent)
         self._frame = frame
@@ -602,6 +619,15 @@ class OverlayWindow(QWidget):
         # Window coordinates, per the class docstring -- None until
         # set_selection is called.
         self._selection: QRect | None = None
+
+        # Handle currently being dragged (SNX-33 re-framing), and the
+        # selection as it stood the moment that drag started. The anchor is
+        # read-only for the drag's whole duration -- every edge it doesn't
+        # own comes from here, never from the live selection -- which is
+        # what keeps the opposite edge/corner from creeping as the mouse
+        # moves. None outside a handle drag.
+        self._active_handle: Handle | None = None
+        self._resize_anchor: QRect | None = None
 
         self._dash_offset = 0.0
         self._ants_timer = QTimer(self)
@@ -639,13 +665,101 @@ class OverlayWindow(QWidget):
         self._dash_offset = (self._dash_offset + step) % cycle
         self.update()
 
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
         handle = self._handle_at(event.position())
+        if handle is None:
+            # Ink lives on a later ticket. Nothing to do here yet, but a
+            # miss falling through to this no-op -- rather than the handle
+            # branch below -- is exactly what "stop event propagation at
+            # the handle" needs from this method: a future stroke-start
+            # only ever gets reached when a handle wasn't hit.
+            return
+        # Per the spec: a handle press is a resize, never a stroke, and
+        # returning here means nothing past this point runs for it.
+        self._active_handle = handle
+        self._resize_anchor = QRect(self._selection)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._active_handle is not None:
+            self._resize_selection(event.position())
+            handle = self._active_handle
+        else:
+            handle = self._handle_at(event.position())
         if handle is not None:
             self.setCursor(_HANDLE_CURSORS[handle])
         else:
             self.unsetCursor()
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._active_handle = None
+        self._resize_anchor = None
+
+    def _resize_selection(self, pos: QPointF) -> None:
+        """Apply one drag-move of `self._active_handle` to the selection.
+
+        `self._resize_anchor` is the selection as it stood when the drag
+        started; edges this handle doesn't free are read from it and never
+        written below, which is what keeps the opposite edge/corner
+        anchored for the whole drag. Clamps are applied in the order the
+        README's "Re-framing" section gives -- minimum size, `x >= 0`,
+        `y >= 52`, stays inside the window, room for the floating bar --
+        with the one deliberate deviation the ticket calls for: the
+        minimum is `tokens.Metric.SEL_MIN_W/H` (16x16, not the spec's
+        200x140), and the floating-bar clamp gives way to that minimum
+        instead of the other way round.
+        """
+        handle = self._active_handle
+        anchor = QRectF(self._resize_anchor)
+        metric = design.tokens.Metric
+
+        left, top = anchor.left(), anchor.top()
+        right, bottom = anchor.right(), anchor.bottom()
+        free_left = handle in _LEFT_HANDLES
+        free_right = handle in _RIGHT_HANDLES
+        free_top = handle in _TOP_HANDLES
+        free_bottom = handle in _BOTTOM_HANDLES
+
+        # 1. Minimum size: the dragged edge stops MIN away from the anchor
+        # edge it's measured against, which never itself moves.
+        if free_left:
+            left = min(pos.x(), right - metric.SEL_MIN_W)
+        if free_right:
+            right = max(pos.x(), left + metric.SEL_MIN_W)
+        if free_top:
+            top = min(pos.y(), bottom - metric.SEL_MIN_H)
+        if free_bottom:
+            bottom = max(pos.y(), top + metric.SEL_MIN_H)
+
+        # 2. x >= 0
+        if free_left:
+            left = max(left, 0.0)
+        # 3. y >= 52, clear of the top hint HUD.
+        if free_top:
+            top = max(top, self._TOP_CLEARANCE)
+        # 4. Stays inside the window.
+        if free_right:
+            right = min(right, self.width())
+        if free_bottom:
+            bottom = min(bottom, self.height())
+        # 5. Room for the floating bar below. height <= window_height - y -
+        # BAR_ROOM is, since height is always bottom - top, the same bound
+        # as bottom <= window_height - BAR_ROOM regardless of y -- but only
+        # tightens the bottom edge when doing so wouldn't undercut the
+        # minimum height step 1 already established (the ticket's
+        # deliberate reordering of the spec's clamps).
+        if free_bottom:
+            bar_limit = self.height() - self._BAR_ROOM
+            if bar_limit >= top + metric.SEL_MIN_H:
+                bottom = min(bottom, bar_limit)
+
+        self.set_selection(
+            QRect(round(left), round(top), round(right - left), round(bottom - top))
+        )
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)

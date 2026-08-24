@@ -883,3 +883,142 @@ class TestHandleCursors:
 
         QTest.mouseMove(overlay, QPoint(100, 90))  # deep inside the selection
         assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+
+class TestReframing:
+    """SNX-33: dragging a handle re-frames the live selection, per
+    docs/design/overlay-redesign.md's "Re-framing" section -- with the
+    ticket's one deliberate deviation from that spec: the minimum size is
+    16x16 (`tokens.Metric.SEL_MIN_W/H`), not the spec's 200x140.
+    """
+
+    def _overlay(self, size=(400, 400)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        return overlay
+
+    def _drag(self, overlay, press_pos, move_pos):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press_pos)
+        QTest.mouseMove(overlay, move_pos)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=move_pos)
+
+    def test_dragging_an_edge_handle_moves_only_that_edge(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._edge_handle_rect(Handle.TOP).center().toPoint()
+
+        self._drag(overlay, press, QPoint(175, 60))
+
+        sel = overlay._selection
+        # Top moved to the drag target; every other edge -- in particular
+        # the opposite (bottom) edge -- is exactly where it started.
+        assert (sel.x(), sel.y()) == (100, 60)
+        assert (sel.width(), sel.height()) == (150, 140)
+
+    def test_dragging_a_corner_moves_both_its_edges_opposite_corner_fixed(self):
+        # A generous window, so the floating-bar clamp (covered on its own
+        # below) doesn't also kick in here and muddy what this test is
+        # checking.
+        overlay = self._overlay(size=(500, 500))
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.BOTTOM_RIGHT).center().toPoint()
+
+        self._drag(overlay, press, QPoint(320, 280))
+
+        sel = overlay._selection
+        # Top-left corner (the anchor for a bottom-right drag) is untouched.
+        assert (sel.x(), sel.y()) == (100, 100)
+        assert (sel.width(), sel.height()) == (220, 180)
+
+    def test_drag_cannot_shrink_below_the_minimum_size_in_tokens(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+
+        # Dragged well past the left (anchor) edge, which would invert the
+        # rect if nothing stopped it.
+        self._drag(overlay, press, QPoint(50, 150))
+
+        sel = overlay._selection
+        assert sel.x() == 100  # anchor edge never moved
+        assert sel.width() == tokens.Metric.SEL_MIN_W == 16
+
+    def test_drag_keeps_the_selection_clear_of_the_left_and_top_edges(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        self._drag(overlay, press, QPoint(-50, -50))
+
+        sel = overlay._selection
+        assert sel.x() == 0  # x >= 0
+        assert sel.y() == 52  # y >= 52, clear of the hint HUD
+
+    def test_drag_keeps_the_selection_inside_the_window(self):
+        overlay = self._overlay(size=(400, 400))
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.BOTTOM_RIGHT).center().toPoint()
+
+        self._drag(overlay, press, QPoint(900, 900))
+
+        sel = overlay._selection
+        assert sel.x() + sel.width() <= overlay.width()
+        assert sel.y() + sel.height() <= overlay.height()
+        # The floating-bar clamp is the tighter of the two bottom bounds
+        # here, so it's the one actually reached.
+        assert sel.y() + sel.height() == overlay.height() - overlay._BAR_ROOM
+
+    def test_bar_room_clamp_gives_way_to_the_minimum_rather_than_the_reverse(self):
+        # A selection already pinned near the bottom of a short window: the
+        # floating-bar clamp alone would force the selection below the
+        # minimum height. Per the ticket, the minimum wins -- the bar-room
+        # clamp is skipped rather than shrinking the selection further.
+        overlay = self._overlay(size=(200, 200))
+        overlay.set_selection(QRect(20, 170, 100, 16))
+        bar_limit = overlay.height() - overlay._BAR_ROOM
+        assert bar_limit < 170 + tokens.Metric.SEL_MIN_H  # the clamp would conflict
+        press = overlay._edge_handle_rect(Handle.BOTTOM).center().toPoint()
+
+        self._drag(overlay, press, QPoint(70, 195))
+
+        sel = overlay._selection
+        assert sel.y() == 170  # anchor (top) never moved
+        assert sel.height() == 25  # 195 - 170, not clamped down to bar_limit
+        assert sel.y() + sel.height() > bar_limit
+
+
+class TestHandlePressDoesNotStartAStroke:
+    """SNX-33: "Handle presses must not start a stroke -- stop event
+    propagation at the handle." OverlayWindow has no drawing/ink of its own
+    yet (a later ticket), so this asserts the boundary the spec calls for:
+    a handle hit is consumed as a resize and nothing else, while a miss
+    leaves no resize state behind for a future stroke-start to trip over.
+    """
+
+    def _overlay(self):
+        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 100, 80))
+        return overlay
+
+    def test_press_on_a_handle_starts_a_resize_not_a_stroke(self):
+        overlay = self._overlay()
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+
+        assert overlay._active_handle is Handle.TOP_LEFT
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=press)
+        assert overlay._active_handle is None
+
+    def test_press_away_from_every_handle_starts_no_resize(self):
+        overlay = self._overlay()
+        original = QRect(overlay._selection)
+
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 90)
+        )  # deep inside the selection, nowhere near a handle
+
+        assert overlay._active_handle is None
+        assert overlay._selection == original
