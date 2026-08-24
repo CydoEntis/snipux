@@ -39,6 +39,7 @@ from PyQt6.QtGui import (
     QPainterPathStroker,
     QPen,
     QPolygonF,
+    QTransform,
 )
 
 from snipux import design
@@ -849,7 +850,51 @@ def _transformed(shape: Shape, map_point) -> Shape:
     raise TypeError(f"don't know how to translate a {type(shape).__name__}")
 
 
-def render_selection(frame: Frame, shapes: list[Shape], selection: QRectF) -> QImage:
+def _mask_outside_path(image: QImage, path: QPainterPath) -> QImage:
+    """Return a copy of `image` (already in `image`'s own pixel coordinates,
+    same space as `path`) with every pixel outside `path` forced fully
+    transparent and everything inside it left untouched.
+
+    Per docs/design/overlay-redesign.md's "Capture modes" entry for
+    Freeform: "export crops to its bounding box with the outside
+    transparent." Built from a same-size mask image — opaque wherever
+    `path` fills, fully transparent everywhere else — composited via
+    `QPainter.CompositionMode.CompositionMode_DestinationIn`, rather than a
+    per-pixel loop: `drawImage()` rasterizes across the mask's *entire*
+    rect regardless of any given pixel's own alpha, so the composition
+    zeroes out-of-path destination pixels uniformly across the whole image
+    — a `fillPath` directly on `image` would only touch the pixels the path
+    itself covers and leave everything outside it exactly as `image`
+    already had it.
+
+    Converts to an alpha-carrying format first: the frame this is normally
+    called on is `Format_RGB32` (see capture.py), which has no alpha
+    channel to punch a hole in at all.
+    """
+    result = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+
+    mask = QImage(result.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    mask.fill(Qt.GlobalColor.transparent)
+    mask_painter = QPainter(mask)
+    mask_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    mask_painter.setPen(Qt.PenStyle.NoPen)
+    mask_painter.setBrush(Qt.GlobalColor.black)  # opaque; only its alpha is read below
+    mask_painter.drawPath(path)
+    mask_painter.end()  # closed before `mask` is read via drawImage, per CLAUDE.md
+
+    painter = QPainter(result)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+    painter.drawImage(0, 0, mask)
+    painter.end()  # closed before this function returns `result`, per CLAUDE.md
+    return result
+
+
+def render_selection(
+    frame: Frame,
+    shapes: list[Shape],
+    selection: QRectF,
+    selection_path: QPainterPath | None = None,
+) -> QImage:
     """Export the annotated selection as a flattened `QImage`.
 
     `selection` and every point in `shapes` are in overlay-window
@@ -870,6 +915,15 @@ def render_selection(frame: Frame, shapes: list[Shape], selection: QRectF) -> QI
     bounds is simply never painted there, which is what keeps this
     consistent with the live ink layer's clip-rect behaviour without this
     function needing its own explicit clip.
+
+    `selection_path`, given only for a confirmed Freeform lasso (same
+    coordinate space as `selection`/`shapes`), is put through the exact same
+    origin-shift-then-scale mapping as every mark above — via `QTransform`
+    rather than `_transformed`'s per-shape dispatch, since a `QPainterPath`
+    isn't a `Shape` — and then handed to `_mask_outside_path` to force
+    everything outside the lasso's own outline transparent. `None` (every
+    other capture mode) skips this entirely, leaving the cropped rectangle
+    opaque exactly as before this parameter existed.
     """
     cropped = frame.crop(selection.translated(frame.logical_origin))
 
@@ -884,4 +938,12 @@ def render_selection(frame: Frame, shapes: list[Shape], selection: QRectF) -> QI
         return QPointF(local.x() * scale_x, local.y() * scale_y)
 
     mapped_shapes = [_transformed(shape, to_cropped_pixel) for shape in shapes]
-    return render(cropped.image, mapped_shapes)
+    image = render(cropped.image, mapped_shapes)
+
+    if selection_path is not None:
+        path_transform = QTransform(
+            scale_x, 0, 0, scale_y, -origin.x() * scale_x, -origin.y() * scale_y
+        )
+        image = _mask_outside_path(image, path_transform.map(selection_path))
+
+    return image
