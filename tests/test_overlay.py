@@ -6,6 +6,7 @@ from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QWidget
 
+import snipux.app as app_module
 from snipux.capture import Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
 from snipux.design import tokens
@@ -787,6 +788,108 @@ class TestOverlayWindowMarks:
         assert result.pixelColor(10, 20) == self.RED
 
 
+class TestEraserTool:
+    """SNX-38: per-shape hit-testing itself lives on `Shape` (shapes.py --
+    see TestShapeHitTest in test_shapes.py); this class covers how
+    OverlayWindow wires that into a click, and the eraser's own
+    single-slot undo.
+    """
+
+    RED = QColor(255, 0, 0)
+    BLUE = QColor(0, 0, 255)
+
+    def _mark(self, start, end, colour=None):
+        return Rectangle(
+            colour=colour or self.RED, stroke_width=6, start=QPointF(*start), end=QPointF(*end)
+        )
+
+    def _overlay(self, selection=QRect(0, 0, 200, 200)):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_click_with_eraser_active_removes_the_topmost_hit_mark(self):
+        overlay = self._overlay()
+        bottom = self._mark((20, 20), (80, 80), colour=self.RED)
+        top = self._mark((20, 20), (80, 80), colour=self.BLUE)  # coincides with `bottom`
+        overlay.add_mark(bottom)
+        overlay.add_mark(top)
+        overlay.set_eraser_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 50))
+
+        # Both marks sit under the click; only the last-drawn (topmost) one
+        # is gone -- draw order, per the ticket, not add order coincidence.
+        assert overlay.marks == (bottom,)
+
+    def test_click_with_eraser_inactive_removes_nothing(self):
+        overlay = self._overlay()
+        mark = self._mark((20, 20), (80, 80))
+        overlay.add_mark(mark)
+        # set_eraser_active is never called: default state is inactive.
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 50))
+
+        assert overlay.marks == (mark,)
+
+    def test_click_on_empty_space_with_eraser_active_removes_nothing_and_does_not_raise(self):
+        overlay = self._overlay()
+        mark = self._mark((20, 20), (80, 80))
+        overlay.add_mark(mark)
+        overlay.set_eraser_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(150, 150))
+
+        assert overlay.marks == (mark,)
+
+    def test_erase_at_returns_none_on_a_miss(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((20, 20), (80, 80)))
+
+        assert overlay.erase_at(QPointF(150, 150)) is None
+        assert len(overlay.marks) == 1
+
+    def test_undo_erase_restores_the_mark_at_its_original_position(self):
+        overlay = self._overlay()
+        first = self._mark((10, 10), (30, 30))
+        second = self._mark((40, 40), (60, 60))
+        third = self._mark((70, 70), (90, 90))
+        overlay.add_mark(first)
+        overlay.add_mark(second)
+        overlay.add_mark(third)
+
+        erased = overlay.erase_at(QPointF(40, 50))  # `second`'s left border
+
+        assert erased is second
+        assert overlay.marks == (first, third)
+
+        overlay.undo_erase()
+
+        # Restored between `first` and `third`, its original draw-order
+        # position -- not appended to the end.
+        assert overlay.marks == (first, second, third)
+
+    def test_undo_erase_is_a_no_op_with_nothing_to_restore(self):
+        overlay = self._overlay()
+        mark = self._mark((20, 20), (80, 80))
+        overlay.add_mark(mark)
+
+        overlay.undo_erase()  # nothing has been erased yet
+
+        assert overlay.marks == (mark,)
+
+    def test_cursor_is_a_pointer_over_the_selection_while_the_eraser_is_active(self):
+        overlay = self._overlay(selection=QRect(50, 50, 100, 80))
+        overlay.set_eraser_active(True)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        QTest.mouseMove(overlay, QPoint(100, 90))  # deep inside the selection
+
+        assert overlay.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
 class TestSelectionStroke:
     """SNX-32: the two coincident 1px strokes -- solid white under an
     animated dashed dark one -- that make the marching ants.
@@ -987,6 +1090,19 @@ class TestHandleCursors:
         assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor
 
         QTest.mouseMove(overlay, QPoint(100, 90))  # deep inside the selection
+        # Not a handle, but still inside the selection: crosshair, per
+        # docs/design/overlay-redesign.md's "Selection frame" cursor table
+        # ("crosshair for every tool except the eraser") -- SNX-38 gives
+        # this class its first non-handle cursor state.
+        assert overlay.cursor().shape() == Qt.CursorShape.CrossCursor
+
+    def test_cursor_resets_to_arrow_outside_the_selection(self):
+        overlay = self._shown_overlay()
+
+        QTest.mouseMove(overlay, QPoint(50, 50))
+        assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor
+
+        QTest.mouseMove(overlay, QPoint(10, 10))  # outside the selection entirely
         assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
 
 
@@ -1127,3 +1243,196 @@ class TestHandlePressDoesNotStartAStroke:
 
         assert overlay._active_handle is None
         assert overlay._selection == original
+
+
+class TestUndoRedoClear:
+    """SNX-39: the general undo/redo/clear stack over `_marks`, distinct
+    from the eraser's own single-slot `undo_erase` (TestEraserTool above).
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _mark(self, start, end, colour=None):
+        return Rectangle(
+            colour=colour or self.RED, stroke_width=4, start=QPointF(*start), end=QPointF(*end)
+        )
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        return overlay
+
+    def test_undo_moves_the_newest_mark_to_the_redo_stack(self):
+        overlay = self._overlay()
+        first = self._mark((0, 0), (10, 10))
+        second = self._mark((20, 20), (30, 30))
+        overlay.add_mark(first)
+        overlay.add_mark(second)
+
+        overlay.undo()
+
+        assert overlay.marks == (first,)
+        assert overlay.can_redo
+
+    def test_redo_returns_the_mark_to_the_same_position_in_draw_order(self):
+        overlay = self._overlay()
+        first = self._mark((0, 0), (10, 10))
+        second = self._mark((20, 20), (30, 30))
+        third = self._mark((40, 40), (50, 50))
+        overlay.add_mark(first)
+        overlay.add_mark(second)
+        overlay.add_mark(third)
+
+        overlay.undo()  # third -> redo
+        overlay.undo()  # second -> redo
+        overlay.redo()  # second back, between first and (undone) third
+
+        assert overlay.marks == (first, second)
+
+    def test_undo_with_nothing_to_undo_is_a_no_op(self):
+        overlay = self._overlay()
+
+        overlay.undo()
+
+        assert overlay.marks == ()
+        assert not overlay.can_undo
+
+    def test_redo_with_nothing_to_redo_is_a_no_op(self):
+        overlay = self._overlay()
+        mark = self._mark((0, 0), (10, 10))
+        overlay.add_mark(mark)
+
+        overlay.redo()  # nothing has been undone
+
+        assert overlay.marks == (mark,)
+
+    def test_committing_a_new_mark_empties_the_redo_stack(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+        overlay.undo()
+        assert overlay.can_redo  # one mark sitting on the redo stack
+
+        overlay.add_mark(self._mark((50, 50), (60, 60)))
+
+        assert not overlay.can_redo
+        marks_before = overlay.marks
+        overlay.redo()  # no-op: the stack this would have popped is gone
+        assert overlay.marks == marks_before
+
+    def test_clear_empties_both_stacks_in_one_step(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+        overlay.add_mark(self._mark((20, 20), (30, 30)))
+        overlay.undo()  # one mark now sits on the redo stack too
+
+        overlay.clear()
+
+        assert overlay.marks == ()
+        assert not overlay.can_undo
+        assert not overlay.can_redo
+
+    def test_clear_is_not_itself_undoable(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+
+        overlay.clear()
+        overlay.undo()  # must not resurrect the cleared mark
+
+        assert overlay.marks == ()
+
+
+class TestCopy:
+    """SNX-39: fixes the real bug where the clipboard was written once, on
+    open, before any annotation existed -- `copy()` must flatten whatever
+    is in `_marks` at the moment it's called.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        return overlay
+
+    def test_copy_puts_the_flattened_selection_on_the_clipboard(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(80, 80))
+        )
+
+        overlay.copy()
+
+        assert len(calls) == 1
+        copied = calls[0]
+        assert isinstance(copied, QImage)
+        assert copied.pixelColor(20, 50) == self.RED  # the rectangle's left border
+
+    def test_copy_after_annotation_reflects_marks_made_since_open(self, monkeypatch):
+        # The bug this ticket fixes: a real editor.py Editor copied the raw
+        # capture exactly once in __init__. Calling copy() a second time,
+        # after a mark lands, must pick that mark up -- not still show
+        # whatever was on the clipboard when the overlay first opened.
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+
+        overlay.copy()  # nothing drawn yet
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(80, 80))
+        )
+        overlay.copy()  # after annotation
+
+        assert len(calls) == 2
+        before, after = calls
+        assert before.pixelColor(20, 50) != self.RED
+        assert after.pixelColor(20, 50) == self.RED
+
+
+class TestSave:
+    """SNX-39: save writes a timestamped PNG under ~/Pictures/snipux,
+    creating that directory when it doesn't exist -- unlike
+    `app.save_image`'s own bare-~/Pictures default, which editor.py's
+    still-existing Editor keeps using.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, size=(50, 50)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, *size))
+        return overlay
+
+    def test_save_writes_under_pictures_snipux_and_creates_the_directory(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        target_dir = tmp_path / "Pictures" / "snipux"
+        assert not target_dir.exists()
+        overlay = self._overlay()
+
+        path = overlay.save()
+
+        assert path.parent == target_dir
+        assert path.exists()
+        assert QImage(str(path)).size() == overlay.rendered_image().size()
+
+    def test_save_flattens_the_marks_present_at_call_time(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=6, start=QPointF(5, 5), end=QPointF(40, 40))
+        )
+
+        path = overlay.save()
+
+        saved = QImage(str(path))
+        assert saved.pixelColor(5, 20) == self.RED  # the rectangle's left border
