@@ -1,3 +1,9 @@
 PyQt6>=6.5
 jeepney>=0.8
 pytest>=8.0
+# Build-only, dev/test dependencies: test_design.py builds an actual wheel
+# to prove design assets are packaged, not just importable from the source
+# tree (SNX-56). setuptools mirrors [build-system] in pyproject.toml; wheel
+# is what setuptools' build_wheel hook needs to write the .whl itself.
+setuptools>=68
+wheel>=0.40

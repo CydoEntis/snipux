@@ -1,9 +1,16 @@
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
 import pytest
 from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtWidgets import QApplication
 
 import snipux.design as design
 from snipux.design import tokens
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SOLID_ICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">'
@@ -183,3 +190,63 @@ class TestFontFamilies:
 
         assert result.ui
         assert result.mono
+
+
+@pytest.fixture(scope="module")
+def wheel_contents(tmp_path_factory):
+    # Builds the real wheel and inspects it, rather than importing from the
+    # source tree -- that's exactly the gap SNX-56 fell through: an explicit
+    # `packages = ["snipux"]` list silently dropped the design subpackage,
+    # and design/icons/*.svg were never declared as data, so the install had
+    # no icons in it even once the subpackage was found. Only a check
+    # against the built artifact catches that class of bug.
+    out_dir = tmp_path_factory.mktemp("snipux-wheel")
+    # --no-deps: this only needs to prove what's *packaged*, not resolve
+    # PyQt6/jeepney again. --no-build-isolation: build with the
+    # setuptools/wheel already installed from requirements.txt instead of
+    # pip fetching a second, isolated copy of them.
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            str(_REPO_ROOT),
+            "--no-deps",
+            "--no-build-isolation",
+            "--wheel-dir",
+            str(out_dir),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel_paths = list(out_dir.glob("snipux-*.whl"))
+    assert len(wheel_paths) == 1, f"expected exactly one built wheel, got {wheel_paths}"
+
+    with zipfile.ZipFile(wheel_paths[0]) as archive:
+        return set(archive.namelist())
+
+
+class TestPackagedDistribution:
+    def test_design_subpackage_is_importable_from_the_wheel(self, wheel_contents):
+        assert "snipux/design/__init__.py" in wheel_contents
+        assert "snipux/design/tokens.py" in wheel_contents
+
+    def test_every_vendored_icon_is_in_the_wheel(self, wheel_contents):
+        icon_dir = _REPO_ROOT / "snipux" / "design" / "icons"
+        expected = {f"snipux/design/icons/{path.name}" for path in icon_dir.glob("*.svg")}
+        assert expected, "expected at least one vendored icon in the source tree"
+        assert expected <= wheel_contents
+
+    def test_font_files_are_in_the_wheel_when_present(self, wheel_contents):
+        # design/fonts/ is empty in this handoff (see design/__init__.py),
+        # so this is written to hold once IBM Plex is vendored rather than
+        # to assert anything about today's checkout.
+        font_dir = _REPO_ROOT / "snipux" / "design" / "fonts"
+        expected = (
+            {f"snipux/design/fonts/{path.name}" for path in font_dir.glob("*") if path.is_file()}
+            if font_dir.is_dir()
+            else set()
+        )
+        assert expected <= wheel_contents
