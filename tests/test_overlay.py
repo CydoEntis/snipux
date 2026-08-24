@@ -19,7 +19,7 @@ from snipux.capture import Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
 from snipux.design import font_families
 from snipux.design import tokens
-from snipux.shapes import Rectangle
+from snipux.shapes import Arrow, Blur, Highlighter, Pen, Pixelate, Rectangle, StepMarker, Text
 from snipux.overlay import (
     BlurTray,
     CaptureModePopover,
@@ -922,6 +922,251 @@ class TestEraserTool:
         assert overlay.cursor().shape() == Qt.CursorShape.PointingHandCursor
 
 
+class TestDrawingTools:
+    """SNX-52: a press inside the selection starts a mark for whichever
+    tool `_bar.active_tool` names; move extends it; release either commits
+    it (via shapes.finalize_mark) or discards it if it never reached the
+    spec's minimum size. A committed mark takes its colour/stroke from
+    `_ink_colour`/`_stroke_width`, and -- for blur -- its shape class and
+    strength from `_blur_mode`/`_blur_strength`, per
+    docs/design/overlay-redesign.md's "Drawing".
+    """
+
+    def _overlay(self, selection=QRect(0, 0, 200, 200)):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_pen_press_move_release_commits_a_polyline(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(40, 40))
+        QTest.mouseMove(overlay, QPoint(60, 30))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(60, 30))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Pen)
+        assert mark.points == [QPointF(20, 20), QPointF(40, 40), QPointF(60, 30)]
+
+    def test_highlighter_press_move_release_commits_a_polyline(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("highlighter")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(50, 50))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert len(overlay.marks) == 1
+        assert isinstance(overlay.marks[0], Highlighter)
+
+    def test_pen_stroke_with_only_a_press_and_release_is_discarded(self):
+        # No mouseMoveEvent in between: the stroke never grows past its one
+        # anchor point, below finalize_mark's freehand minimum.
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+
+        assert overlay.marks == ()
+
+    def test_arrow_press_move_release_commits_from_press_to_release(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("arrow")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Arrow)
+        assert mark.start == QPointF(20, 20)
+        assert mark.end == QPointF(80, 60)
+
+    def test_rect_press_move_release_commits_from_press_to_release(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("rect")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Rectangle)
+        assert mark.start == QPointF(20, 20)
+        assert mark.end == QPointF(80, 60)
+
+    def test_in_progress_rect_is_visible_mid_drag(self):
+        # Same stroke width/colour TestOverlayWindowMarks's own painted-mark
+        # tests already rely on for a clean, fully-covered sample pixel.
+        overlay = self._overlay()
+        overlay._bar.select_tool("rect")
+        overlay._ink_colour = "#ff0000"
+        overlay._stroke_width = 6
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+
+        rendered = overlay.grab().toImage()
+        assert rendered.pixelColor(20, 40) == QColor("#ff0000")  # left edge of the live preview
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+    def test_blur_press_move_release_commits_a_blur_shape(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("blur")
+        overlay._blur_mode = "blur"
+        overlay._blur_strength = 12
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Blur)
+        assert not isinstance(mark, Pixelate)
+        assert mark.start == QPointF(20, 20)
+        assert mark.end == QPointF(80, 60)
+        assert mark.strength == 12
+
+    def test_pixelate_mode_commits_a_pixelate_shape(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("blur")
+        overlay._blur_mode = "pix"
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert isinstance(overlay.marks[0], Pixelate)
+
+    def test_tiny_blur_drag_is_discarded_on_release(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("blur")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(21, 21))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(21, 21))
+
+        assert overlay.marks == ()
+
+    def test_step_commits_on_a_click_alone_with_no_drag(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("step")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+        # Committed on the press itself -- never arms a drag to release.
+        assert overlay._in_progress_shape is None
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, StepMarker)
+        assert mark.point == QPointF(30, 30)
+        assert mark.number == 1
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+        assert len(overlay.marks) == 1  # release adds nothing further
+
+    def test_text_click_opens_the_label_editor_with_no_mark_yet(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+
+        assert overlay.marks == ()
+        assert overlay._text_edit is not None
+        assert not overlay._text_edit.isHidden()
+        assert overlay._text_edit.placeholderText() == "Label"
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+    def test_text_commits_once_typed_and_editing_finishes(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Text)
+        assert mark.text == "hello"
+        assert mark.point == QPointF(30, 30)
+        assert overlay._text_edit.isHidden()
+
+    def test_text_editing_finished_with_nothing_typed_commits_no_mark(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert overlay.marks == ()
+
+    def test_text_label_focus_also_suppresses_shortcuts(self):
+        # The other half of SNX-47's suppression AC (see
+        # TestKeyboardShortcutSuppression), now against the real text-tool
+        # editor this ticket wires up rather than a bare stand-in QLineEdit.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert overlay._bar.active_tool == "text"  # the "P" shortcut never fired
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+    def test_press_on_a_handle_resizes_and_commits_no_mark(self):
+        overlay = self._overlay(selection=QRect(0, 0, 100, 100))
+        overlay._bar.select_tool("pen")
+        handle_pos = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=handle_pos)
+        QTest.mouseMove(overlay, handle_pos + QPoint(30, 0))
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, pos=handle_pos + QPoint(30, 0)
+        )
+
+        assert overlay.marks == ()
+        assert overlay._selection.width() != 100  # the resize itself did happen
+
+    def test_committed_mark_takes_the_current_tray_colour_and_stroke(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+        overlay._ink_colour = "#123456"
+        overlay._stroke_width = 17
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(40, 40))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
+
+        mark = overlay.marks[0]
+        assert mark.colour == QColor("#123456")
+        assert mark.stroke_width == 17
+
+
 class TestSelectionStroke:
     """SNX-32: the two coincident 1px strokes -- solid white under an
     animated dashed dark one -- that make the marching ants.
@@ -1134,7 +1379,16 @@ class TestHandleCursors:
         QTest.mouseMove(overlay, QPoint(50, 50))
         assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor
 
-        QTest.mouseMove(overlay, QPoint(10, 10))  # outside the selection entirely
+        # Outside the selection *and* clear of every other chrome widget --
+        # (10, 10) used to qualify, but SNX-46's HintHUD now spans the
+        # window's full width for its own HUD_H=44px strip, so a move there
+        # lands on that child widget instead of reaching this one's own
+        # mouseMoveEvent at all (Qt delivers it to whichever widget is
+        # actually under the point), leaving this cursor stuck rather than
+        # unset. (280, 280) sits below the HUD, below the floating bar, and
+        # outside the selection, so it actually exercises this widget's own
+        # cursor-reset branch.
+        QTest.mouseMove(overlay, QPoint(280, 280))
         assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
 
 
@@ -3677,11 +3931,12 @@ class TestKeyboardShortcutSuppression:
         assert overlay._bar.active_tool is None
 
     def test_tool_letter_does_not_fire_while_a_text_label_is_focused(self):
-        # No text-label editor is wired into OverlayWindow yet (a later
-        # ticket, per the class docstring) -- shapes.Text's own docstring
-        # names QLineEdit as that widget, mirroring editor.py's
-        # Canvas._ensure_text_edit, so a bare QLineEdit stands in for it
-        # here.
+        # A bare QLineEdit stands in for the real text tool's own label
+        # editor (`overlay._text_edit`, SNX-52) -- this class only cares
+        # that *any* QLineEdit having focus suppresses shortcuts, not that
+        # it's specifically the one the text tool builds; see
+        # TestDrawingTools.test_text_label_focus_also_suppresses_shortcuts
+        # for that narrower case.
         overlay = self._overlay()
         label = QLineEdit(overlay)
         label.setFocus()

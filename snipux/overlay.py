@@ -45,7 +45,22 @@ from PyQt6.QtWidgets import (
 
 from snipux import design
 from snipux.capture import Frame
-from snipux.shapes import ObscuringShape, Shape, StepMarker, render_selection
+from snipux.shapes import (
+    Arrow,
+    Blur,
+    Crop,
+    Highlighter,
+    ObscuringShape,
+    Pen,
+    Pixelate,
+    Rectangle,
+    Shape,
+    StepMarker,
+    Text,
+    finalize_mark,
+    next_step_number,
+    render_selection,
+)
 
 
 class SelectionMode(Enum):
@@ -2284,6 +2299,19 @@ class Toast(QWidget):
         painter.end()
 
 
+# Tool name -> Shape subclass for a freehand (points-list) stroke, keyed
+# by the same string ids tokens.TOOLS/FloatingBar use -- mirrors editor.py's
+# _FREEHAND_SHAPE_CLASSES, just keyed by these strings instead of the old
+# Tool enum, since OverlayWindow (unlike Canvas) never had one.
+_FREEHAND_MARK_CLASSES = {"pen": Pen, "highlighter": Highlighter}
+
+# Tool name -> Shape subclass for a press-to-release two-point stroke.
+# 'blur' is deliberately absent: which of Blur/Pixelate it commits depends
+# on `_blur_mode`, decided in `OverlayWindow._start_stroke` at press time
+# rather than looked up here.
+_TWO_POINT_MARK_CLASSES = {"arrow": Arrow, "rect": Rectangle}
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -2343,7 +2371,20 @@ class OverlayWindow(QWidget):
     two-stage Esc (`_handle_escape`) the spec leaves for us to decide --
     finally wiring `discard()` up to a key, per that method's own
     docstring. All of it is suppressed while a slider or a text-editing
-    widget has focus (`_shortcuts_suppressed`).
+    widget has focus (`_shortcuts_suppressed`). SNX-52 (this ticket) is
+    what the "still a later ticket" note above `_on_tool_selected` used to
+    point at: `mousePressEvent` now dispatches a press that misses every
+    handle and lands inside the selection -- with the eraser disarmed --
+    to `_start_stroke`, which arms `_in_progress_shape` for
+    pen/highlighter/arrow/rect/blur (`mouseMoveEvent` extends it,
+    `mouseReleaseEvent` runs it through `shapes.finalize_mark` and either
+    commits or discards it), commits a `StepMarker` immediately for step,
+    and opens the lazily-built `_text_edit` for text (`_start_text_entry`/
+    `_commit_text`, mirroring editor.py's `Canvas._ensure_text_edit`). A
+    committed mark always takes its colour/stroke from `_ink_colour`/
+    `_stroke_width` and, for blur, its shape class and strength from
+    `_blur_mode`/`_blur_strength` -- the same tray-tracked state prior
+    tickets already left ready to be read.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -2458,6 +2499,29 @@ class OverlayWindow(QWidget):
         # erased yet, or once undo_erase() has already consumed it.
         self._erased_mark: tuple[int, Shape] | None = None
 
+        # Live drawing (SNX-52): the mark a left-press/drag/release is
+        # currently building, in this widget's own window coordinates --
+        # the same space `_marks` lives in, per the class docstring. None
+        # outside an active stroke; `mousePressEvent` never sets both this
+        # and `_active_handle` for the same press, so a resize and a
+        # stroke can never be in progress at once. See `_start_stroke`.
+        self._in_progress_shape: Shape | None = None
+
+        # The text tool (SNX-52): a lazily-built QLineEdit that mirrors
+        # editor.py's `Canvas._ensure_text_edit`/`_commit_text` -- a click
+        # opens it, seeded with a placeholder (never pre-filled text, so
+        # committing with nothing typed still discards it, per
+        # `_commit_text`'s own guard) and focused for immediate typing.
+        # `_pending_text_*` holds the press-time colour/stroke/point until
+        # `editingFinished` commits (or discards) them; `_committing_text`
+        # guards against `hide()`'s own re-entrant `editingFinished`, same
+        # as `Canvas._commit_text`'s own docstring explains.
+        self._text_edit: QLineEdit | None = None
+        self._pending_text_point: QPointF | None = None
+        self._pending_text_colour: QColor | None = None
+        self._pending_text_stroke_width: float | None = None
+        self._committing_text = False
+
         self._dash_offset = 0.0
         self._ants_timer = QTimer(self)
         self._ants_timer.setInterval(self._ANTS_TIMER_INTERVAL_MS)
@@ -2551,13 +2615,15 @@ class OverlayWindow(QWidget):
         self.update()
 
     def _on_tool_selected(self, tool: str) -> None:
-        """Wire the bar's tool buttons to the one piece of per-tool state
-        this class already tracks: the eraser's hit-testing arm/disarm (see
-        `set_eraser_active`). Switching the *live drawing* tool itself --
-        pen, arrow, and the rest actually starting a stroke on drag -- is
-        still a later ticket in the same arc, per the class docstring; this
-        only has to keep the eraser cursor and hit-testing in sync with
-        whichever tool button the bar shows as active.
+        """Wire the bar's tool buttons to the eraser's hit-testing
+        arm/disarm (see `set_eraser_active`) and the settings tray's
+        visibility. `mousePressEvent`/`_start_stroke` read `self._bar.
+        active_tool` directly at press time rather than this class keeping
+        a second copy of it -- `FloatingBar` is already the one place a
+        click and a shortcut key (`keyPressEvent`'s tool letters) both
+        funnel through (`FloatingBar.select_tool`'s own docstring), so
+        there is nothing for this method to track beyond the two things
+        below that don't already live on the bar.
         """
         self.set_eraser_active(tool == "eraser")
         self._sync_tray_visibility()
@@ -3087,27 +3153,157 @@ class OverlayWindow(QWidget):
             return
         handle = self._handle_at(event.position())
         if handle is None:
-            if (
-                self._eraser_active
-                and self._selection is not None
-                and QRectF(self._selection).contains(event.position())
+            if self._selection is not None and QRectF(self._selection).contains(
+                event.position()
             ):
-                # No drag, per the spec's "Drawing": "eraser -- no drag." A
-                # miss (nothing under the cursor) is already a safe no-op
-                # inside erase_at itself.
-                self.erase_at(event.position())
-            # Every other tool's stroke-start is still a later ticket.
-            # Falling through to this no-op -- rather than the handle
-            # branch below -- is exactly what "stop event propagation at
-            # the handle" needs from this method: a future stroke-start
-            # only ever gets reached when a handle wasn't hit.
+                if self._eraser_active:
+                    # No drag, per the spec's "Drawing": "eraser -- no
+                    # drag." A miss (nothing under the cursor) is already a
+                    # safe no-op inside erase_at itself.
+                    self.erase_at(event.position())
+                else:
+                    self._start_stroke(event.position())
+            # A press outside the selection (or with no selection at all)
+            # is a no-op for every tool. Falling through to this no-op --
+            # rather than the handle branch below -- is exactly what "stop
+            # event propagation at the handle" needs from this method: a
+            # stroke only ever starts when a handle wasn't hit.
             return
         # Per the spec: a handle press is a resize, never a stroke, and
         # returning here means nothing past this point runs for it.
         self._active_handle = handle
         self._resize_anchor = QRect(self._selection)
 
+    def _start_stroke(self, pos: QPointF) -> None:
+        """Begin a mark for whichever tool `self._bar.active_tool` names,
+        at `pos` (this widget's own window coordinates -- the same space
+        `_marks` lives in). Only ever reached from `mousePressEvent` for a
+        press that missed every resize handle, landed inside the
+        selection, and found the eraser disarmed.
+
+        docs/design/overlay-redesign.md's "Drawing" is the spec for what
+        each tool does here: pen/highlighter/arrow/rect/blur arm
+        `_in_progress_shape` for `_extend_stroke`/`mouseReleaseEvent` to
+        grow and commit; step commits a `StepMarker` immediately, on the
+        press alone, per its own "click only" entry; text opens its label
+        editor instead of arming a drag (`_start_text_entry`), since that
+        tool's whole gesture is the click too. A `tool` of `None` (nothing
+        picked in the bar yet, or the eraser -- handled by the caller
+        before this is ever reached) or any other unrecognised string is a
+        no-op, mirroring editor.py's own `Canvas._new_in_progress_shape`
+        guard on `self._tool is None`.
+        """
+        tool = self._bar.active_tool
+        colour = QColor(self._ink_colour)
+
+        if tool in _FREEHAND_MARK_CLASSES:
+            shape_class = _FREEHAND_MARK_CLASSES[tool]
+            self._in_progress_shape = shape_class(
+                colour=colour, stroke_width=self._stroke_width, points=[pos]
+            )
+        elif tool in _TWO_POINT_MARK_CLASSES:
+            shape_class = _TWO_POINT_MARK_CLASSES[tool]
+            self._in_progress_shape = shape_class(
+                colour=colour, stroke_width=self._stroke_width, start=pos, end=pos
+            )
+        elif tool == "blur":
+            shape_class = Blur if self._blur_mode == "blur" else Pixelate
+            self._in_progress_shape = shape_class(
+                colour=colour,
+                stroke_width=self._stroke_width,
+                start=pos,
+                end=pos,
+                strength=self._blur_strength,
+            )
+        elif tool == "step":
+            # Click only -- no drag, no `_in_progress_shape`, per the spec.
+            self.add_mark(
+                StepMarker(
+                    colour=colour,
+                    stroke_width=self._stroke_width,
+                    point=pos,
+                    number=next_step_number(self._marks),
+                )
+            )
+            return
+        elif tool == "text":
+            self._start_text_entry(pos, colour)
+            return
+        else:
+            return
+
+        self.update()  # something to show from the very first pixel
+
+    def _extend_stroke(self, pos: QPointF) -> None:
+        """Grow `_in_progress_shape` to `pos`: append a point for a
+        freehand stroke (pen/highlighter), or move its `end` for a
+        two-point one (arrow/rect/blur) -- the same split editor.py's
+        `Canvas.mouseMoveEvent` makes, since both classes of shape share
+        the same field names (see shapes.py's `_transformed` docstring).
+        """
+        if isinstance(self._in_progress_shape, (Pen, Highlighter)):
+            self._in_progress_shape.points.append(pos)
+        else:
+            self._in_progress_shape.end = pos
+        self.update()
+
+    # -- text tool (SNX-52) -------------------------------------------------
+
+    def _start_text_entry(self, pos: QPointF, colour: QColor) -> None:
+        """Open the text tool's label editor at `pos`, seeded with a
+        placeholder and focused for immediate typing, per
+        docs/design/overlay-redesign.md's "Drawing": "text -- click drops
+        an editable label seeded with Label, focused for immediate
+        typing." Mirrors editor.py's `Canvas.mousePressEvent` handling of
+        `Tool.TEXT` -- the label commits later, via `_commit_text`, never
+        here.
+        """
+        self._pending_text_point = pos
+        self._pending_text_colour = colour
+        self._pending_text_stroke_width = self._stroke_width
+        text_edit = self._ensure_text_edit()
+        text_edit.clear()
+        text_edit.move(pos.toPoint())
+        text_edit.show()
+        text_edit.setFocus()
+
+    def _ensure_text_edit(self) -> QLineEdit:
+        if self._text_edit is None:
+            self._text_edit = QLineEdit(self)
+            # Grey hint text, not a seeded value -- see `_commit_text`'s
+            # `if self._text_edit.text():` guard, same reasoning as
+            # editor.py's `Canvas._ensure_text_edit`.
+            self._text_edit.setPlaceholderText("Label")
+            self._text_edit.hide()
+            self._text_edit.editingFinished.connect(self._commit_text)
+        return self._text_edit
+
+    def _commit_text(self) -> None:
+        # Re-entrancy guard, not a signal disconnect: hide() below drops
+        # the field's focus and re-triggers editingFinished synchronously
+        # -- see Canvas._commit_text's own docstring for the identical
+        # reasoning this mirrors.
+        if self._committing_text:
+            return
+        self._committing_text = True
+        try:
+            if self._text_edit.text():
+                self.add_mark(
+                    Text(
+                        colour=self._pending_text_colour,
+                        stroke_width=self._pending_text_stroke_width,
+                        point=self._pending_text_point,
+                        text=self._text_edit.text(),
+                    )
+                )
+            self._text_edit.hide()
+            self._pending_text_point = None
+        finally:
+            self._committing_text = False
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._in_progress_shape is not None:
+            self._extend_stroke(event.position())
         if self._active_handle is not None:
             self._resize_selection(event.position())
             handle = self._active_handle
@@ -3136,6 +3332,19 @@ class OverlayWindow(QWidget):
             return
         self._active_handle = None
         self._resize_anchor = None
+        if self._in_progress_shape is not None:
+            shape = self._in_progress_shape
+            self._in_progress_shape = None
+            committed = finalize_mark(shape)
+            if committed is not None:
+                self.add_mark(committed)
+            else:
+                # Below the spec's minimum size -- discarded, not
+                # committed (shapes.finalize_mark's own docstring is the
+                # authority for which shapes/thresholds that covers). Still
+                # needs a repaint: `_paint_marks` was showing this shape's
+                # live preview up to the instant of release.
+                self.update()
 
     def _resize_selection(self, pos: QPointF) -> None:
         """Apply one drag-move of `self._active_handle` to the selection.
@@ -3242,7 +3451,7 @@ class OverlayWindow(QWidget):
         coordinates": "in Qt just `painter.setClipRect(sel)` before drawing
         marks."
         """
-        if not self._marks:
+        if not self._marks and self._in_progress_shape is None:
             return
         painter.save()
         painter.setClipRect(QRectF(self._selection))
@@ -3254,14 +3463,44 @@ class OverlayWindow(QWidget):
             if isinstance(shape, ObscuringShape):
                 # Obscuring marks sample the frozen frame's own pixels
                 # rather than paint onto a painter (see
-                # shapes.ObscuringShape.draw()) -- compositing those live
-                # against a resizable selection is a later ticket's
-                # concern, same as the tool that would create them.
-                # render_selection() (export) still handles them correctly,
-                # via render()'s own special-casing.
+                # shapes.ObscuringShape.draw()) -- compositing a committed
+                # one live against a resizable selection, on every repaint,
+                # is a later ticket's concern; render_selection() (export)
+                # still handles it correctly, via render()'s own
+                # special-casing. An *in-progress* blur/pixelate drag gets
+                # a lightweight marquee instead -- see
+                # `_paint_in_progress_shape` below -- so the tool this
+                # ticket wires up isn't silently invisible while dragging.
                 continue
             shape.draw(painter)
+        if self._in_progress_shape is not None:
+            self._paint_in_progress_shape(painter, self._in_progress_shape)
         painter.restore()
+
+    def _paint_in_progress_shape(self, painter: QPainter, shape: Shape) -> None:
+        """Live preview of the mark `_start_stroke`/`_extend_stroke` are
+        currently building -- everything but `StepMarker`/`Text`, which
+        commit on press alone and never reach `_in_progress_shape` (see
+        `_start_stroke`).
+
+        `Rectangle`/`Arrow.draw()` already tolerate either corner order
+        (see their own docstrings, "for the live in-progress preview"), so
+        the shape's own `draw()` is enough for every tool but blur/
+        pixelate: an `ObscuringShape` has no live preview of its own --
+        `_paint_marks` above never draws a *committed* one either, for the
+        same cost reason -- so this borrows `shapes.Crop`'s dashed-outline
+        marquee instead, built from this shape's own colour/stroke/corners
+        rather than the real (expensive, ordering-dependent) blur effect.
+        """
+        if isinstance(shape, ObscuringShape):
+            Crop(
+                colour=shape.colour,
+                stroke_width=shape.stroke_width,
+                start=shape.start,
+                end=shape.end,
+            ).draw(painter)
+            return
+        shape.draw(painter)
 
     def _paint_scrim(self, painter: QPainter) -> None:
         """Layer 2: dim everything outside the selection.

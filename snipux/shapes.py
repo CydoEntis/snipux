@@ -326,26 +326,29 @@ def finalize_mark(shape: Shape) -> Shape | None:
 
     - `Pen`/`Highlighter` need more than one point -- a plain click never
       reaches a second `mouseMoveEvent` to append one.
-    - `Arrow`/`Rectangle` need their bounding box to exceed
-      `DROP_THRESHOLD` in at least one axis -- a horizontal or vertical
-      drag is a deliberate mark even though it is exactly zero in the
-      other axis, so this is an *or*, not an *and*.
+    - `Arrow`/`Rectangle`/`ObscuringShape` (`Blur`/`Pixelate`) need their
+      bounding box to exceed `DROP_THRESHOLD` in at least one axis -- a
+      horizontal or vertical drag is a deliberate mark even though it is
+      exactly zero in the other axis, so this is an *or*, not an *and*.
 
     `Rectangle` additionally gets its `start`/`end` normalised to
     top-left/bottom-right order here, independent of the size check --
     `draw()` already tolerates either order for the live preview (see its
     docstring), but the *committed* shape needs a stable convention for
     later callers (eraser hit-testing, `_transformed`) the way every other
-    two-point shape already has by construction.
+    two-point shape already has by construction. `ObscuringShape` needs no
+    such normalising: `apply()` already runs its own corners through
+    `_rect_from_corners` internally, so a raw start/end pair -- release
+    ahead of press or not -- is already what it expects.
 
-    Every other shape (`Line`, `Text`, `StepMarker`, `Crop`,
-    `ObscuringShape` and subclasses) has no drag-size or corner-order
-    notion this ticket scopes, so it is returned unchanged.
+    Every other shape (`Line`, `Text`, `StepMarker`, `Crop`) has no
+    drag-size or corner-order notion this ticket scopes, so it is returned
+    unchanged.
     """
     if isinstance(shape, (Pen, Highlighter)):
         return shape if len(shape.points) > 1 else None
 
-    if isinstance(shape, (Arrow, Rectangle)):
+    if isinstance(shape, (Arrow, Rectangle, ObscuringShape)):
         rect = _rect_from_corners(shape.start, shape.end)
         if rect.width() <= DROP_THRESHOLD and rect.height() <= DROP_THRESHOLD:
             return None
