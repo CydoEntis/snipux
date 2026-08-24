@@ -12,6 +12,7 @@ from snipux.design import color as design_color
 from snipux.design import tokens
 from snipux.shapes import Rectangle
 from snipux.overlay import (
+    BlurTray,
     FloatingBar,
     GeometryProvider,
     Handle,
@@ -20,10 +21,12 @@ from snipux.overlay import (
     SelectionMode,
     SettingsTray,
     UnsupportedGeometryProvider,
+    _BlurModeWell,
     _CustomColorButton,
     _Divider,
     _HANDLE_CURSORS,
     _PreviewDot,
+    _SegmentButton,
     _SwatchButton,
     _TOOL_SHORTCUT_KEYS,
     _ToolPill,
@@ -1875,9 +1878,9 @@ class TestSettingsTrayVisibility:
         assert not tray.isVisible()
 
     def test_hidden_for_blur(self):
-        # Blur gets its own strength/mode tray, per the spec -- a later
-        # ticket. Until that exists, blur is simply not a tokens.DRAW_TOOLS
-        # member, so this tray hides for it exactly like the eraser.
+        # Blur gets its own strength/mode tray (BlurTray, SNX-42) in this
+        # one's place -- 'blur' is simply not a tokens.DRAW_TOOLS member,
+        # so this tray hides for it exactly like the eraser.
         tray = SettingsTray()
         tray.set_tool("pen")
 
@@ -2234,3 +2237,229 @@ class TestSettingsTrayOverlayIntegration:
         overlay._tray._slider.setValue(21)
 
         assert overlay._stroke_width == 21
+
+
+class TestBlurTrayComposition:
+    """SNX-42: the blur tray replaces SettingsTray's colour/stroke controls
+    with a Blur/Pixelate toggle, a strength slider/readout and the hint --
+    per docs/design/overlay-redesign.md's "Blur tray" paragraph.
+    """
+
+    def test_contains_the_mode_well_with_both_segments(self):
+        tray = BlurTray()
+
+        assert isinstance(tray._well, _BlurModeWell)
+        assert isinstance(tray._well.blur_button, _SegmentButton)
+        assert isinstance(tray._well.pixelate_button, _SegmentButton)
+
+    def test_contains_the_slider_and_readout(self):
+        tray = BlurTray()
+
+        assert isinstance(tray._slider, QSlider)
+        assert tray._readout is not None
+
+    def test_hint_matches_the_blur_tools_token_hint(self):
+        tray = BlurTray()
+
+        assert tray._hint.text() == tokens.TOOL_HINTS["blur"]
+
+    def test_slider_range_matches_the_blur_tokens(self):
+        tray = BlurTray()
+
+        assert tray._slider.minimum() == tokens.Metric.BLUR_MIN
+        assert tray._slider.maximum() == tokens.Metric.BLUR_MAX
+
+    def test_default_strength_matches_the_token_default(self):
+        tray = BlurTray()
+
+        assert tray.strength == tokens.Metric.BLUR_DEFAULT
+        assert tray._slider.value() == tokens.Metric.BLUR_DEFAULT
+
+    def test_default_blur_mode_is_blur(self):
+        tray = BlurTray()
+
+        assert tray.blur_mode == "blur"
+
+
+class TestBlurTraySegmentToggle:
+    """SNX-42: 'the two-segment toggle chooses between blur and pixelate,
+    and exactly one segment reads as active,' and 'the segment that is
+    active decides which obscuring shape a drag commits.'
+    """
+
+    def test_blur_segment_is_active_by_default(self):
+        tray = BlurTray()
+
+        assert tray._well.blur_button.is_active
+        assert not tray._well.pixelate_button.is_active
+
+    def test_clicking_pixelate_activates_it_and_deactivates_blur(self):
+        tray = BlurTray()
+
+        QTest.mouseClick(tray._well.pixelate_button, Qt.MouseButton.LeftButton)
+
+        assert tray.blur_mode == "pix"
+        assert tray._well.pixelate_button.is_active
+        assert not tray._well.blur_button.is_active
+
+    def test_clicking_blur_after_pixelate_activates_it_and_deactivates_pixelate(self):
+        tray = BlurTray()
+        QTest.mouseClick(tray._well.pixelate_button, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(tray._well.blur_button, Qt.MouseButton.LeftButton)
+
+        assert tray.blur_mode == "blur"
+        assert tray._well.blur_button.is_active
+        assert not tray._well.pixelate_button.is_active
+
+    def test_clicking_a_segment_emits_blur_mode_changed(self):
+        tray = BlurTray()
+        received = Mock()
+        tray.blurModeChanged.connect(received)
+
+        QTest.mouseClick(tray._well.pixelate_button, Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with("pix")
+
+
+class TestBlurTrayStrengthReadout:
+    """SNX-42: 'the strength slider covers the range in tokens.py and
+    starts at the token default' and 'the readout shows the current
+    strength and has a minimum width so the tray does not reflow.'
+    """
+
+    def test_readout_has_a_minimum_width(self):
+        tray = BlurTray()
+
+        assert tray._readout.minimumWidth() == BlurTray._READOUT_MIN_W
+
+    def test_readout_shows_the_default_strength(self):
+        tray = BlurTray()
+
+        assert tray._readout.text() == str(tokens.Metric.BLUR_DEFAULT)
+
+    def test_moving_the_slider_updates_the_readout(self):
+        tray = BlurTray()
+
+        tray._slider.setValue(15)
+
+        assert tray._readout.text() == "15"
+        assert tray.strength == 15
+
+    def test_moving_the_slider_emits_strength_changed(self):
+        tray = BlurTray()
+        received = Mock()
+        tray.strengthChanged.connect(received)
+
+        tray._slider.setValue(12)
+
+        received.assert_called_once_with(12)
+
+    def test_set_strength_clamps_to_the_token_range(self):
+        tray = BlurTray()
+
+        tray.set_strength(tokens.Metric.BLUR_MAX + 50)
+        assert tray.strength == tokens.Metric.BLUR_MAX
+
+        tray.set_strength(tokens.Metric.BLUR_MIN - 50)
+        assert tray.strength == tokens.Metric.BLUR_MIN
+
+
+class TestBlurTrayOverlayIntegration:
+    """SNX-42: the blur tray wired into OverlayWindow, shown in place of
+    SettingsTray -- never alongside it -- while the bar's active tool is
+    'blur', mirroring how SNX-41 wired SettingsTray in.
+    """
+
+    def _overlay(self, size=(1600, 1000)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def test_blur_tray_shown_and_positioned_once_blur_is_picked(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+
+        assert overlay._blur_tray.isVisible()
+        assert not overlay._tray.isVisible()
+        expected_top = overlay._bar.geometry().bottom() + tokens.Metric.TRAY_OFFSET_Y
+        assert overlay._blur_tray.geometry().top() == expected_top
+        assert overlay._blur_tray.geometry().center().x() == pytest.approx(
+            overlay._bar.geometry().center().x(), abs=1
+        )
+
+    def test_draw_tray_replaces_blur_tray_when_switching_back(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+        assert overlay._blur_tray.isVisible()
+
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        assert overlay._tray.isVisible()
+        assert not overlay._blur_tray.isVisible()
+
+    def test_blur_tray_hidden_for_the_eraser(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+        assert overlay._blur_tray.isVisible()
+
+        QTest.mouseClick(overlay._bar._tool_buttons["eraser"], Qt.MouseButton.LeftButton)
+
+        assert not overlay._blur_tray.isVisible()
+        assert not overlay._tray.isVisible()
+
+    def test_blur_tray_hides_when_the_selection_is_cleared(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+        assert overlay._blur_tray.isVisible()
+
+        overlay.set_selection(None)
+
+        assert not overlay._blur_tray.isVisible()
+
+    def test_blur_tray_stays_hidden_while_the_overlay_itself_is_not_shown(self):
+        # Same guarantee TestSettingsTrayOverlayIntegration establishes for
+        # `_tray`: none of this file's pixel-sampling OverlayWindow tests
+        # call .show(), so `_blur_tray` may not start painting into a
+        # grab() it wasn't asked for either.
+        overlay = self._overlay(size=(200, 200))
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        overlay._on_tool_selected("blur")
+
+        assert not overlay._blur_tray.isVisible()
+
+    def test_toggling_the_segment_updates_the_overlays_blur_mode(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+        assert overlay._blur_mode == "blur"
+
+        QTest.mouseClick(overlay._blur_tray._well.pixelate_button, Qt.MouseButton.LeftButton)
+
+        assert overlay._blur_mode == "pix"
+
+    def test_moving_the_strength_slider_updates_the_overlays_blur_strength(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+
+        overlay._blur_tray._slider.setValue(17)
+
+        assert overlay._blur_strength == 17
