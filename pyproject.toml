@@ -19,5 +19,17 @@ dependencies = [
 [project.scripts]
 snipux = "snipux.app:cli"
 
-[tool.setuptools]
-packages = ["snipux"]
+[tool.setuptools.packages.find]
+# An explicit list ("snipux") silently drops subpackages added later --
+# that is exactly how snipux.design shipped without ever being installed.
+# Finding by pattern instead means a future snipux.<whatever> needs no
+# packaging change to be picked up.
+include = ["snipux", "snipux.*"]
+
+[tool.setuptools.package-data]
+# icons/*.svg are read at runtime by design/__init__.py via Path(__file__),
+# not imported as modules, so they must be declared as data or they never
+# make it into the install. fonts/*.ttf and *.otf are listed the same way
+# even though design/fonts/ is empty in this handoff -- vendoring IBM Plex
+# later should need no packaging change, only dropping the files in.
+"snipux.design" = ["icons/*.svg", "fonts/*.ttf", "fonts/*.otf"]
