@@ -25,7 +25,7 @@ from snipux.capture import (
     build_wayland_registry,
     build_x11_registry,
 )
-from snipux.overlay import GeometryProvider, SelectionMode, UnsupportedGeometryProvider
+from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -34,8 +34,8 @@ FILL_COLOR = qRgb(10, 20, 30)
 def qapp():
     # QGuiApplication.clipboard() needs a live application instance even
     # when no widget is ever created, and this file must not depend on
-    # test_editor.py having already created one — module-scoped like
-    # test_editor.py's own fixture, but independent of it.
+    # test_overlay.py having already created one — module-scoped like
+    # that file's own fixture, but independent of it.
     instance = QApplication.instance()
     if instance is None:
         instance = QApplication([])
@@ -208,7 +208,7 @@ class TestCopyImageToClipboard:
         # QImage.__eq__ also compares format, and a PNG round trip isn't
         # guaranteed to hand back the exact same format as the RGB32
         # source on every Qt build. Matches the sampling convention used
-        # throughout test_editor.py.
+        # throughout test_overlay.py.
         round_tripped = QImage()
         assert round_tripped.loadFromData(piped_bytes)
         assert round_tripped.size() == image.size()
@@ -445,14 +445,14 @@ class TestTransportSingleInstance:
 @pytest.fixture
 def make_controller():
     """Builds `AppController`s and closes every window each one opened
-    (overlays, editor, tray icon) at teardown.
+    (its overlay, its tray icon) at teardown.
 
-    Overlay/editor windows this file shows are otherwise left dangling
-    past their test: they're real (if offscreen) top-level windows sharing
-    this process's single `QApplication`, and a leftover one has been
-    observed to disturb mouse/focus-dependent assertions in unrelated
-    tests (e.g. test_overlay.py's hover tests) that happen to run later in
-    the same session.
+    Overlay windows this file shows are otherwise left dangling past their
+    test: they're real (if offscreen) top-level windows sharing this
+    process's single `QApplication`, and a leftover one has been observed
+    to disturb mouse/focus-dependent assertions in unrelated tests (e.g.
+    test_overlay.py's hover tests) that happen to run later in the same
+    session.
     """
     controllers = []
 
@@ -469,15 +469,13 @@ def make_controller():
     yield _make
 
     for controller in controllers:
-        for overlay in controller._overlays:
-            overlay.close()
-        if controller._editor is not None:
-            controller._editor.close()
+        if controller._overlay is not None:
+            controller._overlay.close()
         controller._tray_icon.hide()
 
 
 class TestAppControllerCapture:
-    def test_start_capture_opens_one_overlay_per_monitor_and_no_editor(self, make_controller):
+    def test_start_capture_opens_the_overlay_window(self, make_controller):
         registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
         geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
         controller = make_controller(
@@ -486,14 +484,13 @@ class TestAppControllerCapture:
 
         controller.start_capture()
 
-        assert len(controller._overlays) == 2
-        assert controller._editor is None
-        # The no-argument entry point still means rectangle mode -- the
-        # --snip forwarding path and the transport listener both call
-        # start_capture() with no argument and must keep this behaviour.
-        assert controller._overlays[0]._mode is SelectionMode.RECTANGLE
+        # A single OverlayWindow spanning the whole desktop, not one Overlay
+        # per monitor -- the new overlay's own capture-mode popover is what
+        # picks Region/Window/Full screen/Freeform now, so nothing here
+        # constructs the old editor.py window either.
+        assert isinstance(controller._overlay, OverlayWindow)
 
-    def test_start_capture_passes_the_controllers_geometry_provider_to_the_overlays(
+    def test_start_capture_passes_the_controllers_geometry_provider_to_the_overlay(
         self, make_controller
     ):
         registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
@@ -508,8 +505,8 @@ class TestAppControllerCapture:
         controller.start_capture()
 
         # Identity, not just type: proves the *injected* provider reached
-        # the overlay rather than create_overlays()'s own default.
-        assert controller._overlays[0]._geometry_provider is provider
+        # the overlay rather than some default of OverlayWindow's own.
+        assert controller._overlay._geometry_provider is provider
 
     def test_start_capture_defaults_to_the_controllers_own_geometry_provider(
         self, make_controller
@@ -518,9 +515,9 @@ class TestAppControllerCapture:
         # must have already resolved its own default (build_default_
         # geometry_provider(), typically UnsupportedGeometryProvider under
         # the test environment's non-X11 session) rather than leaving
-        # create_overlays() to fall back to a *different* default of its
-        # own -- the acceptance criterion is that AppController always
-        # decides which provider is used, on every path.
+        # OverlayWindow to fall back to a *different* default of its own --
+        # the acceptance criterion is that AppController always decides
+        # which provider is used, on every path.
         registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
         controller = make_controller(
             registry,
@@ -530,9 +527,24 @@ class TestAppControllerCapture:
 
         controller.start_capture()
 
-        assert controller._overlays[0]._geometry_provider is controller._geometry_provider
+        assert controller._overlay._geometry_provider is controller._geometry_provider
 
-    def test_start_capture_is_a_noop_while_overlays_are_already_open(self, make_controller):
+    def test_start_capture_passes_the_controllers_registry_to_the_overlay(self, make_controller):
+        # OverlayWindow re-grabs through this same registry for its own
+        # delayed capture (and Window/Full screen mode) -- an inert default
+        # registry there could never actually re-capture anything.
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+
+        controller.start_capture()
+
+        assert controller._overlay._registry is registry
+
+    def test_start_capture_is_a_noop_while_the_overlay_is_already_open(self, make_controller):
         registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
         controller = make_controller(
             registry,
@@ -540,11 +552,32 @@ class TestAppControllerCapture:
             monitor_geometries=[QRectF(0, 0, 200, 200)],
         )
         controller.start_capture()
-        first_overlays = controller._overlays
+        first_overlay = controller._overlay
 
         controller.start_capture()
 
-        assert controller._overlays is first_overlays
+        assert controller._overlay is first_overlay
+
+    def test_start_capture_opens_a_new_overlay_once_the_previous_one_is_closed(
+        self, make_controller
+    ):
+        # Proves the re-entrancy guard reads live visibility rather than
+        # "an overlay was built at some point" -- otherwise a second Snip
+        # after the first capture finished would stay stuck idle forever.
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        controller.start_capture()
+        first_overlay = controller._overlay
+        first_overlay.close()
+
+        controller.start_capture()
+
+        assert controller._overlay is not first_overlay
+        assert isinstance(controller._overlay, OverlayWindow)
 
     def test_failed_capture_leaves_controller_idle(self, make_controller):
         registry = BackendRegistry([FailingCaptureBackend()])
@@ -556,8 +589,7 @@ class TestAppControllerCapture:
 
         controller.start_capture()
 
-        assert controller._overlays == []
-        assert controller._editor is None
+        assert controller._overlay is None
 
     def test_failed_capture_reports_it_through_the_tray_icon(self, make_controller, monkeypatch):
         registry = BackendRegistry([FailingCaptureBackend()])
@@ -583,72 +615,32 @@ class TestAppControllerCapture:
 
         # The tray icon (and thus the resident process) is still alive and
         # usable after the failure, not torn down by it.
-        assert controller.rectangle_action.text() == "Rectangular Snip"
+        assert controller.snip_action.text() == "Snip"
         controller.start_capture()  # must not raise a second time
-
-    def test_confirming_a_selection_opens_exactly_one_editor_and_clears_overlays(
-        self, make_controller
-    ):
-        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
-        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
-        controller = make_controller(
-            registry, FakeTransport(make_transport_state()), monitor_geometries=geometries
-        )
-        controller.start_capture()
-        overlay = controller._overlays[0]
-
-        overlay.confirmed.emit(QRectF(10, 10, 50, 50), None)
-
-        assert controller._overlays == []
-        assert controller._editor is not None
-
-    def test_cancelling_returns_to_idle_with_no_editor(self, make_controller):
-        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
-        controller = make_controller(
-            registry,
-            FakeTransport(make_transport_state()),
-            monitor_geometries=[QRectF(0, 0, 200, 200)],
-        )
-        controller.start_capture()
-        overlay = controller._overlays[0]
-
-        overlay.cancelled.emit()
-
-        assert controller._overlays == []
-        assert controller._editor is None
 
 
 class TestAppControllerTrayMenu:
-    def test_tray_menu_offers_one_item_per_selection_mode_and_quit(self, make_controller):
+    def test_tray_menu_offers_a_single_snip_item_and_quit(self, make_controller):
         controller = make_controller(
             BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
         )
 
-        # Labelled for a user, not by SelectionMode's own enum name/value
-        # ("WINDOW"/"window" etc must not leak into the menu text).
-        assert controller.rectangle_action.text() == "Rectangular Snip"
-        assert controller.freeform_action.text() == "Freeform Snip"
-        assert controller.window_action.text() == "Window Snip"
-        assert controller.full_screen_action.text() == "Full-screen Snip"
+        # The old per-SelectionMode items are gone: OverlayWindow's own
+        # capture-mode popover is what picks Region/Window/Full screen/
+        # Freeform once the overlay is open, per the ticket.
+        assert controller.snip_action.text() == "Snip"
         assert controller.quit_action.text() == "Quit"
+        assert [action.text() for action in controller._tray_icon.contextMenu().actions()] == [
+            "Snip",
+            "Quit",
+        ]
 
-    @pytest.mark.parametrize(
-        "action_name, mode",
-        [
-            ("rectangle_action", SelectionMode.RECTANGLE),
-            ("freeform_action", SelectionMode.FREEFORM),
-            ("window_action", SelectionMode.WINDOW),
-            ("full_screen_action", SelectionMode.FULL_SCREEN),
-        ],
-    )
-    def test_each_menu_item_starts_a_capture_in_its_own_mode(
-        self, make_controller, action_name, mode
-    ):
+    def test_snip_action_starts_a_capture(self, make_controller):
         # Asserts on the real effect of triggering the action, not on
         # whether start_capture() was called via a monkeypatched instance
-        # attribute: the action's `triggered` signal is connected to a
-        # lambda at __init__ time, so replacing `controller.start_capture`
-        # afterwards would never be seen by an already-connected slot.
+        # attribute: the action's `triggered` signal is connected at
+        # __init__ time, so replacing `controller.start_capture` afterwards
+        # would never be seen by an already-connected slot.
         registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
         controller = make_controller(
             registry,
@@ -656,10 +648,9 @@ class TestAppControllerTrayMenu:
             monitor_geometries=[QRectF(0, 0, 200, 200)],
         )
 
-        getattr(controller, action_name).trigger()
+        controller.snip_action.trigger()
 
-        assert len(controller._overlays) == 1
-        assert controller._overlays[0]._mode is mode
+        assert isinstance(controller._overlay, OverlayWindow)
 
     def test_quit_action_does_not_raise_with_no_running_event_loop(self, make_controller):
         # No test in this file ever calls .exec(), so QApplication.quit()

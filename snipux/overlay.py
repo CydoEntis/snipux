@@ -44,8 +44,23 @@ from PyQt6.QtWidgets import (
 )
 
 from snipux import design
-from snipux.capture import Frame
-from snipux.shapes import ObscuringShape, Shape, StepMarker, render_selection
+from snipux.capture import BackendRegistry, CaptureError, Frame
+from snipux.shapes import (
+    Arrow,
+    Blur,
+    Crop,
+    Highlighter,
+    ObscuringShape,
+    Pen,
+    Pixelate,
+    Rectangle,
+    Shape,
+    StepMarker,
+    Text,
+    finalize_mark,
+    next_step_number,
+    render_selection,
+)
 
 
 class SelectionMode(Enum):
@@ -232,6 +247,18 @@ class Overlay(QWidget):
         self._paint_magnifier(painter)
         painter.end()
 
+    def _current_selection_path(self) -> QPainterPath | None:
+        """The lasso path the veil should invert against right now, in
+        absolute logical coordinates -- the live drag path while one is in
+        progress, the confirmed path once released, or `None` outside
+        freeform mode (or before any freeform drag has started), in which
+        case `_paint_veil` falls back to the plain bounding-rect hole every
+        other mode already uses.
+        """
+        if self._mode is not SelectionMode.FREEFORM:
+            return None
+        return self._drag_path if self._drag_path is not None else self._selection_path
+
     def _paint_veil(self, painter: QPainter) -> None:
         widget_rect = QRectF(self.rect())
         # A single even-odd fill dims everywhere except the selection hole
@@ -239,7 +266,18 @@ class Overlay(QWidget):
         # that could disagree with this one at the edge.
         path = QPainterPath()
         path.addRect(widget_rect)
-        if self._selection is not None:
+        selection_path = self._current_selection_path()
+        if selection_path is not None:
+            # Freeform: the scrim inverts against the traced lasso itself,
+            # not its bounding box, per docs/design/overlay-redesign.md's
+            # "Capture modes" entry for Freeform. Translated the same way
+            # `_to_local` translates a rect -- this widget's own local
+            # origin is this monitor's absolute top-left -- so a path drawn
+            # partly off this monitor still punches the right hole in this
+            # Overlay's own slice of it; QPainter clips the rest for free.
+            origin = self._monitor_geometry.topLeft()
+            path.addPath(selection_path.translated(-origin))
+        elif self._selection is not None:
             local_selection = self._to_local(self._selection).intersected(widget_rect)
             if not local_selection.isEmpty():
                 path.addRect(local_selection)
@@ -2284,6 +2322,93 @@ class Toast(QWidget):
         painter.end()
 
 
+# ---------------------------------------------------------------------------
+# Delay countdown (SNX-50)
+# ---------------------------------------------------------------------------
+# docs/design/overlay-redesign.md's "Capture modes" entry for Delay is the
+# authority: "the overlay dismisses, waits, re-grabs and re-opens. Show a
+# countdown." The prototype never simulates Delay (Region is the only mode it
+# simulates, per that same section's opening line), so there is no reference
+# markup for the countdown's own look -- styled here from the same BAR_BG
+# glass and TEXT_PRIMARY/mono readout the rest of this file's chrome already
+# uses, rather than inventing a one-off palette for a single widget.
+
+
+class DelayCountdown(QWidget):
+    """A small, top-level countdown shown while `OverlayWindow` is hidden
+    for a delayed re-capture (`OverlayWindow._start_delayed_capture`).
+
+    Deliberately *not* a child of `OverlayWindow`, unlike every other piece
+    of chrome in this file: the entire reason the overlay hides for the
+    delay is so it isn't in its own screenshot (per the spec: "the overlay
+    dismisses... so it is not in its own screenshot" is the point of Delay
+    in the first place), and a child widget goes invisible the instant its
+    parent does -- see `OverlayWindow.hideEvent`, which relies on exactly
+    that to take `_bar`/`_tray`/`_popover`/`_toast`/`_hud` down with it. A
+    countdown built the same way would vanish along with the window it is
+    supposed to be standing in for, which is the one thing it must not do.
+    """
+
+    _SIZE = 96
+    _BG_ALPHA = 0.72  # the same "glass over the desktop" treatment as the bar
+
+    def __init__(self):
+        # No parent, ever -- see the class docstring.
+        super().__init__(None)
+        # Frameless/always-on-top so it reads as a HUD rather than a window
+        # a user could accidentally click into and lose focus of, mirroring
+        # `Overlay`/`OverlayWindow`'s own `setWindowFlags` calls.
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(self._SIZE, self._SIZE)
+
+        self._label = QLabel(self)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setGeometry(0, 0, self._SIZE, self._SIZE)
+        font = QFont(design.font_families().mono)
+        font.setPixelSize(36)
+        font.setWeight(QFont.Weight(600))
+        self._label.setFont(font)
+        self._label.setStyleSheet(f"color: {design.color('TEXT_PRIMARY').name()};")
+
+    def set_seconds_remaining(self, seconds: int) -> None:
+        self._label.setText(str(seconds))
+
+    def show_centered_on(self, geometry: QRect) -> None:
+        """Position centred over `geometry` -- the virtual-desktop rect the
+        hidden `OverlayWindow` itself spans -- and show.
+        """
+        center = QRectF(geometry).center()
+        self.move(round(center.x() - self._SIZE / 2), round(center.y() - self._SIZE / 2))
+        self.show()
+        self.raise_()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = QColor(design.tokens.Color.BAR_BG)
+        bg.setAlphaF(self._BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawEllipse(QRectF(self.rect()))
+        painter.end()
+
+
+# Tool name -> Shape subclass for a freehand (points-list) stroke, keyed
+# by the same string ids tokens.TOOLS/FloatingBar use -- mirrors editor.py's
+# _FREEHAND_SHAPE_CLASSES, just keyed by these strings instead of the old
+# Tool enum, since OverlayWindow (unlike Canvas) never had one.
+_FREEHAND_MARK_CLASSES = {"pen": Pen, "highlighter": Highlighter}
+
+# Tool name -> Shape subclass for a press-to-release two-point stroke.
+# 'blur' is deliberately absent: which of Blur/Pixelate it commits depends
+# on `_blur_mode`, decided in `OverlayWindow._start_stroke` at press time
+# rather than looked up here.
+_TWO_POINT_MARK_CLASSES = {"arrow": Arrow, "rect": Rectangle}
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -2343,7 +2468,72 @@ class OverlayWindow(QWidget):
     two-stage Esc (`_handle_escape`) the spec leaves for us to decide --
     finally wiring `discard()` up to a key, per that method's own
     docstring. All of it is suppressed while a slider or a text-editing
-    widget has focus (`_shortcuts_suppressed`).
+    widget has focus (`_shortcuts_suppressed`). SNX-52 was
+    what the "still a later ticket" note above `_on_tool_selected` used to
+    point at: `mousePressEvent` now dispatches a press that misses every
+    handle and lands inside the selection -- with the eraser disarmed --
+    to `_start_stroke`, which arms `_in_progress_shape` for
+    pen/highlighter/arrow/rect/blur (`mouseMoveEvent` extends it,
+    `mouseReleaseEvent` runs it through `shapes.finalize_mark` and either
+    commits or discards it), commits a `StepMarker` immediately for step,
+    and opens the lazily-built `_text_edit` for text (`_start_text_entry`/
+    `_commit_text`, mirroring editor.py's `Canvas._ensure_text_edit`). A
+    committed mark always takes its colour/stroke from `_ink_colour`/
+    `_stroke_width` and, for blur, its shape class and strength from
+    `_blur_mode`/`_blur_strength` -- the same tray-tracked state prior
+    tickets already left ready to be read. SNX-48 (this ticket) makes
+    `_capture_mode` do something once it names Window or Full screen,
+    instead of sitting unread the way `_on_capture_mode_selected`'s own
+    docstring used to say it would: `_enter_window_mode` arms
+    `_picking_window`, which `mouseMoveEvent`/`mousePressEvent` check
+    ahead of the resize/stroke dispatch above so a hover previews the
+    window under the cursor (`_geometry_provider.window_at`, the same
+    `GeometryProvider` `Overlay` already takes) and a click snaps
+    `_selection` to it (`_confirm_window_pick`); `_select_full_screen`
+    sets `_selection` to whichever of `_monitor_geometries` contains the
+    cursor's last known position immediately, no click needed past
+    picking the row. Either way the result is handed to `set_selection`
+    like any other -- nothing downstream distinguishes a mode-produced
+    selection from a dragged one, which is what makes it re-framable and
+    annotatable the same way. A `GeometryProvider` that reports itself
+    unavailable (`UnsupportedGeometryProvider`, same as `Overlay`'s own
+    default) must not leave Window mode looking chosen but inert: it
+    toasts an explanation and falls back to Region instead, per the
+    ticket's own acceptance criterion. SNX-49 (this ticket) makes Freeform
+    do the same: `_enter_freeform_mode` arms `_picking_freeform`, which
+    `mousePressEvent`/`mouseMoveEvent`/`mouseReleaseEvent` check ahead of
+    the same resize/stroke dispatch, so a press starts tracing a lasso
+    (`_start_freeform_drag`), motion extends it (`_extend_freeform_drag`),
+    and release closes and confirms it (`_confirm_freeform_pick`) -- the
+    same press-drag-release-close shape `Overlay`'s own FREEFORM handling
+    above already uses, including its misfire threshold. The confirmed
+    path is stored as `_selection_path`, alongside `_selection` (its own
+    bounding rect, handed to `set_selection` like any other mode's result
+    so the selection frame/handles/chips/bar stay exactly as re-framable
+    and annotatable), and read by `_paint_scrim` (the dim scrim inverts
+    against the path itself, not its bounding box) and `rendered_image`
+    (via `shapes.render_selection`'s new `selection_path` parameter, which
+    masks everything outside it transparent) -- per the spec's Freeform
+    entry: "the selection becomes a path, the dim scrim inverts against
+    it, and export crops to its bounding box with the outside transparent."
+    SNX-50 (this ticket) makes `_delay` do something once it names anything
+    but `Off`: `_on_capture_mode_selected` hands off to
+    `_start_delayed_capture` instead of dispatching a mode immediately,
+    which hides this whole window (so it isn't in its own screenshot),
+    shows `DelayCountdown` (a separate, non-child top-level widget -- see
+    its own docstring for why it can't be a child), and ticks a `QTimer`
+    down once a second. `_finish_delayed_capture` then re-grabs through
+    `_registry` -- the same `BackendRegistry` the first frame came through,
+    injected the same way `geometry_provider` is -- and re-opens over the
+    fresh frame by mutating `_frame` and re-showing in place, rather than
+    building a second `OverlayWindow`: every other piece of state
+    (`_ink_colour`, `_stroke_width`, `_bar`'s active tool, `_capture_mode`
+    itself) already lives on `self` and needs no copying across. The mode
+    picked when the delay was confirmed is remembered
+    (`_pending_capture_mode`) and re-dispatched to the same
+    Window/Full screen/Freeform handling above once the new frame is in,
+    so a delayed Window/Full screen/Freeform pick still does its own thing
+    on the new content instead of silently downgrading to Region.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -2398,9 +2588,34 @@ class OverlayWindow(QWidget):
     _FROZEN_ICON_SIZE = 13
     _FROZEN_LABEL = "Frozen"
 
-    def __init__(self, frame: Frame, parent=None, hints_enabled: bool = True):
+    def __init__(
+        self,
+        frame: Frame,
+        parent=None,
+        hints_enabled: bool = True,
+        geometry_provider: GeometryProvider | None = None,
+        monitor_geometries: list[QRectF] | None = None,
+        registry: BackendRegistry | None = None,
+    ):
         super().__init__(parent)
         self._frame = frame
+
+        # SNX-48: sourced for Window/Full screen capture-mode handling
+        # below, mirroring `Overlay`'s own constructor args of the same
+        # names. `_geometry_provider` defaults the same way `Overlay`'s
+        # does -- `UnsupportedGeometryProvider` reports no windows
+        # anywhere, which is what makes Window mode degrade instead of
+        # needing a None-check at every call site. `_monitor_geometries`
+        # defaults to the frame's own full span (there is no per-monitor
+        # split to make without one) so a single-monitor caller -- every
+        # test in this file included -- gets a correct Full screen
+        # selection without having to pass one in.
+        self._geometry_provider = geometry_provider or UnsupportedGeometryProvider()
+        self._monitor_geometries = (
+            list(monitor_geometries)
+            if monitor_geometries
+            else [QRectF(frame.logical_origin, frame.logical_size)]
+        )
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -2423,6 +2638,42 @@ class OverlayWindow(QWidget):
         # Window coordinates, per the class docstring -- None until
         # set_selection is called.
         self._selection: QRect | None = None
+        # SNX-49: the exact traced lasso, window coordinates -- same space
+        # as `_selection` -- only ever non-None right after a Freeform pick
+        # confirms (`_confirm_freeform_pick`). `set_selection`'s own `path`
+        # parameter defaults to clearing this, which is what keeps a stale
+        # lasso from lingering once the selection changes by any other
+        # means (a resize drag, Window/Full screen picks, a fresh Freeform
+        # drag) -- see that method's own docstring.
+        self._selection_path: QPainterPath | None = None
+
+        # SNX-48: last-known pointer position over the frozen desktop
+        # itself (window-local logical coords, the same space `_selection`
+        # lives in) -- tracked from ordinary mouse-move events the same
+        # way `Overlay._cursor_pos` is, rather than ever calling
+        # `QCursor.pos()`, so `_select_full_screen` can answer "which
+        # display is the cursor on" without this widget reaching for
+        # global cursor state no test can control offscreen. None until
+        # the first move.
+        self._cursor_pos: QPointF | None = None
+        # True from the moment Window mode is armed (`_enter_window_mode`)
+        # until a click lands on a window (`_confirm_window_pick`), per
+        # the spec's "hover highlights the window under the cursor...
+        # click accepts it." While armed, `mousePressEvent`/
+        # `mouseMoveEvent` dispatch to the Window-picking branch ahead of
+        # the resize-handle/stroke logic below, the same "handled here,
+        # nothing else runs" shape `_active_handle`/`_eraser_active`
+        # already use for their own presses.
+        self._picking_window = False
+
+        # SNX-49: armed the same way `_picking_window` is, from the moment
+        # Freeform mode is chosen (`_enter_freeform_mode`) until a full
+        # press-drag-release lasso confirms (`_confirm_freeform_pick`) or
+        # is discarded as too small. `_freeform_drag_path` is the lasso
+        # currently being traced -- window coordinates, same space
+        # `_selection`/`_marks` live in -- None outside an active drag.
+        self._picking_freeform = False
+        self._freeform_drag_path: QPainterPath | None = None
 
         # Handle currently being dragged (SNX-33 re-framing), and the
         # selection as it stood the moment that drag started. The anchor is
@@ -2457,6 +2708,29 @@ class OverlayWindow(QWidget):
         # undo_erase() -- see its own docstring. None once nothing has been
         # erased yet, or once undo_erase() has already consumed it.
         self._erased_mark: tuple[int, Shape] | None = None
+
+        # Live drawing (SNX-52): the mark a left-press/drag/release is
+        # currently building, in this widget's own window coordinates --
+        # the same space `_marks` lives in, per the class docstring. None
+        # outside an active stroke; `mousePressEvent` never sets both this
+        # and `_active_handle` for the same press, so a resize and a
+        # stroke can never be in progress at once. See `_start_stroke`.
+        self._in_progress_shape: Shape | None = None
+
+        # The text tool (SNX-52): a lazily-built QLineEdit that mirrors
+        # editor.py's `Canvas._ensure_text_edit`/`_commit_text` -- a click
+        # opens it, seeded with a placeholder (never pre-filled text, so
+        # committing with nothing typed still discards it, per
+        # `_commit_text`'s own guard) and focused for immediate typing.
+        # `_pending_text_*` holds the press-time colour/stroke/point until
+        # `editingFinished` commits (or discards) them; `_committing_text`
+        # guards against `hide()`'s own re-entrant `editingFinished`, same
+        # as `Canvas._commit_text`'s own docstring explains.
+        self._text_edit: QLineEdit | None = None
+        self._pending_text_point: QPointF | None = None
+        self._pending_text_colour: QColor | None = None
+        self._pending_text_stroke_width: float | None = None
+        self._committing_text = False
 
         self._dash_offset = 0.0
         self._ants_timer = QTimer(self)
@@ -2522,6 +2796,29 @@ class OverlayWindow(QWidget):
         self._popover.delayChanged.connect(self._on_delay_changed)
         self._bar.captureChipClicked.connect(self._toggle_capture_popover)
 
+        # The delayed re-capture (SNX-50): `_registry` is what
+        # `_finish_delayed_capture` re-grabs through -- an empty
+        # `BackendRegistry` by default, the same "an inert default degrades
+        # instead of needing a None-check everywhere" shape
+        # `UnsupportedGeometryProvider` already gives `_geometry_provider`
+        # above (an empty registry's own `capture()` raises `CaptureError`
+        # with its own "no capture backend is available" message, which
+        # `_finish_delayed_capture` already has to handle for a real,
+        # non-empty registry that simply fails). `_countdown`/`_delay_timer`
+        # are built lazily, on the first delay actually confirmed, rather
+        # than unconditionally here -- unlike `_toast`/`_hud`, `_countdown`
+        # is not a child of this window (see its own docstring for why) and
+        # every `OverlayWindow` this file's tests build would otherwise
+        # leave a real, if hidden, extra top-level widget behind it.
+        # `_pending_capture_mode` is the mode `_on_capture_mode_selected`
+        # was confirming when the delay started, re-dispatched once the
+        # fresh frame is in.
+        self._registry = registry if registry is not None else BackendRegistry()
+        self._countdown: DelayCountdown | None = None
+        self._delay_timer: QTimer | None = None
+        self._delay_remaining = 0
+        self._pending_capture_mode: str | None = None
+
         # The toast (SNX-45): the single `Toast` instance `copy`/`save`/
         # `clear`/`discard` below all share -- see `_show_toast` for the
         # `self.isVisible()` gate that keeps it from painting into this
@@ -2544,20 +2841,36 @@ class OverlayWindow(QWidget):
         self._hud.setGeometry(0, 0, self.width(), design.tokens.Metric.HUD_H)
         self._hud.hide()
 
-    def set_selection(self, rect: QRect | None) -> None:
-        """Set the current selection (window coordinates) and repaint."""
+    def set_selection(self, rect: QRect | None, path: QPainterPath | None = None) -> None:
+        """Set the current selection (window coordinates) and repaint.
+
+        `path` (SNX-49) is only ever passed by `_confirm_freeform_pick`,
+        with the exact lasso `_selection`'s bounding box was taken from --
+        every other caller (a resize drag, Window/Full screen picks, a
+        fresh Freeform drag's own `set_selection(None)`) leaves it at the
+        default `None`, which is what keeps a previously-confirmed lasso
+        from lingering once the selection changes by some other means. In
+        particular, re-framing a Freeform selection via its resize handles
+        silently reverts it to a plain rectangle: the path was traced
+        against the *original* bounding box, and `_resize_selection` has no
+        way to reshape it to match a dragged edge, so keeping a now-stale
+        path around would be worse than dropping it.
+        """
         self._selection = rect
+        self._selection_path = path
         self._sync_bar_visibility()
         self.update()
 
     def _on_tool_selected(self, tool: str) -> None:
-        """Wire the bar's tool buttons to the one piece of per-tool state
-        this class already tracks: the eraser's hit-testing arm/disarm (see
-        `set_eraser_active`). Switching the *live drawing* tool itself --
-        pen, arrow, and the rest actually starting a stroke on drag -- is
-        still a later ticket in the same arc, per the class docstring; this
-        only has to keep the eraser cursor and hit-testing in sync with
-        whichever tool button the bar shows as active.
+        """Wire the bar's tool buttons to the eraser's hit-testing
+        arm/disarm (see `set_eraser_active`) and the settings tray's
+        visibility. `mousePressEvent`/`_start_stroke` read `self._bar.
+        active_tool` directly at press time rather than this class keeping
+        a second copy of it -- `FloatingBar` is already the one place a
+        click and a shortcut key (`keyPressEvent`'s tool letters) both
+        funnel through (`FloatingBar.select_tool`'s own docstring), so
+        there is nothing for this method to track beyond the two things
+        below that don't already live on the bar.
         """
         self.set_eraser_active(tool == "eraser")
         self._sync_tray_visibility()
@@ -2605,13 +2918,312 @@ class OverlayWindow(QWidget):
         own label to match, per the reference's `{{ mode }}` binding on
         the chip button itself.
 
-        Per the ticket, only Region does anything past this -- Window,
-        Full screen and Freeform are separate tickets that will read
-        `_capture_mode` once they exist, the same way `_blur_mode` above
-        sits unread until its own drawing ticket lands.
+        SNX-48 makes Window and Full screen actually do something past
+        the label update: `_enter_window_mode` arms hover-preview/click-
+        to-snap picking, `_select_full_screen` snaps `_selection`
+        immediately. SNX-49 does the same for Freeform:
+        `_enter_freeform_mode` arms press-drag-release lasso tracing.
+        Whatever picking was in progress for a previous mode is disarmed
+        unconditionally first -- switching away from Window or Freeform
+        mid-pick must not leave `_picking_window`/`_picking_freeform`
+        stuck armed underneath whatever the newly-picked mode does
+        instead.
+
+        SNX-50 (this ticket) intercepts all of the above whenever `_delay`
+        isn't `Off`: per the spec's Delay entry, confirming a mode while a
+        delay is set dismisses the overlay, waits, re-grabs and re-opens,
+        rather than acting on the current (soon to be stale) frame right
+        away. `_start_delayed_capture` takes over from here and
+        re-dispatches to this same mode logic itself, once the fresh frame
+        is in.
         """
+        self._picking_window = False
+        self._picking_freeform = False
+        self._freeform_drag_path = None
         self._capture_mode = mode
         self._bar.set_capture_mode(mode)
+
+        if self._delay != "Off":  # design.tokens.DELAYS[0]
+            self._start_delayed_capture(mode)
+            return
+
+        self._dispatch_capture_mode(mode)
+
+    def _dispatch_capture_mode(self, mode: str) -> None:
+        """Run whichever mode-specific picking `mode` itself calls for --
+        the immediate half of `_on_capture_mode_selected`, factored out so
+        `_finish_delayed_capture` can re-run it against a fresh frame
+        without also re-running the delay check above (which would just
+        recurse into another wait).
+        """
+        if mode == "Window":  # design.tokens.CAPTURE_MODES[1][0]
+            self._enter_window_mode()
+        elif mode == "Full screen":  # design.tokens.CAPTURE_MODES[2][0]
+            self._select_full_screen()
+        elif mode == "Freeform":  # design.tokens.CAPTURE_MODES[3][0]
+            self._enter_freeform_mode()
+
+    # -- delayed re-capture (SNX-50) -----------------------------------------
+    # docs/design/overlay-redesign.md's "Capture modes" entry for Delay is
+    # the authority: "Off / 3s / 5s / 10s. When set, the overlay dismisses,
+    # waits, re-grabs and re-opens. Show a countdown." The re-grab is a
+    # second, independent call through `_registry` -- the same
+    # `BackendRegistry` the first frame came through, per CLAUDE.md's one
+    # architectural rule applying to this grab exactly as it does to the
+    # first -- never a re-use of `_frame` as it stood before the wait.
+
+    def _start_delayed_capture(self, mode: str) -> None:
+        """Hide this window and start counting the seconds in `_delay`
+        down, per the spec's "the overlay dismisses, waits" -- hiding
+        happens synchronously, before the wait itself begins, so the
+        overlay is never on screen (and never in danger of being in its
+        own next screenshot) for any part of the delay.
+
+        `mode` is remembered as `_pending_capture_mode` and re-dispatched
+        by `_finish_delayed_capture` once the fresh frame is in, so a
+        delayed Window/Full screen/Freeform pick still does its own thing
+        against the new content instead of only ever landing on Region.
+        """
+        self._pending_capture_mode = mode
+        self._delay_remaining = int(self._delay.rstrip("s"))
+        self.hide()
+
+        if self._countdown is None:
+            self._countdown = DelayCountdown()
+        self._countdown.set_seconds_remaining(self._delay_remaining)
+        # `self.geometry()` is still the real virtual-desktop rect this
+        # window spans -- hiding a QWidget doesn't clear its geometry --
+        # so the countdown can centre on it without this window needing to
+        # stay visible to answer the question.
+        self._countdown.show_centered_on(self.geometry())
+
+        if self._delay_timer is None:
+            self._delay_timer = QTimer(self)
+            self._delay_timer.setInterval(1000)
+            self._delay_timer.timeout.connect(self._tick_delay)
+        self._delay_timer.start()
+
+    def _tick_delay(self) -> None:
+        """One second of the countdown elapsing. Reaching zero stops the
+        timer and hands off to `_finish_delayed_capture` -- this method
+        itself never touches `_registry` or `_frame`.
+        """
+        self._delay_remaining -= 1
+        if self._delay_remaining <= 0:
+            self._delay_timer.stop()
+            self._countdown.hide()
+            self._finish_delayed_capture()
+            return
+        self._countdown.set_seconds_remaining(self._delay_remaining)
+
+    def _finish_delayed_capture(self) -> None:
+        """Re-grab through `_registry` and re-open over the fresh frame.
+
+        A failed re-grab (per CLAUDE.md, a capture failure must not take
+        down the rest of the app) leaves the *old* frame in place and
+        simply re-shows this window with it, toasted, rather than leaving
+        the user with no overlay and no explanation at all -- mirrors
+        `_enter_window_mode`'s own "toast and fall back" handling of an
+        unavailable `GeometryProvider`.
+
+        On success, `_frame` and this window's own geometry are replaced
+        in place (this is still the same `OverlayWindow`, never a second
+        one) -- which is what leaves `_ink_colour`/`_stroke_width`/the
+        bar's active tool/`_capture_mode` itself exactly as the user had
+        them, with nothing to copy across, per the ticket's "the overlay
+        re-opens... with the tool, colour and stroke settings the user had
+        chosen" acceptance criterion. The stale selection is cleared --
+        it described a rectangle of the *old* content -- and the picked
+        mode is re-dispatched against the new one.
+        """
+        mode = self._pending_capture_mode
+        try:
+            frame = self._registry.capture()
+        except CaptureError as exc:
+            self.show()
+            self._show_toast("timer", str(exc))
+            return
+
+        self._frame = frame
+        self.setGeometry(
+            round(frame.logical_origin.x()),
+            round(frame.logical_origin.y()),
+            round(frame.logical_size.width()),
+            round(frame.logical_size.height()),
+        )
+        self._hud.setGeometry(0, 0, self.width(), design.tokens.Metric.HUD_H)
+        self.set_selection(None)
+        self.show()
+        self._dispatch_capture_mode(mode)
+
+    # -- Window / Full screen capture modes (SNX-48) -------------------------
+    # docs/design/overlay-redesign.md's "Capture modes" section is the
+    # authority: "Window -- hover highlights the window under the cursor
+    # (snap the selection to its frame); click accepts it. Then annotation
+    # proceeds identically" and "Full screen -- selection = the whole
+    # display." Both mirror `Overlay`'s own WINDOW/FULL_SCREEN handling
+    # above, but hand their result to this window's own `set_selection`
+    # instead of emitting `confirmed` into a separate editor -- the whole
+    # point of this ticket is that the result stays open for re-framing
+    # and in-place annotation exactly like a dragged selection.
+
+    def _enter_window_mode(self) -> None:
+        """Arm Window-mode picking, or -- per the ticket's acceptance
+        criterion -- tell the user and fall back to Region if this
+        platform has no `GeometryProvider` that can answer at all.
+
+        A silent no-op here (the trap `UnsupportedGeometryProvider`'s own
+        docstring warns "isn't load-bearing for the mode-3 fallback
+        itself" against) would leave the chip reading "Window" for a mode
+        that can never produce anything -- indistinguishable from a bug.
+        Instead this toasts an explanation and reverts `_capture_mode`,
+        the chip label, and the popover's own selected row back to
+        Region, mirroring `CaptureModePopover.set_mode`'s own "seeding
+        the popover from elsewhere" use case.
+        """
+        if not self._geometry_provider.is_available():
+            self._show_toast("window", "Window capture isn't available on this session")
+            fallback = design.tokens.CAPTURE_MODES[0][0]  # "Region"
+            self._capture_mode = fallback
+            self._bar.set_capture_mode(fallback)
+            self._popover.set_mode(fallback)
+            return
+        self._picking_window = True
+        # Whatever was selected before (if anything) is not a Window-mode
+        # preview and must not linger on screen while the user hasn't
+        # hovered a window yet -- mirrors `Overlay`'s own hover branch,
+        # which likewise clears on a miss rather than leaving a stale rect.
+        self.set_selection(None)
+
+    def _confirm_window_pick(self, pos: QPointF) -> None:
+        """Snap `_selection` to the window under `pos` (this widget's own
+        window-local coordinates) and disarm picking. Only ever reached
+        from `mousePressEvent` while `_picking_window` is armed.
+
+        A miss leaves `_picking_window` armed and `_selection` as the
+        last hover left it (already `None`, per `mouseMoveEvent`'s own
+        miss handling below) -- the user can simply move and click again,
+        rather than one mis-click ending the mode for good.
+        """
+        rect = self._geometry_provider.window_at(self._to_absolute(pos))
+        if rect is None:
+            return
+        self._picking_window = False
+        self.set_selection(self._to_local_rect(rect).toRect())
+
+    def _select_full_screen(self) -> None:
+        """Set `_selection` to the whole display the cursor is on, per
+        the spec's "Full screen -- selection = the whole display" and
+        this ticket's cursor-aware acceptance criterion. Snaps
+        immediately -- no drag, no click needed past picking the row.
+
+        Falls back to this window's own centre when the cursor has never
+        moved over the frozen desktop yet (`_cursor_pos` is still
+        `None`) -- a real overlay is always shown full-screen under the
+        pointer, so this only matters for a caller (a test, or the very
+        first popover interaction) that never issued a prior move.
+        """
+        cursor = (
+            self._cursor_pos
+            if self._cursor_pos is not None
+            else QPointF(self.width() / 2, self.height() / 2)
+        )
+        rect = self._monitor_at(self._to_absolute(cursor))
+        self.set_selection(self._to_local_rect(rect).toRect())
+
+    # -- Freeform capture mode (SNX-49) --------------------------------------
+    # docs/design/overlay-redesign.md's "Capture modes" entry for Freeform is
+    # the authority: "lasso; the selection becomes a path, the dim scrim
+    # inverts against it, and export crops to its bounding box with the
+    # outside transparent." Unlike Window/Full screen above, this mode's
+    # selection comes from an ordinary press-drag-release -- the same
+    # gesture `Overlay.mousePressEvent`/`mouseMoveEvent`/`mouseReleaseEvent`
+    # already use for their own FREEFORM handling above, adapted to this
+    # window's own coordinate space and `set_selection`'s `path` parameter
+    # rather than a `confirmed` signal.
+
+    def _enter_freeform_mode(self) -> None:
+        """Arm Freeform-mode lasso tracing. Mirrors `_enter_window_mode`'s
+        own "nothing selected yet" clear: whatever was selected before must
+        not linger on screen while the user hasn't started tracing a new
+        lasso.
+        """
+        self._picking_freeform = True
+        self.set_selection(None)
+
+    def _start_freeform_drag(self, pos: QPointF) -> None:
+        """Begin tracing a lasso at `pos` (window coordinates). Only ever
+        reached from `mousePressEvent` while `_picking_freeform` is armed.
+        """
+        self._freeform_drag_path = QPainterPath()
+        self._freeform_drag_path.moveTo(pos)
+        # Something to show from the very first pixel, mirroring `Overlay`'s
+        # own FREEFORM press handling above.
+        self.set_selection(QRect(pos.toPoint(), QSize(0, 0)))
+
+    def _extend_freeform_drag(self, pos: QPointF) -> None:
+        self._freeform_drag_path.lineTo(pos)
+        self.set_selection(self._freeform_drag_path.boundingRect().toRect())
+
+    def _confirm_freeform_pick(self, pos: QPointF) -> None:
+        """End the lasso at `pos` and confirm it, or discard it as a
+        misfire. Only ever reached from `mouseReleaseEvent` while
+        `_picking_freeform` is armed and a drag is in progress.
+
+        The release itself is traced as a point, same as every intermediate
+        move -- omitting it would silently drop the final drag segment and
+        let `closeSubpath()` cut straight from the last *moved-to* point
+        back to the anchor instead, per the ticket's "a lasso that is not
+        closed by the user is closed for them on release" -- `closeSubpath()`
+        is exactly that closing, unconditional regardless of where the
+        release landed relative to the anchor. Mirrors `Overlay`'s own
+        freeform release handling, including its misfire threshold: measured
+        by the traced path's own bounding-rect diagonal, not anchor-to-
+        release distance, so a closed loop back near its start point isn't
+        misfired away just because its last pixel lands next to its first.
+        """
+        path = self._freeform_drag_path
+        self._freeform_drag_path = None
+        path.lineTo(pos)
+        path.closeSubpath()
+        bounds = path.boundingRect().toRect()
+        diagonal = math.hypot(bounds.width(), bounds.height())
+        if diagonal < QApplication.startDragDistance():
+            self.set_selection(None)
+            return
+        self._picking_freeform = False
+        self.set_selection(bounds, path=path)
+
+    def _monitor_at(self, absolute_point: QPointF) -> QRectF:
+        """The `_monitor_geometries` entry containing `absolute_point`
+        (absolute logical virtual-desktop coordinates), or the frame's
+        own full span if none does -- a point can land outside every
+        known monitor only when `_monitor_geometries` wasn't supplied
+        accurately, and the whole capture is the only sane rect left to
+        offer rather than raising.
+        """
+        for geometry in self._monitor_geometries:
+            if geometry.contains(absolute_point):
+                return geometry
+        return QRectF(self._frame.logical_origin, self._frame.logical_size)
+
+    def _to_absolute(self, local_point: QPointF) -> QPointF:
+        """This widget's own window-local logical point -> absolute
+        logical virtual-desktop point -- the space `GeometryProvider`/
+        `_monitor_geometries` both use, the same conversion `Overlay.
+        _to_absolute` performs for its own (differently-anchored) local
+        space.
+        """
+        return local_point + self._frame.logical_origin
+
+    def _to_local_rect(self, absolute_rect: QRectF) -> QRectF:
+        """Absolute logical virtual-desktop rect -> this widget's own
+        window-local logical rect -- the inverse of `_to_absolute`,
+        applied to a rect rather than a point for `_confirm_window_pick`/
+        `_select_full_screen`, whose `GeometryProvider`/
+        `_monitor_geometries` results both arrive in absolute coordinates.
+        """
+        return QRectF(absolute_rect.topLeft() - self._frame.logical_origin, absolute_rect.size())
 
     def _on_delay_changed(self, delay: str) -> None:
         self._delay = delay
@@ -2907,10 +3519,17 @@ class OverlayWindow(QWidget):
         coordinates to the cropped image's own origin exactly once -- see
         `shapes.render_selection` and docs/design/overlay-redesign.md's
         "Ink lives in screen coordinates".
+
+        `_selection_path`, set only for a just-confirmed Freeform lasso,
+        is passed straight through: `render_selection` is what actually
+        masks the pixels outside it transparent, per the "Capture modes"
+        entry for Freeform.
         """
         if self._selection is None:
             raise ValueError("no selection to export")
-        return render_selection(self._frame, self._marks, QRectF(self._selection))
+        return render_selection(
+            self._frame, self._marks, QRectF(self._selection), self._selection_path
+        )
 
     # -- copy / save (SNX-39) ----------------------------------------------
     # Both render fresh from `rendered_image()` at the moment they're
@@ -3085,29 +3704,202 @@ class OverlayWindow(QWidget):
             # resize or an erase underneath the popover in the same press.
             self._popover.hide()
             return
+        if self._picking_window:
+            # A press while armed is always a pick, never a resize or a
+            # stroke -- returns unconditionally, the same "stop event
+            # propagation" rule the handle branch below already follows.
+            self._confirm_window_pick(event.position())
+            return
+        if self._picking_freeform:
+            # Same "stop event propagation" rule as Window mode above: a
+            # press while armed always (re)starts a lasso, never a resize
+            # or a stroke.
+            self._start_freeform_drag(event.position())
+            return
         handle = self._handle_at(event.position())
         if handle is None:
-            if (
-                self._eraser_active
-                and self._selection is not None
-                and QRectF(self._selection).contains(event.position())
+            if self._selection is not None and QRectF(self._selection).contains(
+                event.position()
             ):
-                # No drag, per the spec's "Drawing": "eraser -- no drag." A
-                # miss (nothing under the cursor) is already a safe no-op
-                # inside erase_at itself.
-                self.erase_at(event.position())
-            # Every other tool's stroke-start is still a later ticket.
-            # Falling through to this no-op -- rather than the handle
-            # branch below -- is exactly what "stop event propagation at
-            # the handle" needs from this method: a future stroke-start
-            # only ever gets reached when a handle wasn't hit.
+                if self._eraser_active:
+                    # No drag, per the spec's "Drawing": "eraser -- no
+                    # drag." A miss (nothing under the cursor) is already a
+                    # safe no-op inside erase_at itself.
+                    self.erase_at(event.position())
+                else:
+                    self._start_stroke(event.position())
+            # A press outside the selection (or with no selection at all)
+            # is a no-op for every tool. Falling through to this no-op --
+            # rather than the handle branch below -- is exactly what "stop
+            # event propagation at the handle" needs from this method: a
+            # stroke only ever starts when a handle wasn't hit.
             return
         # Per the spec: a handle press is a resize, never a stroke, and
         # returning here means nothing past this point runs for it.
         self._active_handle = handle
         self._resize_anchor = QRect(self._selection)
 
+    def _start_stroke(self, pos: QPointF) -> None:
+        """Begin a mark for whichever tool `self._bar.active_tool` names,
+        at `pos` (this widget's own window coordinates -- the same space
+        `_marks` lives in). Only ever reached from `mousePressEvent` for a
+        press that missed every resize handle, landed inside the
+        selection, and found the eraser disarmed.
+
+        docs/design/overlay-redesign.md's "Drawing" is the spec for what
+        each tool does here: pen/highlighter/arrow/rect/blur arm
+        `_in_progress_shape` for `_extend_stroke`/`mouseReleaseEvent` to
+        grow and commit; step commits a `StepMarker` immediately, on the
+        press alone, per its own "click only" entry; text opens its label
+        editor instead of arming a drag (`_start_text_entry`), since that
+        tool's whole gesture is the click too. A `tool` of `None` (nothing
+        picked in the bar yet, or the eraser -- handled by the caller
+        before this is ever reached) or any other unrecognised string is a
+        no-op, mirroring editor.py's own `Canvas._new_in_progress_shape`
+        guard on `self._tool is None`.
+        """
+        tool = self._bar.active_tool
+        colour = QColor(self._ink_colour)
+
+        if tool in _FREEHAND_MARK_CLASSES:
+            shape_class = _FREEHAND_MARK_CLASSES[tool]
+            self._in_progress_shape = shape_class(
+                colour=colour, stroke_width=self._stroke_width, points=[pos]
+            )
+        elif tool in _TWO_POINT_MARK_CLASSES:
+            shape_class = _TWO_POINT_MARK_CLASSES[tool]
+            self._in_progress_shape = shape_class(
+                colour=colour, stroke_width=self._stroke_width, start=pos, end=pos
+            )
+        elif tool == "blur":
+            shape_class = Blur if self._blur_mode == "blur" else Pixelate
+            self._in_progress_shape = shape_class(
+                colour=colour,
+                stroke_width=self._stroke_width,
+                start=pos,
+                end=pos,
+                strength=self._blur_strength,
+            )
+        elif tool == "step":
+            # Click only -- no drag, no `_in_progress_shape`, per the spec.
+            self.add_mark(
+                StepMarker(
+                    colour=colour,
+                    stroke_width=self._stroke_width,
+                    point=pos,
+                    number=next_step_number(self._marks),
+                )
+            )
+            return
+        elif tool == "text":
+            self._start_text_entry(pos, colour)
+            return
+        else:
+            return
+
+        self.update()  # something to show from the very first pixel
+
+    def _extend_stroke(self, pos: QPointF) -> None:
+        """Grow `_in_progress_shape` to `pos`: append a point for a
+        freehand stroke (pen/highlighter), or move its `end` for a
+        two-point one (arrow/rect/blur) -- the same split editor.py's
+        `Canvas.mouseMoveEvent` makes, since both classes of shape share
+        the same field names (see shapes.py's `_transformed` docstring).
+        """
+        if isinstance(self._in_progress_shape, (Pen, Highlighter)):
+            self._in_progress_shape.points.append(pos)
+        else:
+            self._in_progress_shape.end = pos
+        self.update()
+
+    # -- text tool (SNX-52) -------------------------------------------------
+
+    def _start_text_entry(self, pos: QPointF, colour: QColor) -> None:
+        """Open the text tool's label editor at `pos`, seeded with a
+        placeholder and focused for immediate typing, per
+        docs/design/overlay-redesign.md's "Drawing": "text -- click drops
+        an editable label seeded with Label, focused for immediate
+        typing." Mirrors editor.py's `Canvas.mousePressEvent` handling of
+        `Tool.TEXT` -- the label commits later, via `_commit_text`, never
+        here.
+        """
+        self._pending_text_point = pos
+        self._pending_text_colour = colour
+        self._pending_text_stroke_width = self._stroke_width
+        text_edit = self._ensure_text_edit()
+        text_edit.clear()
+        text_edit.move(pos.toPoint())
+        text_edit.show()
+        text_edit.setFocus()
+
+    def _ensure_text_edit(self) -> QLineEdit:
+        if self._text_edit is None:
+            self._text_edit = QLineEdit(self)
+            # Grey hint text, not a seeded value -- see `_commit_text`'s
+            # `if self._text_edit.text():` guard, same reasoning as
+            # editor.py's `Canvas._ensure_text_edit`.
+            self._text_edit.setPlaceholderText("Label")
+            self._text_edit.hide()
+            self._text_edit.editingFinished.connect(self._commit_text)
+        return self._text_edit
+
+    def _commit_text(self) -> None:
+        # Re-entrancy guard, not a signal disconnect: hide() below drops
+        # the field's focus and re-triggers editingFinished synchronously
+        # -- see Canvas._commit_text's own docstring for the identical
+        # reasoning this mirrors.
+        if self._committing_text:
+            return
+        self._committing_text = True
+        try:
+            if self._text_edit.text():
+                self.add_mark(
+                    Text(
+                        colour=self._pending_text_colour,
+                        stroke_width=self._pending_text_stroke_width,
+                        point=self._pending_text_point,
+                        text=self._text_edit.text(),
+                    )
+                )
+            self._text_edit.hide()
+            self._pending_text_point = None
+        finally:
+            self._committing_text = False
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        # SNX-48: tracked on every move regardless of mode, so
+        # `_select_full_screen` always has a recent position to answer
+        # "which display is the cursor on" from -- see its own docstring
+        # for why this beats `QCursor.pos()`.
+        self._cursor_pos = event.position()
+
+        if self._picking_window:
+            # Live preview while armed: a hit sets `_selection` to that
+            # window's rect, a miss clears it -- mirrors `Overlay`'s own
+            # "a miss actively clears any previously-shown preview instead
+            # of leaving it stuck." None of the resize/stroke/cursor logic
+            # below applies while picking, so this returns unconditionally.
+            rect = self._geometry_provider.window_at(self._to_absolute(event.position()))
+            self.set_selection(self._to_local_rect(rect).toRect() if rect is not None else None)
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            super().mouseMoveEvent(event)
+            return
+
+        if self._picking_freeform:
+            # Same shape as the Window branch above: while a lasso is being
+            # traced, none of the resize/stroke/cursor logic below applies,
+            # so this returns unconditionally. Before the first press (drag
+            # not yet started), there is nothing to extend -- a plain hover
+            # over the frozen desktop while armed, same as `Overlay`'s own
+            # freeform mode shows no live preview until a press begins one.
+            if self._freeform_drag_path is not None:
+                self._extend_freeform_drag(event.position())
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            super().mouseMoveEvent(event)
+            return
+
+        if self._in_progress_shape is not None:
+            self._extend_stroke(event.position())
         if self._active_handle is not None:
             self._resize_selection(event.position())
             handle = self._active_handle
@@ -3134,8 +3926,28 @@ class OverlayWindow(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        if self._picking_freeform and self._freeform_drag_path is not None:
+            # A release with a lasso actually in progress always confirms
+            # or discards it, never falls through to the resize/stroke
+            # logic below -- same "stop event propagation" rule the press
+            # handler above already follows for this mode.
+            self._confirm_freeform_pick(event.position())
+            return
         self._active_handle = None
         self._resize_anchor = None
+        if self._in_progress_shape is not None:
+            shape = self._in_progress_shape
+            self._in_progress_shape = None
+            committed = finalize_mark(shape)
+            if committed is not None:
+                self.add_mark(committed)
+            else:
+                # Below the spec's minimum size -- discarded, not
+                # committed (shapes.finalize_mark's own docstring is the
+                # authority for which shapes/thresholds that covers). Still
+                # needs a repaint: `_paint_marks` was showing this shape's
+                # live preview up to the instant of release.
+                self.update()
 
     def _resize_selection(self, pos: QPointF) -> None:
         """Apply one drag-move of `self._active_handle` to the selection.
@@ -3242,7 +4054,7 @@ class OverlayWindow(QWidget):
         coordinates": "in Qt just `painter.setClipRect(sel)` before drawing
         marks."
         """
-        if not self._marks:
+        if not self._marks and self._in_progress_shape is None:
             return
         painter.save()
         painter.setClipRect(QRectF(self._selection))
@@ -3254,14 +4066,44 @@ class OverlayWindow(QWidget):
             if isinstance(shape, ObscuringShape):
                 # Obscuring marks sample the frozen frame's own pixels
                 # rather than paint onto a painter (see
-                # shapes.ObscuringShape.draw()) -- compositing those live
-                # against a resizable selection is a later ticket's
-                # concern, same as the tool that would create them.
-                # render_selection() (export) still handles them correctly,
-                # via render()'s own special-casing.
+                # shapes.ObscuringShape.draw()) -- compositing a committed
+                # one live against a resizable selection, on every repaint,
+                # is a later ticket's concern; render_selection() (export)
+                # still handles it correctly, via render()'s own
+                # special-casing. An *in-progress* blur/pixelate drag gets
+                # a lightweight marquee instead -- see
+                # `_paint_in_progress_shape` below -- so the tool this
+                # ticket wires up isn't silently invisible while dragging.
                 continue
             shape.draw(painter)
+        if self._in_progress_shape is not None:
+            self._paint_in_progress_shape(painter, self._in_progress_shape)
         painter.restore()
+
+    def _paint_in_progress_shape(self, painter: QPainter, shape: Shape) -> None:
+        """Live preview of the mark `_start_stroke`/`_extend_stroke` are
+        currently building -- everything but `StepMarker`/`Text`, which
+        commit on press alone and never reach `_in_progress_shape` (see
+        `_start_stroke`).
+
+        `Rectangle`/`Arrow.draw()` already tolerate either corner order
+        (see their own docstrings, "for the live in-progress preview"), so
+        the shape's own `draw()` is enough for every tool but blur/
+        pixelate: an `ObscuringShape` has no live preview of its own --
+        `_paint_marks` above never draws a *committed* one either, for the
+        same cost reason -- so this borrows `shapes.Crop`'s dashed-outline
+        marquee instead, built from this shape's own colour/stroke/corners
+        rather than the real (expensive, ordering-dependent) blur effect.
+        """
+        if isinstance(shape, ObscuringShape):
+            Crop(
+                colour=shape.colour,
+                stroke_width=shape.stroke_width,
+                start=shape.start,
+                end=shape.end,
+            ).draw(painter)
+            return
+        shape.draw(painter)
 
     def _paint_scrim(self, painter: QPainter) -> None:
         """Layer 2: dim everything outside the selection.
@@ -3273,11 +4115,26 @@ class OverlayWindow(QWidget):
         window and punches the selection out in one call, so there's no
         separate "dim then punch a hole" step that could disagree with this
         one at the selection's edge.
+
+        SNX-49: while a Freeform lasso is being traced or has just been
+        confirmed, the hole this punches is the lasso's own outline rather
+        than its bounding rect, per docs/design/overlay-redesign.md's
+        "Capture modes" entry for Freeform ("the dim scrim inverts against
+        it"). The selection frame/handles/chips/bar painted after this all
+        still key off `_selection` (the path's own bounding rect) -- only
+        this hole follows the path's exact shape.
         """
         widget_rect = QRectF(self.rect())
         path = QPainterPath()
         path.addRect(widget_rect)
-        if self._selection is not None:
+        lasso = (
+            self._freeform_drag_path
+            if self._freeform_drag_path is not None
+            else self._selection_path
+        )
+        if lasso is not None:
+            path.addPath(lasso)
+        elif self._selection is not None:
             local_selection = QRectF(self._selection).intersected(widget_rect)
             if not local_selection.isEmpty():
                 path.addRect(local_selection)
