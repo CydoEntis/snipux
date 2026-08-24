@@ -36,6 +36,7 @@ from PyQt6.QtGui import (
     QImage,
     QPainter,
     QPainterPath,
+    QPainterPathStroker,
     QPen,
     QPolygonF,
 )
@@ -56,9 +57,39 @@ class Shape(ABC):
     colour: QColor
     stroke_width: float
 
+    # Fixed slack (in whichever coordinate space a shape's own points are
+    # in -- see the module docstring) added on top of a stroke-only
+    # shape's painted stroke width, or Text's font-derived box, when
+    # hit-testing for the eraser. Without it a thin 1px line, or a
+    # precisely-placed anchor point (Text/StepMarker), would demand
+    # pixel-perfect aim to click. Same value editor.py's own (separate,
+    # image-pixel-space) eraser hit-testing already settled on, kept here
+    # too since overlay-window-space marks want the same feel.
+    HIT_TOLERANCE: ClassVar[float] = 6.0
+
     @abstractmethod
     def draw(self, painter: QPainter) -> None:
         """Paint this shape onto `painter`'s active device."""
+
+    def hit_test(self, point: QPointF) -> bool:
+        """Whether `point` -- in this shape's own coordinate space, per the
+        module docstring -- lands on this mark, for the eraser tool.
+
+        Only ever called while the eraser is the active tool
+        (docs/design/overlay-redesign.md's "Drawing": "Marks become
+        hit-testable only while the eraser is active"), never during
+        ordinary drawing, so paying for this is opt-in, not a cost every
+        paintEvent carries.
+
+        Base implementation: never a hit -- the safe default for a shape
+        type that hasn't opted in below, mirroring
+        `ObscuringShape.draw()`'s "fail loudly if reached unexpectedly"
+        spirit but returning False instead of raising: a shape the eraser
+        can't reason about should never be silently removed, but a stray
+        click landing on one shouldn't crash the eraser either. Every
+        concrete shape a committed mark can actually be overrides this.
+        """
+        return False
 
     def _pen(self) -> QPen:
         pen = QPen(self.colour)
@@ -67,9 +98,39 @@ class Shape(ABC):
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         return pen
 
+    def _stroke_hit_test(self, path: QPainterPath, point: QPointF) -> bool:
+        """Shared by every stroke-only shape's hit_test: widen `path` --
+        the same outline draw() strokes -- by this shape's actual painted
+        stroke width plus HIT_TOLERANCE, then test `point` against the
+        widened region. Reads the width from `self._pen()` rather than
+        `self.stroke_width` directly, so a subclass that widens its own
+        pen for painting (Highlighter, via its `_pen()` override) gets a
+        hit region that matches what it actually draws, without that
+        formula being duplicated here -- this is what satisfies "a hit
+        test on a stroked shape allows for the stroke width."
+        """
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self._pen().widthF() + self.HIT_TOLERANCE)
+        return stroker.createStroke(path).contains(point)
+
 
 def _rect_from_corners(start: QPointF, end: QPointF) -> QRectF:
     return QRectF(start, end).normalized()
+
+
+def _polyline_path(points: list[QPointF]) -> QPainterPath | None:
+    """A QPainterPath tracing `points` as connected line segments, or None
+    if there are fewer than two to connect -- shared by Pen/Highlighter's
+    hit_test, which both stroke a plain polyline the same way their draw()
+    does.
+    """
+    if len(points) < 2:
+        return None
+    path = QPainterPath()
+    path.moveTo(points[0])
+    for point in points[1:]:
+        path.lineTo(point)
+    return path
 
 
 @dataclass
@@ -83,6 +144,10 @@ class Pen(Shape):
             return
         painter.setPen(self._pen())
         painter.drawPolyline(QPolygonF(self.points))
+
+    def hit_test(self, point: QPointF) -> bool:
+        path = _polyline_path(self.points)
+        return path is not None and self._stroke_hit_test(path, point)
 
 
 @dataclass
@@ -115,6 +180,13 @@ class Highlighter(Shape):
         painter.drawPolyline(QPolygonF(self.points))
         painter.setOpacity(1.0)
 
+    def hit_test(self, point: QPointF) -> bool:
+        # Reuses this class's own _pen() override (stroke x HIGHLIGHT_MULT)
+        # via _stroke_hit_test, so the hit region matches the wider stroke
+        # actually painted, not the narrower Pen-sized one.
+        path = _polyline_path(self.points)
+        return path is not None and self._stroke_hit_test(path, point)
+
 
 @dataclass
 class Line(Shape):
@@ -126,6 +198,12 @@ class Line(Shape):
     def draw(self, painter: QPainter) -> None:
         painter.setPen(self._pen())
         painter.drawLine(self.start, self.end)
+
+    def hit_test(self, point: QPointF) -> bool:
+        path = QPainterPath()
+        path.moveTo(self.start)
+        path.lineTo(self.end)
+        return self._stroke_hit_test(path, point)
 
 
 @dataclass
@@ -188,6 +266,17 @@ class Arrow(Shape):
         head.closeSubpath()
         painter.fillPath(head, self.colour)
 
+    def hit_test(self, point: QPointF) -> bool:
+        # Hit-tests the shaft alone, ignoring the filled head's triangle --
+        # a deliberate simplification (also made in editor.py's own
+        # eraser hit-testing) rather than reconstructing the head's exact
+        # geometry a second time here; the head sits at the shaft's end
+        # and the tolerance already gives a click near it plenty of slack.
+        path = QPainterPath()
+        path.moveTo(self.start)
+        path.lineTo(self.end)
+        return self._stroke_hit_test(path, point)
+
 
 @dataclass
 class Rectangle(Shape):
@@ -209,6 +298,15 @@ class Rectangle(Shape):
         painter.drawRoundedRect(
             _rect_from_corners(self.start, self.end), self.CORNER_RADIUS, self.CORNER_RADIUS
         )
+
+    def hit_test(self, point: QPointF) -> bool:
+        # The stroked outline only -- clicking the empty, unfilled
+        # interior is clicking whatever is behind the rectangle, not the
+        # rectangle itself, same reasoning editor.py's own hit-testing
+        # gives for the analogous case.
+        path = QPainterPath()
+        path.addRect(_rect_from_corners(self.start, self.end))
+        return self._stroke_hit_test(path, point)
 
 
 # Below this bounding-box size (in either axis) a drag is treated as a
@@ -269,6 +367,13 @@ class Ellipse(Shape):
         painter.setPen(self._pen())
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(_rect_from_corners(self.start, self.end))
+
+    def hit_test(self, point: QPointF) -> bool:
+        # Stroked outline only -- same "interior isn't the shape" reasoning
+        # as Rectangle.hit_test above.
+        path = QPainterPath()
+        path.addEllipse(_rect_from_corners(self.start, self.end))
+        return self._stroke_hit_test(path, point)
 
 
 def _rounded_pixel_rect(rect: QRectF) -> QRect:
@@ -379,6 +484,12 @@ class ObscuringShape(Shape):
         # calls apply() instead. Raises rather than silently no-op-ing so a
         # caller that bypasses render()'s isinstance check fails loudly.
         raise NotImplementedError("ObscuringShape uses apply(), not draw()")
+
+    def hit_test(self, point: QPointF) -> bool:
+        # The whole filled patch counts as the mark, unlike a stroke-only
+        # shape's outline -- so no HIT_TOLERANCE slack is added here, same
+        # as the analogous case in editor.py's own hit-testing.
+        return _rect_from_corners(self.start, self.end).contains(point)
 
 
 @dataclass
@@ -506,6 +617,20 @@ class Text(Shape):
             self.text,
         )
 
+    def hit_test(self, point: QPointF) -> bool:
+        # A generous fixed box centred on the anchor point rather than
+        # measuring the actual chip draw() paints -- good enough to pick
+        # the label out without duplicating this class's own font-metrics
+        # sizing logic here, same spirit as its `_font()`/chip layout.
+        half_extent = self.HIT_TOLERANCE + self.stroke_width * self.TEXT_FONT_SIZE_FACTOR
+        rect = QRectF(
+            self.point.x() - half_extent,
+            self.point.y() - half_extent,
+            half_extent * 2,
+            half_extent * 2,
+        )
+        return rect.contains(point)
+
 
 @dataclass
 class StepMarker(Shape):
@@ -596,6 +721,14 @@ class StepMarker(Shape):
         painter.setPen(QPen(self.BADGE_TEXT_COLOUR))
         painter.setFont(self._font())
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(self.number))
+
+    def hit_test(self, point: QPointF) -> bool:
+        # Fixed at RADIUS (tokens.py's STEP_D / 2), not stroke-derived --
+        # mirrors draw()'s own sizing, and the badge's filled area is
+        # already generous enough that no extra HIT_TOLERANCE is needed.
+        path = QPainterPath()
+        path.addEllipse(self.point, self.RADIUS, self.RADIUS)
+        return path.contains(point)
 
 
 def next_step_number(shapes: list[Shape]) -> int:
