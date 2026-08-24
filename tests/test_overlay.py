@@ -15,14 +15,15 @@ from PyQt6.QtWidgets import (
 )
 
 import snipux.app as app_module
-from snipux.capture import Frame, X11WindowGeometryProvider
+from snipux.capture import BackendRegistry, CaptureBackend, Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
 from snipux.design import font_families
 from snipux.design import tokens
-from snipux.shapes import Rectangle
+from snipux.shapes import Arrow, Blur, Highlighter, Pen, Pixelate, Rectangle, StepMarker, Text
 from snipux.overlay import (
     BlurTray,
     CaptureModePopover,
+    DelayCountdown,
     FloatingBar,
     GeometryProvider,
     Handle,
@@ -392,6 +393,43 @@ class TestFreeformMode:
         confirmed.assert_not_called()
         assert overlay._selection is None
 
+    def test_veil_is_painted_outside_the_path_not_the_bounding_box(self):
+        # SNX-49 AC: the scrim inverts against the lasso itself, so a point
+        # inside the L's own bounding box but in the notch it cuts away
+        # (unlike test_confirms_bounds_and_excludes_pixels_outside_the_path's
+        # plain path.contains() check) must still read as dimmed, not as
+        # the undimmed base colour a bounding-box-only hole would show.
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FREEFORM)
+
+        self._trace_l_shape(overlay)
+
+        rendered = overlay.grab().toImage()
+        base_color = QColor(10, 20, 30)
+        assert rendered.pixelColor(30, 30) == base_color  # inside the stem
+        assert rendered.pixelColor(80, 100) == base_color  # inside the foot
+        assert rendered.pixelColor(80, 40) != base_color  # in the notch: dimmed
+
+    def test_veil_follows_the_path_live_mid_drag(self):
+        frame = make_frame()
+        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FREEFORM)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self._STEM_TOP_LEFT)
+        QTest.mouseMove(overlay, self._STEM_TOP_RIGHT)
+        QTest.mouseMove(overlay, self._NOTCH_CORNER)
+        # Traced so far: (20,20) -> (60,20) -> (60,80), an open path whose
+        # bounding box is (20,20)-(60,80). Qt implicitly closes an open
+        # path for filling purposes (a straight line from (60,80) back to
+        # (20,20)), so (25, 75) sits inside that bounding box but on the far
+        # side of that implicit closing edge -- outside the filled shape.
+
+        rendered = overlay.grab().toImage()
+        base_color = QColor(10, 20, 30)
+        assert rendered.pixelColor(30, 30) == base_color  # inside the traced shape
+        assert rendered.pixelColor(25, 75) != base_color  # in the bbox, outside it: dimmed
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=self._NOTCH_CORNER)
+
     def test_closed_loop_back_near_start_still_confirms(self):
         # Anchor-to-release distance would be tiny here; only the traced
         # path's own bounding-rect diagonal should decide misfire or not.
@@ -675,6 +713,29 @@ class TestOverlayWindow:
         assert sampled.green() == pytest.approx(expected.green(), abs=2)
         assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
 
+    def test_freeform_scrim_inverts_against_the_path_not_the_bounding_box(self):
+        # SNX-49 AC: an L-shaped path whose bounding box is (20,20)-(100,120)
+        # -- the notch cut out of its top-right must stay dimmed even
+        # though it sits squarely inside that bounding box.
+        frame = make_frame()
+        overlay = OverlayWindow(frame)
+        path = QPainterPath()
+        path.moveTo(QPointF(20, 20))
+        path.lineTo(QPointF(60, 20))
+        path.lineTo(QPointF(60, 80))
+        path.lineTo(QPointF(100, 80))
+        path.lineTo(QPointF(100, 120))
+        path.lineTo(QPointF(20, 120))
+        path.closeSubpath()
+        overlay.set_selection(QRect(20, 20, 80, 100), path=path)
+
+        rendered = overlay.grab().toImage()
+        base_color = QColor(10, 20, 30)
+
+        assert rendered.pixelColor(30, 30) == base_color  # inside the stem
+        assert rendered.pixelColor(80, 100) == base_color  # inside the foot
+        assert rendered.pixelColor(80, 40) != base_color  # in the notch: dimmed
+
     def test_no_selection_dims_the_whole_window(self):
         frame = make_frame()
         overlay = OverlayWindow(frame)
@@ -922,6 +983,251 @@ class TestEraserTool:
         assert overlay.cursor().shape() == Qt.CursorShape.PointingHandCursor
 
 
+class TestDrawingTools:
+    """SNX-52: a press inside the selection starts a mark for whichever
+    tool `_bar.active_tool` names; move extends it; release either commits
+    it (via shapes.finalize_mark) or discards it if it never reached the
+    spec's minimum size. A committed mark takes its colour/stroke from
+    `_ink_colour`/`_stroke_width`, and -- for blur -- its shape class and
+    strength from `_blur_mode`/`_blur_strength`, per
+    docs/design/overlay-redesign.md's "Drawing".
+    """
+
+    def _overlay(self, selection=QRect(0, 0, 200, 200)):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_pen_press_move_release_commits_a_polyline(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(40, 40))
+        QTest.mouseMove(overlay, QPoint(60, 30))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(60, 30))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Pen)
+        assert mark.points == [QPointF(20, 20), QPointF(40, 40), QPointF(60, 30)]
+
+    def test_highlighter_press_move_release_commits_a_polyline(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("highlighter")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(50, 50))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert len(overlay.marks) == 1
+        assert isinstance(overlay.marks[0], Highlighter)
+
+    def test_pen_stroke_with_only_a_press_and_release_is_discarded(self):
+        # No mouseMoveEvent in between: the stroke never grows past its one
+        # anchor point, below finalize_mark's freehand minimum.
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+
+        assert overlay.marks == ()
+
+    def test_arrow_press_move_release_commits_from_press_to_release(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("arrow")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Arrow)
+        assert mark.start == QPointF(20, 20)
+        assert mark.end == QPointF(80, 60)
+
+    def test_rect_press_move_release_commits_from_press_to_release(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("rect")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Rectangle)
+        assert mark.start == QPointF(20, 20)
+        assert mark.end == QPointF(80, 60)
+
+    def test_in_progress_rect_is_visible_mid_drag(self):
+        # Same stroke width/colour TestOverlayWindowMarks's own painted-mark
+        # tests already rely on for a clean, fully-covered sample pixel.
+        overlay = self._overlay()
+        overlay._bar.select_tool("rect")
+        overlay._ink_colour = "#ff0000"
+        overlay._stroke_width = 6
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+
+        rendered = overlay.grab().toImage()
+        assert rendered.pixelColor(20, 40) == QColor("#ff0000")  # left edge of the live preview
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+    def test_blur_press_move_release_commits_a_blur_shape(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("blur")
+        overlay._blur_mode = "blur"
+        overlay._blur_strength = 12
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Blur)
+        assert not isinstance(mark, Pixelate)
+        assert mark.start == QPointF(20, 20)
+        assert mark.end == QPointF(80, 60)
+        assert mark.strength == 12
+
+    def test_pixelate_mode_commits_a_pixelate_shape(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("blur")
+        overlay._blur_mode = "pix"
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert isinstance(overlay.marks[0], Pixelate)
+
+    def test_tiny_blur_drag_is_discarded_on_release(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("blur")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(21, 21))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(21, 21))
+
+        assert overlay.marks == ()
+
+    def test_step_commits_on_a_click_alone_with_no_drag(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("step")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+        # Committed on the press itself -- never arms a drag to release.
+        assert overlay._in_progress_shape is None
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, StepMarker)
+        assert mark.point == QPointF(30, 30)
+        assert mark.number == 1
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+        assert len(overlay.marks) == 1  # release adds nothing further
+
+    def test_text_click_opens_the_label_editor_with_no_mark_yet(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+
+        assert overlay.marks == ()
+        assert overlay._text_edit is not None
+        assert not overlay._text_edit.isHidden()
+        assert overlay._text_edit.placeholderText() == "Label"
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+    def test_text_commits_once_typed_and_editing_finishes(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Text)
+        assert mark.text == "hello"
+        assert mark.point == QPointF(30, 30)
+        assert overlay._text_edit.isHidden()
+
+    def test_text_editing_finished_with_nothing_typed_commits_no_mark(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert overlay.marks == ()
+
+    def test_text_label_focus_also_suppresses_shortcuts(self):
+        # The other half of SNX-47's suppression AC (see
+        # TestKeyboardShortcutSuppression), now against the real text-tool
+        # editor this ticket wires up rather than a bare stand-in QLineEdit.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert overlay._bar.active_tool == "text"  # the "P" shortcut never fired
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+    def test_press_on_a_handle_resizes_and_commits_no_mark(self):
+        overlay = self._overlay(selection=QRect(0, 0, 100, 100))
+        overlay._bar.select_tool("pen")
+        handle_pos = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=handle_pos)
+        QTest.mouseMove(overlay, handle_pos + QPoint(30, 0))
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, pos=handle_pos + QPoint(30, 0)
+        )
+
+        assert overlay.marks == ()
+        assert overlay._selection.width() != 100  # the resize itself did happen
+
+    def test_committed_mark_takes_the_current_tray_colour_and_stroke(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+        overlay._ink_colour = "#123456"
+        overlay._stroke_width = 17
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(40, 40))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
+
+        mark = overlay.marks[0]
+        assert mark.colour == QColor("#123456")
+        assert mark.stroke_width == 17
+
+
 class TestSelectionStroke:
     """SNX-32: the two coincident 1px strokes -- solid white under an
     animated dashed dark one -- that make the marching ants.
@@ -1134,7 +1440,16 @@ class TestHandleCursors:
         QTest.mouseMove(overlay, QPoint(50, 50))
         assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor
 
-        QTest.mouseMove(overlay, QPoint(10, 10))  # outside the selection entirely
+        # Outside the selection *and* clear of every other chrome widget --
+        # (10, 10) used to qualify, but SNX-46's HintHUD now spans the
+        # window's full width for its own HUD_H=44px strip, so a move there
+        # lands on that child widget instead of reaching this one's own
+        # mouseMoveEvent at all (Qt delivers it to whichever widget is
+        # actually under the point), leaving this cursor stuck rather than
+        # unset. (280, 280) sits below the HUD, below the floating bar, and
+        # outside the selection, so it actually exercises this widget's own
+        # cursor-reset branch.
+        QTest.mouseMove(overlay, QPoint(280, 280))
         assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
 
 
@@ -2929,7 +3244,12 @@ class TestCaptureModePopoverOverlayIntegration:
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
         QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
-        target_label = tokens.CAPTURE_MODES[1][0]
+        # Freeform, not Window/Full screen (SNX-48 gives those two their own
+        # picking/selection behaviour, covered by TestCaptureModeWindow
+        # Integration/TestCaptureModeFullScreenIntegration below) -- this
+        # test is only about the generic "picking a row records the label
+        # and updates the chip" mechanism every row shares.
+        target_label = tokens.CAPTURE_MODES[3][0]
 
         QTest.mouseClick(overlay._popover._rows[target_label], Qt.MouseButton.LeftButton)
 
@@ -2987,6 +3307,645 @@ class TestCaptureModePopoverOverlayIntegration:
         overlay.set_selection(None)
 
         assert not overlay._popover.isVisible()
+
+
+def _close_stray_toplevel_windows() -> None:
+    """Close every top-level widget still alive from an earlier test.
+
+    None of this file's many other `OverlayWindow`/`Overlay` tests close
+    their own instance -- ordinary practice throughout the file, since
+    each test builds a fresh one and nothing downstream reads a previous
+    test's leftovers. But `TestCaptureModeWindowIntegration`/
+    `TestCaptureModeFullScreenIntegration` below depend on a bare hover-
+    only `QTest.mouseMove` (no button held) actually reaching the right
+    window -- and by the time hundreds of never-closed, same-screen-rect
+    top-level windows have piled up over a full run, the offscreen QPA
+    platform can misroute that hover to a stale one instead of the
+    current test's, a real flake this codebase doesn't otherwise trigger
+    (every other interaction in this file is press-driven, which grabs
+    the mouse and isn't affected). A clean slate immediately before each
+    test in those two classes only -- not a file-wide fixture, so no
+    other test's behaviour changes -- keeps that routing unambiguous.
+    """
+    for widget in QApplication.topLevelWidgets():
+        widget.close()
+
+
+class TestCaptureModeWindowIntegration:
+    """SNX-48 AC: picking Window in the popover arms hover-preview/click-
+    to-snap picking on `OverlayWindow` itself -- sourced from a
+    `GeometryProvider`, the same one `Overlay`'s own WINDOW mode
+    (`TestWindowMode` above) already uses -- producing a `_selection`
+    that stays open for re-framing and in-place annotation instead of
+    being confirmed into a separate editor.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    WINDOW_RECT = QRectF(30, 30, 50, 50)
+    HIT_POINT = QPoint(50, 50)
+    # Outside WINDOW_RECT, and -- as important -- outside the real child
+    # widgets `OverlayWindow` shows once it has a selection: `HintHUD`
+    # spans the full width for `tokens.Metric.HUD_H` (44px) from the top,
+    # and the floating bar sits well below the selection. A point inside
+    # either one would never reach `OverlayWindow.mouseMoveEvent` at all
+    # (Qt delivers it to that child instead), silently turning this into
+    # a no-op rather than an actual miss.
+    MISS_POINT = QPoint(200, 70)
+    WINDOW_LABEL = tokens.CAPTURE_MODES[1][0]
+    REGION_LABEL = tokens.CAPTURE_MODES[0][0]
+
+    def _overlay(self, provider=None, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame, geometry_provider=provider)
+        # The popover is only reachable through the bar's own chip, and
+        # the bar is only shown once a selection already exists -- so
+        # every scenario below starts from an ordinary prior selection,
+        # the same way a real capture would already have one (a default
+        # Region selection, or an earlier drag) before the user ever
+        # opens the mode chip.
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        # A window's very first bare hover-only QTest.mouseMove (no button
+        # held) can be dropped by the offscreen QPA platform even with a
+        # clean slate (`_clean_slate` above); a throwaway move here, before
+        # any test's own real one, reliably establishes hover delivery to
+        # *this* window for the rest of the test.
+        QTest.mouseMove(overlay, QPoint(0, 0))
+        return overlay
+
+    def _pick_window_mode(self, overlay):
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(
+            overlay._popover._rows[self.WINDOW_LABEL], Qt.MouseButton.LeftButton
+        )
+
+    def test_picking_window_arms_picking_and_clears_the_prior_selection(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+
+        self._pick_window_mode(overlay)
+
+        assert overlay._picking_window
+        assert overlay._selection is None
+
+    def test_hover_previews_the_window_under_the_cursor(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+
+        QTest.mouseMove(overlay, self.HIT_POINT)
+
+        assert overlay._selection == self.WINDOW_RECT.toRect()
+
+    def test_hover_clears_on_a_miss(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+        QTest.mouseMove(overlay, self.HIT_POINT)
+        assert overlay._selection is not None
+
+        QTest.mouseMove(overlay, self.MISS_POINT)
+
+        assert overlay._selection is None
+
+    def test_click_snaps_the_selection_and_disarms_picking(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        assert overlay._selection == self.WINDOW_RECT.toRect()
+        assert not overlay._picking_window
+
+    def test_click_on_a_miss_leaves_picking_armed(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.MISS_POINT)
+
+        assert overlay._picking_window
+        assert overlay._selection is None
+
+    def test_selection_from_window_mode_is_reframable_like_a_dragged_one(self):
+        # Mirrors TestDimensionChipLiveUpdate's own pattern above: `press`
+        # only needs to land inside the handle to grab it -- the resize
+        # itself is driven entirely by the absolute `target` passed to the
+        # move/release that follow, not by any delta from `press`.
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+        press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+        target = QPoint(120, 55)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, target)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=target)
+
+        # left/top/bottom stay anchored at the window-mode rect's own
+        # edges (30, 30, 80); only the dragged right edge moves, to 120.
+        assert overlay._selection == QRect(30, 30, 90, 50)
+
+    def test_selection_from_window_mode_can_be_annotated(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        overlay.add_mark(_mark())
+
+        assert len(overlay.marks) == 1
+
+    def test_no_provider_toasts_and_falls_back_to_region(self):
+        # `geometry_provider=None` -> `UnsupportedGeometryProvider`, per
+        # `OverlayWindow`'s own default -- the same "degrade rather than
+        # raise" fallback `Overlay`'s WINDOW mode already has, but this
+        # ticket also requires telling the user rather than a silent no-op.
+        overlay = self._overlay(provider=None)
+
+        self._pick_window_mode(overlay)
+
+        assert not overlay._picking_window
+        assert overlay._capture_mode == self.REGION_LABEL
+        assert overlay._bar._chip._text_label.text() == self.REGION_LABEL
+        assert overlay._popover.mode == self.REGION_LABEL
+        assert overlay._toast.isVisible()
+        assert "window" in overlay._toast._text_label.text().lower()
+
+    def test_unavailable_provider_toasts_and_never_queries_window_at(self):
+        provider = Mock(spec=GeometryProvider)
+        provider.is_available.return_value = False
+        overlay = self._overlay(provider=provider)
+
+        self._pick_window_mode(overlay)
+
+        assert not overlay._picking_window
+        assert overlay._capture_mode == self.REGION_LABEL
+        assert overlay._toast.isVisible()
+        provider.window_at.assert_not_called()
+
+
+class TestCaptureModeFullScreenIntegration:
+    """SNX-48 AC: picking Full screen in the popover sets `_selection` to
+    the whole display the cursor is on, immediately -- no drag or click
+    needed past picking the row.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    FULL_SCREEN_LABEL = tokens.CAPTURE_MODES[2][0]
+
+    def _overlay(self, size=(600, 600), monitor_geometries=None):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame, monitor_geometries=monitor_geometries)
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _pick_full_screen(self, overlay):
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(
+            overlay._popover._rows[self.FULL_SCREEN_LABEL], Qt.MouseButton.LeftButton
+        )
+
+    def test_selects_the_whole_window_on_a_single_monitor(self):
+        overlay = self._overlay()
+
+        self._pick_full_screen(overlay)
+
+        assert overlay._selection == QRect(0, 0, 600, 600)
+
+    def test_selects_the_monitor_the_cursor_last_moved_over(self):
+        left = QRectF(0, 0, 250, 600)
+        right = QRectF(250, 0, 350, 600)
+        overlay = self._overlay(monitor_geometries=[left, right])
+        # Throwaway move before the real one -- see the identical comment
+        # on TestCaptureModeWindowIntegration._overlay; not folded into
+        # this class's own _overlay() because the fallback test right
+        # below needs `_cursor_pos` to still be None when it starts.
+        QTest.mouseMove(overlay, QPoint(590, 590))
+        QTest.mouseMove(overlay, QPoint(100, 100))  # inside `left`
+
+        self._pick_full_screen(overlay)
+
+        assert overlay._selection == left.toRect()
+
+    def test_falls_back_to_the_windows_own_centre_with_no_prior_cursor_move(self):
+        left = QRectF(0, 0, 250, 600)
+        right = QRectF(250, 0, 350, 600)
+        overlay = self._overlay(monitor_geometries=[left, right])
+        # No QTest.mouseMove at all -- `_cursor_pos` is still None, so
+        # the window's own centre (300, 300), inside `right` only, is
+        # what decides the display.
+
+        self._pick_full_screen(overlay)
+
+        assert overlay._selection == right.toRect()
+
+    def test_selection_from_full_screen_is_reframable_like_a_dragged_one(self):
+        overlay = self._overlay()
+        self._pick_full_screen(overlay)
+        press = overlay._edge_handle_rect(Handle.BOTTOM).center().toPoint()
+        # Comfortably clear of the `_BAR_ROOM` clamp (window height 600
+        # minus 130 = 470) so the result is the plain dragged value, not
+        # that clamp's own floor -- `_resize_selection`'s docstring is the
+        # authority for why that clamp exists at all.
+        target = QPoint(300, 300)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, target)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=target)
+
+        assert overlay._selection == QRect(0, 0, 600, 300)
+
+    def test_selection_from_full_screen_can_be_annotated(self):
+        overlay = self._overlay()
+        self._pick_full_screen(overlay)
+
+        overlay.add_mark(_mark())
+
+        assert len(overlay.marks) == 1
+
+
+class TestCaptureModeFreeformIntegration:
+    """SNX-49 AC: picking Freeform in the popover arms press-drag-release
+    lasso tracing. Release confirms the traced path (closing it for the
+    user if they didn't), sets `_selection` to its bounding box -- same as
+    every other mode, so the selection frame/handles/chips/bar stay
+    re-framable and annotatable exactly as before -- and stores the exact
+    path as `_selection_path` for the scrim/export to key off separately.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    FREEFORM_LABEL = tokens.CAPTURE_MODES[3][0]
+
+    # The same L-shape `TestFreeformMode` traces for `Overlay` above --
+    # reused here so the excluded-notch assertions below rest on that
+    # class's own already-proven path.contains() geometry rather than
+    # re-derived coordinates.
+    _STEM_TOP_LEFT = QPoint(20, 20)
+    _STEM_TOP_RIGHT = QPoint(60, 20)
+    _NOTCH_CORNER = QPoint(60, 80)
+    _FOOT_TOP_RIGHT = QPoint(100, 80)
+    _FOOT_BOTTOM_RIGHT = QPoint(100, 120)
+    _FOOT_BOTTOM_LEFT = QPoint(20, 120)  # release point; never returns to the anchor
+
+    def _overlay(self, size=(200, 200)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 50, 50))  # a prior selection to clear
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _pick_freeform_mode(self, overlay):
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(
+            overlay._popover._rows[self.FREEFORM_LABEL], Qt.MouseButton.LeftButton
+        )
+
+    def _trace_l_shape(self, overlay):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self._STEM_TOP_LEFT)
+        QTest.mouseMove(overlay, self._STEM_TOP_RIGHT)
+        QTest.mouseMove(overlay, self._NOTCH_CORNER)
+        QTest.mouseMove(overlay, self._FOOT_TOP_RIGHT)
+        QTest.mouseMove(overlay, self._FOOT_BOTTOM_RIGHT)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=self._FOOT_BOTTOM_LEFT)
+
+    def test_picking_freeform_arms_picking_and_clears_the_prior_selection(self):
+        overlay = self._overlay()
+
+        self._pick_freeform_mode(overlay)
+
+        assert overlay._picking_freeform
+        assert overlay._selection is None
+
+    def test_drag_traces_a_lasso_and_confirms_its_bounds_on_release(self):
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+
+        self._trace_l_shape(overlay)
+
+        assert not overlay._picking_freeform
+        assert overlay._selection == QRect(20, 20, 80, 100)
+        assert isinstance(overlay._selection_path, QPainterPath)
+        assert overlay._selection_path.contains(QPointF(30, 30))  # inside the stem
+        assert overlay._selection_path.contains(QPointF(80, 100))  # inside the foot
+        assert not overlay._selection_path.contains(QPointF(80, 40))  # in the notch
+
+    def test_unclosed_lasso_is_closed_for_the_user_on_release(self):
+        # The release point (_FOOT_BOTTOM_LEFT) never returns to the press
+        # anchor (_STEM_TOP_LEFT) -- if the loop weren't closed for the
+        # user, the region between the two along the L's own open edge
+        # wouldn't be part of the filled path at all.
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+
+        self._trace_l_shape(overlay)
+
+        assert overlay._selection_path.contains(QPointF(21, 100))
+
+    def test_release_below_threshold_is_a_misfire_and_leaves_picking_armed(self):
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert overlay._picking_freeform
+        assert overlay._selection is None
+
+    def test_selection_from_freeform_can_be_annotated(self):
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+        self._trace_l_shape(overlay)
+
+        overlay.add_mark(_mark())
+
+        assert len(overlay.marks) == 1
+
+    def test_resizing_a_freeform_selection_reverts_it_to_a_plain_rectangle(self):
+        # The path was traced against the *original* bounding box; a
+        # handle drag has no way to reshape it to match a dragged edge, so
+        # re-framing silently drops the path rather than leaving a now-stale
+        # one behind -- see `OverlayWindow.set_selection`'s own docstring.
+        overlay = self._overlay()
+        self._pick_freeform_mode(overlay)
+        self._trace_l_shape(overlay)
+        press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+        target = QPoint(150, press.y())
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, target)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=target)
+
+        assert overlay._selection_path is None
+
+
+class _FakeCaptureBackend(CaptureBackend):
+    """Unlike a `Mock`, this returns a real, distinguishable `Frame` --
+    for proving a delayed re-capture's frame came from *this* backend
+    rather than merely that `capture()` was called at all. Mirrors
+    `test_app.py`'s own `FakeCaptureBackend`.
+    """
+
+    def __init__(self, frame: Frame):
+        self._frame = frame
+
+    def name(self) -> str:
+        return "fake"
+
+    def is_available(self) -> bool:
+        return True
+
+    def capture(self) -> Frame:
+        return self._frame
+
+
+class _FailingCaptureBackend(CaptureBackend):
+    def name(self) -> str:
+        return "failing"
+
+    def is_available(self) -> bool:
+        return True
+
+    def capture(self) -> Frame:
+        raise RuntimeError("capture failed")
+
+
+class TestCaptureModeDelayIntegration:
+    """SNX-50 AC: picking a mode in the popover while `_delay` isn't `Off`
+    hides `OverlayWindow` before any wait begins, shows a countdown while
+    it's gone, re-grabs through `_registry` -- the same `BackendRegistry`
+    the first frame came through, per CLAUDE.md's one architectural rule
+    applying to this grab exactly as it does to the first -- and re-opens
+    over the fresh frame with the tool/colour/stroke the user had chosen.
+    A delay of `Off` (the default `tokens.DELAYS[0]`) does none of that.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    REGION_LABEL = tokens.CAPTURE_MODES[0][0]
+    FREEFORM_LABEL = tokens.CAPTURE_MODES[3][0]
+
+    def _overlay(self, registry=None, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame, registry=registry)
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _open_popover_and_set_delay(self, overlay, delay_clicks=1):
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        for _ in range(delay_clicks):
+            QTest.mouseClick(overlay._popover._delay_row, Qt.MouseButton.LeftButton)
+
+    def _confirm_mode(self, overlay, label):
+        QTest.mouseClick(overlay._popover._rows[label], Qt.MouseButton.LeftButton)
+
+    def test_confirming_a_mode_with_a_delay_hides_the_overlay_before_the_wait_begins(self):
+        overlay = self._overlay()
+        self._open_popover_and_set_delay(overlay)  # DELAYS[1] == "3s"
+        assert overlay._delay == tokens.DELAYS[1]
+
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        assert not overlay.isVisible()
+        # The wait itself hasn't elapsed at all yet -- this isn't "hidden
+        # eventually," it's hidden synchronously, before the first tick.
+        assert overlay._delay_remaining == 3
+
+    def test_a_countdown_is_visible_while_the_overlay_is_hidden(self):
+        overlay = self._overlay()
+        self._open_popover_and_set_delay(overlay)
+
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        assert not overlay.isVisible()
+        assert overlay._countdown.isVisible()
+        assert overlay._countdown._label.text() == "3"
+
+    def test_countdown_ticks_down_once_per_second_elapsed(self):
+        overlay = self._overlay()
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        overlay._delay_timer.timeout.emit()
+        assert overlay._countdown._label.text() == "2"
+        overlay._delay_timer.timeout.emit()
+        assert overlay._countdown._label.text() == "1"
+
+    def test_after_the_wait_a_fresh_frame_is_captured_through_the_registry(self):
+        original_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        regrabbed_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FakeCaptureBackend(regrabbed_frame)])
+        overlay = OverlayWindow(original_frame, registry=registry)
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        # Identity, not just equal content: this must be the frame the
+        # fake backend handed back through `_registry.capture()`, never
+        # the original `frame` the constructor was given.
+        assert overlay._frame is regrabbed_frame
+        assert overlay._frame is not original_frame
+
+    def test_the_overlay_reopens_once_the_countdown_reaches_zero(self):
+        regrabbed_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FakeCaptureBackend(regrabbed_frame)])
+        overlay = self._overlay(registry=registry)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay.isVisible()
+        assert not overlay._countdown.isVisible()
+        # The stale selection described the *old* content; it's cleared
+        # rather than carried over onto the new frame's pixels.
+        assert overlay._selection is None
+
+    def test_reopened_overlay_keeps_the_tool_colour_and_stroke_the_user_chose(self):
+        regrabbed_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FakeCaptureBackend(regrabbed_frame)])
+        overlay = self._overlay(registry=registry)
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        _name, target_hex = tokens.INK_SWATCHES[3]
+        QTest.mouseClick(overlay._tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
+        overlay._tray._slider.setValue(21)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay._bar.active_tool == "pen"
+        assert overlay._ink_colour == target_hex
+        assert overlay._stroke_width == 21
+
+    def test_delayed_freeform_pick_still_arms_lasso_tracing_on_the_new_frame(self):
+        # The picked mode isn't forgotten across the wait -- Window/Full
+        # screen/Freeform still do their own thing against the fresh
+        # frame, same as they would with no delay at all.
+        regrabbed_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FakeCaptureBackend(regrabbed_frame)])
+        overlay = self._overlay(registry=registry)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.FREEFORM_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay._picking_freeform
+
+    def test_failed_regrab_restores_the_old_frame_and_toasts_instead_of_crashing(self):
+        original_frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        registry = BackendRegistry([_FailingCaptureBackend()])
+        overlay = OverlayWindow(original_frame, registry=registry)
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        self._open_popover_and_set_delay(overlay)
+        self._confirm_mode(overlay, self.REGION_LABEL)
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay.isVisible()
+        assert overlay._frame is original_frame
+        assert overlay._toast.isVisible()
+        assert "capture failed" in overlay._toast._text_label.text()
+
+    def test_delay_off_captures_immediately_with_no_hide_or_countdown(self):
+        overlay = self._overlay()
+        assert overlay._delay == tokens.DELAYS[0]  # "Off", the default
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        self._confirm_mode(overlay, self.FREEFORM_LABEL)
+
+        assert overlay.isVisible()
+        assert overlay._countdown is None
+        # Freeform's own immediate arming (SNX-49) still ran -- proving this
+        # went through the ordinary dispatch path, not a delay that just
+        # happened to finish instantly.
+        assert overlay._picking_freeform
+
+
+class TestFreeformExport:
+    """SNX-49 AC: the exported image is cropped to the lasso's bounding box
+    with the pixels outside the path fully transparent, in a format
+    (`QImage`, later written as PNG by `app.save_image`) that preserves
+    that transparency.
+    """
+
+    def _overlay_with_triangular_lasso(self):
+        # A right triangle within a square bounding box: (10,10)-(10,60) up
+        # the left edge, (10,60)-(60,60) along the bottom, and the
+        # hypotenuse (60,60)-(10,10) closing it -- so a point near the
+        # bounding box's excluded top-right corner is unambiguously outside
+        # the path while its own centre is unambiguously inside.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        path = QPainterPath()
+        path.moveTo(QPointF(10, 10))
+        path.lineTo(QPointF(10, 60))
+        path.lineTo(QPointF(60, 60))
+        path.closeSubpath()
+        overlay.set_selection(QRect(10, 10, 50, 50), path=path)
+        return overlay
+
+    def test_pixels_outside_the_path_are_fully_transparent(self):
+        overlay = self._overlay_with_triangular_lasso()
+
+        rendered = overlay.rendered_image()
+
+        # `rendered` is already cropped to the selection's own (10,10)
+        # top-left, so these are that crop's local pixel coordinates --
+        # (15,55)/(45,15) in the pre-crop, window-local space the path
+        # itself is defined in, shifted back by the selection's origin.
+        assert rendered.pixelColor(5, 45).alpha() == 255  # inside the triangle
+        assert rendered.pixelColor(35, 5).alpha() == 0  # excluded corner
+
+    def test_cropped_to_the_bounding_box_size(self):
+        overlay = self._overlay_with_triangular_lasso()
+
+        rendered = overlay.rendered_image()
+
+        assert rendered.size() == QSize(50, 50)
+
+    def test_non_freeform_selections_stay_fully_opaque(self):
+        # No regression: a plain rectangular selection (no `_selection_path`)
+        # must not suddenly pick up an alpha channel it never had before.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(10, 10, 50, 50))
+
+        rendered = overlay.rendered_image()
+
+        assert rendered.pixelColor(15, 15).alpha() == 255
+
+    def test_saved_png_preserves_the_transparency(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        overlay = self._overlay_with_triangular_lasso()
+
+        path = overlay.save()
+
+        saved = QImage(str(path))
+        assert saved.pixelColor(5, 45).alpha() == 255
+        assert saved.pixelColor(35, 5).alpha() == 0
 
 
 def _mark(start=(10, 10), end=(20, 20)):
@@ -3677,11 +4636,12 @@ class TestKeyboardShortcutSuppression:
         assert overlay._bar.active_tool is None
 
     def test_tool_letter_does_not_fire_while_a_text_label_is_focused(self):
-        # No text-label editor is wired into OverlayWindow yet (a later
-        # ticket, per the class docstring) -- shapes.Text's own docstring
-        # names QLineEdit as that widget, mirroring editor.py's
-        # Canvas._ensure_text_edit, so a bare QLineEdit stands in for it
-        # here.
+        # A bare QLineEdit stands in for the real text tool's own label
+        # editor (`overlay._text_edit`, SNX-52) -- this class only cares
+        # that *any* QLineEdit having focus suppresses shortcuts, not that
+        # it's specifically the one the text tool builds; see
+        # TestDrawingTools.test_text_label_focus_also_suppresses_shortcuts
+        # for that narrower case.
         overlay = self._overlay()
         label = QLineEdit(overlay)
         label.setFocus()
