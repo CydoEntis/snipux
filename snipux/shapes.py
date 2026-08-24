@@ -31,6 +31,7 @@ from typing import ClassVar
 from PyQt6.QtCore import Qt, QPointF, QRect, QRectF, QSizeF
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPolygonF
 
+from snipux import design
 from snipux.capture import Frame
 
 
@@ -77,21 +78,31 @@ class Pen(Shape):
 
 @dataclass
 class Highlighter(Shape):
-    """Freehand stroke at reduced opacity, unlike `Pen`.
+    """Freehand stroke at reduced opacity and widened relative to `Pen`.
+
+    Per docs/design/overlay-redesign.md's "Drawing": stroke x
+    `Metric.HIGHLIGHT_MULT` at `Metric.HIGHLIGHT_ALPHA`, painted as a single
+    stroked path (one `drawPolyline` call with round caps/joins from
+    `_pen()`) rather than per-segment strokes, which is what keeps
+    overlapping segments of the same sweep from double-darkening at the
+    alpha this class paints at.
 
     Sets/restores opacity immediately around its own draw() so opacity never
     bleeds into shapes drawn after it in the same render() pass.
     """
 
-    OPACITY = 0.4
-
     points: list[QPointF] = field(default_factory=list)
+
+    def _pen(self) -> QPen:
+        pen = super()._pen()
+        pen.setWidthF(self.stroke_width * design.tokens.Metric.HIGHLIGHT_MULT)
+        return pen
 
     def draw(self, painter: QPainter) -> None:
         if len(self.points) < 2:
             return
         painter.setPen(self._pen())
-        painter.setOpacity(self.OPACITY)
+        painter.setOpacity(design.tokens.Metric.HIGHLIGHT_ALPHA)
         painter.drawPolyline(QPolygonF(self.points))
         painter.setOpacity(1.0)
 
@@ -112,39 +123,54 @@ class Line(Shape):
 class Arrow(Shape):
     """A straight shaft plus a filled arrowhead at `end`.
 
-    Pixel-distinguishable from `Line` between the same two points: the
-    arrowhead flares out beyond the shaft's own width near `end`.
+    Geometry per docs/design/overlay-redesign.md's "Drawing": the head is a
+    filled isosceles triangle sized from the stroke width (floored so it
+    stays visible at any width but never dwarfs a thin stroke), and the
+    shaft stops short of the tip by a fraction of the head's own length so
+    a thick shaft's round cap never shows through the filled head.
     """
 
-    # Arrowhead size scales with stroke width so it stays visible at any
-    # width but never dwarfs a thin stroke or hides inside a thick one.
-    HEAD_LENGTH_FACTOR = 3.0
-    HEAD_ANGLE_RADIANS = math.radians(25)
+    HEAD_LENGTH_MIN = 10.0
+    HEAD_LENGTH_FACTOR = 3.4
+    HEAD_HALF_WIDTH_MIN = 7.0
+    HEAD_HALF_WIDTH_FACTOR = 2.2
+    SHAFT_STOP_FRACTION = 0.55
 
     start: QPointF = field(default_factory=QPointF)
     end: QPointF = field(default_factory=QPointF)
 
     def draw(self, painter: QPainter) -> None:
-        painter.setPen(self._pen())
-        painter.drawLine(self.start, self.end)
-
         dx = self.end.x() - self.start.x()
         dy = self.end.y() - self.start.y()
         shaft_length = math.hypot(dx, dy)
+
+        painter.setPen(self._pen())
         if shaft_length == 0:
-            return  # degenerate arrow (start == end): shaft alone already drawn (a dot)
+            painter.drawLine(self.start, self.end)  # degenerate arrow: a dot
+            return
 
-        angle = math.atan2(dy, dx)
-        head_length = max(self.stroke_width, 1.0) * self.HEAD_LENGTH_FACTOR
+        head_length = max(self.HEAD_LENGTH_MIN, self.stroke_width * self.HEAD_LENGTH_FACTOR)
+        head_half_width = max(
+            self.HEAD_HALF_WIDTH_MIN, self.stroke_width * self.HEAD_HALF_WIDTH_FACTOR
+        )
 
-        back_left = QPointF(
-            self.end.x() - head_length * math.cos(angle - self.HEAD_ANGLE_RADIANS),
-            self.end.y() - head_length * math.sin(angle - self.HEAD_ANGLE_RADIANS),
-        )
-        back_right = QPointF(
-            self.end.x() - head_length * math.cos(angle + self.HEAD_ANGLE_RADIANS),
-            self.end.y() - head_length * math.sin(angle + self.HEAD_ANGLE_RADIANS),
-        )
+        # Unit vector along the shaft, tip-ward, and its perpendicular --
+        # used to build the head's base corners and shorten the shaft
+        # without resorting to trig (atan2/cos/sin), unlike the previous
+        # angle-based construction this replaces.
+        ux, uy = dx / shaft_length, dy / shaft_length
+        px, py = -uy, ux
+
+        base_x = self.end.x() - ux * head_length
+        base_y = self.end.y() - uy * head_length
+        back_left = QPointF(base_x + px * head_half_width, base_y + py * head_half_width)
+        back_right = QPointF(base_x - px * head_half_width, base_y - py * head_half_width)
+
+        # Stops short of `end` by SHAFT_STOP_FRACTION of the head's own
+        # length -- the design doc's "so it does not poke through the tip".
+        shaft_stop = head_length * self.SHAFT_STOP_FRACTION
+        shaft_end = QPointF(self.end.x() - ux * shaft_stop, self.end.y() - uy * shaft_stop)
+        painter.drawLine(self.start, shaft_end)
 
         head = QPainterPath()
         head.moveTo(self.end)
@@ -156,7 +182,14 @@ class Arrow(Shape):
 
 @dataclass
 class Rectangle(Shape):
-    """An unfilled, stroke-only rectangle spanning two image-pixel corners."""
+    """An unfilled, stroke-only rounded rectangle spanning two image-pixel
+    corners, per docs/design/overlay-redesign.md's "Drawing" (3px corner
+    radius). `finalize_mark()` below is what normalises a negative
+    width/height on release; draw() itself already tolerates either corner
+    order via `_rect_from_corners`, for the live in-progress preview.
+    """
+
+    CORNER_RADIUS = 3.0
 
     start: QPointF = field(default_factory=QPointF)
     end: QPointF = field(default_factory=QPointF)
@@ -164,7 +197,56 @@ class Rectangle(Shape):
     def draw(self, painter: QPainter) -> None:
         painter.setPen(self._pen())
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(_rect_from_corners(self.start, self.end))
+        painter.drawRoundedRect(
+            _rect_from_corners(self.start, self.end), self.CORNER_RADIUS, self.CORNER_RADIUS
+        )
+
+
+# Below this bounding-box size (in either axis) a drag is treated as a
+# stray click rather than a deliberate mark -- docs/design/overlay-redesign.md's
+# "Drawing": "shapes need > 3px in either axis". Not named in tokens.py: it
+# governs commit-vs-discard at release time, not anything painted.
+DROP_THRESHOLD = 3.0
+
+
+def finalize_mark(shape: Shape) -> Shape | None:
+    """The release-time gate between an in-progress drag and the ink layer.
+
+    Returns the shape to commit, or `None` if it should be discarded
+    instead -- per docs/design/overlay-redesign.md's "Marks under the
+    minimum size are discarded on release", which is what stops a stray
+    click from leaving an invisible dot in the undo stack:
+
+    - `Pen`/`Highlighter` need more than one point -- a plain click never
+      reaches a second `mouseMoveEvent` to append one.
+    - `Arrow`/`Rectangle` need their bounding box to exceed
+      `DROP_THRESHOLD` in at least one axis -- a horizontal or vertical
+      drag is a deliberate mark even though it is exactly zero in the
+      other axis, so this is an *or*, not an *and*.
+
+    `Rectangle` additionally gets its `start`/`end` normalised to
+    top-left/bottom-right order here, independent of the size check --
+    `draw()` already tolerates either order for the live preview (see its
+    docstring), but the *committed* shape needs a stable convention for
+    later callers (eraser hit-testing, `_transformed`) the way every other
+    two-point shape already has by construction.
+
+    Every other shape (`Line`, `Text`, `StepMarker`, `Crop`,
+    `ObscuringShape` and subclasses) has no drag-size or corner-order
+    notion this ticket scopes, so it is returned unchanged.
+    """
+    if isinstance(shape, (Pen, Highlighter)):
+        return shape if len(shape.points) > 1 else None
+
+    if isinstance(shape, (Arrow, Rectangle)):
+        rect = _rect_from_corners(shape.start, shape.end)
+        if rect.width() <= DROP_THRESHOLD and rect.height() <= DROP_THRESHOLD:
+            return None
+        if isinstance(shape, Rectangle):
+            return replace(shape, start=rect.topLeft(), end=rect.bottomRight())
+        return shape
+
+    return shape
 
 
 @dataclass
