@@ -3183,7 +3183,12 @@ class TestCaptureModePopoverOverlayIntegration:
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
         QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
-        target_label = tokens.CAPTURE_MODES[1][0]
+        # Freeform, not Window/Full screen (SNX-48 gives those two their own
+        # picking/selection behaviour, covered by TestCaptureModeWindow
+        # Integration/TestCaptureModeFullScreenIntegration below) -- this
+        # test is only about the generic "picking a row records the label
+        # and updates the chip" mechanism every row shares.
+        target_label = tokens.CAPTURE_MODES[3][0]
 
         QTest.mouseClick(overlay._popover._rows[target_label], Qt.MouseButton.LeftButton)
 
@@ -3241,6 +3246,266 @@ class TestCaptureModePopoverOverlayIntegration:
         overlay.set_selection(None)
 
         assert not overlay._popover.isVisible()
+
+
+def _close_stray_toplevel_windows() -> None:
+    """Close every top-level widget still alive from an earlier test.
+
+    None of this file's many other `OverlayWindow`/`Overlay` tests close
+    their own instance -- ordinary practice throughout the file, since
+    each test builds a fresh one and nothing downstream reads a previous
+    test's leftovers. But `TestCaptureModeWindowIntegration`/
+    `TestCaptureModeFullScreenIntegration` below depend on a bare hover-
+    only `QTest.mouseMove` (no button held) actually reaching the right
+    window -- and by the time hundreds of never-closed, same-screen-rect
+    top-level windows have piled up over a full run, the offscreen QPA
+    platform can misroute that hover to a stale one instead of the
+    current test's, a real flake this codebase doesn't otherwise trigger
+    (every other interaction in this file is press-driven, which grabs
+    the mouse and isn't affected). A clean slate immediately before each
+    test in those two classes only -- not a file-wide fixture, so no
+    other test's behaviour changes -- keeps that routing unambiguous.
+    """
+    for widget in QApplication.topLevelWidgets():
+        widget.close()
+
+
+class TestCaptureModeWindowIntegration:
+    """SNX-48 AC: picking Window in the popover arms hover-preview/click-
+    to-snap picking on `OverlayWindow` itself -- sourced from a
+    `GeometryProvider`, the same one `Overlay`'s own WINDOW mode
+    (`TestWindowMode` above) already uses -- producing a `_selection`
+    that stays open for re-framing and in-place annotation instead of
+    being confirmed into a separate editor.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    WINDOW_RECT = QRectF(30, 30, 50, 50)
+    HIT_POINT = QPoint(50, 50)
+    # Outside WINDOW_RECT, and -- as important -- outside the real child
+    # widgets `OverlayWindow` shows once it has a selection: `HintHUD`
+    # spans the full width for `tokens.Metric.HUD_H` (44px) from the top,
+    # and the floating bar sits well below the selection. A point inside
+    # either one would never reach `OverlayWindow.mouseMoveEvent` at all
+    # (Qt delivers it to that child instead), silently turning this into
+    # a no-op rather than an actual miss.
+    MISS_POINT = QPoint(200, 70)
+    WINDOW_LABEL = tokens.CAPTURE_MODES[1][0]
+    REGION_LABEL = tokens.CAPTURE_MODES[0][0]
+
+    def _overlay(self, provider=None, size=(600, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame, geometry_provider=provider)
+        # The popover is only reachable through the bar's own chip, and
+        # the bar is only shown once a selection already exists -- so
+        # every scenario below starts from an ordinary prior selection,
+        # the same way a real capture would already have one (a default
+        # Region selection, or an earlier drag) before the user ever
+        # opens the mode chip.
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        # A window's very first bare hover-only QTest.mouseMove (no button
+        # held) can be dropped by the offscreen QPA platform even with a
+        # clean slate (`_clean_slate` above); a throwaway move here, before
+        # any test's own real one, reliably establishes hover delivery to
+        # *this* window for the rest of the test.
+        QTest.mouseMove(overlay, QPoint(0, 0))
+        return overlay
+
+    def _pick_window_mode(self, overlay):
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(
+            overlay._popover._rows[self.WINDOW_LABEL], Qt.MouseButton.LeftButton
+        )
+
+    def test_picking_window_arms_picking_and_clears_the_prior_selection(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+
+        self._pick_window_mode(overlay)
+
+        assert overlay._picking_window
+        assert overlay._selection is None
+
+    def test_hover_previews_the_window_under_the_cursor(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+
+        QTest.mouseMove(overlay, self.HIT_POINT)
+
+        assert overlay._selection == self.WINDOW_RECT.toRect()
+
+    def test_hover_clears_on_a_miss(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+        QTest.mouseMove(overlay, self.HIT_POINT)
+        assert overlay._selection is not None
+
+        QTest.mouseMove(overlay, self.MISS_POINT)
+
+        assert overlay._selection is None
+
+    def test_click_snaps_the_selection_and_disarms_picking(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        assert overlay._selection == self.WINDOW_RECT.toRect()
+        assert not overlay._picking_window
+
+    def test_click_on_a_miss_leaves_picking_armed(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.MISS_POINT)
+
+        assert overlay._picking_window
+        assert overlay._selection is None
+
+    def test_selection_from_window_mode_is_reframable_like_a_dragged_one(self):
+        # Mirrors TestDimensionChipLiveUpdate's own pattern above: `press`
+        # only needs to land inside the handle to grab it -- the resize
+        # itself is driven entirely by the absolute `target` passed to the
+        # move/release that follow, not by any delta from `press`.
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+        press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
+        target = QPoint(120, 55)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, target)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=target)
+
+        # left/top/bottom stay anchored at the window-mode rect's own
+        # edges (30, 30, 80); only the dragged right edge moves, to 120.
+        assert overlay._selection == QRect(30, 30, 90, 50)
+
+    def test_selection_from_window_mode_can_be_annotated(self):
+        overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
+        self._pick_window_mode(overlay)
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        overlay.add_mark(_mark())
+
+        assert len(overlay.marks) == 1
+
+    def test_no_provider_toasts_and_falls_back_to_region(self):
+        # `geometry_provider=None` -> `UnsupportedGeometryProvider`, per
+        # `OverlayWindow`'s own default -- the same "degrade rather than
+        # raise" fallback `Overlay`'s WINDOW mode already has, but this
+        # ticket also requires telling the user rather than a silent no-op.
+        overlay = self._overlay(provider=None)
+
+        self._pick_window_mode(overlay)
+
+        assert not overlay._picking_window
+        assert overlay._capture_mode == self.REGION_LABEL
+        assert overlay._bar._chip._text_label.text() == self.REGION_LABEL
+        assert overlay._popover.mode == self.REGION_LABEL
+        assert overlay._toast.isVisible()
+        assert "window" in overlay._toast._text_label.text().lower()
+
+    def test_unavailable_provider_toasts_and_never_queries_window_at(self):
+        provider = Mock(spec=GeometryProvider)
+        provider.is_available.return_value = False
+        overlay = self._overlay(provider=provider)
+
+        self._pick_window_mode(overlay)
+
+        assert not overlay._picking_window
+        assert overlay._capture_mode == self.REGION_LABEL
+        assert overlay._toast.isVisible()
+        provider.window_at.assert_not_called()
+
+
+class TestCaptureModeFullScreenIntegration:
+    """SNX-48 AC: picking Full screen in the popover sets `_selection` to
+    the whole display the cursor is on, immediately -- no drag or click
+    needed past picking the row.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    FULL_SCREEN_LABEL = tokens.CAPTURE_MODES[2][0]
+
+    def _overlay(self, size=(600, 600), monitor_geometries=None):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame, monitor_geometries=monitor_geometries)
+        overlay.set_selection(QRect(400, 200, 100, 100))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _pick_full_screen(self, overlay):
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(
+            overlay._popover._rows[self.FULL_SCREEN_LABEL], Qt.MouseButton.LeftButton
+        )
+
+    def test_selects_the_whole_window_on_a_single_monitor(self):
+        overlay = self._overlay()
+
+        self._pick_full_screen(overlay)
+
+        assert overlay._selection == QRect(0, 0, 600, 600)
+
+    def test_selects_the_monitor_the_cursor_last_moved_over(self):
+        left = QRectF(0, 0, 250, 600)
+        right = QRectF(250, 0, 350, 600)
+        overlay = self._overlay(monitor_geometries=[left, right])
+        # Throwaway move before the real one -- see the identical comment
+        # on TestCaptureModeWindowIntegration._overlay; not folded into
+        # this class's own _overlay() because the fallback test right
+        # below needs `_cursor_pos` to still be None when it starts.
+        QTest.mouseMove(overlay, QPoint(590, 590))
+        QTest.mouseMove(overlay, QPoint(100, 100))  # inside `left`
+
+        self._pick_full_screen(overlay)
+
+        assert overlay._selection == left.toRect()
+
+    def test_falls_back_to_the_windows_own_centre_with_no_prior_cursor_move(self):
+        left = QRectF(0, 0, 250, 600)
+        right = QRectF(250, 0, 350, 600)
+        overlay = self._overlay(monitor_geometries=[left, right])
+        # No QTest.mouseMove at all -- `_cursor_pos` is still None, so
+        # the window's own centre (300, 300), inside `right` only, is
+        # what decides the display.
+
+        self._pick_full_screen(overlay)
+
+        assert overlay._selection == right.toRect()
+
+    def test_selection_from_full_screen_is_reframable_like_a_dragged_one(self):
+        overlay = self._overlay()
+        self._pick_full_screen(overlay)
+        press = overlay._edge_handle_rect(Handle.BOTTOM).center().toPoint()
+        # Comfortably clear of the `_BAR_ROOM` clamp (window height 600
+        # minus 130 = 470) so the result is the plain dragged value, not
+        # that clamp's own floor -- `_resize_selection`'s docstring is the
+        # authority for why that clamp exists at all.
+        target = QPoint(300, 300)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, target)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=target)
+
+        assert overlay._selection == QRect(0, 0, 600, 300)
+
+    def test_selection_from_full_screen_can_be_annotated(self):
+        overlay = self._overlay()
+        self._pick_full_screen(overlay)
+
+        overlay.add_mark(_mark())
+
+        assert len(overlay.marks) == 1
 
 
 def _mark(start=(10, 10), end=(20, 20)):
