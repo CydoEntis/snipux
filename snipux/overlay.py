@@ -44,7 +44,7 @@ from PyQt6.QtWidgets import (
 )
 
 from snipux import design
-from snipux.capture import Frame
+from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.shapes import (
     Arrow,
     Blur,
@@ -2322,6 +2322,80 @@ class Toast(QWidget):
         painter.end()
 
 
+# ---------------------------------------------------------------------------
+# Delay countdown (SNX-50)
+# ---------------------------------------------------------------------------
+# docs/design/overlay-redesign.md's "Capture modes" entry for Delay is the
+# authority: "the overlay dismisses, waits, re-grabs and re-opens. Show a
+# countdown." The prototype never simulates Delay (Region is the only mode it
+# simulates, per that same section's opening line), so there is no reference
+# markup for the countdown's own look -- styled here from the same BAR_BG
+# glass and TEXT_PRIMARY/mono readout the rest of this file's chrome already
+# uses, rather than inventing a one-off palette for a single widget.
+
+
+class DelayCountdown(QWidget):
+    """A small, top-level countdown shown while `OverlayWindow` is hidden
+    for a delayed re-capture (`OverlayWindow._start_delayed_capture`).
+
+    Deliberately *not* a child of `OverlayWindow`, unlike every other piece
+    of chrome in this file: the entire reason the overlay hides for the
+    delay is so it isn't in its own screenshot (per the spec: "the overlay
+    dismisses... so it is not in its own screenshot" is the point of Delay
+    in the first place), and a child widget goes invisible the instant its
+    parent does -- see `OverlayWindow.hideEvent`, which relies on exactly
+    that to take `_bar`/`_tray`/`_popover`/`_toast`/`_hud` down with it. A
+    countdown built the same way would vanish along with the window it is
+    supposed to be standing in for, which is the one thing it must not do.
+    """
+
+    _SIZE = 96
+    _BG_ALPHA = 0.72  # the same "glass over the desktop" treatment as the bar
+
+    def __init__(self):
+        # No parent, ever -- see the class docstring.
+        super().__init__(None)
+        # Frameless/always-on-top so it reads as a HUD rather than a window
+        # a user could accidentally click into and lose focus of, mirroring
+        # `Overlay`/`OverlayWindow`'s own `setWindowFlags` calls.
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(self._SIZE, self._SIZE)
+
+        self._label = QLabel(self)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setGeometry(0, 0, self._SIZE, self._SIZE)
+        font = QFont(design.font_families().mono)
+        font.setPixelSize(36)
+        font.setWeight(QFont.Weight(600))
+        self._label.setFont(font)
+        self._label.setStyleSheet(f"color: {design.color('TEXT_PRIMARY').name()};")
+
+    def set_seconds_remaining(self, seconds: int) -> None:
+        self._label.setText(str(seconds))
+
+    def show_centered_on(self, geometry: QRect) -> None:
+        """Position centred over `geometry` -- the virtual-desktop rect the
+        hidden `OverlayWindow` itself spans -- and show.
+        """
+        center = QRectF(geometry).center()
+        self.move(round(center.x() - self._SIZE / 2), round(center.y() - self._SIZE / 2))
+        self.show()
+        self.raise_()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = QColor(design.tokens.Color.BAR_BG)
+        bg.setAlphaF(self._BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawEllipse(QRectF(self.rect()))
+        painter.end()
+
+
 # Tool name -> Shape subclass for a freehand (points-list) stroke, keyed
 # by the same string ids tokens.TOOLS/FloatingBar use -- mirrors editor.py's
 # _FREEHAND_SHAPE_CLASSES, just keyed by these strings instead of the old
@@ -2442,6 +2516,24 @@ class OverlayWindow(QWidget):
     masks everything outside it transparent) -- per the spec's Freeform
     entry: "the selection becomes a path, the dim scrim inverts against
     it, and export crops to its bounding box with the outside transparent."
+    SNX-50 (this ticket) makes `_delay` do something once it names anything
+    but `Off`: `_on_capture_mode_selected` hands off to
+    `_start_delayed_capture` instead of dispatching a mode immediately,
+    which hides this whole window (so it isn't in its own screenshot),
+    shows `DelayCountdown` (a separate, non-child top-level widget -- see
+    its own docstring for why it can't be a child), and ticks a `QTimer`
+    down once a second. `_finish_delayed_capture` then re-grabs through
+    `_registry` -- the same `BackendRegistry` the first frame came through,
+    injected the same way `geometry_provider` is -- and re-opens over the
+    fresh frame by mutating `_frame` and re-showing in place, rather than
+    building a second `OverlayWindow`: every other piece of state
+    (`_ink_colour`, `_stroke_width`, `_bar`'s active tool, `_capture_mode`
+    itself) already lives on `self` and needs no copying across. The mode
+    picked when the delay was confirmed is remembered
+    (`_pending_capture_mode`) and re-dispatched to the same
+    Window/Full screen/Freeform handling above once the new frame is in,
+    so a delayed Window/Full screen/Freeform pick still does its own thing
+    on the new content instead of silently downgrading to Region.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -2503,6 +2595,7 @@ class OverlayWindow(QWidget):
         hints_enabled: bool = True,
         geometry_provider: GeometryProvider | None = None,
         monitor_geometries: list[QRectF] | None = None,
+        registry: BackendRegistry | None = None,
     ):
         super().__init__(parent)
         self._frame = frame
@@ -2703,6 +2796,29 @@ class OverlayWindow(QWidget):
         self._popover.delayChanged.connect(self._on_delay_changed)
         self._bar.captureChipClicked.connect(self._toggle_capture_popover)
 
+        # The delayed re-capture (SNX-50): `_registry` is what
+        # `_finish_delayed_capture` re-grabs through -- an empty
+        # `BackendRegistry` by default, the same "an inert default degrades
+        # instead of needing a None-check everywhere" shape
+        # `UnsupportedGeometryProvider` already gives `_geometry_provider`
+        # above (an empty registry's own `capture()` raises `CaptureError`
+        # with its own "no capture backend is available" message, which
+        # `_finish_delayed_capture` already has to handle for a real,
+        # non-empty registry that simply fails). `_countdown`/`_delay_timer`
+        # are built lazily, on the first delay actually confirmed, rather
+        # than unconditionally here -- unlike `_toast`/`_hud`, `_countdown`
+        # is not a child of this window (see its own docstring for why) and
+        # every `OverlayWindow` this file's tests build would otherwise
+        # leave a real, if hidden, extra top-level widget behind it.
+        # `_pending_capture_mode` is the mode `_on_capture_mode_selected`
+        # was confirming when the delay started, re-dispatched once the
+        # fresh frame is in.
+        self._registry = registry if registry is not None else BackendRegistry()
+        self._countdown: DelayCountdown | None = None
+        self._delay_timer: QTimer | None = None
+        self._delay_remaining = 0
+        self._pending_capture_mode: str | None = None
+
         # The toast (SNX-45): the single `Toast` instance `copy`/`save`/
         # `clear`/`discard` below all share -- see `_show_toast` for the
         # `self.isVisible()` gate that keeps it from painting into this
@@ -2805,13 +2921,21 @@ class OverlayWindow(QWidget):
         SNX-48 makes Window and Full screen actually do something past
         the label update: `_enter_window_mode` arms hover-preview/click-
         to-snap picking, `_select_full_screen` snaps `_selection`
-        immediately. SNX-49 (this ticket) does the same for Freeform:
+        immediately. SNX-49 does the same for Freeform:
         `_enter_freeform_mode` arms press-drag-release lasso tracing.
         Whatever picking was in progress for a previous mode is disarmed
         unconditionally first -- switching away from Window or Freeform
         mid-pick must not leave `_picking_window`/`_picking_freeform`
         stuck armed underneath whatever the newly-picked mode does
         instead.
+
+        SNX-50 (this ticket) intercepts all of the above whenever `_delay`
+        isn't `Off`: per the spec's Delay entry, confirming a mode while a
+        delay is set dismisses the overlay, waits, re-grabs and re-opens,
+        rather than acting on the current (soon to be stale) frame right
+        away. `_start_delayed_capture` takes over from here and
+        re-dispatches to this same mode logic itself, once the fresh frame
+        is in.
         """
         self._picking_window = False
         self._picking_freeform = False
@@ -2819,12 +2943,118 @@ class OverlayWindow(QWidget):
         self._capture_mode = mode
         self._bar.set_capture_mode(mode)
 
+        if self._delay != "Off":  # design.tokens.DELAYS[0]
+            self._start_delayed_capture(mode)
+            return
+
+        self._dispatch_capture_mode(mode)
+
+    def _dispatch_capture_mode(self, mode: str) -> None:
+        """Run whichever mode-specific picking `mode` itself calls for --
+        the immediate half of `_on_capture_mode_selected`, factored out so
+        `_finish_delayed_capture` can re-run it against a fresh frame
+        without also re-running the delay check above (which would just
+        recurse into another wait).
+        """
         if mode == "Window":  # design.tokens.CAPTURE_MODES[1][0]
             self._enter_window_mode()
         elif mode == "Full screen":  # design.tokens.CAPTURE_MODES[2][0]
             self._select_full_screen()
         elif mode == "Freeform":  # design.tokens.CAPTURE_MODES[3][0]
             self._enter_freeform_mode()
+
+    # -- delayed re-capture (SNX-50) -----------------------------------------
+    # docs/design/overlay-redesign.md's "Capture modes" entry for Delay is
+    # the authority: "Off / 3s / 5s / 10s. When set, the overlay dismisses,
+    # waits, re-grabs and re-opens. Show a countdown." The re-grab is a
+    # second, independent call through `_registry` -- the same
+    # `BackendRegistry` the first frame came through, per CLAUDE.md's one
+    # architectural rule applying to this grab exactly as it does to the
+    # first -- never a re-use of `_frame` as it stood before the wait.
+
+    def _start_delayed_capture(self, mode: str) -> None:
+        """Hide this window and start counting the seconds in `_delay`
+        down, per the spec's "the overlay dismisses, waits" -- hiding
+        happens synchronously, before the wait itself begins, so the
+        overlay is never on screen (and never in danger of being in its
+        own next screenshot) for any part of the delay.
+
+        `mode` is remembered as `_pending_capture_mode` and re-dispatched
+        by `_finish_delayed_capture` once the fresh frame is in, so a
+        delayed Window/Full screen/Freeform pick still does its own thing
+        against the new content instead of only ever landing on Region.
+        """
+        self._pending_capture_mode = mode
+        self._delay_remaining = int(self._delay.rstrip("s"))
+        self.hide()
+
+        if self._countdown is None:
+            self._countdown = DelayCountdown()
+        self._countdown.set_seconds_remaining(self._delay_remaining)
+        # `self.geometry()` is still the real virtual-desktop rect this
+        # window spans -- hiding a QWidget doesn't clear its geometry --
+        # so the countdown can centre on it without this window needing to
+        # stay visible to answer the question.
+        self._countdown.show_centered_on(self.geometry())
+
+        if self._delay_timer is None:
+            self._delay_timer = QTimer(self)
+            self._delay_timer.setInterval(1000)
+            self._delay_timer.timeout.connect(self._tick_delay)
+        self._delay_timer.start()
+
+    def _tick_delay(self) -> None:
+        """One second of the countdown elapsing. Reaching zero stops the
+        timer and hands off to `_finish_delayed_capture` -- this method
+        itself never touches `_registry` or `_frame`.
+        """
+        self._delay_remaining -= 1
+        if self._delay_remaining <= 0:
+            self._delay_timer.stop()
+            self._countdown.hide()
+            self._finish_delayed_capture()
+            return
+        self._countdown.set_seconds_remaining(self._delay_remaining)
+
+    def _finish_delayed_capture(self) -> None:
+        """Re-grab through `_registry` and re-open over the fresh frame.
+
+        A failed re-grab (per CLAUDE.md, a capture failure must not take
+        down the rest of the app) leaves the *old* frame in place and
+        simply re-shows this window with it, toasted, rather than leaving
+        the user with no overlay and no explanation at all -- mirrors
+        `_enter_window_mode`'s own "toast and fall back" handling of an
+        unavailable `GeometryProvider`.
+
+        On success, `_frame` and this window's own geometry are replaced
+        in place (this is still the same `OverlayWindow`, never a second
+        one) -- which is what leaves `_ink_colour`/`_stroke_width`/the
+        bar's active tool/`_capture_mode` itself exactly as the user had
+        them, with nothing to copy across, per the ticket's "the overlay
+        re-opens... with the tool, colour and stroke settings the user had
+        chosen" acceptance criterion. The stale selection is cleared --
+        it described a rectangle of the *old* content -- and the picked
+        mode is re-dispatched against the new one.
+        """
+        mode = self._pending_capture_mode
+        try:
+            frame = self._registry.capture()
+        except CaptureError as exc:
+            self.show()
+            self._show_toast("timer", str(exc))
+            return
+
+        self._frame = frame
+        self.setGeometry(
+            round(frame.logical_origin.x()),
+            round(frame.logical_origin.y()),
+            round(frame.logical_size.width()),
+            round(frame.logical_size.height()),
+        )
+        self._hud.setGeometry(0, 0, self.width(), design.tokens.Metric.HUD_H)
+        self.set_selection(None)
+        self.show()
+        self._dispatch_capture_mode(mode)
 
     # -- Window / Full screen capture modes (SNX-48) -------------------------
     # docs/design/overlay-redesign.md's "Capture modes" section is the
