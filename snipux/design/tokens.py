@@ -52,6 +52,12 @@ class Color:
     CHIP_DARK_BG_ALPHA = 0.78
     CHIP_DARK_FG    = "#e5e7d9"
 
+    # Top hint HUD
+    HUD_BG          = "#141512"   # at 50% alpha
+    HUD_BG_ALPHA    = 0.50
+    HUD_TEXT        = "#d9dbcd"   # surrounding prose
+    HUD_KEY         = "#ffffff"   # key names -- pure white, mono
+
     # Toast
     TOAST_BG        = "#e9ecf2"   # at 96% alpha
     TOAST_BG_ALPHA  = 0.96

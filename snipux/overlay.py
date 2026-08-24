@@ -2068,6 +2068,99 @@ class CaptureModePopover(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Top hint HUD (SNX-46)
+# ---------------------------------------------------------------------------
+# docs/design/overlay-redesign.md's "Top hint HUD" section is the authority
+# here. It's a first-run affordance, behind a preference (`hints`) that
+# defaults on -- see `OverlayWindow.set_hints_enabled` -- and the spec's own
+# "Re-framing" section already reserves the room for it: `OverlayWindow.
+# _TOP_CLEARANCE` (52) is 8px clear of `tokens.Metric.HUD_H` (44), so the two
+# have agreed since SNX-33 landed and this ticket only has to paint into the
+# space already held open.
+
+
+class HintHUD(QWidget):
+    """The overlay's full-width top hint bar, per docs/design/overlay-
+    redesign.md's "Top hint HUD" section: `Esc discard ink · Enter copy &
+    dismiss · P H A R S T B E pick a tool · drag any edge to re-frame -- the
+    ink stays where you put it`.
+
+    A real child widget of `OverlayWindow` -- built from real `QLabel`
+    segments, not painted inside `OverlayWindow.paintEvent` -- the same
+    reasoning `Toast` documents for itself: `OverlayWindow.rendered_image`
+    flattens `_marks` onto the frame via `shapes.render_selection` and never
+    touches this window's chrome at all, so the HUD can't leak into an
+    export regardless of whether it happens to be on screen at the moment
+    `copy`/`save` is called.
+
+    Key names (`Esc`, `Enter`, the eight tool shortcuts) are their own
+    labels in the mono family at `HUD_KEY` (pure white); the surrounding
+    prose is the UI family at the muted `HUD_TEXT` -- per the spec's "Key
+    names are mono in pure white," so a key reads as a key at a glance
+    rather than blending into the sentence around it.
+    """
+
+    # (text, is_key) in reading order. The key segment for the tool
+    # shortcuts is built from `_TOOL_SHORTCUT_KEYS`/`tokens.TOOLS` rather
+    # than typed out as "P H A R S T B E" -- if a shortcut or tool order
+    # ever changes, this line follows it instead of silently drifting out
+    # of sync the way a hand-typed copy of the same letters could.
+    def _segments(self) -> list[tuple[str, bool]]:
+        keys = " ".join(_TOOL_SHORTCUT_KEYS[tool] for tool in design.tokens.TOOLS)
+        return [
+            ("Esc", True),
+            (" discard ink · ", False),
+            ("Enter", True),
+            (" copy & dismiss · ", False),
+            (keys, True),
+            (
+                " pick a tool · drag any edge to re-frame — the ink"
+                " stays where you put it",
+                False,
+            ),
+        ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedHeight(design.tokens.Metric.HUD_H)
+
+        # Full-width and centred, per "Full width... contents centred" --
+        # a stretch on both sides of the segment labels is what centres a
+        # variable-width run of text without this widget needing to measure
+        # it itself the way OverlayWindow's own chips do.
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addStretch(1)
+        for text, is_key in self._segments():
+            layout.addWidget(self._segment_label(text, is_key))
+        layout.addStretch(1)
+
+    def _segment_label(self, text: str, is_key: bool) -> QLabel:
+        label = QLabel(text, self)
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        family = design.font_families().mono if is_key else design.font_families().ui
+        font = QFont(family)
+        size, weight = design.tokens.Font.HUD
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight(weight))
+        label.setFont(font)
+        colour = design.color("HUD_KEY" if is_key else "HUD_TEXT")
+        label.setStyleSheet(f"color: {colour.name()};")
+        return label
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        # A flat, translucent fill -- per the Qt notes' "cheaper fallback:
+        # raise the fill alpha... and skip the blur," the same trade-off
+        # FloatingBar/SettingsTray/CaptureModePopover already make for their
+        # own backdrop-filter blur.
+        painter.fillRect(QRectF(self.rect()), design.color("HUD_BG"))
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
 # Toast (SNX-45)
 # ---------------------------------------------------------------------------
 
@@ -2223,7 +2316,11 @@ class OverlayWindow(QWidget):
     `discard` -- the last of those four not itself wired to Esc yet, per
     `discard`'s own docstring -- gated on `self.isVisible()` the same way
     `_bar` already is, so it never paints into this window's own many
-    pixel-sampling tests.
+    pixel-sampling tests. SNX-46 (this ticket) adds `HintHUD` (`_hud`),
+    gated on both `self.isVisible()` (same reason as `_bar`/`_toast`) and
+    `_hints_enabled` -- the preference the spec's "Top hint HUD" section
+    puts it behind, default on, toggled via `set_hints_enabled` -- via
+    `_sync_hud_visibility`.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -2278,7 +2375,7 @@ class OverlayWindow(QWidget):
     _FROZEN_ICON_SIZE = 13
     _FROZEN_LABEL = "Frozen"
 
-    def __init__(self, frame: Frame, parent=None):
+    def __init__(self, frame: Frame, parent=None, hints_enabled: bool = True):
         super().__init__(parent)
         self._frame = frame
 
@@ -2408,6 +2505,21 @@ class OverlayWindow(QWidget):
         # window's own many pixel-sampling tests, none of which call
         # `.show()`, the same reason `_sync_bar_visibility` gates `_bar`.
         self._toast = Toast(self)
+
+        # The top hint HUD (SNX-46): behind the `hints` preference the spec
+        # puts it behind, default on. A real child widget the same way
+        # `_bar`/`_toast` are -- see `_sync_hud_visibility` for the same
+        # `self.isVisible()` gate those two already use, here paired with
+        # `_hints_enabled` so turning the preference off hides the bar
+        # immediately regardless of this window's own visibility. Spans the
+        # window's full width at construction time -- this window's own
+        # geometry is set once above and never resized afterwards (a
+        # fullscreen overlay), so there is no resizeEvent to keep this in
+        # sync with.
+        self._hints_enabled = hints_enabled
+        self._hud = HintHUD(self)
+        self._hud.setGeometry(0, 0, self.width(), design.tokens.Metric.HUD_H)
+        self._hud.hide()
 
     def set_selection(self, rect: QRect | None) -> None:
         """Set the current selection (window coordinates) and repaint."""
@@ -2571,6 +2683,41 @@ class OverlayWindow(QWidget):
         """
         if self.isVisible():
             self._toast.show_message(icon_name, text, self.size())
+
+    # -- top hint HUD (SNX-46) -----------------------------------------------
+
+    @property
+    def hints_enabled(self) -> bool:
+        return self._hints_enabled
+
+    def set_hints_enabled(self, enabled: bool) -> None:
+        """Toggle the top hint HUD -- the preference docs/design/overlay-
+        redesign.md's "Top hint HUD" section puts it behind (`hints`,
+        default on). Turning it off hides `_hud` immediately; turning it
+        back on shows it again as soon as `_sync_hud_visibility`'s other
+        gate -- `self.isVisible()` -- is also true, same as flipping
+        `_selection` does for `_bar`.
+        """
+        self._hints_enabled = enabled
+        self._sync_hud_visibility()
+
+    def _sync_hud_visibility(self) -> None:
+        """Show/hide `_hud` to match `_hints_enabled` and this window's own
+        visibility.
+
+        Gated on `self.isVisible()` for the same reason `_sync_bar_
+        visibility`/`_show_toast` are: a child widget's own `.show()` call
+        is enough to make Qt paint it into a `grab()` of this window
+        regardless of whether this window itself was ever shown, and this
+        file's many pixel-sampling tests never call `.show()` first -- so
+        the HUD must stay off screen until this window actually is, same as
+        the bar/tray/toast already do, on top of respecting the preference.
+        """
+        if self._hints_enabled and self.isVisible():
+            self._hud.show()
+            self._hud.raise_()
+        else:
+            self._hud.hide()
 
     def add_mark(self, shape: Shape) -> None:
         """Append `shape` to the ink layer and repaint.
@@ -2793,6 +2940,9 @@ class OverlayWindow(QWidget):
         # that seeds one at construction time) needs the bar to catch up
         # now that `self.isVisible()` has actually become true.
         self._sync_bar_visibility()
+        # Likewise the HUD: `_hints_enabled` defaults on and may already be
+        # true before this window was ever shown.
+        self._sync_hud_visibility()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
@@ -2801,6 +2951,7 @@ class OverlayWindow(QWidget):
         self._tray.hide()
         self._popover.hide()
         self._toast.hide()
+        self._hud.hide()
 
     def _advance_ants(self) -> None:
         """Advance the dashed stroke's offset by one animation frame.
