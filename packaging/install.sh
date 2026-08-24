@@ -75,6 +75,19 @@ echo "Installing desktop entry into $applications_dir..."
 mkdir -p "$applications_dir"
 cp "$script_dir/snipux.desktop" "$applications_dir/snipux.desktop"
 
+# Same .desktop file, second copy in the XDG autostart directory -- that is
+# the only difference between "launchable from the applications list" and
+# "brought back automatically at login" under the freedesktop autostart
+# spec, which GNOME (and every other compliant desktop) honours by reading
+# ~/.config/autostart/*.desktop at session start. A plain `cp` is already
+# idempotent: re-running this just overwrites the same filename, never adds
+# a second entry.
+autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+echo "Installing autostart entry into $autostart_dir..."
+mkdir -p "$autostart_dir"
+cp "$script_dir/snipux.desktop" "$autostart_dir/snipux.desktop"
+echo "Autostart entry written to $autostart_dir/snipux.desktop"
+
 # The launcher goes into ~/.local/bin -- whether that's on PATH for a
 # *graphical* GNOME session (as opposed to the login shell this script runs
 # under) depends on how the display manager builds the session environment.
@@ -136,4 +149,30 @@ fi
 
 if [ "$shortcut_bound" = true ]; then
     echo "Bound Super+Shift+S to run: $launcher --snip"
+fi
+
+# Start snipux now, rather than leaving the user to wait for the next login
+# for the autostart entry above to fire -- otherwise the keybinding just
+# bound would silently do nothing until a reboot.
+#
+# A bare launch (no --snip) is the resident/tray entry point
+# (run_resident_app() in snipux/app.py); if nothing is listening on its
+# single-instance socket yet it becomes the resident instance, and if
+# something already is, it forwards a snip request to it instead of
+# refusing to start. That forwarding is exactly right for the keybinding,
+# but not here: re-running this script with snipux already running must
+# leave it alone, not pop open the capture overlay as a side effect of
+# checking. So the running-or-not check happens here, in the shell, before
+# the launcher is invoked at all.
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "Could not start snipux: no graphical session detected (neither"
+    echo "DISPLAY nor WAYLAND_DISPLAY is set). It will start automatically"
+    echo "at your next graphical login via the autostart entry above."
+elif command -v pgrep >/dev/null 2>&1 && pgrep -f "$venv_dir/bin/snipux" >/dev/null 2>&1; then
+    echo "snipux is already running."
+else
+    echo "Starting snipux..."
+    nohup "$launcher" >/dev/null 2>&1 </dev/null &
+    disown
+    echo "Started snipux (pid $!)."
 fi

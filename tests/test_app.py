@@ -3,11 +3,13 @@ import re
 import pytest
 from PyQt6.QtCore import QPointF, QRectF, QSizeF
 from PyQt6.QtGui import QGuiApplication, QImage, qRgb
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from snipux import app
 from snipux.app import (
     AppController,
+    QLocalSocketTransport,
     Transport,
     build_default_geometry_provider,
     build_default_registry,
@@ -316,22 +318,127 @@ class TestSnipFlag:
         assert exit_code == 0
         assert state["forwarded_requests"] == 1
 
-    def test_reports_an_error_when_nothing_is_running(self, capsys):
+    def test_starts_a_resident_instance_and_shows_the_overlay_when_nothing_is_running(
+        self, monkeypatch
+    ):
+        # Per SNX-53: install.sh binds this flag to a GNOME keybinding, and
+        # nothing else ever starts a resident instance (no autostart entry),
+        # so refusing here left the key dead on a fresh install and dead
+        # again after every reboot -- the flag itself must now become the
+        # resident instance instead of just erroring out.
+        #
+        # QApplication.exec is monkeypatched for the same reason
+        # TestRunResidentApp's tests do: this file's qapp fixture shares one
+        # real QApplication across the whole module, so actually blocking
+        # in .exec() here would hang every test that runs after this one.
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
         state = make_transport_state()  # fresh: nothing resident yet
 
-        exit_code = main(["--snip"], transport=FakeTransport(state))
+        try:
+            exit_code = main(
+                ["--snip"], registry=registry, transport=FakeTransport(state)
+            )
 
-        assert exit_code != 0
-        assert state["forwarded_requests"] == 0
-        captured = capsys.readouterr()
-        assert captured.err != ""
-        assert captured.out == ""
+            assert exit_code == 0
+            assert state["forwarded_requests"] == 0
+            assert len(created) == 1
+            # It stayed resident rather than a one-shot: a listener is now
+            # registered, so the *next* press is forwarded to it rather than
+            # this whole dance repeating and racing a second instance.
+            assert state["primary_on_request"] is not None
+            # And the overlay opened immediately -- the whole point of
+            # pressing the key -- rather than only reaching an idle tray
+            # icon that a Snip request would still have to be forwarded to.
+            assert isinstance(created[0]._overlay, OverlayWindow)
+        finally:
+            if created and created[0]._overlay is not None:
+                created[0]._overlay.close()
+            if created:
+                created[0]._tray_icon.hide()
+
+    def test_reports_a_failed_capture_through_the_tray_rather_than_exiting_silently(
+        self, monkeypatch
+    ):
+        # AC: "--snip still reports a real failure to capture rather than
+        # exiting silently" -- becoming resident must not turn a genuine
+        # capture failure into something indistinguishable from the key
+        # doing nothing.
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        # Forces the "tray exists" branch regardless of the machine running
+        # the tests (see the equivalent note on
+        # test_failed_capture_reports_it_through_the_tray_icon above); the
+        # no-tray fallback for this same failure path is covered separately
+        # by TestNoSystemTray below.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        calls = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: calls.append((title, message)),
+        )
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+        registry = BackendRegistry([FailingCaptureBackend()])
+        state = make_transport_state()  # fresh: nothing resident yet
+
+        try:
+            exit_code = main(
+                ["--snip"], registry=registry, transport=FakeTransport(state)
+            )
+
+            assert exit_code == 0
+            assert len(calls) == 1
+            assert "capture failed" in calls[0][1]
+            assert created[0]._overlay is None
+        finally:
+            if created:
+                created[0]._tray_icon.hide()
 
     def test_mutually_exclusive_with_list_backends(self):
         with pytest.raises(SystemExit) as excinfo:
             main(["--snip", "--list-backends"])
 
         assert excinfo.value.code != 0
+
+
+class TestQLocalSocketTransportRace:
+    def test_try_claim_reports_not_primary_when_listen_loses_the_race(self, monkeypatch):
+        # AC: "two presses in quick succession with nothing running produce
+        # one running instance, not two." On the Linux target, two
+        # near-simultaneous try_claim() calls can both pass the connect
+        # probe (neither server is listening yet) and then race into
+        # listen() -- Unix domain sockets make exactly one of those two
+        # calls fail, per Qt's own documented contract for listen(). This
+        # dev machine's QLocalServer doesn't reproduce that exclusivity
+        # itself (a real cross-platform difference, not a test flake), so
+        # the loser's listen() failure is simulated directly rather than
+        # relied upon -- this exercises the same branch a real race on
+        # Linux would take: try_claim() must report False, not True, and
+        # must not leave `_server` pointing at a server that never actually
+        # started listening.
+        monkeypatch.setattr(QLocalSocket, "waitForConnected", lambda self, timeout: False)
+        monkeypatch.setattr(QLocalServer, "listen", lambda self, name: False)
+        transport = QLocalSocketTransport(f"snipux-test-race-{id(self)}")
+
+        assert transport.try_claim() is False
+        assert transport._server is None
 
 
 class TestCli:
@@ -592,6 +699,14 @@ class TestAppControllerCapture:
         assert controller._overlay is None
 
     def test_failed_capture_reports_it_through_the_tray_icon(self, make_controller, monkeypatch):
+        # Forces the "tray exists" branch regardless of what the machine
+        # actually running the tests reports (typically False under the
+        # offscreen platform tests run under) -- this test is specifically
+        # about the tray-reporting path; the no-tray fallback has its own
+        # test below.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
         registry = BackendRegistry([FailingCaptureBackend()])
         controller = make_controller(
             registry,
@@ -661,6 +776,118 @@ class TestAppControllerTrayMenu:
         )
 
         controller.quit_action.trigger()
+
+
+class TestNoSystemTray:
+    """SNX-54: `QSystemTrayIcon.isSystemTrayAvailable()` is what decides
+    whether the tray icon is actually shown -- exercised here by faking
+    both outcomes directly (per the ticket's own acceptance criterion),
+    rather than depending on whatever the machine running the suite
+    happens to report. That matters in practice too: under the offscreen
+    platform this whole file runs under, it reports False, which is why
+    the tray-reporting tests above force it True instead of relying on the
+    ambient value.
+    """
+
+    def test_tray_icon_is_shown_when_a_tray_is_available(self, make_controller, monkeypatch):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        assert controller._tray_icon.isVisible() is True
+
+    def test_tray_icon_is_not_shown_when_no_tray_is_available(self, make_controller, monkeypatch):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        assert controller._tray_icon.isVisible() is False
+
+    def test_prints_once_on_stdout_when_no_tray_is_available(
+        self, make_controller, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+
+        make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        out = capsys.readouterr().out
+        assert out.count("No system tray") == 1
+        # Must actually say how to quit, not just that there's no icon --
+        # with the tray's own Quit menu item invisible, this is the only
+        # place that answer is ever given to the user.
+        assert "quit" in out.lower()
+
+    def test_says_nothing_when_a_tray_is_available(self, make_controller, monkeypatch, capsys):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+
+        make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        out = capsys.readouterr().out
+        assert "No system tray" not in out
+
+    def test_app_still_responds_to_a_snip_request_with_no_tray_available(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+
+        controller.start_capture()
+
+        assert isinstance(controller._overlay, OverlayWindow)
+
+    def test_capture_failure_is_still_reported_on_stdout_with_no_tray_available(
+        self, make_controller, monkeypatch, capsys
+    ):
+        # AC: "a capture failure is still reported to the user when there
+        # is no tray to show a balloon message in" -- showMessage() has
+        # nowhere to appear on an icon that was never shown, so this must
+        # not silently swallow the failure instead.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+        registry = BackendRegistry([FailingCaptureBackend()])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        capsys.readouterr()  # discard the "no tray available" notice from __init__
+        show_message_calls = []
+        monkeypatch.setattr(
+            controller._tray_icon,
+            "showMessage",
+            lambda *args, **kwargs: show_message_calls.append(args),
+        )
+
+        controller.start_capture()
+
+        out = capsys.readouterr().out
+        assert "failing" in out
+        assert "capture failed" in out
+        assert show_message_calls == []
 
 
 class TestRunResidentApp:

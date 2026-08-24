@@ -5,11 +5,12 @@ grabs keys globally (see `docs/SPEC.md`, "Resident process and hotkey"). This
 page is the entire mechanism: there is no code-side fallback, and once the
 binding is set up GNOME runs `snipux --snip` for you.
 
-`--snip` asks an *already-running* snipux instance to start a capture; it
-does not start the resident process itself. Install snipux and make sure it
-is running (e.g. via the desktop entry, or `snipux` from a terminal) before
-you use the shortcut, otherwise the first press after login will report that
-no instance is running instead of taking a snip.
+`--snip` asks an *already-running* snipux instance to start a capture, and
+starts one itself first if nothing was running yet -- so the very first press
+after login (or after a crash) still shows the capture overlay, rather than
+depending on something else having started snipux first. Either way, install
+snipux (this page assumes `packaging/install.sh` has already been run) so
+`snipux --snip` is resolvable when GNOME runs the command below.
 
 ## `packaging/install.sh` does this for you
 
@@ -26,6 +27,22 @@ already had configured are kept. Re-running `install.sh` reuses the same
 If `gsettings` isn't available, or setting the shortcut otherwise fails,
 `install.sh` says so and leaves the tool installed and usable — it does not
 fail the install. Follow the manual steps below in that case.
+
+`install.sh` also writes a copy of `packaging/snipux.desktop` into
+`~/.config/autostart/` (creating the directory if needed) — the
+freedesktop-standard location GNOME (and every other compliant desktop)
+reads at login to bring applications back automatically, so the binding
+above still has something to talk to after a reboot without you doing
+anything by hand. Re-running `install.sh` just overwrites the same
+filename, so this never produces a second entry.
+
+Finally, `install.sh` starts snipux itself at the end of a successful
+install, so the keybinding works immediately rather than only after the
+next login. It skips this — printing that it could not start the app,
+rather than failing the install — on a machine with no graphical session
+(neither `DISPLAY` nor `WAYLAND_DISPLAY` set), and it leaves an
+already-running instance alone rather than starting a second one or
+nudging it into an unwanted capture.
 
 **To undo the automatic binding**, remove the `snipux` slot from the list and
 reset its keys:
@@ -105,9 +122,9 @@ uses.
 
 ## 4. Try it
 
-Press Super+Shift+S. If snipux is running, the screen freezes into the
-selection overlay. If instead nothing happens, check that snipux is running
-and that `snipux --snip` succeeds when run by hand from a terminal.
+Press Super+Shift+S. The screen freezes into the selection overlay, whether
+or not snipux happened to be running already. If instead nothing happens,
+check that `snipux --snip` succeeds when run by hand from a terminal.
 
 ## Prefer Print Screen instead?
 
