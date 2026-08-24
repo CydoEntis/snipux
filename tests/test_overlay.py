@@ -4,7 +4,14 @@ import pytest
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QColorDialog, QPushButton, QSlider, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QColorDialog,
+    QLabel,
+    QPushButton,
+    QSlider,
+    QWidget,
+)
 
 import snipux.app as app_module
 from snipux.capture import Frame, X11WindowGeometryProvider
@@ -13,6 +20,7 @@ from snipux.design import tokens
 from snipux.shapes import Rectangle
 from snipux.overlay import (
     BlurTray,
+    CaptureModePopover,
     FloatingBar,
     GeometryProvider,
     Handle,
@@ -22,9 +30,12 @@ from snipux.overlay import (
     SettingsTray,
     UnsupportedGeometryProvider,
     _BlurModeWell,
+    _CaptureModeRow,
     _CustomColorButton,
+    _DelayRow,
     _Divider,
     _HANDLE_CURSORS,
+    _MenuSeparator,
     _PreviewDot,
     _SegmentButton,
     _SwatchButton,
@@ -2463,6 +2474,326 @@ class TestBlurTrayOverlayIntegration:
         overlay._blur_tray._slider.setValue(17)
 
         assert overlay._blur_strength == 17
+
+
+class TestCaptureModePopoverComposition:
+    """SNX-44: the popover carries one row per `tokens.CAPTURE_MODES` entry,
+    a separator, then the delay row -- per docs/design/overlay-redesign.md's
+    "Capture-mode popover" section.
+    """
+
+    def test_contains_one_row_per_capture_mode_token_in_order(self):
+        popover = CaptureModePopover()
+
+        expected = [label for label, _icon, _note in tokens.CAPTURE_MODES]
+        assert list(popover._rows.keys()) == expected
+
+    def test_contains_the_separator_and_delay_row(self):
+        popover = CaptureModePopover()
+
+        assert len(popover.findChildren(_MenuSeparator)) == 1
+        assert isinstance(popover._delay_row, _DelayRow)
+
+    def test_default_delay_is_the_first_delay_token(self):
+        popover = CaptureModePopover()
+
+        assert popover.delay == tokens.DELAYS[0]
+        assert popover._delay_row._value.text() == tokens.DELAYS[0]
+
+    def test_row_label_and_note_match_their_capture_mode_token(self):
+        popover = CaptureModePopover()
+        label, _icon, note = tokens.CAPTURE_MODES[1]
+
+        row = popover._rows[label]
+
+        assert row._label.text() == label
+        assert note in [child.text() for child in row.findChildren(QLabel)]
+
+
+class TestCaptureModePopoverSelection:
+    """SNX-44: 'the selected row is marked with a check and picking a row
+    records that mode and closes the popover.'
+    """
+
+    def test_first_capture_mode_is_selected_by_default(self):
+        popover = CaptureModePopover()
+
+        default_label = tokens.CAPTURE_MODES[0][0]
+        assert popover.mode == default_label
+        assert popover._rows[default_label].is_selected
+        assert all(
+            not row.is_selected
+            for label, row in popover._rows.items()
+            if label != default_label
+        )
+
+    def test_clicking_a_row_selects_it_and_deselects_the_rest(self):
+        popover = CaptureModePopover()
+        target_label = tokens.CAPTURE_MODES[2][0]
+
+        QTest.mouseClick(popover._rows[target_label], Qt.MouseButton.LeftButton)
+
+        assert popover.mode == target_label
+        assert popover._rows[target_label].is_selected
+        assert all(
+            not row.is_selected
+            for label, row in popover._rows.items()
+            if label != target_label
+        )
+
+    def test_clicking_a_row_emits_mode_selected(self):
+        popover = CaptureModePopover()
+        received = Mock()
+        popover.modeSelected.connect(received)
+        target_label = tokens.CAPTURE_MODES[1][0]
+
+        QTest.mouseClick(popover._rows[target_label], Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with(target_label)
+
+    def test_clicking_a_row_closes_the_popover(self):
+        popover = CaptureModePopover()
+        popover.show()
+        target_label = tokens.CAPTURE_MODES[3][0]
+
+        QTest.mouseClick(popover._rows[target_label], Qt.MouseButton.LeftButton)
+
+        assert not popover.isVisible()
+
+    def test_unselected_row_shows_no_check(self):
+        # isHidden(), not isVisible(): this popover is never shown here, and
+        # isVisible() always reads False for a child of an unshown top-level
+        # widget regardless of its own setVisible() call -- isHidden()
+        # reflects the widget's own explicit show/hide state instead.
+        popover = CaptureModePopover()
+
+        other_label = tokens.CAPTURE_MODES[1][0]
+
+        assert popover._rows[other_label]._check.isHidden()
+
+    def test_selected_row_shows_the_check(self):
+        popover = CaptureModePopover()
+
+        default_label = tokens.CAPTURE_MODES[0][0]
+        assert not popover._rows[default_label]._check.isHidden()
+
+
+class TestCaptureModePopoverDelay:
+    """SNX-44: 'the delay row cycles through tokens.DELAYS in order and
+    wraps back to the first value.'
+    """
+
+    def test_clicking_the_delay_row_cycles_through_every_token_in_order(self):
+        popover = CaptureModePopover()
+
+        for expected in tokens.DELAYS[1:]:
+            QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+            assert popover.delay == expected
+            assert popover._delay_row._value.text() == expected
+
+    def test_cycling_past_the_last_delay_wraps_to_the_first(self):
+        popover = CaptureModePopover()
+        for _ in range(len(tokens.DELAYS) - 1):
+            QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+        assert popover.delay == tokens.DELAYS[-1]
+
+        QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+
+        assert popover.delay == tokens.DELAYS[0]
+
+    def test_clicking_the_delay_row_emits_delay_changed(self):
+        popover = CaptureModePopover()
+        received = Mock()
+        popover.delayChanged.connect(received)
+
+        QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with(tokens.DELAYS[1])
+
+    def test_clicking_the_delay_row_does_not_close_the_popover(self):
+        popover = CaptureModePopover()
+        popover.show()
+
+        QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+
+        assert popover.isVisible()
+
+    def test_clicking_the_delay_row_does_not_change_the_capture_mode(self):
+        popover = CaptureModePopover()
+
+        QTest.mouseClick(popover._delay_row, Qt.MouseButton.LeftButton)
+
+        assert popover.mode == tokens.CAPTURE_MODES[0][0]
+
+
+class TestCaptureModePopoverPositioning:
+    """SNX-44: 'the popover opens above the bar when there is room above it
+    and below the bar when there is not,' per the spec's rule: "if bar top
+    > 300px, place the popover at bar_top - popover_height - 8; otherwise
+    place it below the bar."
+    """
+
+    def test_opens_above_the_bar_when_bar_top_is_past_the_threshold(self):
+        popover = CaptureModePopover()
+        bar_geometry = QRect(200, 400, 600, 48)
+        assert bar_geometry.top() > CaptureModePopover._UP_THRESHOLD
+
+        popover.reposition(bar_geometry, QSize(1600, 1000))
+
+        expected_top = (
+            bar_geometry.top() - popover.geometry().height() - tokens.Metric.MENU_OFFSET
+        )
+        assert popover.geometry().top() == expected_top
+        assert popover.geometry().bottom() < bar_geometry.top()
+
+    def test_opens_below_the_bar_when_bar_top_is_at_or_under_the_threshold(self):
+        popover = CaptureModePopover()
+        bar_geometry = QRect(200, 250, 600, 48)
+        assert bar_geometry.top() <= CaptureModePopover._UP_THRESHOLD
+
+        popover.reposition(bar_geometry, QSize(1600, 1000))
+
+        expected_top = bar_geometry.bottom() + tokens.Metric.MENU_OFFSET
+        assert popover.geometry().top() == expected_top
+        assert popover.geometry().top() > bar_geometry.bottom() - 1
+
+    def test_width_matches_the_menu_width_token(self):
+        popover = CaptureModePopover()
+
+        popover.reposition(QRect(200, 250, 600, 48), QSize(1600, 1000))
+
+        assert popover.geometry().width() == tokens.Metric.MENU_W
+
+    def test_horizontal_position_clamps_inside_the_window(self):
+        popover = CaptureModePopover()
+        bar_geometry = QRect(0, 250, 50, 48)  # far left, narrow bar
+
+        popover.reposition(bar_geometry, QSize(1600, 1000))
+
+        assert popover.geometry().left() >= 0
+        assert popover.geometry().right() <= 1600
+
+
+class TestCaptureModePopoverOverlayIntegration:
+    """SNX-44: the popover wired into `OverlayWindow` -- opened from the
+    bar's capture chip and closed either by picking a row or by clicking
+    outside it, mirroring how SNX-40/41/42 wired `FloatingBar`/the trays in.
+    """
+
+    def _overlay(self, size=(1600, 1000)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def test_clicking_the_chip_opens_the_popover(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        assert overlay._popover.isVisible()
+
+    def test_clicking_the_chip_again_closes_the_popover(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        assert overlay._popover.isVisible()
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        assert not overlay._popover.isVisible()
+
+    def test_popover_opens_above_the_bar_when_the_selection_sits_low(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        # A low selection pushes the bar well past the 300px threshold.
+        overlay.set_selection(QRect(400, 700, 200, 150))
+        assert overlay._bar.geometry().top() > CaptureModePopover._UP_THRESHOLD
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        assert overlay._popover.geometry().bottom() < overlay._bar.geometry().top()
+
+    def test_popover_opens_below_the_bar_when_the_selection_sits_high(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        # A high selection keeps the bar's top at or under the threshold.
+        overlay.set_selection(QRect(400, 50, 200, 150))
+        assert overlay._bar.geometry().top() <= CaptureModePopover._UP_THRESHOLD
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        assert overlay._popover.geometry().top() > overlay._bar.geometry().bottom() - 1
+
+    def test_picking_a_mode_records_it_and_updates_the_chip_label(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        target_label = tokens.CAPTURE_MODES[1][0]
+
+        QTest.mouseClick(overlay._popover._rows[target_label], Qt.MouseButton.LeftButton)
+
+        assert overlay._capture_mode == target_label
+        assert overlay._bar._chip._text_label.text() == target_label
+        assert not overlay._popover.isVisible()
+
+    def test_cycling_the_delay_row_updates_the_overlays_delay(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._popover._delay_row, Qt.MouseButton.LeftButton)
+
+        assert overlay._delay == tokens.DELAYS[1]
+
+    def test_clicking_outside_the_popover_closes_it_without_changing_the_mode(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        assert overlay._popover.isVisible()
+        original_mode = overlay._capture_mode
+
+        # A point on the frozen desktop, far from both the popover and any
+        # other chrome -- the top-left corner is always clear of both.
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(2, 2))
+
+        assert not overlay._popover.isVisible()
+        assert overlay._capture_mode == original_mode
+
+    def test_popover_hides_when_the_overlay_is_hidden(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        assert overlay._popover.isVisible()
+
+        overlay.hide()
+
+        assert not overlay._popover.isVisible()
+
+    def test_popover_hides_when_the_selection_is_cleared(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        assert overlay._popover.isVisible()
+
+        overlay.set_selection(None)
+
+        assert not overlay._popover.isVisible()
 
 
 def _mark(start=(10, 10), end=(20, 20)):
