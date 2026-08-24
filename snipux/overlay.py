@@ -18,9 +18,19 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSizeF, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPainterPath, QPen, QTransform
-from PyQt6.QtWidgets import QApplication, QLabel, QWidget
+from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, QTimer, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QIcon,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QTransform,
+)
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QWidget
 
 from snipux import design
 from snipux.capture import Frame
@@ -548,6 +558,428 @@ def _l_bracket_local_path(length: float, thickness: float, radius: float) -> QPa
     return path
 
 
+# ---------------------------------------------------------------------------
+# Floating bar (SNX-40)
+# ---------------------------------------------------------------------------
+# docs/design/overlay-redesign.md's "Floating bar" section is the authority
+# for every metric below; tokens.py is where each one actually lives. Two
+# things that section calls out because they are easy to get wrong: the
+# bar's fill is a 93%-alpha *paint*, never a 93%-*opacity* widget -- that
+# would wash every glyph out along with the background; and the bar's own
+# position must clamp so it can never leave the screen once the selection is
+# dragged down to the bottom edge.
+
+# Reverse of tokens.SHORTCUTS ("P" -> "pen"), so a button can look up its own
+# key by tool name instead of every button re-scanning the forward mapping.
+_TOOL_SHORTCUT_KEYS = {tool: key for key, tool in design.tokens.SHORTCUTS.items()}
+
+
+def _tool_label(tool: str) -> str:
+    """Human-facing text for a `tokens.TOOLS` entry.
+
+    Mirrors editor.py's `_tool_label` (SNX-26) -- same title-casing -- over
+    the redesign's plain string tool identifiers rather than the old `Tool`
+    enum.
+    """
+    return tool.replace("_", " ").title()
+
+
+class _IconButton(QPushButton):
+    """One 34px icon button in the floating bar: a tool, undo, redo, clear
+    or copy. A real `QPushButton`, not a rectangle painted by some
+    ancestor's paintEvent, so its tooltip and click handling come for free.
+
+    Idle/hover/active/disabled/danger-hover each recolour the glyph itself,
+    not just the background -- per the spec's button-state table, "active
+    tool... with an #f8faf0 glyph" -- so a state change regenerates the icon
+    pixmap via `design.icon()` rather than leaning on a stylesheet, which has
+    no way to reach into an SVG's `currentColor` stroke.
+    """
+
+    def __init__(
+        self,
+        icon_name: str,
+        tooltip: str,
+        *,
+        idle_color: QColor | None = None,
+        hover_bg: QColor | None = None,
+        hover_color: QColor | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        metric = design.tokens.Metric
+        self._icon_name = icon_name
+        self._idle_color = idle_color or design.color("ICON_IDLE")
+        self._hover_bg = hover_bg or design.color("ICON_HOVER_BG")
+        # None (every button but Clear) means hovering leaves the glyph's
+        # own colour alone -- only Clear's danger hover recolours the icon
+        # as well as the background.
+        self._hover_color = hover_color
+        self._active = False
+
+        self.setFixedSize(metric.BTN, metric.BTN)
+        self.setIconSize(QSize(metric.ICON, metric.ICON))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tooltip)
+        self.setFlat(True)
+        self._refresh()
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        self._refresh()
+
+    def setEnabled(self, enabled: bool) -> None:
+        super().setEnabled(enabled)
+        self._refresh()
+
+    def enterEvent(self, event) -> None:
+        self._refresh(hovered=True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._refresh(hovered=False)
+        super().leaveEvent(event)
+
+    def _refresh(self, hovered: bool | None = None) -> None:
+        if hovered is None:
+            hovered = self.underMouse()
+        metric = design.tokens.Metric
+
+        if not self.isEnabled():
+            # Per the README's "Undo / redo": disabled is the preferred way
+            # to show an empty stack, over just recolouring a still-live
+            # button -- so this is a real QWidget.setEnabled(False), not a
+            # cosmetic-only state.
+            bg, glyph = None, design.color("ICON_DISABLED")
+        elif hovered and self._hover_color is not None:
+            bg, glyph = self._hover_bg, self._hover_color
+        elif self._active:
+            bg, glyph = design.color("ICON_ACTIVE_BG"), design.color("ICON_ACTIVE")
+        elif hovered:
+            bg, glyph = self._hover_bg, self._idle_color
+        else:
+            bg, glyph = None, self._idle_color
+
+        if bg is not None:
+            self.setStyleSheet(
+                "QPushButton { border: none; border-radius: %dpx;"
+                " background: rgba(%d, %d, %d, %s); }"
+                % (metric.BTN_RADIUS, bg.red(), bg.green(), bg.blue(), bg.alphaF())
+            )
+        else:
+            self.setStyleSheet("QPushButton { border: none; background: transparent; }")
+
+        # design.icon() only ever fills QIcon.Mode.Normal; left at that,
+        # Qt's style would auto-generate its own faded Disabled variant the
+        # moment setEnabled(False) runs above, undoing the exact
+        # ICON_DISABLED colour just chosen. Registering the same pixmap for
+        # both modes makes the disabled state use precisely what was asked
+        # for instead of a second, uncontrolled recolouring on top of it.
+        pixmap = design.icon(self._icon_name, glyph).pixmap(metric.ICON, metric.ICON)
+        icon = QIcon()
+        icon.addPixmap(pixmap, QIcon.Mode.Normal)
+        icon.addPixmap(pixmap, QIcon.Mode.Disabled)
+        self.setIcon(icon)
+
+
+class _PillButton(QPushButton):
+    """The two bar controls that pair an icon with a text label inside a
+    solid pill: the capture-mode chip (row 1) and Save (row 17).
+
+    Built from a child layout of two `QLabel`s rather than
+    `QPushButton.setIcon`/`setText`, which always places the icon first --
+    the chip needs its chevron *after* the label, per the spec's "label +
+    14px chevron".
+    """
+
+    def __init__(
+        self,
+        icon_name: str,
+        text: str,
+        *,
+        icon_size: int,
+        text_color: QColor,
+        bg_color: QColor,
+        icon_after: bool,
+        pad_left: int,
+        pad_right: int,
+        tooltip: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        metric = design.tokens.Metric
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tooltip)
+        self.setFixedHeight(metric.CHIP_H)
+        self.setStyleSheet(
+            "QPushButton { border: none; border-radius: %dpx;"
+            " background: rgba(%d, %d, %d, %s); }"
+            % (
+                metric.BTN_RADIUS,
+                bg_color.red(),
+                bg_color.green(),
+                bg_color.blue(),
+                bg_color.alphaF(),
+            )
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(pad_left, 0, pad_right, 0)
+        layout.setSpacing(6)
+
+        icon_label = QLabel(self)
+        icon_label.setPixmap(design.icon(icon_name, text_color).pixmap(icon_size, icon_size))
+        # A click must reach the QPushButton underneath, not stop at a
+        # child QLabel sitting on top of it.
+        icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        text_label = QLabel(text, self)
+        text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        font = QFont(design.font_families().ui)
+        size, weight = design.tokens.Font.CHIP_LABEL
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight(weight))
+        text_label.setFont(font)
+        text_label.setStyleSheet(f"color: {text_color.name()};")
+
+        for widget in (text_label, icon_label) if icon_after else (icon_label, text_label):
+            layout.addWidget(widget)
+
+
+class _Divider(QWidget):
+    """1px vertical divider between the bar's button groups."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(1, design.tokens.Metric.DIVIDER_H)
+        colour = design.color("DIVIDER")
+        self.setStyleSheet(
+            "background: rgba(%d, %d, %d, %s);"
+            % (colour.red(), colour.green(), colour.blue(), colour.alphaF())
+        )
+
+
+class FloatingBar(QWidget):
+    """The overlay redesign's floating bar: capture chip, eight tool
+    buttons, undo/redo/clear, copy and save, per
+    docs/design/overlay-redesign.md's "Floating bar" section -- eleven
+    groups in place of the twenty-plus controls the old editor.py toolbar
+    had, and per the ticket that reduction is not meant to grow back.
+
+    A real child widget of `OverlayWindow`, built from real `QPushButton`s
+    -- never painted inside `OverlayWindow.paintEvent` -- which is what
+    gives every control a tooltip and hover state for free instead of
+    hand-rolled hit-testing. `paintEvent` below paints the glass fill as a
+    translucent *brush*, not a reduced-*opacity* widget: `setWindowOpacity`
+    would dim every child glyph along with the background, exactly the
+    mistake the README calls out.
+    """
+
+    toolSelected = pyqtSignal(str)
+    undoRequested = pyqtSignal()
+    redoRequested = pyqtSignal()
+    clearRequested = pyqtSignal()
+    copyRequested = pyqtSignal()
+    saveRequested = pyqtSignal()
+    captureChipClicked = pyqtSignal()
+
+    UNDO_SHORTCUT = "Ctrl+Z"
+    REDO_SHORTCUT = "Ctrl+Shift+Z"
+
+    # The README gives the top clamp as this literal pixel value, not a
+    # tokens.Metric entry -- same convention OverlayWindow's own
+    # _TOP_CLEARANCE/_BAR_ROOM already follow for prose-only constants.
+    _TOP_MAX_FROM_BOTTOM = 118
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # The widget's own backdrop is transparent so paintEvent's alpha
+        # fill is the only thing establishing a background colour --
+        # without this attribute Qt composites the widget as opaque and the
+        # "93% alpha, not 93% opacity" distinction has nothing to paint
+        # against.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        metric = design.tokens.Metric
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(
+            metric.BAR_PAD_H, metric.BAR_PAD_V, metric.BAR_PAD_H, metric.BAR_PAD_V
+        )
+        layout.setSpacing(metric.BAR_GAP)
+
+        self._active_tool: str | None = None
+        self._tool_buttons: dict[str, _IconButton] = {}
+
+        self._chip = self._build_capture_chip()
+        self._chip.clicked.connect(self.captureChipClicked)
+        layout.addWidget(self._chip)
+        self._add_divider(layout)
+
+        for tool in design.tokens.TOOLS:
+            key = _TOOL_SHORTCUT_KEYS[tool]
+            button = _IconButton(tool, f"{_tool_label(tool)} — {key}")
+            button.clicked.connect(lambda checked=False, t=tool: self._on_tool_clicked(t))
+            self._tool_buttons[tool] = button
+            layout.addWidget(button)
+        self._add_divider(layout)
+
+        self._undo_button = _IconButton("undo", f"Undo — {self.UNDO_SHORTCUT}")
+        self._undo_button.clicked.connect(self.undoRequested)
+        self._undo_button.setEnabled(False)
+        layout.addWidget(self._undo_button)
+
+        self._redo_button = _IconButton("redo", f"Redo — {self.REDO_SHORTCUT}")
+        self._redo_button.clicked.connect(self.redoRequested)
+        self._redo_button.setEnabled(False)
+        layout.addWidget(self._redo_button)
+
+        self._clear_button = _IconButton(
+            "trash",
+            "Clear ink",
+            hover_bg=design.color("DANGER_BG"),
+            hover_color=design.color("DANGER_FG"),
+        )
+        self._clear_button.clicked.connect(self.clearRequested)
+        layout.addWidget(self._clear_button)
+        self._add_divider(layout)
+
+        self._copy_button = _IconButton("copy", "Copy", idle_color=design.color("ICON_NEUTRAL"))
+        self._copy_button.clicked.connect(self.copyRequested)
+        layout.addWidget(self._copy_button)
+
+        self._save_button = self._build_save_button()
+        self._save_button.clicked.connect(self.saveRequested)
+        layout.addWidget(self._save_button)
+
+    # -- construction helpers ------------------------------------------------
+
+    def _add_divider(self, layout: QHBoxLayout) -> None:
+        metric = design.tokens.Metric
+        layout.addSpacing(metric.BAR_DIVIDER_GAP)
+        layout.addWidget(_Divider(self))
+        layout.addSpacing(metric.BAR_DIVIDER_GAP)
+
+    def _build_capture_chip(self) -> _PillButton:
+        label, _icon, _note = design.tokens.CAPTURE_MODES[0]  # "Region", the bar's default
+        metric = design.tokens.Metric
+        return _PillButton(
+            "chevron",
+            label,
+            icon_size=14,
+            text_color=design.color("ACCENT_FG"),
+            bg_color=design.color("ACCENT"),
+            icon_after=True,
+            pad_left=metric.CHIP_PAD_L,
+            pad_right=metric.CHIP_PAD_R,
+            tooltip="Capture mode",
+        )
+
+    def _build_save_button(self) -> _PillButton:
+        metric = design.tokens.Metric
+        return _PillButton(
+            "save",
+            "Save",
+            icon_size=metric.ICON,
+            text_color=design.color("TEXT_PRIMARY"),
+            # No token names this fill on its own; it is the same
+            # #ffffff/10% pair tokens.Color.BAR_BORDER already defines, so
+            # that's reused here rather than re-typed, per CLAUDE.md's
+            # "import from tokens rather than re-typing literals."
+            bg_color=design.color("BAR_BORDER"),
+            icon_after=False,
+            pad_left=13,
+            pad_right=13,
+            tooltip="Save",
+        )
+
+    # -- tool selection --------------------------------------------------
+
+    def _on_tool_clicked(self, tool: str) -> None:
+        self.set_active_tool(tool)
+        self.toolSelected.emit(tool)
+
+    def set_active_tool(self, tool: str | None) -> None:
+        """Mark `tool`'s button active and every other tool button idle.
+
+        The single place this is enforced, whether the change came from a
+        click above or a caller driving the bar directly -- per the spec,
+        exactly one tool reads as active at a time.
+        """
+        self._active_tool = tool
+        for name, button in self._tool_buttons.items():
+            button.set_active(name == tool)
+
+    @property
+    def active_tool(self) -> str | None:
+        return self._active_tool
+
+    # -- undo / redo -------------------------------------------------------
+
+    def set_undo_enabled(self, enabled: bool) -> None:
+        self._undo_button.setEnabled(enabled)
+
+    def set_redo_enabled(self, enabled: bool) -> None:
+        self._redo_button.setEnabled(enabled)
+
+    # -- fill ----------------------------------------------------------------
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.Metric
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        # design.color("BAR_BG") already carries BAR_BG_ALPHA (93%) --
+        # painted here as a translucent *fill*, never as reduced *widget*
+        # opacity, so every child painted after this (each button's own
+        # glyph) stays fully opaque.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("BAR_BG"))
+        painter.drawRoundedRect(rect, metric.BAR_RADIUS, metric.BAR_RADIUS)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.color("BAR_BORDER"))
+        painter.drawRoundedRect(rect, metric.BAR_RADIUS, metric.BAR_RADIUS)
+        painter.end()
+
+    # -- positioning -----------------------------------------------------
+
+    def reposition(self, selection: QRect, bounds_size: QSize) -> None:
+        """Centre the bar under `selection`, clamped so it can never leave a
+        window of `bounds_size` -- even with the selection dragged to the
+        very bottom edge -- per the spec's "Floating bar" clamp rule.
+        """
+        metric = design.tokens.Metric
+        size = self.sizeHint()
+        # QRectF, not the raw QRect `selection`: QRect.bottom() is
+        # inclusive (top + height - 1), which would put the bar a pixel
+        # higher than intended -- same fix OverlayWindow's own
+        # `_bracket_path` already applies for the same reason.
+        sel = QRectF(selection)
+
+        desired_center_x = sel.center().x()
+        # Falls back to the window's own centre, rather than inverting, when
+        # the window is narrower than twice BAR_MIN_EDGE -- a case the
+        # README's "at least 400px from either screen edge" doesn't
+        # anticipate (a real screen is always wider than 800px) but a small
+        # test/embedded window can hit.
+        half_width = bounds_size.width() / 2
+        min_center = min(metric.BAR_MIN_EDGE, half_width)
+        max_center = max(bounds_size.width() - metric.BAR_MIN_EDGE, half_width)
+        center_x = max(min_center, min(desired_center_x, max_center))
+
+        desired_top = sel.bottom() + metric.BAR_OFFSET_Y
+        top = min(desired_top, bounds_size.height() - self._TOP_MAX_FROM_BOTTOM)
+
+        self.setGeometry(
+            round(center_x - size.width() / 2), round(top), size.width(), size.height()
+        )
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -567,9 +999,13 @@ class OverlayWindow(QWidget):
     `undo_erase`) plus `copy`/`save`, which render `_marks` fresh at the
     moment they're called -- replacing the old editor.py flow's bug of
     copying the un-annotated capture once, before any annotation could
-    exist. The floating bar and the drawing-tool mouse handling that would
-    actually call `add_mark` from a live drag are still later tickets in
-    the same arc; this class exists so they have a shell to attach to.
+    exist. SNX-40 (this ticket) adds `FloatingBar` itself as a real child
+    widget (`_bar`), wired to `undo`/`redo`/`clear`/`copy`/`save` and to
+    `set_eraser_active`, and kept positioned under `_selection` by
+    `_sync_bar_visibility`. The drawing-tool mouse handling that would
+    actually call `add_mark` from a live drag -- for every tool but the
+    eraser, which SNX-38 already wired end to end -- is still a later
+    ticket in the same arc.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -674,10 +1110,59 @@ class OverlayWindow(QWidget):
         self._ants_timer.setInterval(self._ANTS_TIMER_INTERVAL_MS)
         self._ants_timer.timeout.connect(self._advance_ants)
 
+        # The floating bar (SNX-40): a real child widget, positioned under
+        # the selection by `_sync_bar` below rather than drawn in this
+        # class's own paintEvent. Starts hidden -- shown only once this
+        # window itself is shown (see showEvent/hideEvent) so a caller that
+        # never shows the window (most of this file's own tests, which grab()
+        # an unshown widget to sample pixels) never has the bar painted over
+        # whatever they're sampling.
+        self._bar = FloatingBar(self)
+        self._bar.hide()
+        self._bar.undoRequested.connect(self.undo)
+        self._bar.redoRequested.connect(self.redo)
+        self._bar.clearRequested.connect(self.clear)
+        self._bar.copyRequested.connect(self.copy)
+        self._bar.saveRequested.connect(self.save)
+        self._bar.toolSelected.connect(self._on_tool_selected)
+
     def set_selection(self, rect: QRect | None) -> None:
         """Set the current selection (window coordinates) and repaint."""
         self._selection = rect
+        self._sync_bar_visibility()
         self.update()
+
+    def _on_tool_selected(self, tool: str) -> None:
+        """Wire the bar's tool buttons to the one piece of per-tool state
+        this class already tracks: the eraser's hit-testing arm/disarm (see
+        `set_eraser_active`). Switching the *live drawing* tool itself --
+        pen, arrow, and the rest actually starting a stroke on drag -- is
+        still a later ticket in the same arc, per the class docstring; this
+        only has to keep the eraser cursor and hit-testing in sync with
+        whichever tool button the bar shows as active.
+        """
+        self.set_eraser_active(tool == "eraser")
+
+    def _sync_bar_visibility(self) -> None:
+        """Show/hide and reposition the floating bar to match `_selection`.
+
+        Guarded on `self.isVisible()` -- not just "is there a selection" --
+        so this window's own many pixel-sampling tests, none of which ever
+        call `.show()`, never end up with the bar painted into a `grab()`
+        they didn't ask for: a child widget's own `.show()` call is enough
+        to make Qt paint it in a `grab()` regardless of whether this window
+        itself was ever shown, so visibility has to be gated here rather
+        than unconditionally following `_selection`.
+        """
+        if self._selection is not None and self.isVisible():
+            self._bar.reposition(self._selection, self.size())
+            self._bar.show()
+        else:
+            self._bar.hide()
+
+    def _sync_bar_undo_redo(self) -> None:
+        self._bar.set_undo_enabled(self.can_undo)
+        self._bar.set_redo_enabled(self.can_redo)
 
     def add_mark(self, shape: Shape) -> None:
         """Append `shape` to the ink layer and repaint.
@@ -695,6 +1180,7 @@ class OverlayWindow(QWidget):
         """
         self._marks.append(shape)
         self._redo.clear()
+        self._sync_bar_undo_redo()
         self.update()
 
     @property
@@ -728,6 +1214,7 @@ class OverlayWindow(QWidget):
         if not self._marks:
             return
         self._redo.append(self._marks.pop())
+        self._sync_bar_undo_redo()
         self.update()
 
     def redo(self) -> None:
@@ -741,6 +1228,7 @@ class OverlayWindow(QWidget):
         if not self._redo:
             return
         self._marks.append(self._redo.pop())
+        self._sync_bar_undo_redo()
         self.update()
 
     def clear(self) -> None:
@@ -754,6 +1242,7 @@ class OverlayWindow(QWidget):
         """
         self._marks = []
         self._redo = []
+        self._sync_bar_undo_redo()
         self.update()
 
     def set_eraser_active(self, active: bool) -> None:
@@ -865,10 +1354,15 @@ class OverlayWindow(QWidget):
         # acceptance criterion is explicit that the timer must not keep
         # ticking (and scheduling repaints) once the overlay is hidden.
         self._ants_timer.start()
+        # A selection set before this window was ever shown (e.g. a mode
+        # that seeds one at construction time) needs the bar to catch up
+        # now that `self.isVisible()` has actually become true.
+        self._sync_bar_visibility()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
         self._ants_timer.stop()
+        self._bar.hide()
 
     def _advance_ants(self) -> None:
         """Advance the dashed stroke's offset by one animation frame.
