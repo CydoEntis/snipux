@@ -126,8 +126,11 @@ class Metric:
     MENU_OFFSET      = 8          # opens UPWARD from the bar; see README
 
     # Selection
-    SEL_MIN_W        = 200
-    SEL_MIN_H        = 140
+    # The reference prototype uses 200x140; SNX-33 deliberately shrinks
+    # this floor to 16x16 so a taskbar icon or a single line of text can
+    # still be snipped.
+    SEL_MIN_W        = 16
+    SEL_MIN_H        = 16
     SEL_STROKE_W     = 1
     ANTS_DASH        = (7, 7)     # on, off
     ANTS_PERIOD_MS   = 700        # one 14px dash cycle
