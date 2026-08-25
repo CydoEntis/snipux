@@ -12,35 +12,38 @@ depending on something else having started snipux first. Either way, install
 snipux (this page assumes `packaging/install.sh` has already been run) so
 `snipux --snip` is resolvable when GNOME runs the command below.
 
-## `packaging/install.sh` does this for you
+## `snipux --setup` does this for you
 
-As of the last step of install, `install.sh` runs exactly the mechanism
-below itself: it appends a `custom-keybindings` slot named `snipux`, sets its
-`command` to the installed launcher's *absolute* path plus `--snip` (not the
-bare `snipux` name — `~/.local/bin` is not reliably on `PATH` in a graphical
-GNOME session, which the script checks and warns about separately), and sets
-its `binding` to `<Super><Shift>s`. It reads the existing
-`custom-keybindings` list first and appends to it, so any shortcuts you
-already had configured are kept. Re-running `install.sh` reuses the same
-`snipux` slot rather than adding a second one.
+`packaging/install.sh` runs `snipux --setup` (SNX-73) right after installing
+the package into its venv, and that command runs exactly the mechanism below
+itself: it appends a `custom-keybindings` slot named `snipux`, sets its
+`command` to the installed console script's *absolute* path plus `--snip`
+(not the bare `snipux` name — `~/.local/bin` is not reliably on `PATH` in a
+graphical GNOME session), and sets its `binding` to `<Super><Shift>s`. It
+reads the existing `custom-keybindings` list first and appends to it, so any
+shortcuts you already had configured are kept. Running `snipux --setup`
+again (via a re-run of `install.sh`, or directly once snipux is installed)
+reuses the same `snipux` slot rather than adding a second one.
 
 If `gsettings` isn't available, or setting the shortcut otherwise fails,
-`install.sh` says so and leaves the tool installed and usable — it does not
+`--setup` says so and leaves the tool installed and usable — it does not
 fail the install. Follow the manual steps below in that case.
 
-`install.sh` also writes a copy of `packaging/snipux.desktop` into
-`~/.config/autostart/` (creating the directory if needed) — the
-freedesktop-standard location GNOME (and every other compliant desktop)
-reads at login to bring applications back automatically, so the binding
-above still has something to talk to after a reboot without you doing
-anything by hand. Re-running `install.sh` just overwrites the same
-filename, so this never produces a second entry.
+`--setup` also writes its bundled `.desktop` template (shipped inside the
+`snipux` package itself, so this works from a `pip`/`pipx` install with no
+repository checkout present) into `~/.config/autostart/` (creating the
+directory if needed) — the freedesktop-standard location GNOME (and every
+other compliant desktop) reads at login to bring applications back
+automatically, so the binding above still has something to talk to after a
+reboot without you doing anything by hand. Running `--setup` again just
+overwrites the same filename, so this never produces a second entry.
 
-Finally, `install.sh` starts snipux itself at the end of a successful
-install, so the keybinding works immediately rather than only after the
-next login. It skips this — printing that it could not start the app,
-rather than failing the install — on a machine with no graphical session
-(neither `DISPLAY` nor `WAYLAND_DISPLAY` set), and it leaves an
+Finally, `install.sh` itself (not `--setup`, which only handles the desktop
+entry, autostart entry, and shortcut) starts snipux at the end of a
+successful install, so the keybinding works immediately rather than only
+after the next login. It skips this — printing that it could not start the
+app, rather than failing the install — on a machine with no graphical
+session (neither `DISPLAY` nor `WAYLAND_DISPLAY` set), and it leaves an
 already-running instance alone rather than starting a second one or
 nudging it into an unwanted capture.
 

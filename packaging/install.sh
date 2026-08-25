@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs snipux for the current user: a self-contained virtual environment,
-# the package itself, a launcher on PATH, then the .desktop file so it shows
-# up in GNOME's application list.
+# the package itself, a launcher on PATH, then `snipux --setup` (SNX-73) for
+# the desktop entry, autostart entry, and GNOME shortcut so it shows up in
+# GNOME's application list and Super+Shift+S works.
 #
 # User-local throughout -- no sudo, nothing under /usr/share, and nothing
 # written into the system Python's site-packages. Ubuntu 23.04+ (including
@@ -70,39 +71,24 @@ exec "$venv_dir/bin/snipux" "\$@"
 LAUNCHER
 chmod +x "$launcher"
 
-# The .desktop file in the repo carries a placeholder Exec= line rather than
-# a bare "snipux" -- $bin_dir is not reliably on PATH in a graphical GNOME
-# session (see the keybinding below, which hit this same issue), so the
-# entries that get installed must carry the launcher's absolute path
-# instead of a name that may not resolve. `sed` (not `cp`) writes the real
-# path in on every run, so re-running this script rewrites both entries
-# rather than leaving a stale path behind.
-applications_dir="$HOME/.local/share/applications"
-echo "Installing desktop entry into $applications_dir..."
-mkdir -p "$applications_dir"
-sed "s|^Exec=__SNIPUX_LAUNCHER__$|Exec=$launcher|" "$script_dir/snipux.desktop" > "$applications_dir/snipux.desktop"
-echo "Desktop entry written to $applications_dir/snipux.desktop (Exec=$launcher)"
-
-# Same .desktop file, second copy in the XDG autostart directory -- that is
-# the only difference between "launchable from the applications list" and
-# "brought back automatically at login" under the freedesktop autostart
-# spec, which GNOME (and every other compliant desktop) honours by reading
-# ~/.config/autostart/*.desktop at session start. Writing (not copying) is
-# already idempotent: re-running this just overwrites the same filename,
-# never adds a second entry.
-autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
-echo "Installing autostart entry into $autostart_dir..."
-mkdir -p "$autostart_dir"
-sed "s|^Exec=__SNIPUX_LAUNCHER__$|Exec=$launcher|" "$script_dir/snipux.desktop" > "$autostart_dir/snipux.desktop"
-echo "Autostart entry written to $autostart_dir/snipux.desktop (Exec=$launcher)"
+# Desktop entry, autostart entry, and the GNOME Super+Shift+S shortcut are
+# all `snipux --setup`'s job (SNX-73) -- it ships its own .desktop template
+# inside the package and writes it under both locations, plus the
+# gsettings dance below the keybinding used to be. Delegating here rather
+# than repeating that logic in shell is the whole point: one
+# implementation, not two that drift. `$launcher` is used (not a bare
+# "snipux") so this works even before $bin_dir is confirmed to be on PATH,
+# just like every other launcher invocation below.
+echo "Running snipux --setup..."
+"$launcher" --setup
 
 # The launcher goes into ~/.local/bin -- whether that's on PATH for a
 # *graphical* GNOME session (as opposed to the login shell this script runs
 # under) depends on how the display manager builds the session environment.
 # Check rather than assume, so a broken PATH shows up here instead of as a
-# silently dead terminal invocation later. The .desktop entries above are
-# unaffected either way, since they now carry $launcher's absolute path
-# rather than the bare "snipux" name.
+# silently dead terminal invocation later. The .desktop entries `--setup`
+# just wrote are unaffected either way, since they carry the venv's console
+# script's own absolute path rather than the bare "snipux" name.
 if command -v snipux >/dev/null 2>&1; then
     echo "Done. snipux is on PATH and listed in GNOME's application list."
 else
@@ -110,54 +96,6 @@ else
     echo "but $bin_dir is not on PATH in this shell (checked: command -v snipux)."
     echo "Typing plain \"snipux\" from a terminal won't work there -- use"
     echo "$launcher, or add $bin_dir to PATH, e.g. by logging out and back in."
-fi
-
-# Bind Super+Shift+S to the launcher via GNOME's custom-keybindings
-# mechanism -- see docs/super-shift-s-gnome.md for what this does by hand
-# and how to undo it. The launcher's absolute path is used (not the bare
-# "snipux" name) because $bin_dir is not reliably on PATH in a graphical
-# GNOME session, as just checked above.
-media_keys_schema="org.gnome.settings-daemon.plugins.media-keys"
-slot_path="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/"
-slot_schema="$media_keys_schema.custom-keybinding:$slot_path"
-shortcut_bound=false
-
-if ! command -v gsettings >/dev/null 2>&1; then
-    echo "Note: gsettings not found -- cannot bind Super+Shift+S automatically."
-    echo "See docs/super-shift-s-gnome.md to bind it by hand."
-elif ! current_keybindings="$(gsettings get "$media_keys_schema" custom-keybindings 2>/dev/null)"; then
-    echo "Note: could not read GNOME's custom-keybindings list -- cannot bind"
-    echo "Super+Shift+S automatically. See docs/super-shift-s-gnome.md to bind it by hand."
-else
-    case "$current_keybindings" in
-        *"'$slot_path'"*)
-            # A previous run of this script already appended our slot --
-            # reuse it instead of adding a duplicate entry.
-            ;;
-        "@as []")
-            current_keybindings="['$slot_path']"
-            ;;
-        *)
-            # Splice our slot into the existing list rather than replacing
-            # it, so shortcuts the user set up by hand are kept.
-            current_keybindings="${current_keybindings%]}, '$slot_path']"
-            ;;
-    esac
-
-    if gsettings set "$media_keys_schema" custom-keybindings "$current_keybindings" \
-        && gsettings set "$slot_schema" name 'snipux' \
-        && gsettings set "$slot_schema" command "$launcher --snip" \
-        && gsettings set "$slot_schema" binding '<Super><Shift>s'
-    then
-        shortcut_bound=true
-    else
-        echo "Note: setting the GNOME shortcut failed -- cannot bind Super+Shift+S"
-        echo "automatically. See docs/super-shift-s-gnome.md to bind it by hand."
-    fi
-fi
-
-if [ "$shortcut_bound" = true ]; then
-    echo "Bound Super+Shift+S to run: $launcher --snip"
 fi
 
 # Start snipux now, rather than leaving the user to wait for the next login
