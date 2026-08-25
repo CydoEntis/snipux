@@ -2414,7 +2414,7 @@ class TestToast:
     def test_show_message_sets_the_icon_and_the_text(self):
         toast = Toast()
 
-        toast.show_message("copy", "Copied to clipboard", QSize(800, 600))
+        toast.show_message("copy", "Copied to clipboard", QRectF(0, 0, 800, 600))
 
         assert toast._text_label.text() == "Copied to clipboard"
         assert not toast._icon_label.pixmap().isNull()
@@ -2422,14 +2422,14 @@ class TestToast:
 
     def test_show_message_positions_bottom_centre_of_the_given_window_size(self):
         toast = Toast()
-        window_size = QSize(800, 600)
+        window_size = QRectF(0, 0, 800, 600)
 
         toast.show_message("save", "Saved to ~/Pictures/snipux", window_size)
 
         size = toast.sizeHint()
         expected_left = round((window_size.width() - size.width()) / 2)
         expected_top = round(
-            window_size.height() - tokens.Metric.TOAST_BOTTOM - size.height()
+            window_size.bottom() - tokens.Metric.TOAST_BOTTOM - size.height()
         )
         assert toast.geometry().left() == expected_left
         assert toast.geometry().top() == expected_top
@@ -2437,7 +2437,7 @@ class TestToast:
     def test_dismiss_timer_interval_matches_tokens_toast_ms(self):
         toast = Toast()
 
-        toast.show_message("trash", "Ink cleared", QSize(400, 300))
+        toast.show_message("trash", "Ink cleared", QRectF(0, 0, 400, 300))
 
         assert toast._timer.interval() == tokens.Metric.TOAST_MS
         assert toast._timer.isSingleShot()
@@ -2449,7 +2449,7 @@ class TestToast:
         # already establish the pattern of driving a QTimer's own slot
         # directly instead of blocking the suite on it.
         toast = Toast()
-        toast.show_message("copy", "Copied to clipboard", QSize(400, 300))
+        toast.show_message("copy", "Copied to clipboard", QRectF(0, 0, 400, 300))
         assert toast.isVisible()
 
         toast._timer.timeout.emit()
@@ -2458,9 +2458,9 @@ class TestToast:
 
     def test_a_second_message_replaces_the_first_rather_than_stacking(self):
         toast = Toast()
-        toast.show_message("copy", "Copied to clipboard", QSize(400, 300))
+        toast.show_message("copy", "Copied to clipboard", QRectF(0, 0, 400, 300))
 
-        toast.show_message("save", "Saved to ~/Pictures/snipux", QSize(400, 300))
+        toast.show_message("save", "Saved to ~/Pictures/snipux", QRectF(0, 0, 400, 300))
 
         # One widget, its content overwritten -- not a second Toast
         # instance sitting behind or beside the first.
@@ -2469,10 +2469,10 @@ class TestToast:
 
     def test_a_second_message_restarts_the_dismiss_timer(self):
         toast = Toast()
-        toast.show_message("copy", "Copied to clipboard", QSize(400, 300))
+        toast.show_message("copy", "Copied to clipboard", QRectF(0, 0, 400, 300))
         first_timer = toast._timer
 
-        toast.show_message("save", "Saved to ~/Pictures/snipux", QSize(400, 300))
+        toast.show_message("save", "Saved to ~/Pictures/snipux", QRectF(0, 0, 400, 300))
 
         # The same QTimer instance, still running -- QTimer.start() on an
         # already-active timer resets its remaining time, which is what
@@ -2699,7 +2699,7 @@ class TestCaptureChipResizesOnModeChange:
         # chip changes width."
         bar = FloatingBar()
         selection = QRect(500, 300, 200, 150)
-        bounds = QSize(1600, 1000)
+        bounds = QRectF(0, 0, 1600, 1000)
         bar.reposition(selection, bounds)
         bar.grab()
         narrow_center = bar.geometry().center().x()
@@ -2770,7 +2770,7 @@ class TestFloatingBarPositioning:
     def test_centres_under_the_selection_with_room_to_spare(self):
         bar = FloatingBar()
         selection = QRect(400, 200, 200, 150)  # bottom edge at y=350
-        bounds = QSize(1600, 1000)
+        bounds = QRectF(0, 0, 1600, 1000)
 
         bar.reposition(selection, bounds)
 
@@ -2784,7 +2784,7 @@ class TestFloatingBarPositioning:
         assert bar.geometry().top() == expected_top
 
     def test_top_clamps_so_the_bar_cannot_leave_a_short_window(self):
-        bounds = QSize(1600, 400)
+        bounds = QRectF(0, 0, 1600, 400)
         # Natural position (bottom + BAR_OFFSET_Y) would land past the
         # window's own bottom edge.
         selection = QRect(400, 350, 200, 40)
@@ -2792,12 +2792,12 @@ class TestFloatingBarPositioning:
 
         bar.reposition(selection, bounds)
 
-        assert bar.geometry().top() == bounds.height() - FloatingBar._TOP_MAX_FROM_BOTTOM
-        assert bar.geometry().bottom() <= bounds.height()
+        assert bar.geometry().top() == bounds.bottom() - FloatingBar._TOP_MAX_FROM_BOTTOM
+        assert bar.geometry().bottom() <= bounds.bottom()
 
     def test_centre_clamps_away_from_the_left_screen_edge(self):
         bar = FloatingBar()
-        bounds = QSize(1600, 1000)
+        bounds = QRectF(0, 0, 1600, 1000)
         selection = QRect(0, 200, 50, 50)  # centre x = 25, far left
 
         bar.reposition(selection, bounds)
@@ -2810,12 +2810,12 @@ class TestFloatingBarPositioning:
 
     def test_centre_clamps_away_from_the_right_screen_edge(self):
         bar = FloatingBar()
-        bounds = QSize(1600, 1000)
+        bounds = QRectF(0, 0, 1600, 1000)
         selection = QRect(1580, 200, 15, 50)  # centre x near the right edge
 
         bar.reposition(selection, bounds)
 
-        expected = bounds.width() - tokens.Metric.BAR_MIN_EDGE
+        expected = bounds.right() - tokens.Metric.BAR_MIN_EDGE
         assert bar.geometry().center().x() == pytest.approx(expected, abs=1)
 
 
@@ -4073,7 +4073,7 @@ class TestCaptureModePopoverPositioning:
         bar_geometry = QRect(200, 400, 600, 48)
         assert bar_geometry.top() > CaptureModePopover._UP_THRESHOLD
 
-        popover.reposition(bar_geometry, QSize(1600, 1000))
+        popover.reposition(bar_geometry, QRectF(0, 0, 1600, 1000))
 
         expected_top = (
             bar_geometry.top() - popover.geometry().height() - tokens.Metric.MENU_OFFSET
@@ -4086,7 +4086,7 @@ class TestCaptureModePopoverPositioning:
         bar_geometry = QRect(200, 250, 600, 48)
         assert bar_geometry.top() <= CaptureModePopover._UP_THRESHOLD
 
-        popover.reposition(bar_geometry, QSize(1600, 1000))
+        popover.reposition(bar_geometry, QRectF(0, 0, 1600, 1000))
 
         expected_top = bar_geometry.bottom() + tokens.Metric.MENU_OFFSET
         assert popover.geometry().top() == expected_top
@@ -4095,7 +4095,7 @@ class TestCaptureModePopoverPositioning:
     def test_width_matches_the_menu_width_token(self):
         popover = CaptureModePopover()
 
-        popover.reposition(QRect(200, 250, 600, 48), QSize(1600, 1000))
+        popover.reposition(QRect(200, 250, 600, 48), QRectF(0, 0, 1600, 1000))
 
         assert popover.geometry().width() == tokens.Metric.MENU_W
 
@@ -4103,7 +4103,7 @@ class TestCaptureModePopoverPositioning:
         popover = CaptureModePopover()
         bar_geometry = QRect(0, 250, 50, 48)  # far left, narrow bar
 
-        popover.reposition(bar_geometry, QSize(1600, 1000))
+        popover.reposition(bar_geometry, QRectF(0, 0, 1600, 1000))
 
         assert popover.geometry().left() >= 0
         assert popover.geometry().right() <= 1600
@@ -4583,7 +4583,7 @@ class TestPopoverHeightReflectsItsChildren:
         bar_geometry = QRect(200, 400, 600, 48)
         assert bar_geometry.top() > CaptureModePopover._UP_THRESHOLD
 
-        popover.reposition(bar_geometry, QSize(1600, 1000))
+        popover.reposition(bar_geometry, QRectF(0, 0, 1600, 1000))
 
         assert popover.geometry().height() > 150
         assert popover.geometry().bottom() < bar_geometry.top()
@@ -6582,3 +6582,340 @@ class TestOpenOverlay:
         result.close()
 
         assert created and all(veil.closed for veil in created)
+
+
+# ---------------------------------------------------------------------------
+# Chrome on a staggered multi-monitor desktop
+# ---------------------------------------------------------------------------
+# The floating bar, both popovers and the settings trays used to be clamped
+# against `OverlayWindow.size()` -- the whole virtual desktop on X11, where a
+# single window spans every monitor. A union of monitors is not a safe place
+# to put chrome: unless every monitor is the same height and mounted at the
+# same offset, the union contains gaps that no monitor displays, and chrome
+# clamped into one of those gaps is invisible while still being, technically,
+# inside the window.
+#
+# The geometry below is a real three-monitor desktop that shows it: a 1440px
+# centre monitor flanked by two 1080px monitors mounted ~200px lower. The
+# union is 6400x1440; the flanking monitors stop at y=1281 and y=1268.
+
+STAGGERED_LEFT = QRectF(0, 201, 1920, 1080)      # bottom edge y=1281
+STAGGERED_CENTRE = QRectF(1920, 0, 2560, 1440)   # full height, the primary
+STAGGERED_RIGHT = QRectF(4480, 188, 1920, 1080)  # bottom edge y=1268
+STAGGERED = [STAGGERED_CENTRE, STAGGERED_LEFT, STAGGERED_RIGHT]
+STAGGERED_UNION = QRectF(0, 0, 6400, 1440)
+
+
+class TestChromeStaysOnTheSelectionsMonitor:
+    """Every piece of floating chrome is clamped to the monitor the
+    selection is on, never to the union of every monitor.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self, selection: QRect) -> OverlayWindow:
+        frame = make_frame(image_size=(6400, 1440), logical_size=(6400, 1440))
+        overlay = OverlayWindow(frame, monitor_geometries=list(STAGGERED))
+        overlay.setGeometry(0, 0, 6400, 1440)
+        overlay.set_selection(selection)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    @staticmethod
+    def _on_a_monitor(rect: QRect) -> bool:
+        return any(QRectF(m).contains(QRectF(rect)) for m in STAGGERED)
+
+    def test_bar_for_a_selection_low_on_a_short_monitor_stays_on_it(self):
+        # The regression. The old clamp allowed a top of
+        # union.height() - _TOP_MAX_FROM_BOTTOM == 1322, which is 41px
+        # below this monitor's own bottom edge -- so the bar was drawn
+        # into the gap beneath it and never appeared on any screen.
+        overlay = self._overlay(QRect(300, 1000, 600, 250))
+
+        bar = overlay._bar.geometry()
+
+        assert self._on_a_monitor(bar), f"bar at {bar} is on no monitor"
+        assert QRectF(STAGGERED_LEFT).contains(QRectF(bar))
+        assert bar.bottom() <= STAGGERED_LEFT.bottom()
+
+    def test_bar_low_on_the_other_short_monitor_stays_on_it_too(self):
+        overlay = self._overlay(QRect(4700, 1000, 600, 250))
+
+        bar = overlay._bar.geometry()
+
+        assert self._on_a_monitor(bar), f"bar at {bar} is on no monitor"
+        assert bar.bottom() <= STAGGERED_RIGHT.bottom()
+
+    def test_bar_near_an_inner_edge_does_not_straddle_the_bezel(self):
+        # Selection hard against the left monitor's inner edge. Clamped to
+        # the union, the bar centred on it and spilled across x=1920 onto
+        # the centre monitor -- split down the middle by the bezel.
+        overlay = self._overlay(QRect(1500, 600, 380, 300))
+
+        bar = overlay._bar.geometry()
+
+        assert QRectF(STAGGERED_LEFT).contains(QRectF(bar))
+        assert bar.right() <= STAGGERED_LEFT.right()
+
+    def test_bar_on_the_full_height_centre_monitor_is_unaffected(self):
+        # The single-monitor-shaped case that always worked, and must keep
+        # working: nothing here should have moved.
+        overlay = self._overlay(QRect(2600, 500, 700, 400))
+
+        bar = overlay._bar.geometry()
+
+        assert QRectF(STAGGERED_CENTRE).contains(QRectF(bar))
+        expected_top = QRectF(QRect(2600, 500, 700, 400)).bottom() + tokens.Metric.BAR_OFFSET_Y
+        assert bar.top() == expected_top
+
+    def test_chrome_bounds_picks_the_monitor_holding_most_of_the_selection(self):
+        # Straddles the bezel, but three quarters of it is on the centre
+        # monitor, so that is where the chrome belongs.
+        overlay = self._overlay(QRect(1820, 400, 400, 300))
+
+        assert overlay._chrome_bounds() == STAGGERED_CENTRE
+
+    def test_chrome_bounds_is_the_union_only_when_nothing_overlaps(self):
+        # Entirely inside the gap above the left monitor -- no monitor
+        # overlaps it at all, and `_monitor_at`'s own last resort is the
+        # frame's full span.
+        overlay = self._overlay(QRect(300, 20, 200, 100))
+
+        assert overlay._chrome_bounds() == STAGGERED_UNION
+
+    def test_settings_tray_stays_on_the_selections_monitor(self):
+        overlay = self._overlay(QRect(300, 950, 600, 250))
+        overlay._bar.select_tool(sorted(tokens.DRAW_TOOLS)[0])
+
+        tray = overlay._tray.geometry()
+
+        assert self._on_a_monitor(tray), f"tray at {tray} is on no monitor"
+
+    def test_capture_popover_stays_on_the_selections_monitor(self):
+        overlay = self._overlay(QRect(300, 1000, 600, 250))
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        popover = overlay._popover.geometry()
+
+        assert self._on_a_monitor(popover), f"popover at {popover} is on no monitor"
+
+    def _drag(self, overlay, start: QPoint, end: QPoint) -> None:
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start
+        )
+        for step in (0.3, 0.6, 1.0):
+            QTest.mouseMove(
+                overlay,
+                QPoint(
+                    round(start.x() + (end.x() - start.x()) * step),
+                    round(start.y() + (end.y() - start.y()) * step),
+                ),
+            )
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end
+        )
+
+    def _empty_overlay(self) -> OverlayWindow:
+        frame = make_frame(image_size=(6400, 1440), logical_size=(6400, 1440))
+        overlay = OverlayWindow(frame, monitor_geometries=list(STAGGERED))
+        overlay.setGeometry(0, 0, 6400, 1440)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_toolbar_stays_on_the_monitor_the_drag_started_on(self):
+        # A drag begun on the left monitor and carried a little past the
+        # bezel. Slightly more of the finished rectangle lands on the centre
+        # monitor, so "largest overlap" handed the toolbar to the centre --
+        # moving the controls off the screen being worked on for a reason
+        # invisible to the user. The monitor the drag *started* on is what
+        # "the monitor I ran the selection on" means.
+        overlay = self._empty_overlay()
+
+        self._drag(overlay, QPoint(1184, 243), QPoint(2779, 1017))
+
+        assert overlay._selection == QRect(1184, 243, 1595, 774)
+        bar = overlay._bar.geometry()
+        assert QRectF(STAGGERED_LEFT).contains(QRectF(bar)), f"bar at {bar}"
+
+    def test_a_drag_started_on_the_right_monitor_keeps_its_toolbar_there(self):
+        overlay = self._empty_overlay()
+
+        self._drag(overlay, QPoint(5200, 400), QPoint(4200, 900))
+
+        bar = overlay._bar.geometry()
+        assert QRectF(STAGGERED_RIGHT).contains(QRectF(bar)), f"bar at {bar}"
+
+    def test_a_picked_selection_has_no_anchor_and_uses_largest_overlap(self):
+        # Window / Full screen produce a rect outright rather than by
+        # dragging, so there is no "monitor I started on" to honour.
+        overlay = self._overlay(QRect(1820, 400, 400, 300))
+
+        assert overlay._selection_anchor is None
+        assert overlay._chrome_bounds() == STAGGERED_CENTRE
+
+    def test_clearing_the_selection_forgets_where_it_started(self):
+        overlay = self._empty_overlay()
+        self._drag(overlay, QPoint(300, 600), QPoint(900, 900))
+        assert overlay._selection_anchor is not None
+
+        overlay.set_selection(None)
+
+        assert overlay._selection_anchor is None
+
+    def test_cancel_button_is_visible_with_no_selection_yet(self):
+        # The regression the user actually hit: a fresh overlay, nothing
+        # selected. SNX-80's close button went to the top-right corner of
+        # the *window* -- (6350, 16) here, which is 172px above the
+        # rightmost monitor's top edge and therefore on no screen at all.
+        # The overlay came up dimmed with no visible control anywhere.
+        frame = make_frame(image_size=(6400, 1440), logical_size=(6400, 1440))
+        overlay = OverlayWindow(frame, monitor_geometries=list(STAGGERED))
+        overlay.setGeometry(0, 0, 6400, 1440)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        button = overlay._close_button.geometry()
+
+        assert overlay._close_button.isVisible()
+        assert self._on_a_monitor(button), f"cancel button at {button} is on no monitor"
+
+    def test_cancel_button_follows_the_selection_to_its_monitor(self):
+        overlay = self._overlay(QRect(300, 700, 600, 250))
+
+        button = overlay._close_button.geometry()
+
+        assert QRectF(STAGGERED_LEFT).contains(QRectF(button))
+        assert button.top() >= STAGGERED_LEFT.top()
+
+    def test_toast_confirms_on_the_selections_monitor(self):
+        # "Bottom centre of the window" is the bottom centre of the whole
+        # virtual desktop once one window spans every monitor -- so saving
+        # a snip taken on the left monitor used to confirm it in the middle
+        # of the centre one, ~2900px away from what the user was looking at.
+        overlay = self._overlay(QRect(300, 700, 600, 250))
+
+        overlay._show_toast("save", "Saved to ~/Pictures/snipux")
+        toast = overlay._toast.geometry()
+
+        assert self._on_a_monitor(toast), f"toast at {toast} is on no monitor"
+        assert QRectF(STAGGERED_LEFT).contains(QRectF(toast))
+
+    def test_popover_flip_threshold_is_measured_from_its_own_monitor(self):
+        # The spec's "bar top > 300px" is a distance from the top of the
+        # screen the user is looking at. Read as an absolute window
+        # coordinate it also counted the 201px this monitor is mounted
+        # down the virtual desktop, flipping the popover upward far too
+        # early -- off the top of the monitor.
+        overlay = self._overlay(QRect(300, 250, 600, 120))
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        popover = overlay._popover.geometry()
+
+        assert self._on_a_monitor(popover), f"popover at {popover} is on no monitor"
+        assert popover.top() >= STAGGERED_LEFT.top()
+
+
+class TestOverlayHoldsTheWholeVirtualDesktop:
+    """The overlay must keep the exact size of the frame it is showing.
+
+    `paintEvent` draws the frozen frame with
+    `drawImage(QRectF(self.rect()), ...)`, so the window's size *is* the
+    scale the whole capture is drawn at. GNOME/Mutter treats a plain
+    managed window's geometry as a suggestion and shrinks one this large to
+    a single monitor's work area -- a 6400x1440 request came back as
+    2560x1337. Every monitor then got crushed into that, and every
+    coordinate the user dragged in was off by the same factor.
+
+    There is no window manager under the offscreen platform these tests run
+    on, so the resize itself cannot be reproduced here; what is asserted is
+    the mechanism that prevents it -- fixed (min == max) size hints, which
+    is what a WM honours.
+    """
+
+    def test_size_hints_pin_the_window_to_the_frames_size(self):
+        frame = make_frame(image_size=(6400, 1440), logical_size=(6400, 1440))
+
+        overlay = OverlayWindow(frame)
+
+        assert overlay.minimumSize() == QSize(6400, 1440)
+        assert overlay.maximumSize() == QSize(6400, 1440)
+
+    def test_a_resize_cannot_shrink_the_window(self):
+        # What Mutter attempts: shrink it to one monitor's work area.
+        frame = make_frame(image_size=(6400, 1440), logical_size=(6400, 1440))
+        overlay = OverlayWindow(frame)
+
+        overlay.resize(2560, 1337)
+
+        assert overlay.size() == QSize(6400, 1440)
+
+    def test_the_frozen_frame_is_drawn_at_one_to_one(self):
+        # The consequence that matters: with the window pinned, the frame is
+        # drawn unscaled, so a selection means what it says.
+        frame = make_frame(image_size=(6400, 1440), logical_size=(6400, 1440))
+        overlay = OverlayWindow(frame)
+        overlay.resize(2560, 1337)
+
+        assert overlay.width() == frame.image.width()
+        assert overlay.height() == frame.image.height()
+
+
+class TestWaylandPicksTheInteractiveMonitor:
+    """SNX-58 left the one interactive Wayland window on
+    `monitor_geometries[0]` -- whatever `QGuiApplication.screens()` listed
+    first, which Qt does not promise is the primary screen.
+    """
+
+    def test_prefers_the_primary_screen_over_the_first_entry(self):
+        primary = QRectF(QApplication.primaryScreen().geometry())
+        elsewhere = QRectF(primary.right() + 100, 0, 640, 480)
+        # Primary deliberately second, the case the old `[0]` got wrong.
+        assert overlay_module._interactive_geometry([elsewhere, primary]) == primary
+
+    def test_falls_back_to_the_first_entry_when_no_entry_is_the_primary(self):
+        # Synthetic geometries matching no real screen -- every other test
+        # in this file, and the offscreen platform generally.
+        first = QRectF(0, 0, 200, 200)
+        second = QRectF(200, 0, 200, 200)
+        assert overlay_module._interactive_geometry([first, second]) == first
+
+    def test_handles_an_empty_geometry_list(self):
+        assert overlay_module._interactive_geometry([]) == QRectF()
+
+    def test_veils_cover_every_monitor_except_the_interactive_one(self, monkeypatch):
+        # The `[1:]` slice this replaced was only correct while the
+        # interactive monitor was always the first entry: once it can be
+        # any entry, slicing leaves the chosen monitor veiled *and* one
+        # other monitor uncovered.
+        veiled: list[QRectF] = []
+
+        class FakeVeil:
+            def __init__(self, monitor_frame):
+                veiled.append(
+                    QRectF(monitor_frame.logical_origin, monitor_frame.logical_size)
+                )
+
+            def show_on_screen(self, screen):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
+        first = QRectF(0, 0, 200, 200)
+        chosen = QRectF(200, 0, 200, 200)
+        third = QRectF(400, 0, 200, 200)
+        monkeypatch.setattr(
+            overlay_module, "_interactive_geometry", lambda geometries: chosen
+        )
+        frame = make_frame(image_size=(600, 200), logical_size=(600, 200))
+
+        result = open_overlay(frame, [first, chosen, third], wayland=True)
+        result.close()
+
+        assert veiled == [first, third]
+
