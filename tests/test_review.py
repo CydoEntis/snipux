@@ -453,3 +453,126 @@ class TestEditLabel:
         window._set_annotating(True)
 
         assert window._annotate_button.text() == "Done editing"
+
+
+class TestTextTool:
+    """The text tool works here now: it drives the same `TextLabelEditor`
+    the overlay does, with one difference -- the field is placed at the
+    widget point clicked, but the mark it commits is stored in image
+    coordinates like every other mark in this window.
+    """
+
+    def _editing(self) -> ReviewWindow:
+        window = ReviewWindow(make_image(600, 400))
+        window.resize(1020, 700)
+        window._canvas.resize(1020, 600)
+        window._set_annotating(True)
+        window._canvas.set_tool("text")
+        return window
+
+    def test_clicking_opens_a_label_and_commits_no_mark_yet(self):
+        window = self._editing()
+
+        window._canvas.mousePressEvent(_press(window._canvas, 500, 300))
+
+        assert window._canvas._text_editor.field is not None
+        assert len(window._store) == 0
+
+    def test_typing_then_finishing_commits_a_text_mark(self):
+        window = self._editing()
+        window._canvas.mousePressEvent(_press(window._canvas, 500, 300))
+
+        window._canvas._text_editor.field.setText("hello")
+        window._canvas._text_editor.commit()
+
+        assert len(window._store) == 1
+        assert window._store.marks[0].text == "hello"
+
+    def test_the_mark_is_stored_in_image_coordinates(self):
+        # The widget point clicked is not the image point stored -- if it
+        # were, the label would export somewhere else entirely.
+        window = self._editing()
+        canvas = window._canvas
+
+        canvas.mousePressEvent(_press(canvas, 500, 300))
+        canvas._text_editor.field.setText("x")
+        canvas._text_editor.commit()
+
+        expected = canvas.to_image(QPointF(500, 300))
+        assert window._store.marks[0].point == expected
+
+    def test_an_empty_label_commits_nothing(self):
+        window = self._editing()
+        window._canvas.mousePressEvent(_press(window._canvas, 500, 300))
+
+        window._canvas._text_editor.commit()
+
+        assert len(window._store) == 0
+
+    def test_a_second_click_commits_the_first_label(self):
+        # A click elsewhere never blurs the field, so nothing else would
+        # force the commit and the first label would be lost.
+        window = self._editing()
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 400, 250))
+        canvas._text_editor.field.setText("first")
+
+        canvas.mousePressEvent(_press(canvas, 600, 350))
+
+        assert len(window._store) == 1
+        assert window._store.marks[0].text == "first"
+
+    def test_switching_to_another_tool_commits_it_too(self):
+        window = self._editing()
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 400, 250))
+        canvas._text_editor.field.setText("kept")
+
+        canvas.set_tool("pen")
+        canvas.mousePressEvent(_press(canvas, 500, 300))
+
+        assert any(getattr(m, "text", None) == "kept" for m in window._store.marks)
+
+    def test_leaving_edit_mode_commits_it(self):
+        window = self._editing()
+        window._canvas.mousePressEvent(_press(window._canvas, 400, 250))
+        window._canvas._text_editor.field.setText("saved on exit")
+
+        window._set_annotating(False)
+
+        assert len(window._store) == 1
+
+    def test_abandon_drops_it_without_committing(self):
+        window = self._editing()
+        window._canvas.mousePressEvent(_press(window._canvas, 400, 250))
+        window._canvas._text_editor.field.setText("discarded")
+
+        window._canvas.abandon_text()
+
+        assert len(window._store) == 0
+
+    def test_the_text_mark_reaches_the_exported_image(self, tmp_path):
+        window = self._editing()
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 500, 300))
+        canvas._text_editor.field.setText("exported")
+        canvas._text_editor.commit()
+
+        target = window.save_as(tmp_path / "with-text.png")
+
+        assert target.exists()
+        assert any(getattr(m, "text", None) == "exported" for m in window._store.marks)
+
+
+class TestTrayNamesTheActiveTool:
+    def test_the_tray_label_follows_the_tool(self):
+        # It carries the tool's name and hint; left untold it reads as
+        # whichever tool it last showed.
+        window = ReviewWindow(make_image())
+        window.resize(1020, 700)
+        window._set_annotating(True)
+
+        window._bar.select_tool("text")
+        window._sync_tray()
+
+        assert window._tray._tool == "text"
