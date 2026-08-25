@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable
@@ -2653,6 +2653,23 @@ _TWO_POINT_MARK_CLASSES = {
 }
 
 
+@dataclass(frozen=True)
+class _MarkAction:
+    """One entry in `OverlayWindow`'s undo/redo history (SNX-39; SNX-70
+    folds the eraser into it): `kind` is `'add'` for a mark `add_mark`
+    appended or `'erase'` for one `erase_at` removed, and `index` is its
+    position in `_marks`' draw order at the moment that action ran.
+    `undo`/`redo` invert/replay the pair -- see their own docstrings --
+    which is what lets an erase take its turn in the very same history as
+    an ordinary draw, rather than living in a slot of its own the way it
+    used to.
+    """
+
+    kind: str
+    index: int
+    shape: Shape
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -2664,15 +2681,21 @@ class OverlayWindow(QWidget):
     widget's own window coordinates, clipped to the selection, per
     docs/design/overlay-redesign.md's "Ink lives in screen coordinates" --
     so re-framing moves the clip over marks that never move themselves.
-    SNX-38 adds the eraser: `erase_at`/`undo_erase`, hit-testing marks via
+    SNX-38 adds the eraser: `erase_at`, hit-testing marks via
     `Shape.hit_test` only while `set_eraser_active` has armed it, per the
     spec's "Marks become hit-testable only while the eraser is active."
     SNX-39 adds the general undo/redo/clear stack over `_marks` itself
-    (`undo`/`redo`/`clear`, distinct from the eraser's own single-slot
-    `undo_erase`) plus `copy`/`save`, which render `_marks` fresh at the
-    moment they're called -- replacing the old editor.py flow's bug of
-    copying the un-annotated capture once, before any annotation could
-    exist. SNX-40 adds `FloatingBar` itself as a real child widget (`_bar`),
+    (`undo`/`redo`/`clear`) plus `copy`/`save`, which render `_marks` fresh
+    at the moment they're called -- replacing the old editor.py flow's bug
+    of copying the un-annotated capture once, before any annotation could
+    exist. SNX-70 folds `erase_at` into that same undo/redo stack: it used
+    to push onto a private single-slot `undo_erase` that nothing in the UI
+    ever called, so an erase had no way back; now it appends a
+    `_MarkAction` the same way `add_mark` does, and `undo`/`redo` invert
+    whichever kind is on top, so an erase takes its turn in draw order
+    alongside ordinary marks and Ctrl+Z/the bar's Undo button -- already
+    wired to `undo()` -- actually reach it. SNX-40 adds `FloatingBar`
+    itself as a real child widget (`_bar`),
     wired to `undo`/`redo`/`clear`/`copy`/`save` and to `set_eraser_active`,
     and kept positioned under `_selection` by `_sync_bar_visibility`.
     SNX-41 adds `SettingsTray` (`_tray`), shown and positioned under the
@@ -2990,13 +3013,19 @@ class OverlayWindow(QWidget):
         # covers and why equality against it is enough to know the cached
         # image is still correct.
         self._base_layer_cache: tuple[tuple, QImage] | None = None
-        # Redo stack (SNX-39): whole marks popped off the *end* of `_marks`
-        # by undo(), in the order undo() popped them -- so redo() popping
-        # this list's own end and appending back to `_marks` restores each
-        # one to exactly the draw-order position it was undone from. Never
-        # touched by erase_at/undo_erase, which is its own single-slot undo
-        # scoped to the eraser tool alone -- see that pair's docstrings.
-        self._redo: list[Shape] = []
+        # Undo/redo history (SNX-39; SNX-70 folds the eraser into it): a
+        # stack of `_MarkAction`s, one per `add_mark`/`erase_at` call, in
+        # the order they happened. `undo()` pops `_undo`, inverts the
+        # action (dropping an 'add', reinserting an 'erase') and pushes it
+        # onto `_redo`; `redo()` pops `_redo`, replays the action
+        # (reinserting an 'add', re-removing an 'erase') and pushes it back
+        # onto `_undo`. Recording each action's `index` at the moment it
+        # ran is what lets an 'erase' from the middle of `_marks` -- not
+        # just the newest mark -- undo/redo back to exactly the position it
+        # happened at, the same way an 'add' 's end-of-list position always
+        # has.
+        self._undo: list[_MarkAction] = []
+        self._redo: list[_MarkAction] = []
 
         # Eraser tool state (SNX-38). False until a caller (the floating
         # bar's eraser button, a later ticket) arms it via
@@ -3005,10 +3034,6 @@ class OverlayWindow(QWidget):
         # testable only while the eraser is active," so ordinary drawing
         # never pays for it.
         self._eraser_active = False
-        # (index, shape) most recently removed by erase_at, restorable via
-        # undo_erase() -- see its own docstring. None once nothing has been
-        # erased yet, or once undo_erase() has already consumed it.
-        self._erased_mark: tuple[int, Shape] | None = None
 
         # Live drawing (SNX-52): the mark a left-press/drag/release is
         # currently building, in this widget's own window coordinates --
@@ -3719,6 +3744,7 @@ class OverlayWindow(QWidget):
         committed after an undo makes whatever was undone unreachable by
         redo again, same as any ordinary undo/redo history.
         """
+        self._undo.append(_MarkAction("add", len(self._marks), shape))
         self._marks.append(shape)
         self._redo.clear()
         self._sync_bar_undo_redo()
@@ -3730,37 +3756,53 @@ class OverlayWindow(QWidget):
         mirroring `Canvas.shapes` in editor.py."""
         return tuple(self._marks)
 
-    # -- undo / redo / clear (SNX-39) --------------------------------------
-    # Two stacks of whole marks, per docs/design/overlay-redesign.md's
-    # "Undo / redo": undo pops the newest mark off `_marks` onto `_redo`;
-    # redo pops it back. Both are plain end-of-list push/pop, which is what
-    # keeps a redone mark landing at exactly the draw-order position it was
-    # undone from -- there is no index bookkeeping to get wrong.
+    # -- undo / redo / clear (SNX-39; SNX-70 folds the eraser in) ----------
+    # Two stacks of `_MarkAction`s, per docs/design/overlay-redesign.md's
+    # "Undo / redo": undo pops the newest action off `_undo` and inverts it
+    # onto `_redo`; redo pops it back and replays it onto `_undo`. Unlike
+    # the plain end-of-list push/pop this used to be before SNX-70, each
+    # action carries its own `index` -- needed now that an 'erase' can
+    # remove from the middle of `_marks`, not just the end the way an 'add'
+    # always does -- so undo/redo restore exactly the draw-order position
+    # the action happened at either way.
 
     @property
     def can_undo(self) -> bool:
-        return bool(self._marks)
+        return bool(self._undo)
 
     @property
     def can_redo(self) -> bool:
         return bool(self._redo)
 
     def undo(self) -> None:
-        """Move the newest mark from the ink layer to the redo stack.
+        """Invert the newest action on the undo stack and move it to the
+        redo stack.
 
-        A no-op with nothing to undo -- mirrors `Canvas.undo`'s guard in
-        editor.py, just against `_marks` being empty rather than a history
-        index, since this class keeps no separate history list.
+        An 'add' action (`add_mark` appending a mark) is undone by removing
+        that mark from `_marks`; an 'erase' action (SNX-70: `erase_at`
+        removing one) is undone by reinserting it -- both read
+        `_MarkAction.index`, which is what puts an undone erase back at
+        exactly the draw-order position it was removed from rather than at
+        the end. A no-op with nothing to undo.
         """
-        if not self._marks:
+        if not self._undo:
             return
-        self._redo.append(self._marks.pop())
+        action = self._undo.pop()
+        if action.kind == "add":
+            self._marks.pop(action.index)
+        else:
+            self._marks.insert(action.index, action.shape)
+        self._redo.append(action)
         self._sync_bar_undo_redo()
         self.update()
 
     def redo(self) -> None:
-        """Move the newest undone mark from the redo stack back onto the
-        ink layer, at the same position in draw order it was undone from.
+        """Replay the newest action on the redo stack and move it back to
+        the undo stack.
+
+        Mirrors `undo()`: an 'add' action is redone by reinserting the mark
+        at `index`; an 'erase' action is redone by removing it again from
+        that same position.
 
         A no-op with nothing to redo -- either nothing has been undone yet,
         or a mark committed since (see `add_mark`) already cleared the
@@ -3768,7 +3810,12 @@ class OverlayWindow(QWidget):
         """
         if not self._redo:
             return
-        self._marks.append(self._redo.pop())
+        action = self._redo.pop()
+        if action.kind == "add":
+            self._marks.insert(action.index, action.shape)
+        else:
+            self._marks.pop(action.index)
+        self._undo.append(action)
         self._sync_bar_undo_redo()
         self.update()
 
@@ -3799,11 +3846,13 @@ class OverlayWindow(QWidget):
         self._show_toast("trash", "Ink discarded")
 
     def _empty_marks(self) -> None:
-        """The shared body of `clear()`/`discard()`: empty `_marks` and
-        `_redo` and resync the bar's undo/redo buttons, without deciding
-        which toast (if any) to show -- that choice is each caller's own.
+        """The shared body of `clear()`/`discard()`: empty `_marks` and both
+        the undo and redo stacks, and resync the bar's undo/redo buttons,
+        without deciding which toast (if any) to show -- that choice is
+        each caller's own.
         """
         self._marks = []
+        self._undo = []
         self._redo = []
         self._sync_bar_undo_redo()
         self.update()
@@ -3834,35 +3883,23 @@ class OverlayWindow(QWidget):
         raises nothing: not every click lands on ink, and that is not an
         error.
 
-        The removed (index, shape) pair is stashed for undo_erase() to
-        restore at the same list position it was removed from -- see that
-        method's own docstring. A later erase_at call overwrites it, same
-        as this tool has only ever removed one mark at a time.
+        SNX-70: the removed mark is pushed onto the general undo stack
+        (`_undo`) as an 'erase' `_MarkAction`, clearing `_redo` the same
+        way `add_mark` does -- so an erase takes its turn in the same
+        undo/redo history as any other action, and Ctrl+Z/the bar's Undo
+        button (already wired to `undo()`) actually restore it, instead of
+        the private single-slot `undo_erase` this used to feed that nothing
+        in the UI ever called.
         """
         for index in range(len(self._marks) - 1, -1, -1):
             if self._marks[index].hit_test(point):
                 shape = self._marks.pop(index)
-                self._erased_mark = (index, shape)
+                self._undo.append(_MarkAction("erase", index, shape))
+                self._redo.clear()
+                self._sync_bar_undo_redo()
                 self.update()
                 return shape
         return None
-
-    def undo_erase(self) -> None:
-        """Restore the mark most recently removed by erase_at to its
-        original position in draw order.
-
-        A no-op if nothing has been erased since the last erase_at/
-        undo_erase call -- this is a single slot of undo scoped to the
-        eraser tool itself, not the general multi-action undo/redo stack
-        docs/design/overlay-redesign.md's "Undo / redo" section describes,
-        which is a later ticket's concern.
-        """
-        if self._erased_mark is None:
-            return
-        index, shape = self._erased_mark
-        self._marks.insert(index, shape)
-        self._erased_mark = None
-        self.update()
 
     def rendered_image(self) -> QImage:
         """The final exported image: `_marks` flattened onto the current
