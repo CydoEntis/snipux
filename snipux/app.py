@@ -658,6 +658,56 @@ class AppController:
         if platform.current.registered_shortcut is None:
             self._report_shortcut(message)
 
+    def run_first_launch_setup(self) -> None:
+        """Install desktop integration once, the first time this process is
+        ever the resident instance (SNX-95) -- so `snipux --setup` is not a
+        step anyone has to remember to run before the app is actually
+        usable.
+
+        `setup_desktop.load_setup_complete()` is the record: once it says
+        setup already ran, this returns immediately without rewriting
+        anything. `--setup` (`main()`'s own dispatch, untouched by this)
+        stays the explicit way to redo it after a move or an upgrade, and
+        `--remove` deletes the same config file this record lives in, so a
+        later launch sees no record and sets up again rather than assuming
+        the install is still there.
+
+        Called once by `_become_resident()`, the same place
+        `install_hotkey_listener()` is and for the same reason: this is the
+        process that is actually going to stay resident, not every
+        `AppController` a test happens to construct directly.
+
+        A platform with nothing behind the seam yet (macOS today) must not
+        stop the app from starting just because it can't set itself up --
+        `UnimplementedPlatformError` is caught and reported through
+        `_report_shortcut` the same way any other step that can't run is,
+        the "a failure must not stop the rest" rule CLAUDE.md states for
+        capture backends, applied one level up here. Every other failure --
+        no graphical session, no permission to write a shortcut -- is
+        already a step-level note `install_desktop_integration()` itself
+        prints and recovers from (see `setup_desktop.run_setup()`), so
+        there is nothing left for this method to catch.
+        """
+        if setup_desktop.load_setup_complete():
+            return
+
+        try:
+            platform.current.install_desktop_integration()
+        except platform.UnimplementedPlatformError as exc:
+            # Recorded anyway: retrying (and re-printing this note) on
+            # every single launch would be worse than a user re-running
+            # --setup once real support lands on this platform.
+            setup_desktop.save_setup_complete(True)
+            self._report_shortcut(str(exc))
+            return
+
+        setup_desktop.save_setup_complete(True)
+        shortcut = setup_desktop.human_shortcut(setup_desktop.load_shortcut())
+        self._report_shortcut(
+            f"snipux is set up: it starts at login, and {shortcut} starts a "
+            "snip. Change the shortcut any time in Settings."
+        )
+
     def _quit(self) -> None:
         QApplication.instance().quit()
 
@@ -888,6 +938,11 @@ def _become_resident(
     is the process that is actually resident, so it is the one that should
     hold the Windows global hotkey registration (SNX-91) -- not every
     `AppController` a test happens to construct directly.
+
+    `run_first_launch_setup()` (SNX-95) runs here too, for the identical
+    reason: whether desktop integration has ever run is a real, one-time
+    action against the OS (writing files, binding a shortcut), not
+    something every `AppController` a test builds should also trigger.
     """
     # Already built by whoever called `try_claim()` -- see
     # `_ensure_qapplication`, which must run before the claim, not after.
@@ -895,6 +950,7 @@ def _become_resident(
 
     controller = AppController(registry, transport)
     controller.install_hotkey_listener()
+    controller.run_first_launch_setup()
     if start_capture_immediately:
         controller.start_capture()
     return app.exec()
