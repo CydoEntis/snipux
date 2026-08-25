@@ -4465,7 +4465,24 @@ class OverlayWindow(QWidget):
         typing." Mirrors editor.py's `Canvas.mousePressEvent` handling of
         `Tool.TEXT` -- the label commits later, via `_commit_text`, never
         here.
+
+        SNX-77: a click that lands away from the field never blurs it --
+        the shared `_text_edit` stays focused right through
+        `mousePressEvent`/`_start_stroke` -- so nothing forces the
+        `editingFinished` this label editor relies on to commit. Committing
+        explicitly here, before touching `_pending_text_*` or clearing the
+        field, is what a second (or third...) label needs to survive:
+        `_commit_text` reads whatever was typed into the *still-live*
+        field against the *still-old* pending point/colour/stroke-width,
+        so the label just finished keeps the position and styling it was
+        typed at rather than picking up this click's. Only once that's
+        settled do the pending fields move on to this new click, and only
+        then does the field get cleared and re-shown for it -- so an empty
+        field (nothing typed yet, or the very first label ever) still has
+        nothing to commit, per `_commit_text`'s own guard.
         """
+        if self._text_edit is not None:
+            self._commit_text()
         self._pending_text_point = pos
         self._pending_text_colour = colour
         self._pending_text_stroke_width = self._stroke_width
