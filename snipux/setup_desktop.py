@@ -1,5 +1,5 @@
-"""`snipux --setup`: the desktop-integration steps a wheel cannot do on its
-own.
+"""`snipux --setup`/`snipux --remove`: the desktop-integration steps a wheel
+cannot do (or undo) on its own.
 
 A built wheel is 37 files of importable code and nothing else -- no
 `.desktop` entry, no autostart entry, no GNOME shortcut -- so `pip install
@@ -12,11 +12,17 @@ with no repository checkout present, and `install.sh` calls `run_setup()`
 (via `snipux --setup`) rather than repeating the logic -- one implementation,
 not two that drift.
 
+`run_remove()` (via `snipux --remove`) is the exact counterpart: `pipx
+uninstall snipux` only removes the package, not anything `--setup` wrote
+outside it, which otherwise leaves a dead autostart entry, a dead keyboard
+shortcut, and a ghost application-list entry behind (SNX-83). Running
+`--remove` first is what makes an uninstall actually clean.
+
 Every step -- desktop entry, autostart entry, hicolor icon theme, GNOME
-shortcut -- is attempted and reported independently. One failing (no
-`gsettings`, a read-only `~/.config`) must not stop the rest, the same "a
-failure must not stop the next one" rule CLAUDE.md states for capture
-backends, applied here.
+shortcut -- is attempted and reported independently, in both directions.
+One failing (no `gsettings`, a read-only `~/.config`) must not stop the
+rest, the same "a failure must not stop the next one" rule CLAUDE.md states
+for capture backends, applied here.
 """
 
 from __future__ import annotations
@@ -108,6 +114,68 @@ def _write_entry(directory: Path, contents: str, exec_path: Path, label: str) ->
     return True
 
 
+def _remove_entry(directory: Path, label: str) -> bool:
+    """Delete `directory/snipux.desktop`, the counterpart to `_write_entry()`.
+
+    Reports plainly, rather than failing, when there is nothing to remove --
+    a second `--remove`, or a first one run on a machine `--setup` never ran
+    on, must not be treated as an error just because the file is already
+    gone. An `OSError` while deleting (e.g. a permissions problem) is caught
+    and reported here rather than raised, so it doesn't take down the steps
+    after it, mirroring `_write_entry()`.
+    """
+    path = directory / "snipux.desktop"
+    if not path.exists():
+        print(f"{label.capitalize()} entry not found at {path} -- nothing to remove")
+        return True
+    try:
+        path.unlink()
+    except OSError as exc:
+        print(f"Note: could not remove the {label} entry at {path}: {exc}")
+        return False
+    print(f"{label.capitalize()} entry removed from {path}")
+    return True
+
+
+def remove_icons(hicolor_dir: Path | None = None) -> bool:
+    """Delete every `hicolor_dir/<size>x<size>/apps/snipux.png` that
+    `install_icons()` may have written -- the counterpart step for
+    `--remove`.
+
+    Looks for whatever is actually there (`hicolor_dir/*/apps/snipux.png`)
+    rather than only the sizes this installed copy of snipux currently
+    vendors, so an icon left behind by an older version with a different
+    size set still gets cleaned up. Each file is removed independently and a
+    failure on one (e.g. a read-only `~/.local/share`) is reported and
+    skipped rather than raised -- the same "one step failing must not stop
+    the rest" rule CLAUDE.md states for capture backends, applied per-size
+    here as `install_icons()` already does on the way in.
+    """
+    if hicolor_dir is None:
+        hicolor_dir = (
+            Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+            / "icons"
+            / "hicolor"
+        )
+
+    removed_sizes = []
+    for target in sorted(hicolor_dir.glob("*/apps/snipux.png")):
+        size = target.parent.parent.name
+        try:
+            target.unlink()
+        except OSError as exc:
+            print(f"Note: could not remove the {size} icon at {target}: {exc}")
+            continue
+        removed_sizes.append(size)
+
+    if removed_sizes:
+        print(f"Icon theme entries ({', '.join(removed_sizes)}) removed from {hicolor_dir}")
+    else:
+        print(f"Note: no icon theme entries were found under {hicolor_dir}")
+
+    return bool(removed_sizes)
+
+
 def _append_slot(current_keybindings: str) -> str:
     """Splice `_SLOT_PATH` into gsettings' `custom-keybindings` list value,
     keeping whatever was already there.
@@ -178,6 +246,86 @@ def bind_gnome_shortcut(exec_path: Path) -> str:
         )
 
     return f"Bound Super+Shift+S to run: {launcher_cmd}"
+
+
+def _remove_slot(current_keybindings: str) -> str:
+    """The inverse of `_append_slot()`: splice `_SLOT_PATH` out of
+    gsettings' `custom-keybindings` list value, keeping every other entry
+    exactly as it was and in the same order.
+
+    Picks the entry out by content (not by string position) so it works
+    whether the slot is first, last, or in the middle of the list -- the
+    same "splice, don't replace" care `_append_slot()` already takes on the
+    way in, per the ticket, is what keeps a shortcut the user bound by hand
+    intact here.
+    """
+    if f"'{_SLOT_PATH}'" not in current_keybindings:
+        return current_keybindings
+    remaining = [
+        path for path in re.findall(r"'([^']*)'", current_keybindings) if path != _SLOT_PATH
+    ]
+    if not remaining:
+        return "@as []"
+    return "[" + ", ".join(f"'{path}'" for path in remaining) + "]"
+
+
+def unbind_gnome_shortcut() -> str:
+    """Remove the Super+Shift+S GNOME custom-keybinding slot
+    `bind_gnome_shortcut()` set up -- see `docs/super-shift-s-gnome.md` for
+    what this undoes.
+
+    Splices `_SLOT_PATH` out of the `custom-keybindings` list (via
+    `_remove_slot()`) rather than resetting the whole list, so a shortcut
+    the user bound by hand independently survives -- the same care
+    `bind_gnome_shortcut()` takes on the way in, per the ticket. Also resets
+    the slot's own schema (name/command/binding) so nothing about our entry
+    lingers in dconf once it's no longer listed.
+
+    Returns a one-line, human-readable report of what happened. Never
+    raises: no `gsettings` (not GNOME), the schema being unreadable, or the
+    shortcut simply never having been set are all normal, expected cases
+    here, not errors -- the acceptance criterion is that a step which can't
+    be done (or has nothing to do) is reported plainly, not that the whole
+    command fails because of it.
+    """
+    if shutil.which("gsettings") is None:
+        return (
+            "Note: gsettings not found -- nothing to remove for the "
+            "Super+Shift+S shortcut."
+        )
+
+    try:
+        current = subprocess.run(
+            ["gsettings", "get", _MEDIA_KEYS_SCHEMA, "custom-keybindings"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return (
+            "Note: could not read GNOME's custom-keybindings list -- cannot "
+            "remove the Super+Shift+S shortcut automatically. See "
+            "docs/super-shift-s-gnome.md to remove it by hand."
+        )
+
+    if f"'{_SLOT_PATH}'" not in current:
+        return "Super+Shift+S shortcut was not set -- nothing to remove."
+
+    new_keybindings = _remove_slot(current)
+
+    try:
+        subprocess.run(
+            ["gsettings", "set", _MEDIA_KEYS_SCHEMA, "custom-keybindings", new_keybindings],
+            check=True,
+        )
+        subprocess.run(["gsettings", "reset-recursively", _SLOT_SCHEMA], check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return (
+            "Note: removing the GNOME shortcut failed. See "
+            "docs/super-shift-s-gnome.md to remove it by hand."
+        )
+
+    return "Removed the Super+Shift+S shortcut."
 
 
 def install_icons(hicolor_dir: Path | None = None) -> bool:
@@ -277,5 +425,48 @@ def run_setup(
     _write_entry(autostart_dir, contents, exec_path, "autostart")
     install_icons(hicolor_dir)
     print(bind_gnome_shortcut(exec_path))
+
+    return 0
+
+
+def run_remove(
+    *,
+    applications_dir: Path | None = None,
+    autostart_dir: Path | None = None,
+    hicolor_dir: Path | None = None,
+) -> int:
+    """The body of `snipux --remove`: the exact counterpart to
+    `run_setup()` -- deletes the desktop entry, the autostart entry, the
+    installed icons, and the GNOME Super+Shift+S shortcut slot, so
+    `pipx uninstall snipux` afterwards leaves nothing behind (SNX-83).
+
+    `applications_dir`/`autostart_dir`/`hicolor_dir` default to the same
+    real XDG locations `run_setup()` uses, and are only ever overridden by
+    tests.
+
+    Unlike `run_setup()`, there is no console script to locate first: every
+    step here only deletes things that may or may not already be there, so
+    nothing depends on where (or whether) `snipux` itself is still
+    installed. Always returns 0 -- every step below already reports its own
+    failure or absence as a note rather than raising, the same "one step
+    failing must not stop the rest" rule CLAUDE.md states for capture
+    backends, applied here so running `--remove` right before an uninstall
+    can't itself fail the uninstall.
+    """
+    if applications_dir is None:
+        applications_dir = (
+            Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+            / "applications"
+        )
+    if autostart_dir is None:
+        autostart_dir = (
+            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+            / "autostart"
+        )
+
+    _remove_entry(applications_dir, "desktop")
+    _remove_entry(autostart_dir, "autostart")
+    remove_icons(hicolor_dir)
+    print(unbind_gnome_shortcut())
 
     return 0

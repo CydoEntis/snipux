@@ -196,6 +196,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "Super+Shift+S shortcut for this installed copy of snipux -- no "
         "repository checkout needed",
     )
+    group.add_argument(
+        "--remove",
+        action="store_true",
+        help="undo everything --setup did -- the desktop entry, autostart "
+        "entry, installed icons, and GNOME Super+Shift+S shortcut -- run "
+        "this before `pipx uninstall snipux` so nothing is left behind",
+    )
     return parser
 
 
@@ -245,6 +252,12 @@ def main(
         # resident path, this never touches capture backends or a display,
         # so it's handled before either is ever built.
         return setup_desktop.run_setup()
+
+    if args.remove:
+        # Same reasoning as --setup above: --remove only deletes what
+        # --setup wrote, so it has no more use for a registry or a display
+        # than --setup did.
+        return setup_desktop.run_remove()
 
     if args.snip:
         # Forward to an already-resident instance when there is one. When

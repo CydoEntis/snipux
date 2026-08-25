@@ -517,6 +517,63 @@ class TestSetupFlag:
         assert excinfo.value.code != 0
 
 
+class TestRemoveFlag:
+    """SNX-83: `--remove` dispatches to `setup_desktop.run_remove()` the
+    same way `--setup` dispatches to `run_setup()` -- undoing the desktop
+    entry, autostart entry, installed icons, and GNOME shortcut has nothing
+    to do with capture backends either. `run_remove()`'s own behaviour is
+    covered directly in test_setup_desktop.py; this only proves main()
+    reaches it.
+    """
+
+    def test_dispatches_to_run_remove_and_returns_its_exit_code(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app.setup_desktop, "run_remove", lambda: calls.append("called") or 0
+        )
+
+        exit_code = main(["--remove"])
+
+        assert exit_code == 0
+        assert calls == ["called"]
+
+    def test_propagates_a_nonzero_exit_code_from_run_remove(self, monkeypatch):
+        monkeypatch.setattr(app.setup_desktop, "run_remove", lambda: 1)
+
+        assert main(["--remove"]) == 1
+
+    def test_does_not_build_a_registry(self, monkeypatch):
+        # A registry built here would mean --remove pays for probing real
+        # capture backends it has no use for; build_default_registry raising
+        # proves it's never called on this path.
+        monkeypatch.setattr(app.setup_desktop, "run_remove", lambda: 0)
+
+        def must_not_be_called():
+            raise AssertionError("build_default_registry() must not run for --remove")
+
+        monkeypatch.setattr(app, "build_default_registry", must_not_be_called)
+
+        main(["--remove"])
+
+    def test_mutually_exclusive_with_setup(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--remove", "--setup"])
+
+        assert excinfo.value.code != 0
+
+    def test_mutually_exclusive_with_snip(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--remove", "--snip"])
+
+        assert excinfo.value.code != 0
+
+    def test_mutually_exclusive_with_list_backends(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--remove", "--list-backends"])
+
+        assert excinfo.value.code != 0
+
+
 class TestQLocalSocketTransportRace:
     def test_try_claim_reports_not_primary_when_listen_loses_the_race(self, monkeypatch):
         # AC: "two presses in quick succession with nothing running produce
