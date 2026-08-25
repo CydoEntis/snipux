@@ -29,6 +29,13 @@ other half: the `QAbstractNativeEventFilter` `app.py` installs on the
 `RegisterHotKey(None, ...)` posts to this thread's message queue rather
 than to any window of ours.
 
+`find_shortcut_conflict` (SNX-93) is the Windows answer to
+`setup_desktop.find_shortcut_conflicts_named()`'s GNOME-only conflict check:
+Settings' banner and Save button call it instead, on Windows, to name the
+Windows Snipping Tool's own Win+Shift+S or whatever else `RegisterHotKey`
+itself refuses -- see its own docstring for why a probe registration is the
+only way to see the latter at all.
+
 `ctypes` against `user32`, not a new dependency -- see `capture.py`'s
 `Win32GdiBackend` for the same reasoning already applied to the capture
 backend, and CLAUDE.md on why a fourth runtime dependency is a decision to
@@ -79,6 +86,20 @@ _ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 # fixed id is enough -- RegisterHotKey's id only has to be unique within
 # this process, not system-wide.
 _HOTKEY_ID = 1
+
+# find_shortcut_conflict()'s own id, distinct from _HOTKEY_ID above: the
+# probe registers and immediately releases a *candidate* combination to see
+# whether Windows refuses it, and must never touch the real, held
+# registration bind_shortcut() already owns under _HOTKEY_ID while doing so.
+_CONFLICT_PROBE_ID = 2
+
+# The Windows Snipping Tool's own global shortcut (Windows 10 1809+) --
+# already spoken for on every fresh install, whether or not anything else
+# has claimed a hotkey yet, and invisible to a RegisterHotKey probe since it
+# is a shell feature, not a process to collide with. In canonical form
+# (_MODIFIER_ORDER puts Shift before Super), not the "Win+Shift+S" spelling
+# Microsoft's own docs use.
+_SNIPPING_TOOL_SHORTCUT = "Shift+Super+S"
 
 # setup_desktop.normalise_shortcut() only ever emits these four canonical
 # modifier names (see its own _MODIFIER_ORDER) -- a KeyError here would mean
@@ -622,6 +643,51 @@ class WindowsPlatform(Platform):
         if not ctypes.windll.user32.UnregisterHotKey(None, _HOTKEY_ID):
             return f"Could not release {setup_desktop.human_shortcut(shortcut)}."
         return f"Released {setup_desktop.human_shortcut(shortcut)}."
+
+    def find_shortcut_conflict(self, shortcut: str) -> str | None:
+        """None if `shortcut` looks free to register, else a short name of
+        whatever already holds it -- the Windows answer (SNX-93) to
+        `setup_desktop.find_shortcut_conflicts_named()`'s GNOME one, which
+        Settings' conflict banner and Save button both call instead of that
+        on Windows (`HotkeyEventFilter.is_available()` is what tells them
+        apart, the same capability check `app.py`'s own platform-dependent
+        paths already use).
+
+        Two things can hold a combination here. The Windows Snipping Tool's
+        own Win+Shift+S is invisible to any RegisterHotKey probe -- it is a
+        shell feature, not a process registration -- so it is named by a
+        direct comparison first. Everything else is only visible by
+        actually trying to register it, since Win32 has no query for "who
+        holds this" the way GNOME's introspectable schemas are: the probe
+        registers `shortcut` under a throwaway id distinct from the real
+        `_HOTKEY_ID` and releases it immediately, so it never actually
+        holds the key -- a pure check, not a bind.
+
+        The shortcut snipux itself already holds is never reported as a
+        conflict with itself; without that check the probe above would
+        find its own live registration and misreport it as a clash.
+        """
+        normalised = setup_desktop.normalise_shortcut(shortcut)
+        if normalised is None:
+            return None
+        if normalised == _SNIPPING_TOOL_SHORTCUT:
+            return "the Windows Snipping Tool"
+        if (
+            self.registered_shortcut is not None
+            and setup_desktop.normalise_shortcut(self.registered_shortcut) == normalised
+        ):
+            return None
+
+        translated = _accelerator_to_win32(shortcut)
+        if translated is None:
+            return None
+        modifiers, vk = translated
+        if ctypes.windll.user32.RegisterHotKey(None, _CONFLICT_PROBE_ID, modifiers, vk):
+            ctypes.windll.user32.UnregisterHotKey(None, _CONFLICT_PROBE_ID)
+            return None
+        if ctypes.GetLastError() == _ERROR_HOTKEY_ALREADY_REGISTERED:
+            return "another application"
+        return None
 
     def default_save_folder(self) -> Path:
         raise UnimplementedPlatformError(_PLATFORM_NAME, "default_save_folder")
