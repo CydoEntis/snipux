@@ -37,7 +37,12 @@ from snipux.capture import (
     build_x11_registry,
     detect_session_type,
 )
-from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
+from snipux.overlay import (
+    GeometryProvider,
+    OverlayWindow,
+    UnsupportedGeometryProvider,
+    open_overlay,
+)
 
 
 def copy_image_to_clipboard(image: QImage) -> None:
@@ -477,10 +482,18 @@ class AppController:
             if self._monitor_geometries is not None
             else self._real_monitor_geometries()
         )
-        overlay = OverlayWindow(
+        # SNX-58: the session type is detected here, never assumed, and
+        # handed to open_overlay() rather than each call site re-deriving
+        # it -- the same pattern build_default_registry() already uses for
+        # picking capture backends. A client can't position its own window
+        # on Wayland, which is what open_overlay()'s own docstring (and
+        # OverlayWindow.show_on_screen's) covers; X11 keeps behaving
+        # exactly as it did before this ticket.
+        overlay = open_overlay(
             frame,
+            geometries,
+            wayland=detect_session_type() == "wayland",
             geometry_provider=self._geometry_provider,
-            monitor_geometries=geometries,
             # So a delayed capture (SNX-50's re-grab) and Window/Full
             # screen mode inside the overlay itself have the same registry
             # the initial capture above used, rather than an inert default
@@ -493,8 +506,9 @@ class AppController:
         # its own dismissal (Esc, Enter-to-copy, the bar's Copy/Save) and
         # closes itself; nothing here needs to be told when that happens,
         # since the next start_capture() call just replaces this reference
-        # once .isVisible() reports the old one gone.
-        overlay.show()
+        # once .isVisible() reports the old one gone. open_overlay() already
+        # showed it (and any Wayland multi-monitor veil companions), so
+        # there's no separate .show() to call here.
         self._overlay = overlay
 
 
