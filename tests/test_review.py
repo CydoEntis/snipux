@@ -805,3 +805,115 @@ class TestCopyConfirms:
         window.save_as(tmp_path / "shot.png")
 
         assert "Saved to" in window._toast._text_label.text()
+
+
+class TestLabelsAreClickableAndNotBlackBoxes:
+    """Two faults in one feature. `Text.draw` puts the chip's top-left at
+    the anchor while `hit_test` centred a fixed box *on* it, so the label
+    you could see was not the label you could click; and the live field had
+    no stylesheet at all, so a QLineEdit painted its palette's opaque base
+    -- a black rectangle over the screenshot.
+    """
+
+    def _label(self, text="asdasdas"):
+        return shapes.Text(
+            colour=QColor("#e3ff4f"), stroke_width=6,
+            point=QPointF(100, 100), text=text,
+        )
+
+    def _store_with(self, shape):
+        from snipux.marks import MarkStore
+
+        store = MarkStore()
+        store.add(shape)
+        return store
+
+    def test_the_hit_region_is_the_chip_that_is_drawn(self):
+        label = self._label()
+
+        assert label.hit_test(label.chip_rect().center())
+
+    def test_clicking_the_far_end_of_a_label_erases_it(self):
+        # The end furthest from the anchor is exactly what the old centred
+        # box missed.
+        label = self._label("a much longer label than before")
+        store = self._store_with(label)
+        far_end = QPointF(label.chip_rect().right() - 4, label.chip_rect().center().y())
+
+        assert store.erase(far_end) is label
+
+    def test_a_longer_label_has_a_wider_hit_region(self):
+        assert (
+            self._label("a much longer label").chip_rect().width()
+            > self._label("x").chip_rect().width()
+        )
+
+    def test_the_live_field_is_styled_so_it_is_not_an_opaque_box(self):
+        window = ReviewWindow(make_image())
+        window.resize(1020, 700)
+        window._set_annotating(True)
+
+        window._canvas._text_editor.begin(QPointF(200, 200), QColor("#e3ff4f"), 6)
+
+        style = window._canvas._text_editor.field.styleSheet()
+        assert "background: rgba(" in style, "an unstyled QLineEdit paints an opaque box"
+        assert "border-radius" in style
+
+
+class TestEraserSweeps:
+    """Rubbing something out is a sweep everywhere else it exists; making
+    the user aim at each mark in turn was the odd one out.
+    """
+
+    def _editing(self):
+        window = ReviewWindow(make_image(600, 400))
+        window.resize(1020, 700)
+        window._canvas.resize(1020, 600)
+        window._set_annotating(True)
+        window._canvas.set_tool("eraser")
+        return window
+
+    def _pen_at(self, x, y):
+        # Two points, not one: a single-point polyline has no path, so it
+        # would hit-test as nothing and the test would pass for the wrong
+        # reason.
+        return shapes.Pen(
+            colour=QColor("#fff"), stroke_width=8,
+            points=[QPointF(x - 6, y), QPointF(x + 6, y)],
+        )
+
+    def test_a_drag_erases_everything_it_passes_over(self):
+        window = self._editing()
+        canvas = window._canvas
+        for x in (100, 150, 200):
+            window._store.add(self._pen_at(x, 200))
+        assert len(window._store) == 3
+
+        start = canvas.image_rect().topLeft()
+        scale = canvas._scale()
+        canvas.mousePressEvent(
+            _press(canvas, start.x() + 100 * scale, start.y() + 200 * scale)
+        )
+        for x in (120, 150, 180, 200):
+            canvas.mouseMoveEvent(
+                _move(canvas, start.x() + x * scale, start.y() + 200 * scale)
+            )
+        canvas.mouseReleaseEvent(
+            _release(canvas, start.x() + 200 * scale, start.y() + 200 * scale)
+        )
+
+        assert len(window._store) == 0, "a sweep should take all three"
+
+    def test_the_sweep_stops_at_release(self):
+        window = self._editing()
+        canvas = window._canvas
+        window._store.add(self._pen_at(100, 200))
+        start = canvas.image_rect().topLeft()
+        scale = canvas._scale()
+        canvas.mousePressEvent(_press(canvas, start.x() + 400 * scale, start.y() + 50 * scale))
+        canvas.mouseReleaseEvent(_release(canvas, start.x() + 400 * scale, start.y() + 50 * scale))
+
+        # Moving after release must not keep erasing.
+        canvas.mouseMoveEvent(_move(canvas, start.x() + 100 * scale, start.y() + 200 * scale))
+
+        assert len(window._store) == 1

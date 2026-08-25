@@ -87,6 +87,9 @@ class ImageCanvas(QWidget):
         self._blur_mode = "blur"
         self._blur_strength = tokens.Metric.BLUR_DEFAULT
         self._in_progress: shapes.Shape | None = None
+        # True for the duration of an eraser press, so a drag rubs out
+        # everything it passes over rather than only what it started on.
+        self._erasing = False
         self._composite_key: tuple | None = None
         self._composite: QImage = image
         # The same label editor the overlay uses. `to_image` is the only
@@ -193,11 +196,12 @@ class ImageCanvas(QWidget):
             return
         position = self.to_image(event.position())
         if self._tool == "eraser":
-            # Slack in image units for a few screen pixels of aim: a mark's
-            # own hit tolerance is fixed in image units, so at anything
-            # under 100% zoom it shrinks on screen to almost nothing.
-            scale = self._scale() or 1.0
-            self._store.erase(position, slack=self._ERASER_SLACK_PX / scale)
+            # Armed for the whole press, so the eraser can be swept over a
+            # group of marks instead of aimed at each one -- see
+            # `mouseMoveEvent`. Rubbing something out is a sweep everywhere
+            # else it exists.
+            self._erasing = True
+            self._erase_at(position)
             return
         if self._tool == "text":
             # Placed where the click landed, in widget coordinates -- the
@@ -232,13 +236,28 @@ class ImageCanvas(QWidget):
         )
         self.update()
 
+    def _erase_at(self, position: QPointF) -> None:
+        """Remove whatever is under `position`, with slack for aim.
+
+        A mark's hit tolerance is fixed in image units, so at anything under
+        100% zoom it shrinks on screen to almost nothing; the slack is the
+        screen-pixel allowance converted back through the live scale.
+        """
+        scale = self._scale() or 1.0
+        if self._store.erase(position, slack=self._ERASER_SLACK_PX / scale):
+            self.marksChanged.emit()
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._erasing:
+            self._erase_at(self.to_image(event.position()))
+            return
         if self._in_progress is None:
             return
         extend_stroke(self._in_progress, self.to_image(event.position()))
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._erasing = False
         if self._in_progress is None:
             return
         shape, self._in_progress = self._in_progress, None

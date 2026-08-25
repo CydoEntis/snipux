@@ -361,6 +361,29 @@ class TextLabelEditor(QObject):
     def _ensure_field(self) -> "LabelLineEdit":
         if self._field is None:
             self._field = LabelLineEdit(self.parent())
+            # Styled to match the chip it becomes. Unstyled, a QLineEdit
+            # paints its palette's opaque base -- a black rectangle sitting
+            # over the screenshot, which is what it looked like: a bug, not
+            # a text field. The tokens here are the same ones `shapes.Text`
+            # paints its committed chip with, so typing looks like what you
+            # get.
+            from . import design as _design
+
+            background = _design.color("TEXT_LABEL_BG")
+            ring = _design.color("TEXT_LABEL_RING")
+            metric = _design.tokens.Metric
+            self._field.setStyleSheet(
+                "QLineEdit {"
+                f" background: rgba({background.red()}, {background.green()},"
+                f" {background.blue()}, {background.alphaF():.2f});"
+                f" border: {metric.TEXT_LABEL_RING_W}px solid"
+                f" rgba({ring.red()}, {ring.green()}, {ring.blue()},"
+                f" {ring.alphaF():.2f});"
+                f" border-radius: {metric.TEXT_LABEL_RADIUS}px;"
+                f" padding: {metric.TEXT_LABEL_PAD_V}px {metric.TEXT_LABEL_PAD_H}px;"
+                f" color: {_design.color('TEXT_PRIMARY').name()};"
+                " selection-background-color: rgba(255, 255, 255, 0.22); }"
+            )
             # Grey hint text, not a seeded value -- `commit`'s own emptiness
             # guard is what makes a label nobody typed into cost nothing.
             self._field.setPlaceholderText("Label")
