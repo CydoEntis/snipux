@@ -20,7 +20,17 @@ from snipux.capture import BackendRegistry, CaptureBackend, Frame, X11WindowGeom
 from snipux.design import color as design_color
 from snipux.design import font_families
 from snipux.design import tokens
-from snipux.shapes import Arrow, Blur, Highlighter, Pen, Pixelate, Rectangle, StepMarker, Text
+from snipux.shapes import (
+    Arrow,
+    Blur,
+    Highlighter,
+    ObscuringShape,
+    Pen,
+    Pixelate,
+    Rectangle,
+    StepMarker,
+    Text,
+)
 from snipux.overlay import (
     BlurTray,
     CaptureModePopover,
@@ -76,6 +86,20 @@ def make_frame(
         logical_origin=QPointF(*logical_origin),
         logical_size=QSizeF(*logical_size),
     )
+
+
+def make_gradient_frame(size=(200, 200)) -> Frame:
+    # A flat make_frame() fill would look identical blurred or not -- an
+    # obscuring effect needs real per-pixel variation to be provably
+    # visible on screen. Mirrors test_shapes.py's own make_gradient_image,
+    # just wrapped in a Frame for OverlayWindow's sake.
+    width, height = size
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    for x in range(width):
+        red = round(255 * x / (width - 1))
+        for y in range(height):
+            image.setPixelColor(x, y, QColor(red, 0, 0))
+    return Frame(image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(*size))
 
 
 def _blend(base: QColor, fg: QColor) -> QColor:
@@ -882,6 +906,179 @@ class TestOverlayWindowMarks:
         assert result.height() == 100
         # (60, 60) in window coordinates is (10, 10) inside the crop.
         assert result.pixelColor(10, 20) == self.RED
+
+
+class TestOverlayWindowObscuringMarks:
+    """SNX-63: a committed Blur/Pixelate mark used to be invisible until
+    export -- `_paint_marks` skipped every `ObscuringShape` outright, with
+    a "later ticket" comment nothing ever picked up. `_base_layer_image`
+    now bakes every committed obscuring mark into Layer 1 itself, so the
+    ink layer stops lying about what release does.
+    """
+
+    def test_committed_blur_shows_blurred_pixels_immediately_after_release(self):
+        frame = make_gradient_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay._bar.select_tool("blur")
+        overlay._blur_mode = "blur"
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(120, 120))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
+
+        # No export call anywhere in this test -- this is what release
+        # itself paints, deep inside the mark's own rect so a marquee
+        # outline (the in-progress preview's own look) could never account
+        # for the difference.
+        raw = frame.image.pixelColor(70, 70)
+        rendered = overlay.grab().toImage().pixelColor(70, 70)
+        assert rendered != raw
+
+    def test_committed_pixelate_shows_its_blocks_on_screen(self):
+        # Same probe technique test_shapes.py's TestPixelateBlocky uses:
+        # a coarser (higher-strength) downsample spans a wider block, so
+        # two probes that straddle the fine block's edge still read equal
+        # once pixelated -- proof this is genuinely blocky, not just
+        # blurred. The mark's own rect is inset from the selection's edges
+        # (kept at the window's own full size) so the probes below don't
+        # land on the selection frame's corner brackets/edge handles,
+        # which are painted after -- and on top of -- the ink layer.
+        patch = 80
+        offset = 20
+        strength = tokens.Metric.BLUR_DEFAULT
+        frame = make_gradient_frame(size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(
+            Pixelate(
+                colour=QColor("#ff0000"),
+                stroke_width=4,
+                start=QPointF(offset, offset),
+                end=QPointF(offset + patch, offset + patch),
+                strength=strength,
+            )
+        )
+
+        rendered = overlay.grab().toImage()
+
+        block_width = patch // (patch // strength)
+        row = offset + 40
+        probe_a, probe_b = offset + 1, offset + block_width + 1
+        assert rendered.pixelColor(probe_a, row) == rendered.pixelColor(offset + 3, row)
+        assert rendered.pixelColor(probe_a, row) != rendered.pixelColor(probe_b, row)
+
+    def test_on_screen_result_matches_the_exported_image_for_the_same_mark(self):
+        frame = make_gradient_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(
+            Blur(colour=QColor("#ff0000"), stroke_width=4, start=QPointF(20, 20), end=QPointF(120, 120))
+        )
+
+        on_screen = overlay.grab().toImage()
+        exported = overlay.rendered_image()
+
+        # The selection spans the whole window at its own (0, 0) origin,
+        # so window coordinates and the exported crop's coordinates are
+        # the same pixels here -- a direct probe comparison is valid.
+        assert on_screen.pixelColor(70, 70) == exported.pixelColor(70, 70)
+
+    def test_changing_strength_on_an_already_committed_mark_updates_its_look(self):
+        # Inset from the selection's own edges for the same reason as
+        # test_committed_pixelate_shows_its_blocks_on_screen above -- kept
+        # clear of the corner brackets/edge handles painted over the ink
+        # layer.
+        patch = 80
+        offset = 20
+        frame = make_gradient_frame(size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(
+            Pixelate(
+                colour=QColor("#ff0000"),
+                stroke_width=4,
+                start=QPointF(offset, offset),
+                end=QPointF(offset + patch, offset + patch),
+                strength=tokens.Metric.BLUR_MIN,
+            )
+        )
+        mark = overlay.marks[0]
+        low_block_width = patch // (patch // tokens.Metric.BLUR_MIN)
+        row = offset + 40
+        probe_a, probe_b = offset + 1, offset + low_block_width + 1
+
+        low_strength = overlay.grab().toImage()
+        # A pixel just past the low-strength block boundary already read
+        # differently from the block before it...
+        assert low_strength.pixelColor(probe_a, row) != low_strength.pixelColor(probe_b, row)
+
+        # ...simulates the settings tray's strength slider retuning the
+        # mark just drawn, still committed, still the same object.
+        mark.strength = tokens.Metric.BLUR_MAX
+
+        high_strength = overlay.grab().toImage()
+        # The coarser block now spans both probes, so they read equal --
+        # proof the already-committed mark's look actually changed.
+        assert high_strength.pixelColor(probe_a, row) == high_strength.pixelColor(probe_b, row)
+
+    def test_reframing_keeps_an_obscuring_mark_aligned_to_its_own_pixels(self):
+        # Same property TestOverlayWindowMarks's own
+        # test_reframing_leaves_a_mark_over_the_same_content pins for an
+        # ordinary painted mark: a re-frame must never move where a
+        # committed mark's own effect sits, obscuring marks included.
+        frame = make_gradient_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 100, 100))
+        overlay.add_mark(
+            Blur(colour=QColor("#ff0000"), stroke_width=4, start=QPointF(20, 20), end=QPointF(60, 60))
+        )
+
+        before = overlay.grab().toImage().pixelColor(40, 40)
+
+        overlay.set_selection(QRect(0, 0, 150, 150))
+        after = overlay.grab().toImage().pixelColor(40, 40)
+
+        assert before == after
+
+    def test_repeated_repaints_do_not_recompute_obscuring_marks_each_time(self, monkeypatch):
+        # Per this ticket's own performance acceptance criterion: a
+        # repaint triggered by something unrelated -- an in-progress pen
+        # stroke elsewhere on the canvas -- must not redo blur/pixelate's
+        # scale-down/scale-up sampling on every single frame once nothing
+        # about the obscuring marks themselves has changed.
+        frame = make_gradient_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(
+            Blur(colour=QColor("#ff0000"), stroke_width=4, start=QPointF(10, 10), end=QPointF(60, 60))
+        )
+        overlay.add_mark(
+            Pixelate(
+                colour=QColor("#ff0000"), stroke_width=4, start=QPointF(80, 80), end=QPointF(130, 130)
+            )
+        )
+
+        calls = []
+        original_apply = ObscuringShape.apply
+
+        def counting_apply(self, image):
+            calls.append(self)
+            return original_apply(self, image)
+
+        monkeypatch.setattr(ObscuringShape, "apply", counting_apply)
+
+        overlay.grab()  # first paint under the patch: bakes both marks once
+        assert len(calls) == 2
+
+        overlay._in_progress_shape = Pen(
+            colour=QColor("#00ff00"), stroke_width=3, points=[QPointF(150, 150)]
+        )
+        for x in range(150, 160):
+            overlay._in_progress_shape.points.append(QPointF(x, 150))
+            overlay.grab()
+
+        assert len(calls) == 2  # unchanged: the cached bake was reused every time
 
 
 class TestEraserTool:
