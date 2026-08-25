@@ -29,9 +29,10 @@ the capture backends.
 ```
 snipux/
   capture.py    backends + virtual-desktop frame; the only platform-specific code
-  overlay.py    frozen-frame selection windows, one per monitor
+  overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
   shapes.py     annotation data model and the flattening renderer
-  editor.py     the annotation window
+  settings.py   the Settings window (Qt in front of setup_desktop.py)
+  setup_desktop.py  desktop/autostart entries, icons, the GNOME shortcut, config
   app.py        controller, tray, CLI
 tests/          pytest, mirroring the module names
 ```

@@ -950,7 +950,7 @@ class TestAppControllerOverlayDismissal:
 
 
 class TestAppControllerTrayMenu:
-    def test_tray_menu_offers_a_single_snip_item_and_quit(self, make_controller):
+    def test_tray_menu_offers_snip_settings_and_quit(self, make_controller):
         controller = make_controller(
             BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
         )
@@ -960,8 +960,11 @@ class TestAppControllerTrayMenu:
         # Freeform once the overlay is open, per the ticket.
         assert controller.snip_action.text() == "Snip"
         assert controller.quit_action.text() == "Quit"
+        # Settings sits between them: it is the second thing anyone opens a
+        # tray menu for, and it must not be below Quit.
         assert [action.text() for action in controller._tray_icon.contextMenu().actions()] == [
             "Snip",
+            "Settings...",
             "Quit",
         ]
 

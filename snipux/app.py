@@ -44,6 +44,7 @@ from snipux.overlay import (
     open_overlay,
 )
 from snipux import setup_desktop
+from snipux.settings import SettingsDialog
 
 
 def copy_image_to_clipboard(image: QImage) -> None:
@@ -456,6 +457,9 @@ class AppController:
         )
 
         self._overlay: OverlayWindow | None = None
+        # Held for the same reason `_overlay` is: a parentless widget is
+        # fair game for the GC while its window is still on screen.
+        self._settings: SettingsDialog | None = None
 
         # Stock Ubuntu GNOME shows no legacy tray icon at all without the
         # AppIndicator extension: calling show() unconditionally left the
@@ -486,6 +490,8 @@ class AppController:
         # pair couldn't change mode once a selection was already open.
         self.snip_action = menu.addAction("Snip")
         self.snip_action.triggered.connect(self.start_capture)
+        self.settings_action = menu.addAction("Settings...")
+        self.settings_action.triggered.connect(self.open_settings)
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         self._tray_icon.setContextMenu(menu)
@@ -505,6 +511,46 @@ class AppController:
             )
 
         self._transport.listen(self.start_capture)
+
+    def open_settings(self) -> None:
+        """Show the Settings window, or raise the one already open.
+
+        Held on `self` for the same reason `_overlay` is: a parentless
+        widget is fair game for Python's GC to collect out from under a
+        window still on screen. Non-modal, so a snip can still be taken
+        while it is open.
+        """
+        if self._settings is not None and self._settings.isVisible():
+            self._settings.raise_()
+            self._settings.activateWindow()
+            return
+        self._settings = SettingsDialog(on_saved=self._on_settings_saved)
+        self._settings.show()
+        self._settings.raise_()
+        self._settings.activateWindow()
+
+    def _on_settings_saved(self) -> None:
+        """Apply what Settings just wrote.
+
+        The shortcut has to be re-bound through gsettings, not merely
+        remembered -- the stored value is what survives the next `--setup`,
+        but GNOME only knows about the binding it was told. Reported to the
+        tray (or stdout) rather than silently, since rebinding is exactly
+        the operation whose silent failure this whole feature exists to
+        get away from.
+        """
+        exec_path = setup_desktop.find_console_script()
+        if exec_path is None:
+            message = (
+                "Settings saved, but the snipux console script could not be "
+                "found, so the shortcut was not re-bound."
+            )
+        else:
+            message = setup_desktop.bind_gnome_shortcut(exec_path)
+        if self._tray_available:
+            self._tray_icon.showMessage("snipux", message, QSystemTrayIcon.MessageIcon.Information)
+        else:
+            print(message)
 
     def _quit(self) -> None:
         QApplication.instance().quit()
