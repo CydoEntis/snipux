@@ -576,3 +576,74 @@ class TestTrayNamesTheActiveTool:
         window._sync_tray()
 
         assert window._tray._tool == "text"
+
+
+class TestEveryToolIsNamedOnScreen:
+    """The eraser had no on-screen name anywhere: the settings tray names
+    every other tool, but only appears for tools with colour and stroke to
+    set. Its glyph is not self-explanatory at 16px, so the one tool with
+    nothing to configure was the one tool you could not identify.
+    """
+
+    def _editing(self) -> ReviewWindow:
+        window = ReviewWindow(make_image())
+        window.resize(1020, 700)
+        window._set_annotating(True)
+        return window
+
+    def test_the_eraser_is_named(self):
+        window = self._editing()
+
+        window._bar.select_tool("eraser")
+        window._sync_tray()
+
+        assert window._tool_hint.isVisibleTo(window._canvas)
+        assert window._tool_hint._pill._text_label.text() == "Eraser"
+
+    def test_the_eraser_says_what_it_does(self):
+        window = self._editing()
+
+        window._bar.select_tool("eraser")
+        window._sync_tray()
+
+        assert window._tool_hint._hint.text() == tokens.TOOL_HINTS["eraser"]
+
+    def test_a_draw_tool_uses_the_tray_instead_of_the_strip(self):
+        # The strip is the fallback, not a second name for tools already
+        # named by the tray.
+        window = self._editing()
+
+        window._bar.select_tool("pen")
+        window._sync_tray()
+
+        assert not window._tool_hint.isVisibleTo(window._canvas)
+        assert window._tray.isVisibleTo(window._canvas)
+
+    def test_leaving_edit_mode_puts_the_strip_away(self):
+        window = self._editing()
+        window._bar.select_tool("eraser")
+        window._sync_tray()
+
+        window._set_annotating(False)
+
+        assert not window._tool_hint.isVisibleTo(window._canvas)
+
+
+class TestToolButtonsCarryTooltips:
+    def test_every_tool_button_has_one(self):
+        window = ReviewWindow(make_image())
+
+        for tool, button in window._bar._tool_buttons.items():
+            assert button.toolTip(), f"{tool} has no tooltip"
+
+    def test_the_tooltip_names_the_tool_and_its_key(self):
+        window = ReviewWindow(make_image())
+
+        assert window._bar._tool_buttons["eraser"].toolTip() == "Eraser — E"
+
+    def test_buttons_track_the_mouse_so_the_tooltip_timer_fires(self):
+        # Qt's wake-up timer is driven by moves over the widget, not by the
+        # enter event alone.
+        window = ReviewWindow(make_image())
+
+        assert window._bar._tool_buttons["eraser"].hasMouseTracking()

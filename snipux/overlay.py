@@ -683,6 +683,10 @@ class _IconButton(QPushButton):
         self.setFixedSize(metric.BTN, metric.BTN)
         self.setIconSize(QSize(metric.ICON, metric.ICON))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Qt's tooltip wake-up timer is driven by mouse moves over the
+        # widget, not by the enter event alone, so a button that never sees
+        # one can sit under the cursor without a tooltip ever appearing.
+        self.setMouseTracking(True)
         self.setToolTip(tooltip)
         self.setFlat(True)
         self._refresh()
@@ -776,6 +780,10 @@ class _PillButton(QPushButton):
         super().__init__(parent)
         metric = design.tokens.Metric
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Qt's tooltip wake-up timer is driven by mouse moves over the
+        # widget, not by the enter event alone, so a button that never sees
+        # one can sit under the cursor without a tooltip ever appearing.
+        self.setMouseTracking(True)
         self.setToolTip(tooltip)
         self.setFixedHeight(metric.CHIP_H)
         self.setStyleSheet(
@@ -1697,6 +1705,64 @@ class _BlurModeWell(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(bg)
         painter.drawRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
+        painter.end()
+
+
+class ToolHintStrip(QWidget):
+    """Names the active tool and says what it does, for tools the settings
+    tray does not cover.
+
+    The tray is where every other tool gets named -- pill, then hint -- but
+    it only appears for something with colour and stroke to set, so the
+    eraser had no on-screen name anywhere. Its glyph is not
+    self-explanatory at 16px and a tooltip is a hover away at best, so the
+    one tool with nothing to configure was also the one tool you could not
+    identify.
+
+    Deliberately the tray's own two left-hand pieces and nothing else: the
+    same pill, the same hint from `tokens.TOOL_HINTS`, so it reads as that
+    tray with its controls omitted rather than as a different thing.
+    """
+
+    _BG_ALPHA = 0.93
+    _RADIUS = 12
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 6, 12, 6)
+        layout.setSpacing(9)
+
+        self._pill = _ToolPill(self)
+        layout.addWidget(self._pill)
+
+        self._hint = QLabel(self)
+        font = QFont(design.font_families().ui)
+        size, weight = design.tokens.Font.TRAY_HINT
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight(weight))
+        self._hint.setFont(font)
+        self._hint.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
+        layout.addWidget(self._hint)
+
+    def set_tool(self, tool: str) -> None:
+        self._pill.set_tool(tool)
+        self._hint.setText(design.tokens.TOOL_HINTS.get(tool, ""))
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = design.color("BAR_BG")
+        bg.setAlphaF(self._BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.color("BAR_BORDER"))
+        painter.drawRoundedRect(
+            QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self._RADIUS, self._RADIUS
+        )
         painter.end()
 
 
@@ -3212,6 +3278,12 @@ class OverlayWindow(QWidget):
         self._blur_strength: int = design.tokens.Metric.BLUR_DEFAULT
         self._blur_tray = BlurTray(self)
         self._blur_tray.hide()
+
+        # Names whichever tool has no tray of its own -- the eraser -- so
+        # there is never an active tool with nothing on screen identifying
+        # it. See `ToolHintStrip`.
+        self._tool_hint = ToolHintStrip(self)
+        self._tool_hint.hide()
         self._blur_tray.blurModeChanged.connect(self._on_blur_mode_changed)
         self._blur_tray.strengthChanged.connect(self._on_blur_strength_changed)
 
@@ -3834,6 +3906,7 @@ class OverlayWindow(QWidget):
         disagree.
         """
         tool = self._bar.active_tool
+        self._tool_hint.hide()
         if not self._bar.isVisible():
             self._tray.hide()
             self._blur_tray.hide()
@@ -3850,6 +3923,12 @@ class OverlayWindow(QWidget):
         else:
             self._tray.hide()
             self._blur_tray.hide()
+            if tool:
+                # No tray for this tool (the eraser), so the strip carries
+                # its name instead of leaving nothing on screen at all.
+                self._tool_hint.set_tool(tool)
+                self._tool_hint.show()
+                self._reposition_tray(self._tool_hint)
 
     def _reposition_close_button(self) -> None:
         """Put the close button in the top-right corner of `_chrome_bounds`
