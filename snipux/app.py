@@ -200,8 +200,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--remove",
         action="store_true",
         help="undo everything --setup did -- the desktop entry, autostart "
-        "entry, installed icons, and GNOME Super+Shift+S shortcut -- run "
-        "this before `pipx uninstall snipux` so nothing is left behind",
+        "entry, installed icons, GNOME shortcut and remembered shortcut "
+        "choice -- run this before `pipx uninstall snipux` so nothing is "
+        "left behind",
+    )
+    # Outside the mutually exclusive group above: this modifies --setup
+    # rather than being an action of its own.
+    parser.add_argument(
+        "--shortcut",
+        metavar="ACCELERATOR",
+        help="with --setup, bind this accelerator instead of the default "
+        f"{setup_desktop.DEFAULT_SHORTCUT}, and remember it so later "
+        "--setup runs (every install.sh does one) keep it. GNOME "
+        "accelerator syntax, e.g. '<Super><Shift>x' or '<Alt>Print'",
     )
     return parser
 
@@ -247,11 +258,14 @@ def main(
 
     args = parser.parse_args(argv)
 
+    if args.shortcut is not None and not args.setup:
+        parser.error("--shortcut only means anything alongside --setup")
+
     if args.setup:
         # No registry/transport involved -- unlike --snip and the default
         # resident path, this never touches capture backends or a display,
         # so it's handled before either is ever built.
-        return setup_desktop.run_setup()
+        return setup_desktop.run_setup(shortcut=args.shortcut)
 
     if args.remove:
         # Same reasoning as --setup above: --remove only deletes what

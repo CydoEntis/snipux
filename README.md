@@ -63,6 +63,26 @@ snipux --setup
 `--setup` writes the pieces `pipx install` can't: the `.desktop` entry, the
 autostart entry, and the GNOME Super+Shift+S shortcut. Safe to re-run.
 
+### Using a different shortcut
+
+Super+Shift+S is a popular key combination, and whichever app claimed it
+first wins — GNOME binds it without complaint and yours simply never fires.
+Pick another:
+
+```sh
+snipux --setup --shortcut '<Super><Shift>x'
+```
+
+GNOME's accelerator syntax, not the `Super+Shift+X` form the docs render
+for humans: modifiers in angle brackets, then the key —
+`'<Super><Shift>x'`, `'<Alt>Print'`, `'Print'`, `'F9'`. Anything else is
+rejected with an explanation rather than bound and silently ignored.
+
+The choice is remembered in `~/.config/snipux/config.json`, so later
+`snipux --setup` runs — including the one `packaging/install.sh` performs on
+every install — keep it instead of reverting to the default. `snipux
+--remove` deletes it along with everything else `--setup` wrote.
+
 ## Using snipux
 
 snipux runs resident in the background (with a tray icon, where one is
@@ -70,8 +90,9 @@ available) so the shortcut reaches an already-warm process instead of
 paying startup cost on every snip.
 
 1. **Press Super+Shift+S** (wired up by `snipux --setup`; see
-   [docs/super-shift-s-gnome.md](docs/super-shift-s-gnome.md) to bind a
-   different key or desktop). The whole virtual desktop freezes into a
+   [Using a different shortcut](#using-a-different-shortcut) above, or
+   [docs/super-shift-s-gnome.md](docs/super-shift-s-gnome.md) for other
+   desktops). The whole virtual desktop freezes into a
    full-screen overlay — this single frozen frame is what selection and
    annotation both work against, which is why the flow is identical on
    Wayland and X11.

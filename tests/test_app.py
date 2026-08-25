@@ -478,7 +478,7 @@ class TestSetupFlag:
     def test_dispatches_to_run_setup_and_returns_its_exit_code(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            app.setup_desktop, "run_setup", lambda: calls.append("called") or 0
+            app.setup_desktop, "run_setup", lambda **kwargs: calls.append("called") or 0
         )
 
         exit_code = main(["--setup"])
@@ -487,7 +487,7 @@ class TestSetupFlag:
         assert calls == ["called"]
 
     def test_propagates_a_nonzero_exit_code_from_run_setup(self, monkeypatch):
-        monkeypatch.setattr(app.setup_desktop, "run_setup", lambda: 1)
+        monkeypatch.setattr(app.setup_desktop, "run_setup", lambda **kwargs: 1)
 
         assert main(["--setup"]) == 1
 
@@ -495,7 +495,7 @@ class TestSetupFlag:
         # A registry built here would mean --setup pays for probing real
         # capture backends it has no use for; build_default_registry raising
         # proves it's never called on this path.
-        monkeypatch.setattr(app.setup_desktop, "run_setup", lambda: 0)
+        monkeypatch.setattr(app.setup_desktop, "run_setup", lambda **kwargs: 0)
 
         def must_not_be_called():
             raise AssertionError("build_default_registry() must not run for --setup")
@@ -1210,3 +1210,32 @@ class TestRunResidentApp:
             assert state["primary_on_request"] is not None
         finally:
             created[0]._tray_icon.hide()
+
+
+class TestShortcutFlag:
+    """`--shortcut` modifies `--setup` rather than being an action itself."""
+
+    def test_is_passed_through_to_run_setup(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            app.setup_desktop, "run_setup", lambda **kwargs: seen.update(kwargs) or 0
+        )
+
+        assert main(["--setup", "--shortcut", "<Super><Shift>x"]) == 0
+        assert seen["shortcut"] == "<Super><Shift>x"
+
+    def test_setup_alone_passes_none_so_the_stored_value_wins(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            app.setup_desktop, "run_setup", lambda **kwargs: seen.update(kwargs) or 0
+        )
+
+        main(["--setup"])
+
+        assert seen["shortcut"] is None
+
+    def test_is_rejected_without_setup(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["--shortcut", "<Super><Shift>x"])
+
+        assert "only means anything alongside --setup" in capsys.readouterr().err
