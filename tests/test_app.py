@@ -49,6 +49,26 @@ def qapp():
     return instance
 
 
+@pytest.fixture(autouse=True)
+def _assume_setup_already_ran(monkeypatch):
+    """Default every test in this file to "a previous launch already ran
+    desktop integration" (SNX-95), the same safe state a real second launch
+    finds itself in via `setup_desktop.load_setup_complete()`.
+
+    Without this, any test that lets `main(["--snip"])`/`run_resident_app()`
+    actually become the resident instance -- TestSnipFlag's `--snip` tests,
+    for instance, which build a real (not stubbed) `AppController` -- would
+    also reach `AppController.run_first_launch_setup()` for real, which
+    writes actual OS state (this developer's own `~/.config/snipux/
+    config.json`, `.desktop`/autostart files, a real GNOME/Windows shortcut
+    bind). Autouse so that stays true by default everywhere, not just in
+    the places already known to need it; `TestRunFirstLaunchSetup` and
+    `TestRunResidentApp`'s own first-launch test override this per-test to
+    exercise the real "nothing has run yet" branch.
+    """
+    monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+
+
 def make_image(size=(20, 10), fill_color=FILL_COLOR) -> QImage:
     image = QImage(*size, QImage.Format.Format_RGB32)
     image.fill(fill_color)
@@ -1288,6 +1308,38 @@ class TestRunResidentApp:
         finally:
             created[0]._tray_icon.hide()
 
+    def test_running_resident_for_the_first_time_runs_first_launch_setup(self, monkeypatch):
+        # AC: "the first launch installs the desktop integration and binds
+        # the shortcut without the user running --setup" -- proving
+        # _become_resident() actually reaches run_first_launch_setup(), the
+        # same way it already proves install_hotkey_listener() is reached
+        # for the process that really becomes resident.
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+
+        calls = []
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+            def run_first_launch_setup(self):
+                calls.append(True)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+
+        state = make_transport_state()
+        transport = FakeTransport(state)
+
+        try:
+            result = run_resident_app(registry=BackendRegistry(), transport=transport)
+
+            assert result == 0
+            assert calls == [True]
+        finally:
+            created[0]._tray_icon.hide()
+
 
 class TestShortcutFlag:
     """`--shortcut` modifies `--setup` rather than being an action itself."""
@@ -1495,6 +1547,129 @@ class TestWindowsHotkeyIntegration:
 
         assert bind_calls == [None]
         assert gnome_calls == []
+
+
+class TestRunFirstLaunchSetup:
+    """SNX-95: `AppController.run_first_launch_setup()` is what lets a bare
+    `snipux` launch install desktop integration and bind the shortcut
+    without anyone having to know to run `--setup` first. Exercised
+    directly on a constructed controller here -- `_become_resident()`'s own
+    call to it is covered separately, in TestRunResidentApp, the same split
+    `install_hotkey_listener()` already has between this file's
+    TestWindowsHotkeyIntegration and TestRunResidentApp.
+    """
+
+    def test_skips_and_touches_nothing_once_already_recorded_complete(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+
+        def install_must_not_be_called(**kwargs):
+            raise AssertionError(
+                "install_desktop_integration() must not run once already recorded complete"
+            )
+
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", install_must_not_be_called
+        )
+
+        def save_must_not_be_called(enabled, cd=None):
+            raise AssertionError(
+                "save_setup_complete() must not rewrite an already-complete record"
+            )
+
+        monkeypatch.setattr(app.setup_desktop, "save_setup_complete", save_must_not_be_called)
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+        report_calls = []
+        monkeypatch.setattr(controller, "_report_shortcut", lambda message: report_calls.append(message))
+
+        controller.run_first_launch_setup()  # must not raise
+
+        assert report_calls == []
+
+    def test_installs_desktop_integration_and_records_completion_on_first_run(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: False)
+        install_calls = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: install_calls.append(kwargs) or 0,
+        )
+        save_calls = []
+        monkeypatch.setattr(
+            app.setup_desktop,
+            "save_setup_complete",
+            lambda enabled, cd=None: save_calls.append(enabled) or True,
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()
+
+        assert install_calls == [{}]
+        assert save_calls == [True]
+
+    def test_reports_what_it_set_up_and_how_to_change_it(self, make_controller, monkeypatch):
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: False)
+        monkeypatch.setattr(app.platform.current, "install_desktop_integration", lambda **kwargs: 0)
+        monkeypatch.setattr(app.setup_desktop, "save_setup_complete", lambda enabled, cd=None: True)
+        monkeypatch.setattr(app.setup_desktop, "load_shortcut", lambda cd=None: "Control+Alt+S")
+        monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True))
+        calls = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: calls.append(message),
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()
+
+        # Reported exactly once, and names both halves of the AC: what got
+        # set up (the shortcut) and how to change it (Settings).
+        assert len(calls) == 1
+        assert "Control+Alt+S" in calls[0]
+        assert "Settings" in calls[0]
+
+    def test_an_unimplemented_platform_is_reported_and_does_not_stop_the_app(
+        self, make_controller, monkeypatch
+    ):
+        # AC: "a step that cannot run reports why and does not stop the app
+        # from starting" -- macOS (SNX-85) has nothing behind the seam yet,
+        # and any future platform in the same state must behave the same
+        # way: reported, not fatal.
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: False)
+
+        def raise_unimplemented(**kwargs):
+            raise app.platform.UnimplementedPlatformError("macOS", "install_desktop_integration")
+
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", raise_unimplemented
+        )
+        save_calls = []
+        monkeypatch.setattr(
+            app.setup_desktop,
+            "save_setup_complete",
+            lambda enabled, cd=None: save_calls.append(enabled) or True,
+        )
+        monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True))
+        calls = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: calls.append(message),
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()  # must not raise
+
+        assert len(calls) == 1
+        assert "macOS" in calls[0]
+        # Recorded anyway, so a future launch doesn't re-attempt (and
+        # re-report) this on every single startup -- see
+        # run_first_launch_setup()'s own docstring.
+        assert save_calls == [True]
 
 
 class TestReviewWindowIntegration:
