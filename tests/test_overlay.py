@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 import pytest
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt
-from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, qRgb
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
     QApplication,
@@ -4413,6 +4413,190 @@ class TestShapeToolPopoverOverlayIntegration:
         overlay.set_selection(None)
 
         assert not overlay._shape_popover.isVisible()
+
+
+class TestCaptureModeRowSizing:
+    """SNX-75: `_CaptureModeRow` and `_DelayRow` are `QPushButton`s whose
+    real content -- glyph, two-line label, check mark -- lives in a child
+    layout rather than the button's own text()/icon(), the same shape
+    `_PillButton` was in for SNX-59. Left unfixed, `QPushButton.sizeHint()`
+    falls back to its placeholder-text measurement (48x12 per the ticket)
+    instead of the ~45px a 12.5px name over an 11px note plus top/bottom
+    padding actually needs, and the popover's QVBoxLayout collapses every
+    row to that sliver.
+    """
+
+    def test_capture_mode_row_size_hint_matches_its_child_layout(self):
+        row = _CaptureModeRow("Region", "crop", "Drag any rectangle")
+
+        assert row.sizeHint() == row.layout().sizeHint()
+        assert row.minimumSizeHint() == row.sizeHint()
+
+    def test_delay_row_size_hint_matches_its_child_layout(self):
+        row = _DelayRow()
+
+        assert row.sizeHint() == row.layout().sizeHint()
+        assert row.minimumSizeHint() == row.sizeHint()
+
+    def test_row_height_grows_with_the_font_it_actually_renders_with(self, monkeypatch):
+        # Acceptance criterion: "a row's height comes from the fonts and
+        # metrics it renders with, not a fixed number." Bumping the label
+        # font's own pixel size (read at construction time, same as every
+        # other row) must grow the row's sizeHint in step -- a fixed-number
+        # height wouldn't move at all.
+        small = _CaptureModeRow("Region", "crop", "Drag any rectangle")
+
+        monkeypatch.setattr(tokens.Font, "MENU_LABEL", (30.0, 500))
+        big = _CaptureModeRow("Region", "crop", "Drag any rectangle")
+
+        assert big.sizeHint().height() > small.sizeHint().height()
+
+    def test_row_is_tall_enough_for_its_glyph_and_two_line_label(self):
+        # The ticket's own arithmetic, computed from the real fonts rather
+        # than restated as a literal: a 12.5px name over an 11px note (with
+        # the row's own inter-line gap) versus the 16px glyph, whichever is
+        # taller, plus MENU_ROW_PAD_V top and bottom.
+        row = _CaptureModeRow("Full screen", "monitor", "Whole display")
+        row.resize(row.sizeHint())
+        row.grab()
+        metric = tokens.Metric
+
+        label_font = QFont(font_families().ui)
+        size, weight = tokens.Font.MENU_LABEL
+        label_font.setPixelSize(round(size))
+        label_font.setWeight(QFont.Weight(weight))
+
+        note_font = QFont(font_families().ui)
+        size, weight = tokens.Font.MENU_NOTE
+        note_font.setPixelSize(round(size))
+        note_font.setWeight(QFont.Weight(weight))
+
+        text_height = (
+            QFontMetricsF(label_font).height()
+            + row._LABEL_GAP
+            + QFontMetricsF(note_font).height()
+        )
+        content_height = max(row._ICON_SIZE, text_height)
+        min_height = content_height + 2 * metric.MENU_ROW_PAD_V
+
+        assert row.height() >= min_height
+
+
+class TestPopoverHeightReflectsItsChildren:
+    """SNX-75 acceptance: 'the popover's own height is the sum of its rows,
+    separator and padding rather than a collapsed value' -- checked against
+    the actual laid-out children, not a hand re-derived number, so this
+    would fail the same way the ticket's own 262x83 measurement did before
+    the row fix.
+    """
+
+    def test_capture_mode_popover_height_equals_its_rows_plus_separator_plus_padding(self):
+        popover = CaptureModePopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+        metric = tokens.Metric
+
+        separator = popover.findChild(_MenuSeparator)
+        children_height = (
+            sum(row.height() for row in popover._rows.values())
+            + separator.height()
+            + popover._delay_row.height()
+        )
+
+        assert popover.height() == children_height + 2 * metric.MENU_PAD
+
+    def test_capture_mode_popover_height_is_no_longer_collapsed(self):
+        # Before SNX-75, five rows collapsed to ~12px apiece (see
+        # `_CaptureModeRow`'s own docstring for the ticket's 262x83
+        # measurement) -- comfortably under 100px total. A real popover with
+        # four two-line mode rows, a separator and a delay row needs well
+        # over that.
+        popover = CaptureModePopover()
+
+        assert popover.sizeHint().height() > 150
+
+    def test_shape_tool_popover_height_equals_its_rows_plus_padding(self):
+        popover = ShapeToolPopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+        metric = tokens.Metric
+
+        children_height = sum(row.height() for row in popover._rows.values())
+
+        assert popover.height() == children_height + 2 * metric.MENU_PAD
+
+    def test_shape_tool_popover_height_is_no_longer_collapsed(self):
+        popover = ShapeToolPopover()
+
+        assert popover.sizeHint().height() > 100
+
+    def test_reposition_uses_the_corrected_uncollapsed_height(self):
+        # AC: "the popover still opens above the bar when there is room and
+        # below it when there is not, at its corrected height" -- both
+        # branches already read `self.sizeHint().height()`, so the fix here
+        # is just that height no longer being a collapsed value.
+        popover = CaptureModePopover()
+        bar_geometry = QRect(200, 400, 600, 48)
+        assert bar_geometry.top() > CaptureModePopover._UP_THRESHOLD
+
+        popover.reposition(bar_geometry, QSize(1600, 1000))
+
+        assert popover.geometry().height() > 150
+        assert popover.geometry().bottom() < bar_geometry.top()
+
+
+class TestPopoverChildrenAreNeverClippedBelowSizeHint:
+    """SNX-75 acceptance: 'a test opens each popover and fails if any child
+    is laid out smaller than its sizeHint.' `grab()` forces a real layout
+    pass offscreen, per CLAUDE.md and mirroring `TestPillButtonLabelWidth`'s
+    own convention -- `sizeHint()`/`geometry()` alone can hold stale
+    pre-layout values.
+
+    Height only, not width: every row is deliberately stretched to the
+    popover's own fixed `MENU_W` column by the parent `QVBoxLayout`
+    (`CaptureModePopover`/`ShapeToolPopover` both `setFixedWidth`), the same
+    way `_MenuSeparator`'s width is never its own sizeHint's either -- width
+    is a layout choice, not a symptom of the collapse this ticket fixes.
+    The defect this test guards, per the ticket's own measurements, is
+    rows/popovers laid out *shorter* than the content they render.
+    """
+
+    def _assert_no_child_is_clipped(self, popover: QWidget) -> None:
+        for child in popover.findChildren(QWidget):
+            granted = child.geometry().height()
+            hint = child.sizeHint().height()
+            assert granted >= hint, (
+                f"{child!r} granted {granted}px tall but its own sizeHint asks for {hint}px"
+            )
+
+    def test_capture_mode_popover_opens_with_no_child_clipped(self):
+        popover = CaptureModePopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+
+        self._assert_no_child_is_clipped(popover)
+
+    def test_shape_tool_popover_opens_with_no_child_clipped(self):
+        popover = ShapeToolPopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+
+        self._assert_no_child_is_clipped(popover)
+
+    def test_a_collapsed_row_would_fail_this_measurement(self):
+        # Proves the measurement above actually bites: forcing a row back
+        # down to a fixed height shorter than its own sizeHint reproduces
+        # exactly the collapse the ticket reports.
+        popover = CaptureModePopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+        row = next(iter(popover._rows.values()))
+
+        row.setFixedHeight(12)
+        popover.grab()
+
+        with pytest.raises(AssertionError):
+            self._assert_no_child_is_clipped(popover)
 
 
 def _close_stray_toplevel_windows() -> None:
