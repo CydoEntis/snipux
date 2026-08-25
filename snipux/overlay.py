@@ -3135,6 +3135,15 @@ class OverlayWindow(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         )
+        # Every pixel of this window is the frozen frame, so Qt must not
+        # fill it with the palette's background first. That fill is what
+        # flashed: the window maps, gets one frame of flat colour, and only
+        # then gets its first paintEvent -- read as the screen blinking
+        # before the snip rather than the capture simply appearing. Telling
+        # Qt the paint is opaque and there is no system background to draw
+        # means the first thing ever shown is the desktop itself.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         # The frame's own logical origin/size *is* the virtual desktop's
         # bounds -- a full capture already spans every monitor, so no union
         # of screen geometries needs computing here the way create_overlays()
@@ -3222,6 +3231,9 @@ class OverlayWindow(QWidget):
         # moves. None outside a handle drag.
         self._active_handle: Handle | None = None
         self._resize_anchor: QRect | None = None
+
+        # True for the duration of an eraser press -- see mousePressEvent.
+        self._erasing = False
 
         # Region-mode drag-to-create (SNX-57): window-local logical anchor
         # of an in-progress left-button drag that is building a *brand new*
@@ -4472,6 +4484,11 @@ class OverlayWindow(QWidget):
         is None until it does -- so `setScreen` has something to act on.
         """
         if screen is None:
+            # Rendered once before mapping: `grab()` runs a full paintEvent
+            # into an offscreen pixmap, so the backing store already holds
+            # the frozen frame when the window appears rather than being
+            # filled on the first exposure.
+            self.grab()
             self.show()
         else:
             self.winId()
@@ -4682,9 +4699,13 @@ class OverlayWindow(QWidget):
                 event.position()
             ):
                 if self._eraser_active:
-                    # No drag, per the spec's "Drawing": "eraser -- no
-                    # drag." A miss (nothing under the cursor) is already a
-                    # safe no-op inside erase_at itself.
+                    # Armed for the whole press so the eraser can be swept
+                    # across a group of marks rather than aimed at each one
+                    # -- see `mouseMoveEvent`. The spec's "eraser -- no
+                    # drag" meant it draws nothing, not that it may only be
+                    # clicked; rubbing out is a sweep everywhere else it
+                    # exists. A miss is a safe no-op inside erase_at.
+                    self._erasing = True
                     self.erase_at(event.position())
                 else:
                     self._start_stroke(event.position())
@@ -4833,6 +4854,9 @@ class OverlayWindow(QWidget):
         self._text_editor.begin(pos, colour, self._stroke_width)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._erasing:
+            self.erase_at(event.position())
+            return
         # SNX-48: tracked on every move regardless of mode, so
         # `_select_full_screen` always has a recent position to answer
         # "which display is the cursor on" from -- see its own docstring
@@ -4906,6 +4930,7 @@ class OverlayWindow(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._erasing = False
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if self._picking_freeform and self._freeform_drag_path is not None:

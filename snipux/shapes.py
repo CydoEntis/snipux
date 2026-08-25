@@ -625,6 +625,26 @@ class Text(Shape):
         )
         return font
 
+    def chip_rect(self) -> QRectF:
+        """The label chip's actual bounds -- anchor at its top-left, sized
+        to the text it holds.
+
+        Shared by `draw` and `hit_test` so the two cannot disagree. They
+        did: `hit_test` used to centre a fixed box *on* the anchor while
+        `draw` extends right and down from it, so the hit region covered
+        one corner of the chip and clicking the label you could see missed
+        it. That is what made the eraser look like it ignored labels.
+        """
+        metrics = QFontMetricsF(self._font())
+        pad_h = design.tokens.Metric.TEXT_LABEL_PAD_H
+        pad_v = design.tokens.Metric.TEXT_LABEL_PAD_V
+        return QRectF(
+            self.point.x(),
+            self.point.y(),
+            metrics.horizontalAdvance(self.text) + pad_h * 2,
+            metrics.height() + pad_v * 2,
+        )
+
     def draw(self, painter: QPainter) -> None:
         if not self.text:
             return  # an empty string is a no-op, not an error: see PLAN.md
@@ -633,12 +653,7 @@ class Text(Shape):
         metrics = QFontMetricsF(font)
         pad_h = design.tokens.Metric.TEXT_LABEL_PAD_H
         pad_v = design.tokens.Metric.TEXT_LABEL_PAD_V
-        chip = QRectF(
-            self.point.x(),
-            self.point.y(),
-            metrics.horizontalAdvance(self.text) + pad_h * 2,
-            metrics.height() + pad_v * 2,
-        )
+        chip = self.chip_rect()
         radius = design.tokens.Metric.TEXT_LABEL_RADIUS
 
         # Background then ring, each its own drawRoundedRect call at the
@@ -667,18 +682,13 @@ class Text(Shape):
         )
 
     def hit_test(self, point: QPointF) -> bool:
-        # A generous fixed box centred on the anchor point rather than
-        # measuring the actual chip draw() paints -- good enough to pick
-        # the label out without duplicating this class's own font-metrics
-        # sizing logic here, same spirit as its `_font()`/chip layout.
-        half_extent = self.HIT_TOLERANCE + self.stroke_width * self.TEXT_FONT_SIZE_FACTOR
-        rect = QRectF(
-            self.point.x() - half_extent,
-            self.point.y() - half_extent,
-            half_extent * 2,
-            half_extent * 2,
-        )
-        return rect.contains(point)
+        # The chip draw() actually paints, widened by the usual tolerance.
+        # Anything else and the label you can see is not the label you can
+        # click -- see `chip_rect`.
+        return self.chip_rect().adjusted(
+            -self.HIT_TOLERANCE, -self.HIT_TOLERANCE,
+            self.HIT_TOLERANCE, self.HIT_TOLERANCE,
+        ).contains(point)
 
 
 @dataclass
