@@ -1326,3 +1326,82 @@ class TestReviewWindowIntegration:
         controller._reviews[0].accept()
 
         assert controller._reviews == []
+
+
+class TestQApplicationLifetime:
+    """The QApplication must exist -- and stay alive -- before a transport
+    claims its socket.
+
+    QLocalServer's socket notifier binds to the thread's event dispatcher at
+    construction. With no live QApplication there is no dispatcher, and
+    building one afterwards orphans the notifier rather than adopting it:
+    newConnection never fires again, so a resident accepts no forwarded
+    requests and `snipux --snip` -- the keyboard shortcut's only caller --
+    does nothing at all, silently, for the life of the process.
+    """
+
+    def test_the_qapplication_is_held_beyond_the_callers_scope(self):
+        # The original bug was subtler than the ordering: _ensure_qapplication
+        # built one and returned it, run_resident_app discarded the return
+        # value, and PyQt collected it before try_claim() ran -- the same
+        # foot-gun this file documents for parentless widgets.
+        returned = app._ensure_qapplication()
+
+        assert app._QAPPLICATION is returned
+        assert QApplication.instance() is returned
+
+    def test_it_survives_a_garbage_collection_between_use_sites(self):
+        import gc
+
+        app._ensure_qapplication()
+        gc.collect()
+
+        assert QApplication.instance() is not None
+
+    def test_it_reuses_an_existing_instance(self):
+        first = app._ensure_qapplication()
+        second = app._ensure_qapplication()
+
+        assert first is second
+
+
+class TestSnipRequestProtocol:
+    """A liveness probe and a capture request both connect; only one of them
+    means "take a snip".
+    """
+
+    def test_a_bare_connection_is_not_a_request(self, tmp_path):
+        # try_claim() probes by connecting. When a connection alone was the
+        # request, every probe fired a capture on the resident -- including
+        # --snip's own probe moments before its real request, which is why
+        # one keypress delivered two.
+        name = f"snipux-test-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        fired = []
+        server.listen(lambda: fired.append(True))
+
+        probe = app.QLocalSocketTransport(name)
+        assert probe.try_claim() is False  # the probe connects, then gives up
+        QApplication.processEvents()
+        QTest.qWait(50)
+        QApplication.processEvents()
+
+        assert fired == [], "a liveness probe must not trigger a capture"
+
+    def test_a_real_request_is_delivered(self, tmp_path):
+        name = f"snipux-test-req-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        fired = []
+        server.listen(lambda: fired.append(True))
+
+        client = app.QLocalSocketTransport(name)
+        client.send_snip_request()
+        for _ in range(20):
+            QApplication.processEvents()
+            QTest.qWait(20)
+            if fired:
+                break
+
+        assert fired == [True]
