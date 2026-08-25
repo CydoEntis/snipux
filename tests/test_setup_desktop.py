@@ -856,6 +856,40 @@ class TestShortcutConfig:
         assert setup_desktop.forget_shortcut(tmp_path) is False
 
 
+class TestSetupComplete:
+    """SNX-95: the record that lets a later launch tell "already set up"
+    apart from "never has been", so it can skip redoing desktop
+    integration -- without rewriting anything -- instead of running it on
+    every single startup.
+    """
+
+    def test_defaults_to_false_when_nothing_is_stored(self, tmp_path):
+        assert setup_desktop.load_setup_complete(tmp_path) is False
+
+    def test_a_saved_value_round_trips(self, tmp_path):
+        assert setup_desktop.save_setup_complete(True, tmp_path)
+
+        assert setup_desktop.load_setup_complete(tmp_path) is True
+
+    def test_saving_preserves_other_keys_in_the_document(self, tmp_path):
+        setup_desktop.save_shortcut("Alt+Print", tmp_path)
+
+        setup_desktop.save_setup_complete(True, tmp_path)
+
+        assert setup_desktop.load_shortcut(tmp_path) == "Alt+Print"
+        assert setup_desktop.load_setup_complete(tmp_path) is True
+
+    def test_a_corrupt_config_is_treated_as_not_set_up(self, tmp_path):
+        # A broken config must not be able to make setup silently skip
+        # itself forever -- the same "never fail --setup" care
+        # load_shortcut() already takes on the same file.
+        path = setup_desktop.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ this is not json")
+
+        assert setup_desktop.load_setup_complete(tmp_path) is False
+
+
 class TestShortcutValidation:
     """gsettings accepts any string and silently never fires a binding it
     cannot parse -- exactly the invisible failure this feature exists to
@@ -1004,3 +1038,20 @@ class TestRunSetupWithAShortcut:
         )
 
         assert not setup_desktop.config_path(tmp_path / "config").exists()
+
+    def test_remove_clears_the_setup_complete_record_too(self, tmp_path, monkeypatch):
+        # SNX-95: so a later launch sets up again rather than assuming this
+        # install is still set up, the same way it must not keep assuming a
+        # shortcut is still bound once --remove has unbound it.
+        monkeypatch.setattr(setup_desktop, "unbind_gnome_shortcut", lambda: "unbound")
+        setup_desktop.save_setup_complete(True, tmp_path / "config")
+        assert setup_desktop.load_setup_complete(tmp_path / "config") is True
+
+        setup_desktop.run_remove(
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+            config_dir=tmp_path / "config",
+        )
+
+        assert setup_desktop.load_setup_complete(tmp_path / "config") is False

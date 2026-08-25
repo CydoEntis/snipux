@@ -519,6 +519,28 @@ def forget_shortcut(config_dir: Path | None = None) -> bool:
     return True
 
 
+def load_setup_complete(config_dir: Path | None = None) -> bool:
+    """Whether desktop integration has already run once -- either an
+    explicit `--setup`, or the app's own first-launch run of it (SNX-95).
+
+    `app.py`'s resident startup reads this before doing anything, so a
+    second and every later launch skips straight past desktop integration
+    rather than rewriting the same `.desktop`/autostart/icon files and
+    rebinding the same shortcut every single time it starts.
+    """
+    return _read_config(config_dir).get("setup_complete") is True
+
+
+def save_setup_complete(enabled: bool, config_dir: Path | None = None) -> bool:
+    """Record whether desktop integration has run -- see
+    `load_setup_complete`. Stored in the same `config.json` `forget_shortcut`
+    (and so `run_remove`) already deletes, which is what makes `--remove`
+    clearing this record, so a later launch sets up again, fall out for
+    free rather than needing its own removal step.
+    """
+    return _write_config("setup_complete", bool(enabled), config_dir)
+
+
 # Schemas GNOME keeps its own keyboard shortcuts in. Not exhaustive by
 # design -- these are the ones that hold the bindings a user is realistically
 # about to collide with, and an unknown schema on some other desktop is a
@@ -1056,6 +1078,12 @@ def run_remove(
     failing must not stop the rest" rule CLAUDE.md states for capture
     backends, applied here so running `--remove` right before an uninstall
     can't itself fail the uninstall.
+
+    `forget_shortcut()` below deletes the whole `config.json`, not just the
+    shortcut key -- which is also where `load_setup_complete()` records
+    that desktop integration has already run (SNX-95), so that record goes
+    away with it. That is what makes the next launch run first-launch setup
+    again rather than wrongly assuming this install is still set up.
     """
     if applications_dir is None:
         applications_dir = (
