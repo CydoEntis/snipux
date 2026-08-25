@@ -895,6 +895,66 @@ def install_icons(hicolor_dir: Path | None = None) -> bool:
     return bool(installed_sizes)
 
 
+def render_ico() -> bytes | None:
+    """Pack the vendored `design/logo/snipux-<size>.png` files into a
+    single multi-resolution Windows `.ico` -- what `platform/windows.py`
+    writes out for its Start Menu and Startup shortcuts to point their icon
+    at (SNX-92), the Windows analogue of `install_icons()` copying the same
+    PNGs into the hicolor theme on Linux.
+
+    Wraps each PNG's own bytes into an ICO container rather than decoding
+    and re-encoding them: Windows' `.ico` format has accepted PNG-compressed
+    entries (instead of raw BMP ones) since Vista, so this is just building
+    an `ICONDIR`/`ICONDIRENTRY` table (the stdlib `struct` module, same as
+    `capture.py`'s hand-rolled `_BitmapInfoHeader`/`_RECT`) around bytes
+    already on disk -- no pixel decoding, and so no reason to add an
+    imaging dependency (Pillow, numpy) CLAUDE.md already rules out for a
+    screenshot tool just to concatenate bytes.
+
+    Capped at 256px: `ICONDIRENTRY`'s width/height fields are one byte each
+    (0 meaning 256), so the vendored 512px master cannot be represented
+    there and is left out -- every other vendored size fits.
+
+    Returns None if no vendored PNG is usable at all, the same "nothing to
+    install" shape `install_icons()` reports for the same directory, so a
+    caller can tell "built a real icon" from "built nothing" without
+    inspecting the bytes.
+    """
+    import struct
+
+    sized = []
+    for path in sorted(_LOGO_DIR.glob("snipux-*.png")):
+        match = _LOGO_SIZE_RE.match(path.name)
+        if match is None:
+            continue
+        size = int(match.group(1))
+        if size > 256:
+            continue
+        try:
+            sized.append((size, path.read_bytes()))
+        except OSError:
+            continue
+
+    if not sized:
+        return None
+    sized.sort()
+
+    header = struct.pack("<HHH", 0, 1, len(sized))
+    directory = b""
+    image_data = b""
+    offset = len(header) + 16 * len(sized)  # each ICONDIRENTRY is 16 bytes
+    for size, data in sized:
+        edge = size if size < 256 else 0  # 0 means 256, per the format
+        # BBBB: width, height, palette colours (0 = >=8bpp), reserved.
+        # HH: colour planes (1), bits per pixel (32, RGBA).
+        # II: byte count, offset from the start of the file.
+        directory += struct.pack("<BBBBHHII", edge, edge, 0, 0, 1, 32, len(data), offset)
+        image_data += data
+        offset += len(data)
+
+    return header + directory + image_data
+
+
 def run_setup(
     *,
     exec_path: Path | None = None,

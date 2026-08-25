@@ -272,23 +272,24 @@ def main(
         # resident path, this never touches capture backends or a display,
         # so it's handled before either is ever built.
         #
-        # Calls setup_desktop directly rather than through the platform
-        # seam (snipux/platform/) on purpose: setup_desktop's own
-        # gsettings/`.desktop` steps already degrade to a reported note
-        # when they can't run (no gsettings, a read-only directory) rather
-        # than raising, which is what lets `--setup` run harmlessly during
-        # Windows-hosted development per CLAUDE.md. The platform seam's
-        # Windows/macOS implementations raise instead -- correct once they
-        # exist for real, but routing this call through them today would
-        # turn every `--setup` run during Windows development into a
-        # crash, which is a regression this ticket must not introduce.
-        return setup_desktop.run_setup(shortcut=args.shortcut)
+        # Routed through the platform seam (snipux/platform/) rather than
+        # calling setup_desktop directly: that used to be the only real
+        # implementation (Windows/macOS both raised), so going through the
+        # seam would have turned every `--setup` run during Windows-hosted
+        # development into a crash. Windows now has its own real
+        # implementation (SNX-92), so this reaches it instead of writing
+        # meaningless `.desktop`/gsettings state under fake XDG paths on a
+        # non-Linux host. macOS still raises `UnimplementedPlatformError`
+        # naming itself and the operation -- the documented, intended
+        # behaviour for a platform seam with nothing behind it yet (see
+        # `snipux/platform/__init__.py`), not a regression this introduces.
+        return platform.current.install_desktop_integration(shortcut=args.shortcut)
 
     if args.remove:
         # Same reasoning as --setup above: --remove only deletes what
         # --setup wrote, so it has no more use for a registry or a display
         # than --setup did.
-        return setup_desktop.run_remove()
+        return platform.current.remove_desktop_integration()
 
     if args.snip:
         # Forward to an already-resident instance when there is one. When

@@ -523,18 +523,27 @@ class TestSnipFlag:
 
 
 class TestSetupFlag:
-    """SNX-73: `--setup` dispatches to `setup_desktop.run_setup()` rather
-    than building a registry or touching a display -- the desktop entry,
-    autostart entry, and GNOME shortcut it installs have nothing to do with
-    capture backends. `setup_desktop.run_setup()`'s own behaviour (what it
-    writes, how it reports failures) is covered directly in
-    test_setup_desktop.py; this only proves main() reaches it.
+    """SNX-73/SNX-92: `--setup` dispatches to
+    `platform.current.install_desktop_integration()` rather than building a
+    registry or touching a display -- the desktop entry, autostart entry,
+    and shortcut it installs have nothing to do with capture backends.
+    Mocked on `platform.current` itself (whichever `Platform` the host this
+    suite runs on resolves to -- `LinuxPlatform`/`WindowsPlatform`, both
+    real per CLAUDE.md's "development happens on Windows and in an Ubuntu
+    VM"), not on `setup_desktop.run_setup()`, which only `LinuxPlatform`
+    calls; `install_desktop_integration()`'s own real behaviour is covered
+    directly in test_setup_desktop.py (Linux) and test_platform.py
+    (Windows) -- this only proves main() reaches it.
     """
 
-    def test_dispatches_to_run_setup_and_returns_its_exit_code(self, monkeypatch):
+    def test_dispatches_to_install_desktop_integration_and_returns_its_exit_code(
+        self, monkeypatch
+    ):
         calls = []
         monkeypatch.setattr(
-            app.setup_desktop, "run_setup", lambda **kwargs: calls.append("called") or 0
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: calls.append("called") or 0,
         )
 
         exit_code = main(["--setup"])
@@ -542,8 +551,10 @@ class TestSetupFlag:
         assert exit_code == 0
         assert calls == ["called"]
 
-    def test_propagates_a_nonzero_exit_code_from_run_setup(self, monkeypatch):
-        monkeypatch.setattr(app.setup_desktop, "run_setup", lambda **kwargs: 1)
+    def test_propagates_a_nonzero_exit_code_from_install_desktop_integration(self, monkeypatch):
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", lambda **kwargs: 1
+        )
 
         assert main(["--setup"]) == 1
 
@@ -551,7 +562,9 @@ class TestSetupFlag:
         # A registry built here would mean --setup pays for probing real
         # capture backends it has no use for; build_default_registry raising
         # proves it's never called on this path.
-        monkeypatch.setattr(app.setup_desktop, "run_setup", lambda **kwargs: 0)
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", lambda **kwargs: 0
+        )
 
         def must_not_be_called():
             raise AssertionError("build_default_registry() must not run for --setup")
@@ -574,18 +587,23 @@ class TestSetupFlag:
 
 
 class TestRemoveFlag:
-    """SNX-83: `--remove` dispatches to `setup_desktop.run_remove()` the
-    same way `--setup` dispatches to `run_setup()` -- undoing the desktop
-    entry, autostart entry, installed icons, and GNOME shortcut has nothing
-    to do with capture backends either. `run_remove()`'s own behaviour is
-    covered directly in test_setup_desktop.py; this only proves main()
-    reaches it.
+    """SNX-83/SNX-92: `--remove` dispatches to
+    `platform.current.remove_desktop_integration()` the same way `--setup`
+    dispatches to `install_desktop_integration()` -- undoing the desktop
+    entry, autostart entry, installed icons, and shortcut has nothing to do
+    with capture backends either. `remove_desktop_integration()`'s own
+    behaviour is covered directly in test_setup_desktop.py (Linux) and
+    test_platform.py (Windows); this only proves main() reaches it.
     """
 
-    def test_dispatches_to_run_remove_and_returns_its_exit_code(self, monkeypatch):
+    def test_dispatches_to_remove_desktop_integration_and_returns_its_exit_code(
+        self, monkeypatch
+    ):
         calls = []
         monkeypatch.setattr(
-            app.setup_desktop, "run_remove", lambda: calls.append("called") or 0
+            app.platform.current,
+            "remove_desktop_integration",
+            lambda: calls.append("called") or 0,
         )
 
         exit_code = main(["--remove"])
@@ -593,8 +611,8 @@ class TestRemoveFlag:
         assert exit_code == 0
         assert calls == ["called"]
 
-    def test_propagates_a_nonzero_exit_code_from_run_remove(self, monkeypatch):
-        monkeypatch.setattr(app.setup_desktop, "run_remove", lambda: 1)
+    def test_propagates_a_nonzero_exit_code_from_remove_desktop_integration(self, monkeypatch):
+        monkeypatch.setattr(app.platform.current, "remove_desktop_integration", lambda: 1)
 
         assert main(["--remove"]) == 1
 
@@ -602,7 +620,7 @@ class TestRemoveFlag:
         # A registry built here would mean --remove pays for probing real
         # capture backends it has no use for; build_default_registry raising
         # proves it's never called on this path.
-        monkeypatch.setattr(app.setup_desktop, "run_remove", lambda: 0)
+        monkeypatch.setattr(app.platform.current, "remove_desktop_integration", lambda: 0)
 
         def must_not_be_called():
             raise AssertionError("build_default_registry() must not run for --remove")
@@ -1274,10 +1292,12 @@ class TestRunResidentApp:
 class TestShortcutFlag:
     """`--shortcut` modifies `--setup` rather than being an action itself."""
 
-    def test_is_passed_through_to_run_setup(self, monkeypatch):
+    def test_is_passed_through_to_install_desktop_integration(self, monkeypatch):
         seen = {}
         monkeypatch.setattr(
-            app.setup_desktop, "run_setup", lambda **kwargs: seen.update(kwargs) or 0
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: seen.update(kwargs) or 0,
         )
 
         assert main(["--setup", "--shortcut", "<Super><Shift>x"]) == 0
@@ -1286,7 +1306,9 @@ class TestShortcutFlag:
     def test_setup_alone_passes_none_so_the_stored_value_wins(self, monkeypatch):
         seen = {}
         monkeypatch.setattr(
-            app.setup_desktop, "run_setup", lambda **kwargs: seen.update(kwargs) or 0
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: seen.update(kwargs) or 0,
         )
 
         main(["--setup"])
