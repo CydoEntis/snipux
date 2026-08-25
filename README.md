@@ -39,6 +39,24 @@ environment and a launcher on PATH — no repository checkout needed. `snipux
 Super+Shift+S shortcut, the pieces a wheel can't install on its own. Both
 commands are safe to re-run.
 
+## Uninstall
+
+Run `snipux --remove` **before** `pipx uninstall snipux`, so the desktop
+entry, the autostart entry, the installed icons, and the GNOME
+Super+Shift+S shortcut all go with it:
+
+```sh
+snipux --remove
+pipx uninstall snipux
+```
+
+`pipx uninstall` only removes the installed package — it has no idea `--setup`
+also wrote files outside it, so skipping `--remove` first leaves an autostart
+entry pointing at a binary that no longer exists, a dead keyboard shortcut,
+and a ghost entry in GNOME's application list. `--remove` only ever splices
+its own custom-keybinding slot out of GNOME's list, so any other shortcuts
+you've set up by hand are left alone. Safe to re-run, same as `--setup`.
+
 ## Requirements
 
 - Python 3.10+

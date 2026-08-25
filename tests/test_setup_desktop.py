@@ -252,6 +252,198 @@ class TestInstallIcons:
         assert "no icon theme entries were written" in out
 
 
+class TestRunRemove:
+    """SNX-83: `run_remove()` is `run_setup()`'s exact counterpart --
+    everything it writes, `--remove` deletes -- so `pipx uninstall snipux`
+    doesn't leave a dead autostart entry, a dead keybinding, and a ghost
+    application-list entry behind.
+    """
+
+    def test_removes_the_desktop_and_autostart_entries_and_reports_it(
+        self, tmp_path, capsys
+    ):
+        applications_dir = tmp_path / "applications"
+        autostart_dir = tmp_path / "autostart"
+        exec_path = Path("/opt/snipux/bin/snipux")
+        setup_desktop.run_setup(
+            exec_path=exec_path,
+            applications_dir=applications_dir,
+            autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
+        )
+        capsys.readouterr()  # discard --setup's own output
+
+        exit_code = setup_desktop.run_remove(
+            applications_dir=applications_dir,
+            autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
+        )
+
+        assert exit_code == 0
+        assert not (applications_dir / "snipux.desktop").exists()
+        assert not (autostart_dir / "snipux.desktop").exists()
+        out = capsys.readouterr().out
+        assert f"Desktop entry removed from {applications_dir / 'snipux.desktop'}" in out
+        assert f"Autostart entry removed from {autostart_dir / 'snipux.desktop'}" in out
+
+    def test_removes_the_installed_icons(self, tmp_path):
+        hicolor_dir = tmp_path / "icons"
+        setup_desktop.run_setup(
+            exec_path=Path("/opt/snipux/bin/snipux"),
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=hicolor_dir,
+        )
+        assert list(hicolor_dir.glob("*/apps/snipux.png"))  # sanity: setup wrote some
+
+        setup_desktop.run_remove(
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=hicolor_dir,
+        )
+
+        assert list(hicolor_dir.glob("*/apps/snipux.png")) == []
+
+    def test_running_it_when_nothing_was_ever_set_up_reports_absence_not_failure(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+
+        exit_code = setup_desktop.run_remove(
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+        )
+
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "not found" in out
+        assert "nothing to remove" in out.lower()
+
+    def test_running_it_twice_is_harmless(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+        applications_dir = tmp_path / "applications"
+        autostart_dir = tmp_path / "autostart"
+        exec_path = Path("/opt/snipux/bin/snipux")
+        setup_desktop.run_setup(
+            exec_path=exec_path,
+            applications_dir=applications_dir,
+            autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
+        )
+
+        first = setup_desktop.run_remove(
+            applications_dir=applications_dir,
+            autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
+        )
+        second = setup_desktop.run_remove(
+            applications_dir=applications_dir,
+            autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
+        )
+
+        assert first == 0
+        assert second == 0
+        assert not (applications_dir / "snipux.desktop").exists()
+
+    def test_a_step_that_cannot_be_done_still_lets_the_rest_complete(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # Simulates a read-only applications_dir at removal time -- one step
+        # failing must not take the rest down with it, per CLAUDE.md's rule
+        # for capture backends applied here.
+        applications_dir = tmp_path / "applications"
+        autostart_dir = tmp_path / "autostart"
+        exec_path = Path("/opt/snipux/bin/snipux")
+        setup_desktop.run_setup(
+            exec_path=exec_path,
+            applications_dir=applications_dir,
+            autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
+        )
+
+        real_unlink = Path.unlink
+
+        def failing_unlink(self, *args, **kwargs):
+            if self == applications_dir / "snipux.desktop":
+                raise PermissionError("no")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+        exit_code = setup_desktop.run_remove(
+            applications_dir=applications_dir,
+            autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
+        )
+
+        assert exit_code == 0
+        assert not (autostart_dir / "snipux.desktop").exists()
+        out = capsys.readouterr().out
+        assert "Note: could not remove the desktop entry" in out
+
+
+class TestRemoveIcons:
+    def test_removes_every_installed_size_and_reports_it(self, tmp_path, capsys):
+        hicolor_dir = tmp_path / "hicolor"
+        setup_desktop.install_icons(hicolor_dir)
+        capsys.readouterr()
+
+        result = setup_desktop.remove_icons(hicolor_dir)
+
+        assert result is True
+        assert list(hicolor_dir.glob("*/apps/snipux.png")) == []
+        out = capsys.readouterr().out
+        assert "removed from" in out
+
+    def test_reports_absence_rather_than_failing_when_nothing_was_installed(
+        self, tmp_path, capsys
+    ):
+        hicolor_dir = tmp_path / "hicolor"
+
+        result = setup_desktop.remove_icons(hicolor_dir)
+
+        assert result is False
+        out = capsys.readouterr().out
+        assert "no icon theme entries were found" in out
+
+    def test_running_it_twice_is_harmless(self, tmp_path):
+        hicolor_dir = tmp_path / "hicolor"
+        setup_desktop.install_icons(hicolor_dir)
+
+        first = setup_desktop.remove_icons(hicolor_dir)
+        second = setup_desktop.remove_icons(hicolor_dir)
+
+        assert first is True
+        assert second is False
+
+    def test_one_size_failing_to_remove_does_not_stop_the_others(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        hicolor_dir = tmp_path / "hicolor"
+        setup_desktop.install_icons(hicolor_dir)
+        capsys.readouterr()
+        failing_target = hicolor_dir / "16x16" / "apps" / "snipux.png"
+
+        real_unlink = Path.unlink
+
+        def failing_unlink(self, *args, **kwargs):
+            if self == failing_target:
+                raise PermissionError("no")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+        result = setup_desktop.remove_icons(hicolor_dir)
+
+        assert result is True  # at least one other size still got removed
+        assert failing_target.exists()
+        assert not (hicolor_dir / "32x32" / "apps" / "snipux.png").exists()
+        out = capsys.readouterr().out
+        assert "Note: could not remove the 16x16 icon" in out
+
+
 class TestAppendSlot:
     SLOT = setup_desktop._SLOT_PATH
 
@@ -289,6 +481,11 @@ class FakeGsettingsStore:
         if argv[1] == "set":
             schema, key, value = argv[2], argv[3], argv[4]
             self.values[(schema, key)] = value
+            return SimpleNamespace(returncode=0)
+        if argv[1] == "reset-recursively":
+            schema = argv[2]
+            for key in [key for key in self.values if key[0] == schema]:
+                del self.values[key]
             return SimpleNamespace(returncode=0)
         raise AssertionError(f"unexpected gsettings invocation: {argv}")
 
@@ -365,3 +562,127 @@ class TestBindGnomeShortcut:
         message = setup_desktop.bind_gnome_shortcut(Path("/opt/snipux/bin/snipux"))
 
         assert "setting the GNOME shortcut failed" in message
+
+
+class TestRemoveSlot:
+    SLOT = setup_desktop._SLOT_PATH
+
+    def test_returns_the_list_unchanged_when_the_slot_is_absent(self):
+        current = "['/existing/slot/']"
+
+        assert setup_desktop._remove_slot(current) == current
+
+    def test_removes_the_only_entry_down_to_an_empty_list(self):
+        assert setup_desktop._remove_slot(f"['{self.SLOT}']") == "@as []"
+
+    def test_removes_the_slot_from_the_end_keeping_the_others(self):
+        result = setup_desktop._remove_slot(f"['/existing/slot/', '{self.SLOT}']")
+
+        assert result == "['/existing/slot/']"
+
+    def test_removes_the_slot_from_the_start_keeping_the_others(self):
+        result = setup_desktop._remove_slot(f"['{self.SLOT}', '/existing/slot/']")
+
+        assert result == "['/existing/slot/']"
+
+    def test_removes_the_slot_from_the_middle_keeping_the_others_in_order(self):
+        result = setup_desktop._remove_slot(
+            f"['/a/', '{self.SLOT}', '/b/']"
+        )
+
+        assert result == "['/a/', '/b/']"
+
+
+class TestUnbindGnomeShortcut:
+    def test_reports_a_note_when_gsettings_is_not_on_path(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+
+        message = setup_desktop.unbind_gnome_shortcut()
+
+        assert "gsettings not found" in message
+        assert "nothing to remove" in message.lower()
+
+    def test_reports_plainly_when_the_shortcut_was_never_set(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: "/usr/bin/gsettings")
+        store = FakeGsettingsStore()
+        monkeypatch.setattr(setup_desktop.subprocess, "run", store.run)
+
+        message = setup_desktop.unbind_gnome_shortcut()
+
+        assert "was not set" in message
+        assert "nothing to remove" in message.lower()
+        # Nothing was written back -- there was nothing to change.
+        assert not any(call[1] == "set" for call in store.calls)
+
+    def test_removes_the_slot_and_reports_it(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: "/usr/bin/gsettings")
+        store = FakeGsettingsStore()
+        store.values[(setup_desktop._MEDIA_KEYS_SCHEMA, "custom-keybindings")] = (
+            f"['{setup_desktop._SLOT_PATH}']"
+        )
+        store.values[(setup_desktop._SLOT_SCHEMA, "name")] = "snipux"
+        monkeypatch.setattr(setup_desktop.subprocess, "run", store.run)
+
+        message = setup_desktop.unbind_gnome_shortcut()
+
+        assert "Removed the Super+Shift+S shortcut" in message
+        final_list = store.values[(setup_desktop._MEDIA_KEYS_SCHEMA, "custom-keybindings")]
+        assert setup_desktop._SLOT_PATH not in final_list
+        # reset-recursively cleared the slot's own keys.
+        assert (setup_desktop._SLOT_SCHEMA, "name") not in store.values
+
+    def test_keeps_a_shortcut_the_user_configured_by_hand(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: "/usr/bin/gsettings")
+        store = FakeGsettingsStore()
+        store.values[(setup_desktop._MEDIA_KEYS_SCHEMA, "custom-keybindings")] = (
+            f"['/existing/custom0/', '{setup_desktop._SLOT_PATH}']"
+        )
+        monkeypatch.setattr(setup_desktop.subprocess, "run", store.run)
+
+        setup_desktop.unbind_gnome_shortcut()
+
+        final_list = store.values[(setup_desktop._MEDIA_KEYS_SCHEMA, "custom-keybindings")]
+        assert "custom0" in final_list
+        assert setup_desktop._SLOT_PATH not in final_list
+
+    def test_running_it_twice_is_harmless(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: "/usr/bin/gsettings")
+        store = FakeGsettingsStore()
+        store.values[(setup_desktop._MEDIA_KEYS_SCHEMA, "custom-keybindings")] = (
+            f"['{setup_desktop._SLOT_PATH}']"
+        )
+        monkeypatch.setattr(setup_desktop.subprocess, "run", store.run)
+
+        first = setup_desktop.unbind_gnome_shortcut()
+        second = setup_desktop.unbind_gnome_shortcut()
+
+        assert "Removed" in first
+        assert "was not set" in second
+
+    def test_reports_a_note_when_reading_the_list_fails(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: "/usr/bin/gsettings")
+
+        def raising_run(argv, **kwargs):
+            raise setup_desktop.subprocess.CalledProcessError(1, argv)
+
+        monkeypatch.setattr(setup_desktop.subprocess, "run", raising_run)
+
+        message = setup_desktop.unbind_gnome_shortcut()
+
+        assert "could not read GNOME's custom-keybindings list" in message
+
+    def test_reports_a_note_when_removing_the_shortcut_fails(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: "/usr/bin/gsettings")
+
+        def flaky_run(argv, **kwargs):
+            if argv[1] == "get":
+                return SimpleNamespace(
+                    stdout=f"['{setup_desktop._SLOT_PATH}']"
+                )
+            raise setup_desktop.subprocess.CalledProcessError(1, argv)
+
+        monkeypatch.setattr(setup_desktop.subprocess, "run", flaky_run)
+
+        message = setup_desktop.unbind_gnome_shortcut()
+
+        assert "removing the GNOME shortcut failed" in message
