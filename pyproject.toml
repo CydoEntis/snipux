@@ -59,7 +59,11 @@ include = ["snipux", "snipux.*"]
 # make it into the install. fonts/*.ttf and *.otf are listed the same way
 # even though design/fonts/ is empty in this handoff -- vendoring IBM Plex
 # later should need no packaging change, only dropping the files in.
-"snipux.design" = ["icons/*.svg", "fonts/*.ttf", "fonts/*.otf"]
+# logo/*.png is the same story, read at runtime by app.py's load_app_icon()
+# and setup_desktop.py's install_icons() -- SNX-81: this is exactly the
+# mistake SNX-56 had to fix for icons/*.svg, so the new logo assets are
+# declared here from the start rather than repeating it.
+"snipux.design" = ["icons/*.svg", "fonts/*.ttf", "fonts/*.otf", "logo/*.png"]
 # snipux.desktop is read at runtime by setup_desktop.py via Path(__file__),
 # the same pattern as design/icons above -- SNX-73: this is what lets
 # `snipux --setup` write a real .desktop entry from an installed wheel with
