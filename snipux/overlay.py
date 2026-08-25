@@ -52,7 +52,9 @@ from snipux.shapes import (
     Arrow,
     Blur,
     Crop,
+    Ellipse,
     Highlighter,
+    Line,
     ObscuringShape,
     Pen,
     Pixelate,
@@ -874,6 +876,11 @@ class FloatingBar(QWidget):
     copyRequested = pyqtSignal()
     saveRequested = pyqtSignal()
     captureChipClicked = pyqtSignal()
+    # SNX-64: rect's own button is the group's entry point for
+    # Ellipse/Line/Crop -- emitted instead of `toolSelected` when its
+    # button is clicked, the same "click opens a popover" shape
+    # `captureChipClicked` already gives the capture chip.
+    shapeMenuRequested = pyqtSignal()
 
     UNDO_SHORTCUT = "Ctrl+Z"
     REDO_SHORTCUT = "Ctrl+Shift+Z"
@@ -910,7 +917,14 @@ class FloatingBar(QWidget):
         for tool in design.tokens.TOOLS:
             key = _TOOL_SHORTCUT_KEYS[tool]
             button = _IconButton(tool, f"{_tool_label(tool)} — {key}")
-            button.clicked.connect(lambda checked=False, t=tool: self._on_tool_clicked(t))
+            if tool == "rect":
+                # SNX-64: a click opens the shape submenu (Rectangle/
+                # Ellipse/Line/Crop) rather than picking rect outright --
+                # `OverlayWindow._toggle_shape_popover` is what actually
+                # selects a tool, via `ShapeToolPopover.toolSelected`.
+                button.clicked.connect(self.shapeMenuRequested)
+            else:
+                button.clicked.connect(lambda checked=False, t=tool: self._on_tool_clicked(t))
             self._tool_buttons[tool] = button
             layout.addWidget(button)
         self._add_divider(layout)
@@ -1015,11 +1029,16 @@ class FloatingBar(QWidget):
 
         The single place this is enforced, whether the change came from a
         click above or a caller driving the bar directly -- per the spec,
-        exactly one tool reads as active at a time.
+        exactly one tool reads as active at a time. SNX-64: `tool` being
+        one of `tokens.RECT_GROUP`'s Ellipse/Line/Crop -- which have no
+        button of their own -- reads as the rect button itself being
+        active, the same way picking any of them from its popover ought to
+        leave *something* in the bar showing the group is in use.
         """
         self._active_tool = tool
         for name, button in self._tool_buttons.items():
-            button.set_active(name == tool)
+            is_rect_group_member = name == "rect" and tool in design.tokens.RECT_GROUP
+            button.set_active(name == tool or is_rect_group_member)
 
     @property
     def active_tool(self) -> str | None:
@@ -2189,6 +2208,117 @@ class CaptureModePopover(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Shape submenu (SNX-64)
+# ---------------------------------------------------------------------------
+# Restores Ellipse, Line and Crop -- shapes.py has always fully implemented
+# all three, but nothing in the redesigned chrome ever named them, so the
+# bar only ever offered eight of the eleven tools the owner asked to keep
+# (see tokens.RECT_GROUP's own comment for the full rationale). The design
+# handoff's own guidance for a tool that doesn't fit the eight is a submenu
+# off an existing button, not a bar button of its own -- rect is that
+# button, since all four (Rectangle included) are two-point box/line marks.
+
+
+class ShapeToolPopover(QWidget):
+    """Rect's own submenu: `tokens.RECT_GROUP` as a short list of rows,
+    reusing `_CaptureModeRow` (glyph, label, note, check mark for whichever
+    is the bar's current tool) the same way `CaptureModePopover` does for
+    capture modes -- opened by `OverlayWindow._toggle_shape_popover` off
+    `FloatingBar.shapeMenuRequested`, positioned against the rect button
+    itself rather than the whole bar.
+    """
+
+    toolSelected = pyqtSignal(str)
+
+    # Same #1a1c18 BAR_BG at 97% CaptureModePopover's own _BG_ALPHA already
+    # names -- reused rather than re-derived for this second, smaller popover.
+    _BG_ALPHA = 0.97
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        metric = design.tokens.Metric
+        self.setFixedWidth(metric.MENU_W)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD
+        )
+        layout.setSpacing(0)
+
+        self._tool: str = design.tokens.RECT_GROUP[0]
+
+        self._rows: dict[str, _CaptureModeRow] = {}
+        for tool in design.tokens.RECT_GROUP:
+            row = _CaptureModeRow(
+                _tool_label(tool), tool, design.tokens.TOOL_HINTS[tool], self
+            )
+            row.clicked.connect(lambda checked=False, t=tool: self._on_row_clicked(t))
+            self._rows[tool] = row
+            layout.addWidget(row)
+
+        self._select_row(self._tool)
+
+    @property
+    def tool(self) -> str:
+        return self._tool
+
+    def set_tool(self, tool: str) -> None:
+        """Mark `tool`'s row checked without emitting `toolSelected` or
+        closing the popover -- for `_toggle_shape_popover` to seed the
+        popover with whichever group member is already active, mirroring
+        `CaptureModePopover.set_mode`'s own split from `_on_row_clicked`.
+        """
+        self._tool = tool
+        self._select_row(tool)
+
+    def _select_row(self, tool: str) -> None:
+        for name, row in self._rows.items():
+            row.set_selected(name == tool)
+
+    def _on_row_clicked(self, tool: str) -> None:
+        self.set_tool(tool)
+        self.toolSelected.emit(tool)
+        self.hide()
+
+    def reposition(self, button_geometry: QRect, window_size: QSize) -> None:
+        """Position the popover above `button_geometry` (the rect button's
+        own geometry, already mapped into this widget's parent's
+        coordinate space by the caller), horizontally centred on it and
+        clamped inside `window_size` -- mirroring
+        `CaptureModePopover.reposition`'s own centring/clamping.
+        """
+        metric = design.tokens.Metric
+        width = metric.MENU_W
+        height = self.sizeHint().height()
+
+        center_x = button_geometry.center().x()
+        left = center_x - width / 2
+        left = max(0, min(left, window_size.width() - width))
+
+        top = max(0, button_geometry.top() - height - metric.MENU_OFFSET)
+
+        self.setGeometry(round(left), round(top), width, height)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.Metric
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        bg = QColor(design.tokens.Color.BAR_BG)
+        bg.setAlphaF(self._BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.color("DIVIDER"))
+        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
 # Top hint HUD (SNX-46)
 # ---------------------------------------------------------------------------
 # docs/design/overlay-redesign.md's "Top hint HUD" section is the authority
@@ -2469,8 +2599,20 @@ _FREEHAND_MARK_CLASSES = {"pen": Pen, "highlighter": Highlighter}
 # Tool name -> Shape subclass for a press-to-release two-point stroke.
 # 'blur' is deliberately absent: which of Blur/Pixelate it commits depends
 # on `_blur_mode`, decided in `OverlayWindow._start_stroke` at press time
-# rather than looked up here.
-_TWO_POINT_MARK_CLASSES = {"arrow": Arrow, "rect": Rectangle}
+# rather than looked up here. Ellipse/Line/Crop (SNX-64) are keyed in
+# alongside Arrow/Rectangle rather than needing any dispatch logic of their
+# own: `_start_stroke`/`_extend_stroke`/`mouseReleaseEvent` already only
+# ever read this dict by the bar's active tool name, so restoring the
+# three tools the redesign dropped is exactly this one addition -- see
+# `tokens.RECT_GROUP` for how a user actually reaches "ellipse"/"line"/
+# "crop" as `self._bar.active_tool` in the first place.
+_TWO_POINT_MARK_CLASSES = {
+    "arrow": Arrow,
+    "rect": Rectangle,
+    "ellipse": Ellipse,
+    "line": Line,
+    "crop": Crop,
+}
 
 
 class OverlayWindow(QWidget):
@@ -2620,6 +2762,16 @@ class OverlayWindow(QWidget):
     pixels exactly once, upstream in `capture.py`; the frame handed in here
     is already frozen, and the spec's own deviation note applies: this never
     uses `QScreen.grabWindow(0)`, which returns black on Wayland.
+
+    SNX-64 restores Ellipse, Line and Crop -- fully implemented in shapes.py
+    since before the redesign, but unreachable from this window's chrome
+    until now. `_TWO_POINT_MARK_CLASSES` gained the three alongside
+    Arrow/Rectangle, so `_start_stroke`/`_extend_stroke`/`mouseReleaseEvent`
+    need no changes of their own to draw, commit, erase, undo/redo and
+    export them exactly the way Rectangle already works; `_shape_popover`
+    (`ShapeToolPopover`) is the new chrome that makes `self._bar.
+    active_tool` able to ever *become* one of them, off the rect button's
+    own click rather than a twelfth bar button -- see `tokens.RECT_GROUP`.
     """
 
     # Marching ants: a QTimer at ~30fps advancing the dashed pen's offset,
@@ -2900,6 +3052,14 @@ class OverlayWindow(QWidget):
         self._popover.delayChanged.connect(self._on_delay_changed)
         self._bar.captureChipClicked.connect(self._toggle_capture_popover)
 
+        # SNX-64: rect's own shape submenu -- Ellipse/Line/Crop, restored
+        # alongside Rectangle -- opened off the rect button rather than the
+        # capture chip, see `ShapeToolPopover`'s own docstring.
+        self._shape_popover = ShapeToolPopover(self)
+        self._shape_popover.hide()
+        self._shape_popover.toolSelected.connect(self._on_shape_tool_selected)
+        self._bar.shapeMenuRequested.connect(self._toggle_shape_popover)
+
         # The delayed re-capture (SNX-50): `_registry` is what
         # `_finish_delayed_capture` re-grabs through -- an empty
         # `BackendRegistry` by default, the same "an inert default degrades
@@ -3016,6 +3176,43 @@ class OverlayWindow(QWidget):
         self._popover.reposition(self._bar.geometry(), self.size())
         self._popover.show()
         self._popover.raise_()
+
+    # -- shape submenu (SNX-64) ----------------------------------------------
+
+    def _toggle_shape_popover(self) -> None:
+        """Open/close rect's own shape submenu from its button click.
+
+        Mirrors `_toggle_capture_popover` exactly -- a second click while
+        it's already open closes it again -- except the popover is
+        positioned against the rect *button*'s own geometry rather than the
+        whole bar's, and is seeded with whichever of `tokens.RECT_GROUP` is
+        currently active so reopening it shows the right row checked.
+        `_bar._tool_buttons["rect"].geometry()` is in the button's own
+        parent's (the bar's) coordinate space, not this window's -- `mapTo`
+        is what puts it in the same space `_shape_popover`, a direct child
+        of this window, needs for its own `setGeometry`.
+        """
+        if self._shape_popover.isVisible():
+            self._shape_popover.hide()
+            return
+        active = self._bar.active_tool
+        self._shape_popover.set_tool(
+            active if active in design.tokens.RECT_GROUP else design.tokens.RECT_GROUP[0]
+        )
+        button = self._bar._tool_buttons["rect"]
+        origin = button.mapTo(self, QPoint(0, 0))
+        self._shape_popover.reposition(QRect(origin, button.size()), self.size())
+        self._shape_popover.show()
+        self._shape_popover.raise_()
+
+    def _on_shape_tool_selected(self, tool: str) -> None:
+        """Wire a popover row pick to the same tool-selection path a bar
+        button click or a keyboard shortcut already goes through --
+        `FloatingBar.select_tool` is the one place a tool becomes active
+        (see its own docstring), so a submenu pick is a third way to reach
+        it, not a fourth copy of what picking a tool does.
+        """
+        self._bar.select_tool(tool)
 
     def _on_capture_mode_selected(self, mode: str) -> None:
         """Track the popover's chosen capture mode and update the chip's
@@ -3356,6 +3553,7 @@ class OverlayWindow(QWidget):
             self._tray.hide()
             self._blur_tray.hide()
             self._popover.hide()
+            self._shape_popover.hide()
 
     def _sync_tray_visibility(self) -> None:
         """Show/hide and reposition whichever settings tray -- draw or
@@ -3721,6 +3919,7 @@ class OverlayWindow(QWidget):
         self._bar.hide()
         self._tray.hide()
         self._popover.hide()
+        self._shape_popover.hide()
         self._toast.hide()
         self._hud.hide()
 
@@ -3880,6 +4079,13 @@ class OverlayWindow(QWidget):
             # to the handle/eraser logic below, so it can't also start a
             # resize or an erase underneath the popover in the same press.
             self._popover.hide()
+            return
+        if self._shape_popover.isVisible() and not self._shape_popover.geometry().contains(
+            event.position().toPoint()
+        ):
+            # Same "click outside closes it" rule as the capture popover
+            # above, applied to rect's own shape submenu.
+            self._shape_popover.hide()
             return
         if self._picking_window:
             # A press while armed is always a pick, never a resize or a

@@ -23,7 +23,10 @@ from snipux.design import tokens
 from snipux.shapes import (
     Arrow,
     Blur,
+    Crop,
+    Ellipse,
     Highlighter,
+    Line,
     ObscuringShape,
     Pen,
     Pixelate,
@@ -43,6 +46,7 @@ from snipux.overlay import (
     OverlayWindow,
     SelectionMode,
     SettingsTray,
+    ShapeToolPopover,
     Toast,
     UnsupportedGeometryProvider,
     _BlurModeWell,
@@ -907,6 +911,32 @@ class TestOverlayWindowMarks:
         # (60, 60) in window coordinates is (10, 10) inside the crop.
         assert result.pixelColor(10, 20) == self.RED
 
+    def test_rendered_image_contains_a_restored_shape_tools_mark(self):
+        # SNX-64: same export path as the test above, but drawn through the
+        # real press/move/release tool -- ellipse here -- rather than a
+        # hand-built Shape, and reading the ellipse's own leftmost point
+        # (vertically centred in its bounding box) rather than a
+        # rectangle's flat left border. Press/release land at least 20px
+        # inside every selection edge (unlike the (60, 60) corner the
+        # Rectangle test above adds its mark at directly, bypassing mouse
+        # events entirely) so the press isn't mistaken for a resize handle.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 100, 100))
+        overlay._bar.select_tool("ellipse")
+        overlay._ink_colour = "#ff0000"
+        overlay._stroke_width = 6
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 80))
+        QTest.mouseMove(overlay, QPoint(120, 120))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
+
+        result = overlay.rendered_image()
+
+        # (80, 100) in window coordinates -- the ellipse's own leftmost
+        # point, vertically centred -- is (30, 50) inside the crop.
+        assert result.pixelColor(30, 50) == self.RED
+
 
 class TestOverlayWindowObscuringMarks:
     """SNX-63: a committed Blur/Pixelate mark used to be invisible until
@@ -1172,6 +1202,41 @@ class TestEraserTool:
 
         assert overlay.marks == (mark,)
 
+    @pytest.mark.parametrize(
+        "mark, hit_point",
+        [
+            # Ellipse/Crop: the bounding box's own left border, vertically
+            # centred -- same probe Rectangle's own hit-testing already
+            # relies on elsewhere in this file.
+            (
+                Ellipse(colour=RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(80, 80)),
+                QPoint(20, 50),
+            ),
+            # Line has no left border to speak of -- its own diagonal is
+            # the only place a click can land on it.
+            (
+                Line(colour=RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(80, 80)),
+                QPoint(50, 50),
+            ),
+            (
+                Crop(colour=RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(80, 80)),
+                QPoint(20, 50),
+            ),
+        ],
+    )
+    def test_click_with_eraser_active_removes_a_restored_tools_mark(self, mark, hit_point):
+        # SNX-64: Crop had no hit_test override at all before this ticket --
+        # unlike Ellipse/Line, which already had one -- so this is what
+        # proves the eraser can reach all three restored tools' marks, not
+        # just the two shapes.py already covered.
+        overlay = self._overlay()
+        overlay.add_mark(mark)
+        overlay.set_eraser_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=hit_point)
+
+        assert overlay.marks == ()
+
     def test_cursor_is_a_pointer_over_the_selection_while_the_eraser_is_active(self):
         overlay = self._overlay(selection=QRect(50, 50, 100, 80))
         overlay.set_eraser_active(True)
@@ -1278,6 +1343,67 @@ class TestDrawingTools:
         assert rendered.pixelColor(20, 40) == QColor("#ff0000")  # left edge of the live preview
 
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+    def test_ellipse_press_move_release_commits_from_press_to_release(self):
+        # SNX-64: restored via `_TWO_POINT_MARK_CLASSES`, reached through
+        # rect's own shape submenu -- see TestShapeToolPopover -- but the
+        # commit itself goes through the exact same press/move/release path
+        # rect and arrow already use.
+        overlay = self._overlay()
+        overlay._bar.select_tool("ellipse")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Ellipse)
+        assert mark.start == QPointF(20, 20)
+        assert mark.end == QPointF(80, 60)
+
+    def test_line_press_move_release_commits_from_press_to_release(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("line")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Line)
+        assert mark.start == QPointF(20, 20)
+        assert mark.end == QPointF(80, 60)
+
+    def test_crop_press_move_release_commits_from_press_to_release(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("crop")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Crop)
+        assert mark.start == QPointF(20, 20)
+        assert mark.end == QPointF(80, 60)
+
+    @pytest.mark.parametrize("tool", ["ellipse", "line", "crop"])
+    def test_restored_shape_tools_take_ink_colour_and_stroke_from_the_tray(self, tool):
+        overlay = self._overlay()
+        overlay._bar.select_tool(tool)
+        overlay._ink_colour = "#38bdf8"
+        overlay._stroke_width = 9
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+
+        mark = overlay.marks[0]
+        assert mark.colour == QColor("#38bdf8")
+        assert mark.stroke_width == 9
 
     def test_blur_press_move_release_commits_a_blur_shape(self):
         overlay = self._overlay()
@@ -1923,6 +2049,28 @@ class TestUndoRedoClear:
 
         assert overlay.marks == (first,)
         assert overlay.can_redo
+
+    def test_undo_and_redo_cover_a_restored_shape_tools_mark(self):
+        # SNX-64: undo/redo have no per-shape-type dispatch of their own
+        # (see this class's own docstring) -- proving it works for whatever
+        # `add_mark` was actually handed, drawn through the real tool
+        # rather than a hand-built shapes.Ellipse, is what closes the gap
+        # the acceptance criterion asks for.
+        overlay = self._overlay()
+        overlay._bar.select_tool("ellipse")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        mark = overlay.marks[0]
+
+        overlay.undo()
+
+        assert overlay.marks == ()
+        assert overlay.can_redo
+
+        overlay.redo()
+
+        assert overlay.marks == (mark,)
 
     def test_redo_returns_the_mark_to_the_same_position_in_draw_order(self):
         overlay = self._overlay()
@@ -3839,6 +3987,196 @@ class TestCaptureModePopoverOverlayIntegration:
         overlay.set_selection(None)
 
         assert not overlay._popover.isVisible()
+
+
+class TestShapeToolPopoverComposition:
+    """SNX-64: the popover carries one row per `tokens.RECT_GROUP` entry --
+    Rectangle, Ellipse, Line, Crop -- mirroring `CaptureModePopover`'s own
+    "one row per token" composition.
+    """
+
+    def test_contains_one_row_per_rect_group_token_in_order(self):
+        popover = ShapeToolPopover()
+
+        assert list(popover._rows.keys()) == tokens.RECT_GROUP
+
+    def test_row_label_and_note_match_their_tool_token(self):
+        popover = ShapeToolPopover()
+        tool = tokens.RECT_GROUP[1]
+
+        row = popover._rows[tool]
+
+        assert row._label.text() == _tool_label(tool)
+        assert tokens.TOOL_HINTS[tool] in [child.text() for child in row.findChildren(QLabel)]
+
+
+class TestShapeToolPopoverSelection:
+    """SNX-64: the same "selected row is checked, picking a row records it
+    and closes the popover" contract `CaptureModePopover` already gives
+    capture modes, applied to the four rect-group shape tools.
+    """
+
+    def test_rect_is_selected_by_default(self):
+        popover = ShapeToolPopover()
+
+        assert popover.tool == "rect"
+        assert popover._rows["rect"].is_selected
+        assert all(
+            not row.is_selected for tool, row in popover._rows.items() if tool != "rect"
+        )
+
+    def test_clicking_a_row_selects_it_and_deselects_the_rest(self):
+        popover = ShapeToolPopover()
+
+        QTest.mouseClick(popover._rows["line"], Qt.MouseButton.LeftButton)
+
+        assert popover.tool == "line"
+        assert popover._rows["line"].is_selected
+        assert all(
+            not row.is_selected for tool, row in popover._rows.items() if tool != "line"
+        )
+
+    def test_clicking_a_row_emits_tool_selected(self):
+        popover = ShapeToolPopover()
+        received = Mock()
+        popover.toolSelected.connect(received)
+
+        QTest.mouseClick(popover._rows["crop"], Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with("crop")
+
+    def test_clicking_a_row_closes_the_popover(self):
+        popover = ShapeToolPopover()
+        popover.show()
+
+        QTest.mouseClick(popover._rows["ellipse"], Qt.MouseButton.LeftButton)
+
+        assert not popover.isVisible()
+
+
+class TestShapeToolPopoverOverlayIntegration:
+    """SNX-64: the popover wired into `OverlayWindow` -- opened from the
+    bar's rect button and closed either by picking a row or by clicking
+    outside it, mirroring `TestCaptureModePopoverOverlayIntegration` above.
+    """
+
+    def _overlay(self, size=(1600, 1000)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def test_clicking_the_rect_button_opens_the_popover(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+
+        assert overlay._shape_popover.isVisible()
+
+    def test_clicking_the_rect_button_again_closes_the_popover(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        assert overlay._shape_popover.isVisible()
+
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+
+        assert not overlay._shape_popover.isVisible()
+
+    def test_picking_ellipse_makes_it_the_bars_active_tool_and_closes_the_popover(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._shape_popover._rows["ellipse"], Qt.MouseButton.LeftButton)
+
+        assert overlay._bar.active_tool == "ellipse"
+        assert not overlay._shape_popover.isVisible()
+
+    def test_picking_a_rect_group_tool_shows_the_colour_and_stroke_tray(self):
+        # Criterion: "each restored tool takes the current ink colour and
+        # stroke width from the settings tray" -- which first requires the
+        # tray to actually be showing once the tool is picked.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._shape_popover._rows["line"], Qt.MouseButton.LeftButton)
+
+        assert overlay._tray.isVisible()
+
+    def test_rect_button_reads_active_while_a_group_tool_is_active(self):
+        # Criterion: "the floating bar does not grow additional top-level
+        # buttons" -- the rect button is still the only chrome naming the
+        # group, so it has to be the one that reads active on its behalf.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._shape_popover._rows["crop"], Qt.MouseButton.LeftButton)
+
+        assert overlay._bar._tool_buttons["rect"].is_active
+
+    def test_reopening_the_popover_shows_the_currently_active_tool_checked(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay._shape_popover._rows["ellipse"], Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+
+        assert overlay._shape_popover._rows["ellipse"].is_selected
+
+    def test_clicking_outside_the_popover_closes_it_without_changing_the_tool(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        assert overlay._shape_popover.isVisible()
+        original_tool = overlay._bar.active_tool
+
+        # A point on the frozen desktop, far from both the popover and any
+        # other chrome -- the top-left corner is always clear of both.
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(2, 2))
+
+        assert not overlay._shape_popover.isVisible()
+        assert overlay._bar.active_tool == original_tool
+
+    def test_popover_hides_when_the_overlay_is_hidden(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        assert overlay._shape_popover.isVisible()
+
+        overlay.hide()
+
+        assert not overlay._shape_popover.isVisible()
+
+    def test_popover_hides_when_the_selection_is_cleared(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        assert overlay._shape_popover.isVisible()
+
+        overlay.set_selection(None)
+
+        assert not overlay._shape_popover.isVisible()
 
 
 def _close_stray_toplevel_windows() -> None:

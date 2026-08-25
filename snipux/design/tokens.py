@@ -201,8 +201,24 @@ class Shadow:
 # ---------------------------------------------------------------- behaviour
 TOOLS = ["pen", "highlighter", "arrow", "rect", "step", "text", "blur", "eraser"]
 
-# Tools whose settings tray is the colour + stroke tray.
-DRAW_TOOLS = ["pen", "highlighter", "arrow", "rect", "step", "text"]
+# SNX-64: shapes.py has always fully implemented Ellipse, Line and Crop, but
+# nothing reachable from the redesigned chrome ever named them, so the bar
+# only ever offered eight of the eleven tools the owner asked -- before the
+# redesign started -- to keep, because he had tried all eleven and they
+# worked. That instruction outranks the design handoff's own "eight tools,
+# no more bar buttons" rule, the same way the 16x16 minimum selection
+# (TODO.md) already outranks it: this is the second deliberate deviation.
+# The handoff's own guidance for a tool that doesn't fit the eight is a
+# submenu off an existing button rather than a bar button of its own, so
+# these three are reachable only through the rect button's own popover
+# (`ShapeToolPopover` in overlay.py) -- `rect` itself is first so the
+# popover's default selection matches the button's own glyph.
+RECT_GROUP = ["rect", "ellipse", "line", "crop"]
+
+# Tools whose settings tray is the colour + stroke tray. Ellipse/Line/Crop
+# take their ink colour and stroke width from it exactly the way Rectangle
+# already does -- see RECT_GROUP above.
+DRAW_TOOLS = ["pen", "highlighter", "arrow", "rect", "step", "text", "ellipse", "line", "crop"]
 
 SHORTCUTS = {
     "P": "pen", "H": "highlighter", "A": "arrow", "R": "rect",
@@ -227,4 +243,7 @@ TOOL_HINTS = {
     "text":        "Click, then type into the label",
     "blur":        "Drag over anything private",
     "eraser":      "Click a mark to remove it",
+    "ellipse":     "Drag to draw an oval",
+    "line":        "Drag for a straight line",
+    "crop":        "Drag to box off a dashed crop mark",
 }
