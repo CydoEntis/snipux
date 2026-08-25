@@ -37,6 +37,7 @@ from snipux.capture import (
     XwininfoWindowGeometryProvider,
     BackendRegistry,
     CaptureError,
+    WindowsWindowGeometryProvider,
     X11WindowGeometryProvider,
     detect_session_type,
 )
@@ -152,16 +153,23 @@ def build_default_geometry_provider() -> GeometryProvider:
     Tried in order, the same way capture backends are: `wmctrl` first for
     its curated window list, then `xwininfo` (x11-utils, which a GNOME
     session already has) so a stock Ubuntu without `wmctrl` still gets
-    Window mode instead of silently falling back to Region. Wayland, or a
-    machine with neither, gets `UnsupportedGeometryProvider` and degrades to
-    plain rectangle dragging exactly as it does without a provider at all.
-    The
-    choice is made here rather than in overlay.py so overlay.py never needs
-    to import anything wmctrl-specific — per CLAUDE.md, platform-specific
-    code stays confined to capture.py, and app.py is already the place that
-    picks between platform-specific implementations for `registry`.
+    Window mode instead of silently falling back to Region, then
+    `WindowsWindowGeometryProvider` (SNX-90), which answers unconditionally
+    on `win32` since Windows has no "no client may enumerate other
+    windows" restriction to work around in the first place. Wayland, or a
+    machine with none of the above, gets `UnsupportedGeometryProvider` and
+    degrades to plain rectangle dragging exactly as it does without a
+    provider at all. The choice is made here rather than in overlay.py so
+    overlay.py never needs to import anything platform-specific — per
+    CLAUDE.md, platform-specific code stays confined to capture.py, and
+    app.py is already the place that picks between platform-specific
+    implementations for `registry`.
     """
-    for provider in (X11WindowGeometryProvider(), XwininfoWindowGeometryProvider()):
+    for provider in (
+        X11WindowGeometryProvider(),
+        XwininfoWindowGeometryProvider(),
+        WindowsWindowGeometryProvider(),
+    ):
         if provider.is_available():
             return provider
     return UnsupportedGeometryProvider()

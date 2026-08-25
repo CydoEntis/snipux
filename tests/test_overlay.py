@@ -1,3 +1,5 @@
+import ctypes
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -17,7 +19,14 @@ from PyQt6.QtWidgets import (
 import snipux.app as app_module
 import snipux.overlay as overlay_module
 from conftest import skip_on_windows
-from snipux.capture import BackendRegistry, CaptureBackend, Frame, X11WindowGeometryProvider
+from snipux import capture as capture_module
+from snipux.capture import (
+    BackendRegistry,
+    CaptureBackend,
+    Frame,
+    WindowsWindowGeometryProvider,
+    X11WindowGeometryProvider,
+)
 from snipux.design import color as design_color
 from snipux.design import font_families
 from snipux.design import tokens
@@ -619,6 +628,99 @@ class TestX11WindowGeometryProviderIntegration:
             lambda *a, **k: Mock(stdout=self.WMCTRL_STDOUT, returncode=0),
         )
         provider = X11WindowGeometryProvider()
+
+        frame = make_frame()
+        overlay = Overlay(
+            frame,
+            QRectF(0, 0, 200, 200),
+            mode=SelectionMode.WINDOW,
+            geometry_provider=provider,
+        )
+        confirmed = Mock()
+        overlay.confirmed.connect(confirmed)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        confirmed.assert_called_once_with(QRectF(30, 30, 50, 50), None)
+
+
+class _FakeWindowsUser32:
+    """Just enough of `ctypes.windll.user32` for one `EnumWindows` pass
+    reporting a single, visible, non-minimised window -- see
+    `TestWindowsWindowGeometryProviderIntegration` below.
+    """
+
+    def __init__(self, hwnd=1, title="Some Window"):
+        self._hwnd = hwnd
+        self._title = title
+
+    def EnumWindows(self, callback, lparam):
+        callback(self._hwnd, lparam)
+        return 1
+
+    def IsWindowVisible(self, hwnd):
+        return 1
+
+    def IsIconic(self, hwnd):
+        return 0
+
+    def GetWindowTextLengthW(self, hwnd):
+        return len(self._title)
+
+    def GetWindowTextW(self, hwnd, buffer, _size):
+        buffer.value = self._title
+        return len(self._title)
+
+
+class _FakeWindowsDwmapi:
+    """Reports one fixed extended-frame-bounds rect for every window, and
+    "not cloaked" -- everything `TestWindowsWindowGeometryProviderIntegration`
+    needs `DwmGetWindowAttribute` to answer.
+    """
+
+    def __init__(self, bounds):
+        self._bounds = bounds  # (left, top, right, bottom)
+
+    def DwmGetWindowAttribute(self, hwnd, attribute, out_ref, _size):
+        if attribute == WindowsWindowGeometryProvider._DWMWA_CLOAKED:
+            ctypes.cast(out_ref, ctypes.POINTER(ctypes.c_int)).contents.value = 0
+            return 0
+        target = ctypes.cast(out_ref, ctypes.POINTER(capture_module._RECT)).contents
+        target.left, target.top, target.right, target.bottom = self._bounds
+        return 0
+
+
+class TestWindowsWindowGeometryProviderIntegration:
+    """SNX-90's Windows counterpart to
+    `TestX11WindowGeometryProviderIntegration` above: proves the real
+    `WindowsWindowGeometryProvider` (not just `TestWindowMode`'s fake)
+    satisfies `Overlay`'s expectations end to end -- a real `EnumWindows`/
+    `DwmGetWindowAttribute` call, mocked at the ctypes boundary, feeding
+    straight into window-mode click handling.
+    """
+
+    HIT_POINT = QPoint(50, 50)  # inside (30,30)-(80,80)
+
+    def test_click_on_an_enumerated_window_confirms_its_extended_frame_bounds(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("snipux.capture.sys.platform", "win32")
+        monkeypatch.setattr(
+            "snipux.capture.ctypes.windll",
+            SimpleNamespace(
+                user32=_FakeWindowsUser32(),
+                dwmapi=_FakeWindowsDwmapi(bounds=(30, 30, 80, 80)),
+            ),
+            raising=False,
+        )
+        # ctypes.WINFUNCTYPE is Windows-only in the stdlib itself; CFUNCTYPE
+        # builds an equally callable-from-Python function pointer and is
+        # available everywhere, which is all the enum callback below needs
+        # from it in a test that never crosses into real Win32 code.
+        monkeypatch.setattr(
+            "snipux.capture.ctypes.WINFUNCTYPE", ctypes.CFUNCTYPE, raising=False
+        )
+        provider = WindowsWindowGeometryProvider()
 
         frame = make_frame()
         overlay = Overlay(

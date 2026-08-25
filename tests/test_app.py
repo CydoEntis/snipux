@@ -27,6 +27,7 @@ from snipux.capture import (
     BackendRegistry,
     CaptureBackend,
     Frame,
+    WindowsWindowGeometryProvider,
     X11WindowGeometryProvider,
 )
 from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
@@ -129,6 +130,22 @@ class TestBuildDefaultRegistry:
 
 
 class TestBuildDefaultGeometryProvider:
+    # Every test below runs on whatever OS actually hosts the test suite
+    # (this repo's own CI runs both Windows and an Ubuntu VM, per
+    # CLAUDE.md), so `WindowsWindowGeometryProvider`'s *real*
+    # `is_available()` -- a bare `sys.platform == "win32"` check, no
+    # monkeypatching required to make it answer True on an actual Windows
+    # host -- would otherwise win the X11/Xwininfo tests below out from
+    # under them whenever the suite happens to run on Windows. Forcing it
+    # unavailable here is what keeps those tests' verdicts about X11/xwininfo
+    # priority, not about which OS happened to run them.
+    def _force_windows_provider_unavailable(self, monkeypatch):
+        class NoWindows(WindowsWindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        monkeypatch.setattr(app, "WindowsWindowGeometryProvider", NoWindows)
+
     def test_returns_x11_window_geometry_provider_when_it_reports_available(
         self, monkeypatch
     ):
@@ -163,11 +180,38 @@ class TestBuildDefaultGeometryProvider:
 
         assert isinstance(build_default_geometry_provider(), HasXwininfo)
 
-    def test_returns_unsupported_geometry_provider_when_neither_is_available(
+    def test_falls_back_to_windows_when_neither_x11_tool_is_available(
         self, monkeypatch
     ):
-        # Wayland, or an X11 session with neither tool: window mode degrades
-        # to plain rectangle dragging rather than pretending to work.
+        # SNX-90: a win32 host has no wmctrl/xwininfo at all, but it isn't
+        # stuck with UnsupportedGeometryProvider the way a bare Wayland
+        # session is -- EnumWindows can always answer there.
+        class NoWmctrl(X11WindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        class NoXwininfo(XwininfoWindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        class AvailableWindows(WindowsWindowGeometryProvider):
+            def is_available(self):
+                return True
+
+        monkeypatch.setattr(app, "X11WindowGeometryProvider", NoWmctrl)
+        monkeypatch.setattr(app, "XwininfoWindowGeometryProvider", NoXwininfo)
+        monkeypatch.setattr(app, "WindowsWindowGeometryProvider", AvailableWindows)
+
+        provider = build_default_geometry_provider()
+
+        assert isinstance(provider, AvailableWindows)
+
+    def test_returns_unsupported_geometry_provider_when_none_is_available(
+        self, monkeypatch
+    ):
+        # Wayland, or an X11 session with neither tool and not on Windows
+        # either: window mode degrades to plain rectangle dragging rather
+        # than pretending to work.
         class UnavailableProvider(X11WindowGeometryProvider):
             def is_available(self):
                 return False
@@ -178,6 +222,7 @@ class TestBuildDefaultGeometryProvider:
 
         monkeypatch.setattr(app, "XwininfoWindowGeometryProvider", NoXwininfo)
         monkeypatch.setattr(app, "X11WindowGeometryProvider", UnavailableProvider)
+        self._force_windows_provider_unavailable(monkeypatch)
 
         provider = build_default_geometry_provider()
 
