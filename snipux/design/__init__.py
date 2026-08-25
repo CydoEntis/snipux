@@ -18,10 +18,30 @@ docs/design/overlay-redesign.md:
 Widget code should import from here rather than re-typing any hex, metric or
 font name from the design — `tokens.py` is the single source of truth, and
 this module is the only thing that resolves it into Qt objects.
+
+`PACKAGE_DIR` (SNX-96) is the other thing this module owns: the `snipux/`
+package directory every runtime asset — this module's own icons/fonts,
+app.py's tray/window logo, setup_desktop.py's `.desktop` template and
+Start-Menu icon — hangs off of. `Path(__file__).resolve().parent` (this
+file lives at `snipux/design/__init__.py`, so `.parent.parent` is
+`snipux/`) is correct for a source checkout and for a plain `pip install`,
+where those assets sit on disk beside the code that reads them, exactly
+where `pyproject.toml`'s package-data declaration puts them. It is *not*
+correct inside a PyInstaller bundle: PyInstaller freezes pure-Python
+modules into an archive rather than extracting them as files, so `__file__`
+there names a path nothing can actually open — `sys._MEIPASS` is
+PyInstaller's own answer to "where did you put the data files", and
+`packaging/windows/snipux.spec` adds `snipux/design` and
+`snipux/snipux.desktop` there at the same `snipux/...`-relative layout the
+source tree already uses, so both cases resolve to the same relative paths.
+Computing this once, here, rather than separately in each of the three
+modules that need it, is what keeps the bundle-vs-checkout distinction in
+one place instead of three that could drift.
 """
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +51,20 @@ from PyQt6.QtSvg import QSvgRenderer
 
 from . import tokens
 
-_DESIGN_DIR = Path(__file__).resolve().parent
+
+def _resolve_package_dir() -> Path:
+    """The on-disk `snipux/` package directory, or its PyInstaller-bundle
+    equivalent -- see the module docstring for why these two cases differ
+    and why this is the one place that difference is resolved.
+    """
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root is not None:
+        return Path(bundle_root) / "snipux"
+    return Path(__file__).resolve().parent.parent
+
+
+PACKAGE_DIR = _resolve_package_dir()
+_DESIGN_DIR = PACKAGE_DIR / "design"
 _ICON_DIR = _DESIGN_DIR / "icons"
 _FONT_DIR = _DESIGN_DIR / "fonts"
 
