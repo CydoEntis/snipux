@@ -73,6 +73,21 @@ def icon(name: str, color: QColor | str) -> QIcon:
     return QIcon(pixmap)
 
 
+def win_color(token_name: str) -> QColor:
+    """`tokens.Win.<token_name>` -> QColor, alpha included.
+
+    The same pairing rule `color()` applies to the overlay's palette, for
+    the Settings/review chrome: `OK_BG` + `OK_BG_ALPHA` is one colour, and
+    resolving it in one place is what stops a caller re-typing the
+    percentage into an rgba() string that then drifts from the token.
+    """
+    if not hasattr(tokens.Win, token_name):
+        raise ValueError(f"no such window colour: {token_name!r}")
+    qcolor = QColor(getattr(tokens.Win, token_name))
+    qcolor.setAlphaF(getattr(tokens.Win, f"{token_name}_ALPHA", 1.0))
+    return qcolor
+
+
 def color(token_name: str) -> QColor:
     """Resolve `tokens.Color.<token_name>` to a QColor, alpha included.
 

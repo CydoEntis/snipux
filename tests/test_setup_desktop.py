@@ -506,9 +506,12 @@ class TestBindGnomeShortcut:
 
         message = setup_desktop.bind_gnome_shortcut(exec_path)
 
-        assert f"Bound Super+Shift+S to run: {exec_path} --snip" in message
+        assert f"Bound {setup_desktop.DEFAULT_SHORTCUT} to run: {exec_path} --snip" in message
         assert store.values[(setup_desktop._SLOT_SCHEMA, "command")] == f"{exec_path} --snip"
-        assert store.values[(setup_desktop._SLOT_SCHEMA, "binding")] == "<Super><Shift>s"
+        # GNOME is handed its own spelling, not the canonical readable one.
+        assert store.values[(setup_desktop._SLOT_SCHEMA, "binding")] == (
+            setup_desktop.to_gsettings(setup_desktop.DEFAULT_SHORTCUT)
+        )
         assert store.values[(setup_desktop._SLOT_SCHEMA, "name")] == "snipux"
 
     def test_running_twice_leaves_the_slot_listed_exactly_once(self, monkeypatch):
@@ -698,9 +701,9 @@ class TestShortcutConfig:
         assert setup_desktop.load_shortcut(tmp_path) == setup_desktop.DEFAULT_SHORTCUT
 
     def test_a_saved_shortcut_round_trips(self, tmp_path):
-        assert setup_desktop.save_shortcut("<Super><Shift>x", tmp_path)
+        assert setup_desktop.save_shortcut("Super+Shift+X", tmp_path)
 
-        assert setup_desktop.load_shortcut(tmp_path) == "<Super><Shift>x"
+        assert setup_desktop.load_shortcut(tmp_path) == "Super+Shift+X"
 
     def test_a_corrupt_config_falls_back_to_the_default(self, tmp_path):
         # A broken config must never be able to fail --setup, which
@@ -714,7 +717,7 @@ class TestShortcutConfig:
     def test_a_stored_value_that_no_longer_validates_is_ignored(self, tmp_path):
         path = setup_desktop.config_path(tmp_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('{"shortcut": "Super+Shift+S"}')
+        path.write_text('{"shortcut": "not a shortcut at all"}')
 
         assert setup_desktop.load_shortcut(tmp_path) == setup_desktop.DEFAULT_SHORTCUT
 
@@ -723,17 +726,17 @@ class TestShortcutConfig:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('{"something_else": 42}')
 
-        setup_desktop.save_shortcut("<Alt>Print", tmp_path)
+        setup_desktop.save_shortcut("Alt+Print", tmp_path)
 
         import json
 
         assert json.loads(path.read_text()) == {
             "something_else": 42,
-            "shortcut": "<Alt>Print",
+            "shortcut": "Alt+Print",
         }
 
     def test_forget_removes_the_file(self, tmp_path):
-        setup_desktop.save_shortcut("<Alt>Print", tmp_path)
+        setup_desktop.save_shortcut("Alt+Print", tmp_path)
 
         assert setup_desktop.forget_shortcut(tmp_path)
         assert not setup_desktop.config_path(tmp_path).exists()
@@ -749,30 +752,76 @@ class TestShortcutValidation:
     """
 
     @pytest.mark.parametrize(
-        "accelerator", ["<Super><Shift>x", "<Alt>Print", "Print", "F9", "<Primary><Alt>p"]
+        "accelerator",
+        [
+            "Control+Alt+S",         # the canonical form
+            "Super+Shift+X",
+            "<Super><Shift>x",       # gsettings' form, accepted on the way in
+            "<Alt>Print",
+            "<Primary><Alt>p",       # GNOME's other spelling of Control
+            "ctrl+alt+t",
+        ],
     )
-    def test_accepts_real_accelerators(self, accelerator):
+    def test_accepts_every_spelling_that_names_a_real_combination(self, accelerator):
         assert setup_desktop.validate_shortcut(accelerator) is None
 
-    def test_rejects_the_human_readable_form_people_actually_type(self):
-        problem = setup_desktop.validate_shortcut("Super+Shift+S")
+    @pytest.mark.parametrize("bare", ["Print", "F9", "S"])
+    def test_rejects_a_key_with_no_modifier(self, bare):
+        # It would swallow that key desktop-wide.
+        problem = setup_desktop.validate_shortcut(bare)
 
-        assert problem is not None
-        assert "+" in problem and "<Super><Shift>x" in problem
+        assert problem is not None and "modifier" in problem
 
-    @pytest.mark.parametrize("bad", ["", "   ", "<Super> x", "<Super><Shift>"])
+    @pytest.mark.parametrize("bad", ["", "   ", "<Super> x", "nonsense+", "Ctrl+"])
     def test_rejects_malformed_input(self, bad):
         assert setup_desktop.validate_shortcut(bad) is not None
+
+
+class TestShortcutNormalisation:
+    """One spelling to reason about: whatever a shortcut arrives as -- typed,
+    recorded, or read back from GNOME -- it normalises to `Control+Alt+S`.
+    That is what lets the conflict check compare them at all.
+    """
+
+    @pytest.mark.parametrize(
+        "given,expected",
+        [
+            ("Control+Alt+S", "Control+Alt+S"),
+            ("<Control><Alt>s", "Control+Alt+S"),
+            ("<Primary><Alt>s", "Control+Alt+S"),
+            ("ctrl+alt+s", "Control+Alt+S"),
+            ("<Alt>Print", "Alt+Print"),
+        ],
+    )
+    def test_every_spelling_lands_on_one(self, given, expected):
+        assert setup_desktop.normalise_shortcut(given) == expected
+
+    def test_modifier_order_is_fixed_regardless_of_input_order(self):
+        # Control, Alt, Shift, Super -- a permutation would quietly miss a
+        # real clash, since the conflict check compares these strings.
+        assert setup_desktop.normalise_shortcut("Shift+Control+S") == "Control+Shift+S"
+        assert setup_desktop.normalise_shortcut("Super+Alt+S") == "Alt+Super+S"
+
+    @pytest.mark.parametrize(
+        "given,expected",
+        [
+            ("Control+Alt+S", "<Control><Alt>s"),
+            ("Super+Shift+X", "<Shift><Super>x"),
+            ("Alt+Print", "<Alt>Print"),
+        ],
+    )
+    def test_gsettings_gets_its_own_spelling(self, given, expected):
+        assert setup_desktop.to_gsettings(given) == expected
 
 
 class TestHumanShortcut:
     @pytest.mark.parametrize(
         "accelerator,expected",
         [
-            ("<Super><Shift>s", "Super+Shift+S"),
-            ("<Super><Shift>x", "Super+Shift+X"),
+            ("<Super><Shift>s", "Shift+Super+S"),
+            ("<Control><Alt>s", "Control+Alt+S"),
             ("<Alt>Print", "Alt+Print"),
-            ("Print", "Print"),
+            ("Control+Alt+S", "Control+Alt+S"),
         ],
     )
     def test_renders_the_way_docs_and_settings_panels_do(self, accelerator, expected):
@@ -802,11 +851,11 @@ class TestRunSetupWithAShortcut:
             lambda exec_path, shortcut=None: bound.append(shortcut) or "bound",
         )
 
-        exit_code = self._setup(tmp_path, shortcut="<Super><Shift>x")
+        exit_code = self._setup(tmp_path, shortcut="Super+Shift+X")
 
         assert exit_code == 0
-        assert bound == ["<Super><Shift>x"]
-        assert setup_desktop.load_shortcut(tmp_path / "config") == "<Super><Shift>x"
+        assert bound == ["Super+Shift+X"]
+        assert setup_desktop.load_shortcut(tmp_path / "config") == "Super+Shift+X"
 
     def test_a_later_setup_keeps_it_instead_of_reverting(self, tmp_path, monkeypatch):
         # The whole point: install.sh runs --setup on every install, and
@@ -818,14 +867,14 @@ class TestRunSetupWithAShortcut:
             "bind_gnome_shortcut",
             lambda exec_path, shortcut=None: bound.append(shortcut) or "bound",
         )
-        self._setup(tmp_path, shortcut="<Alt>Print")
+        self._setup(tmp_path, shortcut="Alt+Print")
 
         self._setup(tmp_path)
 
-        assert bound == ["<Alt>Print", "<Alt>Print"]
+        assert bound == ["Alt+Print", "Alt+Print"]
 
     def test_a_bad_shortcut_fails_before_anything_is_written(self, tmp_path, capsys):
-        exit_code = self._setup(tmp_path, shortcut="Super+Shift+S")
+        exit_code = self._setup(tmp_path, shortcut="not a shortcut")
 
         assert exit_code == 1
         assert "error:" in capsys.readouterr().err
@@ -834,7 +883,7 @@ class TestRunSetupWithAShortcut:
 
     def test_remove_forgets_the_stored_shortcut(self, tmp_path, monkeypatch):
         monkeypatch.setattr(setup_desktop, "unbind_gnome_shortcut", lambda: "unbound")
-        setup_desktop.save_shortcut("<Alt>Print", tmp_path / "config")
+        setup_desktop.save_shortcut("Alt+Print", tmp_path / "config")
 
         setup_desktop.run_remove(
             applications_dir=tmp_path / "applications",

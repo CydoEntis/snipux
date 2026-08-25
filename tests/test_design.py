@@ -130,7 +130,14 @@ class TestTokenAlphaComments:
         matches = _ALPHA_COMMENT_RE.findall(source)
         assert matches, "expected to find at least one alpha-in-comment colour token"
 
-        missing = [name for name, _ in matches if not hasattr(tokens.Color, f"{name}_ALPHA")]
+        # The rule applies to both palettes: Color for the overlay, Win for
+        # the Settings/review chrome, each resolved by its own helper.
+        missing = [
+            name
+            for name, _ in matches
+            if not hasattr(tokens.Color, f"{name}_ALPHA")
+            and not hasattr(tokens.Win, f"{name}_ALPHA")
+        ]
         assert not missing, (
             f"{missing} name an alpha in a comment but have no matching "
             f"<name>_ALPHA constant for design.color() to apply"
@@ -142,7 +149,9 @@ class TestTokenAlphaComments:
 
         for name, percent in matches:
             expected = float(percent) / 100
-            actual = getattr(tokens.Color, f"{name}_ALPHA")
+            actual = getattr(
+                tokens.Color, f"{name}_ALPHA", None
+            ) or getattr(tokens.Win, f"{name}_ALPHA")
             assert actual == pytest.approx(expected), (
                 f"{name}_ALPHA is {actual}, but its comment names {percent}%"
             )
