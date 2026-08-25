@@ -98,6 +98,36 @@ def save_image(image: QImage, directory: Path | str | None = None) -> Path:
     return path
 
 
+_LOGO_DIR = Path(__file__).resolve().parent / "design" / "logo"
+
+
+def load_app_icon() -> QIcon:
+    """Build a multi-resolution QIcon from the vendored
+    `design/logo/snipux-<size>.png` files -- the same PNGs
+    `setup_desktop.install_icons()` copies into the user's hicolor icon
+    theme. Adding every size lets Qt pick the closest match itself for
+    whatever the tray, window titlebar, or Alt-Tab switcher asks for,
+    rather than scaling a single pixmap up or down.
+
+    Falls back to the small drawn placeholder this used to always be when
+    the artwork directory is missing or none of the files in it load as a
+    real image -- SNX-81's acceptance criterion is that a broken or
+    absent icon must not stop the tray (and the whole resident process)
+    from starting, the same "a failure must not stop the rest" rule
+    CLAUDE.md states for capture backends, applied here.
+    """
+    icon = QIcon()
+    if _LOGO_DIR.is_dir():
+        for path in sorted(_LOGO_DIR.glob("snipux-*.png")):
+            icon.addFile(str(path))
+
+    if icon.isNull():
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(QColor(60, 110, 200))
+        return QIcon(pixmap)
+    return icon
+
+
 def build_default_registry() -> BackendRegistry:
     """Construct the `BackendRegistry` the real app uses.
 
@@ -166,6 +196,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "Super+Shift+S shortcut for this installed copy of snipux -- no "
         "repository checkout needed",
     )
+    group.add_argument(
+        "--remove",
+        action="store_true",
+        help="undo everything --setup did -- the desktop entry, autostart "
+        "entry, installed icons, and GNOME Super+Shift+S shortcut -- run "
+        "this before `pipx uninstall snipux` so nothing is left behind",
+    )
     return parser
 
 
@@ -215,6 +252,12 @@ def main(
         # resident path, this never touches capture backends or a display,
         # so it's handled before either is ever built.
         return setup_desktop.run_setup()
+
+    if args.remove:
+        # Same reasoning as --setup above: --remove only deletes what
+        # --setup wrote, so it has no more use for a registry or a display
+        # than --setup did.
+        return setup_desktop.run_remove()
 
     if args.snip:
         # Forward to an already-resident instance when there is one. When
@@ -410,7 +453,16 @@ class AppController:
         # this check.
         self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
 
-        self._tray_icon = QSystemTrayIcon(self._build_icon())
+        # The window icon is set here, not left to whatever an individual
+        # window (the overlay, later a dialog) might set for itself, so
+        # every window this process ever shows -- and the window
+        # switcher/taskbar entry for it -- carries the real icon rather
+        # than Qt's default, from the moment the app has a QApplication at
+        # all.
+        icon = load_app_icon()
+        QApplication.instance().setWindowIcon(icon)
+
+        self._tray_icon = QSystemTrayIcon(icon)
         menu = QMenu()
         # A single Snip item, not one per SelectionMode: OverlayWindow's own
         # capture-mode popover (CaptureModePopover, opened from its floating
@@ -439,14 +491,6 @@ class AppController:
             )
 
         self._transport.listen(self.start_capture)
-
-    def _build_icon(self) -> QIcon:
-        # No icon asset exists in this repo, and adding one would be
-        # unnecessary churn against CLAUDE.md's small, deliberate
-        # dependency list — built programmatically instead.
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(QColor(60, 110, 200))
-        return QIcon(pixmap)
 
     def _quit(self) -> None:
         QApplication.instance().quit()

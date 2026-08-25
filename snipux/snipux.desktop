@@ -3,6 +3,6 @@ Type=Application
 Name=snipux
 Comment=A Windows Snipping Tool workalike for Linux
 Exec=__SNIPUX_LAUNCHER__
-Icon=org.gnome.Screenshot
+Icon=snipux
 Categories=Graphics;Utility;
 Terminal=false
