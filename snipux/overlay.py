@@ -2774,6 +2774,33 @@ class _MarkAction:
     shape: Shape | tuple[Shape, ...]
 
 
+class _LabelLineEdit(QLineEdit):
+    """The text tool's own label editor (`OverlayWindow._text_edit`) -- a
+    plain `QLineEdit` except for one thing: it accepts the Return/Enter key
+    event it already consumed (SNX-76).
+
+    Stock `QLineEdit.keyPressEvent` deliberately leaves Return/Enter
+    unaccepted after emitting `returnPressed`/`editingFinished`, precisely
+    so a dialog's default button can still fire from inside a text field.
+    `OverlayWindow` has no default button, only the same key bound to
+    "copy and dismiss" (`keyPressEvent`'s own Enter branch) -- and Qt
+    propagates an unaccepted key event up the parent-widget chain, so the
+    very keystroke that just committed this label as a mark (`_commit_text`,
+    wired to `editingFinished`) would otherwise reach `OverlayWindow.
+    keyPressEvent` a second time and fire that shortcut too, closing the
+    overlay the user only meant to add one label to. `_shortcuts_suppressed`
+    can't catch this second delivery: `_commit_text` already hid the field
+    and dropped its focus by the time the event arrives there. Accepting the
+    event here, once the base class is done with it, is what stops that
+    second delivery from happening at all.
+    """
+
+    def keyPressEvent(self, event) -> None:
+        super().keyPressEvent(event)
+        if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+            event.accept()
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -4450,7 +4477,7 @@ class OverlayWindow(QWidget):
 
     def _ensure_text_edit(self) -> QLineEdit:
         if self._text_edit is None:
-            self._text_edit = QLineEdit(self)
+            self._text_edit = _LabelLineEdit(self)
             # Grey hint text, not a seeded value -- see `_commit_text`'s
             # `if self._text_edit.text():` guard, same reasoning as
             # editor.py's `Canvas._ensure_text_edit`.

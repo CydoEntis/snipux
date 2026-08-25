@@ -5939,6 +5939,86 @@ class TestKeyboardEnter:
         assert overlay.isVisible()
 
 
+class TestLabelEnterDoesNotDismissOverlay:
+    """SNX-76: Return committed a focused label as a Text mark *and* went on
+    to fire OverlayWindow.keyPressEvent's own Enter shortcut in the same
+    keystroke, copying and closing the overlay the user only meant to add
+    one label to. Stock QLineEdit deliberately leaves Return unaccepted
+    after emitting editingFinished (so a dialog's default button can still
+    fire from inside a focused field), and Qt walks an unaccepted key event
+    up the parent-widget chain -- `_commit_text` had already hidden the
+    label and dropped its focus by the time that second delivery reached
+    `_shortcuts_suppressed()`, so the guard no longer saw an editor there to
+    suppress for.
+
+    Every test below delivers the key to `overlay._text_edit` itself (or,
+    for Escape, to `overlay` -- QLineEdit never claims Escape, so it always
+    reached OverlayWindow.keyPressEvent the ordinary way) the way a real
+    keystroke would, rather than calling `overlay.keyPressEvent` directly --
+    that would skip the very propagation this bug depended on and pass
+    either way.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_enter_commits_the_label_and_leaves_the_overlay_open(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+
+        QTest.keyClicks(overlay._text_edit, "hello")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 1
+        assert isinstance(overlay.marks[0], Text)
+        assert overlay.marks[0].text == "hello"
+        assert overlay._text_edit.isHidden()
+        assert overlay.isVisible()  # never copied-and-dismissed
+        assert calls == []
+
+    def test_escape_abandons_the_label_without_touching_other_marks(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._text_edit.isHidden()
+        assert len(overlay.marks) == 1
+        assert isinstance(overlay.marks[0], Rectangle)  # the earlier mark survives
+        assert overlay.isVisible()
+
+    def test_enter_with_no_label_being_edited_still_copies_and_closes(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert len(calls) == 1
+        assert not overlay.isVisible()
+
+
 class TestKeyboardEscapeTwoStage:
     """SNX-47 AC: 'Esc with marks present discards them and toasts, and Esc
     with no marks present closes the overlay without capturing.' The
