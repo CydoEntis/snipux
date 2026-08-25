@@ -26,6 +26,19 @@ instant, which is what lets the same code path behave identically on X11 and
 Wayland. Everything downstream — region select, annotation, export — is ordinary
 drawing on an image we already hold.
 
+## Install
+
+```sh
+pipx install snipux
+snipux --setup
+```
+
+`pipx install` puts snipux and its dependencies in their own isolated
+environment and a launcher on PATH — no repository checkout needed. `snipux
+--setup` then writes the `.desktop` entry, the autostart entry, and the GNOME
+Super+Shift+S shortcut, the pieces a wheel can't install on its own. Both
+commands are safe to re-run.
+
 ## Requirements
 
 - Python 3.10+

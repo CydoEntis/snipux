@@ -9,12 +9,39 @@ description = "A Windows Snipping Tool workalike for Linux."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [
+    { name = "Cody", email = "cydoentis@gmail.com" },
+]
+keywords = ["screenshot", "snipping-tool", "wayland", "gnome", "linux", "annotation"]
+# Trove classifiers PyPI renders on the project page. The OS classifier is
+# load-bearing, not decorative -- capture.py's one architectural rule only
+# holds on Linux (X11/Wayland via the compositor's own portal/APIs), so
+# "Operating System :: POSIX :: Linux" tells pip/pipx not to even offer this
+# on Windows or macOS rather than installing something that cannot capture.
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: Capture :: Screen Capture",
+    "Topic :: Utilities",
+]
 # Matches requirements.txt's two runtime packages. pytest stays a
 # dev/test-only dependency -- no snipux/*.py module imports it.
 dependencies = [
     "PyQt6>=6.5",
     "jeepney>=0.8",
 ]
+
+[project.urls]
+Homepage = "https://github.com/CydoEntis/snipux"
+Repository = "https://github.com/CydoEntis/snipux"
+Issues = "https://github.com/CydoEntis/snipux/issues"
 
 [project.scripts]
 snipux = "snipux.app:cli"
