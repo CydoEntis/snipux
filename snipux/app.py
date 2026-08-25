@@ -30,6 +30,7 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from snipux.capture import (
+    XwininfoWindowGeometryProvider,
     BackendRegistry,
     CaptureError,
     X11WindowGeometryProvider,
@@ -157,18 +158,21 @@ def build_default_registry() -> BackendRegistry:
 def build_default_geometry_provider() -> GeometryProvider:
     """Construct the `GeometryProvider` the real app uses for window mode.
 
-    `X11WindowGeometryProvider` when its own `is_available()` says the
-    session is X11 with `wmctrl` on PATH; `UnsupportedGeometryProvider`
-    otherwise, so Wayland and a machine without `wmctrl` degrade to plain
-    rectangle dragging exactly as they do without a provider at all. The
+    Tried in order, the same way capture backends are: `wmctrl` first for
+    its curated window list, then `xwininfo` (x11-utils, which a GNOME
+    session already has) so a stock Ubuntu without `wmctrl` still gets
+    Window mode instead of silently falling back to Region. Wayland, or a
+    machine with neither, gets `UnsupportedGeometryProvider` and degrades to
+    plain rectangle dragging exactly as it does without a provider at all.
+    The
     choice is made here rather than in overlay.py so overlay.py never needs
     to import anything wmctrl-specific — per CLAUDE.md, platform-specific
     code stays confined to capture.py, and app.py is already the place that
     picks between platform-specific implementations for `registry`.
     """
-    provider = X11WindowGeometryProvider()
-    if provider.is_available():
-        return provider
+    for provider in (X11WindowGeometryProvider(), XwininfoWindowGeometryProvider()):
+        if provider.is_available():
+            return provider
     return UnsupportedGeometryProvider()
 
 

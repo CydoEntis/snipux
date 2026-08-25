@@ -11,6 +11,7 @@ tickets register real backends into. No real backend lives here yet.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -367,6 +368,105 @@ class ScrotBackend(_ShellOutX11Backend):
 
     def _command(self, path: str) -> list[str]:
         return ["scrot", path]
+
+
+class XwininfoWindowGeometryProvider:
+    """Window geometry from `xwininfo`, for X11 sessions without `wmctrl`.
+
+    Same duck-typed shape as `X11WindowGeometryProvider`, and used only when
+    that one cannot run. `wmctrl` is not installed by default on Ubuntu, so
+    without this fallback Window mode silently reverted to Region on a stock
+    desktop -- the mode was in the menu, picking it did nothing visible, and
+    the only clue was a toast. `xwininfo` ships in x11-utils, which a GNOME
+    session already pulls in.
+
+    One `xwininfo -root -children` call lists the root's direct children
+    with their geometry, which is what a window picker needs. Its output is
+    less curated than `wmctrl -lG`: panels, docks and 1x1 helper windows are
+    in it too, so anything unmapped or implausibly small is dropped here
+    rather than offered as something to capture.
+    """
+
+    _CACHE_SECONDS = 0.2
+    # Below this, in either axis, a "window" is a helper or an input proxy,
+    # not something a user meant to capture.
+    _MIN_SIDE = 80
+
+    # Windows that exist but are nobody's idea of a capture target. The
+    # compositor's backdrop is the one that actually matters: it spans the
+    # whole desktop and sits above everything, so left in the list it would
+    # be the answer to every hover.
+    _NOT_WINDOWS = frozenset({"mutter guard window"})
+
+    # "     0x3400011 "snipux": ("snipux" "Snipux")  1200x800+100+50  +100+50"
+    _LINE_RE = re.compile(
+        r'^\s*(0x[0-9a-f]+)\s+(?:"([^"]*)")?.*?'
+        r"\s(\d+)x(\d+)\+(-?\d+)\+(-?\d+)\s+\+(-?\d+)\+(-?\d+)\s*$"
+    )
+
+    def __init__(self):
+        self._cache: list[tuple[str, QRectF]] | None = None
+        self._cache_time: float | None = None
+
+    def is_available(self) -> bool:
+        return detect_session_type() == "x11" and shutil.which("xwininfo") is not None
+
+    def list_windows(self) -> list[tuple[str, QRectF]]:
+        now = time.monotonic()
+        if (
+            self._cache is not None
+            and self._cache_time is not None
+            and now - self._cache_time < self._CACHE_SECONDS
+        ):
+            return self._cache
+        windows = self._list_windows_uncached()
+        self._cache = windows
+        self._cache_time = now
+        return windows
+
+    def _list_windows_uncached(self) -> list[tuple[str, QRectF]]:
+        if shutil.which("xwininfo") is None:
+            return []
+        try:
+            result = subprocess.run(
+                ["xwininfo", "-root", "-children"],
+                check=True, capture_output=True, text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return []
+
+        desktop = _virtual_desktop_geometry()
+        windows: list[tuple[str, QRectF]] = []
+        for line in result.stdout.splitlines():
+            match = self._LINE_RE.match(line)
+            if match is None:
+                continue
+            _win_id, title, width, height, _x, _y, abs_x, abs_y = match.groups()
+            try:
+                rect = QRectF(float(abs_x), float(abs_y), float(width), float(height))
+            except ValueError:
+                continue
+            if rect.width() < self._MIN_SIDE or rect.height() < self._MIN_SIDE:
+                continue
+            if (title or "") in self._NOT_WINDOWS:
+                continue
+            # A window the exact size of the whole virtual desktop is the
+            # compositor's own backdrop, not something anybody meant to
+            # capture -- and offered as a pick it would swallow every real
+            # window behind it, since it is on top of all of them.
+            if rect.contains(desktop) or rect == desktop:
+                continue
+            windows.append((title or "", rect))
+        # Reversed: xwininfo lists children bottom-of-stack first, and
+        # `window_at` takes the first match, which must be the topmost.
+        windows.reverse()
+        return windows
+
+    def window_at(self, point: QPointF) -> QRectF | None:
+        for _title, rect in self.list_windows():
+            if rect.contains(point):
+                return rect
+        return None
 
 
 class X11WindowGeometryProvider:

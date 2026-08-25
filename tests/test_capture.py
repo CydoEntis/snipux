@@ -1,5 +1,6 @@
 import os
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF
@@ -1011,3 +1012,75 @@ class TestWaylandRegistryFailover:
         frame = registry.capture()
 
         assert frame is good_frame
+
+
+class TestXwininfoWindowGeometryProvider:
+    """Window mode's fallback for X11 sessions without `wmctrl`.
+
+    `wmctrl` is not installed by default on Ubuntu, so without this the mode
+    was in the menu, picking it did nothing visible, and the only clue was a
+    toast -- indistinguishable from the feature being broken.
+    """
+
+    SAMPLE = (
+        '  0x3400011 "Terminal": ("terminal" "Terminal")  866x629+10+20  +504+215\n'
+        '  0x400007 "mutter guard window": ()  6400x1440+0+0  +0+0\n'
+        '  0x2200004 "tiny": ()  1x1+0+0  +0+0\n'
+        '  0x2200005 "Brave": ("brave" "Brave")  1920x1080+0+0  +0+201\n'
+    )
+
+    def _provider(self, monkeypatch, stdout=SAMPLE):
+        provider = capture.XwininfoWindowGeometryProvider()
+        monkeypatch.setattr(capture.shutil, "which", lambda name: "/usr/bin/xwininfo")
+        monkeypatch.setattr(
+            capture.subprocess, "run",
+            lambda *a, **k: SimpleNamespace(stdout=stdout, returncode=0),
+        )
+        return provider
+
+    def test_it_reads_absolute_geometry(self, monkeypatch):
+        provider = self._provider(monkeypatch)
+
+        windows = dict(provider.list_windows())
+
+        assert windows["Terminal"] == QRectF(504, 215, 866, 629)
+
+    def test_the_compositors_backdrop_is_not_a_window(self, monkeypatch):
+        # It spans the whole desktop and sits above everything, so left in
+        # the list it would be the answer to every hover.
+        provider = self._provider(monkeypatch)
+
+        assert "mutter guard window" not in dict(provider.list_windows())
+
+    def test_helper_windows_are_dropped(self, monkeypatch):
+        provider = self._provider(monkeypatch)
+
+        assert "tiny" not in dict(provider.list_windows())
+
+    def test_the_topmost_window_wins_a_hover(self, monkeypatch):
+        # xwininfo lists children bottom-of-stack first, so the list has to
+        # be reversed or a hover resolves to whatever is underneath.
+        provider = self._provider(monkeypatch)
+
+        assert provider.list_windows()[0][0] == "Brave"
+
+    def test_a_miss_returns_none(self, monkeypatch):
+        provider = self._provider(monkeypatch)
+
+        assert provider.window_at(QPointF(99999, 99999)) is None
+
+    def test_a_failing_xwininfo_yields_no_windows_rather_than_raising(self, monkeypatch):
+        provider = capture.XwininfoWindowGeometryProvider()
+        monkeypatch.setattr(capture.shutil, "which", lambda name: "/usr/bin/xwininfo")
+
+        def boom(*args, **kwargs):
+            raise OSError("nope")
+
+        monkeypatch.setattr(capture.subprocess, "run", boom)
+
+        assert provider.list_windows() == []
+
+    def test_it_is_unavailable_without_xwininfo(self, monkeypatch):
+        monkeypatch.setattr(capture.shutil, "which", lambda name: None)
+
+        assert not capture.XwininfoWindowGeometryProvider().is_available()
