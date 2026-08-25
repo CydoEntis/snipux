@@ -1242,3 +1242,87 @@ class TestShortcutFlag:
             main(["--shortcut", "<Super><Shift>x"])
 
         assert "only means anything alongside --setup" in capsys.readouterr().err
+
+
+class TestReviewWindowIntegration:
+    """The review window is off unless Settings turns it on, and opens only
+    for a real capture -- never for a cancelled snip.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    def test_no_window_opens_when_the_setting_is_off(self, make_controller, monkeypatch):
+        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: False)
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+
+        controller._overlay.copy()
+
+        assert controller._reviews == []
+
+    def test_a_window_opens_when_the_setting_is_on(self, make_controller, monkeypatch):
+        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: True)
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+
+        controller._overlay.copy()
+
+        assert len(controller._reviews) == 1
+
+    def test_cancelling_a_snip_opens_nothing(self, make_controller, monkeypatch):
+        # Esc is not a capture. _on_captured fires from copy()/save() only,
+        # never from the dismissal hook that every ending routes through.
+        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: True)
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+
+        controller._overlay.close()
+
+        assert controller._reviews == []
+
+    def test_the_setting_is_read_fresh_for_each_snip(self, make_controller, monkeypatch):
+        # Toggling it in Settings should take effect on the next snip, not
+        # the next launch.
+        enabled = [False]
+        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: enabled[0])
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+        controller._overlay.copy()
+        assert controller._reviews == []
+
+        enabled[0] = True
+        controller._overlay.copy()
+
+        assert len(controller._reviews) == 1
+
+    def test_several_snips_leave_several_windows_open(self, make_controller, monkeypatch):
+        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: True)
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+
+        controller._overlay.copy()
+        controller._overlay.copy()
+
+        assert len(controller._reviews) == 2
+
+    def test_a_closed_window_is_forgotten(self, make_controller, monkeypatch):
+        # Otherwise a long session accumulates every snip it ever took.
+        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: True)
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+        controller._overlay.copy()
+
+        controller._reviews[0].accept()
+
+        assert controller._reviews == []
