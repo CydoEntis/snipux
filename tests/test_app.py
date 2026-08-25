@@ -1427,3 +1427,51 @@ class TestSnipRequestProtocol:
                 break
 
         assert fired == [True]
+
+
+class TestASecondRequestSurfacesTheOverlay:
+    """A snip request while one is already open used to be a silent no-op.
+
+    An overlay the user has lost track of then turns every later press of
+    the shortcut into nothing at all, with no clue why -- indistinguishable
+    from the keybinding having stopped working, and reported as exactly
+    that.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    def test_it_does_not_open_a_second_overlay(self, make_controller):
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        first = controller._overlay
+
+        controller.start_capture()
+
+        assert controller._overlay is first
+
+    def test_it_reveals_an_overlay_still_inside_its_opacity_delay(self, make_controller):
+        # Raising something still transparent would look like nothing
+        # happening, which is the whole complaint.
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        controller._overlay.setWindowOpacity(0.0)
+
+        controller.start_capture()
+
+        assert controller._overlay.windowOpacity() == 1.0
+
+    def test_a_request_after_it_closes_opens_a_fresh_one(self, make_controller):
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        first = controller._overlay
+        first.close()
+
+        controller.start_capture()
+
+        assert controller._overlay is not None
+        assert controller._overlay is not first
