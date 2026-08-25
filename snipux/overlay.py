@@ -2554,6 +2554,75 @@ class Toast(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Close button (SNX-80)
+# ---------------------------------------------------------------------------
+# `_bar` and the per-selection chips (the dimension chip, the frozen pill)
+# all only ever exist once a selection does -- `_sync_bar_visibility`,
+# `OverlayWindow.paintEvent`'s own `if self._selection is not None` guard --
+# but a user who opens the overlay and decides, before dragging anything at
+# all, that they don't want to snip anything has exactly as much right to a
+# visible way out as one who's already mid-annotation. SNX-65 turned off the
+# only thing (the hint HUD) that ever told anyone Escape was that way out,
+# so this is its own small piece of chrome, independent of both: shown for
+# as long as `OverlayWindow` itself is (`showEvent`/`hideEvent`, the same
+# pairing `_toast`/`_hud` already use), never gated on `_selection`,
+# `_bar.active_tool` or `_marks` the way everything else in this file is.
+
+
+class _CloseButton(QPushButton):
+    """A small round button pinned to a fixed corner of the overlay: the
+    one control guaranteed to be on screen, and clickable, from the moment
+    the overlay opens to the moment it closes.
+
+    Unlike `_IconButton` (idle-transparent, relying on the bar's own glass
+    fill for contrast against the frozen desktop underneath), this button
+    has no bar behind it -- it sits directly over whatever pixels happen to
+    be there, which could be any colour at all -- so its background is
+    always painted, not just on hover, using the same `BAR_BG`/
+    `BAR_BG_ALPHA` glass the floating bar itself uses. A plain QSS
+    `:hover` rule is enough for the hover state (no custom paintEvent
+    needed, unlike `_SwatchButton`'s two-colour ring): there is only ever
+    one fill to swap.
+    """
+
+    _SIZE = design.tokens.Metric.BTN
+    _ICON_SIZE = design.tokens.Metric.ICON
+    # How much brighter the fill reads on hover -- enough to register as a
+    # state change without a dedicated token for a control this small, the
+    # same un-tokenized-literal convention `OverlayWindow`'s own
+    # `_CORNER_BRACKET_OFFSET` and friends already follow.
+    _HOVER_ALPHA_BOOST = 0.07
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self._SIZE, self._SIZE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Names Escape by its full word, not the "Esc" abbreviation every
+        # other tooltip in this file uses for a shortcut -- this is the
+        # one place a user with the hint HUD off (SNX-65's new default)
+        # learns the keyboard route exists at all, so it spells the key
+        # out rather than assuming the abbreviation is already familiar.
+        self.setToolTip("Close — Escape")
+        self.setFlat(True)
+
+        bg = design.color("BAR_BG")
+        hover_bg = QColor(bg)
+        hover_bg.setAlphaF(min(1.0, bg.alphaF() + self._HOVER_ALPHA_BOOST))
+        self.setStyleSheet(
+            "QPushButton { border: none; border-radius: %dpx;"
+            " background: rgba(%d, %d, %d, %s); }"
+            "QPushButton:hover { background: rgba(%d, %d, %d, %s); }"
+            % (
+                self._SIZE // 2,
+                bg.red(), bg.green(), bg.blue(), bg.alphaF(),
+                hover_bg.red(), hover_bg.green(), hover_bg.blue(), hover_bg.alphaF(),
+            )
+        )
+        self.setIcon(design.icon("close", design.color("TEXT_PRIMARY")))
+        self.setIconSize(QSize(self._ICON_SIZE, self._ICON_SIZE))
+
+
+# ---------------------------------------------------------------------------
 # Delay countdown (SNX-50)
 # ---------------------------------------------------------------------------
 # docs/design/overlay-redesign.md's "Capture modes" entry for Delay is the
@@ -2710,8 +2779,9 @@ class OverlayWindow(QWidget):
     - Chrome must never reach the export. `rendered_image()` flattens
       `_marks` onto the selection's crop of the frozen frame; it never
       touches `_bar`, `_tray`/`_blur_tray`, `_toast`, `_hud`, `_popover`,
-      `_shape_popover` or any other widget painted over the overlay, so
-      none of that chrome can ever leak into a copy or a save.
+      `_shape_popover`, `_close_button` or any other widget painted over
+      the overlay, so none of that chrome can ever leak into a copy or a
+      save.
 
     Everything else here is chrome and mode-handling built around those
     three constraints. `FloatingBar` (`_bar`) is the real child widget
@@ -2738,7 +2808,11 @@ class OverlayWindow(QWidget):
     copy-and-dismiss, `?` to reveal the hint HUD, and the two-stage Esc
     (`_handle_escape`) the spec leaves for us to decide -- all of it
     suppressed while a slider or a text-editing widget has focus
-    (`_shortcuts_suppressed`).
+    (`_shortcuts_suppressed`). `_close_button` (SNX-80) is Esc's visible
+    counterpart: a fixed-corner control that discards any ink and closes in
+    a single click, shown for as long as this window is regardless of
+    `_selection`, active tool or ink state -- unlike `_bar` and the chips,
+    which only exist once a selection does.
     """
 
     # Marching ants: a QTimer at ~30fps advancing the dashed pen's offset,
@@ -2763,6 +2837,11 @@ class OverlayWindow(QWidget):
     # the ticket explicitly overrides from the spec's default.
     _TOP_CLEARANCE = 52  # keeps the selection clear of the top hint HUD
     _BAR_ROOM = 130  # keeps room below the selection for the floating bar
+
+    # Close button (SNX-80): fixed distance from the window's own top-right
+    # corner, given as a literal same as every other pixel value above that
+    # neither the redesign spec nor this ticket's own handoff tokenized.
+    _CLOSE_BUTTON_MARGIN = 16
 
     # Chips above the selection (SNX-43), per docs/design/overlay-redesign.md's
     # "Chips above the selection" section: the reference gives these as
@@ -3074,6 +3153,28 @@ class OverlayWindow(QWidget):
         self._hud = HintHUD(self)
         self._hud.setGeometry(0, 0, self.width(), design.tokens.Metric.HUD_H)
         self._hud.hide()
+
+        # The close button (SNX-80): see `_CloseButton`'s own docstring and
+        # the "Close button" comment block above it for why this exists at
+        # all, and why it is neither a bar button nor per-selection chrome.
+        # Positioned once, here, the same way `_hud` above is -- this
+        # window's own geometry is set once at construction and never
+        # resized afterwards (a fullscreen overlay), so there is no
+        # resizeEvent to keep a fixed corner offset in sync with. Starts
+        # hidden, like `_bar`/`_tray`/`_toast`/`_hud`, so a caller that
+        # never shows this window (most of this file's own tests, which
+        # `grab()` an unshown widget to sample pixels) never has it painted
+        # over whatever they're sampling; `showEvent`/`hideEvent` are what
+        # bring it up and down with the window itself, unconditionally --
+        # unlike every other piece of chrome here, its visibility never
+        # depends on `_selection`, `_bar.active_tool` or `_marks`.
+        self._close_button = _CloseButton(self)
+        self._close_button.move(
+            round(self.width() - self._CLOSE_BUTTON_MARGIN - _CloseButton._SIZE),
+            self._CLOSE_BUTTON_MARGIN,
+        )
+        self._close_button.clicked.connect(self._cancel)
+        self._close_button.hide()
 
     def set_selection(self, rect: QRect | None, path: QPainterPath | None = None) -> None:
         """Set the current selection (window coordinates) and repaint.
@@ -3784,6 +3885,22 @@ class OverlayWindow(QWidget):
         self._sync_bar_undo_redo()
         self.update()
 
+    def _cancel(self) -> None:
+        """The close button's own handler (SNX-80): discard any ink and
+        close, unconditionally, in the single click a visible button gets.
+
+        Unlike `_handle_escape`'s two-stage discard-then-close -- which
+        exists so a first press can back a mid-annotation user out of their
+        ink without losing the overlay itself -- a click on a control whose
+        whole point is "leave now" doesn't get to ask for a second one.
+        `_empty_marks()` alone, not `discard()`: `discard()`'s own "Ink
+        discarded" toast would never actually be seen, since this window is
+        about to close and `hideEvent` hides `_toast` along with everything
+        else, so showing it here would just be dead code with extra steps.
+        """
+        self._empty_marks()
+        self.close()
+
     def set_eraser_active(self, active: bool) -> None:
         """Arm/disarm the eraser tool (SNX-38).
 
@@ -3921,6 +4038,10 @@ class OverlayWindow(QWidget):
         # Likewise the HUD: `_hints_enabled` defaults on and may already be
         # true before this window was ever shown.
         self._sync_hud_visibility()
+        # The close button (SNX-80): unconditional, unlike the two syncs
+        # above -- it has no preference or selection state to check, it is
+        # simply on for as long as this window is.
+        self._close_button.show()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
@@ -3931,6 +4052,7 @@ class OverlayWindow(QWidget):
         self._shape_popover.hide()
         self._toast.hide()
         self._hud.hide()
+        self._close_button.hide()
 
     def closeEvent(self, event) -> None:
         # Deliberately not hideEvent: `_start_delayed_capture` (SNX-50)
