@@ -5809,6 +5809,97 @@ class TestKeyboardEscapeTwoStage:
         assert not overlay.isVisible()
 
 
+class TestCloseButton:
+    """SNX-80 AC: 'the overlay shows a visible control that closes it
+    without capturing; using it discards any ink and takes no screenshot;
+    it is reachable no matter which tool is selected and whether or not
+    ink has been drawn; it does not appear in the exported image; its
+    tooltip names Escape.'
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, with_selection=True):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        if with_selection:
+            overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_visible_before_any_selection_has_been_made(self):
+        # `_bar` and the chips above the selection both only exist once a
+        # selection does -- this is the one control a user has to back out
+        # with before they've dragged anything at all.
+        overlay = self._overlay(with_selection=False)
+
+        assert overlay._close_button.isVisible()
+        assert not overlay._bar.isVisible()
+
+    def test_stays_visible_regardless_of_active_tool_and_ink_present(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        assert overlay._close_button.isVisible()
+
+    def test_hidden_while_the_overlay_itself_is_not_shown(self):
+        # Mirrors `_bar`'s own "stays hidden and unpainted" guarantee --
+        # this window is never actually shown, so nothing in it should be
+        # either.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+
+        assert not overlay._close_button.isVisible()
+
+    def test_tooltip_names_escape(self):
+        overlay = self._overlay()
+
+        assert "Escape" in overlay._close_button.toolTip()
+
+    def test_click_discards_ink_and_closes_without_capturing(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        QTest.mouseClick(overlay._close_button, Qt.MouseButton.LeftButton)
+
+        assert overlay.marks == ()
+        assert not overlay.isVisible()
+        assert calls == []  # never captured
+
+    def test_click_before_any_selection_still_closes(self):
+        overlay = self._overlay(with_selection=False)
+
+        QTest.mouseClick(overlay._close_button, Qt.MouseButton.LeftButton)
+
+        assert not overlay.isVisible()
+
+    def test_excluded_from_the_exported_image(self):
+        size = (200, 200)
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        # The selection spans the whole window, including the close
+        # button's own fixed corner position -- a leak would show up there
+        # as a pixel-colour mismatch against the frame's own base colour.
+        overlay.set_selection(QRect(0, 0, *size))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        rendered = overlay.rendered_image()
+
+        button_center = overlay._close_button.geometry().center()
+        assert rendered.pixelColor(button_center) == QColor(10, 20, 30)
+
+
 class TestKeyboardShortcutSuppression:
     """SNX-47 AC: 'none of these keys fire while a text label is being
     edited or a slider has focus, and the key reaches the focused widget
