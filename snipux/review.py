@@ -46,7 +46,13 @@ from PyQt6.QtWidgets import (
 from . import design, setup_desktop, shapes
 from .design import tokens
 from .marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
-from .overlay import BlurTray, FloatingBar, SettingsTray, ShapeToolPopover
+from .overlay import (
+    BlurTray,
+    FloatingBar,
+    SettingsTray,
+    ShapeToolPopover,
+    ToolHintStrip,
+)
 from .winchrome import AccentButton, SecondaryButton, WinWindow, _mono_font, _ui_font
 
 
@@ -424,6 +430,11 @@ class ReviewWindow(WinWindow):
 
         # The rect button's Ellipse/Line/Crop submenu, for the same reason:
         # three of the tools were unreachable without it.
+        # Names whichever tool has no tray of its own -- the eraser -- so
+        # there is never an active tool the user cannot identify.
+        self._tool_hint = ToolHintStrip(self._canvas)
+        self._tool_hint.hide()
+
         self._shape_popover = ShapeToolPopover(self._canvas)
         self._shape_popover.hide()
         self._shape_popover.toolSelected.connect(self._on_shape_selected)
@@ -465,7 +476,7 @@ class ReviewWindow(WinWindow):
         and stroke tray rather than sitting alongside it".
         """
         tool = self._bar.active_tool
-        for tray in (self._tray, self._blur_tray):
+        for tray in (self._tray, self._blur_tray, self._tool_hint):
             tray.hide()
         # Gated on whether we are editing, not on whether the widget is
         # mapped: `isVisible()` is false for a window that has not been
@@ -483,7 +494,12 @@ class ReviewWindow(WinWindow):
         elif tool == "blur":
             tray = self._blur_tray
         if tray is None:
-            return
+            if tool:
+                # No tray for this tool, so the strip carries its name.
+                self._tool_hint.set_tool(tool)
+                tray = self._tool_hint
+            else:
+                return
         size = tray.sizeHint()
         bar = self._bar.geometry()
         tray.setGeometry(
