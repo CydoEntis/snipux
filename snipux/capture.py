@@ -852,3 +852,63 @@ def build_wayland_registry() -> BackendRegistry:
     registry.add(PortalScreenshotBackend())
     registry.add(GnomeShellHelperBackend())
     return registry
+
+
+def build_linux_registry() -> BackendRegistry:
+    """The real Linux `BackendRegistry`, chosen by `detect_session_type()`.
+
+    Wayland gets `build_wayland_registry()`, X11 gets `build_x11_registry()`,
+    and an unrecognised session type gets both, concatenated -- every
+    backend already gates itself with its own `is_available()`, so offering
+    both lets whatever is actually installed be found instead of failing
+    outright because the session type couldn't be determined. This is what
+    `platform.linux.LinuxPlatform.build_capture_registry()` (SNX-86) calls;
+    it used to be `app.build_default_registry()`'s own logic before that
+    choice moved behind the platform seam.
+    """
+    session_type = detect_session_type()
+    if session_type == "wayland":
+        return build_wayland_registry()
+    if session_type == "x11":
+        return build_x11_registry()
+
+    registry = BackendRegistry()
+    for backend in build_wayland_registry():
+        registry.add(backend)
+    for backend in build_x11_registry():
+        registry.add(backend)
+    return registry
+
+
+class UnsupportedPlatformBackend(CaptureBackend):
+    """Placeholder registered by a platform whose `Platform.build_capture_registry()`
+    (see `snipux/platform/__init__.py`) has no real backend implemented yet
+    -- Windows and macOS today.
+
+    Always unavailable, so `BackendRegistry.capture()` never reaches
+    `capture()` below -- CLAUDE.md's "no backend constructed on a platform
+    it cannot run on" is about running one, and this is only ever named,
+    never run. What it buys over the registry staying empty is that
+    `unavailable_reason()` names the platform: `--list-backends` on Windows
+    would otherwise print "no backends registered", which reads exactly
+    like a bug rather than the honest, still-unimplemented state it is.
+    """
+
+    def __init__(self, platform_name: str):
+        self._platform_name = platform_name
+
+    def name(self) -> str:
+        return f"{self._platform_name.lower()}-native"
+
+    def is_available(self) -> bool:
+        return False
+
+    def unavailable_reason(self) -> str | None:
+        return f"{self._platform_name} capture is not implemented yet"
+
+    def capture(self) -> Frame:
+        # Never reached in practice: is_available() is always False, so
+        # BackendRegistry.capture() skips straight past this backend.
+        # Raising plainly here (rather than pretending to succeed) is what
+        # keeps that true if something ever calls capture() directly.
+        raise NotImplementedError(self.unavailable_reason())

@@ -1,34 +1,63 @@
 # snipux — conventions
 
-A Windows Snipping Tool workalike for Linux. Snip an area, window, freehand
-shape or the whole screen; annotate it; copy or save it.
+A Windows Snipping Tool workalike, going cross-platform. Snip an area, window,
+freehand shape or the whole screen; annotate it; copy or save it.
 
 ## The one architectural rule
 
 **Capture the entire virtual desktop in a single shot, then run selection
-against that frozen frame in our own overlay.** The compositor is involved for
-exactly one instant. This is what lets the same code path behave identically on
-X11 and Wayland, and it is not negotiable — a design that asks the compositor
-for pixels while the user is dragging will work on X11 and fail on Wayland.
-
-Everything downstream of that grab is ordinary drawing on an image we already
-hold in memory.
+against that frozen frame in our own overlay.** The compositor/OS is involved
+for exactly one instant. This is not negotiable, and it gets stronger with
+every platform added, not weaker: a design that asks the OS for pixels while
+the user is dragging is inherently platform-specific at the one moment that
+matters, because every OS's live-interaction APIs differ. Everything
+*downstream* of the grab — selection, chrome, annotation — is ordinary
+drawing on an image already held in memory, and ordinary Qt runs unchanged
+wherever PyQt6 does. That split is what let the same overlay/marks/shapes
+code behave identically on X11 and Wayland, and it is exactly what makes
+Windows and macOS tractable as ports rather than rewrites: it is the reason
+the Windows port (SNX-85/86) touches roughly 210 lines rather than the whole
+codebase. A capture backend that grabs pixels mid-drag instead of up front
+would spread that platform dependency into every module downstream of it,
+on every OS, forever.
 
 ## Target platform
 
-Ubuntu 22.04+, GNOME, **Wayland is the primary target** and X11 must also work.
-The session type is detected at runtime, never assumed. Other desktops are
-expected to work but are not what we test against.
+Linux, Windows and macOS, aimed at full feature parity across all three.
 
-Development happens on Windows and in an Ubuntu VM. Qt behaves the same on all
-three for everything except capture, so keep platform-specific code confined to
-the capture backends.
+- **Linux** (Ubuntu 22.04+, GNOME; other desktops expected to work but not
+  what we test against) is implemented today. Wayland is the primary session
+  type and X11 must also work; the session type is detected at runtime,
+  never assumed.
+- **Windows** is next, targeting full parity (SNX-85/86). The platform seam
+  (`snipux/platform/windows.py`) exists and is wired into the app, but
+  nothing behind it is implemented yet — every operation raises
+  `UnimplementedPlatformError` naming itself and the operation.
+- **macOS** comes after Windows. Same story: the seam
+  (`snipux/platform/darwin.py`) exists, nothing behind it is implemented.
+
+Development happens on Windows and in an Ubuntu VM. Qt behaves the same on
+all three — everything except the platform seam below is ordinary, portable
+PyQt6, so keep platform-specific code confined to the `platform/` package
+(see Layout).
 
 ## Layout
 
 ```
 snipux/
-  capture.py    backends + virtual-desktop frame; the only platform-specific code
+  platform/     the platform seam: an ABC (`Platform`) plus one implementation
+                per OS -- linux.py is real; windows.py and darwin.py raise
+                UnimplementedPlatformError, naming both platform and
+                operation, for everything not built yet. Desktop
+                integration, global-shortcut (re)binding, the default save
+                folder, and which capture backends this OS can even try all
+                get decided here. This is the one place `sys.platform` is
+                read and the one seam to fill in for a new OS -- see its
+                module docstring.
+  capture.py    the Frame type, the CaptureBackend/BackendRegistry
+                abstraction, and the concrete backends a platform's
+                build_capture_registry() chooses between (today, Linux's
+                X11/Wayland ones)
   overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
                 (its pre-snip chooser diverges from the handoff -- see
                  docs/design/pre-snip-chooser.md)
@@ -37,7 +66,8 @@ snipux/
   review.py     the optional post-capture review window; Annotate reuses the bar
   marks.py      the ink layer + undo/redo, shared by the overlay and review
   winchrome.py  frameless title bar/footer/controls for the two ordinary windows
-  setup_desktop.py  desktop/autostart entries, icons, the GNOME shortcut, config
+  setup_desktop.py  Linux desktop/autostart entries, icons, the GNOME
+                shortcut, config -- what platform/linux.py adapts
   app.py        controller, tray, CLI
 tests/          pytest, mirroring the module names
 ```
@@ -54,6 +84,11 @@ Tests must pass with `QT_QPA_PLATFORM=offscreen` — a build machine has no
 display. Widgets can still be exercised there: `QWidget.grab()` runs a full
 `paintEvent` into an offscreen pixmap without showing anything, and that is the
 preferred way to test painting code.
+
+This holds on every platform snipux supports, not just Linux: as Windows and
+macOS gain real implementations behind the `platform/` seam, their tests must
+pass headless too, the same way `tests/test_platform.py` already runs against
+`windows.py`/`darwin.py`'s stubs without a display today.
 
 ## Conventions
 

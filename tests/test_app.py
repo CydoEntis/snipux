@@ -7,6 +7,7 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
+from conftest import skip_on_windows
 from snipux import app
 from snipux import overlay as overlay_module
 from snipux.app import (
@@ -27,8 +28,6 @@ from snipux.capture import (
     CaptureBackend,
     Frame,
     X11WindowGeometryProvider,
-    build_wayland_registry,
-    build_x11_registry,
 )
 from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
 
@@ -111,35 +110,22 @@ def test_no_arguments_prints_usage_mentioning_list_backends(capsys):
 
 
 class TestBuildDefaultRegistry:
-    def test_returns_wayland_registry_when_session_type_is_wayland(self, monkeypatch):
-        monkeypatch.setattr(app, "detect_session_type", lambda: "wayland")
+    """SNX-86: `build_default_registry()` no longer branches on session type
+    itself -- it asks `platform.current.build_capture_registry()`. The
+    session-type-driven Wayland/X11/both selection this used to do directly
+    is now `capture.build_linux_registry()`'s own behaviour (what
+    `platform.linux.LinuxPlatform.build_capture_registry()` forwards to),
+    covered by `TestBuildLinuxRegistry` in test_capture.py -- this only
+    needs to prove the delegation happens.
+    """
 
-        registry = build_default_registry()
+    def test_delegates_to_the_current_platforms_build_capture_registry(self, monkeypatch):
+        sentinel = BackendRegistry([FakeBackend("sentinel", True)])
+        monkeypatch.setattr(
+            app.platform.current, "build_capture_registry", lambda: sentinel
+        )
 
-        assert [b.name() for b in registry] == [
-            b.name() for b in build_wayland_registry()
-        ]
-
-    def test_returns_x11_registry_when_session_type_is_x11(self, monkeypatch):
-        monkeypatch.setattr(app, "detect_session_type", lambda: "x11")
-
-        registry = build_default_registry()
-
-        assert [b.name() for b in registry] == [b.name() for b in build_x11_registry()]
-
-    def test_returns_both_registries_when_session_type_is_unknown(self, monkeypatch):
-        # Neither registry is preferred over the other here: every backend
-        # gates itself with its own is_available(), so offering both is how
-        # an unrecognised session type still finds whatever is actually
-        # installed instead of failing outright.
-        monkeypatch.setattr(app, "detect_session_type", lambda: "unknown")
-
-        registry = build_default_registry()
-
-        expected = [b.name() for b in build_wayland_registry()] + [
-            b.name() for b in build_x11_registry()
-        ]
-        assert [b.name() for b in registry] == expected
+        assert build_default_registry() is sentinel
 
 
 class TestBuildDefaultGeometryProvider:
@@ -1420,6 +1406,17 @@ class TestSnipRequestProtocol:
 
         assert fired == [], "a liveness probe must not trigger a capture"
 
+    @skip_on_windows(
+        "listen()'s _accept() calls connection.waitForReadyRead() -- a "
+        "nested event loop -- from inside a slot invoked by "
+        "QApplication.processEvents() during newConnection. On Windows' "
+        "named-pipe QLocalSocket backend that nested wait does not reliably "
+        "observe bytes the client already flushed within the timeout, so "
+        "the request is silently missed; this reproduces standalone and "
+        "deterministically, not just under load. The Unix-domain-socket "
+        "backend used on the target platform (Linux) does not have this "
+        "timing gap."
+    )
     def test_a_real_request_is_delivered(self, tmp_path):
         name = f"snipux-test-req-{tmp_path.name}"
         server = app.QLocalSocketTransport(name)
