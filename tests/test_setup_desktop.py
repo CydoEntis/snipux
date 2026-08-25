@@ -259,6 +259,26 @@ class TestRunRemove:
     application-list entry behind.
     """
 
+    @pytest.fixture(autouse=True)
+    def _never_touch_the_real_desktop(self, tmp_path, monkeypatch):
+        """Keep `--remove`'s reach inside tmp_path.
+
+        These tests call the real `run_remove`, and every argument it is not
+        given falls back to a real location: `config_dir` to
+        ~/.config/snipux, and the GNOME shortcut to whatever gsettings has.
+        Without this they deleted the developer's own config file and
+        unbound their actual keyboard shortcut on every run -- which is
+        exactly what happened, repeatedly, and looked like the application
+        losing its keybinding at random.
+        """
+        monkeypatch.setattr(
+            setup_desktop, "config_path",
+            lambda config_dir=None: (config_dir or tmp_path / "config") / "config.json",
+        )
+        monkeypatch.setattr(
+            setup_desktop, "unbind_gnome_shortcut", lambda: "Removed the shortcut."
+        )
+
     def test_removes_the_desktop_and_autostart_entries_and_reports_it(
         self, tmp_path, capsys
     ):
