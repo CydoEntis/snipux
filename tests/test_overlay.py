@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 import snipux.app as app_module
+import snipux.overlay as overlay_module
 from snipux.capture import BackendRegistry, CaptureBackend, Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
 from snipux.design import font_families
@@ -48,6 +49,7 @@ from snipux.overlay import (
     _ToolPill,
     _tool_label,
     create_overlays,
+    open_overlay,
 )
 
 BASE_COLOR = qRgb(10, 20, 30)
@@ -4813,3 +4815,183 @@ class TestKeyboardShortcutSuppression:
         QTest.keyClick(label, "P")
 
         assert label.text() == "P"
+
+
+class TestOverlayWindowOnDismissed:
+    """SNX-58: `on_dismissed` is how a Wayland multi-monitor group's
+    `_MonitorVeil` companions get told to close once the real, interactive
+    `OverlayWindow` does -- wired through `closeEvent`, deliberately not
+    `hideEvent`, since `_start_delayed_capture` (SNX-50) also plain-hides
+    this same window mid-countdown and re-shows it moments later, which
+    must not tear the veils down.
+    """
+
+    def test_close_calls_on_dismissed(self):
+        calls = []
+        overlay = OverlayWindow(make_frame(), on_dismissed=lambda: calls.append(1))
+
+        overlay.close()
+
+        assert calls == [1]
+
+    def test_hide_alone_does_not_call_on_dismissed(self):
+        calls = []
+        overlay = OverlayWindow(make_frame(), on_dismissed=lambda: calls.append(1))
+
+        overlay.hide()
+
+        assert calls == []
+
+    def test_on_dismissed_defaults_to_none_and_close_does_not_raise(self):
+        overlay = OverlayWindow(make_frame())
+
+        overlay.close()  # must not raise for lack of a callback
+
+
+class TestOverlayWindowShowOnScreen:
+    """SNX-58 AC: 'the overlay covers the whole screen on Wayland without
+    relying on setting its own window position' and 'the overlay is above
+    other windows and takes keyboard focus when it opens.'
+    """
+
+    def test_none_screen_falls_back_to_a_plain_show(self):
+        overlay = OverlayWindow(make_frame())
+
+        overlay.show_on_screen(None)
+
+        assert overlay.isVisible()
+        assert not overlay.isFullScreen()
+
+    def test_a_real_screen_requests_fullscreen_instead_of_a_plain_show(self):
+        overlay = OverlayWindow(make_frame())
+        screen = QApplication.primaryScreen()
+        assert screen is not None  # the offscreen platform still reports one
+
+        overlay.show_on_screen(screen)
+
+        assert overlay.isVisible()
+        assert overlay.isFullScreen()
+
+
+class TestMonitorVeil:
+    """SNX-58: the non-interactive companion `open_overlay` shows on every
+    monitor besides the one the real `OverlayWindow` covers, on Wayland
+    with more than one monitor.
+    """
+
+    def test_paints_its_own_monitor_frame_dimmed(self):
+        image = QImage(100, 50, QImage.Format.Format_RGB32)
+        image.fill(BASE_COLOR)
+        monitor_frame = Frame(
+            image=image, logical_origin=QPointF(200, 0), logical_size=QSizeF(100, 50)
+        )
+
+        veil = overlay_module._MonitorVeil(monitor_frame)
+
+        assert veil.size() == QSize(100, 50)
+        sampled = veil.grab().toImage().pixelColor(10, 10)
+        expected = _blend(QColor(10, 20, 30), overlay_module.Overlay.VEIL_COLOR)
+        assert sampled.red() == pytest.approx(expected.red(), abs=2)
+        assert sampled.green() == pytest.approx(expected.green(), abs=2)
+        assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
+
+
+class TestOpenOverlay:
+    """SNX-58: `open_overlay` is where the session type app.py already
+    detected (never assumed, per CLAUDE.md) turns into either a single
+    `OverlayWindow` (X11, or a single-monitor Wayland session) or a
+    Wayland multi-monitor group -- see its own docstring for the split.
+    """
+
+    def test_x11_shows_one_overlay_window_spanning_every_monitor(self, monkeypatch):
+        # A `_MonitorVeil` constructed here would mean the X11 path started
+        # building a group it has no business building -- X11's single
+        # OverlayWindow already covers every monitor on its own, unchanged
+        # from before this ticket.
+        monkeypatch.setattr(overlay_module, "_MonitorVeil", Mock(side_effect=AssertionError))
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+
+        result = open_overlay(frame, geometries, wayland=False)
+
+        assert isinstance(result, OverlayWindow)
+        assert result.isVisible()
+        assert not result.isFullScreen()
+        assert result._frame is frame
+        assert result._monitor_geometries == geometries
+
+    def test_wayland_single_monitor_uses_the_frame_uncropped(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        geometries = [QRectF(0, 0, 200, 200)]
+
+        result = open_overlay(frame, geometries, wayland=True)
+
+        assert result._frame is frame
+        assert result._monitor_geometries == geometries
+        assert result._on_dismissed is None
+
+    def test_wayland_multi_monitor_crops_the_primary_window_to_its_own_monitor(self):
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+
+        result = open_overlay(frame, geometries, wayland=True)
+
+        assert result._frame.logical_origin == geometries[0].topLeft()
+        assert result._frame.logical_size == geometries[0].size()
+        assert result._monitor_geometries == [geometries[0]]
+        assert result._on_dismissed is not None
+
+    def test_wayland_multi_monitor_covers_the_remaining_monitors_with_veils(self, monkeypatch):
+        created = []
+
+        class FakeVeil:
+            def __init__(self, monitor_frame):
+                self.monitor_frame = monitor_frame
+                self.closed = False
+                created.append(self)
+
+            def show_on_screen(self, screen):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
+        frame = make_frame(image_size=(600, 200), logical_size=(600, 200))
+        geometries = [
+            QRectF(0, 0, 200, 200),
+            QRectF(200, 0, 200, 200),
+            QRectF(400, 0, 200, 200),
+        ]
+
+        open_overlay(frame, geometries, wayland=True)
+
+        # One veil per monitor but the primary, each cropped to its own.
+        assert [veil.monitor_frame.logical_origin for veil in created] == [
+            geometries[1].topLeft(),
+            geometries[2].topLeft(),
+        ]
+        assert all(not veil.closed for veil in created)
+
+    def test_closing_the_primary_overlay_closes_its_veil_companions(self, monkeypatch):
+        created = []
+
+        class FakeVeil:
+            def __init__(self, monitor_frame):
+                self.closed = False
+                created.append(self)
+
+            def show_on_screen(self, screen):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+
+        result = open_overlay(frame, geometries, wayland=True)
+        result.close()
+
+        assert created and all(veil.closed for veil in created)

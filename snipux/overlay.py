@@ -17,6 +17,7 @@ import math
 from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, QTimer, pyqtSignal
 from PyQt6.QtGui import (
@@ -29,6 +30,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QScreen,
     QTransform,
 )
 from PyQt6.QtWidgets import (
@@ -2604,9 +2606,19 @@ class OverlayWindow(QWidget):
         geometry_provider: GeometryProvider | None = None,
         monitor_geometries: list[QRectF] | None = None,
         registry: BackendRegistry | None = None,
+        on_dismissed: Callable[[], None] | None = None,
     ):
         super().__init__(parent)
         self._frame = frame
+        # SNX-58: called once, from closeEvent, when this window is the
+        # Wayland-primary of a multi-monitor `open_overlay` group -- the
+        # hook that closes the non-interactive `_MonitorVeil` companions
+        # covering the other monitors the moment this one does, so ending
+        # the session on the primary never leaves a dimmed veil stuck on
+        # another screen. None (the default, and the only value X11 or a
+        # single-monitor session ever passes) means there is nothing to
+        # close alongside this window.
+        self._on_dismissed = on_dismissed
 
         # SNX-48: sourced for Window/Full screen capture-mode handling
         # below, mirroring `Overlay`'s own constructor args of the same
@@ -3619,6 +3631,53 @@ class OverlayWindow(QWidget):
         self._toast.hide()
         self._hud.hide()
 
+    def closeEvent(self, event) -> None:
+        # Deliberately not hideEvent: `_start_delayed_capture` (SNX-50)
+        # also plain-hides this same window mid-countdown and re-shows it
+        # in place a moment later, which must not tear down this window's
+        # own `_MonitorVeil` companions (if any) -- only an actual close()
+        # (today, only the second stage of Esc) means the session itself
+        # is over.
+        super().closeEvent(event)
+        if self._on_dismissed is not None:
+            self._on_dismissed()
+
+    def show_on_screen(self, screen: QScreen | None) -> None:
+        """Show this window, positioned for whichever session type the
+        caller (`open_overlay`) already detected -- never assumed here.
+
+        `screen` is None for X11 (and for any caller with no real `QScreen`
+        to hand, e.g. the offscreen platform tests run under): plain
+        `show()`, which lands this window at the geometry `__init__`
+        already set via `setGeometry(frame.logical_origin, ...)` -- X11
+        honours a client's requested position, so that alone is correct
+        and unchanged from before this ticket.
+
+        `screen` given means Wayland: a client there cannot choose its own
+        window's position at all (SNX-58) -- the compositor decides, and
+        a plain shown window routinely lands away from the real pixels the
+        frame was captured from, which is what read as the desktop
+        appearing twice, shifted. Fullscreen is the one state whose
+        placement *is* the compositor's job, guaranteed to match `screen`
+        exactly, so this requests that instead of a plain shown geometry.
+        `winId()` forces the native window to exist first -- `windowHandle()`
+        is None until it does -- so `setScreen` has something to act on.
+        """
+        if screen is None:
+            self.show()
+        else:
+            self.winId()
+            handle = self.windowHandle()
+            if handle is not None:
+                handle.setScreen(screen)
+            self.showFullScreen()
+        # Above every other window and focused the moment it opens, per
+        # the acceptance criterion -- WindowStaysOnTopHint alone (set in
+        # __init__) keeps it on top but doesn't itself force keyboard
+        # focus, particularly right after a fullscreen state change.
+        self.raise_()
+        self.activateWindow()
+
     # -- keyboard shortcuts (SNX-47) -----------------------------------------
     # docs/design/overlay-redesign.md's "Keyboard" table is the authority: a
     # tool letter from tokens.SHORTCUTS, Ctrl+Z / Ctrl+Shift+Z for undo/redo,
@@ -4519,6 +4578,148 @@ class OverlayWindow(QWidget):
         painter.setFont(font)
         painter.setPen(design.color("CHIP_DARK_FG"))
         painter.drawText(QPointF(text_x, baseline), self._FROZEN_LABEL)
+
+
+class _MonitorVeil(QWidget):
+    """SNX-58: the non-interactive Wayland companion `open_overlay` shows
+    on every monitor besides the one the real, interactive `OverlayWindow`
+    covers.
+
+    A Wayland client cannot span two outputs with one surface -- a
+    fullscreen request is inherently a single `wl_output`'s, per
+    `OverlayWindow.show_on_screen`'s own docstring -- so covering a
+    multi-monitor virtual desktop there takes one fullscreen surface per
+    monitor rather than one big window the way X11's single `OverlayWindow`
+    already can. This is deliberately not another `OverlayWindow`: only one
+    monitor is ever the interactive one for a given snip, so the rest just
+    need their own frozen, dimmed pixels and nothing else -- no bar, no
+    tray, no selection of their own. It never seeks focus or reacts to
+    input; `open_overlay` closes every instance of this the moment the
+    real `OverlayWindow` does, via that window's own `on_dismissed`.
+    """
+
+    def __init__(self, monitor_frame: Frame, parent=None):
+        super().__init__(parent)
+        self._image = monitor_frame.image
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        )
+        # Sized to this monitor alone, exactly like `Overlay` above --
+        # `show_on_screen` below is what fullscreens it onto the matching
+        # real `QScreen`; this resize is what its own paintEvent's
+        # `self.rect()` reads while unscreened (e.g. under the offscreen
+        # platform tests run with).
+        self.resize(
+            round(monitor_frame.logical_size.width()),
+            round(monitor_frame.logical_size.height()),
+        )
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.drawImage(QRectF(self.rect()), self._image)
+        # The same flat scrim `Overlay.VEIL_COLOR` dims an unselected
+        # monitor with -- reused rather than re-typed, since this widget
+        # never punches a selection hole in it the way `Overlay` does.
+        painter.fillRect(QRectF(self.rect()), Overlay.VEIL_COLOR)
+        painter.end()
+
+    def show_on_screen(self, screen: QScreen | None) -> None:
+        """Same contract as `OverlayWindow.show_on_screen` -- see its
+        docstring; this window is only ever shown from the Wayland branch
+        of `open_overlay`, so unlike that method there is no plain-`show()`
+        case to fall back to other than a missing `screen` itself.
+        """
+        if screen is not None:
+            self.winId()
+            handle = self.windowHandle()
+            if handle is not None:
+                handle.setScreen(screen)
+        self.showFullScreen()
+
+
+def _screen_for_geometry(geometry: QRectF) -> QScreen | None:
+    """The real `QScreen` whose own geometry matches `geometry` exactly, or
+    None if none does -- e.g. under the offscreen platform tests run with,
+    which reports no real screens a synthetic `monitor_geometries` entry
+    could ever match. `OverlayWindow.show_on_screen`/`_MonitorVeil.
+    show_on_screen` both already treat a None screen as "nothing more
+    specific to target."
+    """
+    for screen in QApplication.screens():
+        if QRectF(screen.geometry()) == geometry:
+            return screen
+    return None
+
+
+def open_overlay(
+    frame: Frame,
+    monitor_geometries: list[QRectF],
+    *,
+    wayland: bool,
+    hints_enabled: bool = True,
+    geometry_provider: GeometryProvider | None = None,
+    registry: BackendRegistry | None = None,
+) -> OverlayWindow:
+    """Build and show the overlay for one snip, positioned for the
+    caller's already-detected session type (`wayland`) rather than assumed
+    here, per CLAUDE.md. Returns the single interactive `OverlayWindow` --
+    the only widget a caller (`app.py`) needs to keep a reference to; any
+    `_MonitorVeil` companions this creates are owned by a closure wired
+    through `OverlayWindow`'s own `on_dismissed` and close themselves the
+    moment the returned window does, so a caller's bookkeeping never has
+    to know they exist.
+
+    X11 (`wayland=False`): unchanged from before this ticket -- one
+    `OverlayWindow` sized to the whole virtual desktop (every entry in
+    `monitor_geometries`), shown via `show_on_screen(None)`, which is
+    exactly the plain `setGeometry`-then-`show()` this window already did.
+
+    Wayland: `OverlayWindow.show_on_screen`'s docstring is the authority
+    for why a single window is fullscreened onto one specific `QScreen`
+    instead. Fullscreen is inherently one output at a time, so with more
+    than one monitor the interactive `OverlayWindow` is cropped
+    (`Frame.crop`, the same helper `Overlay` above already uses) to just
+    the first monitor, and a non-interactive `_MonitorVeil` -- cropped and
+    fullscreened the same way -- covers each of the rest, so every
+    window's own local (0, 0) lines up with the real screen pixels under
+    it and none of them paint a stretched or offset copy of another
+    monitor's content.
+    """
+    primary_geometry = (
+        monitor_geometries[0]
+        if monitor_geometries
+        else QRectF(frame.logical_origin, frame.logical_size)
+    )
+
+    veils: list[_MonitorVeil] = []
+
+    def _close_veils() -> None:
+        for veil in veils:
+            veil.close()
+
+    multi_monitor_wayland = wayland and len(monitor_geometries) > 1
+    overlay_monitor_geometries = (
+        [primary_geometry] if multi_monitor_wayland else monitor_geometries
+    )
+    overlay = OverlayWindow(
+        frame.crop(primary_geometry) if multi_monitor_wayland else frame,
+        hints_enabled=hints_enabled,
+        geometry_provider=geometry_provider,
+        monitor_geometries=overlay_monitor_geometries,
+        registry=registry,
+        on_dismissed=_close_veils if multi_monitor_wayland else None,
+    )
+
+    if not wayland:
+        overlay.show_on_screen(None)
+        return overlay
+
+    overlay.show_on_screen(_screen_for_geometry(primary_geometry))
+    for geometry in monitor_geometries[1:]:
+        veil = _MonitorVeil(frame.crop(geometry))
+        veil.show_on_screen(_screen_for_geometry(geometry))
+        veils.append(veil)
+    return overlay
 
 
 def create_overlays(
