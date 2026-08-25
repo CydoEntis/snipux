@@ -9,8 +9,21 @@ and it deliberately imports no Qt: `--setup` runs with no display. This
 module is the Qt in front of it, and goes through those same functions, so
 the CLI and the window can never disagree about what a valid shortcut is.
 
-Nothing applies live. Save commits the lot and rebinds the shortcut; Cancel
-with unsaved changes asks first.
+Nothing applies live. Save commits the lot; the caller's `on_saved` callback
+(`app.py`'s `_on_settings_saved`) is what actually rebinds the shortcut,
+platform seam and all -- this window only decides *what* to save.
+
+The conflict check itself is platform-specific (SNX-93): GNOME's custom
+keybindings are introspectable, so `ConflictBanner` can list every schema
+already bound to a combination by name (`setup_desktop.
+find_shortcut_conflicts_named`); Windows has no such registry, so
+`platform.current.find_shortcut_conflict()` -- the Windows Snipping Tool's
+own Win+Shift+S, plus an actual `RegisterHotKey` probe for anything else
+holding the key -- stands in instead, and Save refuses a taken combination
+outright rather than appearing to succeed and silently leaving the old one
+bound (see `_save()`). Both paths branch on `HotkeyEventFilter.
+is_available()`, the same capability check `app.py`'s own
+platform-dependent paths already use, not `sys.platform` directly.
 """
 
 from __future__ import annotations
@@ -37,8 +50,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import design, setup_desktop
+from . import design, platform, setup_desktop
 from .design import tokens
+from .platform.windows import HotkeyEventFilter
 from .winchrome import (
     AccentButton,
     SecondaryButton,
@@ -235,6 +249,11 @@ class ConflictBanner(QLabel):
 
     Under the field rather than in a tooltip or a dialog on Save, because a
     clash is information about the choice being made right now.
+
+    The check behind it is platform-specific -- see this module's own
+    docstring for why -- and branches on `HotkeyEventFilter.is_available()`
+    rather than `sys.platform`, so it holds regardless of which OS actually
+    runs a test for it.
     """
 
     def __init__(self, parent: QWidget | None = None):
@@ -243,20 +262,31 @@ class ConflictBanner(QLabel):
         self.setFont(_ui_font(11.5, 400))
 
     def show_for(self, shortcut: str) -> None:
-        conflicts = setup_desktop.find_shortcut_conflicts_named(shortcut)
         win = tokens.Win
-        if conflicts:
-            owner = conflicts[0][1]
-            text = (
-                f"✕  {shortcut} is already {owner}. GNOME will not warn "
-                "you — it will just fire the wrong one."
-            )
-            fg = win.ERR_FG
-            bg, border = _rgba("ERR_BG"), _rgba("ERR_BORDER")
+        if HotkeyEventFilter.is_available():
+            holder = platform.current.find_shortcut_conflict(shortcut)
+            if holder is not None:
+                text = f"✕  {shortcut} is already used by {holder}."
+                fg = win.ERR_FG
+                bg, border = _rgba("ERR_BG"), _rgba("ERR_BORDER")
+            else:
+                text = f"✓  {shortcut} is free to register."
+                fg = win.OK_FG
+                bg, border = _rgba("OK_BG"), _rgba("OK_BORDER")
         else:
-            text = f"✓  No GNOME shortcut uses {shortcut}."
-            fg = win.OK_FG
-            bg, border = _rgba("OK_BG"), _rgba("OK_BORDER")
+            conflicts = setup_desktop.find_shortcut_conflicts_named(shortcut)
+            if conflicts:
+                owner = conflicts[0][1]
+                text = (
+                    f"✕  {shortcut} is already {owner}. GNOME will not warn "
+                    "you — it will just fire the wrong one."
+                )
+                fg = win.ERR_FG
+                bg, border = _rgba("ERR_BG"), _rgba("ERR_BORDER")
+            else:
+                text = f"✓  No GNOME shortcut uses {shortcut}."
+                fg = win.OK_FG
+                bg, border = _rgba("OK_BG"), _rgba("OK_BORDER")
         self.setText(text)
         self.setStyleSheet(
             f"color: {fg}; background: {bg}; border: 1px solid {border};"
@@ -538,12 +568,22 @@ class SettingsWindow(WinWindow):
         self._conflict = ConflictBanner()
         self._conflict.show_for(self._recorder.shortcut_value())
 
-        why = QLabel(
-            "GNOME accepts two applications claiming the same combination "
-            "without a word, then fires whichever it likes. This check is the "
-            "only warning you get — and it cannot see applications that "
-            "grab a key directly rather than through GNOME."
-        )
+        if HotkeyEventFilter.is_available():
+            why_text = (
+                "Windows keeps no registry of who owns a shortcut the way "
+                "GNOME does, so this checks the one thing that is always "
+                "already taken — the Windows Snipping Tool's own "
+                "Win+Shift+S — and, for everything else, whether Windows "
+                "itself refuses to register the combination."
+            )
+        else:
+            why_text = (
+                "GNOME accepts two applications claiming the same combination "
+                "without a word, then fires whichever it likes. This check is the "
+                "only warning you get — and it cannot see applications that "
+                "grab a key directly rather than through GNOME."
+            )
+        why = QLabel(why_text)
         why.setWordWrap(True)
         why.setFont(_ui_font(11.5, 400))
         why.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
@@ -746,7 +786,24 @@ class SettingsWindow(WinWindow):
         self.close()
 
     def _save(self) -> None:
-        setup_desktop.save_shortcut(self._recorder.shortcut_value(), self._config_dir)
+        shortcut = self._recorder.shortcut_value()
+        if HotkeyEventFilter.is_available():
+            # Windows, unlike GNOME, can actually tell a taken combination
+            # apart from a free one (see find_shortcut_conflict's own
+            # docstring) -- so here, unlike the banner above, a clash is
+            # refused outright rather than merely warned about: closing the
+            # window and reporting the failure only afterwards would look
+            # like a save that quietly did nothing.
+            holder = platform.current.find_shortcut_conflict(shortcut)
+            if holder is not None:
+                QMessageBox.warning(
+                    self,
+                    "Shortcut already in use",
+                    f"{shortcut} is already used by {holder} -- snipux cannot "
+                    "register it too. Choose a different combination.",
+                )
+                return
+        setup_desktop.save_shortcut(shortcut, self._config_dir)
         setup_desktop.save_after_capture(
             tokens.AFTER_CAPTURE[self._after_group.checkedId()][0], self._config_dir
         )

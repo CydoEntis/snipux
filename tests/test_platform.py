@@ -394,6 +394,115 @@ class TestWindowsPlatform:
         assert "Could not release" in result
 
 
+class TestFindShortcutConflict:
+    """SNX-93: the Windows answer to `setup_desktop.
+    find_shortcut_conflicts_named()`'s GNOME-only check, which Settings'
+    conflict banner and Save button both call on Windows instead. AC: the
+    Windows Snipping Tool's own Win+Shift+S is named without needing to
+    touch the DLL at all; anything else is only visible by actually
+    probing `RegisterHotKey`, which must always release what it just
+    grabbed rather than leaving it held.
+    """
+
+    _MOD_CONTROL = 0x0002
+    _MOD_ALT = 0x0001
+    _MOD_NOREPEAT = 0x4000
+    _VK_S = ord("S")
+    _PROBE_ID = 2
+
+    def test_the_snipping_tools_own_shortcut_is_named_without_touching_the_dll(
+        self, monkeypatch
+    ):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+
+        result = windows.WindowsPlatform().find_shortcut_conflict("Super+Shift+S")
+
+        assert result == "the Windows Snipping Tool"
+        assert user32.registered == []
+
+    def test_a_shortcut_another_application_holds_is_reported_by_name(self, monkeypatch):
+        modifiers = self._MOD_CONTROL | self._MOD_ALT | self._MOD_NOREPEAT
+        user32 = _FakeUser32Hotkey(clashing={(modifiers, self._VK_S)})
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+
+        result = windows.WindowsPlatform().find_shortcut_conflict("Control+Alt+S")
+
+        assert result == "another application"
+
+    def test_a_free_shortcut_is_reported_as_none(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+
+        result = windows.WindowsPlatform().find_shortcut_conflict("Control+Alt+S")
+
+        assert result is None
+
+    def test_probing_a_free_shortcut_releases_it_again(self, monkeypatch):
+        # A pure check, not a bind -- it must never actually hold the key.
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+
+        windows.WindowsPlatform().find_shortcut_conflict("Control+Alt+S")
+
+        assert [id_ for id_, _mod, _vk in user32.registered] == [self._PROBE_ID]
+        assert user32.unregistered == [self._PROBE_ID]
+
+    def test_the_probe_never_collides_with_snipuxs_own_held_registration(self, monkeypatch):
+        # The real, held registration uses _HOTKEY_ID (1); the probe must
+        # use a different id so checking some other candidate never
+        # unregisters the shortcut snipux is actually holding.
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_shortcut("Control+Alt+S")
+
+        platform_.find_shortcut_conflict("Shift+F9")
+
+        # Only the probe (id 2) was released; the real registration (id 1)
+        # was never touched.
+        assert user32.unregistered == [self._PROBE_ID]
+        assert platform_.registered_shortcut == "Control+Alt+S"
+
+    def test_the_shortcut_snipux_already_holds_is_not_a_conflict_with_itself(
+        self, monkeypatch
+    ):
+        # Without this check, probing the combination snipux is already
+        # bound to would find its own live registration and misreport it
+        # as taken by "another application".
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_shortcut("Control+Alt+S")
+        registered_before = list(user32.registered)
+
+        result = platform_.find_shortcut_conflict("Control+Alt+S")
+
+        assert result is None
+        # No probe registration was even attempted.
+        assert user32.registered == registered_before
+
+    def test_an_unmappable_key_is_reported_without_touching_the_dll(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+
+        result = windows.WindowsPlatform().find_shortcut_conflict(
+            "Control+Alt+PrintThisIsNotAKey"
+        )
+
+        assert result is None
+        assert user32.registered == []
+
+    def test_not_a_shortcut_at_all_is_reported_without_touching_the_dll(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+
+        result = windows.WindowsPlatform().find_shortcut_conflict("")
+
+        assert result is None
+        assert user32.registered == []
+
+
 class TestGuid:
     """`_guid()` -- the one piece of `_create_shortcut` that has nothing to
     do with COM itself, exercised directly rather than only indirectly
