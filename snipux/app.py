@@ -447,11 +447,23 @@ class AppController:
         # every caller here -- the tray's own Snip action, the --snip
         # transport listener wired below, and a forwarded request from a
         # second launch -- needs no mode of its own to pass in.
-        if self._overlay is not None and self._overlay.isVisible():
-            # A Snip request arrived mid-selection (tray double-click, or a
-            # forwarded request from a second launch while already
-            # selecting) — no-op rather than opening a second overlay on
-            # top of the first.
+        #
+        # SNX-62: this used to read `self._overlay.isVisible()` instead of
+        # just `is not None` -- but Copy and Save (before this ticket)
+        # flattened the image and toasted without ever dismissing the
+        # overlay, so `isVisible()` stayed True forever after either one and
+        # every later snip request was silently refused for the rest of the
+        # session. `_on_overlay_dismissed` below is now the single place
+        # `self._overlay` is cleared, driven by `OverlayWindow`'s own
+        # `on_dismissed` hook -- which fires exactly once, from
+        # `closeEvent`, for every way a session actually ends (Copy, Save,
+        # Enter, Esc) -- so this guard no longer depends on a widget
+        # property that a future dismissal path could leave stale again.
+        if self._overlay is not None:
+            # A Snip request arrived while an overlay is genuinely still
+            # open and in use (tray double-click, or a forwarded request
+            # from a second launch while already selecting) — no-op rather
+            # than opening a second overlay on top of the first.
             return
 
         try:
@@ -499,17 +511,31 @@ class AppController:
             # the initial capture above used, rather than an inert default
             # that could never actually re-capture anything.
             registry=self._registry,
+            # SNX-62: the one place `self._overlay` is cleared -- see
+            # `_on_overlay_dismissed` and the guard above.
+            on_dismissed=self._on_overlay_dismissed,
         )
         # Stored on self, not left as a local: a parentless widget is fair
         # game for Python's GC to collect out from under the still-open
         # window otherwise, a known PyQt foot-gun. OverlayWindow manages
         # its own dismissal (Esc, Enter-to-copy, the bar's Copy/Save) and
-        # closes itself; nothing here needs to be told when that happens,
-        # since the next start_capture() call just replaces this reference
-        # once .isVisible() reports the old one gone. open_overlay() already
-        # showed it (and any Wayland multi-monitor veil companions), so
-        # there's no separate .show() to call here.
+        # closes itself; `_on_overlay_dismissed` is what tells this
+        # controller that happened. open_overlay() already showed it (and
+        # any Wayland multi-monitor veil companions), so there's no
+        # separate .show() to call here.
         self._overlay = overlay
+
+    def _on_overlay_dismissed(self) -> None:
+        """Called once, by `OverlayWindow`'s own `on_dismissed` hook, the
+        moment the current overlay's session actually ends -- Copy, Save,
+        Enter, or Esc, every one of which routes through `closeEvent`
+        (SNX-62). Clearing `self._overlay` here, rather than leaving
+        `start_capture`'s guard to re-derive "is it still open" from
+        `isVisible()`, is what makes a stale overlay unable to wedge this
+        guard shut for the rest of the session: whatever ends the overlay,
+        this is the one path that lets the next Snip request through.
+        """
+        self._overlay = None
 
 
 def _become_resident(

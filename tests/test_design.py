@@ -1,3 +1,5 @@
+import inspect
+import re
 import subprocess
 import sys
 import zipfile
@@ -11,6 +13,14 @@ import snipux.design as design
 from snipux.design import tokens
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Matches a Color token assignment whose trailing comment names a percentage,
+# e.g. `ICON_ACTIVE_BG  = "#ffffff"   # at 16% alpha`. Capturing the
+# percentage lets the test check the sibling _ALPHA constant carries that
+# exact value, not merely that one exists.
+_ALPHA_COMMENT_RE = re.compile(
+    r"^\s*([A-Z][A-Z0-9_]*)\s*=\s*[\"'].*[\"'].*#.*?(\d+(?:\.\d+)?)%\s*alpha", re.MULTILINE
+)
 
 SOLID_ICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">'
@@ -103,6 +113,39 @@ class TestColor:
     def test_unknown_token_name_raises(self):
         with pytest.raises(ValueError):
             design.color("NOT_A_REAL_TOKEN")
+
+
+class TestTokenAlphaComments:
+    """SNX-60: a token whose comment names an alpha percentage but has no
+    matching `_ALPHA` constant is silently opaque -- `design.color()` has no
+    way to know the comment's prose was ever meant to apply. ICON_ACTIVE_BG
+    and ICON_HOVER_BG were exactly this bug. This scans the source of
+    tokens.py itself so a future colour added the same broken way fails
+    here, rather than only being caught by whoever happens to eyeball the
+    rendered button.
+    """
+
+    def test_every_alpha_named_in_a_comment_has_a_matching_alpha_constant(self):
+        source = inspect.getsource(tokens)
+        matches = _ALPHA_COMMENT_RE.findall(source)
+        assert matches, "expected to find at least one alpha-in-comment colour token"
+
+        missing = [name for name, _ in matches if not hasattr(tokens.Color, f"{name}_ALPHA")]
+        assert not missing, (
+            f"{missing} name an alpha in a comment but have no matching "
+            f"<name>_ALPHA constant for design.color() to apply"
+        )
+
+    def test_every_alpha_constant_matches_the_percentage_its_comment_names(self):
+        source = inspect.getsource(tokens)
+        matches = _ALPHA_COMMENT_RE.findall(source)
+
+        for name, percent in matches:
+            expected = float(percent) / 100
+            actual = getattr(tokens.Color, f"{name}_ALPHA")
+            assert actual == pytest.approx(expected), (
+                f"{name}_ALPHA is {actual}, but its comment names {percent}%"
+            )
 
 
 class _FakeFontDatabase:
