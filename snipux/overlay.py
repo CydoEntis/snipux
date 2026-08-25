@@ -1945,6 +1945,25 @@ class _CaptureModeRow(QPushButton):
         self._refresh(hovered=False)
         super().leaveEvent(event)
 
+    def sizeHint(self) -> QSize:
+        # QPushButton.sizeHint() sizes off `self.text()`/`self.icon()` --
+        # both unused here, since the glyph/label/note/check pairing lives
+        # in the child QHBoxLayout instead (see class docstring), so the
+        # base implementation falls back to a near-empty placeholder height
+        # regardless of the two-line label actually painted. That's what
+        # SNX-75 found: a row measured 48x12 against the ~45px a 12.5px
+        # name over an 11px note plus 8px top/bottom padding actually needs,
+        # so the popover's QVBoxLayout gave it almost no height and the
+        # whole menu collapsed -- the same class of bug SNX-59 fixed for
+        # `_PillButton` (see its own sizeHint docstring). The child layout
+        # already knows the true height, because it was built from
+        # MENU_ROW_PAD_V plus the icon/text column's own sizeHint, and the
+        # label/note sizeHints come from the fonts they actually render in.
+        return self.layout().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
     def paintEvent(self, event) -> None:
         if self._bg_alpha is None:
             return
@@ -2037,6 +2056,18 @@ class _DelayRow(QPushButton):
         self._hovered = False
         self.update()
         super().leaveEvent(event)
+
+    def sizeHint(self) -> QSize:
+        # Same fix as `_CaptureModeRow.sizeHint` and for the same reason:
+        # this is a QPushButton whose real content lives in a child layout,
+        # so the base sizeHint() -- keyed off the unused text()/icon() --
+        # under-reports it. The popover's own height is the sum of its
+        # rows' sizeHints (AC), so a delay row that still collapsed would
+        # undersize the popover even with every mode row already fixed.
+        return self.layout().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
 
     def paintEvent(self, event) -> None:
         if not self._hovered:
