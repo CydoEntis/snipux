@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable
@@ -2783,6 +2784,15 @@ class OverlayWindow(QWidget):
         # the selection, per the class docstring. Paint order is the list
         # order, mirroring shapes.py's render().
         self._marks: list[Shape] = []
+        # SNX-63: cached output of `_base_layer_image` -- `(key, image)`,
+        # or None before the first paint -- so a repaint triggered by
+        # something unrelated to any committed `ObscuringShape` (an
+        # in-progress pen stroke elsewhere, a resize drag, marching ants)
+        # does not redo blur/pixelate's scale-down-then-up sampling every
+        # single frame. See that method's own docstring for what `key`
+        # covers and why equality against it is enough to know the cached
+        # image is still correct.
+        self._base_layer_cache: tuple[tuple, QImage] | None = None
         # Redo stack (SNX-39): whole marks popped off the *end* of `_marks`
         # by undo(), in the order undo() popped them -- so redo() popping
         # this list's own end and appending back to `_marks` restores each
@@ -4236,11 +4246,14 @@ class OverlayWindow(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        # Layer 1: the frozen frame, full window. This is also what keeps
-        # the selection "undimmed and at 1:1": the scrim below punches a
-        # hole out of this exact drawImage call rather than compositing a
-        # second one, so the hole shows precisely these pixels, untouched.
-        painter.drawImage(QRectF(self.rect()), self._frame.image)
+        # Layer 1: the frozen frame, full window -- with every committed
+        # Blur/Pixelate mark's effect already baked in (SNX-63; see
+        # `_base_layer_image`), not the raw capture. This is also what
+        # keeps the selection "undimmed and at 1:1": the scrim below
+        # punches a hole out of this exact drawImage call rather than
+        # compositing a second one, so the hole shows precisely these
+        # pixels, obscuring marks included, untouched.
+        painter.drawImage(QRectF(self.rect()), self._base_layer_image())
         self._paint_scrim(painter)
         if self._selection is not None:
             # Ink before the stroke/handles, matching the design's layer
@@ -4263,6 +4276,102 @@ class OverlayWindow(QWidget):
             self._paint_dimension_chip(painter)
             self._paint_frozen_pill(painter)
         painter.end()
+
+    def _window_to_frame_scale(self) -> tuple[float, float]:
+        """Ratio of `self._frame.image`'s own pixel size to this widget's
+        window-local (logical) one, along each axis -- the same conversion
+        `Overlay._paint_magnifier` above already uses to map a window/
+        logical point into the frozen frame's own pixel space. Above 1 on
+        any display with a device pixel ratio above one, where the
+        captured frame carries more pixels than the window's logical size.
+
+        Measured against `self.rect()` rather than `self._frame.
+        logical_size` -- the two are set equal at construction (
+        `setGeometry`, `_finish_delayed_capture`), but `self.rect()` is
+        what Layer 1's own `drawImage(QRectF(self.rect()), ...)` scales
+        the frame against, so an obscuring mark's sampled rect has to
+        agree with exactly that source of truth, not a merely-equal
+        second one.
+        """
+        widget_rect = self.rect()
+        if widget_rect.width() <= 0 or widget_rect.height() <= 0:
+            return 1.0, 1.0
+        return (
+            self._frame.image.width() / widget_rect.width(),
+            self._frame.image.height() / widget_rect.height(),
+        )
+
+    def _base_layer_image(self) -> QImage:
+        """Layer 1's own source pixels: `self._frame.image` with every
+        committed `ObscuringShape` mark's blur/pixelate effect actually
+        baked in, in list order -- each one sampling the output of every
+        obscuring mark before it, the same left-to-right composition
+        `shapes.render()` uses for export, via repeated `apply()` calls
+        rather than `render()` itself (which would also flatten every
+        *non*-obscuring mark permanently into the image, losing the
+        live, undo-able painter drawing `_paint_marks` below still wants
+        for those).
+
+        Fixes SNX-63: `_paint_marks` used to skip every `ObscuringShape`
+        outright with a "later ticket" comment that no later ticket ever
+        picked up, so a committed blur/pixelate was invisible until
+        export. Baking it into Layer 1 here instead of painting it inside
+        `_paint_marks` is what keeps it aligned across a re-frame for
+        free -- this method never reads `_selection` at all, only
+        `_marks` and `_frame`, so the obscured patch sits over exactly
+        the pixels it was drawn on regardless of where the selection
+        rect (and its clip) currently is.
+
+        Cached against `key` -- each obscuring mark's class, geometry and
+        `strength`, plus the frame's own identity -- and only recomputed
+        when that key actually changes, per this ticket's "does not
+        visibly stall" acceptance criterion: a repaint triggered by
+        something unrelated (an in-progress stroke elsewhere, marching
+        ants, a resize drag) must not redo the scale-down/scale-up
+        sampling for every obscuring mark on every single frame. Keying
+        on `strength` rather than just object identity is also what
+        makes an already-committed mark's on-screen look track a change
+        to its own `strength` (e.g. a settings-tray slider write) on the
+        very next repaint, instead of it staying stuck at whatever this
+        method last cached.
+
+        A mark's `start`/`end` are in this widget's own window-local
+        coordinates (see the class docstring) and need converting into
+        `self._frame.image`'s own, larger-under-HiDPI pixel space before
+        `apply()` -- which expects both its rect and the image it samples
+        to share one coordinate space -- can sample the right pixels; see
+        `_window_to_frame_scale`.
+        """
+        obscuring = [shape for shape in self._marks if isinstance(shape, ObscuringShape)]
+        key = (
+            id(self._frame),
+            tuple(
+                (
+                    type(shape).__name__,
+                    shape.start.x(),
+                    shape.start.y(),
+                    shape.end.x(),
+                    shape.end.y(),
+                    shape.strength,
+                )
+                for shape in obscuring
+            ),
+        )
+        if self._base_layer_cache is not None and self._base_layer_cache[0] == key:
+            return self._base_layer_cache[1]
+
+        image = self._frame.image
+        if obscuring:
+            scale_x, scale_y = self._window_to_frame_scale()
+            for shape in obscuring:
+                image = replace(
+                    shape,
+                    start=QPointF(shape.start.x() * scale_x, shape.start.y() * scale_y),
+                    end=QPointF(shape.end.x() * scale_x, shape.end.y() * scale_y),
+                ).apply(image)
+
+        self._base_layer_cache = (key, image)
+        return image
 
     def _paint_marks(self, painter: QPainter) -> None:
         """The ink layer: `_marks`, clipped to the selection.
@@ -4287,16 +4396,16 @@ class OverlayWindow(QWidget):
                 step_counter += 1
                 shape.number = step_counter
             if isinstance(shape, ObscuringShape):
-                # Obscuring marks sample the frozen frame's own pixels
-                # rather than paint onto a painter (see
-                # shapes.ObscuringShape.draw()) -- compositing a committed
-                # one live against a resizable selection, on every repaint,
-                # is a later ticket's concern; render_selection() (export)
-                # still handles it correctly, via render()'s own
-                # special-casing. An *in-progress* blur/pixelate drag gets
-                # a lightweight marquee instead -- see
-                # `_paint_in_progress_shape` below -- so the tool this
-                # ticket wires up isn't silently invisible while dragging.
+                # Already baked into Layer 1 by `_base_layer_image` above,
+                # in list order alongside every other obscuring mark --
+                # painting it again here would double its effect, and
+                # `draw()` isn't a real implementation to call anyway (see
+                # its own docstring). An *in-progress* blur/pixelate drag
+                # still gets a lightweight marquee instead -- see
+                # `_paint_in_progress_shape` below -- baking a live preview
+                # into Layer 1 on every mouse-move would be the exact
+                # per-frame cost this ticket's performance criterion rules
+                # out.
                 continue
             shape.draw(painter)
         if self._in_progress_shape is not None:
