@@ -1399,6 +1399,28 @@ class SettingsTray(QWidget):
         self._hint.setText(design.tokens.TOOL_HINTS.get(self._tool, ""))
         self._refresh_readout_and_preview()
 
+    # -- fill ------------------------------------------------------------
+
+    def paintEvent(self, event) -> None:
+        # Same glass treatment as FloatingBar.paintEvent -- design.color's
+        # BAR_BG/BAR_BORDER already carry their alphas (93%/10%), painted
+        # here as a translucent fill+stroke rather than reduced widget
+        # opacity, so every child on top (swatches, slider, readout,
+        # preview dot, hint) stays fully opaque, per SNX-61.
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.Metric
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("BAR_BG"))
+        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.color("BAR_BORDER"))
+        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
+        painter.end()
+
     # -- state ---------------------------------------------------------
 
     @property
@@ -1677,6 +1699,26 @@ class BlurTray(QWidget):
 
         self._select_segment(self._blur_mode)
         self._refresh_readout()
+
+    # -- fill ------------------------------------------------------------
+
+    def paintEvent(self, event) -> None:
+        # Same panel treatment as SettingsTray.paintEvent -- see that
+        # method's docstring for why the fill/border are painted as a
+        # translucent brush rather than widget opacity, per SNX-61.
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.Metric
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("BAR_BG"))
+        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.color("BAR_BORDER"))
+        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
+        painter.end()
 
     # -- state ---------------------------------------------------------
 
