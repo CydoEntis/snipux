@@ -6,7 +6,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from PyQt6.QtGui import QColor, QIcon
+from PyQt6.QtCore import QRect
+from PyQt6.QtGui import QColor, QIcon, QImage, QPainter
 from PyQt6.QtWidgets import QApplication
 
 import snipux.design as design
@@ -313,3 +314,66 @@ class TestPackagedDistribution:
             else set()
         )
         assert expected <= wheel_contents
+
+
+class TestIconsAreOpticallyCentred:
+    """Every glyph has to sit in the middle of its own box.
+
+    They are drawn on a shared 24x24 viewBox, but nothing enforces that the
+    ink inside it is centred -- and one that is not reads as misaligned in a
+    row of buttons however carefully the buttons themselves are spaced. The
+    highlighter's ink was centred on y=15.05 of a box whose middle is 12,
+    which put it visibly low beside the pen.
+
+    Sizes are deliberately not asserted: a wide rectangle and a tall droplet
+    legitimately differ in aspect. Position does not.
+    """
+
+    # Generous enough for a glyph with a deliberate asymmetry (the eraser's
+    # tail sits below its body), tight enough that the highlighter's old
+    # 3.6-unit drop would not have passed.
+    CENTRE_TOLERANCE = 1.6
+
+    def _ink_centre(self, name: str) -> tuple[float, float]:
+        """The centre of the glyph's ink, as an offset from the box's own
+        centre, in percent of the box.
+        """
+        size = 96
+        image = QImage(size, size, QImage.Format.Format_ARGB32)
+        image.fill(0)
+        painter = QPainter(image)
+        design.icon(name, "#ffffff").paint(painter, QRect(0, 0, size, size))
+        painter.end()
+
+        xs, ys = [], []
+        for y in range(size):
+            for x in range(size):
+                if image.pixelColor(x, y).alpha() > 24:
+                    xs.append(x)
+                    ys.append(y)
+        assert xs, f"{name} rendered nothing"
+        cx = (min(xs) + max(xs) + 1) / 2 / size * 100 - 50
+        cy = (min(ys) + max(ys) + 1) / 2 / size * 100 - 50
+        return cx, cy
+
+    @pytest.mark.parametrize("name", sorted(tokens.TOOLS))
+    def test_every_tool_glyph_is_centred(self, name):
+        cx, cy = self._ink_centre(name)
+
+        assert abs(cx) <= self.CENTRE_TOLERANCE, f"{name} is {cx:+.1f}% off horizontally"
+        assert abs(cy) <= self.CENTRE_TOLERANCE, f"{name} is {cy:+.1f}% off vertically"
+
+    @pytest.mark.parametrize("name", ["undo", "redo", "trash", "copy", "save"])
+    def test_every_action_glyph_is_centred(self, name):
+        cx, cy = self._ink_centre(name)
+
+        assert abs(cx) <= self.CENTRE_TOLERANCE, f"{name} is {cx:+.1f}% off horizontally"
+        assert abs(cy) <= self.CENTRE_TOLERANCE, f"{name} is {cy:+.1f}% off vertically"
+
+    def test_the_highlighter_matches_the_pen_it_sits_beside(self):
+        # The specific complaint: side by side, one looked lower than the
+        # other.
+        _pen_x, pen_y = self._ink_centre("pen")
+        _hl_x, hl_y = self._ink_centre("highlighter")
+
+        assert abs(pen_y - hl_y) <= 1.0
