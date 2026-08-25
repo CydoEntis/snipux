@@ -703,7 +703,15 @@ class AppController:
         startup, so toggling it in Settings takes effect on the next snip
         instead of the next launch.
         """
-        if not setup_desktop.load_review_window():
+        # The chooser's own answer wins over the stored preference: the
+        # user said what should happen to *this* snip a moment ago, which
+        # is more current than a setting they configured once. None means
+        # they left it alone and Settings decides, as before.
+        outcome = self._overlay.outcome if self._overlay is not None else None
+        if outcome is not None:
+            if outcome != "review":
+                return
+        elif not setup_desktop.load_review_window():
             return
         # A copy of the image, not the overlay's own: the overlay is about
         # to close, and `rendered_image()` hands back a QImage backed by

@@ -35,6 +35,7 @@ from PyQt6.QtGui import (
     QTransform,
 )
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QApplication,
     QColorDialog,
     QHBoxLayout,
@@ -2293,6 +2294,154 @@ class _MenuSeparator(QWidget):
         painter.end()
 
 
+class _ChooserButton(QPushButton):
+    """One choice on the pre-snip chooser: glyph over label, checkable."""
+
+    _W, _H, _ICON = 78, 58, 18
+
+    def __init__(self, icon_name: str, label: str, tooltip: str, parent=None):
+        super().__init__(parent)
+        self._icon_name = icon_name
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tooltip)
+        self.setMouseTracking(True)
+        self.setFixedSize(self._W, self._H)
+
+        column = QVBoxLayout(self)
+        column.setContentsMargins(0, 7, 0, 7)
+        column.setSpacing(4)
+
+        self._glyph = QLabel()
+        self._glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._glyph.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        column.addWidget(self._glyph)
+
+        self._label = QLabel(label)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        font = QFont(design.font_families().ui)
+        size, weight = design.tokens.Font.TRAY_LABEL
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight(weight))
+        self._label.setFont(font)
+        column.addWidget(self._label)
+
+        self.toggled.connect(lambda _checked: self._refresh())
+        self._refresh()
+
+    def _refresh(self) -> None:
+        on = self.isChecked()
+        glyph = design.color("ACCENT") if on else design.color("ICON_IDLE")
+        self._glyph.setPixmap(design.icon(self._icon_name, glyph).pixmap(self._ICON, self._ICON))
+        self._label.setStyleSheet(
+            f"color: {(design.color('TEXT_PRIMARY') if on else design.color('TEXT_MUTED')).name()};"
+            " background: transparent;"
+        )
+        fill = "rgba(255,255,255,0.10)" if on else "transparent"
+        self.setStyleSheet(
+            f"QPushButton {{ border: none; border-radius: 9px; background: {fill}; }}"
+            "QPushButton:hover { background: rgba(255,255,255,0.06); }"
+        )
+
+
+class CaptureChooser(QWidget):
+    """The bar that appears *before* anything is selected: what to capture,
+    and what should happen to it afterwards.
+
+    A deliberate divergence from `docs/design/handoff-windows.md`, recorded
+    in `docs/design/pre-snip-chooser.md`. The handoff puts capture mode on
+    the floating bar, and that bar only exists once a selection does -- so
+    choosing "window" or "full screen" meant first dragging a region you did
+    not want, purely to reach the control that says you wanted something
+    else. Picking the mode is the first decision of a snip, so it is offered
+    first.
+
+    Two rows of choices, because a snip is two decisions: what to capture,
+    and where it should end up. The second is the same preference Settings
+    calls "After capture" -- surfaced here per-snip because it changes far
+    more often than a setting should have to.
+    """
+
+    modeSelected = pyqtSignal(str)
+    outcomeSelected = pyqtSignal(str)
+
+    _BG_ALPHA = 0.93
+    _RADIUS = 14
+
+    # (id, icon, label, tooltip) -- the three things a finished snip can do.
+    OUTCOMES = (
+        ("review", "image", "Review", "Open it in the review window to edit or save"),
+        ("clip", "copy", "Copy", "Straight to the clipboard, no window"),
+        ("file", "save", "Save", "Write it to disk and say nothing"),
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 8, 10, 8)
+        row.setSpacing(4)
+
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_buttons: dict[str, _ChooserButton] = {}
+        for label, icon_name, hint in design.tokens.CAPTURE_MODES:
+            button = _ChooserButton(icon_name, label, hint)
+            self._mode_group.addButton(button)
+            self._mode_buttons[label] = button
+            button.clicked.connect(lambda _c, m=label: self._pick_mode(m))
+            row.addWidget(button)
+
+        row.addSpacing(design.tokens.Metric.BAR_DIVIDER_GAP)
+        row.addWidget(_Divider(self))
+        row.addSpacing(design.tokens.Metric.BAR_DIVIDER_GAP)
+
+        self._outcome_group = QButtonGroup(self)
+        self._outcome_group.setExclusive(True)
+        self._outcome_buttons: dict[str, _ChooserButton] = {}
+        for identifier, icon_name, label, hint in self.OUTCOMES:
+            button = _ChooserButton(icon_name, label, hint)
+            self._outcome_group.addButton(button)
+            self._outcome_buttons[identifier] = button
+            button.clicked.connect(lambda _c, o=identifier: self._pick_outcome(o))
+            row.addWidget(button)
+
+    def set_mode(self, mode: str) -> None:
+        button = self._mode_buttons.get(mode)
+        if button is not None:
+            button.setChecked(True)
+
+    def set_outcome(self, outcome: str) -> None:
+        button = self._outcome_buttons.get(outcome)
+        if button is not None:
+            button.setChecked(True)
+
+    def _pick_mode(self, mode: str) -> None:
+        self.set_mode(mode)
+        self.modeSelected.emit(mode)
+
+    def _pick_outcome(self, outcome: str) -> None:
+        self.set_outcome(outcome)
+        self.outcomeSelected.emit(outcome)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        background = design.color("BAR_BG")
+        background.setAlphaF(self._BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(background)
+        painter.drawRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.color("BAR_BORDER"))
+        painter.drawRoundedRect(
+            QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self._RADIUS, self._RADIUS
+        )
+        painter.end()
+
+
 class CaptureModePopover(QWidget):
     """The overlay redesign's capture-mode popover: `tokens.CAPTURE_MODES`
     as a list of rows, a separator, then the delay row -- per
@@ -3378,6 +3527,21 @@ class OverlayWindow(QWidget):
         # it. See `ToolHintStrip`.
         self._tool_hint = ToolHintStrip(self)
         self._tool_hint.hide()
+
+        # The pre-snip chooser: what to capture, and what should happen to
+        # it. Shown while there is no selection, which is exactly when the
+        # floating bar is not -- the two never share the screen. See
+        # `CaptureChooser` for why this exists at all.
+        self._chooser = CaptureChooser(self)
+        self._chooser.hide()
+        self._chooser.modeSelected.connect(self._on_capture_mode_selected)
+        self._chooser.outcomeSelected.connect(self._on_outcome_selected)
+        # Seeded from the default rather than `_capture_mode`, which is set
+        # further down this constructor: the chooser is built alongside the
+        # other chrome, and the mode it should show is the same first entry
+        # that field is about to take.
+        self._chooser.set_mode(design.tokens.CAPTURE_MODES[0][0])
+        self._outcome: str | None = None
         self._blur_tray.blurModeChanged.connect(self._on_blur_mode_changed)
         self._blur_tray.strengthChanged.connect(self._on_blur_strength_changed)
 
@@ -3492,6 +3656,7 @@ class OverlayWindow(QWidget):
         self._selection = rect
         self._selection_path = path
         self._sync_bar_visibility()
+        self._sync_chooser_visibility()
         # Follows the selection onto its monitor, like every other piece of
         # chrome -- see `_reposition_close_button`.
         self._reposition_close_button()
@@ -3585,6 +3750,8 @@ class OverlayWindow(QWidget):
         """
         self._bar.select_tool(tool)
 
+    _CHOOSER_TOP_MARGIN = 28
+
     def _on_capture_mode_selected(self, mode: str) -> None:
         """Track the popover's chosen capture mode and update the chip's
         own label to match, per the reference's `{{ mode }}` binding on
@@ -3618,6 +3785,7 @@ class OverlayWindow(QWidget):
         self._region_drag_anchor = None
         self._capture_mode = mode
         self._bar.set_capture_mode(mode)
+        self._chooser.set_mode(mode)
 
         if self._delay != "Off":  # design.tokens.DELAYS[0]
             self._start_delayed_capture(mode)
@@ -3771,6 +3939,8 @@ class OverlayWindow(QWidget):
         # which likewise clears on a miss rather than leaving a stale rect.
         self.set_selection(None)
 
+        self._sync_chooser_visibility()
+
     def _confirm_window_pick(self, pos: QPointF) -> None:
         """Snap `_selection` to the window under `pos` (this widget's own
         window-local coordinates) and disarm picking. Only ever reached
@@ -3832,6 +4002,8 @@ class OverlayWindow(QWidget):
         """
         self._picking_freeform = True
         self.set_selection(None)
+
+        self._sync_chooser_visibility()
 
     def _start_freeform_drag(self, pos: QPointF) -> None:
         """Begin tracing a lasso at `pos` (window coordinates). Only ever
@@ -3963,6 +4135,48 @@ class OverlayWindow(QWidget):
 
     def _on_delay_changed(self, delay: str) -> None:
         self._delay = delay
+
+    @property
+    def outcome(self) -> str | None:
+        """What the user asked to happen to this snip, or None if they did
+        not say and the stored preference should stand.
+        """
+        return self._outcome
+
+    def _on_outcome_selected(self, outcome: str) -> None:
+        self._outcome = outcome
+
+    def _sync_chooser_visibility(self) -> None:
+        """The chooser is up whenever there is nothing selected yet.
+
+        That is the whole of its rule: it answers "what am I capturing",
+        which stops being a question the moment something is. It never
+        shares the screen with the floating bar, which has the opposite
+        condition.
+        """
+        # Gone once a mode that needs the whole screen is armed: Window
+        # previews whatever is under the cursor and Freeform is traced
+        # anywhere, so a bar sitting across the top would be a band of
+        # screen those modes cannot reach. By then the choice it exists to
+        # offer has been made.
+        if (
+            self._selection is not None
+            or self._picking_window
+            or self._picking_freeform
+            or not self.isVisible()
+        ):
+            self._chooser.hide()
+            return
+        size = self._chooser.sizeHint()
+        bounds = self._chrome_bounds()
+        self._chooser.setGeometry(
+            round(bounds.center().x() - size.width() / 2),
+            round(bounds.top() + self._CHOOSER_TOP_MARGIN),
+            size.width(),
+            size.height(),
+        )
+        self._chooser.show()
+        self._chooser.raise_()
 
     def _sync_bar_visibility(self) -> None:
         """Show/hide and reposition the floating bar to match `_selection`.
@@ -4447,6 +4661,7 @@ class OverlayWindow(QWidget):
         # button to a stale size.
         self._reposition_close_button()
         self._close_button.show()
+        self._sync_chooser_visibility()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
@@ -4458,6 +4673,7 @@ class OverlayWindow(QWidget):
         self._toast.hide()
         self._hud.hide()
         self._close_button.hide()
+        self._chooser.hide()
 
     def closeEvent(self, event) -> None:
         # Transparent before the unmap, never after. Mutter stages an unmap

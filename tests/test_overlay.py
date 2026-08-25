@@ -804,7 +804,13 @@ class TestOverlayWindow:
         overlay = OverlayWindow(frame)
         window_rect = QRect(overlay.rect())
 
+        # Visible children only: chrome that is currently hidden (the
+        # pre-snip chooser and its own labels, before it has been shown and
+        # laid out) carries default geometry and paints nothing, so its
+        # size says nothing about what covers the scrim.
         for child in overlay.findChildren(QWidget):
+            if not child.isVisibleTo(overlay):
+                continue
             assert not child.geometry().contains(window_rect), child
 
 
@@ -7115,3 +7121,100 @@ class TestOverlayIsRevealedNotAnimatedOpen:
         overlay._reveal()
 
         assert not overlay.isVisible()
+
+
+class TestCaptureChooser:
+    """The pre-snip chooser: what to capture, and what should happen to it,
+    asked before anything is selected.
+
+    A deliberate divergence from the handoff -- see
+    docs/design/pre-snip-chooser.md. The handoff puts capture mode on the
+    floating bar, which only exists once a selection does, so choosing
+    "window" meant first dragging a region you did not want purely to reach
+    the control that says you wanted something else.
+    """
+
+    def _overlay(self, size=(1200, 800)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_it_is_up_before_anything_is_selected(self):
+        overlay = self._overlay()
+
+        assert overlay._chooser.isVisibleTo(overlay)
+
+    def test_it_offers_every_capture_mode(self):
+        overlay = self._overlay()
+
+        assert list(overlay._chooser._mode_buttons) == [
+            label for label, _icon, _hint in tokens.CAPTURE_MODES
+        ]
+
+    def test_it_stands_down_once_there_is_a_selection(self):
+        # It answers "what am I capturing", which stops being a question
+        # the moment something is -- and the floating bar has the opposite
+        # condition, so the two never share the screen.
+        overlay = self._overlay()
+
+        overlay.set_selection(QRect(100, 100, 300, 200))
+
+        assert not overlay._chooser.isVisibleTo(overlay)
+        assert overlay._bar.isVisibleTo(overlay)
+
+    def test_it_comes_back_when_the_selection_is_cleared(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 300, 200))
+
+        overlay.set_selection(None)
+
+        assert overlay._chooser.isVisibleTo(overlay)
+
+    def test_picking_a_mode_sets_it(self):
+        overlay = self._overlay()
+
+        overlay._chooser._pick_mode("Full screen")
+
+        assert overlay._capture_mode == "Full screen"
+
+    def test_the_bars_chip_stays_in_step_with_it(self):
+        overlay = self._overlay()
+
+        overlay._chooser._pick_mode("Full screen")
+
+        assert overlay._bar._chip._text_label.text() == "Full screen"
+
+    def test_it_stands_aside_for_a_mode_that_needs_the_whole_screen(self):
+        # Window previews whatever is under the cursor; a bar across the top
+        # would be a band those modes cannot reach.
+        overlay = self._overlay()
+
+        overlay._enter_freeform_mode()
+
+        assert not overlay._chooser.isVisibleTo(overlay)
+
+    def test_it_sits_at_the_top_of_the_monitor_not_the_desktop(self):
+        overlay = self._overlay()
+
+        chooser = overlay._chooser.geometry()
+        bounds = overlay._chrome_bounds()
+        assert chooser.top() >= bounds.top()
+        assert abs(chooser.center().x() - bounds.center().x()) <= 2
+
+    def test_the_outcome_is_unset_until_the_user_says(self):
+        # None means "Settings decides", which is what an untouched chooser
+        # should leave in place.
+        overlay = self._overlay()
+
+        assert overlay.outcome is None
+
+    @pytest.mark.parametrize("outcome", ["review", "clip", "file"])
+    def test_picking_an_outcome_records_it(self, outcome):
+        overlay = self._overlay()
+
+        overlay._chooser._pick_outcome(outcome)
+
+        assert overlay.outcome == outcome

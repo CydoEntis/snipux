@@ -30,6 +30,8 @@ the capture backends.
 snipux/
   capture.py    backends + virtual-desktop frame; the only platform-specific code
   overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
+                (its pre-snip chooser diverges from the handoff -- see
+                 docs/design/pre-snip-chooser.md)
   shapes.py     annotation data model and the flattening renderer
   settings.py   the Settings window (Qt in front of setup_desktop.py)
   review.py     the optional post-capture review window; Annotate reuses the bar
