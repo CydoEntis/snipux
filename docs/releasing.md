@@ -47,3 +47,47 @@ Bump `version` in `pyproject.toml` (and `__version__` in
 `snipux/__init__.py`, which is not read from it). PyPI refuses to accept a
 second upload of a version number that has already been published, even if
 the previous upload was later deleted.
+
+# Releasing the Windows installer
+
+SNX-96 already produces a standalone `snipux.exe` that runs with no Python
+installed. SNX-97 wraps that one file in a real installer, so a user does not
+also need to know where to put it. This needs a Windows machine (or a VM) with
+Python 3.10+, pip, and [Inno Setup 6](https://jrsoftware.org/isdl.php)
+(`winget install JRSoftware.InnoSetup`) all on PATH — the packaging equivalent
+of the PyPI account this page's other half assumes.
+
+```powershell
+powershell -File packaging\windows\build.ps1
+```
+
+This one command does both halves: builds `dist\snipux.exe` with PyInstaller
+(`packaging\windows\snipux.spec`), then feeds it to Inno Setup
+(`packaging\windows\snipux.iss`) to produce `dist\snipux-setup.exe`. The
+version reported in the installer, and later in Add/Remove Programs, is read
+straight out of `pyproject.toml` — the same `version` bumped above, not a
+second place to remember.
+
+What running `snipux-setup.exe` actually does:
+
+- Installs to the user's own `%LocalAppData%\Programs\snipux` by default, no
+  administrator prompt — Inno's `PrivilegesRequired=lowest` combined with
+  `{autopf}` in `snipux.iss`. Choosing a machine-wide Program Files install
+  from the installer's UI (or `/ALLUSERS` on its command line) is still
+  possible, and is the only case that prompts for elevation.
+- Registers snipux in Add/Remove Programs with the app icon and the version
+  above. A fixed `AppId` (a GUID baked into `snipux.iss`, never regenerated
+  release to release) is what makes installing a newer version overwrite the
+  old one's files and reuse that one entry, rather than leaving two snipux
+  entries side by side.
+- Places the exe and nothing else. It deliberately does not create a Start
+  Menu shortcut, a Startup entry, or a hotkey binding of its own — snipux
+  already does all three itself, the first time it actually runs (SNX-95),
+  and the installer would only be duplicating that. The installer does launch
+  snipux once after a finished install so that first run actually happens
+  without the user having to go find the exe themselves.
+- On uninstall, runs `snipux.exe --remove` (undoing everything the first
+  launch above set up) before deleting the exe itself, after first killing
+  any snipux process still running — both so the exe isn't locked and so the
+  `RegisterHotKey` registration a running instance holds is released. Nothing
+  snipux ever wrote is left behind.
