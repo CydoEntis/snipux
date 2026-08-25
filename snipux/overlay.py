@@ -3132,6 +3132,14 @@ class OverlayWindow(QWidget):
             else [QRectF(frame.logical_origin, frame.logical_size)]
         )
 
+        # Deliberately NOT X11BypassWindowManagerHint, tempting though it
+        # is: an override-redirect window is not the window manager's to
+        # stage, so it would skip Mutter's scale-up-on-map animation --
+        # which over a frozen desktop reads as a page expanding across the
+        # area being captured. Measured, though, such a window never becomes
+        # `_NET_ACTIVE_WINDOW`: the WM hands focus to something else, and
+        # this window lives on keyboard input. A cosmetic animation is worth
+        # far less than Esc, Enter and every tool letter working.
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         )
