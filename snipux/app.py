@@ -289,6 +289,10 @@ def main(
         # wasn't already running.
         if transport is None:
             transport = QLocalSocketTransport()
+        # Before try_claim(), never after -- see `_ensure_qapplication`.
+        # This is the path that becomes resident when nothing is running
+        # yet, so it needs the same ordering `run_resident_app` does.
+        _ensure_qapplication()
         if transport.try_claim():
             if registry is None:
                 registry = build_default_registry()
@@ -356,13 +360,23 @@ class QLocalSocketTransport(Transport):
     alongside `QtCore`/`QtGui`/`QtWidgets`, the same way capture.py already
     reaches `QtGui` without declaring it separately.
 
-    The protocol is deliberately minimal: a successful connection to the
-    server *is* the capture request — there is exactly one kind of request
-    today, so no framed message needs parsing.
+    The protocol is one byte: `_REQUEST_BYTE` means "take a snip", and a
+    connection that sends nothing is only asking whether anyone is home.
+
+    That distinction is load-bearing, not ceremony. `try_claim()` probes by
+    connecting, so when a bare connection *was* the request, every liveness
+    check fired a capture on the resident -- including `--snip`'s own probe
+    moments before its real request, which is why one keypress used to
+    deliver two. Nothing worse than a duplicate happened only because
+    `start_capture` ignores a request while an overlay is already open.
     """
 
     SERVER_NAME = "snipux-resident"
     _CONNECT_TIMEOUT_MS = 200
+    _REQUEST_BYTE = b"S"
+    # Long enough that a request is never lost to scheduling, short enough
+    # that a probe (which sends nothing) doesn't hold the handler up.
+    _READ_TIMEOUT_MS = 200
 
     def __init__(self, server_name: str = SERVER_NAME):
         self._server_name = server_name
@@ -400,7 +414,13 @@ class QLocalSocketTransport(Transport):
     def send_snip_request(self) -> None:
         socket = QLocalSocket()
         socket.connectToServer(self._server_name)
-        socket.waitForConnected(self._CONNECT_TIMEOUT_MS)
+        if not socket.waitForConnected(self._CONNECT_TIMEOUT_MS):
+            return
+        socket.write(self._REQUEST_BYTE)
+        # Flushed before disconnecting: this process exits the moment
+        # `main()` returns, and an unflushed byte dies with it -- the
+        # request would be sent, accepted, and silently empty.
+        socket.waitForBytesWritten(self._CONNECT_TIMEOUT_MS)
         socket.disconnectFromServer()
 
     def listen(self, on_request: Callable[[], None]) -> None:
@@ -409,9 +429,17 @@ class QLocalSocketTransport(Transport):
 
         def _accept() -> None:
             connection = self._server.nextPendingConnection()
-            if connection is not None:
-                connection.disconnectFromServer()
-            on_request()
+            if connection is None:
+                return
+            # A probe sends nothing and simply times out here, which is
+            # exactly how it stays distinguishable from a request.
+            requested = (
+                connection.waitForReadyRead(self._READ_TIMEOUT_MS)
+                and connection.readAll().data().startswith(self._REQUEST_BYTE)
+            )
+            connection.disconnectFromServer()
+            if requested:
+                on_request()
 
         self._server.newConnection.connect(_accept)
 
@@ -693,6 +721,49 @@ class AppController:
         self._overlay = None
 
 
+# The process's QApplication, kept alive here for as long as the process
+# lives. PyQt collects a QApplication nothing holds a Python reference to,
+# exactly like the parentless widgets elsewhere in this file -- and a
+# collected QApplication takes the thread's event dispatcher with it, which
+# is precisely the state `_ensure_qapplication` exists to avoid. A local
+# variable is not enough: the one in `run_resident_app` goes out of scope
+# between building the app and claiming the socket.
+_QAPPLICATION: QApplication | None = None
+
+
+def _ensure_qapplication() -> QApplication:
+    """The process's `QApplication`, building one if there isn't one yet.
+
+    Must be called before `Transport.try_claim()`, never after. `try_claim`
+    builds a `QLocalServer` and starts it listening, and Qt gives a socket
+    notifier created with no `QApplication` alive a thread with no event
+    dispatcher. Constructing the `QApplication` afterwards does not adopt
+    it -- it orphans it, prints "QSocketNotifier: current thread's event
+    dispatcher has already been destroyed", and `newConnection` never fires
+    again for the life of the process.
+
+    That is not a cosmetic warning. It meant the resident accepted no
+    forwarded requests at all, so `snipux --snip` -- and therefore the
+    keyboard shortcut, its only real caller -- did nothing, silently and
+    always, while the tray's own Snip item (a direct call, no socket) kept
+    working and made it look like the shortcut alone was cursed.
+
+    Reuses an existing instance rather than constructing unconditionally:
+    PyQt raises on a second QApplication in one process, which is exactly
+    what a test suite's shared fixture provides.
+    """
+    global _QAPPLICATION
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    # Held module-level, not merely returned: a caller that drops the
+    # returned value -- which `run_resident_app` legitimately does, having
+    # no further use for it before `_become_resident` asks again -- would
+    # otherwise let it be collected between here and `try_claim()`.
+    _QAPPLICATION = app
+    return app
+
+
 def _become_resident(
     registry: BackendRegistry,
     transport: Transport,
@@ -715,14 +786,9 @@ def _become_resident(
     primary shows the overlay immediately, the same as if it had forwarded
     to an instance that was already up.
     """
-    # Reuse an already-running instance rather than unconditionally
-    # constructing one: PyQt raises if a second QApplication is built in a
-    # process that already has one, which is exactly the situation a test
-    # suite's shared, module-scoped QApplication fixture creates. Mirrors
-    # the same None-instance check the tests' own `qapp` fixture uses.
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
+    # Already built by whoever called `try_claim()` -- see
+    # `_ensure_qapplication`, which must run before the claim, not after.
+    app = _ensure_qapplication()
 
     controller = AppController(registry, transport)
     if start_capture_immediately:
@@ -744,6 +810,9 @@ def run_resident_app(
         registry = build_default_registry()
     if transport is None:
         transport = QLocalSocketTransport()
+
+    # Before try_claim(), never after -- see `_ensure_qapplication`.
+    _ensure_qapplication()
 
     if not transport.try_claim():
         transport.send_snip_request()
