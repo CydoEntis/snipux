@@ -188,17 +188,29 @@ def _patch_win32_dll(monkeypatch, user32, gdi32):
 class _FakeUser32Windows:
     """Stand-in for `ctypes.windll.user32`, covering what
     `WindowsWindowGeometryProvider` calls: `EnumWindows`, `IsWindowVisible`,
-    `IsIconic`, `GetWindowRect`, `GetWindowTextLengthW`, `GetWindowTextW`.
+    `IsIconic`, `GetWindowRect`, `GetWindowTextLengthW`, `GetWindowTextW`,
+    `GetClassNameW`, `MonitorFromWindow`, `GetMonitorInfoW`.
 
     `windows` is the list of `hwnd`/`visible`/`iconic`/`rect`/`title` dicts
     `EnumWindows` should hand to the caller's callback, one at a time, in
     the order given -- tests put them in the Z-order (topmost first) the
-    real API would visit them in.
+    real API would visit them in. `class_name` is optional and defaults to
+    `""` (an ordinary application window, never one of
+    `WindowsWindowGeometryProvider._SHELL_CLASS_NAMES`).
+
+    `monitors` maps a `hwnd` to the `(left, top, right, bottom)` rect of
+    the monitor it sits on (SNX-94's "larger than its own monitor" check)
+    -- a `hwnd` missing from it gets a monitor large enough to contain any
+    rect a test doesn't care about, so every test written before that
+    check existed keeps working unchanged.
     """
 
-    def __init__(self, windows):
+    _DEFAULT_MONITOR_RECT = (-1_000_000, -1_000_000, 1_000_000, 1_000_000)
+
+    def __init__(self, windows, monitors=None):
         self._windows = {w["hwnd"]: w for w in windows}
         self._order = [w["hwnd"] for w in windows]
+        self._monitors = monitors or {}
 
     def EnumWindows(self, callback, lparam):
         for hwnd in self._order:
@@ -224,6 +236,24 @@ class _FakeUser32Windows:
     def GetWindowTextW(self, hwnd, buffer, _size):
         buffer.value = self._windows[hwnd]["title"]
         return len(buffer.value)
+
+    def GetClassNameW(self, hwnd, buffer, _size):
+        class_name = self._windows[hwnd].get("class_name", "")
+        buffer.value = class_name
+        return len(class_name)
+
+    def MonitorFromWindow(self, hwnd, _flags):
+        # The real API returns an opaque HMONITOR; the hwnd itself is a
+        # perfectly good, distinguishable stand-in since this fake never
+        # has two windows share a monitor rect by aliasing handles.
+        return hwnd
+
+    def GetMonitorInfoW(self, hmonitor, info_ref):
+        left, top, right, bottom = self._monitors.get(hmonitor, self._DEFAULT_MONITOR_RECT)
+        target = ctypes.cast(info_ref, ctypes.POINTER(capture._MonitorInfo)).contents
+        target.rcMonitor.left, target.rcMonitor.top = left, top
+        target.rcMonitor.right, target.rcMonitor.bottom = right, bottom
+        return 1
 
 
 class _FakeDwmapi:
@@ -1586,6 +1616,128 @@ class TestWindowsWindowGeometryProvider:
         windows = capture.WindowsWindowGeometryProvider().list_windows()
 
         assert [title for title, _rect in windows] == ["Visible"]
+
+    def test_list_windows_skips_the_shells_desktop_and_workspace_windows(
+        self, monkeypatch
+    ):
+        # SNX-94: Progman/WorkerW are real, visible, non-minimised
+        # top-level windows -- small ones here, deliberately well within
+        # their monitor, to prove class name alone (not size) is what
+        # excludes them.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows([
+            {"hwnd": 1, "visible": True, "iconic": False, "class_name": "Progman",
+             "rect": (0, 0, 50, 50), "title": ""},
+            {"hwnd": 2, "visible": True, "iconic": False, "class_name": "WorkerW",
+             "rect": (0, 0, 50, 50), "title": ""},
+            {"hwnd": 3, "visible": True, "iconic": False, "class_name": "Notepad",
+             "rect": (0, 0, 50, 50), "title": "Notepad"},
+        ])
+        dwmapi = _FakeDwmapi(
+            frame_bounds={1: (0, 0, 50, 50), 2: (0, 0, 50, 50), 3: (0, 0, 50, 50)}
+        )
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert [title for title, _rect in windows] == ["Notepad"]
+
+    def test_list_windows_skips_the_taskbar(self, monkeypatch):
+        # SNX-94's other named case: hovering the taskbar must not offer
+        # it as a window either. Shell_SecondaryTrayWnd covers a
+        # secondary monitor's taskbar, the same way Shell_TrayWnd covers
+        # the primary one.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows([
+            {"hwnd": 1, "visible": True, "iconic": False, "class_name": "Shell_TrayWnd",
+             "rect": (0, 1040, 1920, 1080), "title": ""},
+            {"hwnd": 2, "visible": True, "iconic": False,
+             "class_name": "Shell_SecondaryTrayWnd",
+             "rect": (1920, 1040, 3840, 1080), "title": ""},
+            {"hwnd": 3, "visible": True, "iconic": False, "class_name": "Notepad",
+             "rect": (0, 0, 50, 50), "title": "Notepad"},
+        ])
+        dwmapi = _FakeDwmapi(
+            frame_bounds={
+                1: (0, 1040, 1920, 1080), 2: (1920, 1040, 3840, 1080), 3: (0, 0, 50, 50),
+            }
+        )
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert [title for title, _rect in windows] == ["Notepad"]
+
+    def test_list_windows_drops_a_window_larger_than_its_monitor(self, monkeypatch):
+        # SNX-94: probing empty desktop returned a rect the size of the
+        # whole virtual desktop (every monitor combined), as though it
+        # were a window -- this is the generic, class-name-independent
+        # guard against exactly that, in case something other than
+        # Progman/WorkerW is ever sized past its own monitor.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False, "class_name": "",
+              "rect": (0, 0, 5120, 2880), "title": "Spans every monitor"}],
+            monitors={1: (0, 0, 1920, 1080)},
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (0, 0, 5120, 2880)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert windows == []
+
+    def test_list_windows_keeps_a_genuine_full_screen_window(self, monkeypatch):
+        # The counterpart to the previous test: a window exactly the size
+        # of the monitor it's on (a borderless-fullscreen game, say) is
+        # not "larger than" that monitor and must still be offered.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False, "class_name": "",
+              "rect": (0, 0, 1920, 1080), "title": "Fullscreen game"}],
+            monitors={1: (0, 0, 1920, 1080)},
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (0, 0, 1920, 1080)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert windows == [("Fullscreen game", QRectF(0, 0, 1920, 1080))]
+
+    def test_window_at_returns_none_when_only_the_desktop_is_under_the_point(
+        self, monkeypatch
+    ):
+        # The actual bug report: hovering an empty area of the desktop
+        # must offer no window, not the whole virtual desktop.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False, "class_name": "Progman",
+              "rect": (0, 0, 5120, 2880), "title": ""}]
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (0, 0, 5120, 2880)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        assert capture.WindowsWindowGeometryProvider().window_at(QPointF(2500, 1400)) is None
+
+    def test_window_at_picks_an_ordinary_window_on_a_negative_coordinate_monitor(
+        self, monkeypatch
+    ):
+        # A monitor placed above/left of the primary has a negative
+        # origin; an ordinary window on it must still be picked, and must
+        # not be mistaken for spanning past its own (also
+        # negative-origin) monitor.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False, "class_name": "Notepad",
+              "rect": (-1920, 0, -920, 1080), "title": "Notepad"}],
+            monitors={1: (-1920, 0, 0, 1080)},
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (-1920, 0, -920, 1080)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        rect = capture.WindowsWindowGeometryProvider().window_at(QPointF(-1500, 500))
+
+        assert rect == QRectF(-1920, 0, 1000, 1080)
 
     def test_window_at_returns_the_topmost_of_several_overlapping_windows(
         self, monkeypatch

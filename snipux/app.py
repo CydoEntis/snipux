@@ -48,6 +48,7 @@ from snipux.overlay import (
     open_overlay,
 )
 from snipux import platform, setup_desktop
+from snipux.platform.windows import HotkeyEventFilter
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
 
@@ -271,23 +272,24 @@ def main(
         # resident path, this never touches capture backends or a display,
         # so it's handled before either is ever built.
         #
-        # Calls setup_desktop directly rather than through the platform
-        # seam (snipux/platform/) on purpose: setup_desktop's own
-        # gsettings/`.desktop` steps already degrade to a reported note
-        # when they can't run (no gsettings, a read-only directory) rather
-        # than raising, which is what lets `--setup` run harmlessly during
-        # Windows-hosted development per CLAUDE.md. The platform seam's
-        # Windows/macOS implementations raise instead -- correct once they
-        # exist for real, but routing this call through them today would
-        # turn every `--setup` run during Windows development into a
-        # crash, which is a regression this ticket must not introduce.
-        return setup_desktop.run_setup(shortcut=args.shortcut)
+        # Routed through the platform seam (snipux/platform/) rather than
+        # calling setup_desktop directly: that used to be the only real
+        # implementation (Windows/macOS both raised), so going through the
+        # seam would have turned every `--setup` run during Windows-hosted
+        # development into a crash. Windows now has its own real
+        # implementation (SNX-92), so this reaches it instead of writing
+        # meaningless `.desktop`/gsettings state under fake XDG paths on a
+        # non-Linux host. macOS still raises `UnimplementedPlatformError`
+        # naming itself and the operation -- the documented, intended
+        # behaviour for a platform seam with nothing behind it yet (see
+        # `snipux/platform/__init__.py`), not a regression this introduces.
+        return platform.current.install_desktop_integration(shortcut=args.shortcut)
 
     if args.remove:
         # Same reasoning as --setup above: --remove only deletes what
         # --setup wrote, so it has no more use for a registry or a display
         # than --setup did.
-        return setup_desktop.run_remove()
+        return platform.current.remove_desktop_integration()
 
     if args.snip:
         # Forward to an already-resident instance when there is one. When
@@ -504,6 +506,10 @@ class AppController:
         # fair game for the GC while its window is still on screen.
         self._settings: SettingsDialog | None = None
         self._reviews: list[ReviewWindow] = []
+        # Set by install_hotkey_listener(), not here -- see its own
+        # docstring for why registering the real Windows hotkey is kept out
+        # of __init__.
+        self.hotkey_filter: HotkeyEventFilter | None = None
 
         # Stock Ubuntu GNOME shows no legacy tray icon at all without the
         # AppIndicator extension: calling show() unconditionally left the
@@ -576,29 +582,81 @@ class AppController:
     def _on_settings_saved(self) -> None:
         """Apply what Settings just wrote.
 
-        The shortcut has to be re-bound through gsettings, not merely
-        remembered -- the stored value is what survives the next `--setup`,
-        but GNOME only knows about the binding it was told. Calls
-        setup_desktop directly rather than through the platform seam, the
-        same reasoning as `main()`'s `--setup`/`--remove` above: this must
-        keep degrading harmlessly (a printed note, not an exception) during
-        Windows-hosted development until a real Windows implementation of
-        `platform.bind_shortcut()` exists. Reported to the tray (or stdout)
-        rather than silently, since rebinding is exactly the operation
-        whose silent failure this whole feature exists to get away from.
+        The shortcut has to be re-bound, not merely remembered -- the
+        stored value is what survives the next `--setup` (Linux) or process
+        restart (Windows), but neither GNOME nor a still-running
+        `RegisterHotKey` registration knows about a change to it on their
+        own. On Windows this goes through the platform seam for real
+        (SNX-91's own acceptance criterion: changing the shortcut re-registers
+        it without restarting the app) -- `HotkeyEventFilter.is_available()`
+        is what tells the two paths apart, the same capability check
+        `install_hotkey_listener()` uses, rather than this method branching
+        on `sys.platform` itself. On Linux this still calls setup_desktop
+        directly rather than through the seam, the same reasoning as
+        `main()`'s `--setup`/`--remove` above: harmless (a printed note, not
+        an exception) during Windows-hosted development.
         """
-        exec_path = setup_desktop.find_console_script()
-        if exec_path is None:
-            message = (
-                "Settings saved, but the snipux console script could not be "
-                "found, so the shortcut was not re-bound."
-            )
+        if HotkeyEventFilter.is_available():
+            message = platform.current.bind_shortcut()
         else:
-            message = setup_desktop.bind_gnome_shortcut(exec_path)
+            exec_path = setup_desktop.find_console_script()
+            if exec_path is None:
+                message = (
+                    "Settings saved, but the snipux console script could not be "
+                    "found, so the shortcut was not re-bound."
+                )
+            else:
+                message = setup_desktop.bind_gnome_shortcut(exec_path)
+        self._report_shortcut(message)
+
+    def _report_shortcut(self, message: str) -> None:
+        """Show a bind/rebind report to the user -- the tray (or stdout with
+        no tray available), same as every other place this controller
+        reports something the user didn't directly ask to see mid-flow.
+        Shared by `_on_settings_saved()` and `install_hotkey_listener()`
+        rather than each inlining the same tray-or-print check.
+        """
         if self._tray_available:
             self._tray_icon.showMessage("snipux", message, QSystemTrayIcon.MessageIcon.Information)
         else:
             print(message)
+
+    def install_hotkey_listener(self) -> None:
+        """Register the Windows global capture hotkey (defaulting to
+        Ctrl+Alt+S) and start listening for it (SNX-91). A no-op everywhere
+        else -- GNOME already owns the keybinding on Linux and invokes
+        `snipux --snip` itself, so there is nothing here for this process to
+        listen for.
+
+        Called once by `app.py`'s `_become_resident()`, for the process
+        that is actually going to stay resident -- not from `__init__`,
+        which every test in test_app.py constructs directly. `RegisterHotKey`
+        is a real OS-level registration for as long as this call holds it
+        (the whole point, per CLAUDE.md and the ticket: the resident process
+        owns the key while it runs), so it belongs to the one process that
+        is really going to run, not to every `AppController` a test happens
+        to build.
+
+        A clash with another application's own hotkey -- the one failure
+        mode `RegisterHotKey` documents -- is reported by name rather than
+        swallowed; `platform.current.registered_shortcut` staying `None`
+        afterwards is how that is told apart from success without parsing
+        the report string (see `WindowsPlatform.bind_shortcut`).
+        """
+        if not HotkeyEventFilter.is_available():
+            return
+
+        self.hotkey_filter = HotkeyEventFilter(self.start_capture)
+        QApplication.instance().installNativeEventFilter(self.hotkey_filter)
+        # Best-effort: Windows already releases the registration itself the
+        # moment this process's thread goes away, clean exit or not (see
+        # WindowsPlatform.unbind_shortcut), so this is tidiness for a clean
+        # Quit, not the mechanism a restart's re-registration depends on.
+        QApplication.instance().aboutToQuit.connect(platform.current.unbind_shortcut)
+
+        message = platform.current.bind_shortcut()
+        if platform.current.registered_shortcut is None:
+            self._report_shortcut(message)
 
     def _quit(self) -> None:
         QApplication.instance().quit()
@@ -825,12 +883,18 @@ def _become_resident(
     launch opens idle to the tray, a `--snip` launch that just became
     primary shows the overlay immediately, the same as if it had forwarded
     to an instance that was already up.
+
+    `install_hotkey_listener()` runs here, once, for the same reason: this
+    is the process that is actually resident, so it is the one that should
+    hold the Windows global hotkey registration (SNX-91) -- not every
+    `AppController` a test happens to construct directly.
     """
     # Already built by whoever called `try_claim()` -- see
     # `_ensure_qapplication`, which must run before the claim, not after.
     app = _ensure_qapplication()
 
     controller = AppController(registry, transport)
+    controller.install_hotkey_listener()
     if start_capture_immediately:
         controller.start_capture()
     return app.exec()

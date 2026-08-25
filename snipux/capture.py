@@ -1088,6 +1088,22 @@ class _RECT(ctypes.Structure):
     ]
 
 
+class _MonitorInfo(ctypes.Structure):
+    """Win32 `MONITORINFO`, just enough of it for `GetMonitorInfoW()` below
+    -- ctypes has no symbolic version of this struct either, same as
+    `_RECT` above. `cbSize` must be set to `sizeof(_MonitorInfo)` before
+    the call, per the Win32 convention every size-prefixed struct here
+    follows.
+    """
+
+    _fields_ = [
+        ("cbSize", ctypes.c_uint32),
+        ("rcMonitor", _RECT),
+        ("rcWork", _RECT),
+        ("dwFlags", ctypes.c_uint32),
+    ]
+
+
 class WindowsWindowGeometryProvider:
     """Real per-window geometry source for Windows' window-selection mode
     (SNX-90).
@@ -1102,8 +1118,8 @@ class WindowsWindowGeometryProvider:
     Windows has no such restriction: `EnumWindows` answers directly, via
     `ctypes`, no new dependency (per CLAUDE.md).
 
-    Two Windows-specific wrinkles decide whether the result actually looks
-    right:
+    Several Windows-specific wrinkles decide whether the result actually
+    looks right:
 
     * `GetWindowRect` includes the invisible resize border DWM draws
       around a modern window (a few pixels of dead space for resize
@@ -1118,6 +1134,25 @@ class WindowsWindowGeometryProvider:
       switch or a suspended UWP app, without closing it) -- all three are
       dropped here, or the picker would snap to something the user cannot
       see.
+    * The shell's own desktop and workspace windows (Progman/WorkerW,
+      hosting the desktop icons/wallpaper) and the taskbar
+      (Shell_TrayWnd/Shell_SecondaryTrayWnd) are real, visible,
+      non-minimised top-level windows -- they pass every check above and
+      would otherwise be offered as pickable "windows" (SNX-94: probing an
+      empty area of the desktop returned the entire virtual desktop, as
+      wide as every monitor combined, as though it were one). Excluded by
+      class name (`_is_shell_window`), since that is what actually
+      identifies them -- there is no visibility flag or attribute that
+      says "this is shell chrome, not an application".
+    * As a second, independent line of defense, a window whose rect is
+      larger than the monitor it sits on is never offered either
+      (`_is_larger_than_its_monitor`) -- Progman/WorkerW would already
+      fail this (they span the whole virtual desktop, wider than any one
+      monitor), but this also catches anything else sized past its own
+      monitor without happening to be one of the four named shell
+      classes. A window exactly the size of the monitor it's on -- a
+      genuine full-screen window, e.g. a borderless game -- is not
+      "larger than" it and passes this check.
     """
 
     # Mirrors X11WindowGeometryProvider._CACHE_SECONDS: overlay.py's window
@@ -1127,6 +1162,17 @@ class WindowsWindowGeometryProvider:
     _CACHE_SECONDS = 0.2
     _DWMWA_CLOAKED = 14
     _DWMWA_EXTENDED_FRAME_BOUNDS = 9
+    _MONITOR_DEFAULTTONEAREST = 2
+
+    # Win32 class names of the shell's own chrome -- Progman and WorkerW
+    # host the desktop wallpaper/icons (WorkerW is created alongside
+    # Progman on modern Windows and can also span the whole virtual
+    # desktop), Shell_TrayWnd is the primary taskbar and
+    # Shell_SecondaryTrayWnd is a taskbar on a secondary monitor. None of
+    # these is something a user ever means by "window".
+    _SHELL_CLASS_NAMES = frozenset(
+        {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
+    )
 
     def __init__(self):
         self._cache: list[tuple[str, QRectF]] | None = None
@@ -1169,9 +1215,14 @@ class WindowsWindowGeometryProvider:
                 return True  # keep enumerating
             if self._is_cloaked(dwmapi, hwnd):
                 return True
+            if self._is_shell_window(user32, hwnd):
+                return True
             rect = self._frame_bounds(dwmapi, user32, hwnd)
-            if rect is not None:
-                windows.append((self._window_title(user32, hwnd), rect))
+            if rect is None:
+                return True
+            if self._is_larger_than_its_monitor(user32, hwnd, rect):
+                return True
+            windows.append((self._window_title(user32, hwnd), rect))
             return True
 
         # ctypes.WINFUNCTYPE is only constructed here, guarded by
@@ -1188,6 +1239,57 @@ class WindowsWindowGeometryProvider:
             hwnd, self._DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)
         )
         return ok == 0 and cloaked.value != 0
+
+    def _is_shell_window(self, user32, hwnd) -> bool:
+        """True for the shell's own desktop/workspace/taskbar chrome (see
+        `_SHELL_CLASS_NAMES`) -- these are real, visible, non-minimised,
+        non-cloaked top-level windows, so class name is the only thing
+        that actually distinguishes them from an application window.
+        """
+        buffer = ctypes.create_unicode_buffer(256)
+        if not user32.GetClassNameW(hwnd, buffer, len(buffer)):
+            return False
+        return buffer.value in self._SHELL_CLASS_NAMES
+
+    def _monitor_rect(self, user32, hwnd) -> QRectF | None:
+        """The rect (absolute logical coordinates, same space as
+        `_frame_bounds`) of the monitor `hwnd` sits on -- `MONITOR_
+        DEFAULTTONEAREST` so a window straddling two monitors, or one
+        whose reported position is briefly off every monitor mid-move,
+        still gets an answer instead of none at all. `None` only when
+        Windows itself can't answer (no monitors, or a stale handle),
+        which `_is_larger_than_its_monitor` treats as "can't tell, so
+        don't drop the window for it".
+        """
+        hmonitor = user32.MonitorFromWindow(hwnd, self._MONITOR_DEFAULTTONEAREST)
+        if not hmonitor:
+            return None
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(_MonitorInfo)
+        if not user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+            return None
+        monitor = info.rcMonitor
+        width = monitor.right - monitor.left
+        height = monitor.bottom - monitor.top
+        if width <= 0 or height <= 0:
+            return None
+        return QRectF(monitor.left, monitor.top, width, height)
+
+    def _is_larger_than_its_monitor(self, user32, hwnd, rect: QRectF) -> bool:
+        """True when `rect` doesn't fit within the monitor `hwnd` sits on.
+
+        A defense in depth alongside `_is_shell_window`, not a duplicate
+        of it: Progman/WorkerW would already fail this (they span the
+        whole virtual desktop), but this also catches anything else
+        sized past its own monitor without being one of the four named
+        shell classes. Strictly greater-than, so a window exactly the
+        size of the monitor it's on -- a genuine full-screen window -- is
+        never dropped by this check.
+        """
+        monitor_rect = self._monitor_rect(user32, hwnd)
+        if monitor_rect is None:
+            return False
+        return rect.width() > monitor_rect.width() or rect.height() > monitor_rect.height()
 
     def _frame_bounds(self, dwmapi, user32, hwnd) -> QRectF | None:
         rect = _RECT()
