@@ -908,7 +908,7 @@ class FloatingBar(QWidget):
 
         self._active_tool: str | None = None
         self._tool_buttons: dict[str, _IconButton] = {}
-        # SNX-68: the last (selection, bounds_size) pair handed to
+        # SNX-68: the last (selection, bounds) pair handed to
         # `reposition` -- `set_capture_mode` replays them through it
         # whenever the chip's label changes width, so the bar re-centres
         # itself instead of just growing/shrinking from its own top-left
@@ -916,7 +916,7 @@ class FloatingBar(QWidget):
         # lets a bare `FloatingBar()` (no `OverlayWindow` around it, as in
         # most of this module's own tests) fall back to a plain resize.
         self._last_selection: QRect | None = None
-        self._last_bounds_size: QSize | None = None
+        self._last_bounds: QRectF | None = None
 
         self._chip = self._build_capture_chip()
         self._chip.clicked.connect(self.captureChipClicked)
@@ -1026,8 +1026,8 @@ class FloatingBar(QWidget):
         called at all -- a bare `FloatingBar()` with no selection yet.
         """
         self._chip.set_text(label)
-        if self._last_selection is not None and self._last_bounds_size is not None:
-            self.reposition(self._last_selection, self._last_bounds_size)
+        if self._last_selection is not None and self._last_bounds is not None:
+            self.reposition(self._last_selection, self._last_bounds)
         else:
             self.resize(self.sizeHint())
 
@@ -1098,10 +1098,23 @@ class FloatingBar(QWidget):
 
     # -- positioning -----------------------------------------------------
 
-    def reposition(self, selection: QRect, bounds_size: QSize) -> None:
-        """Centre the bar under `selection`, clamped so it can never leave a
-        window of `bounds_size` -- even with the selection dragged to the
-        very bottom edge -- per the spec's "Floating bar" clamp rule.
+    def reposition(self, selection: QRect, bounds: QRectF) -> None:
+        """Centre the bar under `selection`, clamped so it can never leave
+        `bounds` -- even with the selection dragged to the very bottom edge
+        -- per the spec's "Floating bar" clamp rule.
+
+        `bounds` is a *rect*, in this widget's parent's coordinate space,
+        not the parent's own size: on a multi-monitor virtual desktop the
+        two are different things, and the spec's clamp rule is about the
+        screen the user is looking at, not the union of every screen. The
+        caller (`OverlayWindow._chrome_bounds`) passes the monitor the
+        selection is actually on. Clamping to the window instead put the
+        bar wherever the *bounding box* allowed: on a layout whose monitors
+        are staggered vertically (1440px-tall centre, 1080px-tall sides
+        mounted lower) the bar for a selection near a short monitor's
+        bottom edge landed in the gap below it -- inside the window, on no
+        monitor at all, so the whole bar was simply invisible. Bounds that
+        are an actual screen's rect cannot express that position.
         """
         metric = design.tokens.Metric
         # SNX-68: remembered so `set_capture_mode` can replay this same
@@ -1109,7 +1122,7 @@ class FloatingBar(QWidget):
         # label did, but the bar's width does, and only this method knows
         # how to turn a width change back into a centred position.
         self._last_selection = selection
-        self._last_bounds_size = bounds_size
+        self._last_bounds = bounds
         size = self.sizeHint()
         # QRectF, not the raw QRect `selection`: QRect.bottom() is
         # inclusive (top + height - 1), which would put the bar a pixel
@@ -1118,18 +1131,24 @@ class FloatingBar(QWidget):
         sel = QRectF(selection)
 
         desired_center_x = sel.center().x()
-        # Falls back to the window's own centre, rather than inverting, when
-        # the window is narrower than twice BAR_MIN_EDGE -- a case the
+        # Falls back to the bounds' own centre, rather than inverting, when
+        # the monitor is narrower than twice BAR_MIN_EDGE -- a case the
         # README's "at least 400px from either screen edge" doesn't
         # anticipate (a real screen is always wider than 800px) but a small
         # test/embedded window can hit.
-        half_width = bounds_size.width() / 2
-        min_center = min(metric.BAR_MIN_EDGE, half_width)
-        max_center = max(bounds_size.width() - metric.BAR_MIN_EDGE, half_width)
+        center = bounds.center().x()
+        min_center = min(bounds.left() + metric.BAR_MIN_EDGE, center)
+        max_center = max(bounds.right() - metric.BAR_MIN_EDGE, center)
         center_x = max(min_center, min(desired_center_x, max_center))
 
         desired_top = sel.bottom() + metric.BAR_OFFSET_Y
-        top = min(desired_top, bounds_size.height() - self._TOP_MAX_FROM_BOTTOM)
+        # Clamped at both ends, not just the bottom: a monitor mounted
+        # below the virtual desktop's origin has a non-zero top, and a
+        # selection near its upper edge would otherwise push the bar above
+        # that monitor into the same never-displayed gap the bottom clamp
+        # exists to avoid.
+        highest_top = min(bounds.top(), bounds.bottom() - self._TOP_MAX_FROM_BOTTOM)
+        top = max(highest_top, min(desired_top, bounds.bottom() - self._TOP_MAX_FROM_BOTTOM))
 
         self.setGeometry(
             round(center_x - size.width() / 2), round(top), size.width(), size.height()
@@ -2222,13 +2241,21 @@ class CaptureModePopover(QWidget):
         self._delay_row.set_value(self._delay)
         self.delayChanged.emit(self._delay)
 
-    def reposition(self, bar_geometry: QRect, window_size: QSize) -> None:
+    def reposition(self, bar_geometry: QRect, bounds: QRectF) -> None:
         """Position the popover against `bar_geometry` (`FloatingBar`'s own
         geometry, already in this widget's parent's coordinate space), per
         the spec's rule: "if bar top > 300px, place the popover at
         bar_top - popover_height - 8; otherwise place it below the bar."
-        Horizontally centred on the bar and clamped inside `window_size`,
+        Horizontally centred on the bar and clamped inside `bounds`,
         mirroring `OverlayWindow._reposition_tray`'s own centring.
+
+        `bounds` is the selection's own monitor, in parent coordinates --
+        see `FloatingBar.reposition`, which this deliberately mirrors. The
+        spec's "300px" is a distance from the top of the *screen* the user
+        is looking at, so it is measured from `bounds.top()` rather than
+        read as an absolute parent coordinate: a monitor mounted 201px down
+        the virtual desktop would otherwise flip the popover upward 201px
+        too early, into a gap no monitor displays.
         """
         metric = design.tokens.Metric
         width = metric.MENU_W
@@ -2236,12 +2263,13 @@ class CaptureModePopover(QWidget):
 
         center_x = bar_geometry.center().x()
         left = center_x - width / 2
-        left = max(0, min(left, window_size.width() - width))
+        left = max(bounds.left(), min(left, bounds.right() - width))
 
-        if bar_geometry.top() > self._UP_THRESHOLD:
+        if bar_geometry.top() - bounds.top() > self._UP_THRESHOLD:
             top = bar_geometry.top() - height - metric.MENU_OFFSET
         else:
             top = bar_geometry.bottom() + metric.MENU_OFFSET
+        top = max(bounds.top(), min(top, bounds.bottom() - height))
 
         self.setGeometry(round(left), round(top), width, height)
 
@@ -2340,12 +2368,14 @@ class ShapeToolPopover(QWidget):
         self.toolSelected.emit(tool)
         self.hide()
 
-    def reposition(self, button_geometry: QRect, window_size: QSize) -> None:
+    def reposition(self, button_geometry: QRect, bounds: QRectF) -> None:
         """Position the popover above `button_geometry` (the rect button's
         own geometry, already mapped into this widget's parent's
         coordinate space by the caller), horizontally centred on it and
-        clamped inside `window_size` -- mirroring
-        `CaptureModePopover.reposition`'s own centring/clamping.
+        clamped inside `bounds` -- mirroring
+        `CaptureModePopover.reposition`'s own centring/clamping, including
+        its reason for taking the selection's monitor rather than the whole
+        window.
         """
         metric = design.tokens.Metric
         width = metric.MENU_W
@@ -2353,9 +2383,10 @@ class ShapeToolPopover(QWidget):
 
         center_x = button_geometry.center().x()
         left = center_x - width / 2
-        left = max(0, min(left, window_size.width() - width))
+        left = max(bounds.left(), min(left, bounds.right() - width))
 
-        top = max(0, button_geometry.top() - height - metric.MENU_OFFSET)
+        top = max(bounds.top(), button_geometry.top() - height - metric.MENU_OFFSET)
+        top = min(top, bounds.bottom() - height)
 
         self.setGeometry(round(left), round(top), width, height)
 
@@ -2547,15 +2578,22 @@ class Toast(QWidget):
 
         self.hide()
 
-    def show_message(self, icon_name: str, text: str, window_size: QSize) -> None:
+    def show_message(self, icon_name: str, text: str, bounds: QRectF) -> None:
         """Show `text` next to `icon_name`'s glyph, positioned at the
-        bottom centre of `window_size`, and (re)start the `TOAST_MS`
+        bottom centre of `bounds`, and (re)start the `TOAST_MS`
         auto-dismiss timer.
 
         Updates this same widget's content rather than creating a new one
         -- there is only ever one toast on screen, per the class docstring
         -- so a second call while the first is still showing both replaces
         the message and restarts the timer in one step.
+
+        `bounds` is the selection's own monitor rather than the parent's
+        size, for the reason `FloatingBar.reposition` sets out at length:
+        "the bottom centre of the window" is the bottom centre of the whole
+        virtual desktop once one window spans every monitor, which is both
+        the wrong monitor to confirm a snip on and, where monitor heights
+        differ, potentially a gap that displays nothing at all.
         """
         metric = design.tokens.Metric
         pixmap = design.icon(icon_name, design.color("TOAST_FG")).pixmap(
@@ -2565,8 +2603,8 @@ class Toast(QWidget):
         self._text_label.setText(text)
 
         size = self.sizeHint()
-        left = (window_size.width() - size.width()) / 2
-        top = window_size.height() - metric.TOAST_BOTTOM - size.height()
+        left = bounds.left() + (bounds.width() - size.width()) / 2
+        top = bounds.bottom() - metric.TOAST_BOTTOM - size.height()
         self.setGeometry(round(left), round(top), size.width(), size.height())
 
         self.show()
@@ -2972,6 +3010,30 @@ class OverlayWindow(QWidget):
             round(frame.logical_size.width()),
             round(frame.logical_size.height()),
         )
+        # Pinned, or the window manager takes the geometry above as a
+        # suggestion and shrinks this window to one monitor's work area.
+        # GNOME/Mutter does exactly that to an ordinary managed window:
+        # a 6400x1440 request came back as 2560x1337+1920+32, the centre
+        # monitor minus the top bar. That is not a cosmetic difference --
+        # `paintEvent` draws the frozen frame with
+        # `drawImage(QRectF(self.rect()), ...)`, so the whole virtual
+        # desktop was then squeezed into whatever the WM allowed, and every
+        # coordinate the user dragged in was scaled by the same factor
+        # (2.5x horizontally on that layout). The overlay showed all three
+        # monitors crushed onto one, and selections came out the wrong size.
+        #
+        # setFixedSize (min == max size hints), not
+        # X11BypassWindowManagerHint: both hold the geometry, but bypassing
+        # the WM makes this an override-redirect window that never gets
+        # focus from it, and this window lives on keyboard input -- Esc,
+        # Enter, Ctrl+Z, every tool letter. Staying managed keeps those
+        # working. Wayland is unaffected either way: there
+        # `show_on_screen` fullscreens one surface per output instead, and
+        # a compositor sizes those itself.
+        self.setFixedSize(
+            round(frame.logical_size.width()),
+            round(frame.logical_size.height()),
+        )
         # Needed for the handle cursors below to update on a plain hover,
         # not just while a button is held -- mirrors `Overlay.setMouseTracking`
         # above for the same reason.
@@ -3038,6 +3100,17 @@ class OverlayWindow(QWidget):
         # the same "drag on an empty overlay" starting point the others get
         # for free.
         self._region_drag_anchor: QPointF | None = None
+
+        # Where the current selection's drag *began*, window-local, kept
+        # after the drag ends -- unlike `_region_drag_anchor`, which is
+        # armed only for the duration of one. `_chrome_bounds` prefers
+        # this point's monitor, so a selection dragged across a bezel
+        # keeps its toolbar on the monitor the user started on rather
+        # than having it jump to whichever monitor ended up with a few
+        # more pixels of it. None when the selection came from
+        # somewhere other than a drag (Window/Full screen), where the
+        # picked rect's own monitor is the better answer.
+        self._selection_anchor: QPointF | None = None
 
         # The ink layer (SNX-34): overlay-window coordinates, the same
         # space `_selection` lives in above -- never translated relative to
@@ -3227,12 +3300,9 @@ class OverlayWindow(QWidget):
         # unlike every other piece of chrome here, its visibility never
         # depends on `_selection`, `_bar.active_tool` or `_marks`.
         self._close_button = _CloseButton(self)
-        self._close_button.move(
-            round(self.width() - self._CLOSE_BUTTON_MARGIN - _CloseButton._SIZE),
-            self._CLOSE_BUTTON_MARGIN,
-        )
         self._close_button.clicked.connect(self._cancel)
         self._close_button.hide()
+        self._reposition_close_button()
 
     def set_selection(self, rect: QRect | None, path: QPainterPath | None = None) -> None:
         """Set the current selection (window coordinates) and repaint.
@@ -3249,9 +3319,14 @@ class OverlayWindow(QWidget):
         way to reshape it to match a dragged edge, so keeping a now-stale
         path around would be worse than dropping it.
         """
+        if rect is None:
+            self._selection_anchor = None
         self._selection = rect
         self._selection_path = path
         self._sync_bar_visibility()
+        # Follows the selection onto its monitor, like every other piece of
+        # chrome -- see `_reposition_close_button`.
+        self._reposition_close_button()
         self.update()
 
     def _on_tool_selected(self, tool: str) -> None:
@@ -3301,7 +3376,7 @@ class OverlayWindow(QWidget):
         if self._popover.isVisible():
             self._popover.hide()
             return
-        self._popover.reposition(self._bar.geometry(), self.size())
+        self._popover.reposition(self._bar.geometry(), self._chrome_bounds())
         self._popover.show()
         self._popover.raise_()
 
@@ -3329,7 +3404,7 @@ class OverlayWindow(QWidget):
         )
         button = self._bar._tool_buttons["rect"]
         origin = button.mapTo(self, QPoint(0, 0))
-        self._shape_popover.reposition(QRect(origin, button.size()), self.size())
+        self._shape_popover.reposition(QRect(origin, button.size()), self._chrome_bounds())
         self._shape_popover.show()
         self._shape_popover.raise_()
 
@@ -3538,6 +3613,9 @@ class OverlayWindow(QWidget):
         miss handling below) -- the user can simply move and click again,
         rather than one mis-click ending the mode for good.
         """
+        # No drag, so no anchor: the picked window's own rect is what
+        # `_chrome_bounds` should resolve against.
+        self._selection_anchor = None
         rect = self._geometry_provider.window_at(self._to_absolute(pos))
         if rect is None:
             return
@@ -3556,6 +3634,9 @@ class OverlayWindow(QWidget):
         pointer, so this only matters for a caller (a test, or the very
         first popover interaction) that never issued a prior move.
         """
+        # No drag, so no anchor: the picked display's own rect is what
+        # `_chrome_bounds` should resolve against.
+        self._selection_anchor = None
         cursor = (
             self._cursor_pos
             if self._cursor_pos is not None
@@ -3588,6 +3669,9 @@ class OverlayWindow(QWidget):
         """Begin tracing a lasso at `pos` (window coordinates). Only ever
         reached from `mousePressEvent` while `_picking_freeform` is armed.
         """
+        # A lasso is a drag like any other, so its first point anchors the
+        # chrome the same way a rectangle drag's press does.
+        self._selection_anchor = pos
         self._freeform_drag_path = QPainterPath()
         self._freeform_drag_path.moveTo(pos)
         # Something to show from the very first pixel, mirroring `Overlay`'s
@@ -3658,6 +3742,57 @@ class OverlayWindow(QWidget):
         """
         return QRectF(absolute_rect.topLeft() - self._frame.logical_origin, absolute_rect.size())
 
+    def _chrome_bounds(self) -> QRectF:
+        """The rect every piece of floating chrome -- bar, popovers, trays
+        -- must stay inside, in this window's own local coordinates.
+
+        This is the monitor the current selection sits on, **not**
+        `self.rect()`. On X11 this one window spans the whole virtual
+        desktop, so its own rect is the union of every monitor, and a
+        union is not a place chrome can safely be put: monitors of
+        different heights, or mounted at different vertical offsets, leave
+        gaps inside that union which no monitor displays. Chrome clamped
+        to the union lands in one of those gaps and is invisible even
+        though it is, technically, inside the window.
+
+        The monitor is where the selection's drag *started*
+        (`_selection_anchor`) whenever that is known. "The monitor I ran the
+        selection on" is the whole of what a user means here, and it is the
+        one answer that cannot surprise them: a drag begun on the left
+        monitor and carried a little way past the bezel would otherwise hand
+        its toolbar to the middle monitor the instant a few more pixels of
+        the rectangle landed there, moving the controls away from the screen
+        being worked on for no reason the user can see.
+
+        Largest overlap with the selection is the fallback, for selections
+        that never came from a drag at all -- Window and Full screen pick a
+        rect outright -- and it beats "whichever monitor holds the centre"
+        for those, since a rect can perfectly well have its centre in a gap.
+        With no selection, or one that overlaps no monitor (it lies entirely
+        inside a gap), this falls back to `_monitor_at`, whose own last
+        resort is the frame's full span.
+        """
+        if self._selection is not None:
+            selection = QRectF(self._selection)
+            if self._selection_anchor is not None:
+                anchor = self._to_absolute(self._selection_anchor)
+                for geometry in self._monitor_geometries:
+                    if geometry.contains(anchor):
+                        return self._to_local_rect(geometry)
+            best: QRectF | None = None
+            best_area = 0.0
+            for geometry in self._monitor_geometries:
+                overlap = self._to_local_rect(geometry).intersected(selection)
+                area = overlap.width() * overlap.height()
+                if area > best_area:
+                    best, best_area = geometry, area
+            if best is not None:
+                return self._to_local_rect(best)
+            centre = self._to_absolute(selection.center())
+        else:
+            centre = self._to_absolute(QRectF(self.rect()).center())
+        return self._to_local_rect(self._monitor_at(centre))
+
     def _on_delay_changed(self, delay: str) -> None:
         self._delay = delay
 
@@ -3673,7 +3808,7 @@ class OverlayWindow(QWidget):
         than unconditionally following `_selection`.
         """
         if self._selection is not None and self.isVisible():
-            self._bar.reposition(self._selection, self.size())
+            self._bar.reposition(self._selection, self._chrome_bounds())
             self._bar.show()
             self._sync_tray_visibility()
         else:
@@ -3718,20 +3853,53 @@ class OverlayWindow(QWidget):
             self._tray.hide()
             self._blur_tray.hide()
 
+    def _reposition_close_button(self) -> None:
+        """Put the close button in the top-right corner of `_chrome_bounds`
+        -- the monitor the selection is on, or the fallback monitor before
+        there is one.
+
+        SNX-80 put it in the top-right corner of the *window*, which is the
+        top-right corner of the whole virtual desktop once one window spans
+        every monitor. On a desktop whose rightmost monitor is mounted
+        lower than the tallest one, that corner is in the gap above it: the
+        button was drawn 170px above the only screen that could have shown
+        it, so the one affordance this ticket exists to provide -- "a
+        visible way to cancel a snip" -- was invisible on exactly the
+        multi-monitor setups it matters most on. Esc still worked, which is
+        why nothing caught it.
+        """
+        bounds = self._chrome_bounds()
+        self._close_button.move(
+            round(bounds.right() - self._CLOSE_BUTTON_MARGIN - _CloseButton._SIZE),
+            round(bounds.top() + self._CLOSE_BUTTON_MARGIN),
+        )
+
     def _reposition_tray(self, tray: QWidget) -> None:
         """Centre `tray` under the bar, `TRAY_OFFSET_Y` below it -- per the
         spec's "Sits 8px below the bar, centred on it." Shared by `_tray`
         and `_blur_tray`, which `_sync_tray_visibility` never shows at the
         same time.
+
+        Clamped into `_chrome_bounds` afterwards, the same monitor rect the
+        bar itself is clamped to: the bar can legitimately sit close enough
+        to its monitor's bottom edge that a tray placed the spec's 8px
+        below it would hang off that monitor -- on a multi-monitor desktop
+        that means a gap displaying nothing, not merely a screen edge. When
+        there is no room below, the tray flips above the bar rather than
+        being pushed back over it.
         """
         metric = design.tokens.Metric
         bar_geometry = self._bar.geometry()
+        bounds = self._chrome_bounds()
         size = tray.sizeHint()
         center_x = bar_geometry.center().x()
         top = bar_geometry.bottom() + metric.TRAY_OFFSET_Y
-        tray.setGeometry(
-            round(center_x - size.width() / 2), round(top), size.width(), size.height()
-        )
+        if top + size.height() > bounds.bottom():
+            top = bar_geometry.top() - metric.TRAY_OFFSET_Y - size.height()
+        top = max(bounds.top(), min(top, bounds.bottom() - size.height()))
+        left = center_x - size.width() / 2
+        left = max(bounds.left(), min(left, bounds.right() - size.width()))
+        tray.setGeometry(round(left), round(top), size.width(), size.height())
 
     def _sync_bar_undo_redo(self) -> None:
         self._bar.set_undo_enabled(self.can_undo)
@@ -3751,7 +3919,7 @@ class OverlayWindow(QWidget):
         actually is, same as the bar/tray/popover already do.
         """
         if self.isVisible():
-            self._toast.show_message(icon_name, text, self.size())
+            self._toast.show_message(icon_name, text, self._chrome_bounds())
 
     # -- top hint HUD (SNX-46) -----------------------------------------------
 
@@ -4099,6 +4267,11 @@ class OverlayWindow(QWidget):
         # The close button (SNX-80): unconditional, unlike the two syncs
         # above -- it has no preference or selection state to check, it is
         # simply on for as long as this window is.
+        # Placed again here, not just in __init__: `_chrome_bounds` reads
+        # `self.rect()` when there is no selection yet, and a window shown
+        # before its real geometry was applied would have anchored the
+        # button to a stale size.
+        self._reposition_close_button()
         self._close_button.show()
 
     def hideEvent(self, event) -> None:
@@ -4370,6 +4543,7 @@ class OverlayWindow(QWidget):
                 # ordinary rectangle drag, the same press-drag-release shape
                 # `Overlay`'s own RECTANGLE mode already uses.
                 self._region_drag_anchor = event.position()
+                self._selection_anchor = event.position()
                 self.set_selection(QRect(event.position().toPoint(), QSize(0, 0)))
             # A press outside an *existing* selection is a no-op for every
             # tool. Falling through to this no-op -- rather than the handle
@@ -5324,6 +5498,34 @@ def _screen_for_geometry(geometry: QRectF) -> QScreen | None:
     return None
 
 
+def _interactive_geometry(monitor_geometries: list[QRectF]) -> QRectF:
+    """Which monitor gets the one interactive window on Wayland.
+
+    `monitor_geometries[0]` is whatever `QGuiApplication.screens()` happened
+    to list first, which Qt does not promise is the primary screen -- on a
+    three-monitor desktop that is a one-in-three chance of opening the only
+    usable overlay on a monitor off to the side while the user watches the
+    middle one do nothing. The primary screen is the deterministic answer,
+    and the same one GNOME's own screenshot UI opens on.
+
+    Not `QCursor.pos()`, tempting though "the monitor being pointed at" is:
+    this file already refuses global cursor state on purpose -- see
+    `_cursor_pos`, tracked from real move events precisely so no test has
+    to control a system-wide pointer -- and `open_overlay` runs before any
+    window exists to have seen a move. The old first-entry behaviour stays
+    as the last resort so a caller passing synthetic geometries (every test
+    of this function) still gets a deterministic answer.
+    """
+    if not monitor_geometries:
+        return QRectF()
+    primary = QApplication.primaryScreen()
+    if primary is not None:
+        geometry = QRectF(primary.geometry())
+        if geometry in monitor_geometries:
+            return geometry
+    return monitor_geometries[0]
+
+
 def open_overlay(
     frame: Frame,
     monitor_geometries: list[QRectF],
@@ -5369,7 +5571,7 @@ def open_overlay(
     monitor's content.
     """
     primary_geometry = (
-        monitor_geometries[0]
+        _interactive_geometry(monitor_geometries)
         if monitor_geometries
         else QRectF(frame.logical_origin, frame.logical_size)
     )
@@ -5406,7 +5608,14 @@ def open_overlay(
         return overlay
 
     overlay.show_on_screen(_screen_for_geometry(primary_geometry))
-    for geometry in monitor_geometries[1:]:
+    # Every monitor except the interactive one, by identity rather than by
+    # slicing off the first entry: `_interactive_geometry` may well have
+    # picked something other than `monitor_geometries[0]`, and a `[1:]`
+    # slice would then leave the chosen monitor double-covered and one
+    # other monitor bare.
+    for geometry in monitor_geometries:
+        if geometry == primary_geometry:
+            continue
         veil = _MonitorVeil(frame.crop(geometry))
         veil.show_on_screen(_screen_for_geometry(geometry))
         veils.append(veil)
