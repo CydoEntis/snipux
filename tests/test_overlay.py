@@ -647,7 +647,9 @@ class TestX11WindowGeometryProviderIntegration:
 class _FakeWindowsUser32:
     """Just enough of `ctypes.windll.user32` for one `EnumWindows` pass
     reporting a single, visible, non-minimised window -- see
-    `TestWindowsWindowGeometryProviderIntegration` below.
+    `TestWindowsWindowGeometryProviderIntegration` below. An ordinary
+    (non-shell) class name and a monitor large enough to contain any test
+    rect, so SNX-94's class-name/monitor-size checks never trip it.
     """
 
     def __init__(self, hwnd=1, title="Some Window"):
@@ -670,6 +672,19 @@ class _FakeWindowsUser32:
     def GetWindowTextW(self, hwnd, buffer, _size):
         buffer.value = self._title
         return len(self._title)
+
+    def GetClassNameW(self, hwnd, buffer, _size):
+        buffer.value = "SomeAppWindow"
+        return len(buffer.value)
+
+    def MonitorFromWindow(self, hwnd, _flags):
+        return hwnd
+
+    def GetMonitorInfoW(self, hmonitor, info_ref):
+        target = ctypes.cast(info_ref, ctypes.POINTER(capture_module._MonitorInfo)).contents
+        target.rcMonitor.left, target.rcMonitor.top = -1_000_000, -1_000_000
+        target.rcMonitor.right, target.rcMonitor.bottom = 1_000_000, 1_000_000
+        return 1
 
 
 class _FakeWindowsDwmapi:
