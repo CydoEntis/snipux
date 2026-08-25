@@ -271,6 +271,17 @@ def main(
         # No registry/transport involved -- unlike --snip and the default
         # resident path, this never touches capture backends or a display,
         # so it's handled before either is ever built.
+        #
+        # Calls setup_desktop directly rather than through the platform
+        # seam (snipux/platform/) on purpose: setup_desktop's own
+        # gsettings/`.desktop` steps already degrade to a reported note
+        # when they can't run (no gsettings, a read-only directory) rather
+        # than raising, which is what lets `--setup` run harmlessly during
+        # Windows-hosted development per CLAUDE.md. The platform seam's
+        # Windows/macOS implementations raise instead -- correct once they
+        # exist for real, but routing this call through them today would
+        # turn every `--setup` run during Windows development into a
+        # crash, which is a regression this ticket must not introduce.
         return setup_desktop.run_setup(shortcut=args.shortcut)
 
     if args.remove:
@@ -568,10 +579,14 @@ class AppController:
 
         The shortcut has to be re-bound through gsettings, not merely
         remembered -- the stored value is what survives the next `--setup`,
-        but GNOME only knows about the binding it was told. Reported to the
-        tray (or stdout) rather than silently, since rebinding is exactly
-        the operation whose silent failure this whole feature exists to
-        get away from.
+        but GNOME only knows about the binding it was told. Calls
+        setup_desktop directly rather than through the platform seam, the
+        same reasoning as `main()`'s `--setup`/`--remove` above: this must
+        keep degrading harmlessly (a printed note, not an exception) during
+        Windows-hosted development until a real Windows implementation of
+        `platform.bind_shortcut()` exists. Reported to the tray (or stdout)
+        rather than silently, since rebinding is exactly the operation
+        whose silent failure this whole feature exists to get away from.
         """
         exec_path = setup_desktop.find_console_script()
         if exec_path is None:
