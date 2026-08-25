@@ -908,6 +908,15 @@ class FloatingBar(QWidget):
 
         self._active_tool: str | None = None
         self._tool_buttons: dict[str, _IconButton] = {}
+        # SNX-68: the last (selection, bounds_size) pair handed to
+        # `reposition` -- `set_capture_mode` replays them through it
+        # whenever the chip's label changes width, so the bar re-centres
+        # itself instead of just growing/shrinking from its own top-left
+        # corner. `None` until the first `reposition` call, which is what
+        # lets a bare `FloatingBar()` (no `OverlayWindow` around it, as in
+        # most of this module's own tests) fall back to a plain resize.
+        self._last_selection: QRect | None = None
+        self._last_bounds_size: QSize | None = None
 
         self._chip = self._build_capture_chip()
         self._chip.clicked.connect(self.captureChipClicked)
@@ -1005,8 +1014,22 @@ class FloatingBar(QWidget):
         `{{ mode }}` binding on the chip button itself -- the chip always
         names whichever capture mode is current, not just its own "Region"
         default from `_build_capture_chip`.
+
+        SNX-68: `_PillButton.sizeHint` (SNX-59) already measures the new
+        label correctly, but nothing re-read it after construction, so the
+        bar itself stayed at its old width and clipped whichever label
+        didn't fit in it -- "Region"'s width, the only one ever measured.
+        Replaying the last `reposition` call redoes both the sizing *and*
+        the centring in one place, the same call `_sync_bar_visibility`
+        already uses for a selection change; a label change deserves no
+        less. Falls back to a plain resize when `reposition` was never
+        called at all -- a bare `FloatingBar()` with no selection yet.
         """
         self._chip.set_text(label)
+        if self._last_selection is not None and self._last_bounds_size is not None:
+            self.reposition(self._last_selection, self._last_bounds_size)
+        else:
+            self.resize(self.sizeHint())
 
     # -- tool selection --------------------------------------------------
 
@@ -1081,6 +1104,12 @@ class FloatingBar(QWidget):
         very bottom edge -- per the spec's "Floating bar" clamp rule.
         """
         metric = design.tokens.Metric
+        # SNX-68: remembered so `set_capture_mode` can replay this same
+        # call -- selection and bounds don't change just because the chip's
+        # label did, but the bar's width does, and only this method knows
+        # how to turn a width change back into a centred position.
+        self._last_selection = selection
+        self._last_bounds_size = bounds_size
         size = self.sizeHint()
         # QRectF, not the raw QRect `selection`: QRect.bottom() is
         # inclusive (top + height - 1), which would put the bar a pixel
