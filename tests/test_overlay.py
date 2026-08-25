@@ -7069,6 +7069,41 @@ class TestOverlayIsRevealedNotAnimatedOpen:
 
         assert overlay.windowOpacity() == 1.0
 
+    def test_closing_goes_transparent_before_unmapping(self):
+        # Mutter stages an unmap the same way it stages a map -- scaling the
+        # window down and away -- which is the expanding page in reverse.
+        # The opacity has to be set before the window is withdrawn, or the
+        # compositor shrinks something still visible.
+        overlay = self._overlay()
+        overlay.show_on_screen(None)
+        overlay._reveal()
+        assert overlay.windowOpacity() == 1.0
+
+        overlay.close()
+
+        assert overlay.windowOpacity() == 0.0
+
+    def test_closing_is_synchronous(self):
+        # Deferring the close a frame to fade would let a second shortcut
+        # press inside that gap be refused as "an overlay is already open":
+        # close() is what tells AppController the session is over.
+        overlay = self._overlay()
+        overlay.show_on_screen(None)
+
+        overlay.close()
+
+        assert not overlay.isVisible()
+
+    def test_closing_still_reports_the_dismissal_exactly_once(self):
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        calls = []
+        overlay = OverlayWindow(frame, on_dismissed=lambda: calls.append(True))
+        overlay.show_on_screen(None)
+
+        overlay.close()
+
+        assert calls == [True]
+
     def test_a_reveal_after_it_closed_does_not_revive_it(self):
         # Esc, or a forwarded second request, can close the window inside
         # the delay; bringing it back by opacity alone would be worse than

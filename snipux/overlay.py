@@ -4460,6 +4460,21 @@ class OverlayWindow(QWidget):
         self._close_button.hide()
 
     def closeEvent(self, event) -> None:
+        # Transparent before the unmap, never after. Mutter stages an unmap
+        # the way it stages a map -- scaling the window down and away --
+        # which over a frozen desktop is the expanding page in reverse, and
+        # just as wrong: finishing or cancelling a snip should hand the
+        # desktop back, not play something on the way out. Setting opacity
+        # here means the compositor has the property before it is asked to
+        # withdraw the window, so it shrinks something already invisible.
+        #
+        # Done synchronously rather than by deferring the close a frame:
+        # `close()` is what tells `AppController` the session is over, and a
+        # close that only takes effect a few milliseconds later would let a
+        # second shortcut press inside that gap be refused as "an overlay is
+        # already open".
+        self.setWindowOpacity(0.0)
+
         # Deliberately not hideEvent: `_start_delayed_capture` (SNX-50)
         # also plain-hides this same window mid-countdown and re-shows it
         # in place a moment later, which must not tear down this window's
@@ -4475,6 +4490,7 @@ class OverlayWindow(QWidget):
     # imperceptible milliseconds, erring short lets the tail of the scale-up
     # show, which is the whole point of the exercise.
     _REVEAL_DELAY_MS = 220
+
 
     def _reveal(self) -> None:
         """Full opacity, once the compositor has finished staging the map.
