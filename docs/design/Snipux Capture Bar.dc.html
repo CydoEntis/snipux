@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  body { margin:0; background:#0a0b0d; font-family:'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color:#c8d96a; text-decoration:none; } a:hover { color:#e3ff4f; }
+  @keyframes ants { to { stroke-dashoffset:-14; } }
+</style>
+</helmet>
+
+<section style="display:flex; flex-direction:column; gap:34px; padding:64px 72px 40px">
+  <header style="display:flex; flex-direction:column; gap:12px; max-width:900px">
+    <div style="display:flex; align-items:center; gap:10px">
+      <div style="width:22px; height:22px; border-radius:6px; background:#e3ff4f; display:grid; place-items:center; color:#15170e">
+        <dc-import name="Icon" glyph="chevron" size="13" stroke="2.1" hint-size="13px,13px"></dc-import>
+      </div>
+      <span style="font:600 13px/1 'IBM Plex Sans'; letter-spacing:.14em; text-transform:uppercase; color:#7f8798">snipux · chooser, condensed</span>
+    </div>
+    <h1 style="margin:0; font:600 30px/1.2 'IBM Plex Sans'; color:#eef1f6; letter-spacing:-.02em"><a href="#3b">3b</a> at a third the height</h1>
+    <p style="margin:0; font:400 15px/1.6 'IBM Plex Sans'; color:#98a0b0; text-wrap:pretty">Two rows and 120px become one row and 54px, still hanging from the active monitor's top edge, still collapsing to the same 26px tab when armed. <a href="#4a">4a</a> is your suggestion taken literally — every decision is a dropdown, including mode. <a href="#4b">4b</a> argues mode is the one thing that shouldn't be: it's the reason the chooser exists, it's four options, and a dropdown turns a one-click switch into click-read-click. So mode stays as icon-only buttons and only the after-decision and delay collapse. Open the dropdowns; they work.</p>
+  </header>
+
+  <div style="display:flex; flex-direction:column; gap:44px">
+
+    <div id="4a" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">4a</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">All three as dropdowns</span>
+        <div style="display:flex; gap:2px; padding:3px; background:#15171b; border:1px solid #23262d; border-radius:9px">
+          <button onClick="{{ g.choose }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ g.tab.chooseBg }}; color:{{ g.tab.chooseFg }}">Choosing</button>
+          <button onClick="{{ g.arm }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ g.tab.armBg }}; color:{{ g.tab.armFg }}">Armed</button>
+        </div>
+        <span style="font:400 12px/1 'IBM Plex Mono'; color:#6d7484">420 × 54</span>
+      </div>
+
+      <div style="position:relative; width:1180px; height:400px; border-radius:12px; overflow:hidden; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9)">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 30% 12%, #2a2536 0%, #16141c 58%, #0d0c11 100%)">
+          <div style="position:absolute; left:0; right:0; top:0; height:26px; background:rgba(12,12,15,.7); display:flex; align-items:center; justify-content:center; font:400 11px/1 'IBM Plex Mono'; color:#a8afa0">Aug 25  12:56 PM</div>
+          <div style="position:absolute; left:110px; top:74px; width:440px; height:222px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:470px; top:150px; width:490px; height:214px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:28px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+          </div>
+        </div>
+        <div style="position:absolute; inset:0; background:rgba(12,13,10,.62)"></div>
+
+        <sc-if value="{{ g.armed }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; left:0; right:0; top:0; bottom:0; cursor:crosshair"></div>
+          <div style="position:absolute; left:504px; top:318px; width:330px; height:92px; border:1.5px solid rgba(227,255,79,.85); border-radius:4px; background:rgba(227,255,79,.07); pointer-events:none">
+            <div style="position:absolute; left:0; top:-27px; padding:4px 9px; border-radius:6px; background:#e3ff4f; color:#15170e; font:600 11px/1 'IBM Plex Mono'; white-space:nowrap">Terminal — 490 × 214</div>
+          </div>
+        </sc-if>
+
+        <div style="position:absolute; left:50%; top:0; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center">
+          <sc-if value="{{ g.choosing }}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex; align-items:center; gap:8px; padding:10px 10px; border-radius:0 0 14px 14px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); border-top:0; box-shadow:0 22px 48px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+              <div style="position:relative">
+                <button onClick="{{ g.openMode }}" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 11px; border:1px solid {{ g.modeBorder }}; border-radius:9px; cursor:pointer; background:{{ g.modeBg }}; color:#f1f3e8; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.09)">
+                  <span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="{{ g.modeGlyph }}" size="16" hint-size="16px,16px"></dc-import></span>{{ g.mode }}
+                  <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import></span>
+                </button>
+                <sc-if value="{{ g.modeOpen }}" hint-placeholder-val="{{ false }}">
+                  <div style="position:absolute; left:0; top:41px; z-index:30; width:246px; padding:5px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+                    <sc-for list="{{ g.modes }}" as="m" hint-placeholder-count="4">
+                      <button onClick="{{ m.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ m.menuBg }}; color:{{ m.menuFg }}" style-hover="background:rgba(255,255,255,.09)">
+                        <dc-import name="Icon" glyph="{{ m.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+                        <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'">{{ m.label }}</span>
+                        <span style="font:400 10.5px 'IBM Plex Mono'; color:#6f766a">{{ m.shortcut }}</span>
+                        <span style="opacity:{{ m.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+                      </button>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </div>
+
+              <span style="font:400 12px/1 'IBM Plex Sans'; color:#8f9689">then</span>
+
+              <div style="position:relative">
+                <button onClick="{{ g.openAfter }}" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 11px; border:1px solid rgba(255,255,255,.1); border-radius:9px; cursor:pointer; background:transparent; color:#f1f3e8; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                  <span style="color:#a8afa0; display:flex"><dc-import name="Icon" glyph="{{ g.afterGlyph }}" size="15" hint-size="15px,15px"></dc-import></span>{{ g.afterLabel }}
+                  <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import></span>
+                </button>
+                <sc-if value="{{ g.afterOpen }}" hint-placeholder-val="{{ false }}">
+                  <div style="position:absolute; left:0; top:41px; z-index:30; width:268px; padding:5px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+                    <sc-for list="{{ g.afters }}" as="o" hint-placeholder-count="3">
+                      <button onClick="{{ o.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ o.menuBg }}; color:{{ o.menuFg }}" style-hover="background:rgba(255,255,255,.09)">
+                        <dc-import name="Icon" glyph="{{ o.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+                        <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+                          <span style="font:500 12.5px/1 'IBM Plex Sans'">{{ o.label }}</span>
+                          <span style="font:400 11px/1.35 'IBM Plex Sans'; color:#8f9689">{{ o.note }}</span>
+                        </span>
+                        <span style="opacity:{{ o.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+                      </button>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </div>
+
+              <div style="position:relative">
+                <button onClick="{{ g.openDelay }}" title="Countdown before the grab" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 11px; border:1px solid rgba(255,255,255,.1); border-radius:9px; cursor:pointer; background:transparent; color:{{ g.delayFg }}; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                  <span style="display:flex"><dc-import name="Icon" glyph="timer" size="15" hint-size="15px,15px"></dc-import></span>{{ g.delay }}
+                  <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import></span>
+                </button>
+                <sc-if value="{{ g.delayOpen }}" hint-placeholder-val="{{ false }}">
+                  <div style="position:absolute; left:0; top:41px; z-index:30; width:150px; padding:5px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+                    <sc-for list="{{ g.delays }}" as="o" hint-placeholder-count="4">
+                      <button onClick="{{ o.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ o.menuBg }}; color:{{ o.menuFg }}" style-hover="background:rgba(255,255,255,.09)">
+                        <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'">{{ o.label }}</span>
+                        <span style="opacity:{{ o.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+                      </button>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </div>
+
+            </div>
+            <div style="display:flex; align-items:center; gap:7px; margin-top:8px; padding:5px 11px; border-radius:8px; background:rgba(16,18,14,.72); border:1px solid rgba(255,255,255,.07); font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; backdrop-filter:blur(8px)">
+              <span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="{{ g.armGlyph }}" size="13" hint-size="13px,13px"></dc-import></span>{{ g.armedHint }}
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ g.armed }}" hint-placeholder-val="{{ false }}">
+            <div onClick="{{ g.choose }}" style="display:flex; align-items:center; gap:8px; height:26px; padding:0 12px; border-radius:0 0 10px 10px; background:rgba(26,28,24,.86); border:1px solid rgba(255,255,255,.1); border-top:0; cursor:pointer; backdrop-filter:blur(14px); opacity:.72; transition:opacity .16s ease" style-hover="opacity:1">
+              <span style="display:flex; align-items:center; gap:6px; color:#eaff7a; font:500 11.5px/1 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="{{ g.modeGlyph }}" size="13" hint-size="13px,13px"></dc-import>{{ g.mode }}</span>
+              <span style="width:1px; height:12px; background:rgba(255,255,255,.16)"></span>
+              <span style="color:#8f9689; font:400 11.5px/1 'IBM Plex Sans'; white-space:nowrap">then {{ g.afterLabel }}</span>
+              <span style="color:#6f766a; display:flex"><dc-import name="Icon" glyph="chevron" size="13" hint-size="13px,13px"></dc-import></span>
+            </div>
+          </sc-if>
+        </div>
+
+        <sc-if value="{{ g.armed }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; left:50%; top:52px; transform:translateX(-50%); padding:5px 11px; border-radius:8px; background:rgba(16,18,14,.72); font:400 11.5px/1 'IBM Plex Sans'; color:#7d8478; backdrop-filter:blur(8px)">{{ g.armedHint }}</div>
+        </sc-if>
+      </div>
+
+      <p style="margin:0; max-width:1180px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Your suggestion as asked for: three dropdowns, no primary, 420 × 54, reading as a sentence left to right — <span style="font-family:'IBM Plex Mono'; color:#c3c9d4">Window, then Review, no delay</span>. The trigger keeps the active mode's icon in accent so the armed state is still legible at a glance. What it costs is the mode switch: changing Region → Window is two clicks and a menu that covers the desktop you're about to capture, and the four modes stop being visible at all — a new user can't see that Freeform exists.</p>
+    </div>
+
+    <div id="4b" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">4b</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Modes stay one click</span>
+        <div style="display:flex; gap:2px; padding:3px; background:#15171b; border:1px solid #23262d; border-radius:9px">
+          <button onClick="{{ h.choose }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ h.tab.chooseBg }}; color:{{ h.tab.chooseFg }}">Choosing</button>
+          <button onClick="{{ h.arm }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ h.tab.armBg }}; color:{{ h.tab.armFg }}">Armed</button>
+        </div>
+        <span style="font:400 12px/1 'IBM Plex Mono'; color:#6d7484">408 × 54</span>
+      </div>
+
+      <div style="position:relative; width:1180px; height:400px; border-radius:12px; overflow:hidden; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9)">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 30% 12%, #2a2536 0%, #16141c 58%, #0d0c11 100%)">
+          <div style="position:absolute; left:0; right:0; top:0; height:26px; background:rgba(12,12,15,.7); display:flex; align-items:center; justify-content:center; font:400 11px/1 'IBM Plex Mono'; color:#a8afa0">Aug 25  12:56 PM</div>
+          <div style="position:absolute; left:110px; top:74px; width:440px; height:222px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:470px; top:150px; width:490px; height:214px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:28px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+          </div>
+        </div>
+        <div style="position:absolute; inset:0; background:rgba(12,13,10,.62)"></div>
+
+        <sc-if value="{{ h.armed }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; left:0; right:0; top:0; bottom:0; cursor:crosshair"></div>
+          <div style="position:absolute; left:504px; top:318px; width:330px; height:92px; border:1.5px solid rgba(227,255,79,.85); border-radius:4px; background:rgba(227,255,79,.07); pointer-events:none">
+            <div style="position:absolute; left:0; top:-27px; padding:4px 9px; border-radius:6px; background:#e3ff4f; color:#15170e; font:600 11px/1 'IBM Plex Mono'; white-space:nowrap">Terminal — 490 × 214</div>
+          </div>
+        </sc-if>
+
+        <div style="position:absolute; left:50%; top:0; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center">
+          <sc-if value="{{ h.choosing }}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex; align-items:center; gap:8px; padding:10px 10px; border-radius:0 0 14px 14px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); border-top:0; box-shadow:0 22px 48px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+              <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.34); border-radius:10px">
+                <sc-for list="{{ h.modes }}" as="m" hint-placeholder-count="4">
+                  <button onClick="{{ m.pick }}" title="{{ m.title }}" style="width:34px; height:34px; display:grid; place-items:center; border:1px solid {{ m.border }}; padding:0; border-radius:8px; cursor:pointer; background:{{ m.bg }}; color:{{ m.fg }}" style-hover="background:rgba(255,255,255,.07)">
+                    <dc-import name="Icon" glyph="{{ m.glyph }}" size="17" hint-size="17px,17px"></dc-import>
+                  </button>
+                </sc-for>
+              </div>
+
+              <span style="font:500 12.5px/1 'IBM Plex Sans'; color:#eaff7a; min-width:66px; white-space:nowrap">{{ h.mode }}</span>
+
+              <div style="width:1px; height:22px; background:rgba(255,255,255,.12)"></div>
+
+              <div style="position:relative">
+                <button onClick="{{ h.openAfter }}" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 11px; border:1px solid rgba(255,255,255,.1); border-radius:9px; cursor:pointer; background:transparent; color:#f1f3e8; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                  <span style="color:#8f9689; font-weight:400">then</span>
+                  <span style="color:#a8afa0; display:flex"><dc-import name="Icon" glyph="{{ h.afterGlyph }}" size="15" hint-size="15px,15px"></dc-import></span>{{ h.afterLabel }}
+                  <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import></span>
+                </button>
+                <sc-if value="{{ h.afterOpen }}" hint-placeholder-val="{{ false }}">
+                  <div style="position:absolute; left:0; top:41px; z-index:30; width:268px; padding:5px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+                    <sc-for list="{{ h.afters }}" as="o" hint-placeholder-count="3">
+                      <button onClick="{{ o.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ o.menuBg }}; color:{{ o.menuFg }}" style-hover="background:rgba(255,255,255,.09)">
+                        <dc-import name="Icon" glyph="{{ o.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+                        <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+                          <span style="font:500 12.5px/1 'IBM Plex Sans'">{{ o.label }}</span>
+                          <span style="font:400 11px/1.35 'IBM Plex Sans'; color:#8f9689">{{ o.note }}</span>
+                        </span>
+                        <span style="opacity:{{ o.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+                      </button>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </div>
+
+              <div style="position:relative">
+                <button onClick="{{ h.openDelay }}" title="Countdown before the grab" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 9px 0 10px; border:1px solid rgba(255,255,255,.1); border-radius:9px; cursor:pointer; background:transparent; color:{{ h.delayFg }}; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                  <span style="display:flex"><dc-import name="Icon" glyph="timer" size="15" hint-size="15px,15px"></dc-import></span>{{ h.delayShort }}
+                  <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import></span>
+                </button>
+                <sc-if value="{{ h.delayOpen }}" hint-placeholder-val="{{ false }}">
+                  <div style="position:absolute; left:0; top:41px; z-index:30; width:150px; padding:5px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+                    <sc-for list="{{ h.delays }}" as="o" hint-placeholder-count="4">
+                      <button onClick="{{ o.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ o.menuBg }}; color:{{ o.menuFg }}" style-hover="background:rgba(255,255,255,.09)">
+                        <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'">{{ o.label }}</span>
+                        <span style="opacity:{{ o.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+                      </button>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </div>
+
+            </div>
+            <div style="display:flex; align-items:center; gap:7px; margin-top:8px; padding:5px 11px; border-radius:8px; background:rgba(16,18,14,.72); border:1px solid rgba(255,255,255,.07); font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; backdrop-filter:blur(8px)">
+              <span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="{{ h.armGlyph }}" size="13" hint-size="13px,13px"></dc-import></span>{{ h.armedHint }}
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ h.armed }}" hint-placeholder-val="{{ false }}">
+            <div onClick="{{ h.choose }}" style="display:flex; align-items:center; gap:8px; height:26px; padding:0 12px; border-radius:0 0 10px 10px; background:rgba(26,28,24,.86); border:1px solid rgba(255,255,255,.1); border-top:0; cursor:pointer; backdrop-filter:blur(14px); opacity:.72; transition:opacity .16s ease" style-hover="opacity:1">
+              <span style="display:flex; align-items:center; gap:6px; color:#eaff7a; font:500 11.5px/1 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="{{ h.modeGlyph }}" size="13" hint-size="13px,13px"></dc-import>{{ h.mode }}</span>
+              <span style="width:1px; height:12px; background:rgba(255,255,255,.16)"></span>
+              <span style="color:#8f9689; font:400 11.5px/1 'IBM Plex Sans'; white-space:nowrap">then {{ h.afterLabel }}</span>
+              <span style="color:#6f766a; display:flex"><dc-import name="Icon" glyph="chevron" size="13" hint-size="13px,13px"></dc-import></span>
+            </div>
+          </sc-if>
+        </div>
+
+        <sc-if value="{{ h.armed }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; left:50%; top:52px; transform:translateX(-50%); padding:5px 11px; border-radius:8px; background:rgba(16,18,14,.72); font:400 11.5px/1 'IBM Plex Sans'; color:#7d8478; backdrop-filter:blur(8px)">{{ h.armedHint }}</div>
+        </sc-if>
+      </div>
+
+      <p style="margin:0; max-width:1180px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Four 34px icon buttons in the recessed well keep every mode one click away and visible, with the selected one's name spelled out beside them so the icons never carry the label alone. Only the two genuinely secondary decisions collapse into dropdowns, and delay shortens to <span style="font-family:'IBM Plex Mono'; color:#c3c9d4">Off</span> when unset. <strong style="color:#c3c9d4; font-weight:500">No primary button</strong> — picking the mode <em>is</em> the commit, so the row ends at the last real decision and what happens next is stated underneath instead of promised by a button that couldn't keep it. Full screen is the one mode with nothing left to aim at, so choosing it fires the grab directly. 408 × 54, and nothing in it lies.</p>
+    </div>
+
+  </div>
+</section>
+
+<section style="display:flex; flex-direction:column; gap:34px; padding:24px 72px 40px; border-top:1px solid #1b1e24">
+  <header style="display:flex; flex-direction:column; gap:12px; max-width:900px">
+    <div style="display:flex; align-items:center; gap:10px">
+      <div style="width:22px; height:22px; border-radius:6px; background:#e3ff4f; display:grid; place-items:center; color:#15170e">
+        <dc-import name="Icon" glyph="crop" size="13" stroke="2.1" hint-size="13px,13px"></dc-import>
+      </div>
+      <span style="font:600 13px/1 'IBM Plex Sans'; letter-spacing:.14em; text-transform:uppercase; color:#7f8798">snipux · the pre-snip chooser</span>
+    </div>
+    <h1 style="margin:0; font:600 30px/1.2 'IBM Plex Sans'; color:#eef1f6; letter-spacing:-.02em">Staying out of the way of a mode that needs the whole screen</h1>
+    <p style="margin:0; font:400 15px/1.6 'IBM Plex Sans'; color:#98a0b0; text-wrap:pretty">The chooser is up when nothing is selected yet, so the entire monitor is under the 62% scrim — no marching ants, no frame, nothing to point at. Which means every pixel it occupies is a pixel Window mode can't preview and Freeform can't trace. Three answers, and they differ on <em>what happens the instant you arm a mode</em>: <a href="#3a">3a</a> shrinks it to a status pill in the spot the floating bar will take over; <a href="#3b">3b</a> parks it against the monitor's top edge as a hover tab; <a href="#3c">3c</a> deletes it and moves the state onto the cursor. Use the <span style="font-family:'IBM Plex Mono'; color:#dfe4ec">Choosing / Armed</span> switch on each to see both halves — the second state is the actual design work.</p>
+  </header>
+
+  <div style="display:flex; flex-direction:column; gap:12px">
+    <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Shared rule · it anchors to a monitor, never to the desktop</span>
+    <div style="display:flex; align-items:center; gap:26px; padding:18px 22px; border-radius:12px; background:#101216; border:1px solid #21242b">
+      <div style="position:relative; width:420px; height:118px; flex:none">
+        <div style="position:absolute; left:0; top:26px; width:150px; height:66px; border-radius:4px; border:1px solid #2c313a; background:#15181d"></div>
+        <div style="position:absolute; left:158px; top:6px; width:130px; height:100px; border-radius:4px; border:1.5px solid #e3ff4f; background:#1b1f16">
+          <div style="position:absolute; left:50%; bottom:9px; transform:translateX(-50%); width:96px; height:13px; border-radius:4px; background:#e3ff4f"></div>
+          <div style="position:absolute; left:50%; top:8px; transform:translateX(-50%); font:500 8px/1 'IBM Plex Mono'; color:#8f9689">ACTIVE</div>
+        </div>
+        <div style="position:absolute; left:296px; top:34px; width:124px; height:58px; border-radius:4px; border:1px solid #2c313a; background:#15181d"></div>
+        <div style="position:absolute; left:150px; top:26px; width:8px; height:66px; background:repeating-linear-gradient(45deg,#22252c 0 3px,transparent 3px 6px)"></div>
+        <div style="position:absolute; left:288px; top:34px; width:8px; height:58px; background:repeating-linear-gradient(45deg,#22252c 0 3px,transparent 3px 6px)"></div>
+      </div>
+      <p style="margin:0; flex:1; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Three staggered monitors, 6400 × 1440 of virtual desktop, dead zones between them. Every position in all three options below is expressed against <strong style="color:#c3c9d4; font-weight:500">the monitor the snip opened on</strong> — its centre, its top edge, its bottom edge — never the virtual desktop's. Centring on the desktop puts the chooser in a gap on this machine. Each frame below <em>is</em> that one monitor.</p>
+    </div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:44px">
+
+    <div id="3a" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">3a</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">It becomes the floating bar</span>
+        <div style="display:flex; gap:2px; padding:3px; background:#15171b; border:1px solid #23262d; border-radius:9px">
+          <button onClick="{{ d.choose }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ d.tab.chooseBg }}; color:{{ d.tab.chooseFg }}">Choosing</button>
+          <button onClick="{{ d.arm }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ d.tab.armBg }}; color:{{ d.tab.armFg }}">Armed</button>
+        </div>
+      </div>
+
+      <div style="position:relative; width:1180px; height:440px; border-radius:12px; overflow:hidden; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9)">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 30% 12%, #2a2536 0%, #16141c 58%, #0d0c11 100%)">
+          <div style="position:absolute; left:0; right:0; top:0; height:26px; background:rgba(12,12,15,.7); display:flex; align-items:center; justify-content:center; font:400 11px/1 'IBM Plex Mono'; color:#a8afa0">Aug 25  12:56 PM</div>
+          <div style="position:absolute; left:110px; top:74px; width:440px; height:230px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:470px; top:158px; width:490px; height:222px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:28px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+          </div>
+        </div>
+        <div style="position:absolute; inset:0; background:rgba(12,13,10,.62)"></div>
+
+        <sc-if value="{{ d.choosing }}" hint-placeholder-val="{{ true }}">
+          <div style="position:absolute; left:50%; bottom:30px; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; gap:9px">
+            <div style="display:flex; align-items:center; gap:8px; padding:8px 9px; border-radius:14px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); box-shadow:0 24px 50px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+              <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.34); border-radius:10px">
+                <sc-for list="{{ d.modes }}" as="m" hint-placeholder-count="4">
+                  <button onClick="{{ m.pick }}" title="{{ m.title }}" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 12px; border:1px solid {{ m.border }}; border-radius:8px; cursor:pointer; background:{{ m.bg }}; color:{{ m.fg }}; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                    <dc-import name="Icon" glyph="{{ m.glyph }}" size="16" hint-size="16px,16px"></dc-import>{{ m.label }}
+                    <span style="font:400 10.5px 'IBM Plex Mono'; color:{{ m.keyFg }}">{{ m.shortcut }}</span>
+                  </button>
+                </sc-for>
+              </div>
+              <div style="width:1px; height:24px; background:rgba(255,255,255,.12)"></div>
+              <button onClick="{{ d.cycleDelay }}" title="Countdown before the grab" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 11px; border:1px solid rgba(255,255,255,.1); border-radius:9px; cursor:pointer; background:transparent; color:{{ d.delayFg }}; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                <dc-import name="Icon" glyph="timer" size="15" hint-size="15px,15px"></dc-import>{{ d.delay }}
+              </button>
+              <button onClick="{{ d.toggleAfter }}" title="What happens after the grab" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 11px; border:1px solid rgba(255,255,255,.1); border-radius:9px; cursor:pointer; background:transparent; color:#d7dacb; font:400 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                <span style="color:#8f9689">then</span>
+                <span style="display:flex; align-items:center; gap:6px; font-weight:500; color:#f1f3e8"><dc-import name="Icon" glyph="{{ d.afterGlyph }}" size="15" hint-size="15px,15px"></dc-import>{{ d.afterLabel }}</span>
+                <dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import>
+              </button>
+              <div style="width:1px; height:24px; background:rgba(255,255,255,.12)"></div>
+              <button onClick="{{ d.arm }}" style="height:34px; padding:0 12px; border:0; border-radius:9px; cursor:pointer; background:transparent; color:#8f9689; font:500 12.5px 'IBM Plex Sans'" style-hover="background:rgba(255,255,255,.07); color:#dfe4ec">Cancel</button>
+              <sc-if value="{{ d.isFull }}" hint-placeholder-val="{{ false }}">
+                <button onClick="{{ d.arm }}" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 15px; border:0; border-radius:9px; cursor:pointer; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="filter:brightness(1.06)">
+                  <dc-import name="Icon" glyph="camera" size="16" stroke="1.95" hint-size="16px,16px"></dc-import>Capture screen
+                  <span style="font:400 11px 'IBM Plex Mono'; color:rgba(21,23,14,.55)">↵</span>
+                </button>
+              </sc-if>
+              <sc-if value="{{ d.notFull }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex; align-items:center; gap:8px; height:34px; padding:0 14px; border-radius:9px; background:rgba(227,255,79,.12); border:1px solid rgba(227,255,79,.3); color:#eaff7a; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap">
+                  <dc-import name="Icon" glyph="{{ d.armGlyph }}" size="16" hint-size="16px,16px"></dc-import>{{ d.armVerb }}
+                </div>
+              </sc-if>
+            </div>
+            <div style="display:flex; align-items:center; gap:9px; padding:6px 12px; border-radius:9px; background:rgba(16,18,14,.82); border:1px solid rgba(255,255,255,.07); font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; backdrop-filter:blur(8px)">
+              <span>The bar hands this exact spot to the tool bar once you have a selection</span>
+              <span style="color:rgba(255,255,255,.18)">·</span>
+              <span><span style="font-family:'IBM Plex Mono'; color:#d7dacb">Esc</span> cancel</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ d.armed }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; left:0; right:0; top:0; bottom:0; cursor:crosshair"></div>
+          <div style="position:absolute; left:50%; bottom:30px; transform:translateX(-50%); display:flex; align-items:center; gap:9px; height:34px; padding:0 8px 0 12px; border-radius:11px; opacity:.42; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); box-shadow:0 18px 40px -16px rgba(0,0,0,.9); backdrop-filter:blur(16px); transition:opacity .16s ease" style-hover="opacity:1">
+            <span style="display:flex; align-items:center; gap:7px; color:#eaff7a; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="{{ d.modeGlyph }}" size="15" hint-size="15px,15px"></dc-import>{{ d.mode }}</span>
+            <span style="width:1px; height:16px; background:rgba(255,255,255,.14)"></span>
+            <span style="display:flex; align-items:center; gap:6px; color:#8f9689; font:400 12px 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="{{ d.afterGlyph }}" size="14" hint-size="14px,14px"></dc-import>{{ d.afterLabel }}</span>
+            <span style="width:1px; height:16px; background:rgba(255,255,255,.14)"></span>
+            <button onClick="{{ d.choose }}" style="height:24px; padding:0 8px; border:0; border-radius:7px; cursor:pointer; background:rgba(255,255,255,.08); color:#c6cab8; font:400 11px 'IBM Plex Mono'; white-space:nowrap" style-hover="background:rgba(255,255,255,.16); color:#f1f3e8">Space</button>
+          </div>
+          <div style="position:absolute; left:50%; bottom:78px; transform:translateX(-50%); padding:5px 11px; border-radius:8px; background:rgba(16,18,14,.72); font:400 11.5px/1 'IBM Plex Sans'; color:#7d8478; backdrop-filter:blur(8px)">{{ d.armedHint }}</div>
+        </sc-if>
+      </div>
+
+      <p style="margin:0; max-width:1180px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Exploits the inverse lifetime directly: the chooser sits at bottom-centre of the active monitor — the floating bar's exact anchor — and when you arm a mode it doesn't disappear, it <em>collapses in place</em> to a 34px status pill at 42% opacity that says what's armed and what happens after. Hover it and it comes back to full. The moment a selection exists, that pill is replaced by the tool bar at the same anchor, so the whole snip reads as one object changing state rather than three widgets taking turns. The cost is honest: ~46px of the bottom strip is never fully clear, so a window whose bottom edge lands there is previewed under a translucent pill.</p>
+    </div>
+
+    <div id="3b" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">3b</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Docks to the monitor's top edge</span>
+        <div style="display:flex; gap:2px; padding:3px; background:#15171b; border:1px solid #23262d; border-radius:9px">
+          <button onClick="{{ e.choose }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ e.tab.chooseBg }}; color:{{ e.tab.chooseFg }}">Choosing</button>
+          <button onClick="{{ e.arm }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ e.tab.armBg }}; color:{{ e.tab.armFg }}">Armed</button>
+        </div>
+        <span style="font:400 12px/1 'IBM Plex Sans'; color:#6d7484">hover the tab to peek</span>
+      </div>
+
+      <div style="position:relative; width:1180px; height:440px; border-radius:12px; overflow:hidden; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9)">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 30% 12%, #2a2536 0%, #16141c 58%, #0d0c11 100%)">
+          <div style="position:absolute; left:0; right:0; top:0; height:26px; background:rgba(12,12,15,.7); display:flex; align-items:center; justify-content:center; font:400 11px/1 'IBM Plex Mono'; color:#a8afa0">Aug 25  12:56 PM</div>
+          <div style="position:absolute; left:110px; top:74px; width:440px; height:230px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:470px; top:158px; width:490px; height:222px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:28px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+          </div>
+        </div>
+        <div style="position:absolute; inset:0; background:rgba(12,13,10,.62)"></div>
+
+        <sc-if value="{{ e.armed }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; left:0; right:0; top:0; bottom:0; cursor:crosshair"></div>
+          <div style="position:absolute; left:504px; top:326px; width:330px; height:96px; border:1.5px solid rgba(227,255,79,.85); border-radius:4px; background:rgba(227,255,79,.07); pointer-events:none">
+            <div style="position:absolute; left:0; top:-27px; padding:4px 9px; border-radius:6px; background:#e3ff4f; color:#15170e; font:600 11px/1 'IBM Plex Mono'; white-space:nowrap">Terminal — 490 × 222</div>
+          </div>
+        </sc-if>
+
+        <div style="position:absolute; left:50%; top:0; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center">
+          <sc-if value="{{ e.choosing }}" hint-placeholder-val="{{ true }}">
+            <div style="width:660px; border-radius:0 0 16px 16px; overflow:hidden; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); border-top:0; box-shadow:0 26px 54px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+              <div style="display:flex; gap:4px; padding:11px 11px 10px">
+                <sc-for list="{{ e.modes }}" as="m" hint-placeholder-count="4">
+                  <button onClick="{{ m.pick }}" title="{{ m.title }}" style="flex:1; display:flex; flex-direction:column; align-items:center; gap:7px; padding:11px 0 10px; border:1px solid {{ m.border }}; border-radius:11px; cursor:pointer; background:{{ m.bg }}; color:{{ m.fg }}" style-hover="background:rgba(255,255,255,.07)">
+                    <dc-import name="Icon" glyph="{{ m.glyph }}" size="21" stroke="1.5" hint-size="21px,21px"></dc-import>
+                    <span style="display:flex; align-items:center; gap:6px; font:500 12px/1 'IBM Plex Sans'">{{ m.label }}<span style="font:400 10px 'IBM Plex Mono'; color:{{ m.keyFg }}">{{ m.shortcut }}</span></span>
+                  </button>
+                </sc-for>
+              </div>
+              <div style="height:1px; background:rgba(255,255,255,.09)"></div>
+              <div style="display:flex; align-items:center; gap:9px; padding:10px 11px; background:rgba(0,0,0,.2)">
+                <span style="font:400 12px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">then</span>
+                <div style="display:flex; gap:3px">
+                  <sc-for list="{{ e.afters }}" as="o" hint-placeholder-count="3">
+                    <button onClick="{{ o.pick }}" title="{{ o.note }}" style="display:flex; align-items:center; gap:6px; height:30px; padding:0 11px; border:1px solid {{ o.border }}; border-radius:99px; cursor:pointer; background:{{ o.bg }}; color:{{ o.fg }}; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                      <dc-import name="Icon" glyph="{{ o.glyph }}" size="14" hint-size="14px,14px"></dc-import>{{ o.label }}
+                    </button>
+                  </sc-for>
+                </div>
+                <div style="width:1px; height:20px; background:rgba(255,255,255,.1)"></div>
+                <button onClick="{{ e.cycleDelay }}" style="display:flex; align-items:center; gap:6px; height:30px; padding:0 10px; border:1px solid rgba(255,255,255,.1); border-radius:99px; cursor:pointer; background:transparent; color:{{ e.delayFg }}; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                  <dc-import name="Icon" glyph="timer" size="14" hint-size="14px,14px"></dc-import>{{ e.delay }}
+                </button>
+                <div style="flex:1"></div>
+                <button onClick="{{ e.arm }}" style="display:flex; align-items:center; gap:8px; height:32px; padding:0 15px; border:0; border-radius:9px; cursor:pointer; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="filter:brightness(1.06)">
+                  <dc-import name="Icon" glyph="{{ e.armGlyph }}" size="16" stroke="1.95" hint-size="16px,16px"></dc-import>{{ e.armVerb }}
+                  <span style="font:400 11px 'IBM Plex Mono'; color:rgba(21,23,14,.55)">↵</span>
+                </button>
+              </div>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ e.armed }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex; align-items:center; gap:8px; height:26px; padding:0 12px; border-radius:0 0 10px 10px; background:rgba(26,28,24,.86); border:1px solid rgba(255,255,255,.1); border-top:0; cursor:pointer; backdrop-filter:blur(14px); opacity:.72; transition:opacity .16s ease" style-hover="opacity:1">
+              <span style="display:flex; align-items:center; gap:6px; color:#eaff7a; font:500 11.5px/1 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="{{ e.modeGlyph }}" size="13" hint-size="13px,13px"></dc-import>{{ e.mode }}</span>
+              <span style="width:1px; height:12px; background:rgba(255,255,255,.16)"></span>
+              <span style="color:#8f9689; font:400 11.5px/1 'IBM Plex Sans'; white-space:nowrap">then {{ e.afterLabel }}</span>
+              <span style="color:#6f766a"><dc-import name="Icon" glyph="chevron" size="13" hint-size="13px,13px"></dc-import></span>
+            </div>
+          </sc-if>
+        </div>
+
+        <sc-if value="{{ e.armed }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; left:50%; top:52px; transform:translateX(-50%); padding:5px 11px; border-radius:8px; background:rgba(16,18,14,.72); font:400 11.5px/1 'IBM Plex Sans'; color:#7d8478; backdrop-filter:blur(8px)">{{ e.armedHint }}</div>
+        </sc-if>
+      </div>
+
+      <p style="margin:0; max-width:1180px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Keeps the placeholder's position and its icon-over-label tiles — both were the right instincts — but makes the panel <em>hang</em> from the monitor's top edge rather than float near it, so it reads as belonging to that monitor and nothing else. Arming shrinks it to a 26px tab, still attached, still hoverable: mode and destination stay readable and one click reopens the panel without re-running the snip. The dead band is 26px of the top edge, which on this machine is already the GNOME bar's territory. Window mode previews cleanly underneath — try Armed and look at the terminal.</p>
+    </div>
+
+    <div id="3c" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">3c</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">It moves onto the cursor</span>
+        <div style="display:flex; gap:2px; padding:3px; background:#15171b; border:1px solid #23262d; border-radius:9px">
+          <button onClick="{{ f.choose }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ f.tab.chooseBg }}; color:{{ f.tab.chooseFg }}">Choosing</button>
+          <button onClick="{{ f.arm }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ f.tab.armBg }}; color:{{ f.tab.armFg }}">Armed</button>
+        </div>
+      </div>
+
+      <div style="position:relative; width:1180px; height:440px; border-radius:12px; overflow:hidden; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9)">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 30% 12%, #2a2536 0%, #16141c 58%, #0d0c11 100%)">
+          <div style="position:absolute; left:0; right:0; top:0; height:26px; background:rgba(12,12,15,.7); display:flex; align-items:center; justify-content:center; font:400 11px/1 'IBM Plex Mono'; color:#a8afa0">Aug 25  12:56 PM</div>
+          <div style="position:absolute; left:110px; top:74px; width:440px; height:230px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:470px; top:158px; width:490px; height:222px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:28px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+          </div>
+        </div>
+        <div style="position:absolute; inset:0; background:rgba(12,13,10,.62)"></div>
+
+        <sc-if value="{{ f.choosing }}" hint-placeholder-val="{{ true }}">
+          <div style="position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); display:flex; flex-direction:column; align-items:center; gap:14px">
+            <div style="display:flex; gap:8px">
+              <sc-for list="{{ f.modes }}" as="m" hint-placeholder-count="4">
+                <button onClick="{{ m.pick }}" title="{{ m.title }}" style="width:128px; display:flex; flex-direction:column; align-items:center; gap:11px; padding:20px 0 15px; border:1px solid {{ m.border }}; border-radius:14px; cursor:pointer; background:{{ m.tileBg }}; color:{{ m.fg }}; backdrop-filter:blur(16px)" style-hover="background:rgba(255,255,255,.09)">
+                  <dc-import name="Icon" glyph="{{ m.glyph }}" size="26" stroke="1.4" hint-size="26px,26px"></dc-import>
+                  <span style="display:flex; flex-direction:column; align-items:center; gap:5px">
+                    <span style="font:500 13px/1 'IBM Plex Sans'">{{ m.label }}</span>
+                    <span style="font:400 10.5px/1 'IBM Plex Mono'; color:{{ m.keyFg }}">{{ m.shortcut }}</span>
+                  </span>
+                </button>
+              </sc-for>
+            </div>
+            <div style="display:flex; align-items:center; gap:9px; padding:7px 9px 7px 13px; border-radius:12px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); box-shadow:0 20px 44px -16px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+              <span style="font:400 12px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">then</span>
+              <div style="display:flex; gap:3px">
+                <sc-for list="{{ f.afters }}" as="o" hint-placeholder-count="3">
+                  <button onClick="{{ o.pick }}" title="{{ o.note }}" style="display:flex; align-items:center; gap:6px; height:30px; padding:0 11px; border:1px solid {{ o.border }}; border-radius:99px; cursor:pointer; background:{{ o.bg }}; color:{{ o.fg }}; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                    <dc-import name="Icon" glyph="{{ o.glyph }}" size="14" hint-size="14px,14px"></dc-import>{{ o.label }}
+                  </button>
+                </sc-for>
+              </div>
+              <div style="width:1px; height:20px; background:rgba(255,255,255,.1)"></div>
+              <button onClick="{{ f.cycleDelay }}" style="display:flex; align-items:center; gap:6px; height:30px; padding:0 10px; border:1px solid rgba(255,255,255,.1); border-radius:99px; cursor:pointer; background:transparent; color:{{ f.delayFg }}; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                <dc-import name="Icon" glyph="timer" size="14" hint-size="14px,14px"></dc-import>{{ f.delay }}
+              </button>
+            </div>
+            <span style="font:400 11.5px/1 'IBM Plex Sans'; color:#6f766a">Everything here disappears the moment you move — the state rides the cursor after that</span>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ f.armed }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; left:0; right:0; top:0; bottom:0; cursor:crosshair"></div>
+          <div style="position:absolute; left:452px; top:0; bottom:0; width:1px; background:rgba(255,255,255,.14)"></div>
+          <div style="position:absolute; left:0; right:0; top:236px; height:1px; background:rgba(255,255,255,.14)"></div>
+          <div style="position:absolute; left:464px; top:248px; display:flex; align-items:center; gap:8px; height:28px; padding:0 11px; border-radius:9px; background:rgba(26,28,24,.9); border:1px solid rgba(255,255,255,.1); box-shadow:0 12px 28px -10px rgba(0,0,0,.85); backdrop-filter:blur(14px)">
+            <span style="display:flex; align-items:center; gap:6px; color:#eaff7a; font:500 11.5px/1 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="{{ f.modeGlyph }}" size="13" hint-size="13px,13px"></dc-import>{{ f.mode }}</span>
+            <span style="width:1px; height:13px; background:rgba(255,255,255,.16)"></span>
+            <span style="color:#8f9689; font:400 11.5px/1 'IBM Plex Sans'; white-space:nowrap">then {{ f.afterLabel }}</span>
+            <sc-if value="{{ f.hasDelay }}" hint-placeholder-val="{{ false }}">
+              <span style="width:1px; height:13px; background:rgba(255,255,255,.16)"></span>
+              <span style="color:#c6cab8; font:500 11px/1 'IBM Plex Mono'; white-space:nowrap">{{ f.delay }}</span>
+            </sc-if>
+          </div>
+          <div style="position:absolute; left:50%; bottom:26px; transform:translateX(-50%); display:flex; align-items:center; gap:9px; padding:6px 12px; border-radius:9px; background:rgba(16,18,14,.72); font:400 11.5px/1 'IBM Plex Sans'; color:#7d8478; backdrop-filter:blur(8px)">
+            <span>{{ f.armedHint }}</span>
+            <span style="color:rgba(255,255,255,.16)">·</span>
+            <span><span style="font-family:'IBM Plex Mono'; color:#c6cab8">R W F L</span> switch mode</span>
+            <span style="color:rgba(255,255,255,.16)">·</span>
+            <span><span style="font-family:'IBM Plex Mono'; color:#c6cab8">Space</span> bring it back</span>
+          </div>
+        </sc-if>
+      </div>
+
+      <p style="margin:0; max-width:1180px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">The only option that leaves the monitor genuinely untouched. The chooser opens as large centred tiles — easy to hit, no scanning, and it can afford the size because it's about to vanish — then on first pointer movement it's gone entirely and the armed state rides beside the crosshair as a 28px readout that moves with you. Nothing occupies fixed screen space, so Window previews and Freeform tracing are unobstructed everywhere. The trade: the settings are only re-reachable by keyboard or by pressing Space to recall the chooser, and a HUD attached to the cursor is one more thing moving while you drag.</p>
+    </div>
+
+  </div>
+</section>
+
+<section style="display:flex; flex-direction:column; gap:34px; padding:24px 72px 96px; border-top:1px solid #1b1e24">
+  <header style="display:flex; flex-direction:column; gap:12px; max-width:900px">
+    <div style="display:flex; align-items:center; gap:10px">
+      <div style="width:22px; height:22px; border-radius:6px; background:#e3ff4f; display:grid; place-items:center; color:#15170e">
+        <dc-import name="Icon" glyph="camera" size="13" stroke="2.1" hint-size="13px,13px"></dc-import>
+      </div>
+      <span style="font:600 13px/1 'IBM Plex Sans'; letter-spacing:.14em; text-transform:uppercase; color:#7f8798">snipux · before the shot</span>
+    </div>
+    <h1 style="margin:0; font:600 30px/1.2 'IBM Plex Sans'; color:#eef1f6; letter-spacing:-.02em">The pre-capture bar</h1>
+    <p style="margin:0; font:400 15px/1.6 'IBM Plex Sans'; color:#98a0b0; text-wrap:pretty">What shipped puts three different kinds of thing in one undifferentiated row: <strong style="color:#c3c9d4; font-weight:500">what to capture</strong> (Region / Window / Full screen / Freeform), <strong style="color:#c3c9d4; font-weight:500">where it goes afterwards</strong> (Review / Copy / Save), and no way to actually commit. Region and Copy both look "selected" in the same style, but they're answers to different questions — so the bar reads as seven peers where two of them happen to be lit. All three options below separate those axes; they differ in how much of the after-decision belongs here at all. <a href="#2a">2a</a> keeps it as one value, <a href="#2b">2b</a> spells it out as a sentence, <a href="#2c">2c</a> removes it.</p>
+  </header>
+
+  <div style="display:flex; flex-direction:column; gap:44px">
+
+    <div id="2a" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">2a</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">One question per control</span>
+      </div>
+
+      <div style="position:relative; width:1180px; height:420px; border-radius:12px; overflow:hidden; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9)">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 30% 12%, #2a2536 0%, #16141c 58%, #0d0c11 100%)">
+          <div style="position:absolute; left:0; right:0; top:0; height:26px; background:rgba(12,12,15,.7); display:flex; align-items:center; justify-content:center; font:400 11px/1 'IBM Plex Mono'; color:#a8afa0">Aug 25  12:56 PM</div>
+          <div style="position:absolute; left:120px; top:78px; width:430px; height:220px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:470px; top:150px; width:470px; height:210px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:28px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+          </div>
+        </div>
+        <div style="position:absolute; left:250px; top:96px; width:560px; height:180px; box-shadow:0 0 0 9999px rgba(8,9,12,.66); border:1px solid rgba(255,255,255,.92)">
+          <svg width="560" height="180" style="position:absolute; inset:0; display:block; overflow:visible; pointer-events:none">
+            <rect x="0.5" y="0.5" width="559" height="179" fill="none" stroke="#0c0f1c" stroke-width="1" stroke-dasharray="7 7" style="animation:ants .7s linear infinite"></rect>
+          </svg>
+          <div style="position:absolute; left:0; top:-34px; display:flex; align-items:center; gap:9px; padding:6px 11px; border-radius:8px; background:#e9ecf2; color:#12141a; font:600 12px/1 'IBM Plex Mono'; white-space:nowrap">{{ a.dims }}<span style="color:#9ca3af">·</span><span style="font-weight:400; color:#4b5563">{{ a.ratio }}</span></div>
+          <div style="position:absolute; left:-2px; top:-2px; width:24px; height:24px; border-top:4px solid #fff; border-left:4px solid #fff"></div>
+          <div style="position:absolute; right:-2px; top:-2px; width:24px; height:24px; border-top:4px solid #fff; border-right:4px solid #fff"></div>
+          <div style="position:absolute; left:-2px; bottom:-2px; width:24px; height:24px; border-bottom:4px solid #fff; border-left:4px solid #fff"></div>
+          <div style="position:absolute; right:-2px; bottom:-2px; width:24px; height:24px; border-bottom:4px solid #fff; border-right:4px solid #fff"></div>
+        </div>
+
+        <div style="position:absolute; left:50%; bottom:30px; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; gap:9px">
+          <div style="display:flex; align-items:center; gap:8px; padding:8px 9px; border-radius:14px; background:rgba(26,28,24,.94); border:1px solid rgba(255,255,255,.1); box-shadow:0 24px 50px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+            <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.34); border-radius:10px">
+              <sc-for list="{{ a.modes }}" as="m" hint-placeholder-count="4">
+                <button onClick="{{ m.pick }}" title="{{ m.title }}" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 12px; border:1px solid {{ m.border }}; border-radius:8px; cursor:pointer; background:{{ m.bg }}; color:{{ m.fg }}; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                  <dc-import name="Icon" glyph="{{ m.glyph }}" size="16" hint-size="16px,16px"></dc-import>{{ m.label }}
+                </button>
+              </sc-for>
+            </div>
+
+            <div style="width:1px; height:24px; background:rgba(255,255,255,.12)"></div>
+
+            <button onClick="{{ a.cycleDelay }}" title="Countdown before the grab" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 11px; border:1px solid rgba(255,255,255,.1); border-radius:9px; cursor:pointer; background:transparent; color:{{ a.delayFg }}; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+              <dc-import name="Icon" glyph="timer" size="15" hint-size="15px,15px"></dc-import>{{ a.delay }}
+            </button>
+
+            <button onClick="{{ a.toggleAfter }}" title="What happens after the grab" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 11px; border:1px solid rgba(255,255,255,.1); border-radius:9px; cursor:pointer; background:transparent; color:#d7dacb; font:400 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+              <span style="color:#8f9689">then</span>
+              <span style="display:flex; align-items:center; gap:6px; font-weight:500; color:#f1f3e8"><dc-import name="Icon" glyph="{{ a.afterGlyph }}" size="15" hint-size="15px,15px"></dc-import>{{ a.afterLabel }}</span>
+              <dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import>
+            </button>
+
+            <div style="width:1px; height:24px; background:rgba(255,255,255,.12)"></div>
+
+            <button style="height:34px; padding:0 12px; border:0; border-radius:9px; cursor:pointer; background:transparent; color:#8f9689; font:500 12.5px 'IBM Plex Sans'" style-hover="background:rgba(255,255,255,.07); color:#dfe4ec">Cancel</button>
+            <button style="display:flex; align-items:center; gap:8px; height:34px; padding:0 15px; border:0; border-radius:9px; cursor:pointer; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="filter:brightness(1.06)">
+              <dc-import name="Icon" glyph="camera" size="16" stroke="1.95" hint-size="16px,16px"></dc-import>{{ a.cta }}
+              <span style="font:400 11px 'IBM Plex Mono'; color:rgba(21,23,14,.55)">↵</span>
+            </button>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:9px; padding:6px 12px; border-radius:9px; background:rgba(16,18,14,.82); border:1px solid rgba(255,255,255,.07); font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; backdrop-filter:blur(8px)">
+            <span>{{ a.hint }}</span>
+            <span style="color:rgba(255,255,255,.18)">·</span>
+            <span><span style="font-family:'IBM Plex Mono'; color:#d7dacb">Space</span> next mode</span>
+            <span style="color:rgba(255,255,255,.18)">·</span>
+            <span><span style="font-family:'IBM Plex Mono'; color:#d7dacb">Esc</span> cancel</span>
+          </div>
+        </div>
+
+        <sc-if value="{{ a.afterOpen }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; left:50%; bottom:120px; margin-left:38px; width:270px; padding:6px; border-radius:12px; background:rgba(26,28,24,.97); border:1px solid rgba(255,255,255,.12); box-shadow:0 26px 60px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+            <sc-for list="{{ a.afters }}" as="o" hint-placeholder-count="3">
+              <button onClick="{{ o.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ o.bg }}; color:{{ o.fg }}" style-hover="background:rgba(255,255,255,.09)">
+                <dc-import name="Icon" glyph="{{ o.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+                <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+                  <span style="font:500 12.5px/1 'IBM Plex Sans'">{{ o.label }}</span>
+                  <span style="font:400 11px/1.35 'IBM Plex Sans'; color:#8f9689">{{ o.note }}</span>
+                </span>
+                <span style="opacity:{{ o.tick }}; color:#e3ff4f"><dc-import name="Icon" glyph="check" size="15" stroke="2" hint-size="15px,15px"></dc-import></span>
+              </button>
+            </sc-for>
+          </div>
+        </sc-if>
+      </div>
+
+      <p style="margin:0; max-width:1180px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Three shapes for three jobs. The four modes are a real segmented control in a recessed well, so "one of these is on" is legible at a glance — the selected one is accent-tinted, not just a lighter grey. Delay and destination are <em>value</em> chips reading <span style="font-family:'IBM Plex Mono'; color:#c3c9d4">then ▸ Review</span>, which can't be mistaken for a mode. Capture is the only filled button, carries its own Return glyph, and the bar finally has a commit. Freeform is in the well like the others rather than sitting greyed-out mid-row.</p>
+    </div>
+
+    <div id="2b" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">2b</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Reads as a sentence</span>
+      </div>
+
+      <div style="position:relative; width:1180px; height:420px; border-radius:12px; overflow:hidden; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9)">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 30% 12%, #2a2536 0%, #16141c 58%, #0d0c11 100%)">
+          <div style="position:absolute; left:0; right:0; top:0; height:26px; background:rgba(12,12,15,.7); display:flex; align-items:center; justify-content:center; font:400 11px/1 'IBM Plex Mono'; color:#a8afa0">Aug 25  12:56 PM</div>
+          <div style="position:absolute; left:120px; top:78px; width:430px; height:220px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:470px; top:150px; width:470px; height:210px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:28px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+          </div>
+        </div>
+        <div style="position:absolute; left:250px; top:90px; width:560px; height:172px; box-shadow:0 0 0 9999px rgba(8,9,12,.66); border:1px solid rgba(255,255,255,.92)">
+          <svg width="560" height="172" style="position:absolute; inset:0; display:block; overflow:visible; pointer-events:none">
+            <rect x="0.5" y="0.5" width="559" height="171" fill="none" stroke="#0c0f1c" stroke-width="1" stroke-dasharray="7 7" style="animation:ants .7s linear infinite"></rect>
+          </svg>
+          <div style="position:absolute; left:0; top:-34px; display:flex; align-items:center; gap:9px; padding:6px 11px; border-radius:8px; background:#e9ecf2; color:#12141a; font:600 12px/1 'IBM Plex Mono'; white-space:nowrap">{{ b.dims }}<span style="color:#9ca3af">·</span><span style="font-weight:400; color:#4b5563">{{ b.ratio }}</span></div>
+          <div style="position:absolute; left:-2px; top:-2px; width:24px; height:24px; border-top:4px solid #fff; border-left:4px solid #fff"></div>
+          <div style="position:absolute; right:-2px; top:-2px; width:24px; height:24px; border-top:4px solid #fff; border-right:4px solid #fff"></div>
+          <div style="position:absolute; left:-2px; bottom:-2px; width:24px; height:24px; border-bottom:4px solid #fff; border-left:4px solid #fff"></div>
+          <div style="position:absolute; right:-2px; bottom:-2px; width:24px; height:24px; border-bottom:4px solid #fff; border-right:4px solid #fff"></div>
+        </div>
+
+        <div style="position:absolute; left:50%; bottom:28px; transform:translateX(-50%); display:flex; flex-direction:column; gap:0; border-radius:16px; overflow:hidden; background:rgba(26,28,24,.94); border:1px solid rgba(255,255,255,.1); box-shadow:0 26px 54px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+          <div style="display:flex; gap:4px; padding:10px 11px">
+            <sc-for list="{{ b.modes }}" as="m" hint-placeholder-count="4">
+              <button onClick="{{ m.pick }}" title="{{ m.title }}" style="width:104px; display:flex; flex-direction:column; align-items:center; gap:7px; padding:11px 0 10px; border:1px solid {{ m.border }}; border-radius:11px; cursor:pointer; background:{{ m.bg }}; color:{{ m.fg }}" style-hover="background:rgba(255,255,255,.07)">
+                <dc-import name="Icon" glyph="{{ m.glyph }}" size="21" stroke="1.5" hint-size="21px,21px"></dc-import>
+                <span style="font:500 12px/1 'IBM Plex Sans'">{{ m.label }}</span>
+              </button>
+            </sc-for>
+          </div>
+
+          <div style="height:1px; background:rgba(255,255,255,.09)"></div>
+
+          <div style="display:flex; align-items:center; gap:9px; padding:10px 11px; background:rgba(0,0,0,.2)">
+            <span style="font:400 12px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">then</span>
+            <div style="display:flex; gap:3px">
+              <sc-for list="{{ b.afters }}" as="o" hint-placeholder-count="3">
+                <button onClick="{{ o.pick }}" title="{{ o.note }}" style="display:flex; align-items:center; gap:6px; height:30px; padding:0 11px; border:1px solid {{ o.border }}; border-radius:99px; cursor:pointer; background:{{ o.bg }}; color:{{ o.fg }}; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                  <dc-import name="Icon" glyph="{{ o.glyph }}" size="14" hint-size="14px,14px"></dc-import>{{ o.label }}
+                </button>
+              </sc-for>
+            </div>
+            <div style="width:1px; height:20px; background:rgba(255,255,255,.1)"></div>
+            <button onClick="{{ b.cycleDelay }}" style="display:flex; align-items:center; gap:6px; height:30px; padding:0 10px; border:1px solid rgba(255,255,255,.1); border-radius:99px; cursor:pointer; background:transparent; color:{{ b.delayFg }}; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+              <dc-import name="Icon" glyph="timer" size="14" hint-size="14px,14px"></dc-import>{{ b.delay }}
+            </button>
+            <div style="width:22px"></div>
+            <span style="flex:1; font:400 11.5px/1 'IBM Plex Sans'; color:#6f766a; white-space:nowrap">{{ b.sentence }}</span>
+            <button style="height:32px; padding:0 12px; border:0; border-radius:9px; cursor:pointer; background:transparent; color:#8f9689; font:500 12.5px 'IBM Plex Sans'" style-hover="background:rgba(255,255,255,.07); color:#dfe4ec">Cancel</button>
+            <button style="display:flex; align-items:center; gap:8px; height:32px; padding:0 15px; border:0; border-radius:9px; cursor:pointer; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="filter:brightness(1.06)">
+              <dc-import name="Icon" glyph="camera" size="16" stroke="1.95" hint-size="16px,16px"></dc-import>{{ b.cta }}
+              <span style="font:400 11px 'IBM Plex Mono'; color:rgba(21,23,14,.55)">↵</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <p style="margin:0; max-width:1180px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Keeps the icon-over-label mode tiles from what you built — they're a good target size and genuinely scannable — but promotes them to their own row, so the row below can be the after-decision without competing. Pill-shaped destination chips can't be confused with the square mode tiles, and the grey line spells the whole thing out: <span style="font-family:'IBM Plex Mono'; color:#c3c9d4">{{ b.sentence }}</span> Costs a second row of height; buys a bar nobody has to decode.</p>
+    </div>
+
+    <div id="2c" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">2c</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Modes only</span>
+      </div>
+
+      <div style="position:relative; width:1180px; height:420px; border-radius:12px; overflow:hidden; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9)">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 30% 12%, #2a2536 0%, #16141c 58%, #0d0c11 100%)">
+          <div style="position:absolute; left:0; right:0; top:0; height:26px; background:rgba(12,12,15,.7); display:flex; align-items:center; justify-content:center; font:400 11px/1 'IBM Plex Mono'; color:#a8afa0">Aug 25  12:56 PM</div>
+          <div style="position:absolute; left:120px; top:78px; width:430px; height:220px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:470px; top:150px; width:470px; height:210px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:28px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+          </div>
+        </div>
+        <div style="position:absolute; left:250px; top:96px; width:560px; height:180px; box-shadow:0 0 0 9999px rgba(8,9,12,.66); border:1px solid rgba(255,255,255,.92)">
+          <svg width="560" height="180" style="position:absolute; inset:0; display:block; overflow:visible; pointer-events:none">
+            <rect x="0.5" y="0.5" width="559" height="179" fill="none" stroke="#0c0f1c" stroke-width="1" stroke-dasharray="7 7" style="animation:ants .7s linear infinite"></rect>
+          </svg>
+          <div style="position:absolute; left:0; top:-34px; display:flex; align-items:center; gap:9px; padding:6px 11px; border-radius:8px; background:#e9ecf2; color:#12141a; font:600 12px/1 'IBM Plex Mono'; white-space:nowrap">{{ c.dims }}<span style="color:#9ca3af">·</span><span style="font-weight:400; color:#4b5563">{{ c.ratio }}</span></div>
+          <div style="position:absolute; left:-2px; top:-2px; width:24px; height:24px; border-top:4px solid #fff; border-left:4px solid #fff"></div>
+          <div style="position:absolute; right:-2px; top:-2px; width:24px; height:24px; border-top:4px solid #fff; border-right:4px solid #fff"></div>
+          <div style="position:absolute; left:-2px; bottom:-2px; width:24px; height:24px; border-bottom:4px solid #fff; border-left:4px solid #fff"></div>
+          <div style="position:absolute; right:-2px; bottom:-2px; width:24px; height:24px; border-bottom:4px solid #fff; border-right:4px solid #fff"></div>
+        </div>
+
+        <div style="position:absolute; left:50%; bottom:32px; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; gap:9px">
+          <div style="display:flex; align-items:center; gap:7px; padding:8px 9px; border-radius:14px; background:rgba(26,28,24,.94); border:1px solid rgba(255,255,255,.1); box-shadow:0 24px 50px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+            <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.34); border-radius:10px">
+              <sc-for list="{{ c.modes }}" as="m" hint-placeholder-count="4">
+                <button onClick="{{ m.pick }}" title="{{ m.title }}" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 12px; border:1px solid {{ m.border }}; border-radius:8px; cursor:pointer; background:{{ m.bg }}; color:{{ m.fg }}; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                  <dc-import name="Icon" glyph="{{ m.glyph }}" size="16" hint-size="16px,16px"></dc-import>{{ m.label }}
+                  <span style="font:400 10.5px 'IBM Plex Mono'; color:{{ m.keyFg }}">{{ m.shortcut }}</span>
+                </button>
+              </sc-for>
+            </div>
+            <div style="width:1px; height:24px; background:rgba(255,255,255,.12); margin:0 2px"></div>
+            <button onClick="{{ c.cycleDelay }}" title="Countdown before the grab" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 11px; border:1px solid rgba(255,255,255,.1); border-radius:9px; cursor:pointer; background:transparent; color:{{ c.delayFg }}; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+              <dc-import name="Icon" glyph="timer" size="15" hint-size="15px,15px"></dc-import>{{ c.delay }}
+            </button>
+            <button title="Capture settings" style="width:34px; height:34px; display:grid; place-items:center; border:1px solid rgba(255,255,255,.1); padding:0; border-radius:9px; cursor:pointer; background:transparent; color:#a8afa0" style-hover="background:rgba(255,255,255,.07); color:#f1f3e8"><dc-import name="Icon" glyph="cog" size="16" hint-size="16px,16px"></dc-import></button>
+            <div style="width:1px; height:24px; background:rgba(255,255,255,.12); margin:0 2px"></div>
+            <button style="height:34px; padding:0 12px; border:0; border-radius:9px; cursor:pointer; background:transparent; color:#8f9689; font:500 12.5px 'IBM Plex Sans'" style-hover="background:rgba(255,255,255,.07); color:#dfe4ec">Cancel</button>
+            <button style="display:flex; align-items:center; gap:8px; height:34px; padding:0 15px; border:0; border-radius:9px; cursor:pointer; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="filter:brightness(1.06)">
+              <dc-import name="Icon" glyph="camera" size="16" stroke="1.95" hint-size="16px,16px"></dc-import>{{ c.cta }}
+              <span style="font:400 11px 'IBM Plex Mono'; color:rgba(21,23,14,.55)">↵</span>
+            </button>
+          </div>
+          <div style="display:flex; align-items:center; gap:9px; padding:6px 12px; border-radius:9px; background:rgba(16,18,14,.82); border:1px solid rgba(255,255,255,.07); font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; backdrop-filter:blur(8px)">
+            <span>{{ c.hint }}</span>
+            <span style="color:rgba(255,255,255,.18)">·</span>
+            <span>you'll get the review window, where Copy and Save live</span>
+          </div>
+        </div>
+      </div>
+
+      <p style="margin:0; max-width:1180px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">The argument for deleting the after-decision from this bar entirely: you're being asked to choose a destination before you've seen what you captured, which is the wrong moment — and Copy and Save already exist in the review window, where you can see what you're copying. So the pre-capture bar answers exactly one question, gains shortcut keys per mode, and the default destination becomes a Settings preference for people who never want the review window. Fewest controls, one concept, and nothing here duplicates something downstream.</p>
+    </div>
+
+  </div>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const MODES = [
+  ['Region', 'crop', 'R', 'Drag any rectangle', '1240 × 398', '3.11 : 1'],
+  ['Window', 'window', 'W', 'Snap to a window', '940 × 420', '2.24 : 1'],
+  ['Full screen', 'monitor', 'F', 'Whole display', '2560 × 1440', '16 : 9'],
+  ['Freeform', 'pen', 'L', 'Lasso an odd shape', '1240 × 398', 'lasso']
+];
+const AFTERS = [
+  ['Review', 'eye', 'Opens the review window so you can annotate.'],
+  ['Copy', 'copy', 'Straight to the clipboard, no window.'],
+  ['Save', 'save', 'Writes the file and says nothing.']
+];
+const DELAYS = ['No delay', '3s', '5s', '10s'];
+const CTA = { 'Region': 'Capture', 'Window': 'Capture window', 'Full screen': 'Capture screen', 'Freeform': 'Capture' };
+const HINTS = {
+  'Region': 'Drag to reframe, or use the handles',
+  'Window': 'Hover a window to snap the frame to it',
+  'Full screen': 'The whole display is framed',
+  'Freeform': 'Draw a closed shape around what you want'
+};
+
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = {
+      a: { mode: 'Region', after: 'Review', delay: 'No delay', afterOpen: false },
+      b: { mode: 'Region', after: 'Review', delay: 'No delay' },
+      c: { mode: 'Region', delay: 'No delay' },
+      d: { mode: 'Region', after: 'Review', delay: 'No delay', afterOpen: false, phase: 'choose' },
+      e: { mode: 'Window', after: 'Review', delay: 'No delay', phase: 'choose' },
+      f: { mode: 'Region', after: 'Copy', delay: 'No delay', phase: 'choose' },
+      g: { mode: 'Window', after: 'Review', delay: 'No delay', phase: 'choose', menu: null },
+      h: { mode: 'Window', after: 'Review', delay: 'No delay', phase: 'choose', menu: null }
+    };
+  }
+
+  set(ns, patch) { this.setState(st => ({ [ns]: { ...st[ns], ...patch } })); }
+
+  modeList(ns, withKey) {
+    const cur = this.state[ns].mode;
+    return MODES.map(([label, glyph, key, title]) => {
+      const on = cur === label;
+      return {
+        key: label, label, glyph, shortcut: key, title: title + (withKey ? ' — ' + key : ''),
+        bg: on ? 'rgba(227,255,79,.15)' : 'transparent',
+        fg: on ? '#eaff7a' : '#a8afa0',
+        border: on ? 'rgba(227,255,79,.42)' : 'transparent',
+        keyFg: on ? 'rgba(234,255,122,.6)' : 'rgba(168,175,160,.5)',
+        tileBg: on ? 'rgba(227,255,79,.15)' : 'rgba(26,28,24,.9)',
+        menuBg: on ? 'rgba(255,255,255,.08)' : 'transparent',
+        menuFg: on ? '#f8faf0' : '#a8afa0',
+        tick: on ? 1 : 0,
+        pick: () => this.set(ns, { mode: label, afterOpen: false, menu: null })
+      };
+    });
+  }
+
+  base(ns) {
+    const s = this.state[ns];
+    const m = MODES.find(x => x[0] === s.mode) || MODES[0];
+    const off = s.delay === 'No delay';
+    return {
+      dims: m[4], ratio: m[5], hint: HINTS[s.mode], cta: CTA[s.mode],
+      delay: s.delay, delayFg: off ? '#a8afa0' : '#eaff7a',
+      cycleDelay: () => this.set(ns, { delay: DELAYS[(DELAYS.indexOf(s.delay) + 1) % DELAYS.length] })
+    };
+  }
+
+  renderVals() {
+    const A = this.state.a, B = this.state.b;
+    const aAfter = AFTERS.find(x => x[0] === A.after) || AFTERS[0];
+    return {
+      a: {
+        ...this.base('a'),
+        modes: this.modeList('a', false),
+        afterLabel: aAfter[0], afterGlyph: aAfter[1],
+        afterOpen: A.afterOpen,
+        toggleAfter: () => this.set('a', { afterOpen: !A.afterOpen }),
+        afters: AFTERS.map(([label, glyph, note]) => ({
+          key: label, label, glyph, note,
+          bg: A.after === label ? 'rgba(255,255,255,.08)' : 'transparent',
+          fg: A.after === label ? '#f8faf0' : '#a8afa0',
+          tick: A.after === label ? 1 : 0,
+          pick: () => this.set('a', { after: label, afterOpen: false })
+        }))
+      },
+      b: {
+        ...this.base('b'),
+        modes: this.modeList('b', false),
+        afters: AFTERS.map(([label, glyph, note]) => {
+          const on = B.after === label;
+          return {
+            key: label, label, glyph, note,
+            bg: on ? 'rgba(227,255,79,.15)' : 'transparent',
+            fg: on ? '#eaff7a' : '#a8afa0',
+            border: on ? 'rgba(227,255,79,.42)' : 'rgba(255,255,255,.1)',
+            pick: () => this.set('b', { after: label })
+          };
+        }),
+        sentence: B.delay === 'No delay'
+          ? 'Grab a ' + B.mode.toLowerCase() + ', then ' + B.after.toLowerCase() + ' it.'
+          : 'Wait ' + B.delay + ', grab a ' + B.mode.toLowerCase() + ', then ' + B.after.toLowerCase() + ' it.'
+      },
+      c: { ...this.base('c'), modes: this.modeList('c', true) },
+      d: this.chooser('d'), e: this.chooser('e'), f: this.chooser('f'),
+      g: { ...this.chooser('g'), ...this.dropdowns('g') },
+      h: { ...this.chooser('h'), ...this.dropdowns('h') }
+    };
+  }
+
+  afterList(ns, pill) {
+    const cur = this.state[ns].after;
+    return AFTERS.map(([label, glyph, note]) => {
+      const on = cur === label;
+      return {
+        key: label, label, glyph, note,
+        bg: on ? (pill ? 'rgba(227,255,79,.15)' : 'rgba(255,255,255,.08)') : 'transparent',
+        fg: on ? (pill ? '#eaff7a' : '#f8faf0') : '#a8afa0',
+        border: on ? 'rgba(227,255,79,.42)' : 'rgba(255,255,255,.1)',
+        tick: on ? 1 : 0,
+        menuBg: on ? 'rgba(255,255,255,.08)' : 'transparent',
+        menuFg: on ? '#f8faf0' : '#a8afa0',
+        pick: () => this.set(ns, { after: label, afterOpen: false, menu: null })
+      };
+    });
+  }
+
+  delayList(ns) {
+    const cur = this.state[ns].delay;
+    return DELAYS.map(label => {
+      const on = cur === label;
+      return {
+        key: label, label, tick: on ? 1 : 0,
+        menuBg: on ? 'rgba(255,255,255,.08)' : 'transparent',
+        menuFg: on ? '#f8faf0' : '#a8afa0',
+        pick: () => this.set(ns, { delay: label, menu: null })
+      };
+    });
+  }
+
+  dropdowns(ns) {
+    const s = this.state[ns];
+    const open = k => () => this.set(ns, { menu: s.menu === k ? null : k });
+    return {
+      delays: this.delayList(ns),
+      delayShort: s.delay === 'No delay' ? 'Off' : s.delay,
+      modeOpen: s.menu === 'mode', afterOpen: s.menu === 'after', delayOpen: s.menu === 'delay',
+      modeBg: s.menu === 'mode' ? 'rgba(255,255,255,.09)' : 'transparent',
+      modeBorder: s.menu === 'mode' ? 'rgba(255,255,255,.2)' : 'rgba(255,255,255,.1)',
+      openMode: open('mode'), openAfter: open('after'), openDelay: open('delay')
+    };
+  }
+
+  chooser(ns) {
+    const s = this.state[ns];
+    const m = MODES.find(x => x[0] === s.mode) || MODES[0];
+    const after = AFTERS.find(x => x[0] === s.after) || AFTERS[0];
+    const choosing = s.phase === 'choose';
+    const ARM = {
+      'Region': ['crop', 'Drag to select', 'Drag anywhere to frame a region'],
+      'Window': ['window', 'Pick a window', 'Hover a window, click to take it'],
+      'Full screen': ['camera', 'Capture screen', 'Grabs this monitor the moment you choose it'],
+      'Freeform': ['pen', 'Trace a shape', 'Draw a closed shape around anything']
+    }[s.mode];
+    return {
+      ...this.base(ns),
+      modes: this.modeList(ns, true),
+      afters: this.afterList(ns, ns !== 'd'),
+      mode: s.mode, modeGlyph: m[1],
+      afterLabel: after[0], afterGlyph: after[1],
+      afterOpen: !!s.afterOpen,
+      toggleAfter: () => this.set(ns, { afterOpen: !s.afterOpen }),
+      armGlyph: ARM[0], armVerb: ARM[1], armedHint: ARM[2],
+      isFull: s.mode === 'Full screen', notFull: s.mode !== 'Full screen',
+      hasDelay: s.delay !== 'No delay',
+      choosing, armed: !choosing,
+      choose: () => this.set(ns, { phase: 'choose' }),
+      arm: () => this.set(ns, { phase: 'armed', afterOpen: false, menu: null }),
+      tab: {
+        chooseBg: choosing ? '#2c313c' : 'transparent', chooseFg: choosing ? '#f3f5f9' : '#8d94a3',
+        armBg: !choosing ? '#2c313c' : 'transparent', armFg: !choosing ? '#f3f5f9' : '#8d94a3'
+      }
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -411,6 +411,145 @@ GNOME_KNOWN = {
 
 SHORTCUT_DEFAULT = "Control+Alt+S"
 
+# ---------------------------------------------------------------------------
+# The pre-snip chooser (design_handoff_snipux_chooser)
+# ---------------------------------------------------------------------------
+# Overlay furniture, not window chrome: warm glass on the 62% scrim, never the
+# opaque Win palette Settings and the review window use. Everything else the
+# chooser needs -- Color, Metric, Shadow, CAPTURE_MODES, AFTER_CAPTURE, DELAYS
+# -- is already above. See docs/design/handoff-chooser.md.
+
+# ---------------------------------------------------------------- geometry
+class ChooserMetric:
+    """The docked chooser row. Logical pixels."""
+
+    # Panel — hangs FLUSH from the active monitor's top edge.
+    # Square top corners, rounded bottom: it belongs to the edge, it does not float.
+    HEIGHT           = 54          # 10 pad + 34 control + 10 pad
+    WIDTH            = 420         # intrinsic; the row sizes to content
+    PAD              = 10
+    GAP              = 8           # between controls
+    RADIUS           = (0, 0, 14, 14)   # tl, tr, br, bl
+    BORDER_TOP       = 0           # no top border — it is against the edge
+
+    # Dropdown triggers
+    TRIGGER_H        = 34
+    TRIGGER_RADIUS   = 9
+    TRIGGER_PAD_L    = 11
+    TRIGGER_PAD_R    = 9           # tighter: the chevron owns that side
+    TRIGGER_ICON     = 15          # 16 for the mode trigger
+    CHEVRON          = 14
+
+    # Dropdown menus
+    MENU_MODE_W      = 250
+    MENU_AFTER_W     = 270         # widest — its rows carry a note line
+    MENU_DELAY_W     = 152
+    MENU_PAD         = 5
+    MENU_RADIUS      = 11
+    MENU_OFFSET_Y    = 41          # from the trigger's top; i.e. 7px below it
+    MENU_ROW_PAD     = (8, 9)
+    MENU_ROW_RADIUS  = 8
+    MENU_ROW_ICON    = 16
+    MENU_TICK        = 14
+
+    # Hint line under the panel
+    HINT_GAP         = 8
+    HINT_H           = 24
+    HINT_PAD         = (5, 11)
+    HINT_RADIUS      = 8
+
+    # Armed tab — what the panel collapses to
+    TAB_H            = 26
+    TAB_PAD_H        = 12
+    TAB_RADIUS       = (0, 0, 10, 10)
+    TAB_OPACITY      = 0.72        # → 1.0 on hover, 160ms ease
+    TAB_BG_ALPHA     = 0.86        # slightly lighter than the panel's 0.93
+
+    # Armed hint, centred under the tab
+    ARMED_HINT_TOP   = 52
+    ARMED_HINT_MS    = 180         # rise+fade in
+
+    # Keyboard legend, bottom centre of the active monitor
+    LEGEND_BOTTOM    = 26
+    LEGEND_H         = 30
+
+
+class ChooserColor:
+    """Only what differs from Color. Everything else comes from the overlay
+    palette.
+
+    Every colour the handoff quotes with an alpha carries its `_ALPHA`
+    sibling, the same pairing rule `Color` and `Win` follow -- so
+    `design.chooser_color()` produces a fully-specified QColor and no caller
+    ever re-types a percentage that can then drift from this file.
+    """
+
+    TRIGGER_BORDER       = "#ffffff"   # at 10% alpha
+    TRIGGER_BORDER_ALPHA = 0.10
+    TRIGGER_BORDER_OPEN  = "#ffffff"   # at 20% alpha -- the open dropdown's trigger
+    TRIGGER_BORDER_OPEN_ALPHA = 0.20
+    TRIGGER_BG_OPEN      = "#ffffff"   # at 9% alpha
+    TRIGGER_BG_OPEN_ALPHA = 0.09
+    MENU_BG              = "#1a1c18"   # at 98% alpha -- denser than the panel; it must be readable
+    MENU_BG_ALPHA        = 0.98
+    MENU_BORDER          = "#ffffff"   # at 12% alpha
+    MENU_BORDER_ALPHA    = 0.12
+    ROW_SELECTED_BG      = "#ffffff"   # at 8% alpha
+    ROW_SELECTED_BG_ALPHA = 0.08
+    ROW_SELECTED_FG      = "#f8faf0"
+    ROW_IDLE_FG          = "#a8afa0"
+    ROW_HOVER_BG         = "#ffffff"   # at 9% alpha
+    ROW_HOVER_BG_ALPHA   = 0.09
+    SHORTCUT_FG          = "#6f766a"   # the R/W/F/L glyphs in the mode menu
+    MODE_ACCENT          = "#eaff7a"   # active mode's icon + the tab's mode label
+    HINT_BG              = "#101210"   # at 72% alpha
+    HINT_BG_ALPHA        = 0.72
+    HINT_BORDER          = "#ffffff"   # at 7% alpha
+    HINT_BORDER_ALPHA    = 0.07
+    HINT_FG              = "#8f9689"
+    WINDOW_PREVIEW       = "#e3ff4f"   # at 85% alpha
+    WINDOW_PREVIEW_ALPHA = 0.85
+    WINDOW_PREVIEW_FILL  = "#e3ff4f"   # at 7% alpha
+    WINDOW_PREVIEW_FILL_ALPHA = 0.07
+    PANEL_BG_ALPHA       = 0.93        # the panel's own fill
+    LEGEND_KEY_FG        = "#d7dacb"
+
+# Delay: label shown on the trigger. "No delay" is the stored value; the
+# chooser prints it in full at this width. (The narrower icon-only variant
+# abbreviates to "Off" — not used in the shipped design.)
+DELAY_DEFAULT = "No delay"
+
+# The destination menu's notes. `AFTER_CAPTURE` carries the same three
+# identifiers with the Settings pane's prose, which is written for a radio
+# card with a whole row to breathe in; at the chooser's 270px it overflows.
+# Same decision, two surfaces, two lengths -- the identifiers stay shared so
+# there is still one list of destinations.
+CHOOSER_AFTER_NOTE = {
+    "review": "Opens the review window to edit.",
+    "clip": "Straight to the clipboard, no window.",
+    "file": "Writes the file and says nothing.",
+}
+
+
+# Mode → what the user does next once the mode is armed. This string is the
+# hint under the panel AND the armed hint under the tab. It replaces the
+# primary button that used to sit at the end of the row: picking the mode IS
+# the commit, so nothing should promise an action it cannot perform.
+MODE_NEXT_STEP = {
+    "Region":      "Drag anywhere to frame a region",
+    "Window":      "Hover a window, click to take it",
+    "Full screen": "Grabs this monitor the moment you choose it",
+    "Freeform":    "Draw a closed shape around anything",
+}
+
+# Mode shortcuts. Live whenever the chooser is on screen, armed or not.
+MODE_KEYS = {"R": "Region", "W": "Window", "F": "Full screen", "L": "Freeform"}
+
+# Full screen is the only mode with nothing left to aim at, so choosing it
+# fires the grab immediately (after any delay). The other three arm and wait.
+IMMEDIATE_MODES = ["Full screen"]
+
+
 TOOL_HINTS = {
     "pen":         "Drag to draw freehand",
     "highlighter": "Sweep over the line that matters",

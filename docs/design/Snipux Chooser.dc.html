@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#0d0c11; font-family:'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color:#e3ff4f; text-decoration:none; } a:hover { color:#eeff8f; }
+  @keyframes rise { from { opacity:0; transform:translate(-50%,-8px); } to { opacity:1; transform:translate(-50%,0); } }
+</style>
+</helmet>
+
+<div style="position:relative; width:100vw; height:100vh; overflow:hidden; background:#0d0c11; user-select:none; cursor:{{ cursor }}">
+
+  <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 30% 12%, #2a2536 0%, #16141c 58%, #0d0c11 100%)">
+    <div style="position:absolute; left:0; right:0; top:0; height:28px; background:rgba(12,12,15,.7); display:flex; align-items:center; justify-content:center; font:400 11.5px/1 'IBM Plex Mono'; color:#a8afa0">Aug 25  12:56 PM</div>
+    <div style="position:absolute; left:8%; top:16%; width:38%; height:46%; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)">
+      <div style="height:30px; background:#2f2338; border-radius:10px 10px 0 0"></div>
+    </div>
+    <div style="position:absolute; left:40%; top:34%; width:42%; height:48%; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+      <div style="height:30px; background:#3b1841; border-radius:10px 10px 0 0; display:flex; align-items:center; justify-content:center; font:500 11px/1 'IBM Plex Sans'; color:#ecd9ee">ubuntu@ubuntu: ~/snipux</div>
+      <div style="padding:12px 16px; font:400 11.5px/20px 'IBM Plex Mono'; color:#e8d8ea; opacity:.9">
+        <div>ubuntu@ubuntu:~/snipux$ snipux &amp;</div>
+        <div style="opacity:.7">[2] 5006</div>
+        <div>ubuntu@ubuntu:~/snipux$</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="position:absolute; inset:0; background:rgba(12,13,10,.62)"></div>
+
+  <sc-if value="{{ armed }}" hint-placeholder-val="{{ false }}">
+    <sc-if value="{{ isWindow }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute; left:40%; top:34%; width:42%; height:48%; border:1.5px solid rgba(227,255,79,.85); border-radius:6px; background:rgba(227,255,79,.07); pointer-events:none">
+        <div style="position:absolute; left:0; top:-30px; padding:5px 10px; border-radius:6px; background:#e3ff4f; color:#15170e; font:600 11.5px/1 'IBM Plex Mono'; white-space:nowrap">Terminal — 1180 × 692</div>
+      </div>
+    </sc-if>
+  </sc-if>
+
+  <div style="position:absolute; left:50%; top:0; transform:translateX(-50%); z-index:20; display:flex; flex-direction:column; align-items:center">
+
+    <sc-if value="{{ choosing }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex; align-items:center; gap:8px; padding:10px; border-radius:0 0 14px 14px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); border-top:0; box-shadow:0 22px 48px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+
+        <div style="position:relative">
+          <button onClick="{{ openMode }}" title="What to capture" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 11px; border:1px solid {{ modeBorder }}; border-radius:9px; cursor:pointer; background:{{ modeBg }}; color:#f1f3e8; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.09)">
+            <span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="{{ modeGlyph }}" size="16" hint-size="16px,16px"></dc-import></span>{{ mode }}
+            <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import></span>
+          </button>
+          <sc-if value="{{ modeOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute; left:0; top:41px; z-index:30; width:250px; padding:5px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+              <sc-for list="{{ modes }}" as="m" hint-placeholder-count="4">
+                <button onClick="{{ m.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ m.menuBg }}; color:{{ m.menuFg }}" style-hover="background:rgba(255,255,255,.09)">
+                  <dc-import name="Icon" glyph="{{ m.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+                  <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'">{{ m.label }}</span>
+                  <span style="font:400 10.5px 'IBM Plex Mono'; color:#6f766a">{{ m.shortcut }}</span>
+                  <span style="opacity:{{ m.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+                </button>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+
+        <span style="font:400 12px/1 'IBM Plex Sans'; color:#8f9689">then</span>
+
+        <div style="position:relative">
+          <button onClick="{{ openAfter }}" title="What happens to it" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 11px; border:1px solid {{ afterBorder }}; border-radius:9px; cursor:pointer; background:{{ afterBg }}; color:#f1f3e8; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+            <span style="color:#a8afa0; display:flex"><dc-import name="Icon" glyph="{{ afterGlyph }}" size="15" hint-size="15px,15px"></dc-import></span>{{ afterLabel }}
+            <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import></span>
+          </button>
+          <sc-if value="{{ afterOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute; left:0; top:41px; z-index:30; width:270px; padding:5px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+              <sc-for list="{{ afters }}" as="o" hint-placeholder-count="3">
+                <button onClick="{{ o.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ o.menuBg }}; color:{{ o.menuFg }}" style-hover="background:rgba(255,255,255,.09)">
+                  <dc-import name="Icon" glyph="{{ o.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+                  <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+                    <span style="font:500 12.5px/1 'IBM Plex Sans'">{{ o.label }}</span>
+                    <span style="font:400 11px/1.35 'IBM Plex Sans'; color:#8f9689">{{ o.note }}</span>
+                  </span>
+                  <span style="opacity:{{ o.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+                </button>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+
+        <div style="position:relative">
+          <button onClick="{{ openDelay }}" title="Countdown before the grab" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 11px; border:1px solid {{ delayBorder }}; border-radius:9px; cursor:pointer; background:{{ delayBg }}; color:{{ delayFg }}; font:500 12.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+            <span style="display:flex"><dc-import name="Icon" glyph="timer" size="15" hint-size="15px,15px"></dc-import></span>{{ delay }}
+            <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="14" hint-size="14px,14px"></dc-import></span>
+          </button>
+          <sc-if value="{{ delayOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute; left:0; top:41px; z-index:30; width:152px; padding:5px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+              <sc-for list="{{ delays }}" as="o" hint-placeholder-count="4">
+                <button onClick="{{ o.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ o.menuBg }}; color:{{ o.menuFg }}" style-hover="background:rgba(255,255,255,.09)">
+                  <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'">{{ o.label }}</span>
+                  <span style="opacity:{{ o.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+                </button>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+
+      <div style="display:flex; align-items:center; gap:7px; margin-top:8px; padding:5px 11px; border-radius:8px; background:rgba(16,18,14,.72); border:1px solid rgba(255,255,255,.07); font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap; backdrop-filter:blur(8px)">
+        <span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="{{ modeGlyph }}" size="13" hint-size="13px,13px"></dc-import></span>{{ armedHint }}
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ armed }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ recall }}" title="Reopen the chooser — Space" style="display:flex; align-items:center; gap:8px; height:26px; padding:0 12px; border-radius:0 0 10px 10px; background:rgba(26,28,24,.86); border:1px solid rgba(255,255,255,.1); border-top:0; cursor:pointer; backdrop-filter:blur(14px); opacity:.72; transition:opacity .16s ease" style-hover="opacity:1">
+        <span style="display:flex; align-items:center; gap:6px; color:#eaff7a; font:500 11.5px/1 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="{{ modeGlyph }}" size="13" hint-size="13px,13px"></dc-import>{{ mode }}</span>
+        <span style="width:1px; height:12px; background:rgba(255,255,255,.16)"></span>
+        <span style="color:#8f9689; font:400 11.5px/1 'IBM Plex Sans'; white-space:nowrap">then {{ afterLabel }}</span>
+        <sc-if value="{{ hasDelay }}" hint-placeholder-val="{{ false }}">
+          <span style="width:1px; height:12px; background:rgba(255,255,255,.16)"></span>
+          <span style="color:#c6cab8; font:500 11px/1 'IBM Plex Mono'; white-space:nowrap">{{ delay }}</span>
+        </sc-if>
+        <span style="color:#6f766a; display:flex"><dc-import name="Icon" glyph="chevron" size="13" hint-size="13px,13px"></dc-import></span>
+      </div>
+    </sc-if>
+  </div>
+
+  <sc-if value="{{ armed }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; left:50%; top:52px; transform:translateX(-50%); z-index:15; padding:5px 11px; border-radius:8px; background:rgba(16,18,14,.72); font:400 11.5px/1 'IBM Plex Sans'; color:#7d8478; white-space:nowrap; backdrop-filter:blur(8px); animation:rise .18s ease">{{ armedHint }}</div>
+  </sc-if>
+
+  <div style="position:absolute; left:50%; bottom:26px; transform:translateX(-50%); z-index:15; display:flex; align-items:center; gap:10px; padding:7px 13px; border-radius:10px; background:rgba(16,18,14,.78); border:1px solid rgba(255,255,255,.07); font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap; backdrop-filter:blur(10px)">
+    <span><span style="font-family:'IBM Plex Mono'; color:#d7dacb">R W F L</span> mode</span>
+    <span style="color:rgba(255,255,255,.18)">·</span>
+    <span><span style="font-family:'IBM Plex Mono'; color:#d7dacb">Space</span> reopen</span>
+    <span style="color:rgba(255,255,255,.18)">·</span>
+    <span><span style="font-family:'IBM Plex Mono'; color:#d7dacb">Esc</span> cancel</span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;mode&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;Region&quot;,&quot;options&quot;:[&quot;Region&quot;,&quot;Window&quot;,&quot;Full screen&quot;,&quot;Freeform&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Initial state&quot;},&quot;after&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;Review&quot;,&quot;options&quot;:[&quot;Review&quot;,&quot;Copy&quot;,&quot;Save&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Initial state&quot;}}">
+const MODES = [
+  ['Region', 'crop', 'R', 'Drag anywhere to frame a region'],
+  ['Window', 'window', 'W', 'Hover a window, click to take it'],
+  ['Full screen', 'monitor', 'F', 'Grabs this monitor the moment you choose it'],
+  ['Freeform', 'pen', 'L', 'Draw a closed shape around anything']
+];
+const AFTERS = [
+  ['Review', 'eye', 'Opens the review window so you can annotate.'],
+  ['Copy', 'copy', 'Straight to the clipboard, no window.'],
+  ['Save', 'save', 'Writes the file and says nothing.']
+];
+const DELAYS = ['No delay', '3s', '5s', '10s'];
+const KEYS = { r: 'Region', w: 'Window', f: 'Full screen', l: 'Freeform' };
+
+class Component extends DCLogic {
+  state = {
+    mode: this.props.mode ?? 'Region',
+    after: this.props.after ?? 'Review',
+    delay: 'No delay',
+    phase: 'choose',
+    menu: null
+  };
+
+  componentDidMount() {
+    this.onKey = e => {
+      const k = e.key.toLowerCase();
+      if (k === 'escape') { e.preventDefault(); this.setState({ menu: null, phase: 'choose' }); return; }
+      if (k === ' ') { e.preventDefault(); this.setState({ phase: 'choose', menu: null }); return; }
+      if (KEYS[k]) { e.preventDefault(); this.setState({ mode: KEYS[k], menu: null, phase: 'armed' }); }
+    };
+    window.addEventListener('keydown', this.onKey);
+  }
+
+  componentWillUnmount() { window.removeEventListener('keydown', this.onKey); }
+
+  trigger(open) {
+    return {
+      bg: open ? 'rgba(255,255,255,.09)' : 'transparent',
+      border: open ? 'rgba(255,255,255,.2)' : 'rgba(255,255,255,.1)'
+    };
+  }
+
+  renderVals() {
+    const s = this.state;
+    const m = MODES.find(x => x[0] === s.mode) || MODES[0];
+    const a = AFTERS.find(x => x[0] === s.after) || AFTERS[0];
+    const choosing = s.phase === 'choose';
+    const openMenu = k => () => this.setState({ menu: s.menu === k ? null : k });
+    const modeT = this.trigger(s.menu === 'mode');
+    const afterT = this.trigger(s.menu === 'after');
+    const delayT = this.trigger(s.menu === 'delay');
+    return {
+      mode: s.mode, modeGlyph: m[1], armedHint: m[3],
+      afterLabel: a[0], afterGlyph: a[1],
+      delay: s.delay, hasDelay: s.delay !== 'No delay',
+      delayFg: s.delay === 'No delay' ? '#c6cab8' : '#eaff7a',
+      choosing, armed: !choosing, isWindow: !choosing && s.mode === 'Window',
+      cursor: choosing ? 'default' : 'crosshair',
+      modeOpen: s.menu === 'mode', afterOpen: s.menu === 'after', delayOpen: s.menu === 'delay',
+      modeBg: modeT.bg, modeBorder: modeT.border,
+      afterBg: afterT.bg, afterBorder: afterT.border,
+      delayBg: delayT.bg, delayBorder: delayT.border,
+      openMode: openMenu('mode'), openAfter: openMenu('after'), openDelay: openMenu('delay'),
+      recall: () => this.setState({ phase: 'choose', menu: null }),
+      modes: MODES.map(([label, glyph, shortcut]) => {
+        const on = s.mode === label;
+        return { key: label, label, glyph, shortcut, tick: on ? 1 : 0,
+          menuBg: on ? 'rgba(255,255,255,.08)' : 'transparent',
+          menuFg: on ? '#f8faf0' : '#a8afa0',
+          pick: () => this.setState({ mode: label, menu: null, phase: 'armed' }) };
+      }),
+      afters: AFTERS.map(([label, glyph, note]) => {
+        const on = s.after === label;
+        return { key: label, label, glyph, note, tick: on ? 1 : 0,
+          menuBg: on ? 'rgba(255,255,255,.08)' : 'transparent',
+          menuFg: on ? '#f8faf0' : '#a8afa0',
+          pick: () => this.setState({ after: label, menu: null }) };
+      }),
+      delays: DELAYS.map(label => {
+        const on = s.delay === label;
+        return { key: label, label, tick: on ? 1 : 0,
+          menuBg: on ? 'rgba(255,255,255,.08)' : 'transparent',
+          menuFg: on ? '#f8faf0' : '#a8afa0',
+          pick: () => this.setState({ delay: label, menu: null }) };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>

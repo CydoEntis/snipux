@@ -138,6 +138,7 @@ class TestTokenAlphaComments:
             for name, _ in matches
             if not hasattr(tokens.Color, f"{name}_ALPHA")
             and not hasattr(tokens.Win, f"{name}_ALPHA")
+            and not hasattr(tokens.ChooserColor, f"{name}_ALPHA")
         ]
         assert not missing, (
             f"{missing} name an alpha in a comment but have no matching "
@@ -150,9 +151,11 @@ class TestTokenAlphaComments:
 
         for name, percent in matches:
             expected = float(percent) / 100
-            actual = getattr(
-                tokens.Color, f"{name}_ALPHA", None
-            ) or getattr(tokens.Win, f"{name}_ALPHA")
+            actual = (
+                getattr(tokens.Color, f"{name}_ALPHA", None)
+                or getattr(tokens.Win, f"{name}_ALPHA", None)
+                or getattr(tokens.ChooserColor, f"{name}_ALPHA")
+            )
             assert actual == pytest.approx(expected), (
                 f"{name}_ALPHA is {actual}, but its comment names {percent}%"
             )

@@ -88,6 +88,20 @@ def win_color(token_name: str) -> QColor:
     return qcolor
 
 
+def chooser_color(token_name: str) -> QColor:
+    """`tokens.ChooserColor.<token_name>` -> QColor, alpha included.
+
+    The same colour+alpha pairing `color()` and `win_color()` apply, for the
+    pre-snip chooser's palette. Resolving it in one place is what stops a
+    caller re-typing a percentage that then drifts from tokens.py.
+    """
+    if not hasattr(tokens.ChooserColor, token_name):
+        raise ValueError(f"no such chooser colour: {token_name!r}")
+    qcolour = QColor(getattr(tokens.ChooserColor, token_name))
+    qcolour.setAlphaF(getattr(tokens.ChooserColor, f"{token_name}_ALPHA", 1.0))
+    return qcolour
+
+
 def color(token_name: str) -> QColor:
     """Resolve `tokens.Color.<token_name>` to a QColor, alpha included.
 
