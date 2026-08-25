@@ -10,10 +10,12 @@ tickets register real backends into. No real backend lives here yet.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -121,7 +123,16 @@ def _missing_backend_advice() -> str:
     failures list. Naming a session-specific package rather than every
     known backend's matters: telling a Wayland user to install maim (an
     X11-only tool) would send them chasing a fix that can't work for them.
+
+    Checked first, before any of that Linux-only reasoning: on Windows
+    "install grim/maim via apt" is not merely unhelpful, it's advice for a
+    different OS entirely. `build_windows_registry()`'s own backends gate
+    themselves with `is_available()`, so this only fires there if neither
+    can even be tried -- still worth a platform-appropriate message rather
+    than falling through to Linux's.
     """
+    if sys.platform == "win32":
+        return "check that this build of snipux includes Windows capture support"
     session_type = detect_session_type()
     if session_type == "wayland":
         return "install grim (e.g. `sudo apt install grim`)"
@@ -231,6 +242,55 @@ def _x11_shell_backend_available(binary: str) -> tuple[bool, str | None]:
     return True, None
 
 
+def _grab_all_screens_composited(ratio: float) -> Frame:
+    """Grab every screen individually via `QScreen.grabWindow(0)` and
+    composite them into one image at `ratio`, each placed at its own offset
+    from the virtual desktop's origin.
+
+    Shared by every Qt-native backend (X11, Windows): there is no single Qt
+    call that hands back the whole virtual desktop in one shot on any
+    platform, `grabWindow(0)` only ever returns that one screen's own
+    pixels -- so covering every monitor means grabbing each and placing it
+    by its own logical geometry, same as this used to do inline in
+    `QtNativeX11Backend.capture()` before Windows needed the identical
+    logic (SNX-88).
+
+    Raises if any screen's grab comes back null -- silently painting
+    nothing for that monitor would produce a frame that looks complete but
+    is missing real content, which is worse than failing loudly and letting
+    `BackendRegistry.capture()` move on to the next backend.
+    """
+    virtual_rect = _virtual_desktop_geometry()
+    origin = virtual_rect.topLeft()
+
+    image = QImage(
+        round(virtual_rect.width() * ratio),
+        round(virtual_rect.height() * ratio),
+        QImage.Format.Format_RGB32,
+    )
+    image.fill(0)
+
+    painter = QPainter(image)
+    for screen in QGuiApplication.screens():
+        pixmap = screen.grabWindow(0)
+        if pixmap.isNull():
+            painter.end()
+            raise RuntimeError("qt-native: grabWindow returned an empty image for a screen")
+        geometry = QRectF(screen.geometry())
+        target = QRectF(
+            (geometry.x() - origin.x()) * ratio,
+            (geometry.y() - origin.y()) * ratio,
+            geometry.width() * ratio,
+            geometry.height() * ratio,
+        )
+        painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
+    # Closed before Frame() is constructed below, never left open across a
+    # read of the image it painted, per CLAUDE.md.
+    painter.end()
+
+    return Frame(image=image, logical_origin=origin, logical_size=virtual_rect.size())
+
+
 class QtNativeX11Backend(CaptureBackend):
     """Captures via Qt's own `QScreen.grabWindow` — no process spawn.
 
@@ -248,9 +308,6 @@ class QtNativeX11Backend(CaptureBackend):
         return None if self.is_available() else "not an X11 session"
 
     def capture(self) -> Frame:
-        virtual_rect = _virtual_desktop_geometry()
-        origin = virtual_rect.topLeft()
-
         # One session-wide ratio, taken from the primary screen, rather
         # than each screen's own devicePixelRatio() — Frame/crop() can only
         # represent a single scale factor for the whole image, so
@@ -260,30 +317,7 @@ class QtNativeX11Backend(CaptureBackend):
         # per-monitor DPI on X11 would need a Frame-level model change,
         # which is out of scope here.
         ratio = QGuiApplication.primaryScreen().devicePixelRatio()
-
-        image = QImage(
-            round(virtual_rect.width() * ratio),
-            round(virtual_rect.height() * ratio),
-            QImage.Format.Format_RGB32,
-        )
-        image.fill(0)
-
-        painter = QPainter(image)
-        for screen in QGuiApplication.screens():
-            pixmap = screen.grabWindow(0)
-            geometry = QRectF(screen.geometry())
-            target = QRectF(
-                (geometry.x() - origin.x()) * ratio,
-                (geometry.y() - origin.y()) * ratio,
-                geometry.width() * ratio,
-                geometry.height() * ratio,
-            )
-            painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
-        # Closed before Frame() is constructed below, never left open
-        # across a read of the image it painted, per CLAUDE.md.
-        painter.end()
-
-        return Frame(image=image, logical_origin=origin, logical_size=virtual_rect.size())
+        return _grab_all_screens_composited(ratio)
 
 
 class _ShellOutX11Backend(CaptureBackend):
@@ -880,10 +914,316 @@ def build_linux_registry() -> BackendRegistry:
     return registry
 
 
+class QtNativeWindowsBackend(CaptureBackend):
+    """Captures via Qt's own `QScreen.grabWindow`, composited across every
+    screen by `_grab_all_screens_composited` -- the same routine
+    `QtNativeX11Backend` uses.
+
+    Unlike Wayland, where a client cannot read the screen directly and
+    `grabWindow` comes back black, Windows lets Qt read real pixels this
+    way -- confirmed on an actual three-monitor Windows desktop (one
+    screen to the right of the primary, one above-and-left of it, i.e. a
+    virtual desktop with both a negative x and a negative y origin): every
+    monitor came back with its own real, distinct content, not a black
+    image and not three copies of the primary. Registered first, same
+    reasoning as `QtNativeX11Backend`: free to check, nothing to spawn.
+    """
+
+    def name(self) -> str:
+        return "qt-native"
+
+    def is_available(self) -> bool:
+        return sys.platform == "win32"
+
+    def unavailable_reason(self) -> str | None:
+        return None if self.is_available() else "not running on Windows"
+
+    def capture(self) -> Frame:
+        ratio = QGuiApplication.primaryScreen().devicePixelRatio()
+        return _grab_all_screens_composited(ratio)
+
+
+class _BitmapInfoHeader(ctypes.Structure):
+    """Win32 `BITMAPINFOHEADER`, just enough of it for `GetDIBits()` below
+    -- ctypes has no symbolic version of this struct built in."""
+
+    _fields_ = [
+        ("biSize", ctypes.c_uint32),
+        ("biWidth", ctypes.c_int32),
+        ("biHeight", ctypes.c_int32),
+        ("biPlanes", ctypes.c_uint16),
+        ("biBitCount", ctypes.c_uint16),
+        ("biCompression", ctypes.c_uint32),
+        ("biSizeImage", ctypes.c_uint32),
+        ("biXPelsPerMeter", ctypes.c_int32),
+        ("biYPelsPerMeter", ctypes.c_int32),
+        ("biClrUsed", ctypes.c_uint32),
+        ("biClrImportant", ctypes.c_uint32),
+    ]
+
+
+class Win32GdiBackend(CaptureBackend):
+    """Fallback for Windows when Qt's own `grabWindow` doesn't cover the
+    whole virtual desktop -- goes straight to the Win32 GDI API via
+    `ctypes` instead. Stdlib, not a new dependency; see CLAUDE.md on why
+    that distinction matters here.
+
+    One `BitBlt` from the desktop DC, sized and positioned by
+    `GetSystemMetrics(SM_*VIRTUALSCREEN)`, grabs every monitor's pixels in
+    a single call -- the OS handing back the whole virtual desktop at
+    once, rather than one grab per monitor composited afterwards
+    client-side the way the qt-native backend does.
+
+    The resulting image's *physical* pixel size can differ from Qt's own
+    logical geometry under display scaling; `Frame.crop()` already
+    tolerates exactly that mismatch (see its own docstring), so logical
+    origin/size here are still taken from `_virtual_desktop_geometry()`,
+    same as every shell-out backend in this file — not trusted from GDI's
+    own physical-pixel numbers, which have no notion of Qt's logical space.
+    """
+
+    _SM_XVIRTUALSCREEN = 76
+    _SM_YVIRTUALSCREEN = 77
+    _SM_CXVIRTUALSCREEN = 78
+    _SM_CYVIRTUALSCREEN = 79
+    _SRCCOPY = 0x00CC0020
+
+    def name(self) -> str:
+        return "win32-gdi"
+
+    def is_available(self) -> bool:
+        return sys.platform == "win32"
+
+    def unavailable_reason(self) -> str | None:
+        return None if self.is_available() else "not running on Windows"
+
+    def capture(self) -> Frame:
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        width = user32.GetSystemMetrics(self._SM_CXVIRTUALSCREEN)
+        height = user32.GetSystemMetrics(self._SM_CYVIRTUALSCREEN)
+        phys_x = user32.GetSystemMetrics(self._SM_XVIRTUALSCREEN)
+        phys_y = user32.GetSystemMetrics(self._SM_YVIRTUALSCREEN)
+        if width <= 0 or height <= 0:
+            raise RuntimeError("win32-gdi: GetSystemMetrics reported an empty virtual screen")
+
+        screen_dc = user32.GetDC(0)
+        if not screen_dc:
+            raise RuntimeError("win32-gdi: GetDC(0) failed")
+        try:
+            image = self._blit_to_image(gdi32, screen_dc, phys_x, phys_y, width, height)
+        finally:
+            # Ours to release: GetDC(0) hands back a shared DC to the whole
+            # screen, not one this call owns, and leaking it degrades every
+            # other app's drawing until the process exits.
+            user32.ReleaseDC(0, screen_dc)
+
+        if image.isNull():
+            raise RuntimeError("win32-gdi: produced an unreadable image")
+
+        virtual_rect = _virtual_desktop_geometry()
+        return Frame(
+            image=image,
+            logical_origin=virtual_rect.topLeft(),
+            logical_size=virtual_rect.size(),
+        )
+
+    def _blit_to_image(self, gdi32, screen_dc, x, y, width, height) -> QImage:
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        old_bitmap = gdi32.SelectObject(mem_dc, bitmap)
+        try:
+            if not gdi32.BitBlt(mem_dc, 0, 0, width, height, screen_dc, x, y, self._SRCCOPY):
+                raise RuntimeError("win32-gdi: BitBlt failed")
+
+            header = _BitmapInfoHeader()
+            header.biSize = ctypes.sizeof(_BitmapInfoHeader)
+            header.biWidth = width
+            # Negative: a top-down DIB, matching QImage's own row order --
+            # without this the image comes back upside down.
+            header.biHeight = -height
+            header.biPlanes = 1
+            header.biBitCount = 32
+            header.biCompression = 0  # BI_RGB
+
+            buffer = ctypes.create_string_buffer(width * height * 4)
+            if not gdi32.GetDIBits(mem_dc, bitmap, 0, height, buffer, ctypes.byref(header), 0):
+                raise RuntimeError("win32-gdi: GetDIBits failed")
+
+            # .copy(): QImage(buffer, ...) only aliases the buffer, which
+            # goes out of scope (and can be freed) once this method
+            # returns -- the Frame this builds must own its own pixels.
+            return QImage(
+                buffer, width, height, width * 4, QImage.Format.Format_RGB32
+            ).copy()
+        finally:
+            gdi32.SelectObject(mem_dc, old_bitmap)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(mem_dc)
+
+
+def build_windows_registry() -> BackendRegistry:
+    """The real Windows `BackendRegistry`: qt-native first, then the Win32
+    GDI fallback for whenever it doesn't cover the whole virtual desktop.
+    """
+    registry = BackendRegistry()
+    registry.add(QtNativeWindowsBackend())
+    registry.add(Win32GdiBackend())
+    return registry
+
+
+class _RECT(ctypes.Structure):
+    """Win32 `RECT`, shared by `GetWindowRect` and
+    `DwmGetWindowAttribute(..., DWMWA_EXTENDED_FRAME_BOUNDS, ...)` below --
+    ctypes has no symbolic version of this struct built in either, same as
+    `_BitmapInfoHeader` above.
+    """
+
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class WindowsWindowGeometryProvider:
+    """Real per-window geometry source for Windows' window-selection mode
+    (SNX-90).
+
+    Duck-types `overlay.GeometryProvider`'s shape (`is_available()`,
+    `window_at()`) without importing it, same reasoning as
+    `X11WindowGeometryProvider` above: `overlay.py` already imports `Frame`
+    from this module, so importing back would create a cycle.
+
+    Unlike X11 -- where a client cannot enumerate other windows itself on
+    Wayland, so `wmctrl`/`xwininfo` have to ask a window manager instead --
+    Windows has no such restriction: `EnumWindows` answers directly, via
+    `ctypes`, no new dependency (per CLAUDE.md).
+
+    Two Windows-specific wrinkles decide whether the result actually looks
+    right:
+
+    * `GetWindowRect` includes the invisible resize border DWM draws
+      around a modern window (a few pixels of dead space for resize
+      grabbing that is not part of what the user sees) -- padding the
+      snapped selection out unless the *extended frame bounds* DWM tracks
+      separately (`DwmGetWindowAttribute` with
+      `DWMWA_EXTENDED_FRAME_BOUNDS`) are used instead. `GetWindowRect` is
+      only a fallback, for the rare case `DwmGetWindowAttribute` itself
+      fails.
+    * A window can be enumerated by `EnumWindows` while hidden, minimised,
+      or cloaked (DWM hides a window this way during a virtual-desktop
+      switch or a suspended UWP app, without closing it) -- all three are
+      dropped here, or the picker would snap to something the user cannot
+      see.
+    """
+
+    # Mirrors X11WindowGeometryProvider._CACHE_SECONDS: overlay.py's window
+    # mode calls window_at() from mouseMoveEvent, at mouse-move frequency,
+    # so re-enumerating every window on every hover would make the
+    # highlight stutter behind the cursor.
+    _CACHE_SECONDS = 0.2
+    _DWMWA_CLOAKED = 14
+    _DWMWA_EXTENDED_FRAME_BOUNDS = 9
+
+    def __init__(self):
+        self._cache: list[tuple[str, QRectF]] | None = None
+        self._cache_time: float | None = None
+
+    def is_available(self) -> bool:
+        return sys.platform == "win32"
+
+    def list_windows(self) -> list[tuple[str, QRectF]]:
+        """(title, absolute logical rect) for every visible, non-minimised,
+        non-cloaked top-level window, topmost first.
+
+        `EnumWindows` already visits windows in top-to-bottom Z-order, so
+        -- unlike `XwininfoWindowGeometryProvider`, which has to reverse
+        `xwininfo`'s bottom-first order -- no re-sorting is needed to make
+        "the topmost window wins" (window_at()'s first match) true.
+        """
+        now = time.monotonic()
+        if (
+            self._cache is not None
+            and self._cache_time is not None
+            and now - self._cache_time < self._CACHE_SECONDS
+        ):
+            return self._cache
+        windows = self._list_windows_uncached()
+        self._cache = windows
+        self._cache_time = now
+        return windows
+
+    def _list_windows_uncached(self) -> list[tuple[str, QRectF]]:
+        if not self.is_available():
+            return []
+        user32 = ctypes.windll.user32
+        dwmapi = ctypes.windll.dwmapi
+
+        windows: list[tuple[str, QRectF]] = []
+
+        def _visit(hwnd, _lparam) -> bool:
+            if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                return True  # keep enumerating
+            if self._is_cloaked(dwmapi, hwnd):
+                return True
+            rect = self._frame_bounds(dwmapi, user32, hwnd)
+            if rect is not None:
+                windows.append((self._window_title(user32, hwnd), rect))
+            return True
+
+        # ctypes.WINFUNCTYPE is only constructed here, guarded by
+        # is_available() above -- it doesn't exist off Windows at all, so
+        # referencing it at module/class-body scope would break importing
+        # this module on Linux, where the rest of this file's tests run.
+        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(_visit)
+        user32.EnumWindows(enum_proc, 0)
+        return windows
+
+    def _is_cloaked(self, dwmapi, hwnd) -> bool:
+        cloaked = ctypes.c_int(0)
+        ok = dwmapi.DwmGetWindowAttribute(
+            hwnd, self._DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)
+        )
+        return ok == 0 and cloaked.value != 0
+
+    def _frame_bounds(self, dwmapi, user32, hwnd) -> QRectF | None:
+        rect = _RECT()
+        ok = dwmapi.DwmGetWindowAttribute(
+            hwnd,
+            self._DWMWA_EXTENDED_FRAME_BOUNDS,
+            ctypes.byref(rect),
+            ctypes.sizeof(rect),
+        )
+        if ok != 0 and not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            return None
+        return QRectF(rect.left, rect.top, width, height)
+
+    def _window_title(self, user32, hwnd) -> str:
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        return buffer.value
+
+    def window_at(self, point: QPointF) -> QRectF | None:
+        for _title, rect in self.list_windows():
+            if rect.contains(point):
+                return rect
+        return None
+
+
 class UnsupportedPlatformBackend(CaptureBackend):
     """Placeholder registered by a platform whose `Platform.build_capture_registry()`
     (see `snipux/platform/__init__.py`) has no real backend implemented yet
-    -- Windows and macOS today.
+    -- macOS today (SNX-88 gave Windows a real one).
 
     Always unavailable, so `BackendRegistry.capture()` never reaches
     `capture()` below -- CLAUDE.md's "no backend constructed on a platform

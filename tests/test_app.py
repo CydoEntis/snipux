@@ -27,6 +27,7 @@ from snipux.capture import (
     BackendRegistry,
     CaptureBackend,
     Frame,
+    WindowsWindowGeometryProvider,
     X11WindowGeometryProvider,
 )
 from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
@@ -129,6 +130,22 @@ class TestBuildDefaultRegistry:
 
 
 class TestBuildDefaultGeometryProvider:
+    # Every test below runs on whatever OS actually hosts the test suite
+    # (this repo's own CI runs both Windows and an Ubuntu VM, per
+    # CLAUDE.md), so `WindowsWindowGeometryProvider`'s *real*
+    # `is_available()` -- a bare `sys.platform == "win32"` check, no
+    # monkeypatching required to make it answer True on an actual Windows
+    # host -- would otherwise win the X11/Xwininfo tests below out from
+    # under them whenever the suite happens to run on Windows. Forcing it
+    # unavailable here is what keeps those tests' verdicts about X11/xwininfo
+    # priority, not about which OS happened to run them.
+    def _force_windows_provider_unavailable(self, monkeypatch):
+        class NoWindows(WindowsWindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        monkeypatch.setattr(app, "WindowsWindowGeometryProvider", NoWindows)
+
     def test_returns_x11_window_geometry_provider_when_it_reports_available(
         self, monkeypatch
     ):
@@ -163,11 +180,38 @@ class TestBuildDefaultGeometryProvider:
 
         assert isinstance(build_default_geometry_provider(), HasXwininfo)
 
-    def test_returns_unsupported_geometry_provider_when_neither_is_available(
+    def test_falls_back_to_windows_when_neither_x11_tool_is_available(
         self, monkeypatch
     ):
-        # Wayland, or an X11 session with neither tool: window mode degrades
-        # to plain rectangle dragging rather than pretending to work.
+        # SNX-90: a win32 host has no wmctrl/xwininfo at all, but it isn't
+        # stuck with UnsupportedGeometryProvider the way a bare Wayland
+        # session is -- EnumWindows can always answer there.
+        class NoWmctrl(X11WindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        class NoXwininfo(XwininfoWindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        class AvailableWindows(WindowsWindowGeometryProvider):
+            def is_available(self):
+                return True
+
+        monkeypatch.setattr(app, "X11WindowGeometryProvider", NoWmctrl)
+        monkeypatch.setattr(app, "XwininfoWindowGeometryProvider", NoXwininfo)
+        monkeypatch.setattr(app, "WindowsWindowGeometryProvider", AvailableWindows)
+
+        provider = build_default_geometry_provider()
+
+        assert isinstance(provider, AvailableWindows)
+
+    def test_returns_unsupported_geometry_provider_when_none_is_available(
+        self, monkeypatch
+    ):
+        # Wayland, or an X11 session with neither tool and not on Windows
+        # either: window mode degrades to plain rectangle dragging rather
+        # than pretending to work.
         class UnavailableProvider(X11WindowGeometryProvider):
             def is_available(self):
                 return False
@@ -178,6 +222,7 @@ class TestBuildDefaultGeometryProvider:
 
         monkeypatch.setattr(app, "XwininfoWindowGeometryProvider", NoXwininfo)
         monkeypatch.setattr(app, "X11WindowGeometryProvider", UnavailableProvider)
+        self._force_windows_provider_unavailable(monkeypatch)
 
         provider = build_default_geometry_provider()
 
@@ -1535,3 +1580,204 @@ class TestTheChoosersOutcomeWins:
         controller._overlay.copy()
 
         assert len(controller._reviews) == 1
+
+
+class _FakeScreen:
+    """Stand-in for QScreen exposing only what `_real_monitor_geometries()`
+    calls -- `geometry()` -- mirroring test_capture.py's `_FakeScreen` for
+    the same reason: a monitor above-and-left of the primary, or two
+    monitors at different scale factors, isn't reachable on the single real
+    display this suite normally runs under, so both are faked here instead.
+    """
+
+    def __init__(self, geometry: QRect):
+        self._geometry = geometry
+
+    def geometry(self) -> QRect:
+        return self._geometry
+
+
+class _FakeQGuiApplication:
+    """Stand-in for the QGuiApplication class object itself -- see
+    test_capture.py's identical pattern. `_real_monitor_geometries()` calls
+    `QGuiApplication.screens()` the same class-style way capture.py does,
+    so monkeypatching the module's `QGuiApplication` name to an instance of
+    this works the same way attribute lookup would on the real class.
+    """
+
+    def __init__(self, screens):
+        self._screens = screens
+
+    def screens(self):
+        return self._screens
+
+
+class TestRealMonitorGeometries:
+    """SNX-89: `_real_monitor_geometries()` is what feeds the overlay's
+    per-monitor chrome/veil placement (`AppController.start_capture`) when
+    no synthetic list is injected. On Linux this is Qt's own screen list,
+    which also works on Windows -- CLAUDE.md's per-monitor-DPI and
+    negative-coordinate warnings are about what that list can *contain* on
+    Windows, not about needing Windows-specific code to read it, so these
+    tests fake `QGuiApplication.screens()` rather than exercise any
+    platform-specific path.
+    """
+
+    def test_covers_every_screen_including_one_above_and_left(
+        self, make_controller, monkeypatch
+    ):
+        # Mirrors the real three-monitor Windows desktop
+        # TestQtNativeWindowsBackend (test_capture.py) was verified
+        # against: one screen right of the primary, one above-and-left of
+        # it -- negative x *and* negative y in the same virtual desktop.
+        screens = [
+            _FakeScreen(QRect(0, 0, 2560, 1440)),
+            _FakeScreen(QRect(2560, 0, 2560, 1440)),
+            _FakeScreen(QRect(1164, -1440, 2560, 1440)),
+        ]
+        monkeypatch.setattr(app, "QGuiApplication", _FakeQGuiApplication(screens))
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        geometries = controller._real_monitor_geometries()
+
+        assert geometries == [
+            QRectF(0, 0, 2560, 1440),
+            QRectF(2560, 0, 2560, 1440),
+            QRectF(1164, -1440, 2560, 1440),
+        ]
+
+    def test_covers_two_monitors_at_different_scale_factors(
+        self, make_controller, monkeypatch
+    ):
+        # Qt already reports each screen's geometry divided by its own
+        # devicePixelRatio, so two physically-1920x1080 panels -- one at
+        # 100% scale, one at 200% -- come back with different logical
+        # sizes even though `_real_monitor_geometries()` is nothing more
+        # than a pass-through of Qt's own screen list.
+        screens = [
+            _FakeScreen(QRect(0, 0, 1920, 1080)),  # 100% scale
+            _FakeScreen(QRect(1920, 0, 960, 540)),  # 200% scale, same panel size
+        ]
+        monkeypatch.setattr(app, "QGuiApplication", _FakeQGuiApplication(screens))
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        geometries = controller._real_monitor_geometries()
+
+        assert geometries == [QRectF(0, 0, 1920, 1080), QRectF(1920, 0, 960, 540)]
+
+
+def make_scaled_capture_frame(
+    logical_origin: QPointF, logical_size: QSizeF, ratio: float, fill_color=FILL_COLOR
+) -> Frame:
+    """A synthetic `Frame` whose image carries more pixels than its logical
+    size, the same way a real capture does on any display with a device
+    pixel ratio above one -- see `Frame`'s own docstring. Used below to
+    prove the overlay's selection/export/chrome-placement math is correct
+    against a scaled, negative-origin frame without needing real HiDPI or
+    multi-monitor Windows hardware to reach it.
+    """
+    image = QImage(
+        round(logical_size.width() * ratio),
+        round(logical_size.height() * ratio),
+        QImage.Format.Format_RGB32,
+    )
+    image.fill(fill_color)
+    return Frame(image=image, logical_origin=logical_origin, logical_size=logical_size)
+
+
+class TestWindowsShapedMultiMonitorSelection:
+    """SNX-89: the overlay covers a Windows-shaped multi-monitor desktop --
+    a monitor above-and-left of the primary (negative logical coordinates)
+    and neighbouring monitors at different scale factors -- correctly, and
+    none of this needs real Windows hardware to prove: a synthetic scaled
+    `Frame` plus injected `monitor_geometries` exercises exactly the same
+    code `start_capture()` wires a real capture through.
+    """
+
+    def test_selection_on_a_negative_origin_monitor_does_not_drift(self, make_controller):
+        # Same three-monitor layout as TestRealMonitorGeometries above and
+        # TestQtNativeWindowsBackend (test_capture.py): virtual desktop
+        # union is QRectF(0, -1440, 5120, 2880). The frame's image carries
+        # 2x the logical pixels, the same as a real capture would on a
+        # scaled display (Frame's per-axis scale, not a single assumed
+        # factor, is what `Frame.crop()`/`render_selection()` already use
+        # to map between the two -- see their own docstrings).
+        monitor_geometries = [
+            QRectF(0, 0, 2560, 1440),
+            QRectF(2560, 0, 2560, 1440),
+            QRectF(1164, -1440, 2560, 1440),  # above-and-left of the primary
+        ]
+        frame = make_scaled_capture_frame(QPointF(0, -1440), QSizeF(5120, 2880), ratio=2.0)
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(frame)]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=monitor_geometries,
+        )
+        controller.start_capture()
+        overlay = controller._overlay
+
+        # A selection entirely on the negative-origin monitor: absolute
+        # QRectF(1300, -1200, 400, 300), which in this window's own
+        # coordinates (absolute minus the frame's logical origin) is
+        # QRect(1300, 240, 400, 300).
+        selection = QRect(1300, 240, 400, 300)
+        overlay.set_selection(selection)
+
+        # No drift: the selection's own absolute point resolves to the
+        # negative-origin monitor, not the primary or its neighbour --
+        # this is exactly what `_chrome_bounds()` relies on to keep the
+        # floating bar on the monitor the user is actually pointing at.
+        absolute_point = overlay._to_absolute(QPointF(selection.center()))
+        assert overlay._monitor_at(absolute_point) == QRectF(1164, -1440, 2560, 1440)
+
+        # The dimension chip reports logical size, matching the behaviour
+        # already required on Linux -- never the frame's larger pixel size.
+        size_text, _mark_text = overlay._dimension_chip_texts()
+        assert size_text == "400 × 300"
+
+        # The exported image is at native resolution (2x here), not
+        # downscaled to the selection's logical size.
+        rendered = overlay.rendered_image()
+        assert rendered.width() == 800
+        assert rendered.height() == 600
+
+    def test_selections_on_neighbouring_monitors_at_different_scales_stay_on_their_own_monitor(
+        self, make_controller
+    ):
+        # Monitor A: 1920x1080 logical at 100% scale. Monitor B: 960x540
+        # logical at 200% scale (same physical panel size, half the
+        # logical footprint) -- placed directly beside A, per CLAUDE.md's
+        # warning that two displays can carry different scale factors at
+        # once. The frame's own image is still one uniform 2x composite
+        # (Frame/crop() can only represent one ratio for the whole image --
+        # see QtNativeX11Backend's own comment on why per-monitor DPI needs
+        # a Frame-level model change that is out of scope here); what this
+        # proves is that the *selection* math -- purely logical-coordinate,
+        # decoupled from the frame's pixel resolution -- never drifts or
+        # bleeds across the boundary between two differently-scaled
+        # neighbours.
+        monitor_a = QRectF(0, 0, 1920, 1080)
+        monitor_b = QRectF(1920, 0, 960, 540)
+        frame = make_scaled_capture_frame(QPointF(0, 0), QSizeF(2880, 1080), ratio=2.0)
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(frame)]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[monitor_a, monitor_b],
+        )
+        controller.start_capture()
+        overlay = controller._overlay
+
+        # Entirely on A, close to the shared boundary.
+        overlay.set_selection(QRect(1800, 100, 100, 100))
+        assert overlay._monitor_at(overlay._to_absolute(QPointF(1850, 150))) == monitor_a
+
+        # Entirely on B, close to the same boundary from the other side.
+        selection_b = QRect(2000, 50, 300, 200)
+        overlay.set_selection(selection_b)
+        assert overlay._monitor_at(overlay._to_absolute(QPointF(2150, 150))) == monitor_b
+
+        size_text, _mark_text = overlay._dimension_chip_texts()
+        assert size_text == "300 × 200"
+        rendered = overlay.rendered_image()
+        assert rendered.width() == 600
+        assert rendered.height() == 400

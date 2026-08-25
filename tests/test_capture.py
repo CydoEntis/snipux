@@ -1,3 +1,4 @@
+import ctypes
 import os
 import subprocess
 from types import SimpleNamespace
@@ -100,6 +101,183 @@ def _write_placeholder_png(path, color=(4, 5, 6)):
     image = QImage(2, 2, QImage.Format.Format_RGB32)
     image.fill(qRgb(*color))
     image.save(path, "PNG")
+
+
+class _FakeUser32:
+    """Stand-in for `ctypes.windll.user32`, covering only what
+    `Win32GdiBackend` calls: `GetSystemMetrics`, `GetDC`, `ReleaseDC`.
+    `metrics` maps a `GetSystemMetrics` index straight to the value the
+    test wants it to report.
+    """
+
+    def __init__(self, metrics, dc=123):
+        self._metrics = metrics
+        self._dc = dc
+        self.released = []
+
+    def GetSystemMetrics(self, index):
+        return self._metrics[index]
+
+    def GetDC(self, hwnd):
+        return self._dc
+
+    def ReleaseDC(self, hwnd, dc):
+        self.released.append(dc)
+        return 1
+
+
+class _FakeGdi32:
+    """Stand-in for `ctypes.windll.gdi32`, covering only what
+    `Win32GdiBackend._blit_to_image` calls. `pixel_bytes`, if given, is
+    what `GetDIBits` fills the caller's buffer with; otherwise a small
+    non-uniform BGRA pattern so a test can tell real pixels came back
+    rather than a zeroed buffer.
+    """
+
+    def __init__(self, pixel_bytes=None, bitblt_ok=True, getdibits_ok=True):
+        self._pixel_bytes = pixel_bytes
+        self._bitblt_ok = bitblt_ok
+        self._getdibits_ok = getdibits_ok
+        self.blit_args = None
+
+    def CreateCompatibleDC(self, dc):
+        return 111
+
+    def CreateCompatibleBitmap(self, dc, width, height):
+        return 222
+
+    def SelectObject(self, dc, obj):
+        return 333
+
+    def BitBlt(self, dest_dc, x, y, width, height, src_dc, src_x, src_y, rop):
+        self.blit_args = (dest_dc, x, y, width, height, src_dc, src_x, src_y, rop)
+        return 1 if self._bitblt_ok else 0
+
+    def GetDIBits(self, dc, bitmap, start, lines, buffer, header_ref, usage):
+        if not self._getdibits_ok:
+            return 0
+        # capture.py passes the header via ctypes.byref(), so it arrives
+        # here as a CArgObject rather than the struct itself -- cast it
+        # back to read biWidth/biHeight, the same way the real Win32 API
+        # would after ctypes' own argument marshaling.
+        header = ctypes.cast(
+            header_ref, ctypes.POINTER(capture._BitmapInfoHeader)
+        ).contents
+        pixel_count = header.biWidth * abs(header.biHeight)
+        pattern = self._pixel_bytes or bytes([10, 20, 30, 255])
+        ctypes.memmove(buffer, pattern * pixel_count, pixel_count * 4)
+        return 1
+
+    def DeleteObject(self, obj):
+        return 1
+
+    def DeleteDC(self, dc):
+        return 1
+
+
+def _patch_win32_dll(monkeypatch, user32, gdi32):
+    """Points `capture.ctypes.windll.user32`/`.gdi32` at the given fakes --
+    `raising=False` because `ctypes.windll` doesn't exist at all off
+    Windows, and this suite runs on both.
+    """
+    monkeypatch.setattr(
+        capture.ctypes, "windll", SimpleNamespace(user32=user32, gdi32=gdi32), raising=False
+    )
+
+
+class _FakeUser32Windows:
+    """Stand-in for `ctypes.windll.user32`, covering what
+    `WindowsWindowGeometryProvider` calls: `EnumWindows`, `IsWindowVisible`,
+    `IsIconic`, `GetWindowRect`, `GetWindowTextLengthW`, `GetWindowTextW`.
+
+    `windows` is the list of `hwnd`/`visible`/`iconic`/`rect`/`title` dicts
+    `EnumWindows` should hand to the caller's callback, one at a time, in
+    the order given -- tests put them in the Z-order (topmost first) the
+    real API would visit them in.
+    """
+
+    def __init__(self, windows):
+        self._windows = {w["hwnd"]: w for w in windows}
+        self._order = [w["hwnd"] for w in windows]
+
+    def EnumWindows(self, callback, lparam):
+        for hwnd in self._order:
+            if not callback(hwnd, lparam):
+                break
+        return 1
+
+    def IsWindowVisible(self, hwnd):
+        return 1 if self._windows[hwnd]["visible"] else 0
+
+    def IsIconic(self, hwnd):
+        return 1 if self._windows[hwnd]["iconic"] else 0
+
+    def GetWindowRect(self, hwnd, rect_ref):
+        left, top, right, bottom = self._windows[hwnd]["rect"]
+        target = ctypes.cast(rect_ref, ctypes.POINTER(capture._RECT)).contents
+        target.left, target.top, target.right, target.bottom = left, top, right, bottom
+        return 1
+
+    def GetWindowTextLengthW(self, hwnd):
+        return len(self._windows[hwnd]["title"])
+
+    def GetWindowTextW(self, hwnd, buffer, _size):
+        buffer.value = self._windows[hwnd]["title"]
+        return len(buffer.value)
+
+
+class _FakeDwmapi:
+    """Stand-in for `ctypes.windll.dwmapi`'s one entry point
+    `WindowsWindowGeometryProvider` calls, `DwmGetWindowAttribute`, for both
+    attributes it asks about: `DWMWA_CLOAKED` and
+    `DWMWA_EXTENDED_FRAME_BOUNDS`.
+
+    `cloaked` maps hwnd -> truthy/falsy. `frame_bounds` maps hwnd -> an
+    (left, top, right, bottom) tuple; a hwnd missing from it makes the
+    extended-frame-bounds call fail (a non-zero HRESULT), the same as DWM
+    itself refusing to answer -- exactly the case
+    `WindowsWindowGeometryProvider._frame_bounds` falls back to
+    `GetWindowRect` for.
+    """
+
+    def __init__(self, cloaked=None, frame_bounds=None):
+        self._cloaked = cloaked or {}
+        self._frame_bounds = frame_bounds or {}
+
+    def DwmGetWindowAttribute(self, hwnd, attribute, out_ref, _size):
+        if attribute == capture.WindowsWindowGeometryProvider._DWMWA_CLOAKED:
+            target = ctypes.cast(out_ref, ctypes.POINTER(ctypes.c_int)).contents
+            target.value = 1 if self._cloaked.get(hwnd) else 0
+            return 0
+        if attribute == capture.WindowsWindowGeometryProvider._DWMWA_EXTENDED_FRAME_BOUNDS:
+            bounds = self._frame_bounds.get(hwnd)
+            if bounds is None:
+                return 1  # a failing HRESULT: DWM couldn't answer
+            left, top, right, bottom = bounds
+            target = ctypes.cast(out_ref, ctypes.POINTER(capture._RECT)).contents
+            target.left, target.top, target.right, target.bottom = left, top, right, bottom
+            return 0
+        raise AssertionError(f"unexpected DwmGetWindowAttribute attribute {attribute!r}")
+
+
+def _patch_windows_geometry_dll(monkeypatch, user32, dwmapi):
+    """Points `capture.ctypes.windll.user32`/`.dwmapi` at the given fakes,
+    the `WindowsWindowGeometryProvider` counterpart of `_patch_win32_dll`
+    above. Also stands `ctypes.WINFUNCTYPE` in for
+    `capture.ctypes.WINFUNCTYPE` when the suite runs off Windows, where the
+    real one doesn't exist at all (it's defined only under `sys.platform ==
+    "win32"` in the stdlib itself) -- `ctypes.CFUNCTYPE` builds the same
+    kind of Python-callable function pointer and is available everywhere,
+    which is all `_list_windows_uncached`'s enum callback needs from it in
+    a test that never actually crosses into real Win32 code.
+    """
+    monkeypatch.setattr(
+        capture.ctypes,
+        "windll",
+        SimpleNamespace(user32=user32, dwmapi=dwmapi),
+        raising=False,
+    )
+    monkeypatch.setattr(capture.ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE, raising=False)
 
 
 def _set_session_type(monkeypatch, session_type):
@@ -257,6 +435,9 @@ class TestBackendRegistry:
         assert str(excinfo.value) == "all capture backends failed: first: first boom; second: second boom"
 
     def test_capture_names_a_wayland_package_when_no_backend_is_available(self, monkeypatch):
+        # Pinned off Windows: this suite runs there too, and the advice
+        # branches on sys.platform before it ever looks at session type.
+        monkeypatch.setattr(capture.sys, "platform", "linux")
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
         registry = BackendRegistry([FakeBackend("b", False, reason="not a Wayland session")])
 
@@ -270,6 +451,7 @@ class TestBackendRegistry:
         assert "grim" in message
 
     def test_capture_names_an_x11_package_when_no_backend_is_available(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "linux")
         monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
         registry = BackendRegistry([FakeBackend("b", False, reason="not an X11 session")])
 
@@ -283,6 +465,7 @@ class TestBackendRegistry:
         assert "maim" in message
 
     def test_capture_still_names_a_package_when_session_type_is_unknown(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "linux")
         monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
         registry = BackendRegistry([])
 
@@ -293,6 +476,27 @@ class TestBackendRegistry:
         assert message.startswith("no capture backend is available:")
         assert not message.rstrip().endswith(":")
         assert "grim" in message and "maim" in message
+
+    def test_capture_names_windows_not_grim_maim_or_apt_when_no_backend_is_available(
+        self, monkeypatch
+    ):
+        # SNX-88: before this, a Windows failure fell through to
+        # session-type-based advice (which always reads "unknown" there,
+        # since XDG_SESSION_TYPE is a Linux/X11/Wayland concept) and told a
+        # Windows user to `sudo apt install grim maim` -- advice for a
+        # different OS entirely.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        registry = BackendRegistry([FakeBackend("b", False, reason="not running on Windows")])
+
+        with pytest.raises(CaptureError) as excinfo:
+            registry.capture()
+
+        message = str(excinfo.value)
+        assert message.startswith("no capture backend is available:")
+        assert "Windows" in message
+        assert "grim" not in message
+        assert "maim" not in message
+        assert "apt install" not in message
 
 
 class TestDetectSessionType:
@@ -1125,10 +1329,340 @@ class TestBuildLinuxRegistry:
         assert [b.name() for b in registry] == expected
 
 
+class TestQtNativeWindowsBackend:
+    """SNX-88: verified against a real three-monitor Windows desktop (one
+    screen to the right of the primary, one above-and-left of it) that
+    `QScreen.grabWindow(0)`, grabbed per-screen and composited the same way
+    `QtNativeX11Backend` already does, returns each monitor's real pixels
+    rather than the black image Wayland hands back or a copy of just the
+    primary display.
+    """
+
+    def test_is_available_only_on_windows(self, monkeypatch):
+        backend = capture.QtNativeWindowsBackend()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert backend.is_available() is True
+
+        monkeypatch.setattr(capture.sys, "platform", "linux")
+        assert backend.is_available() is False
+
+    def test_unavailable_reason_matches_availability(self, monkeypatch):
+        backend = capture.QtNativeWindowsBackend()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert backend.unavailable_reason() is None
+
+        monkeypatch.setattr(capture.sys, "platform", "darwin")
+        assert backend.unavailable_reason() == "not running on Windows"
+
+    def test_capture_covers_every_monitor_including_one_above_and_left(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        # Mirrors the real desktop this backend was verified against:
+        # negative x *and* negative y in the same virtual desktop.
+        screens = [
+            _FakeScreen(QRect(0, 0, 2560, 1440)),
+            _FakeScreen(QRect(2560, 0, 2560, 1440)),
+            _FakeScreen(QRect(1164, -1440, 2560, 1440)),
+        ]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        frame = capture.QtNativeWindowsBackend().capture()
+
+        assert frame.logical_origin == QPointF(0, -1440)
+        assert frame.logical_size == QSizeF(5120, 2880)
+        assert frame.image.width() == 5120
+        assert frame.image.height() == 2880
+        assert not frame.image.isNull()
+
+    def test_capture_raises_when_a_screens_grab_comes_back_empty(self, monkeypatch):
+        # The "only returns the primary display" failure mode the ticket
+        # warns about must not be silently painted as black -- it has to
+        # raise, so BackendRegistry.capture() falls through to the Win32
+        # GDI backend instead of handing back a frame missing a monitor.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+
+        class _NullGrabScreen(_FakeScreen):
+            def grabWindow(self, window_id):
+                return QPixmap()
+
+        screens = [
+            _FakeScreen(QRect(0, 0, 100, 50)),
+            _NullGrabScreen(QRect(100, 0, 100, 50)),
+        ]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        with pytest.raises(RuntimeError):
+            capture.QtNativeWindowsBackend().capture()
+
+
+class TestWin32GdiBackend:
+    """SNX-88: the fallback for when qt-native doesn't cover the whole
+    virtual desktop -- a single BitBlt of the region GetSystemMetrics
+    reports as the virtual screen, via ctypes (no new dependency).
+    """
+
+    def test_is_available_only_on_windows(self, monkeypatch):
+        backend = capture.Win32GdiBackend()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert backend.is_available() is True
+
+        monkeypatch.setattr(capture.sys, "platform", "linux")
+        assert backend.is_available() is False
+
+    def test_unavailable_reason_matches_availability(self, monkeypatch):
+        backend = capture.Win32GdiBackend()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert backend.unavailable_reason() is None
+
+        monkeypatch.setattr(capture.sys, "platform", "darwin")
+        assert backend.unavailable_reason() == "not running on Windows"
+
+    def test_capture_blits_the_gsm_reported_region_in_one_call(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        # A monitor left of the primary, like _virtual_desktop_geometry()
+        # sees on X11's equivalent test -- the logical rect this backend
+        # reports must still come from Qt, not from GDI's own numbers.
+        screens = [_FakeScreen(QRect(-100, 0, 300, 200))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        user32 = _FakeUser32({76: -100, 77: 0, 78: 300, 79: 200})
+        gdi32 = _FakeGdi32()
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        frame = capture.Win32GdiBackend().capture()
+
+        assert gdi32.blit_args is not None
+        _dest_dc, dest_x, dest_y, width, height, _src_dc, src_x, src_y, _rop = gdi32.blit_args
+        assert (dest_x, dest_y) == (0, 0)
+        assert (width, height) == (300, 200)
+        assert (src_x, src_y) == (-100, 0)
+        assert frame.image.width() == 300
+        assert frame.image.height() == 200
+        assert not frame.image.isNull()
+        assert frame.logical_origin == QPointF(-100, 0)
+        assert frame.logical_size == QSizeF(300, 200)
+
+    def test_capture_releases_the_screen_dc_even_when_bitblt_fails(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        screens = [_FakeScreen(QRect(0, 0, 100, 50))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        user32 = _FakeUser32({76: 0, 77: 0, 78: 100, 79: 50})
+        gdi32 = _FakeGdi32(bitblt_ok=False)
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        with pytest.raises(RuntimeError, match="BitBlt"):
+            capture.Win32GdiBackend().capture()
+
+        assert user32.released == [user32._dc]
+
+    def test_capture_raises_when_get_dibits_fails(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        screens = [_FakeScreen(QRect(0, 0, 100, 50))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        user32 = _FakeUser32({76: 0, 77: 0, 78: 100, 79: 50})
+        gdi32 = _FakeGdi32(getdibits_ok=False)
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        with pytest.raises(RuntimeError, match="GetDIBits"):
+            capture.Win32GdiBackend().capture()
+
+    def test_capture_raises_when_the_reported_virtual_screen_is_empty(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32({76: 0, 77: 0, 78: 0, 79: 0})
+        gdi32 = _FakeGdi32()
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        with pytest.raises(RuntimeError, match="GetSystemMetrics"):
+            capture.Win32GdiBackend().capture()
+
+
+class TestBuildWindowsRegistry:
+    """SNX-88: `platform.windows.WindowsPlatform.build_capture_registry()`
+    forwards here, the same way Linux's does to `build_linux_registry()`.
+    """
+
+    def test_registers_backends_in_the_required_order(self):
+        registry = capture.build_windows_registry()
+
+        assert [backend.name() for backend in registry] == ["qt-native", "win32-gdi"]
+
+    def test_capture_falls_through_from_qt_native_to_the_gdi_backend(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        screens = [_FakeScreen(QRect(0, 0, 100, 50))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        monkeypatch.setattr(
+            capture.QtNativeWindowsBackend,
+            "capture",
+            Mock(side_effect=RuntimeError("qt-native boom")),
+        )
+        user32 = _FakeUser32({76: 0, 77: 0, 78: 100, 79: 50})
+        gdi32 = _FakeGdi32()
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        registry = capture.build_windows_registry()
+        frame = registry.capture()
+
+        assert isinstance(frame, Frame)
+        assert not frame.image.isNull()
+
+
+class TestWindowsWindowGeometryProvider:
+    """SNX-90: `EnumWindows`/`GetWindowRect`/`DwmGetWindowAttribute` via
+    ctypes -- Windows' counterpart to `TestX11WindowGeometryProvider`
+    above. Unlike X11, Windows has no "no client may enumerate other
+    windows" restriction to work around, so this is available whenever
+    `sys.platform == "win32"`, no external tool required.
+    """
+
+    def test_is_available_only_on_windows(self, monkeypatch):
+        provider = capture.WindowsWindowGeometryProvider()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert provider.is_available() is True
+
+        monkeypatch.setattr(capture.sys, "platform", "linux")
+        assert provider.is_available() is False
+
+    def test_list_windows_uses_extended_frame_bounds_not_get_window_rect(
+        self, monkeypatch
+    ):
+        # The invisible resize border GetWindowRect would include: its
+        # rect (0,0,120,120) is padded 10px past what DWM's own extended
+        # frame bounds (10,10,100,100) report as actually visible.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False,
+              "rect": (0, 0, 120, 120), "title": "Notepad"}]
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (10, 10, 100, 100)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert windows == [("Notepad", QRectF(10, 10, 90, 90))]
+
+    def test_list_windows_falls_back_to_get_window_rect_when_dwm_fails(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False,
+              "rect": (0, 0, 50, 50), "title": "Old-style window"}]
+        )
+        # No entry for hwnd 1 in frame_bounds -- DwmGetWindowAttribute
+        # reports failure, same as a pre-DWM window.
+        dwmapi = _FakeDwmapi()
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert windows == [("Old-style window", QRectF(0, 0, 50, 50))]
+
+    def test_list_windows_skips_hidden_minimised_and_cloaked_windows(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows([
+            {"hwnd": 1, "visible": False, "iconic": False,
+             "rect": (0, 0, 50, 50), "title": "Hidden"},
+            {"hwnd": 2, "visible": True, "iconic": True,
+             "rect": (0, 0, 50, 50), "title": "Minimised"},
+            {"hwnd": 3, "visible": True, "iconic": False,
+             "rect": (0, 0, 50, 50), "title": "Cloaked"},
+            {"hwnd": 4, "visible": True, "iconic": False,
+             "rect": (0, 0, 50, 50), "title": "Visible"},
+        ])
+        dwmapi = _FakeDwmapi(
+            cloaked={3: True},
+            frame_bounds={
+                1: (0, 0, 50, 50), 2: (0, 0, 50, 50),
+                3: (0, 0, 50, 50), 4: (0, 0, 50, 50),
+            },
+        )
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert [title for title, _rect in windows] == ["Visible"]
+
+    def test_window_at_returns_the_topmost_of_several_overlapping_windows(
+        self, monkeypatch
+    ):
+        # EnumWindows visits windows front-to-back, so the first (not
+        # last) match in enumeration order must win -- unlike
+        # XwininfoWindowGeometryProvider, this needs no reversal to get
+        # there.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows([
+            {"hwnd": 1, "visible": True, "iconic": False,
+             "rect": (0, 0, 100, 100), "title": "Front"},
+            {"hwnd": 2, "visible": True, "iconic": False,
+             "rect": (0, 0, 200, 200), "title": "Back"},
+        ])
+        dwmapi = _FakeDwmapi(
+            frame_bounds={1: (0, 0, 100, 100), 2: (0, 0, 200, 200)}
+        )
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+        provider = capture.WindowsWindowGeometryProvider()
+
+        assert provider.window_at(QPointF(50, 50)) == QRectF(0, 0, 100, 100)
+        assert provider.window_at(QPointF(150, 150)) == QRectF(0, 0, 200, 200)
+        assert provider.window_at(QPointF(500, 500)) is None
+
+    def test_list_windows_reuses_cached_list_within_the_cache_window(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False,
+              "rect": (0, 0, 50, 50), "title": "W"}]
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (0, 0, 50, 50)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+        enum_windows = Mock(wraps=user32.EnumWindows)
+        monkeypatch.setattr(user32, "EnumWindows", enum_windows)
+        clock = [100.0]
+        monkeypatch.setattr(capture.time, "monotonic", lambda: clock[0])
+        provider = capture.WindowsWindowGeometryProvider()
+
+        provider.window_at(QPointF(10, 10))
+        clock[0] += 0.05
+        provider.window_at(QPointF(10, 10))
+
+        assert enum_windows.call_count == 1
+
+    def test_list_windows_refetches_once_the_cache_expires(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False,
+              "rect": (0, 0, 50, 50), "title": "W"}]
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (0, 0, 50, 50)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+        enum_windows = Mock(wraps=user32.EnumWindows)
+        monkeypatch.setattr(user32, "EnumWindows", enum_windows)
+        clock = [100.0]
+        monkeypatch.setattr(capture.time, "monotonic", lambda: clock[0])
+        provider = capture.WindowsWindowGeometryProvider()
+
+        provider.list_windows()
+        clock[0] += capture.WindowsWindowGeometryProvider._CACHE_SECONDS + 0.01
+        provider.list_windows()
+
+        assert enum_windows.call_count == 2
+
+    def test_list_windows_is_empty_off_windows(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "linux")
+
+        assert capture.WindowsWindowGeometryProvider().list_windows() == []
+
+
 class TestUnsupportedPlatformBackend:
-    """SNX-86: what `platform.windows.WindowsPlatform.build_capture_registry()`
-    and `platform.darwin.DarwinPlatform.build_capture_registry()` register in
-    place of a real backend, until one exists.
+    """SNX-86: what `platform.darwin.DarwinPlatform.build_capture_registry()`
+    registers in place of a real backend, until one exists (SNX-88 gave
+    Windows a real one, so it no longer uses this placeholder).
     """
 
     def test_is_never_available(self):
