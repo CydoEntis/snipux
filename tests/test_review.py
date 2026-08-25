@@ -101,7 +101,11 @@ class TestStatusAndPath:
     def test_paths_under_home_are_shown_relative_to_it(self):
         path = Path.home() / "Pictures" / "snipux" / "shot.png"
 
-        assert ReviewWindow._display_path(path) == "~/Pictures/snipux/shot.png"
+        # `_display_path` joins "~/" onto `str(path.relative_to(...))`, which
+        # carries the platform's own separator (backslash on Windows) --
+        # normalise before comparing rather than hard-coding the Linux one.
+        displayed = ReviewWindow._display_path(path).replace("\\", "/")
+        assert displayed == "~/Pictures/snipux/shot.png"
 
     def test_show_in_folder_is_disabled_until_there_is_a_file(self, tmp_path):
         assert not ReviewWindow(make_image())._folder_button.isEnabled()
