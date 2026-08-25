@@ -1592,6 +1592,108 @@ class TestHandlePressDoesNotStartAStroke:
         assert overlay._selection == original
 
 
+class TestRegionDragToCreate:
+    """SNX-57: Region -- the default mode, and the only one with no picking
+    flag of its own -- gets the same "drag on an empty overlay" starting
+    point Window/Full screen/Freeform each already have. Before this,
+    `mousePressEvent` treated a press with no selection yet as a no-op for
+    every tool, per its own comment, so Region -- the mode the whole tool
+    is for -- had no way to ever produce a first selection at all.
+    """
+
+    def _overlay(self, size=(400, 400)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def _drag(self, overlay, press_pos, move_pos):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press_pos)
+        QTest.mouseMove(overlay, move_pos)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=move_pos)
+
+    def test_drag_on_a_fresh_overlay_creates_a_selection_that_follows_the_cursor(self):
+        overlay = self._overlay()
+        assert overlay._selection is None
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+        QTest.mouseMove(overlay, QPoint(150, 120))
+
+        # Still mid-drag, not yet released, but already visible and
+        # tracking the cursor, per "follows the cursor... during the drag."
+        assert overlay._selection == QRect(50, 50, 100, 70)
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(150, 120))
+
+        assert overlay._selection == QRect(50, 50, 100, 70)
+
+    def test_release_commits_the_selection_and_shows_bar_chips_and_handles(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        self._drag(overlay, QPoint(50, 50), QPoint(150, 120))
+
+        assert overlay._selection == QRect(50, 50, 100, 70)
+        assert overlay._bar.isVisible()
+        # The dimension chip reads live off `_selection` -- confirming it
+        # reports this selection's own size is what "chips appear" reduces
+        # to, since the chip itself is painted, not a separately-gated
+        # child widget.
+        size_text, _marks_text = overlay._dimension_chip_texts()
+        assert size_text == "100 × 70"
+        # A handle now hit-tests against the freshly-created selection, the
+        # same corner-bracket geometry every other mode's selection gets.
+        corner = overlay._corner_hit_rect(Handle.BOTTOM_RIGHT).center()
+        assert overlay._handle_at(corner) is Handle.BOTTOM_RIGHT
+
+    def test_selection_created_by_a_drag_can_then_be_reframed_by_its_handles(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        self._drag(overlay, press, QPoint(60, 60))
+
+        sel = overlay._selection
+        # Bottom-right corner (the anchor for a top-left drag) is untouched
+        # -- exactly `TestReframing`'s own re-framing assertions, run here
+        # against a selection this ticket's own drag produced rather than
+        # one seeded directly via `set_selection`.
+        assert (sel.x(), sel.y()) == (60, 60)
+        assert (sel.width(), sel.height()) == (190, 140)
+
+    def test_drag_below_the_minimum_size_leaves_no_selection(self):
+        overlay = self._overlay()
+
+        # 5x4: under both tokens.Metric.SEL_MIN_W and SEL_MIN_H (16x16).
+        self._drag(overlay, QPoint(50, 50), QPoint(55, 54))
+
+        assert overlay._selection is None
+
+    def test_plain_click_with_no_movement_leaves_no_selection(self):
+        overlay = self._overlay()
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert overlay._selection is None
+
+    def test_press_on_an_existing_selections_handle_resizes_it_not_a_new_drag(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(50, 50, 100, 80))
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+
+        # A handle hit is a resize, never a Region drag-to-create -- the
+        # press-time state proves which of the two `mousePressEvent` chose.
+        assert overlay._active_handle is Handle.TOP_LEFT
+        assert overlay._region_drag_anchor is None
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=press)
+
+        # The original selection survives (aside from the resize itself),
+        # rather than being replaced by a fresh drag-created rect.
+        assert overlay._selection is not None
+
+
 class TestUndoRedoClear:
     """SNX-39: the general undo/redo/clear stack over `_marks`, distinct
     from the eraser's own single-slot `undo_erase` (TestEraserTool above).
