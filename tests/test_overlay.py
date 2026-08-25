@@ -5812,7 +5812,10 @@ class TestKeyboardEscapeTwoStage:
 class TestKeyboardShortcutSuppression:
     """SNX-47 AC: 'none of these keys fire while a text label is being
     edited or a slider has focus, and the key reaches the focused widget
-    instead.'
+    instead.' SNX-79 carves Escape and undo/redo out of that suppression --
+    see TestEscapeAndUndoRedoBypassSuppression below for those; this class
+    now only covers the shortcuts that must keep yielding to a focused
+    slider or label.
     """
 
     RED = QColor(255, 0, 0)
@@ -5845,29 +5848,6 @@ class TestKeyboardShortcutSuppression:
         QTest.keyClick(overlay, Qt.Key.Key_P)
 
         assert overlay._bar.active_tool is None
-
-    def test_undo_does_not_fire_while_a_slider_has_focus(self):
-        overlay = self._overlay()
-        overlay.add_mark(
-            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
-        )
-        overlay._tray._slider.setFocus()
-
-        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
-
-        assert len(overlay.marks) == 1
-
-    def test_escape_does_not_discard_while_a_text_label_is_focused(self):
-        overlay = self._overlay()
-        overlay.add_mark(
-            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
-        )
-        label = QLineEdit(overlay)
-        label.setFocus()
-
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)
-
-        assert len(overlay.marks) == 1
 
     def test_enter_does_not_copy_or_close_while_a_slider_has_focus(self, monkeypatch):
         calls = []
@@ -5907,6 +5887,122 @@ class TestKeyboardShortcutSuppression:
         QTest.keyClick(label, "P")
 
         assert label.text() == "P"
+
+
+class TestEscapeAndUndoRedoBypassSuppression:
+    """SNX-79: Escape stops working once the stroke slider or a label has
+    focus, because _shortcuts_suppressed() (SNX-47, see
+    TestKeyboardShortcutSuppression above) dropped every shortcut it names
+    including Escape. Touching the stroke slider is part of ordinary use, so
+    after the first stroke-width change the user had no key left to close
+    the overlay. Escape is the way out of a modal, full-screen window and
+    must keep working regardless of which child holds focus; undo/redo are
+    named in the same acceptance criteria for the same reason.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_escape_closes_the_overlay_while_the_stroke_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay.isVisible()
+
+    def test_escape_abandons_a_focused_label_then_a_further_escape_closes(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        assert overlay._text_edit.isVisible()
+        QTest.keyClicks(overlay._text_edit, "hello")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # first stage: abandons the label
+
+        assert overlay._text_edit.isHidden()
+        assert overlay.marks == ()  # abandoned, not committed as a Text mark
+        assert overlay.isVisible()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # second stage: nothing left, closes
+
+        assert not overlay.isVisible()
+
+    def test_escape_gets_the_user_out_whether_a_slider_or_a_label_has_focus(self):
+        # The acceptance criterion in its own words: focus a slider, then a
+        # label, in turn, and Escape must get the user out of the overlay
+        # both times.
+        overlay = self._overlay()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay.isVisible()
+
+        overlay = self._overlay()
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # abandons the (bare-stand-in) label
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # nothing left to discard, closes
+
+        assert not overlay.isVisible()
+
+    def test_undo_still_fires_while_a_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+        assert overlay.marks == ()
+
+    def test_redo_still_fires_while_a_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        overlay.undo()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(
+            overlay,
+            Qt.Key.Key_Z,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        assert len(overlay.marks) == 1
+
+    def test_tool_letters_stay_suppressed_while_a_slider_has_focus_alongside_escape(self):
+        # Guards against a fix that stops suppressing everything rather than
+        # carving out just Escape and undo/redo -- the AC is explicit that
+        # tool letters must stay suppressed.
+        overlay = self._overlay()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert overlay._bar.active_tool is None
+
+    def test_arrow_key_still_reaches_the_slider_after_the_escape_fix(self):
+        overlay = self._overlay()
+        slider = overlay._tray._slider
+        slider.setFocus()
+        original = slider.value()
+
+        QTest.keyClick(slider, Qt.Key.Key_Right)
+
+        assert slider.value() == original + slider.singleStep()
 
 
 class TestOverlayWindowOnDismissed:

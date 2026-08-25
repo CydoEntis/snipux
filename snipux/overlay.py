@@ -3983,12 +3983,19 @@ class OverlayWindow(QWidget):
     # docs/design/overlay-redesign.md's "Keyboard" table is the authority: a
     # tool letter from tokens.SHORTCUTS, Ctrl+Z / Ctrl+Shift+Z for undo/redo,
     # Enter to copy-and-dismiss, and Esc, whose second stage the table
-    # explicitly leaves for us to decide -- see _handle_escape. All of it is
-    # suppressed outright while a text label or a slider has focus, per the
-    # table's own closing line -- see _shortcuts_suppressed. SNX-65 adds one
-    # more the table predates: `?` toggles `_hints_enabled`, the reachable-
-    # without-a-file escape hatch for the shortcut list now that the HUD it
-    # lives in is off by default.
+    # explicitly leaves for us to decide -- see _handle_escape. The tool
+    # letters, Enter and `?` are suppressed outright while a text label or a
+    # slider has focus, per the table's own closing line -- see
+    # _shortcuts_suppressed. SNX-65 adds one more the table predates: `?`
+    # toggles `_hints_enabled`, the reachable-without-a-file escape hatch for
+    # the shortcut list now that the HUD it lives in is off by default.
+    #
+    # SNX-79: Escape and undo/redo are carved out of that suppression.
+    # Touching the stroke slider is part of ordinary use, and a focused
+    # slider or label must never leave the user with no way to close this
+    # modal, full-screen window, nor with a broken undo stack -- see
+    # keyPressEvent, which checks for those before _shortcuts_suppressed()
+    # rather than after.
 
     def _shortcuts_suppressed(self) -> bool:
         """True while keyboard focus is on a widget these shortcuts must
@@ -4022,14 +4029,59 @@ class OverlayWindow(QWidget):
         else:
             self.close()
 
-    def keyPressEvent(self, event) -> None:
-        if self._shortcuts_suppressed():
-            super().keyPressEvent(event)
-            return
+    def _abandon_text_entry(self, label: QLineEdit) -> None:
+        """Escape's first stage while a label is focused (SNX-79): empties
+        and hides the field instead of committing it as a Text mark, so
+        typing a word into a label and then hitting Escape abandons that
+        label rather than saving it.
 
+        Clearing the text before hiding matters for the real text-tool
+        editor (`_text_edit`): hiding a focused `QLineEdit` fires
+        `editingFinished` synchronously (see `_commit_text`'s own
+        docstring), and `_commit_text` only calls `add_mark`
+        `if self._text_edit.text():` -- with the field already emptied that
+        guard is false, so the existing commit path discards the label
+        itself instead of this needing a second, parallel way to do it.
+        Hiding also returns keyboard focus to this window (Qt's normal
+        behaviour when a focused child is hidden -- see `_shortcuts_
+        suppressed`'s use of `focusWidget()`), which is what lets the
+        *next* Escape reach `_handle_escape` directly instead of bubbling
+        back through here.
+
+        Takes the focused label as a parameter rather than reading
+        `self._text_edit` because `TestKeyboardShortcutSuppression` (SNX-47)
+        stands in a bare `QLineEdit` for the real editor to test suppression
+        generically -- this must abandon whichever label actually has focus.
+        """
+        label.clear()
+        label.hide()
+
+    def keyPressEvent(self, event) -> None:
         key = event.key()
         modifiers = event.modifiers()
 
+        # Escape is the way out of this modal, full-screen window and must
+        # work regardless of which child holds focus (SNX-79) -- checked
+        # ahead of _shortcuts_suppressed() so a focused slider or label never
+        # swallows it. Reaching this method at all already means the focused
+        # child declined the key itself: neither QSlider nor a plain
+        # QLineEdit handles Escape, so Qt's normal unhandled-key propagation
+        # bubbles it up here exactly as if nothing had focus.
+        if key == Qt.Key.Key_Escape:
+            focus = self.focusWidget()
+            if isinstance(focus, QLineEdit):
+                self._abandon_text_entry(focus)
+            else:
+                self._handle_escape()
+            return
+
+        # Same SNX-79 carve-out for undo/redo. A label's own Ctrl+Z /
+        # Ctrl+Shift+Z never reaches this method in the first place --
+        # QLineEdit handles those itself, for its own text-undo, before they
+        # can bubble -- so this only ever runs here with a slider (or
+        # nothing) focused, and no isinstance check is needed the way Escape
+        # above needed one.
+        #
         # Exact-equality modifier check, not bitwise: Ctrl+Shift+Z's
         # modifier set includes ControlModifier, so a bitwise "is Control
         # held" test would swallow every redo as an undo. Same trap
@@ -4043,8 +4095,8 @@ class OverlayWindow(QWidget):
             self.undo()
             return
 
-        if key == Qt.Key.Key_Escape:
-            self._handle_escape()
+        if self._shortcuts_suppressed():
+            super().keyPressEvent(event)
             return
 
         if key in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
