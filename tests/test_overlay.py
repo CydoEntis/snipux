@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 import snipux.app as app_module
+import snipux.overlay as overlay_module
 from snipux.capture import BackendRegistry, CaptureBackend, Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
 from snipux.design import font_families
@@ -48,6 +49,7 @@ from snipux.overlay import (
     _ToolPill,
     _tool_label,
     create_overlays,
+    open_overlay,
 )
 
 BASE_COLOR = qRgb(10, 20, 30)
@@ -1590,6 +1592,108 @@ class TestHandlePressDoesNotStartAStroke:
 
         assert overlay._active_handle is None
         assert overlay._selection == original
+
+
+class TestRegionDragToCreate:
+    """SNX-57: Region -- the default mode, and the only one with no picking
+    flag of its own -- gets the same "drag on an empty overlay" starting
+    point Window/Full screen/Freeform each already have. Before this,
+    `mousePressEvent` treated a press with no selection yet as a no-op for
+    every tool, per its own comment, so Region -- the mode the whole tool
+    is for -- had no way to ever produce a first selection at all.
+    """
+
+    def _overlay(self, size=(400, 400)):
+        frame = make_frame(image_size=size, logical_size=size)
+        return OverlayWindow(frame)
+
+    def _drag(self, overlay, press_pos, move_pos):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press_pos)
+        QTest.mouseMove(overlay, move_pos)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=move_pos)
+
+    def test_drag_on_a_fresh_overlay_creates_a_selection_that_follows_the_cursor(self):
+        overlay = self._overlay()
+        assert overlay._selection is None
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+        QTest.mouseMove(overlay, QPoint(150, 120))
+
+        # Still mid-drag, not yet released, but already visible and
+        # tracking the cursor, per "follows the cursor... during the drag."
+        assert overlay._selection == QRect(50, 50, 100, 70)
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(150, 120))
+
+        assert overlay._selection == QRect(50, 50, 100, 70)
+
+    def test_release_commits_the_selection_and_shows_bar_chips_and_handles(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        self._drag(overlay, QPoint(50, 50), QPoint(150, 120))
+
+        assert overlay._selection == QRect(50, 50, 100, 70)
+        assert overlay._bar.isVisible()
+        # The dimension chip reads live off `_selection` -- confirming it
+        # reports this selection's own size is what "chips appear" reduces
+        # to, since the chip itself is painted, not a separately-gated
+        # child widget.
+        size_text, _marks_text = overlay._dimension_chip_texts()
+        assert size_text == "100 × 70"
+        # A handle now hit-tests against the freshly-created selection, the
+        # same corner-bracket geometry every other mode's selection gets.
+        corner = overlay._corner_hit_rect(Handle.BOTTOM_RIGHT).center()
+        assert overlay._handle_at(corner) is Handle.BOTTOM_RIGHT
+
+    def test_selection_created_by_a_drag_can_then_be_reframed_by_its_handles(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        self._drag(overlay, press, QPoint(60, 60))
+
+        sel = overlay._selection
+        # Bottom-right corner (the anchor for a top-left drag) is untouched
+        # -- exactly `TestReframing`'s own re-framing assertions, run here
+        # against a selection this ticket's own drag produced rather than
+        # one seeded directly via `set_selection`.
+        assert (sel.x(), sel.y()) == (60, 60)
+        assert (sel.width(), sel.height()) == (190, 140)
+
+    def test_drag_below_the_minimum_size_leaves_no_selection(self):
+        overlay = self._overlay()
+
+        # 5x4: under both tokens.Metric.SEL_MIN_W and SEL_MIN_H (16x16).
+        self._drag(overlay, QPoint(50, 50), QPoint(55, 54))
+
+        assert overlay._selection is None
+
+    def test_plain_click_with_no_movement_leaves_no_selection(self):
+        overlay = self._overlay()
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert overlay._selection is None
+
+    def test_press_on_an_existing_selections_handle_resizes_it_not_a_new_drag(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(50, 50, 100, 80))
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+
+        # A handle hit is a resize, never a Region drag-to-create -- the
+        # press-time state proves which of the two `mousePressEvent` chose.
+        assert overlay._active_handle is Handle.TOP_LEFT
+        assert overlay._region_drag_anchor is None
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=press)
+
+        # The original selection survives (aside from the resize itself),
+        # rather than being replaced by a fresh drag-created rect.
+        assert overlay._selection is not None
 
 
 class TestUndoRedoClear:
@@ -4711,3 +4815,183 @@ class TestKeyboardShortcutSuppression:
         QTest.keyClick(label, "P")
 
         assert label.text() == "P"
+
+
+class TestOverlayWindowOnDismissed:
+    """SNX-58: `on_dismissed` is how a Wayland multi-monitor group's
+    `_MonitorVeil` companions get told to close once the real, interactive
+    `OverlayWindow` does -- wired through `closeEvent`, deliberately not
+    `hideEvent`, since `_start_delayed_capture` (SNX-50) also plain-hides
+    this same window mid-countdown and re-shows it moments later, which
+    must not tear the veils down.
+    """
+
+    def test_close_calls_on_dismissed(self):
+        calls = []
+        overlay = OverlayWindow(make_frame(), on_dismissed=lambda: calls.append(1))
+
+        overlay.close()
+
+        assert calls == [1]
+
+    def test_hide_alone_does_not_call_on_dismissed(self):
+        calls = []
+        overlay = OverlayWindow(make_frame(), on_dismissed=lambda: calls.append(1))
+
+        overlay.hide()
+
+        assert calls == []
+
+    def test_on_dismissed_defaults_to_none_and_close_does_not_raise(self):
+        overlay = OverlayWindow(make_frame())
+
+        overlay.close()  # must not raise for lack of a callback
+
+
+class TestOverlayWindowShowOnScreen:
+    """SNX-58 AC: 'the overlay covers the whole screen on Wayland without
+    relying on setting its own window position' and 'the overlay is above
+    other windows and takes keyboard focus when it opens.'
+    """
+
+    def test_none_screen_falls_back_to_a_plain_show(self):
+        overlay = OverlayWindow(make_frame())
+
+        overlay.show_on_screen(None)
+
+        assert overlay.isVisible()
+        assert not overlay.isFullScreen()
+
+    def test_a_real_screen_requests_fullscreen_instead_of_a_plain_show(self):
+        overlay = OverlayWindow(make_frame())
+        screen = QApplication.primaryScreen()
+        assert screen is not None  # the offscreen platform still reports one
+
+        overlay.show_on_screen(screen)
+
+        assert overlay.isVisible()
+        assert overlay.isFullScreen()
+
+
+class TestMonitorVeil:
+    """SNX-58: the non-interactive companion `open_overlay` shows on every
+    monitor besides the one the real `OverlayWindow` covers, on Wayland
+    with more than one monitor.
+    """
+
+    def test_paints_its_own_monitor_frame_dimmed(self):
+        image = QImage(100, 50, QImage.Format.Format_RGB32)
+        image.fill(BASE_COLOR)
+        monitor_frame = Frame(
+            image=image, logical_origin=QPointF(200, 0), logical_size=QSizeF(100, 50)
+        )
+
+        veil = overlay_module._MonitorVeil(monitor_frame)
+
+        assert veil.size() == QSize(100, 50)
+        sampled = veil.grab().toImage().pixelColor(10, 10)
+        expected = _blend(QColor(10, 20, 30), overlay_module.Overlay.VEIL_COLOR)
+        assert sampled.red() == pytest.approx(expected.red(), abs=2)
+        assert sampled.green() == pytest.approx(expected.green(), abs=2)
+        assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
+
+
+class TestOpenOverlay:
+    """SNX-58: `open_overlay` is where the session type app.py already
+    detected (never assumed, per CLAUDE.md) turns into either a single
+    `OverlayWindow` (X11, or a single-monitor Wayland session) or a
+    Wayland multi-monitor group -- see its own docstring for the split.
+    """
+
+    def test_x11_shows_one_overlay_window_spanning_every_monitor(self, monkeypatch):
+        # A `_MonitorVeil` constructed here would mean the X11 path started
+        # building a group it has no business building -- X11's single
+        # OverlayWindow already covers every monitor on its own, unchanged
+        # from before this ticket.
+        monkeypatch.setattr(overlay_module, "_MonitorVeil", Mock(side_effect=AssertionError))
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+
+        result = open_overlay(frame, geometries, wayland=False)
+
+        assert isinstance(result, OverlayWindow)
+        assert result.isVisible()
+        assert not result.isFullScreen()
+        assert result._frame is frame
+        assert result._monitor_geometries == geometries
+
+    def test_wayland_single_monitor_uses_the_frame_uncropped(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        geometries = [QRectF(0, 0, 200, 200)]
+
+        result = open_overlay(frame, geometries, wayland=True)
+
+        assert result._frame is frame
+        assert result._monitor_geometries == geometries
+        assert result._on_dismissed is None
+
+    def test_wayland_multi_monitor_crops_the_primary_window_to_its_own_monitor(self):
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+
+        result = open_overlay(frame, geometries, wayland=True)
+
+        assert result._frame.logical_origin == geometries[0].topLeft()
+        assert result._frame.logical_size == geometries[0].size()
+        assert result._monitor_geometries == [geometries[0]]
+        assert result._on_dismissed is not None
+
+    def test_wayland_multi_monitor_covers_the_remaining_monitors_with_veils(self, monkeypatch):
+        created = []
+
+        class FakeVeil:
+            def __init__(self, monitor_frame):
+                self.monitor_frame = monitor_frame
+                self.closed = False
+                created.append(self)
+
+            def show_on_screen(self, screen):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
+        frame = make_frame(image_size=(600, 200), logical_size=(600, 200))
+        geometries = [
+            QRectF(0, 0, 200, 200),
+            QRectF(200, 0, 200, 200),
+            QRectF(400, 0, 200, 200),
+        ]
+
+        open_overlay(frame, geometries, wayland=True)
+
+        # One veil per monitor but the primary, each cropped to its own.
+        assert [veil.monitor_frame.logical_origin for veil in created] == [
+            geometries[1].topLeft(),
+            geometries[2].topLeft(),
+        ]
+        assert all(not veil.closed for veil in created)
+
+    def test_closing_the_primary_overlay_closes_its_veil_companions(self, monkeypatch):
+        created = []
+
+        class FakeVeil:
+            def __init__(self, monitor_frame):
+                self.closed = False
+                created.append(self)
+
+            def show_on_screen(self, screen):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+
+        result = open_overlay(frame, geometries, wayland=True)
+        result.close()
+
+        assert created and all(veil.closed for veil in created)
