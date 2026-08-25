@@ -46,6 +46,12 @@ Issues = "https://github.com/CydoEntis/snipux/issues"
 [project.scripts]
 snipux = "snipux.app:cli"
 
+[tool.pytest.ini_options]
+# "-ra" keeps skip reasons (and their count) in the summary on every run,
+# `-q` included -- SNX-84: a platform gap that only shows up with an extra
+# flag someone has to remember reads as full coverage.
+addopts = "-ra"
+
 [tool.setuptools.packages.find]
 # An explicit list ("snipux") silently drops subpackages added later --
 # that is exactly how snipux.design shipped without ever being installed.

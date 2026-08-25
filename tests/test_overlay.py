@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 
 import snipux.app as app_module
 import snipux.overlay as overlay_module
+from conftest import skip_on_windows
 from snipux.capture import BackendRegistry, CaptureBackend, Frame, X11WindowGeometryProvider
 from snipux.design import color as design_color
 from snipux.design import font_families
@@ -514,6 +515,15 @@ class TestWindowMode:
 
         confirmed.assert_called_once_with(self.WINDOW_RECT, None)
 
+    @skip_on_windows(
+        "hover-only QTest.mouseMove synthesis depends on the freshly-shown "
+        "overlay being the OS-active window; Windows enforces real window "
+        "activation even under the offscreen QPA platform, so a window left "
+        "active by an earlier test in the same process (there is one shared "
+        "QApplication per run) can swallow the synthetic move. X11/Wayland's "
+        "offscreen backend does not enforce this, which is why it only holds "
+        "on the target platform."
+    )
     def test_hover_previews_and_clears_on_miss(self):
         frame = make_frame()
         overlay = Overlay(
@@ -1749,6 +1759,14 @@ class TestEdgeHandles:
             assert sampled == QColor(255, 255, 255), handle
 
 
+@skip_on_windows(
+    "cursor-shape assertions depend on QTest.mouseMove synthesizing a hover "
+    "onto the freshly-shown overlay as the OS-active window; Windows enforces "
+    "real window activation even under the offscreen QPA platform, so a "
+    "window left active by an earlier test in the same process (one shared "
+    "QApplication per run) steals it. X11/Wayland's offscreen backend does "
+    "not enforce this, which is why it only holds on the target platform."
+)
 class TestHandleCursors:
     """SNX-32: hovering a handle previews the direction it resizes in."""
 
@@ -7293,6 +7311,18 @@ class TestTheDestinationMenuFitsItsWidth:
         )
         return width, QFontMetricsF(_font(11, 400)), QFontMetricsF(_font(12.5, 500))
 
+    @skip_on_windows(
+        "this budget is measured against the font `_font()` actually "
+        "resolves (matching production's own paintEvent), not a hard-coded "
+        "number -- but IBM Plex isn't vendored yet (design/fonts/ is empty "
+        "in this handoff), so the resolved substitute is whatever the "
+        "platform's own GeneralFont fallback is. Linux's fallback happens to "
+        "fit the panel; Windows' offscreen-QPA fallback is markedly wider "
+        "and overruns it. Production already elides safely when that "
+        "happens (see chooser.py's `_MenuRow.paintEvent`), so this is a "
+        "no-eliding-needed guarantee that only holds where a narrow enough "
+        "font is actually available, not a regression."
+    )
     def test_every_note_fits_without_eliding(self):
         width, note_fm, _label_fm = self._budget()
 
