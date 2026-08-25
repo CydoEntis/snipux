@@ -1,3 +1,4 @@
+import ctypes
 import os
 import subprocess
 from types import SimpleNamespace
@@ -100,6 +101,88 @@ def _write_placeholder_png(path, color=(4, 5, 6)):
     image = QImage(2, 2, QImage.Format.Format_RGB32)
     image.fill(qRgb(*color))
     image.save(path, "PNG")
+
+
+class _FakeUser32:
+    """Stand-in for `ctypes.windll.user32`, covering only what
+    `Win32GdiBackend` calls: `GetSystemMetrics`, `GetDC`, `ReleaseDC`.
+    `metrics` maps a `GetSystemMetrics` index straight to the value the
+    test wants it to report.
+    """
+
+    def __init__(self, metrics, dc=123):
+        self._metrics = metrics
+        self._dc = dc
+        self.released = []
+
+    def GetSystemMetrics(self, index):
+        return self._metrics[index]
+
+    def GetDC(self, hwnd):
+        return self._dc
+
+    def ReleaseDC(self, hwnd, dc):
+        self.released.append(dc)
+        return 1
+
+
+class _FakeGdi32:
+    """Stand-in for `ctypes.windll.gdi32`, covering only what
+    `Win32GdiBackend._blit_to_image` calls. `pixel_bytes`, if given, is
+    what `GetDIBits` fills the caller's buffer with; otherwise a small
+    non-uniform BGRA pattern so a test can tell real pixels came back
+    rather than a zeroed buffer.
+    """
+
+    def __init__(self, pixel_bytes=None, bitblt_ok=True, getdibits_ok=True):
+        self._pixel_bytes = pixel_bytes
+        self._bitblt_ok = bitblt_ok
+        self._getdibits_ok = getdibits_ok
+        self.blit_args = None
+
+    def CreateCompatibleDC(self, dc):
+        return 111
+
+    def CreateCompatibleBitmap(self, dc, width, height):
+        return 222
+
+    def SelectObject(self, dc, obj):
+        return 333
+
+    def BitBlt(self, dest_dc, x, y, width, height, src_dc, src_x, src_y, rop):
+        self.blit_args = (dest_dc, x, y, width, height, src_dc, src_x, src_y, rop)
+        return 1 if self._bitblt_ok else 0
+
+    def GetDIBits(self, dc, bitmap, start, lines, buffer, header_ref, usage):
+        if not self._getdibits_ok:
+            return 0
+        # capture.py passes the header via ctypes.byref(), so it arrives
+        # here as a CArgObject rather than the struct itself -- cast it
+        # back to read biWidth/biHeight, the same way the real Win32 API
+        # would after ctypes' own argument marshaling.
+        header = ctypes.cast(
+            header_ref, ctypes.POINTER(capture._BitmapInfoHeader)
+        ).contents
+        pixel_count = header.biWidth * abs(header.biHeight)
+        pattern = self._pixel_bytes or bytes([10, 20, 30, 255])
+        ctypes.memmove(buffer, pattern * pixel_count, pixel_count * 4)
+        return 1
+
+    def DeleteObject(self, obj):
+        return 1
+
+    def DeleteDC(self, dc):
+        return 1
+
+
+def _patch_win32_dll(monkeypatch, user32, gdi32):
+    """Points `capture.ctypes.windll.user32`/`.gdi32` at the given fakes --
+    `raising=False` because `ctypes.windll` doesn't exist at all off
+    Windows, and this suite runs on both.
+    """
+    monkeypatch.setattr(
+        capture.ctypes, "windll", SimpleNamespace(user32=user32, gdi32=gdi32), raising=False
+    )
 
 
 def _set_session_type(monkeypatch, session_type):
@@ -257,6 +340,9 @@ class TestBackendRegistry:
         assert str(excinfo.value) == "all capture backends failed: first: first boom; second: second boom"
 
     def test_capture_names_a_wayland_package_when_no_backend_is_available(self, monkeypatch):
+        # Pinned off Windows: this suite runs there too, and the advice
+        # branches on sys.platform before it ever looks at session type.
+        monkeypatch.setattr(capture.sys, "platform", "linux")
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
         registry = BackendRegistry([FakeBackend("b", False, reason="not a Wayland session")])
 
@@ -270,6 +356,7 @@ class TestBackendRegistry:
         assert "grim" in message
 
     def test_capture_names_an_x11_package_when_no_backend_is_available(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "linux")
         monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
         registry = BackendRegistry([FakeBackend("b", False, reason="not an X11 session")])
 
@@ -283,6 +370,7 @@ class TestBackendRegistry:
         assert "maim" in message
 
     def test_capture_still_names_a_package_when_session_type_is_unknown(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "linux")
         monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
         registry = BackendRegistry([])
 
@@ -293,6 +381,27 @@ class TestBackendRegistry:
         assert message.startswith("no capture backend is available:")
         assert not message.rstrip().endswith(":")
         assert "grim" in message and "maim" in message
+
+    def test_capture_names_windows_not_grim_maim_or_apt_when_no_backend_is_available(
+        self, monkeypatch
+    ):
+        # SNX-88: before this, a Windows failure fell through to
+        # session-type-based advice (which always reads "unknown" there,
+        # since XDG_SESSION_TYPE is a Linux/X11/Wayland concept) and told a
+        # Windows user to `sudo apt install grim maim` -- advice for a
+        # different OS entirely.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        registry = BackendRegistry([FakeBackend("b", False, reason="not running on Windows")])
+
+        with pytest.raises(CaptureError) as excinfo:
+            registry.capture()
+
+        message = str(excinfo.value)
+        assert message.startswith("no capture backend is available:")
+        assert "Windows" in message
+        assert "grim" not in message
+        assert "maim" not in message
+        assert "apt install" not in message
 
 
 class TestDetectSessionType:
@@ -1125,10 +1234,189 @@ class TestBuildLinuxRegistry:
         assert [b.name() for b in registry] == expected
 
 
+class TestQtNativeWindowsBackend:
+    """SNX-88: verified against a real three-monitor Windows desktop (one
+    screen to the right of the primary, one above-and-left of it) that
+    `QScreen.grabWindow(0)`, grabbed per-screen and composited the same way
+    `QtNativeX11Backend` already does, returns each monitor's real pixels
+    rather than the black image Wayland hands back or a copy of just the
+    primary display.
+    """
+
+    def test_is_available_only_on_windows(self, monkeypatch):
+        backend = capture.QtNativeWindowsBackend()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert backend.is_available() is True
+
+        monkeypatch.setattr(capture.sys, "platform", "linux")
+        assert backend.is_available() is False
+
+    def test_unavailable_reason_matches_availability(self, monkeypatch):
+        backend = capture.QtNativeWindowsBackend()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert backend.unavailable_reason() is None
+
+        monkeypatch.setattr(capture.sys, "platform", "darwin")
+        assert backend.unavailable_reason() == "not running on Windows"
+
+    def test_capture_covers_every_monitor_including_one_above_and_left(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        # Mirrors the real desktop this backend was verified against:
+        # negative x *and* negative y in the same virtual desktop.
+        screens = [
+            _FakeScreen(QRect(0, 0, 2560, 1440)),
+            _FakeScreen(QRect(2560, 0, 2560, 1440)),
+            _FakeScreen(QRect(1164, -1440, 2560, 1440)),
+        ]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        frame = capture.QtNativeWindowsBackend().capture()
+
+        assert frame.logical_origin == QPointF(0, -1440)
+        assert frame.logical_size == QSizeF(5120, 2880)
+        assert frame.image.width() == 5120
+        assert frame.image.height() == 2880
+        assert not frame.image.isNull()
+
+    def test_capture_raises_when_a_screens_grab_comes_back_empty(self, monkeypatch):
+        # The "only returns the primary display" failure mode the ticket
+        # warns about must not be silently painted as black -- it has to
+        # raise, so BackendRegistry.capture() falls through to the Win32
+        # GDI backend instead of handing back a frame missing a monitor.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+
+        class _NullGrabScreen(_FakeScreen):
+            def grabWindow(self, window_id):
+                return QPixmap()
+
+        screens = [
+            _FakeScreen(QRect(0, 0, 100, 50)),
+            _NullGrabScreen(QRect(100, 0, 100, 50)),
+        ]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+        with pytest.raises(RuntimeError):
+            capture.QtNativeWindowsBackend().capture()
+
+
+class TestWin32GdiBackend:
+    """SNX-88: the fallback for when qt-native doesn't cover the whole
+    virtual desktop -- a single BitBlt of the region GetSystemMetrics
+    reports as the virtual screen, via ctypes (no new dependency).
+    """
+
+    def test_is_available_only_on_windows(self, monkeypatch):
+        backend = capture.Win32GdiBackend()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert backend.is_available() is True
+
+        monkeypatch.setattr(capture.sys, "platform", "linux")
+        assert backend.is_available() is False
+
+    def test_unavailable_reason_matches_availability(self, monkeypatch):
+        backend = capture.Win32GdiBackend()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert backend.unavailable_reason() is None
+
+        monkeypatch.setattr(capture.sys, "platform", "darwin")
+        assert backend.unavailable_reason() == "not running on Windows"
+
+    def test_capture_blits_the_gsm_reported_region_in_one_call(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        # A monitor left of the primary, like _virtual_desktop_geometry()
+        # sees on X11's equivalent test -- the logical rect this backend
+        # reports must still come from Qt, not from GDI's own numbers.
+        screens = [_FakeScreen(QRect(-100, 0, 300, 200))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        user32 = _FakeUser32({76: -100, 77: 0, 78: 300, 79: 200})
+        gdi32 = _FakeGdi32()
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        frame = capture.Win32GdiBackend().capture()
+
+        assert gdi32.blit_args is not None
+        _dest_dc, dest_x, dest_y, width, height, _src_dc, src_x, src_y, _rop = gdi32.blit_args
+        assert (dest_x, dest_y) == (0, 0)
+        assert (width, height) == (300, 200)
+        assert (src_x, src_y) == (-100, 0)
+        assert frame.image.width() == 300
+        assert frame.image.height() == 200
+        assert not frame.image.isNull()
+        assert frame.logical_origin == QPointF(-100, 0)
+        assert frame.logical_size == QSizeF(300, 200)
+
+    def test_capture_releases_the_screen_dc_even_when_bitblt_fails(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        screens = [_FakeScreen(QRect(0, 0, 100, 50))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        user32 = _FakeUser32({76: 0, 77: 0, 78: 100, 79: 50})
+        gdi32 = _FakeGdi32(bitblt_ok=False)
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        with pytest.raises(RuntimeError, match="BitBlt"):
+            capture.Win32GdiBackend().capture()
+
+        assert user32.released == [user32._dc]
+
+    def test_capture_raises_when_get_dibits_fails(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        screens = [_FakeScreen(QRect(0, 0, 100, 50))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        user32 = _FakeUser32({76: 0, 77: 0, 78: 100, 79: 50})
+        gdi32 = _FakeGdi32(getdibits_ok=False)
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        with pytest.raises(RuntimeError, match="GetDIBits"):
+            capture.Win32GdiBackend().capture()
+
+    def test_capture_raises_when_the_reported_virtual_screen_is_empty(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32({76: 0, 77: 0, 78: 0, 79: 0})
+        gdi32 = _FakeGdi32()
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        with pytest.raises(RuntimeError, match="GetSystemMetrics"):
+            capture.Win32GdiBackend().capture()
+
+
+class TestBuildWindowsRegistry:
+    """SNX-88: `platform.windows.WindowsPlatform.build_capture_registry()`
+    forwards here, the same way Linux's does to `build_linux_registry()`.
+    """
+
+    def test_registers_backends_in_the_required_order(self):
+        registry = capture.build_windows_registry()
+
+        assert [backend.name() for backend in registry] == ["qt-native", "win32-gdi"]
+
+    def test_capture_falls_through_from_qt_native_to_the_gdi_backend(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        screens = [_FakeScreen(QRect(0, 0, 100, 50))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        monkeypatch.setattr(
+            capture.QtNativeWindowsBackend,
+            "capture",
+            Mock(side_effect=RuntimeError("qt-native boom")),
+        )
+        user32 = _FakeUser32({76: 0, 77: 0, 78: 100, 79: 50})
+        gdi32 = _FakeGdi32()
+        _patch_win32_dll(monkeypatch, user32, gdi32)
+
+        registry = capture.build_windows_registry()
+        frame = registry.capture()
+
+        assert isinstance(frame, Frame)
+        assert not frame.image.isNull()
+
+
 class TestUnsupportedPlatformBackend:
-    """SNX-86: what `platform.windows.WindowsPlatform.build_capture_registry()`
-    and `platform.darwin.DarwinPlatform.build_capture_registry()` register in
-    place of a real backend, until one exists.
+    """SNX-86: what `platform.darwin.DarwinPlatform.build_capture_registry()`
+    registers in place of a real backend, until one exists (SNX-88 gave
+    Windows a real one, so it no longer uses this placeholder).
     """
 
     def test_is_never_available(self):
