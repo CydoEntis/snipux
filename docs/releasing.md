@@ -91,3 +91,27 @@ What running `snipux-setup.exe` actually does:
   any snipux process still running — both so the exe isn't locked and so the
   `RegisterHotKey` registration a running instance holds is released. Nothing
   snipux ever wrote is left behind.
+
+### Why the installer isn't signed
+
+`snipux-setup.exe` and `snipux.exe` are shipped unsigned, on purpose, and
+that decision is recorded here so it isn't rediscovered — and re-debated —
+the next time someone notices SmartScreen complaining about a release.
+
+A certificate that Windows actually trusts (an EV or OV code-signing
+certificate from a CA in Microsoft's trusted list) costs a few hundred
+dollars a year, recurring, for as long as releases keep going out. Since
+2023 the CA/Browser Forum has also required the private key to live on a
+hardware token (a physical USB device, or an equivalent cloud HSM) rather
+than as an importable file — so it isn't a one-time purchase that then
+sits in CI; it's an ongoing subscription plus a physical dongle someone has
+to hold and plug in to sign each release, or a paid cloud-HSM signing
+service standing in for it. That is a real, continuing cost for a free,
+unpaid tool at snipux's scale, and it buys exactly one thing: SmartScreen
+and Smart App Control treat the binary as recognized instead of warning
+about or blocking it. Users still get the app either way, just with an
+extra click (SmartScreen's More info → Run anyway) or, rarely, a need to
+install via pipx instead (Smart App Control) — see the README's Windows
+section for what that looks like from the user's side. If snipux's user
+base or distribution model changes enough that the warning itself becomes
+the blocker, that's the trigger to revisit this, not a fixed schedule.

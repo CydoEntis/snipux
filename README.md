@@ -29,6 +29,54 @@ drawing on an image already held in memory.
 
 ## Install
 
+### Windows
+
+Windows has a standalone installer (SNX-96/97) — no Python, and no terminal,
+required:
+
+1. Download `snipux-setup.exe` from the
+   [Releases page](https://github.com/CydoEntis/snipux/releases) (newest
+   release, under Assets).
+2. Run it. It installs to your own user folder — no administrator prompt —
+   and launches snipux once it's done.
+
+**Windows will interrupt that with a warning first**, and it's worth knowing
+exactly what you'll see so it doesn't look like the download failed:
+
+- **SmartScreen.** A blue box reading **"Windows protected your PC"**, with
+  smaller text underneath naming "an unrecognized app". This is Microsoft
+  Defender SmartScreen's standard reaction to *any* downloaded executable
+  without a paid code-signing certificate — it is not a virus warning and
+  not a sign the download is broken. Click **More info**, then **Run
+  anyway**. (See [Why the installer isn't signed](docs/releasing.md#why-the-installer-isnt-signed)
+  for the reasoning behind that certificate not existing.)
+- **Smart App Control.** A stricter, opt-in Windows 11 feature (off by
+  default, but sometimes on out of the box on new PCs) that can block the
+  installer outright instead of just warning — the message reads like the
+  file is corrupt or unsafe, not like a policy decision, and there is no
+  "Run anyway" the way there is for SmartScreen. If that happens: either
+  install with pipx instead (below), which runs through the already-trusted
+  `python.exe` rather than a new unsigned executable, or turn Smart App
+  Control off yourself (Windows Security → App & browser control → Smart
+  App Control → Off) — Microsoft only lets it be turned back on by
+  reinstalling Windows, so that's a bigger step than it sounds.
+
+Once installed, snipux's shortcut is **Ctrl+Alt+S**, not Windows'
+Win+Shift+S — that combination already belongs to the Windows Snipping
+Tool, and Windows won't hand the same combination to a second app. Change
+it from tray → Settings…, the same as on Linux.
+
+**snipux has to actually be running for Ctrl+Alt+S to do anything.** Unlike
+GNOME's shortcut on Linux, which the desktop itself owns, Windows' hotkey is
+a registration the snipux process holds only while it's alive. That's what
+autostart is for: the installer's first run sets up a Startup-folder entry
+(the same thing `snipux --setup` does), so snipux is already running by the
+time you'd want to press the shortcut, from the next login onward.
+
+Already have Python? `pipx` works identically on Windows — see below.
+
+### Linux
+
 snipux isn't published to PyPI — publishing there isn't planned. This is a
 private repository, so install straight from it with
 [pipx](https://pipx.pypa.io/):
@@ -63,7 +111,12 @@ snipux --setup
 `--setup` writes the pieces `pipx install` can't: the `.desktop` entry, the
 autostart entry, and the GNOME Super+Shift+S shortcut. Safe to re-run.
 
-### Using a different shortcut
+The same two `pipx install` commands work unchanged on Windows if you
+already have Python — `--setup` there writes the Start Menu shortcut, the
+Startup entry, and registers Ctrl+Alt+S instead, in place of the
+`.desktop`/GNOME pieces above.
+
+#### Using a different shortcut
 
 Super+Shift+S is a popular key combination, and whichever app claimed it
 first wins — GNOME binds it without complaint and yours simply never fires.
