@@ -125,10 +125,15 @@ again. Turn on **Open each snip in a review window** in Settings and each
 finished snip opens in a small window instead: the image, where it went,
 and Copy / Save As… / Show in Folder.
 
-Off by default, and it carries no drawing tools. Annotation happens in the
-overlay, on the frozen desktop; a second set of tools here would be a second
-implementation to drift from that one. Several snips in a row leave several
-windows open.
+Off by default. Press **Annotate** and it reveals the overlay's *own*
+floating bar over the image — the same widget, the same tools, the same mark
+model, so there is no second tool set to drift. The only differences are
+that there's no capture-mode chip (nothing left to capture) and the bar's
+trailing action is `Done`, since the footer already owns Copy and Save As.
+
+Marks made here live in image coordinates rather than screen coordinates,
+so they survive zooming and export exactly where they looked. Several snips
+in a row leave several windows open.
 
 ## Tools and shortcuts
 

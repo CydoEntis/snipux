@@ -32,7 +32,9 @@ snipux/
   overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
   shapes.py     annotation data model and the flattening renderer
   settings.py   the Settings window (Qt in front of setup_desktop.py)
-  review.py     the optional post-capture review window; no annotation tools
+  review.py     the optional post-capture review window; Annotate reuses the bar
+  marks.py      the ink layer + undo/redo, shared by the overlay and review
+  winchrome.py  frameless title bar/footer/controls for the two ordinary windows
   setup_desktop.py  desktop/autostart entries, icons, the GNOME shortcut, config
   app.py        controller, tray, CLI
 tests/          pytest, mirroring the module names

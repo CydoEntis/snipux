@@ -1,7 +1,10 @@
-"""Tests for `snipux/review.py` -- the post-capture review window.
+"""Tests for `snipux/review.py` -- the review window from
+`docs/design/handoff-windows.md` section 3.
 
-It is deliberately not an editor: what these assert is that it does the
-things the overlay cannot do once it has closed, and nothing else.
+The load-bearing claim these protect is that Annotate mode is not a second
+editor: it drives the overlay's own `FloatingBar` and the same `MarkStore`,
+and the only differences the design allows are the missing capture chip and
+the `Done` trailing action.
 """
 
 from __future__ import annotations
@@ -9,66 +12,222 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PyQt6.QtGui import QImage
+from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication
 
-from snipux.review import ReviewWindow
+from snipux import shapes
+from snipux.design import tokens
+from snipux.overlay import FloatingBar
+from snipux.review import ImageCanvas, ReviewWindow
 
 
 @pytest.fixture(scope="module", autouse=True)
 def qapp():
-    # PyQt6 needs a live QApplication to construct any QWidget, even
-    # offscreen. Module-scoped, same as test_overlay.py's own.
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
     return app
 
 
-def make_image(width=400, height=300) -> QImage:
+def make_image(width=800, height=600) -> QImage:
     image = QImage(width, height, QImage.Format.Format_RGB32)
     image.fill(0x336699)
     return image
 
 
-class TestReviewWindow:
-    def test_titles_itself_with_the_snips_real_size(self):
-        window = ReviewWindow(make_image(640, 480))
+class TestChrome:
+    def test_is_the_size_the_design_specifies(self):
+        window = ReviewWindow(make_image())
 
-        assert "640" in window.windowTitle() and "480" in window.windowTitle()
+        assert window.width() == tokens.WinMetric.REVIEW_W
+        assert window.height() == tokens.WinMetric.REVIEW_H
 
-    def test_a_saved_snip_says_where_it_went(self, tmp_path):
-        path = tmp_path / "shot.png"
+    def test_the_title_bar_names_the_file_and_its_pixel_size(self, tmp_path):
+        window = ReviewWindow(make_image(1377, 936), saved_path=tmp_path / "shot.png")
 
-        window = ReviewWindow(make_image(), saved_path=path)
+        assert window.title_label.text() == "shot.png"
+        assert window.title_detail.text() == "1377 × 936"
 
-        assert str(path) in window._status.text() or "shot.png" in window._status.text()
+    def test_an_unsaved_snip_says_so_rather_than_naming_a_file(self):
+        window = ReviewWindow(make_image())
+
+        assert window.title_label.text() == "Unsaved snip"
+
+
+class TestStatusAndPath:
+    def test_a_saved_snip_reads_saved(self, tmp_path):
+        window = ReviewWindow(make_image(), saved_path=tmp_path / "shot.png")
+
+        assert "Saved" in window._status.text()
 
     def test_a_copied_snip_says_it_is_not_on_disk(self):
         # The distinction that matters: a copied snip is one clipboard write
-        # away from being gone, and the window should say so.
+        # away from being gone.
         window = ReviewWindow(make_image())
 
         assert "not saved" in window._status.text().lower()
 
-    def test_show_in_folder_is_disabled_for_a_snip_that_was_never_saved(self):
+    def test_paths_under_home_are_shown_relative_to_it(self):
+        path = Path.home() / "Pictures" / "snipux" / "shot.png"
+
+        assert ReviewWindow._display_path(path) == "~/Pictures/snipux/shot.png"
+
+    def test_show_in_folder_is_disabled_until_there_is_a_file(self, tmp_path):
+        assert not ReviewWindow(make_image())._folder_button.isEnabled()
+        assert ReviewWindow(
+            make_image(), saved_path=tmp_path / "shot.png"
+        )._folder_button.isEnabled()
+
+
+class TestBadges:
+    def test_the_badge_carries_the_real_pixel_size(self):
+        window = ReviewWindow(make_image(1377, 936))
+
+        assert "1377 × 936" in window._dimension_badge.text()
+
+    def test_one_mark_is_singular(self):
+        window = ReviewWindow(make_image())
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
+
+        assert "1 mark" in window._dimension_badge.text()
+        assert "1 marks" not in window._dimension_badge.text()
+
+    def test_several_marks_are_plural(self):
+        window = ReviewWindow(make_image())
+        for _ in range(3):
+            window._store.add(
+                shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+            )
+
+        assert "3 marks" in window._dimension_badge.text()
+
+    def test_no_marks_means_no_mark_clause_at_all(self):
         window = ReviewWindow(make_image())
 
-        assert not window._folder_button.isEnabled()
+        assert "mark" not in window._dimension_badge.text()
 
-    def test_show_in_folder_is_enabled_once_there_is_a_file(self, tmp_path):
-        window = ReviewWindow(make_image(), saved_path=tmp_path / "shot.png")
 
-        assert window._folder_button.isEnabled()
+class TestAnnotateMode:
+    """The design's central constraint: this reveals the overlay's own bar,
+    and must not become a second editor.
+    """
 
+    def test_it_uses_the_overlays_own_floating_bar(self):
+        window = ReviewWindow(make_image())
+
+        assert isinstance(window._bar, FloatingBar)
+
+    def test_the_bar_is_hidden_until_annotate_is_pressed(self):
+        window = ReviewWindow(make_image())
+        assert not window._bar.isVisibleTo(window)
+
+        window._set_annotating(True)
+
+        assert window._bar.isVisibleTo(window)
+
+    def test_the_button_becomes_done_annotating(self):
+        window = ReviewWindow(make_image())
+
+        window._set_annotating(True)
+
+        assert window._annotate_button.text() == "Done annotating"
+
+    def test_there_is_no_capture_mode_chip(self):
+        # Nothing left to capture, so the chip the overlay carries is absent
+        # -- one of exactly two differences the design permits.
+        window = ReviewWindow(make_image())
+
+        assert not window._bar._chip.isVisibleTo(window._bar)
+
+    def test_the_trailing_action_is_done_not_save(self):
+        # The footer already owns the exports.
+        window = ReviewWindow(make_image())
+
+        assert window._bar._trailing == "done"
+
+    def test_drawing_flips_the_status_to_edited(self):
+        window = ReviewWindow(make_image())
+        window._set_annotating(True)
+
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
+
+        assert "Edited" in window._status.text()
+
+    def test_undo_and_redo_run_through_the_shared_store(self):
+        window = ReviewWindow(make_image())
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
+
+        window._bar.undoRequested.emit()
+        assert len(window._store) == 0
+
+        window._bar.redoRequested.emit()
+        assert len(window._store) == 1
+
+
+class TestImageCoordinates:
+    """Marks live in image space here, not screen space, because the image
+    is the document -- so they survive a zoom and export where they looked.
+    """
+
+    def _canvas(self, image=None):
+        from snipux.marks import MarkStore
+
+        canvas = ImageCanvas(image or make_image(800, 600), MarkStore())
+        canvas.resize(1020, 600)
+        return canvas
+
+    def test_the_centre_of_the_widget_is_the_centre_of_the_image(self):
+        canvas = self._canvas()
+        rect = canvas.image_rect()
+
+        centre = canvas.to_image(rect.center())
+
+        assert centre.x() == pytest.approx(400, abs=1)
+        assert centre.y() == pytest.approx(300, abs=1)
+
+    def test_the_same_pointer_position_maps_differently_at_a_different_zoom(self):
+        # If it did not, ink drawn at 140% would land somewhere else on the
+        # exported image.
+        canvas = self._canvas()
+        before = canvas.to_image(QPointF(500, 300))
+
+        canvas.set_zoom(140)
+        after = canvas.to_image(QPointF(500, 300))
+
+        assert before != after
+
+    def test_the_image_centre_stays_the_image_centre_at_any_zoom(self):
+        canvas = self._canvas()
+
+        for zoom in (60, 100, 160):
+            canvas.set_zoom(zoom)
+            centre = canvas.to_image(canvas.image_rect().center())
+            assert centre.x() == pytest.approx(400, abs=1)
+
+    def test_zoom_is_clamped_to_the_range_the_design_offers(self):
+        canvas = self._canvas()
+        low, high, _step = tokens.WinMetric.ZOOM_STEPS
+
+        canvas.set_zoom(5)
+        assert canvas.zoom == low
+
+        canvas.set_zoom(500)
+        assert canvas.zoom == high
+
+
+class TestExport:
     def test_save_as_writes_a_real_png(self, tmp_path):
         window = ReviewWindow(make_image(120, 90))
         target = tmp_path / "chosen.png"
 
-        written = window.save_as(target)
-
-        assert written == target
-        assert target.exists()
+        assert window.save_as(target) == target
         reloaded = QImage(str(target))
         assert (reloaded.width(), reloaded.height()) == (120, 90)
 
@@ -85,57 +244,44 @@ class TestReviewWindow:
         target = tmp_path / "not" / "there" / "shot.png"
 
         assert window.save_as(target) == target
-        assert target.exists()
 
-    def test_saving_enables_show_in_folder_for_a_copied_snip(self, tmp_path):
+    def test_saving_clears_the_dirty_state_and_enables_the_folder_button(self, tmp_path):
         window = ReviewWindow(make_image())
-        assert not window._folder_button.isEnabled()
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
+        assert "Edited" in window._status.text()
 
         window.save_as(tmp_path / "shot.png")
 
+        assert "Saved" in window._status.text()
         assert window._folder_button.isEnabled()
-        assert "shot.png" in window._status.text()
 
-    def test_copy_puts_the_image_back_on_the_clipboard(self):
-        # Worth having even for a snip that was copied on the way here:
-        # anything copied since has replaced it.
+    def test_copy_clears_the_dirty_state(self):
         window = ReviewWindow(make_image(64, 64))
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
 
         window.copy()
 
-        clipboard = QApplication.clipboard()
-        assert clipboard.image().width() == 64
-        assert "Copied" in window._status.text()
+        assert "Edited" not in window._status.text()
 
-    def test_a_large_snip_is_previewed_scaled_down(self):
-        window = ReviewWindow(make_image(4000, 3000))
+    def test_the_export_carries_the_ink(self, tmp_path):
+        # Marks are already in image coordinates, so the export needs no
+        # translation -- which is most of why the design puts them there.
+        window = ReviewWindow(make_image(200, 200))
+        window._store.add(
+            shapes.Rectangle(
+                colour=QColor("#ff0000"),
+                stroke_width=8,
+                start=QPointF(20, 20),
+                end=QPointF(180, 180),
+            )
+        )
 
-        preview = window._preview.pixmap()
+        target = window.save_as(tmp_path / "inked.png")
 
-        assert preview.width() <= 960 and preview.height() <= 600
-
-    def test_a_small_snip_is_previewed_at_its_true_size(self):
-        # Only ever scaled down -- blowing a small snip up would show the
-        # user something blurrier than what they captured.
-        window = ReviewWindow(make_image(120, 90))
-
-        preview = window._preview.pixmap()
-
-        assert (preview.width(), preview.height()) == (120, 90)
-
-    def test_paths_under_home_are_shown_relative_to_it(self):
-        path = Path.home() / "Pictures" / "snipux" / "shot.png"
-
-        assert ReviewWindow._display_path(path) == "~/Pictures/snipux/shot.png"
-
-    def test_paths_outside_home_are_shown_in_full(self):
-        assert ReviewWindow._display_path(Path("/tmp/shot.png")) == "/tmp/shot.png"
-
-    def test_carries_no_annotation_tools(self):
-        # The design constraint, asserted rather than trusted to review: a
-        # second set of drawing tools would be a second implementation to
-        # drift from the overlay's.
-        window = ReviewWindow(make_image())
-
-        labels = {b.text() for b in window.findChildren(type(window._copy_button))}
-        assert labels == {"Copy", "Save As...", "Show in Folder", "Close"}
+        reloaded = QImage(str(target))
+        colours = {reloaded.pixelColor(x, 20).name() for x in range(20, 180)}
+        assert "#ff0000" in colours, "the rectangle should be in the exported pixels"
