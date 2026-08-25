@@ -1556,10 +1556,9 @@ class SettingsTray(QWidget):
 # anything to an obscuring shape -- with a two-segment Blur/Pixelate toggle,
 # a strength slider/readout and the tool hint. The active segment is the
 # state that decides which of shapes.py's two `ObscuringShape` subclasses a
-# blur drag commits, once that drag-handling itself lands in a later ticket
-# -- mirroring how `SettingsTray`'s colour/stroke already sit unread by any
-# drawing code until their own tool wiring arrives (see `OverlayWindow`'s
-# docstring).
+# blur drag commits -- `OverlayWindow._start_stroke` reads it, the same way
+# it reads `SettingsTray`'s colour/stroke for every other tool (see
+# `OverlayWindow`'s docstring).
 
 
 class _SegmentButton(QPushButton):
@@ -1819,9 +1818,9 @@ class BlurTray(QWidget):
 # (`menuUp = barTop > 300`, `cycleDelay`, `modes.map`) for anything the prose
 # leaves implicit -- e.g. that the chip's own label follows `st.mode`, not
 # just its "Region" construction default. The chip is a mode selector, not
-# an action: per the ticket, only Region does anything past recording the
-# pick -- Window, Full screen and Freeform are separate tickets that will
-# read `OverlayWindow._capture_mode` once they land.
+# an action: picking a row only records `OverlayWindow._capture_mode` and
+# updates the chip's label here; `_dispatch_capture_mode` is what actually
+# reads it back to drive Window/Full screen/Freeform picking.
 
 
 class _CaptureModeRow(QPushButton):
@@ -2679,178 +2678,67 @@ class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
 
-    SNX-31 built the background frame and dim scrim; SNX-32 added the
-    selection frame -- the marching-ants stroke, corner brackets and edge
-    handles; SNX-33 made that selection re-frameable. SNX-34 (this ticket)
-    adds the ink layer itself: `_marks` are stored and painted in this
-    widget's own window coordinates, clipped to the selection, per
-    docs/design/overlay-redesign.md's "Ink lives in screen coordinates" --
-    so re-framing moves the clip over marks that never move themselves.
-    SNX-38 adds the eraser: `erase_at`, hit-testing marks via
-    `Shape.hit_test` only while `set_eraser_active` has armed it, per the
-    spec's "Marks become hit-testable only while the eraser is active."
-    SNX-39 adds the general undo/redo/clear stack over `_marks` itself
-    (`undo`/`redo`/`clear`) plus `copy`/`save`, which render `_marks` fresh
-    at the moment they're called -- replacing the old editor.py flow's bug
-    of copying the un-annotated capture once, before any annotation could
-    exist. SNX-70 folds `erase_at` into that same undo/redo stack: it used
-    to push onto a private single-slot `undo_erase` that nothing in the UI
-    ever called, so an erase had no way back; now it appends a
-    `_MarkAction` the same way `add_mark` does, and `undo`/`redo` invert
-    whichever kind is on top, so an erase takes its turn in draw order
-    alongside ordinary marks and Ctrl+Z/the bar's Undo button -- already
-    wired to `undo()` -- actually reach it. SNX-40 adds `FloatingBar`
-    itself as a real child widget (`_bar`),
-    wired to `undo`/`redo`/`clear`/`copy`/`save` and to `set_eraser_active`,
-    and kept positioned under `_selection` by `_sync_bar_visibility`.
-    SNX-41 adds `SettingsTray` (`_tray`), shown and positioned under the
-    bar by `_sync_tray_visibility` only while the bar's active tool is one
-    of `tokens.DRAW_TOOLS` -- the eraser gets none -- and tracks the
-    colour/stroke it emits as `_ink_colour`/`_stroke_width` for a later
-    ticket's drawing tools to read. SNX-42 (this ticket) adds `BlurTray`
-    (`_blur_tray`) alongside it: `_sync_tray_visibility` shows at most one
-    of the two, `_blur_tray` while the active tool is `'blur'`, per the
-    spec's "It replaces the colour and stroke tray rather than sitting
-    alongside it" -- and tracks the toggle/slider it emits as
-    `_blur_mode`/`_blur_strength`, the same way `_tray` does for colour and
-    stroke. The drawing-tool mouse handling that would actually call
-    `add_mark` from a live drag -- for every tool but the eraser, which
-    SNX-38 already wired end to end -- is still a later ticket in the same
-    arc; `_blur_mode` is what that ticket reads to decide which of
-    shapes.py's `Blur`/`Pixelate` a blur drag commits. SNX-44 (this ticket)
-    adds `CaptureModePopover` (`_popover`), opened by the bar's capture
-    chip (`FloatingBar.captureChipClicked`) via `_toggle_capture_popover`
-    and positioned by the popover's own `reposition` against `_bar`'s
-    geometry. Picking a row tracks `_capture_mode` and updates the chip's
-    own label to match, per the spec's "the chip is a mode selector, not
-    an action" -- Window, Full screen and Freeform are separate tickets
-    that will read `_capture_mode` once they exist, same as `_blur_mode`
-    above sits unread until its own ticket. `mousePressEvent` closes the
-    popover on any click that lands outside it, without touching
-    `_capture_mode`. SNX-45 adds `Toast` (`_toast`), the single instance
-    `_show_toast` shows for `copy`/`save`/`clear`/`discard`, gated on
-    `self.isVisible()` the same way `_bar` already is, so it never paints
-    into this window's own many pixel-sampling tests. SNX-46 adds `HintHUD`
-    (`_hud`), gated on both `self.isVisible()` (same reason as `_bar`/
-    `_toast`) and `_hints_enabled` -- the preference the spec's "Top hint
-    HUD" section puts it behind, toggled via `set_hints_enabled` -- via
-    `_sync_hud_visibility`. SNX-65 changes the default to off (see the
-    "Top hint HUD" comment block above `HintHUD` for why) and adds the `?`
-    shortcut in `keyPressEvent` that flips it back on for anyone who wants
-    the banner. SNX-47 (this ticket)
-    adds `keyPressEvent`: tool letters from `tokens.SHORTCUTS`, Ctrl+Z /
-    Ctrl+Shift+Z for undo/redo, Enter to copy-and-dismiss, and the
-    two-stage Esc (`_handle_escape`) the spec leaves for us to decide --
-    finally wiring `discard()` up to a key, per that method's own
-    docstring. All of it is suppressed while a slider or a text-editing
-    widget has focus (`_shortcuts_suppressed`). SNX-52 was
-    what the "still a later ticket" note above `_on_tool_selected` used to
-    point at: `mousePressEvent` now dispatches a press that misses every
-    handle and lands inside the selection -- with the eraser disarmed --
-    to `_start_stroke`, which arms `_in_progress_shape` for
-    pen/highlighter/arrow/rect/blur (`mouseMoveEvent` extends it,
-    `mouseReleaseEvent` runs it through `shapes.finalize_mark` and either
-    commits or discards it), commits a `StepMarker` immediately for step,
-    and opens the lazily-built `_text_edit` for text (`_start_text_entry`/
-    `_commit_text`, mirroring editor.py's `Canvas._ensure_text_edit`). A
-    committed mark always takes its colour/stroke from `_ink_colour`/
-    `_stroke_width` and, for blur, its shape class and strength from
-    `_blur_mode`/`_blur_strength` -- the same tray-tracked state prior
-    tickets already left ready to be read. SNX-48 (this ticket) makes
-    `_capture_mode` do something once it names Window or Full screen,
-    instead of sitting unread the way `_on_capture_mode_selected`'s own
-    docstring used to say it would: `_enter_window_mode` arms
-    `_picking_window`, which `mouseMoveEvent`/`mousePressEvent` check
-    ahead of the resize/stroke dispatch above so a hover previews the
-    window under the cursor (`_geometry_provider.window_at`, the same
-    `GeometryProvider` `Overlay` already takes) and a click snaps
-    `_selection` to it (`_confirm_window_pick`); `_select_full_screen`
-    sets `_selection` to whichever of `_monitor_geometries` contains the
-    cursor's last known position immediately, no click needed past
-    picking the row. Either way the result is handed to `set_selection`
-    like any other -- nothing downstream distinguishes a mode-produced
-    selection from a dragged one, which is what makes it re-framable and
-    annotatable the same way. A `GeometryProvider` that reports itself
-    unavailable (`UnsupportedGeometryProvider`, same as `Overlay`'s own
-    default) must not leave Window mode looking chosen but inert: it
-    toasts an explanation and falls back to Region instead, per the
-    ticket's own acceptance criterion. SNX-49 (this ticket) makes Freeform
-    do the same: `_enter_freeform_mode` arms `_picking_freeform`, which
-    `mousePressEvent`/`mouseMoveEvent`/`mouseReleaseEvent` check ahead of
-    the same resize/stroke dispatch, so a press starts tracing a lasso
-    (`_start_freeform_drag`), motion extends it (`_extend_freeform_drag`),
-    and release closes and confirms it (`_confirm_freeform_pick`) -- the
-    same press-drag-release-close shape `Overlay`'s own FREEFORM handling
-    above already uses, including its misfire threshold. The confirmed
-    path is stored as `_selection_path`, alongside `_selection` (its own
-    bounding rect, handed to `set_selection` like any other mode's result
-    so the selection frame/handles/chips/bar stay exactly as re-framable
-    and annotatable), and read by `_paint_scrim` (the dim scrim inverts
-    against the path itself, not its bounding box) and `rendered_image`
-    (via `shapes.render_selection`'s new `selection_path` parameter, which
-    masks everything outside it transparent) -- per the spec's Freeform
-    entry: "the selection becomes a path, the dim scrim inverts against
-    it, and export crops to its bounding box with the outside transparent."
-    SNX-50 (this ticket) makes `_delay` do something once it names anything
-    but `Off`: `_on_capture_mode_selected` hands off to
-    `_start_delayed_capture` instead of dispatching a mode immediately,
-    which hides this whole window (so it isn't in its own screenshot),
-    shows `DelayCountdown` (a separate, non-child top-level widget -- see
-    its own docstring for why it can't be a child), and ticks a `QTimer`
-    down once a second. `_finish_delayed_capture` then re-grabs through
-    `_registry` -- the same `BackendRegistry` the first frame came through,
-    injected the same way `geometry_provider` is -- and re-opens over the
-    fresh frame by mutating `_frame` and re-showing in place, rather than
-    building a second `OverlayWindow`: every other piece of state
-    (`_ink_colour`, `_stroke_width`, `_bar`'s active tool, `_capture_mode`
-    itself) already lives on `self` and needs no copying across. The mode
-    picked when the delay was confirmed is remembered
-    (`_pending_capture_mode`) and re-dispatched to the same
-    Window/Full screen/Freeform handling above once the new frame is in,
-    so a delayed Window/Full screen/Freeform pick still does its own thing
-    on the new content instead of silently downgrading to Region. SNX-57
-    (this ticket) gives Region itself -- the default mode, and the only one
-    with no picking flag of its own -- the drag-to-create it was missing:
-    `mousePressEvent` starts a `_region_drag_anchor` press when a press
-    misses every handle and there is no selection yet, `mouseMoveEvent`
-    tracks it live, and `mouseReleaseEvent` hands off to
-    `_confirm_region_drag`, which commits it through `set_selection` like
-    any other mode's result -- discarding it instead, per the minimum-size
-    acceptance criterion, if it lands under `tokens.Metric.SEL_MIN_W/H`.
-
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
     correctly -- this is a *single* window covering the whole desktop, and
-    per the spec's state table (`sel: QRect # window coords`) its selection
-    is kept in window coordinates: local to this widget's own top-left, not
-    the virtual desktop's. `frame` is expected to be a single capture
-    already spanning every monitor -- what `BackendRegistry.capture()`
-    returns -- not a per-monitor crop.
+    per the spec's state table (`sel: QRect # window coords`) its selection,
+    and every mark in `_marks`, is kept in window coordinates: local to this
+    widget's own top-left, not the virtual desktop's. `frame` is expected to
+    be a single capture already spanning every monitor -- what
+    `BackendRegistry.capture()` returns -- not a per-monitor crop.
 
     Per CLAUDE.md's one architectural rule, the compositor is asked for
     pixels exactly once, upstream in `capture.py`; the frame handed in here
     is already frozen, and the spec's own deviation note applies: this never
     uses `QScreen.grabWindow(0)`, which returns black on Wayland.
 
-    SNX-64 restores Ellipse, Line and Crop -- fully implemented in shapes.py
-    since before the redesign, but unreachable from this window's chrome
-    until now. `_TWO_POINT_MARK_CLASSES` gained the three alongside
-    Arrow/Rectangle, so `_start_stroke`/`_extend_stroke`/`mouseReleaseEvent`
-    need no changes of their own to draw, commit, erase, undo/redo and
-    export them exactly the way Rectangle already works; `_shape_popover`
-    (`ShapeToolPopover`) is the new chrome that makes `self._bar.
-    active_tool` able to ever *become* one of them, off the rect button's
-    own click rather than a twelfth bar button -- see `tokens.RECT_GROUP`.
+    Three constraints a maintainer must keep intact:
 
-    SNX-72 (this ticket) folds `clear()` into the undo/redo stack the same
-    way SNX-70 folded `erase_at` in: the trash button sits in the same bar
-    as undo/redo, right next to redo, so a mis-aimed click used to be an
-    unrecoverable way to lose every mark on screen. `clear()` now records
-    the emptied list as one `_MarkAction` (kind `'clear'`) instead of
-    calling `_empty_marks`, so it round-trips through `undo`/`redo` like
-    any other action; `discard()` (Esc) is unchanged and still wipes both
-    stacks outright via `_empty_marks`, since nothing asked for Esc itself
-    to become undoable.
+    - Ink stays in window coordinates. `_marks` are stored and painted in
+      this widget's own coordinate space, clipped to the selection, per the
+      spec's "Ink lives in screen coordinates" -- so re-framing the
+      selection moves the clip over marks that never move themselves.
+    - The scrim is painted, not stacked. `_paint_scrim` fills the dimmed
+      veil directly in this widget's own `paintEvent`, never as a
+      translucent child widget layered over the window -- a full-window
+      child would sit above the ink layer in z-order and eat its mouse
+      events. A single even-odd fill dims the window and punches the
+      selection (or, while a Freeform lasso is being traced or has just
+      been confirmed, the lasso's own outline) out in one call, so there's
+      no separate "dim then punch a hole" step that could disagree with
+      itself at the edge.
+    - Chrome must never reach the export. `rendered_image()` flattens
+      `_marks` onto the selection's crop of the frozen frame; it never
+      touches `_bar`, `_tray`/`_blur_tray`, `_toast`, `_hud`, `_popover`,
+      `_shape_popover` or any other widget painted over the overlay, so
+      none of that chrome can ever leak into a copy or a save.
+
+    Everything else here is chrome and mode-handling built around those
+    three constraints. `FloatingBar` (`_bar`) is the real child widget
+    driving undo/redo/clear/copy/save and the active tool; `SettingsTray`/
+    `BlurTray` show colour-and-stroke or blur controls under it depending on
+    which draw tool is active, with the eraser getting neither. A press
+    that misses every resize handle and lands inside the selection starts a
+    stroke (`_start_stroke`), drag extends it, and release commits it as a
+    mark -- taking its colour/stroke from `_ink_colour`/`_stroke_width` or,
+    for blur, its shape class and strength from `_blur_mode`/
+    `_blur_strength` -- through the same undo/redo/clear history every
+    other mutation of `_marks` goes through (`_MarkAction`, folding `add`,
+    `erase` and `clear` into one stack so any of them can be undone and
+    redone in the order they happened). `CaptureModePopover` picks among
+    Region/Window/Full screen/Freeform; whichever one produces a selection
+    hands it to `set_selection` the same way a plain drag does, so nothing
+    downstream needs to know how a selection was produced, and an optional
+    countdown delay re-grabs through the same `BackendRegistry` and
+    re-opens over the fresh frame in place rather than building a second
+    `OverlayWindow`. `ShapeToolPopover` (`_shape_popover`) makes Ellipse,
+    Line and Crop reachable off the rect button's own click instead of a
+    twelfth bar button. `keyPressEvent` wires tool-letter shortcuts from
+    `tokens.SHORTCUTS`, Ctrl+Z/Ctrl+Shift+Z for undo/redo, Enter to
+    copy-and-dismiss, `?` to reveal the hint HUD, and the two-stage Esc
+    (`_handle_escape`) the spec leaves for us to decide -- all of it
+    suppressed while a slider or a text-editing widget has focus
+    (`_shortcuts_suppressed`).
     """
 
     # Marching ants: a QTimer at ~30fps advancing the dashed pen's offset,
@@ -3042,12 +2930,11 @@ class OverlayWindow(QWidget):
         self._undo: list[_MarkAction] = []
         self._redo: list[_MarkAction] = []
 
-        # Eraser tool state (SNX-38). False until a caller (the floating
-        # bar's eraser button, a later ticket) arms it via
-        # set_eraser_active -- marks are only ever hit-tested while this is
-        # True, per docs/design/overlay-redesign.md's "Drawing": "hit-
-        # testable only while the eraser is active," so ordinary drawing
-        # never pays for it.
+        # Eraser tool state. False until the floating bar's eraser button
+        # (via `_on_tool_selected`) arms it through `set_eraser_active` --
+        # marks are only ever hit-tested while this is True, per
+        # docs/design/overlay-redesign.md's "Drawing": "hit-testable only
+        # while the eraser is active," so ordinary drawing never pays for it.
         self._eraser_active = False
 
         # Live drawing (SNX-52): the mark a left-press/drag/release is
@@ -3107,14 +2994,12 @@ class OverlayWindow(QWidget):
         self._tray.colourChanged.connect(self._on_ink_colour_changed)
         self._tray.strokeChanged.connect(self._on_stroke_width_changed)
 
-        # The blur tray (SNX-42): `_tray`'s replacement, not its
-        # companion, while the active tool is 'blur' -- see
-        # `_sync_tray_visibility`, which shows at most one of the two.
-        # `_blur_mode`/`_blur_strength` are tracked the same way
-        # `_ink_colour`/`_stroke_width` are above -- unread by any drawing
-        # code until the later ticket that wires a live blur drag to
-        # actually call `add_mark` reads them to decide which of
-        # shapes.py's Blur/Pixelate to commit.
+        # The blur tray: `_tray`'s replacement, not its companion, while
+        # the active tool is 'blur' -- see `_sync_tray_visibility`, which
+        # shows at most one of the two. `_blur_mode`/`_blur_strength` are
+        # tracked the same way `_ink_colour`/`_stroke_width` are above --
+        # `_start_stroke` reads them to decide which of shapes.py's
+        # Blur/Pixelate a blur drag commits.
         self._blur_mode: str = "blur"
         self._blur_strength: int = design.tokens.Metric.BLUR_DEFAULT
         self._blur_tray = BlurTray(self)
@@ -3122,13 +3007,13 @@ class OverlayWindow(QWidget):
         self._blur_tray.blurModeChanged.connect(self._on_blur_mode_changed)
         self._blur_tray.strengthChanged.connect(self._on_blur_strength_changed)
 
-        # The capture-mode popover (SNX-44): opened from the bar's chip
-        # click via `_toggle_capture_popover`, positioned by the popover's
-        # own `reposition` against `_bar`'s geometry. `_capture_mode`/
-        # `_delay` start at `tokens.CAPTURE_MODES`/`tokens.DELAYS`' own
-        # first entries -- the same "unread until a later ticket" state
-        # `_ink_colour`/`_blur_mode` above already are, except for the chip
-        # label itself, which `_on_capture_mode_selected` keeps in sync.
+        # The capture-mode popover: opened from the bar's chip click via
+        # `_toggle_capture_popover`, positioned by the popover's own
+        # `reposition` against `_bar`'s geometry. `_capture_mode`/`_delay`
+        # start at `tokens.CAPTURE_MODES`/`tokens.DELAYS`' own first
+        # entries; `_dispatch_capture_mode`/`_start_delayed_capture` are
+        # what read them back, and the chip's own label is kept in sync by
+        # `_on_capture_mode_selected`.
         self._capture_mode: str = design.tokens.CAPTURE_MODES[0][0]
         self._delay: str = design.tokens.DELAYS[0]
         self._popover = CaptureModePopover(self)
@@ -3226,8 +3111,7 @@ class OverlayWindow(QWidget):
 
     def _on_ink_colour_changed(self, hex_colour: str) -> None:
         """Track the tray's current ink colour -- "the colour new marks are
-        drawn in" -- for the still-later ticket that wires the drawing
-        tools themselves up to read it when a stroke starts.
+        drawn in" -- which `_start_stroke` reads when a stroke starts.
         """
         self._ink_colour = hex_colour
 
@@ -3235,9 +3119,9 @@ class OverlayWindow(QWidget):
         self._stroke_width = stroke
 
     def _on_blur_mode_changed(self, mode: str) -> None:
-        """Track the blur tray's active segment -- 'blur' or 'pix' -- for
-        the still-later ticket that wires a live blur drag to read it when
-        deciding which of shapes.py's Blur/Pixelate to commit.
+        """Track the blur tray's active segment -- 'blur' or 'pix' -- which
+        `_start_stroke` reads when deciding which of shapes.py's
+        Blur/Pixelate a blur drag commits.
         """
         self._blur_mode = mode
 
@@ -4110,10 +3994,8 @@ class OverlayWindow(QWidget):
         """True while keyboard focus is on a widget these shortcuts must
         leave alone: a slider (either tray's stroke/strength control) or a
         text-editing widget -- `QLineEdit` is what the text tool's own label
-        editor will be, per `shapes.Text`'s docstring, mirroring editor.py's
-        `Canvas._ensure_text_edit`; checking for it now means this method
-        doesn't have to change again once a later ticket wires the text
-        tool's drag up to actually create one.
+        editor (`_text_edit`) is, per `shapes.Text`'s docstring, mirroring
+        editor.py's `Canvas._ensure_text_edit`.
 
         `self.focusWidget()`, not the process-wide `QApplication.
         focusWidget()`, is enough here: every widget these shortcuts must
