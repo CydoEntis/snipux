@@ -44,6 +44,7 @@ from snipux.overlay import (
     open_overlay,
 )
 from snipux import setup_desktop
+from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
 
 
@@ -460,6 +461,7 @@ class AppController:
         # Held for the same reason `_overlay` is: a parentless widget is
         # fair game for the GC while its window is still on screen.
         self._settings: SettingsDialog | None = None
+        self._reviews: list[ReviewWindow] = []
 
         # Stock Ubuntu GNOME shows no legacy tray icon at all without the
         # AppIndicator extension: calling show() unconditionally left the
@@ -632,6 +634,9 @@ class AppController:
             # SNX-62: the one place `self._overlay` is cleared -- see
             # `_on_overlay_dismissed` and the guard above.
             on_dismissed=self._on_overlay_dismissed,
+            # Fires only for a real capture, never for a cancelled snip --
+            # see `OverlayWindow._report_capture`.
+            on_captured=self._on_captured,
         )
         # Stored on self, not left as a local: a parentless widget is fair
         # game for Python's GC to collect out from under the still-open
@@ -642,6 +647,38 @@ class AppController:
         # any Wayland multi-monitor veil companions), so there's no
         # separate .show() to call here.
         self._overlay = overlay
+
+    def _on_captured(self, image, path) -> None:
+        """Open the review window for a finished snip, when it is turned on.
+
+        Off unless asked for: the overlay already annotates in place, so a
+        window after every capture is a change to the core flow rather than
+        a default to inherit. Read fresh each time rather than cached at
+        startup, so toggling it in Settings takes effect on the next snip
+        instead of the next launch.
+        """
+        if not setup_desktop.load_review_window():
+            return
+        # A copy of the image, not the overlay's own: the overlay is about
+        # to close, and `rendered_image()` hands back a QImage backed by
+        # buffers it owns.
+        review = ReviewWindow(image.copy(), saved_path=path)
+        # Held for the same reason `_overlay` and `_settings` are -- a
+        # parentless widget is fair game for the GC while it is on screen.
+        # A list, not one slot: taking several snips in a row should leave
+        # several windows open, which is most of the point of having one.
+        self._reviews.append(review)
+        review.finished.connect(lambda _result, w=review: self._forget_review(w))
+        review.show()
+        review.raise_()
+        review.activateWindow()
+
+    def _forget_review(self, window) -> None:
+        """Drop a closed review window, so a long session doesn't
+        accumulate every snip it ever took.
+        """
+        if window in self._reviews:
+            self._reviews.remove(window)
 
     def _on_overlay_dismissed(self) -> None:
         """Called once, by `OverlayWindow`'s own `on_dismissed` hook, the

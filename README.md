@@ -117,6 +117,19 @@ paying startup cost on every snip.
    annotated snip to the clipboard and closes the overlay. The bar's Save
    button writes it to disk and closes the overlay too.
 
+### The review window
+
+Copy and Save both dismiss the overlay immediately, so a snip saved to the
+wrong place — or copied when you meant to save — means taking the capture
+again. Turn on **Open each snip in a review window** in Settings and each
+finished snip opens in a small window instead: the image, where it went,
+and Copy / Save As… / Show in Folder.
+
+Off by default, and it carries no drawing tools. Annotation happens in the
+overlay, on the frozen desktop; a second set of tools here would be a second
+implementation to drift from that one. Several snips in a row leave several
+windows open.
+
 ## Tools and shortcuts
 
 | Key | Tool | What it does |

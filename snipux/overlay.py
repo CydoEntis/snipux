@@ -2967,9 +2967,12 @@ class OverlayWindow(QWidget):
         monitor_geometries: list[QRectF] | None = None,
         registry: BackendRegistry | None = None,
         on_dismissed: Callable[[], None] | None = None,
+        on_captured: "Callable[[QImage, Path | None], None] | None" = None,
     ):
         super().__init__(parent)
         self._frame = frame
+        # Fired by `copy()`/`save()` only -- see `_report_capture`.
+        self._on_captured = on_captured
         # SNX-58: called once, from closeEvent, when this window is the
         # Wayland-primary of a multi-monitor `open_overlay` group -- the
         # hook that closes the non-interactive `_MonitorVeil` companions
@@ -4206,14 +4209,16 @@ class OverlayWindow(QWidget):
         """
         from snipux.app import copy_image_to_clipboard
 
-        copy_image_to_clipboard(self.rendered_image())
+        image = self.rendered_image()
+        copy_image_to_clipboard(image)
         self._show_toast("copy", "Copied to clipboard")
+        self._report_capture(image, None)
 
     # Subdirectory of ~/Pictures saves land in -- per the spec's "Save
     # writes a timestamped PNG to ~/Pictures/snipux, creating the
-    # directory." `app.save_image`'s own default (bare ~/Pictures, used by
-    # editor.py's still-existing Editor) doesn't know about this
-    # subdirectory, so it's supplied here rather than changed there.
+    # directory." `app.save_image` defaults to a bare ~/Pictures for its
+    # own other callers, so the subdirectory is supplied here rather than
+    # changed there.
     SAVE_SUBDIRECTORY = "snipux"
 
     def save(self) -> Path:
@@ -4225,9 +4230,21 @@ class OverlayWindow(QWidget):
         from snipux.app import save_image
 
         directory = Path.home() / "Pictures" / self.SAVE_SUBDIRECTORY
-        path = save_image(self.rendered_image(), directory)
+        image = self.rendered_image()
+        path = save_image(image, directory)
         self._show_toast("save", f"Saved to ~/Pictures/{self.SAVE_SUBDIRECTORY}")
+        self._report_capture(image, path)
         return path
+
+    def _report_capture(self, image: QImage, path: "Path | None") -> None:
+        """Tell the caller a snip actually happened, and what came of it.
+
+        Separate from `on_dismissed`, which fires for every way the overlay
+        ends -- Esc included. A cancelled snip is not a capture, and must
+        not open a review window.
+        """
+        if self._on_captured is not None:
+            self._on_captured(image, path)
 
     # SNX-62: the bar's Copy/Save buttons, unlike `copy()`/`save()`
     # themselves, must also end the snip -- taking a snip should end the
@@ -5550,6 +5567,7 @@ def open_overlay(
     geometry_provider: GeometryProvider | None = None,
     registry: BackendRegistry | None = None,
     on_dismissed: Callable[[], None] | None = None,
+    on_captured: "Callable[[QImage, Path | None], None] | None" = None,
 ) -> OverlayWindow:
     """Build and show the overlay for one snip, positioned for the
     caller's already-detected session type (`wayland`) rather than assumed
@@ -5614,6 +5632,7 @@ def open_overlay(
         monitor_geometries=overlay_monitor_geometries,
         registry=registry,
         on_dismissed=_on_overlay_dismissed if needs_dismissal_hook else None,
+        on_captured=on_captured,
     )
 
     if not wayland:
