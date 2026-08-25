@@ -19,7 +19,9 @@ class Color:
     ICON_IDLE       = "#a8afa0"
     ICON_ACTIVE     = "#f8faf0"
     ICON_HOVER_BG   = "#ffffff"   # at 9% alpha
+    ICON_HOVER_BG_ALPHA = 0.09
     ICON_ACTIVE_BG  = "#ffffff"   # at 16% alpha
+    ICON_ACTIVE_BG_ALPHA = 0.16
     ICON_DISABLED   = "#5d6157"
     ICON_NEUTRAL    = "#d7dacb"   # copy button, always enabled
     DANGER_BG       = "#c85050"   # at 22% alpha, clear-ink hover

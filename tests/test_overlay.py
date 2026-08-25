@@ -42,6 +42,7 @@ from snipux.overlay import (
     _Divider,
     _HANDLE_CURSORS,
     _MenuSeparator,
+    _PillButton,
     _PreviewDot,
     _SegmentButton,
     _SwatchButton,
@@ -2015,6 +2016,116 @@ class TestFloatingBarComposition:
         assert overlay._bar.parent() is overlay
 
 
+class TestPillButtonLabelWidth:
+    """SNX-59: the capture chip read 'R' and Save showed no word at all
+    because `_PillButton` sized itself off `QPushButton.sizeHint()`'s
+    placeholder-text fallback (the icon/label pair lives in a child
+    `QHBoxLayout` instead of the button's own text/icon, which is what
+    that fallback measures) rather than off the label it actually renders.
+    `grab()` is used throughout to force a real layout pass offscreen, per
+    CLAUDE.md -- `sizeHint()`/`geometry()` alone can still hold stale
+    pre-layout values.
+    """
+
+    def _granted_vs_hint(self, label: QLabel) -> tuple[int, int]:
+        """A rendered label's granted width against its own sizeHint --
+        the acceptance criterion's own measurement, factored out since
+        every test below repeats it for a different pill/label pair."""
+        return label.geometry().width(), label.sizeHint().width()
+
+    def test_capture_chip_label_is_never_clipped_for_any_capture_mode(self):
+        # Every tokens.CAPTURE_MODES entry, not just the "Region" default --
+        # including "Full screen", the longest name and the one the ticket
+        # names explicitly.
+        for label, _icon, _note in tokens.CAPTURE_MODES:
+            bar = FloatingBar()
+            bar._chip.set_text(label)
+            bar.resize(bar.sizeHint())
+            bar.grab()
+
+            granted, hint = self._granted_vs_hint(bar._chip._text_label)
+
+            assert granted >= hint, (
+                f"{label!r} asked for {hint}px but was only granted {granted}px"
+            )
+            assert bar._chip._text_label.text() == label
+
+    def test_save_button_shows_the_full_word_alongside_its_icon(self):
+        bar = FloatingBar()
+        bar.resize(bar.sizeHint())
+        bar.grab()
+
+        granted, hint = self._granted_vs_hint(bar._save_button._text_label)
+
+        assert bar._save_button._text_label.text() == "Save"
+        assert granted >= hint
+
+    def test_a_clipped_label_would_fail_this_measurement(self):
+        # Proves the measurement above actually bites: pinning the label to
+        # a width narrower than its own sizeHint reproduces exactly the
+        # clipping the ticket reports, so this test would catch a
+        # regression back to a fixed-width pill.
+        bar = FloatingBar()
+        bar.resize(bar.sizeHint())
+        bar.grab()
+        label = bar._chip._text_label
+
+        label.setFixedWidth(label.sizeHint().width() - 5)
+        bar.grab()
+
+        granted, hint = self._granted_vs_hint(label)
+        assert granted < hint
+
+    def test_pill_width_grows_with_its_own_text_rather_than_a_fixed_number(self):
+        # Same construction args, only the text differs -- if the pill were
+        # still sizing itself off a fixed number (or a placeholder string),
+        # the two would come out equal.
+        def make(text: str) -> _PillButton:
+            return _PillButton(
+                "chevron",
+                text,
+                icon_size=14,
+                text_color=design_color("ACCENT_FG"),
+                bg_color=design_color("ACCENT"),
+                icon_after=True,
+                pad_left=tokens.Metric.CHIP_PAD_L,
+                pad_right=tokens.Metric.CHIP_PAD_R,
+                tooltip="",
+            )
+
+        short = make("Hi")
+        long = make("A very much longer capture mode name")
+
+        assert long.sizeHint().width() > short.sizeHint().width()
+        # And it should match what the actual font metrics say the label
+        # needs, not some other independent guess -- the pill's sizeHint is
+        # its child layout's, and the layout's own sizeHint is built from
+        # each child's real sizeHint (icon label + text label + margins).
+        assert short.sizeHint() == short.layout().sizeHint()
+        assert long.sizeHint() == long.layout().sizeHint()
+
+    def test_bar_still_lays_out_correctly_with_a_longer_mode_name(self):
+        # "Full screen" is the longest of tokens.CAPTURE_MODES -- widening
+        # the chip must push every widget after it right, with no overlap,
+        # rather than clipping the label to keep the bar's old width.
+        bar = FloatingBar()
+        bar.resize(bar.sizeHint())
+        bar.grab()
+        narrow_chip_right = bar._chip.geometry().right()
+        narrow_bar_width = bar.width()
+
+        bar._chip.set_text("Full screen")
+        bar.resize(bar.sizeHint())
+        bar.grab()
+
+        assert bar._chip.geometry().right() > narrow_chip_right
+        assert bar.width() > narrow_bar_width
+        # The first tool button (right after the chip's divider) must not
+        # overlap the now-wider chip.
+        first_tool = bar._tool_buttons[tokens.TOOLS[0]]
+        assert first_tool.geometry().left() >= bar._chip.geometry().right()
+
+
 class TestFloatingBarFill:
     """SNX-40: 'the fill is 93% alpha, not 93% widget opacity, or the
     glyphs wash out' -- the ticket's own callout of the easy mistake.
@@ -2366,6 +2477,36 @@ class TestFloatingBarIntegration:
 
         assert (tmp_path / "Pictures" / "snipux").exists()
 
+    def test_copy_button_click_dismisses_the_overlay(self, monkeypatch):
+        # SNX-62: `copy()` alone -- flatten, clipboard, toast -- used to
+        # leave the overlay open, which is what let
+        # AppController.start_capture()'s re-entrancy guard refuse every
+        # later Snip request for the rest of the session. Mirrors
+        # TestKeyboardEnter's own "and closes" test above for Enter's
+        # copy-and-dismiss, but through the bar's actual button.
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        overlay = self._overlay(size=(200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+
+        QTest.mouseClick(overlay._bar._copy_button, Qt.MouseButton.LeftButton)
+
+        assert not overlay.isVisible()
+
+    def test_save_button_click_dismisses_the_overlay(self, monkeypatch, tmp_path):
+        # Same fix as test_copy_button_click_dismisses_the_overlay above,
+        # for Save.
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        overlay = self._overlay(size=(50, 50))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(0, 0, 50, 50))
+
+        QTest.mouseClick(overlay._bar._save_button, Qt.MouseButton.LeftButton)
+
+        assert not overlay.isVisible()
+
 
 class TestOverlayWindowToasts:
     """SNX-45: `copy`/`save`/`clear`/`discard` each toast the message and
@@ -2570,6 +2711,52 @@ class TestSettingsTrayComposition:
         tray = SettingsTray()
 
         assert tray.colour == tokens.INK_SWATCHES[0][1]
+
+
+class TestSettingsTrayFill:
+    """SNX-61: 'the settings tray paints a rounded panel behind its
+    controls' -- same glass treatment as FloatingBar, same alpha-not-opacity
+    rule (see TestFloatingBarFill above). Before this ticket, SettingsTray
+    set WA_TranslucentBackground and defined no paintEvent, so this pixel
+    read as fully transparent (alpha 0) -- background, not panel.
+    """
+
+    def test_background_pixel_is_painted_at_the_token_alpha(self):
+        tray = SettingsTray()
+        tray.resize(tray.sizeHint())
+
+        rendered = tray.grab().toImage()
+        # Top padding strip, mid-width: inside the rounded fill but above
+        # every control, so this is background only.
+        pixel = rendered.pixelColor(tray.width() // 2, 2)
+
+        expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
+        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
+        assert (pixel.red(), pixel.green(), pixel.blue()) == QColor(
+            tokens.Color.BAR_BG
+        ).getRgb()[:3]
+
+    def test_control_pixels_stay_fully_opaque_over_the_translucent_fill(self):
+        # Painting the whole widget at reduced *opacity* would leave every
+        # control pixel translucent too, at the same alpha as the
+        # background -- exactly the mistake the README warns FloatingBar
+        # away from. Scans a swatch button's whole rect and takes the max,
+        # not the min, the same way TestFloatingBarFill's equivalent test
+        # does -- a swatch is a rounded shape, so its own corner pixels sit
+        # outside the fill it paints and would otherwise read as the tray's
+        # translucent background rather than the button's own opacity.
+        tray = SettingsTray()
+        tray.resize(tray.sizeHint())
+
+        rendered = tray.grab().toImage()
+        rect = tray._swatch_buttons[tokens.INK_SWATCHES[0][1]].geometry()
+        alphas = [
+            rendered.pixelColor(x, y).alpha()
+            for x in range(rect.left(), rect.right())
+            for y in range(rect.top(), rect.bottom())
+        ]
+
+        assert max(alphas) == 255
 
 
 class TestSettingsTraySwatchSelection:
@@ -2902,6 +3089,50 @@ class TestBlurTrayComposition:
         tray = BlurTray()
 
         assert tray.blur_mode == "blur"
+
+
+class TestBlurTrayFill:
+    """SNX-61: 'the blur tray paints the same panel treatment' as
+    SettingsTray. Before this ticket, BlurTray set WA_TranslucentBackground
+    and defined no paintEvent either, so this pixel read as fully
+    transparent -- background, not panel.
+    """
+
+    def test_background_pixel_is_painted_at_the_token_alpha(self):
+        tray = BlurTray()
+        tray.resize(tray.sizeHint())
+
+        rendered = tray.grab().toImage()
+        # Top padding strip, mid-width: inside the rounded fill but above
+        # every control, so this is background only.
+        pixel = rendered.pixelColor(tray.width() // 2, 2)
+
+        expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
+        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
+        assert (pixel.red(), pixel.green(), pixel.blue()) == QColor(
+            tokens.Color.BAR_BG
+        ).getRgb()[:3]
+
+    def test_control_pixels_stay_fully_opaque_over_the_translucent_fill(self):
+        # Same rationale as TestSettingsTrayFill's equivalent test: scans
+        # the active (Blur) segment button's whole rect and takes the max,
+        # since its own rounded corners fall outside the segment's own
+        # fill.
+        tray = BlurTray()
+        tray.resize(tray.sizeHint())
+
+        rendered = tray.grab().toImage()
+        rect = tray._well.blur_button.geometry()
+        rect = QRect(
+            tray._well.geometry().topLeft() + rect.topLeft(), rect.size()
+        )
+        alphas = [
+            rendered.pixelColor(x, y).alpha()
+            for x in range(rect.left(), rect.right())
+            for y in range(rect.top(), rect.bottom())
+        ]
+
+        assert max(alphas) == 255
 
 
 class TestBlurTraySegmentToggle:
