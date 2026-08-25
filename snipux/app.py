@@ -703,13 +703,13 @@ class AppController:
         startup, so toggling it in Settings takes effect on the next snip
         instead of the next launch.
         """
-        # The chooser's own answer wins over the stored preference: the
-        # user said what should happen to *this* snip a moment ago, which
-        # is more current than a setting they configured once. None means
-        # they left it alone and Settings decides, as before.
-        outcome = self._overlay.outcome if self._overlay is not None else None
-        if outcome is not None:
-            if outcome != "review":
+        # The chooser is the authority: it is seeded from Settings when the
+        # overlay opens, so its value is either what Settings says or what
+        # the user changed it to for this snip. Either way it is the more
+        # current answer, and per the handoff a per-snip override never
+        # writes back to the stored preference.
+        if self._overlay is not None:
+            if self._overlay.outcome != "review":
                 return
         elif not setup_desktop.load_review_window():
             return

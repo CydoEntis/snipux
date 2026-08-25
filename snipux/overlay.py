@@ -23,6 +23,8 @@ from typing import Callable
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QCursor,
+    QGuiApplication,
     QFont,
     QFontMetricsF,
     QIcon,
@@ -47,8 +49,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from snipux import design
+from snipux import design, setup_desktop
 from snipux.capture import BackendRegistry, CaptureError, Frame
+from snipux.chooser import Chooser
 from snipux.marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
 from snipux.shapes import (
     Arrow,
@@ -2294,154 +2297,6 @@ class _MenuSeparator(QWidget):
         painter.end()
 
 
-class _ChooserButton(QPushButton):
-    """One choice on the pre-snip chooser: glyph over label, checkable."""
-
-    _W, _H, _ICON = 78, 58, 18
-
-    def __init__(self, icon_name: str, label: str, tooltip: str, parent=None):
-        super().__init__(parent)
-        self._icon_name = icon_name
-        self.setCheckable(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(tooltip)
-        self.setMouseTracking(True)
-        self.setFixedSize(self._W, self._H)
-
-        column = QVBoxLayout(self)
-        column.setContentsMargins(0, 7, 0, 7)
-        column.setSpacing(4)
-
-        self._glyph = QLabel()
-        self._glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._glyph.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        column.addWidget(self._glyph)
-
-        self._label = QLabel(label)
-        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.TRAY_LABEL
-        font.setPixelSize(round(size))
-        font.setWeight(QFont.Weight(weight))
-        self._label.setFont(font)
-        column.addWidget(self._label)
-
-        self.toggled.connect(lambda _checked: self._refresh())
-        self._refresh()
-
-    def _refresh(self) -> None:
-        on = self.isChecked()
-        glyph = design.color("ACCENT") if on else design.color("ICON_IDLE")
-        self._glyph.setPixmap(design.icon(self._icon_name, glyph).pixmap(self._ICON, self._ICON))
-        self._label.setStyleSheet(
-            f"color: {(design.color('TEXT_PRIMARY') if on else design.color('TEXT_MUTED')).name()};"
-            " background: transparent;"
-        )
-        fill = "rgba(255,255,255,0.10)" if on else "transparent"
-        self.setStyleSheet(
-            f"QPushButton {{ border: none; border-radius: 9px; background: {fill}; }}"
-            "QPushButton:hover { background: rgba(255,255,255,0.06); }"
-        )
-
-
-class CaptureChooser(QWidget):
-    """The bar that appears *before* anything is selected: what to capture,
-    and what should happen to it afterwards.
-
-    A deliberate divergence from `docs/design/handoff-windows.md`, recorded
-    in `docs/design/pre-snip-chooser.md`. The handoff puts capture mode on
-    the floating bar, and that bar only exists once a selection does -- so
-    choosing "window" or "full screen" meant first dragging a region you did
-    not want, purely to reach the control that says you wanted something
-    else. Picking the mode is the first decision of a snip, so it is offered
-    first.
-
-    Two rows of choices, because a snip is two decisions: what to capture,
-    and where it should end up. The second is the same preference Settings
-    calls "After capture" -- surfaced here per-snip because it changes far
-    more often than a setting should have to.
-    """
-
-    modeSelected = pyqtSignal(str)
-    outcomeSelected = pyqtSignal(str)
-
-    _BG_ALPHA = 0.93
-    _RADIUS = 14
-
-    # (id, icon, label, tooltip) -- the three things a finished snip can do.
-    OUTCOMES = (
-        ("review", "image", "Review", "Open it in the review window to edit or save"),
-        ("clip", "copy", "Copy", "Straight to the clipboard, no window"),
-        ("file", "save", "Save", "Write it to disk and say nothing"),
-    )
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        row = QHBoxLayout(self)
-        row.setContentsMargins(10, 8, 10, 8)
-        row.setSpacing(4)
-
-        self._mode_group = QButtonGroup(self)
-        self._mode_group.setExclusive(True)
-        self._mode_buttons: dict[str, _ChooserButton] = {}
-        for label, icon_name, hint in design.tokens.CAPTURE_MODES:
-            button = _ChooserButton(icon_name, label, hint)
-            self._mode_group.addButton(button)
-            self._mode_buttons[label] = button
-            button.clicked.connect(lambda _c, m=label: self._pick_mode(m))
-            row.addWidget(button)
-
-        row.addSpacing(design.tokens.Metric.BAR_DIVIDER_GAP)
-        row.addWidget(_Divider(self))
-        row.addSpacing(design.tokens.Metric.BAR_DIVIDER_GAP)
-
-        self._outcome_group = QButtonGroup(self)
-        self._outcome_group.setExclusive(True)
-        self._outcome_buttons: dict[str, _ChooserButton] = {}
-        for identifier, icon_name, label, hint in self.OUTCOMES:
-            button = _ChooserButton(icon_name, label, hint)
-            self._outcome_group.addButton(button)
-            self._outcome_buttons[identifier] = button
-            button.clicked.connect(lambda _c, o=identifier: self._pick_outcome(o))
-            row.addWidget(button)
-
-    def set_mode(self, mode: str) -> None:
-        button = self._mode_buttons.get(mode)
-        if button is not None:
-            button.setChecked(True)
-
-    def set_outcome(self, outcome: str) -> None:
-        button = self._outcome_buttons.get(outcome)
-        if button is not None:
-            button.setChecked(True)
-
-    def _pick_mode(self, mode: str) -> None:
-        self.set_mode(mode)
-        self.modeSelected.emit(mode)
-
-    def _pick_outcome(self, outcome: str) -> None:
-        self.set_outcome(outcome)
-        self.outcomeSelected.emit(outcome)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        background = design.color("BAR_BG")
-        background.setAlphaF(self._BG_ALPHA)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(background)
-        painter.drawRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.color("BAR_BORDER"))
-        painter.drawRoundedRect(
-            QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self._RADIUS, self._RADIUS
-        )
-        painter.end()
-
-
 class CaptureModePopover(QWidget):
     """The overlay redesign's capture-mode popover: `tokens.CAPTURE_MODES`
     as a list of rows, a separator, then the delay row -- per
@@ -3532,16 +3387,15 @@ class OverlayWindow(QWidget):
         # it. Shown while there is no selection, which is exactly when the
         # floating bar is not -- the two never share the screen. See
         # `CaptureChooser` for why this exists at all.
-        self._chooser = CaptureChooser(self)
-        self._chooser.hide()
-        self._chooser.modeSelected.connect(self._on_capture_mode_selected)
-        self._chooser.outcomeSelected.connect(self._on_outcome_selected)
-        # Seeded from the default rather than `_capture_mode`, which is set
-        # further down this constructor: the chooser is built alongside the
-        # other chrome, and the mode it should show is the same first entry
-        # that field is about to take.
-        self._chooser.set_mode(design.tokens.CAPTURE_MODES[0][0])
-        self._outcome: str | None = None
+        # The handoff's own surface -- see snipux/chooser.py and
+        # docs/design/handoff-chooser.md. It owns mode, destination and
+        # delay; this window owns everything downstream of them.
+        self._chooser = Chooser(self)
+        self._chooser.modeChosen.connect(self._on_chooser_mode)
+        self._chooser.fireImmediately.connect(self._on_chooser_immediate)
+        self._chooser.cancelled.connect(self._cancel)
+        self._chooser.set_after(setup_desktop.load_after_capture())
+        self._chooser.hide_all()
         self._blur_tray.blurModeChanged.connect(self._on_blur_mode_changed)
         self._blur_tray.strengthChanged.connect(self._on_blur_strength_changed)
 
@@ -3785,7 +3639,11 @@ class OverlayWindow(QWidget):
         self._region_drag_anchor = None
         self._capture_mode = mode
         self._bar.set_capture_mode(mode)
-        self._chooser.set_mode(mode)
+        # `arm=False`: this is the two surfaces agreeing on one value, not
+        # a fresh choice. Arming here would re-emit `modeChosen` straight
+        # back into this method -- one piece of state, two surfaces, and
+        # exactly one of them originating each change.
+        self._chooser.set_mode(mode, arm=False)
 
         if self._delay != "Off":  # design.tokens.DELAYS[0]
             self._start_delayed_capture(mode)
@@ -3806,6 +3664,25 @@ class OverlayWindow(QWidget):
             self._select_full_screen()
         elif mode == "Freeform":  # design.tokens.CAPTURE_MODES[3][0]
             self._enter_freeform_mode()
+        # handoff-chooser.md, Armed: "The cursor becomes a crosshair." The
+        # Window and Freeform branches above repaint it on every move, but
+        # Region has nothing to preview and would otherwise sit under a
+        # plain arrow until the drag it is waiting for actually starts --
+        # which is the one moment the pointer most needs to say "drag me".
+        self._apply_idle_cursor()
+
+    def _apply_idle_cursor(self) -> None:
+        """The pointer when nothing is being dragged, resized or hovered.
+
+        Armed with no selection yet means the chooser has stepped aside and
+        the whole monitor is the target, so the crosshair is the invitation.
+        While still choosing it stays an ordinary arrow: the panel is a
+        thing to click, not an area to drag across.
+        """
+        if self._selection is None and self._chooser.phase == "armed":
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
 
     # -- delayed re-capture (SNX-50) -----------------------------------------
     # docs/design/overlay-redesign.md's "Capture modes" entry for Delay is
@@ -4137,14 +4014,15 @@ class OverlayWindow(QWidget):
         self._delay = delay
 
     @property
-    def outcome(self) -> str | None:
-        """What the user asked to happen to this snip, or None if they did
-        not say and the stored preference should stand.
-        """
-        return self._outcome
+    def outcome(self) -> str:
+        """What should happen to this snip once it is taken.
 
-    def _on_outcome_selected(self, outcome: str) -> None:
-        self._outcome = outcome
+        Always a value, never None: the chooser is seeded from Settings at
+        launch, so "the user did not say" and "the user chose what Settings
+        already said" are the same answer -- and the per-snip control is
+        allowed to differ without writing back, per the handoff.
+        """
+        return self._chooser.after
 
     def _sync_chooser_visibility(self) -> None:
         """The chooser is up whenever there is nothing selected yet.
@@ -4152,31 +4030,43 @@ class OverlayWindow(QWidget):
         That is the whole of its rule: it answers "what am I capturing",
         which stops being a question the moment something is. It never
         shares the screen with the floating bar, which has the opposite
-        condition.
+        condition, so the two may safely share a widget stack.
+
+        Unlike the placeholder this replaces, it does not vanish when a
+        picking mode is armed -- it collapses to a 26px tab against the same
+        edge, which is the handoff's answer to "how does it stay out of the
+        way of a mode that needs the whole screen". See `chooser.Chooser`.
         """
-        # Gone once a mode that needs the whole screen is armed: Window
-        # previews whatever is under the cursor and Freeform is traced
-        # anywhere, so a bar sitting across the top would be a band of
-        # screen those modes cannot reach. By then the choice it exists to
-        # offer has been made.
-        if (
-            self._selection is not None
-            or self._picking_window
-            or self._picking_freeform
-            or not self.isVisible()
-        ):
-            self._chooser.hide()
+        if self._selection is not None or not self.isVisible():
+            self._chooser.hide_all()
             return
-        size = self._chooser.sizeHint()
-        bounds = self._chrome_bounds()
-        self._chooser.setGeometry(
-            round(bounds.center().x() - size.width() / 2),
-            round(bounds.top() + self._CHOOSER_TOP_MARGIN),
-            size.width(),
-            size.height(),
-        )
-        self._chooser.show()
-        self._chooser.raise_()
+        self._chooser.set_screen(self._active_screen_rect(), self.geometry().topLeft())
+
+    def _active_screen_rect(self) -> QRectF:
+        """The monitor the snip opened on, in absolute coordinates.
+
+        The handoff is emphatic that everything here positions against a
+        monitor and never the virtual desktop: on a staggered multi-monitor
+        setup the desktop's centre is a gap between screens. `screenAt` is
+        the cursor's own monitor -- the one being looked at -- with the
+        primary as the fallback the handoff names.
+        """
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            return QRectF(screen.geometry())
+        return self._chrome_bounds().translated(self.geometry().topLeft())
+
+    def _on_chooser_mode(self, mode: str) -> None:
+        """A mode armed from the chooser. One piece of state, two surfaces:
+        the bar's own chip is seeded from the same value.
+        """
+        self._on_capture_mode_selected(mode)
+
+    def _on_chooser_immediate(self, mode: str) -> None:
+        """`Full screen` has nothing left to aim at, so choosing it fires
+        the grab rather than arming -- `tokens.IMMEDIATE_MODES`.
+        """
+        self._on_capture_mode_selected(mode)
 
     def _sync_bar_visibility(self) -> None:
         """Show/hide and reposition the floating bar to match `_selection`.
@@ -4853,6 +4743,17 @@ class OverlayWindow(QWidget):
         key = event.key()
         modifiers = event.modifiers()
 
+        # The chooser's shortcuts are live for as long as it is -- R/W/F/L
+        # to switch mode, Space to reopen it, Esc to close a menu. It gets
+        # first refusal while there is no selection, and returns False for
+        # anything that is not its own.
+        if (
+            self._selection is None
+            and not self._shortcuts_suppressed()
+            and self._chooser.handle_key(key, event.text())
+        ):
+            return
+
         # Escape is the way out of this modal, full-screen window and must
         # work regardless of which child holds focus (SNX-79) -- checked
         # ahead of _shortcuts_suppressed() so a focused slider or label never
@@ -5196,7 +5097,7 @@ class OverlayWindow(QWidget):
                 else Qt.CursorShape.CrossCursor
             )
         else:
-            self.unsetCursor()
+            self._apply_idle_cursor()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:

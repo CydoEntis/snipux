@@ -8,6 +8,7 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from snipux import app
+from snipux import overlay as overlay_module
 from snipux.app import (
     AppController,
     QLocalSocketTransport,
@@ -1279,7 +1280,7 @@ class TestReviewWindowIntegration:
         )
 
     def test_no_window_opens_when_the_setting_is_off(self, make_controller, monkeypatch):
-        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: False)
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "clip")
         controller = self._controller(make_controller)
         controller.start_capture()
         controller._overlay.set_selection(QRect(10, 10, 100, 80))
@@ -1289,7 +1290,7 @@ class TestReviewWindowIntegration:
         assert controller._reviews == []
 
     def test_a_window_opens_when_the_setting_is_on(self, make_controller, monkeypatch):
-        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: True)
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "review")
         controller = self._controller(make_controller)
         controller.start_capture()
         controller._overlay.set_selection(QRect(10, 10, 100, 80))
@@ -1301,7 +1302,7 @@ class TestReviewWindowIntegration:
     def test_cancelling_a_snip_opens_nothing(self, make_controller, monkeypatch):
         # Esc is not a capture. _on_captured fires from copy()/save() only,
         # never from the dismissal hook that every ending routes through.
-        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: True)
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "review")
         controller = self._controller(make_controller)
         controller.start_capture()
         controller._overlay.set_selection(QRect(10, 10, 100, 80))
@@ -1314,7 +1315,8 @@ class TestReviewWindowIntegration:
         # Toggling it in Settings should take effect on the next snip, not
         # the next launch.
         enabled = [False]
-        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: enabled[0])
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_after_capture",
+                            lambda cd=None: "review" if enabled[0] else "clip")
         controller = self._controller(make_controller)
         controller.start_capture()
         controller._overlay.set_selection(QRect(10, 10, 100, 80))
@@ -1322,12 +1324,19 @@ class TestReviewWindowIntegration:
         assert controller._reviews == []
 
         enabled[0] = True
+        # A whole new snip, not another copy off the stale overlay: the
+        # chooser reads the setting when it opens, so that is the moment
+        # the toggle has to be picked up. The first session has to end
+        # first or start_capture just surfaces the overlay already open.
+        controller._overlay.close()
+        controller.start_capture()
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
         controller._overlay.copy()
 
         assert len(controller._reviews) == 1
 
     def test_several_snips_leave_several_windows_open(self, make_controller, monkeypatch):
-        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: True)
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "review")
         controller = self._controller(make_controller)
         controller.start_capture()
         controller._overlay.set_selection(QRect(10, 10, 100, 80))
@@ -1339,7 +1348,7 @@ class TestReviewWindowIntegration:
 
     def test_a_closed_window_is_forgotten(self, make_controller, monkeypatch):
         # Otherwise a long session accumulates every snip it ever took.
-        monkeypatch.setattr(app.setup_desktop, "load_review_window", lambda: True)
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "review")
         controller = self._controller(make_controller)
         controller.start_capture()
         controller._overlay.set_selection(QRect(10, 10, 100, 80))
@@ -1484,7 +1493,8 @@ class TestTheChoosersOutcomeWins:
 
     def _controller(self, make_controller, monkeypatch, stored_review: bool):
         monkeypatch.setattr(
-            app.setup_desktop, "load_review_window", lambda: stored_review
+            overlay_module.setup_desktop, "load_after_capture",
+            lambda cd=None: "review" if stored_review else "clip",
         )
         controller = make_controller(
             BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
@@ -1499,7 +1509,7 @@ class TestTheChoosersOutcomeWins:
         self, make_controller, monkeypatch
     ):
         controller = self._controller(make_controller, monkeypatch, stored_review=False)
-        controller._overlay._chooser._pick_outcome("review")
+        controller._overlay._chooser.set_after("review")
 
         controller._overlay.copy()
 
@@ -1510,16 +1520,20 @@ class TestTheChoosersOutcomeWins:
         self, make_controller, monkeypatch, outcome
     ):
         controller = self._controller(make_controller, monkeypatch, stored_review=True)
-        controller._overlay._chooser._pick_outcome(outcome)
+        controller._overlay._chooser.set_after(outcome)
 
         controller._overlay.copy()
 
         assert controller._reviews == []
 
-    def test_an_untouched_chooser_leaves_settings_in_charge(
+    def test_an_untouched_chooser_carries_what_settings_said(
         self, make_controller, monkeypatch
     ):
+        # It is seeded from Settings when the overlay opens, so "untouched"
+        # and "agrees with Settings" are the same state.
         controller = self._controller(make_controller, monkeypatch, stored_review=True)
+
+        assert controller._overlay.outcome == "review"
 
         controller._overlay.copy()
 

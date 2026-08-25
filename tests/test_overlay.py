@@ -7124,14 +7124,10 @@ class TestOverlayIsRevealedNotAnimatedOpen:
 
 
 class TestCaptureChooser:
-    """The pre-snip chooser: what to capture, and what should happen to it,
-    asked before anything is selected.
+    """The pre-snip chooser, per docs/design/handoff-chooser.md.
 
-    A deliberate divergence from the handoff -- see
-    docs/design/pre-snip-chooser.md. The handoff puts capture mode on the
-    floating bar, which only exists once a selection does, so choosing
-    "window" meant first dragging a region you did not want purely to reach
-    the control that says you wanted something else.
+    Two phases and the transitions between them; the widget's own painting
+    is the prototype's business, not these tests'.
     """
 
     def _overlay(self, size=(1200, 800)):
@@ -7142,79 +7138,249 @@ class TestCaptureChooser:
         QTest.qWaitForWindowExposed(overlay)
         return overlay
 
-    def test_it_is_up_before_anything_is_selected(self):
+    def test_it_starts_in_choosing_with_the_panel_up(self):
         overlay = self._overlay()
 
-        assert overlay._chooser.isVisibleTo(overlay)
+        assert overlay._chooser.phase == "choosing"
+        assert overlay._chooser.panel.isVisibleTo(overlay)
 
-    def test_it_offers_every_capture_mode(self):
+    def test_picking_a_mode_arms_it_and_collapses_to_the_tab(self):
+        # Region, Window and Freeform all need the screen back -- one to
+        # drag on, one to hover over, one to trace across.
         overlay = self._overlay()
 
-        assert list(overlay._chooser._mode_buttons) == [
-            label for label, _icon, _hint in tokens.CAPTURE_MODES
-        ]
+        overlay._chooser.set_mode("Window")
+
+        assert overlay._chooser.phase == "armed"
+        assert overlay._chooser.tab.isVisibleTo(overlay)
+        assert not overlay._chooser.panel.isVisibleTo(overlay)
+
+    def test_the_armed_mode_reaches_the_overlay(self):
+        overlay = self._overlay()
+
+        overlay._chooser.set_mode("Freeform")
+
+        assert overlay._capture_mode == "Freeform"
+
+    def test_full_screen_fires_instead_of_arming(self):
+        # It has nothing left to aim at, so choosing it *is* the capture --
+        # tokens.IMMEDIATE_MODES carries that rather than a name check.
+        overlay = self._overlay()
+        fired = []
+        overlay._chooser.fireImmediately.connect(fired.append)
+
+        overlay._chooser.set_mode("Full screen")
+
+        assert fired == ["Full screen"]
+        assert overlay._chooser.phase == "choosing", "it never arms"
+
+    def test_the_tab_reopens_the_panel_with_selections_intact(self):
+        overlay = self._overlay()
+        overlay._chooser.set_after("clip")
+        overlay._chooser.set_mode("Window")
+
+        overlay._chooser.reopen()
+
+        assert overlay._chooser.phase == "choosing"
+        assert overlay._chooser.panel.isVisibleTo(overlay)
+        assert overlay._chooser.mode == "Window"
+        assert overlay._chooser.after == "clip"
+
+    @pytest.mark.parametrize("key,mode", list(tokens.MODE_KEYS.items()))
+    def test_each_shortcut_selects_its_mode(self, key, mode):
+        overlay = self._overlay()
+        fired = []
+        overlay._chooser.fireImmediately.connect(fired.append)
+
+        overlay._chooser.handle_key(ord(key), key)
+
+        assert overlay._chooser.mode == mode
+
+    def test_space_reopens_from_armed(self):
+        overlay = self._overlay()
+        overlay._chooser.set_mode("Window")
+
+        overlay._chooser.handle_key(Qt.Key.Key_Space, " ")
+
+        assert overlay._chooser.phase == "choosing"
+
+    def test_escape_with_no_menu_open_cancels_the_snip(self):
+        overlay = self._overlay()
+        cancelled = []
+        overlay._chooser.cancelled.connect(lambda: cancelled.append(True))
+
+        overlay._chooser.handle_key(Qt.Key.Key_Escape, "")
+
+        assert cancelled == [True]
+
+    def test_a_key_that_is_not_the_choosers_is_declined(self):
+        # It gets first refusal, not the whole keyboard.
+        overlay = self._overlay()
+
+        assert overlay._chooser.handle_key(Qt.Key.Key_Z, "z") is False
 
     def test_it_stands_down_once_there_is_a_selection(self):
-        # It answers "what am I capturing", which stops being a question
-        # the moment something is -- and the floating bar has the opposite
-        # condition, so the two never share the screen.
+        # Chooser up means no selection; bar up means one exists. They never
+        # coexist, so they may safely share a widget stack.
         overlay = self._overlay()
 
         overlay.set_selection(QRect(100, 100, 300, 200))
 
-        assert not overlay._chooser.isVisibleTo(overlay)
+        assert not overlay._chooser.panel.isVisibleTo(overlay)
+        assert not overlay._chooser.tab.isVisibleTo(overlay)
         assert overlay._bar.isVisibleTo(overlay)
 
-    def test_it_comes_back_when_the_selection_is_cleared(self):
+    def test_the_bars_chip_is_seeded_from_it(self):
+        # One piece of state, two surfaces -- do not duplicate it.
         overlay = self._overlay()
+
+        overlay._chooser.set_mode("Freeform")
+
+        assert overlay._bar._chip._text_label.text() == "Freeform"
+
+    def test_seeding_back_from_the_bar_does_not_rearm(self):
+        # Arming on the way back would re-emit into the handler that sent
+        # it, which is an infinite loop rather than a design.
+        overlay = self._overlay()
+        overlay._chooser.reopen()
+
+        overlay._chooser.set_mode("Window", arm=False)
+
+        assert overlay._chooser.mode == "Window"
+        assert overlay._chooser.phase == "choosing"
+
+    def test_the_panel_hangs_from_the_active_monitors_top_edge(self):
+        # Never the virtual desktop: on a staggered multi-monitor setup its
+        # centre is a gap between screens.
+        overlay = self._overlay()
+
+        panel = overlay._chooser.panel.geometry()
+        screen = overlay._active_screen_rect()
+        assert panel.top() == round(screen.y() - overlay.geometry().top())
+        assert abs(panel.center().x() - (screen.center().x() - overlay.geometry().left())) <= 2
+
+    def test_the_delay_defaults_to_none_and_is_selectable(self):
+        overlay = self._overlay()
+        assert overlay._chooser.delay == tokens.DELAY_DEFAULT
+
+        overlay._chooser.set_delay("5s")
+
+        assert overlay._chooser.delay == "5s"
+
+
+class TestTheDestinationMenuFitsItsWidth:
+    """The menu is a fixed 270px and its notes are prose.
+
+    A note that overruns is not a cosmetic problem: it prints over the tick
+    that says which destination is selected, so the row stops answering the
+    one question it exists to answer.
+    """
+
+    def _budget(self):
+        from PyQt6.QtGui import QFontMetricsF
+
+        from snipux.chooser import _font
+
+        metric = tokens.ChooserMetric
+        _pad_v, pad_h = metric.MENU_ROW_PAD
+        text_x = pad_h + metric.MENU_ROW_ICON + 9
+        width = (
+            metric.MENU_AFTER_W
+            - 2 * metric.MENU_PAD
+            - text_x
+            - pad_h
+            - (metric.MENU_TICK + 8)
+        )
+        return width, QFontMetricsF(_font(11, 400)), QFontMetricsF(_font(12.5, 500))
+
+    def test_every_note_fits_without_eliding(self):
+        width, note_fm, _label_fm = self._budget()
+
+        too_wide = {
+            value: note
+            for value, note in tokens.CHOOSER_AFTER_NOTE.items()
+            if note_fm.horizontalAdvance(note) > width
+        }
+
+        assert too_wide == {}, f"notes wider than {width}px: {too_wide}"
+
+    def test_every_label_fits_without_eliding(self):
+        width, _note_fm, label_fm = self._budget()
+
+        from snipux.chooser import _AFTER_ROWS
+
+        too_wide = {
+            label: label_fm.horizontalAdvance(label)
+            for _value, _icon, label, _note in _AFTER_ROWS
+            if label_fm.horizontalAdvance(label) > width
+        }
+
+        assert too_wide == {}
+
+    def test_the_notes_cover_exactly_the_destinations_offered(self):
+        # Two surfaces, two lengths of prose, one list of destinations.
+        assert set(tokens.CHOOSER_AFTER_NOTE) == {
+            value for value, _label, _description in tokens.AFTER_CAPTURE
+        }
+
+    def test_an_overlong_note_is_elided_rather_than_overrunning(self):
+        from snipux.chooser import _MenuRow
+
+        row = _MenuRow("review", "eye", "Review", "x" * 400)
+        row.resize(tokens.ChooserMetric.MENU_AFTER_W, 40)
+
+        row.grab()  # a full paintEvent; it must not paint past its own edge
+
+
+class TestTheArmedCursorInvitesTheDrag:
+    """handoff-chooser.md, Armed: "The cursor becomes a crosshair."
+
+    Region is the case that matters. Window and Freeform repaint the cursor
+    on every mouse move as part of previewing, but Region has nothing to
+    preview -- so without this it sits under a plain arrow for exactly as
+    long as the user is deciding whether to drag.
+    """
+
+    def _overlay(self, size=(1200, 800)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_choosing_leaves_an_ordinary_arrow(self):
+        # The panel is a thing to click, not an area to drag across.
+        overlay = self._overlay()
+
+        assert overlay._chooser.phase == "choosing"
+        assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+    def test_arming_region_turns_the_pointer_into_a_crosshair(self):
+        overlay = self._overlay()
+
+        overlay._chooser.set_mode("Region")
+
+        assert overlay._chooser.phase == "armed"
+        assert overlay.cursor().shape() == Qt.CursorShape.CrossCursor
+
+    def test_reopening_the_chooser_gives_the_arrow_back(self):
+        overlay = self._overlay()
+        overlay._chooser.set_mode("Region")
+
+        overlay._chooser.reopen()
+        overlay._apply_idle_cursor()
+
+        assert overlay._chooser.phase == "choosing"
+        assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+    def test_a_selection_takes_the_cursor_back_over(self):
+        # Once there is a rectangle, the handle and inside-the-selection
+        # rules own the pointer; the armed crosshair must not override them.
+        overlay = self._overlay()
+        overlay._chooser.set_mode("Region")
+
         overlay.set_selection(QRect(100, 100, 300, 200))
+        overlay._apply_idle_cursor()
 
-        overlay.set_selection(None)
-
-        assert overlay._chooser.isVisibleTo(overlay)
-
-    def test_picking_a_mode_sets_it(self):
-        overlay = self._overlay()
-
-        overlay._chooser._pick_mode("Full screen")
-
-        assert overlay._capture_mode == "Full screen"
-
-    def test_the_bars_chip_stays_in_step_with_it(self):
-        overlay = self._overlay()
-
-        overlay._chooser._pick_mode("Full screen")
-
-        assert overlay._bar._chip._text_label.text() == "Full screen"
-
-    def test_it_stands_aside_for_a_mode_that_needs_the_whole_screen(self):
-        # Window previews whatever is under the cursor; a bar across the top
-        # would be a band those modes cannot reach.
-        overlay = self._overlay()
-
-        overlay._enter_freeform_mode()
-
-        assert not overlay._chooser.isVisibleTo(overlay)
-
-    def test_it_sits_at_the_top_of_the_monitor_not_the_desktop(self):
-        overlay = self._overlay()
-
-        chooser = overlay._chooser.geometry()
-        bounds = overlay._chrome_bounds()
-        assert chooser.top() >= bounds.top()
-        assert abs(chooser.center().x() - bounds.center().x()) <= 2
-
-    def test_the_outcome_is_unset_until_the_user_says(self):
-        # None means "Settings decides", which is what an untouched chooser
-        # should leave in place.
-        overlay = self._overlay()
-
-        assert overlay.outcome is None
-
-    @pytest.mark.parametrize("outcome", ["review", "clip", "file"])
-    def test_picking_an_outcome_records_it(self, outcome):
-        overlay = self._overlay()
-
-        overlay._chooser._pick_outcome(outcome)
-
-        assert overlay.outcome == outcome
+        assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
