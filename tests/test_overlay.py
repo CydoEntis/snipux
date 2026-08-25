@@ -1493,6 +1493,50 @@ class TestDrawingTools:
 
         assert overlay.marks == ()
 
+    def test_second_label_click_commits_the_first_instead_of_discarding_it(self):
+        # SNX-77: clicking to place a second label used to clear() the
+        # shared QLineEdit before editingFinished ever got a chance to
+        # commit the first one -- nothing forced focus away from the field
+        # on this path (unlike a toolbar click), so the first label's text
+        # was simply wiped. Placing several labels in a row is the ordinary
+        # way to annotate a screenshot, so both must survive.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+        overlay._ink_colour = "#123456"
+        overlay._stroke_width = 5
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "first")
+
+        # Changed before the second click, so the assertions below can tell
+        # apart "the first label kept its own colour/size" from "it silently
+        # picked up whatever the tray happens to hold at commit time."
+        overlay._ink_colour = "#abcdef"
+        overlay._stroke_width = 12
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 80))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "second")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 2
+        first, second = overlay.marks
+        assert isinstance(first, Text)
+        assert isinstance(second, Text)
+        assert first.text == "first"
+        assert second.text == "second"
+        # The first label keeps the position and styling it was typed at,
+        # not the second click's.
+        assert first.point == QPointF(30, 30)
+        assert first.colour == QColor("#123456")
+        assert first.stroke_width == 5
+        assert second.point == QPointF(80, 80)
+        assert second.colour == QColor("#abcdef")
+        assert second.stroke_width == 12
+
     def test_text_label_focus_also_suppresses_shortcuts(self):
         # The other half of SNX-47's suppression AC (see
         # TestKeyboardShortcutSuppression), now against the real text-tool
