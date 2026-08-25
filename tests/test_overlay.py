@@ -1114,8 +1114,10 @@ class TestOverlayWindowObscuringMarks:
 class TestEraserTool:
     """SNX-38: per-shape hit-testing itself lives on `Shape` (shapes.py --
     see TestShapeHitTest in test_shapes.py); this class covers how
-    OverlayWindow wires that into a click, and the eraser's own
-    single-slot undo.
+    OverlayWindow wires that into a click. SNX-70 folds erase_at's own
+    undo into the general undo/redo stack (TestUndoRedoClear below covers
+    that fold in full); the erase_at-specific mechanics -- which mark a
+    click removes, a miss being a safe no-op -- stay here.
     """
 
     RED = QColor(255, 0, 0)
@@ -1173,34 +1175,17 @@ class TestEraserTool:
         assert overlay.erase_at(QPointF(150, 150)) is None
         assert len(overlay.marks) == 1
 
-    def test_undo_erase_restores_the_mark_at_its_original_position(self):
+    def test_erase_at_leaves_undo_available(self):
+        # SNX-70: erasing used to land in its own private slot
+        # (`undo_erase`) that neither Ctrl+Z nor the bar's Undo button ever
+        # reached -- can_undo staying False right after an erase was the
+        # bug. See TestUndoRedoClear for the full undo/redo round trip.
         overlay = self._overlay()
-        first = self._mark((10, 10), (30, 30))
-        second = self._mark((40, 40), (60, 60))
-        third = self._mark((70, 70), (90, 90))
-        overlay.add_mark(first)
-        overlay.add_mark(second)
-        overlay.add_mark(third)
+        overlay.add_mark(self._mark((20, 20), (80, 80)))
 
-        erased = overlay.erase_at(QPointF(40, 50))  # `second`'s left border
+        overlay.erase_at(QPointF(20, 50))
 
-        assert erased is second
-        assert overlay.marks == (first, third)
-
-        overlay.undo_erase()
-
-        # Restored between `first` and `third`, its original draw-order
-        # position -- not appended to the end.
-        assert overlay.marks == (first, second, third)
-
-    def test_undo_erase_is_a_no_op_with_nothing_to_restore(self):
-        overlay = self._overlay()
-        mark = self._mark((20, 20), (80, 80))
-        overlay.add_mark(mark)
-
-        overlay.undo_erase()  # nothing has been erased yet
-
-        assert overlay.marks == (mark,)
+        assert overlay.can_undo
 
     @pytest.mark.parametrize(
         "mark, hit_point",
@@ -2027,8 +2012,14 @@ class TestRegionDragToCreate:
 
 
 class TestUndoRedoClear:
-    """SNX-39: the general undo/redo/clear stack over `_marks`, distinct
-    from the eraser's own single-slot `undo_erase` (TestEraserTool above).
+    """SNX-39: the general undo/redo/clear stack over `_marks`. SNX-70 folds
+    the eraser (TestEraserTool above) into this same stack -- `erase_at` no
+    longer has a private single-slot undo of its own -- so an erase takes
+    its turn in draw order alongside ordinary marks and rides the same
+    Ctrl+Z / bar Undo button / redo / commit-clears-redo rules the tests
+    below already cover for `add_mark`. SNX-72 folds `clear()` in the same
+    way: a clear used to drop `_marks` and both stacks outright with no way
+    back, and now takes its own turn in the same history instead.
     """
 
     RED = QColor(255, 0, 0)
@@ -2123,11 +2114,76 @@ class TestUndoRedoClear:
         overlay.redo()  # no-op: the stack this would have popped is gone
         assert overlay.marks == marks_before
 
-    def test_clear_empties_both_stacks_in_one_step(self):
+    def test_clear_moves_every_mark_to_the_undo_stack(self):
+        # SNX-72 AC: "the Undo button is enabled after a clear rather than
+        # greyed out."
         overlay = self._overlay()
         overlay.add_mark(self._mark((0, 0), (10, 10)))
         overlay.add_mark(self._mark((20, 20), (30, 30)))
-        overlay.undo()  # one mark now sits on the redo stack too
+
+        overlay.clear()
+
+        assert overlay.marks == ()
+        assert overlay.can_undo
+
+    def test_clear_still_empties_a_pre_existing_redo_stack(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+        overlay.add_mark(self._mark((20, 20), (30, 30)))
+        overlay.undo()  # one mark now sits on the redo stack
+        assert overlay.can_redo
+
+        overlay.clear()
+
+        assert not overlay.can_redo
+
+    def test_undo_after_clear_restores_every_mark_in_original_order(self):
+        # SNX-72 AC: "clearing all annotations can be undone, restoring
+        # every mark in its original draw order."
+        overlay = self._overlay()
+        first = self._mark((0, 0), (10, 10))
+        second = self._mark((20, 20), (30, 30))
+        overlay.add_mark(first)
+        overlay.add_mark(second)
+
+        overlay.clear()
+        overlay.undo()
+
+        assert overlay.marks == (first, second)
+
+    def test_redo_re_clears(self):
+        # SNX-72 AC: "redo re-clears, so the action round-trips like any
+        # other action."
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+        overlay.add_mark(self._mark((20, 20), (30, 30)))
+        overlay.clear()
+        overlay.undo()
+        assert overlay.marks != ()
+
+        overlay.redo()
+
+        assert overlay.marks == ()
+        assert overlay.can_undo
+        assert not overlay.can_redo
+
+    def test_committing_a_mark_after_undoing_a_clear_empties_the_redo_stack(self):
+        # SNX-72 AC: "committing a new mark after undoing a clear clears the
+        # redo stack, the same rule every other action follows."
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+        overlay.clear()
+        overlay.undo()
+        assert overlay.can_redo  # the clear sitting on the redo stack
+
+        overlay.add_mark(self._mark((50, 50), (60, 60)))
+
+        assert not overlay.can_redo
+
+    def test_clear_with_nothing_to_clear_is_a_no_op(self):
+        # SNX-72 AC: "clearing when there is nothing to clear is still a
+        # no-op and does not push an empty step onto the stack."
+        overlay = self._overlay()
 
         overlay.clear()
 
@@ -2135,14 +2191,76 @@ class TestUndoRedoClear:
         assert not overlay.can_undo
         assert not overlay.can_redo
 
-    def test_clear_is_not_itself_undoable(self):
+    def test_undo_restores_an_erased_mark_to_its_original_position(self):
+        # SNX-70 AC: "erasing a mark leaves undo available, and Ctrl+Z
+        # restores it to its original position in draw order."
         overlay = self._overlay()
-        overlay.add_mark(self._mark((0, 0), (10, 10)))
+        first = self._mark((10, 10), (30, 30))
+        second = self._mark((40, 40), (60, 60))
+        third = self._mark((70, 70), (90, 90))
+        overlay.add_mark(first)
+        overlay.add_mark(second)
+        overlay.add_mark(third)
 
-        overlay.clear()
-        overlay.undo()  # must not resurrect the cleared mark
+        erased = overlay.erase_at(QPointF(40, 50))  # `second`'s left border
+        assert erased is second
+        assert overlay.marks == (first, third)
+
+        overlay.undo()
+
+        # Restored between `first` and `third`, its original draw-order
+        # position -- not appended to the end.
+        assert overlay.marks == (first, second, third)
+
+    def test_redo_erases_the_mark_again(self):
+        # SNX-70 AC: "redo removes it again, so an erase round-trips like
+        # any other action."
+        overlay = self._overlay()
+        mark = self._mark((20, 20), (80, 80))
+        overlay.add_mark(mark)
+        overlay.erase_at(QPointF(20, 50))
+        overlay.undo()
+        assert overlay.marks == (mark,)
+
+        overlay.redo()
 
         assert overlay.marks == ()
+
+    def test_undo_twice_after_draw_then_erase_leaves_neither(self):
+        # SNX-70 AC: "an erase takes its turn in order alongside draws, so
+        # undoing twice after draw-then-erase leaves neither."
+        overlay = self._overlay()
+        mark = self._mark((20, 20), (80, 80))
+        overlay.add_mark(mark)
+        overlay.erase_at(QPointF(20, 50))
+        assert overlay.marks == ()
+
+        overlay.undo()  # undoes the erase: mark comes back
+        assert overlay.marks == (mark,)
+        overlay.undo()  # undoes the draw: mark is gone again
+
+        assert overlay.marks == ()
+        assert not overlay.can_undo
+
+    def test_committing_a_mark_after_an_erase_empties_the_redo_stack(self):
+        # SNX-70 AC: "committing a new mark after an erase clears the redo
+        # stack, the same rule every other action follows."
+        overlay = self._overlay()
+        mark = self._mark((20, 20), (80, 80))
+        overlay.add_mark(mark)
+        overlay.erase_at(QPointF(20, 50))
+        overlay.undo()
+        assert overlay.can_redo  # the erase sitting on the redo stack
+
+        overlay.add_mark(self._mark((100, 100), (120, 120)))
+
+        assert not overlay.can_redo
+
+    def test_no_separate_undo_erase_method_remains(self):
+        # SNX-70 AC: "no separate per-tool undo slot remains for the
+        # eraser" -- erase_at's own docstring used to point at a private
+        # `undo_erase`; it must be gone entirely now that undo() covers it.
+        assert not hasattr(OverlayWindow, "undo_erase")
 
 
 class TestCopy:
@@ -2994,6 +3112,11 @@ class TestOverlayWindowToasts:
 
     def test_a_toast_raised_while_the_first_is_showing_replaces_it(self):
         overlay = self._overlay()
+        # SNX-72: clear() is a no-op (no toast) with nothing to clear, so a
+        # mark must be on screen first for it to actually fire one.
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
 
         overlay.clear()
         assert overlay._toast._text_label.text() == "Ink cleared"

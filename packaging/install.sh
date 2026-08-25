@@ -70,37 +70,46 @@ exec "$venv_dir/bin/snipux" "\$@"
 LAUNCHER
 chmod +x "$launcher"
 
+# The .desktop file in the repo carries a placeholder Exec= line rather than
+# a bare "snipux" -- $bin_dir is not reliably on PATH in a graphical GNOME
+# session (see the keybinding below, which hit this same issue), so the
+# entries that get installed must carry the launcher's absolute path
+# instead of a name that may not resolve. `sed` (not `cp`) writes the real
+# path in on every run, so re-running this script rewrites both entries
+# rather than leaving a stale path behind.
 applications_dir="$HOME/.local/share/applications"
 echo "Installing desktop entry into $applications_dir..."
 mkdir -p "$applications_dir"
-cp "$script_dir/snipux.desktop" "$applications_dir/snipux.desktop"
+sed "s|^Exec=__SNIPUX_LAUNCHER__$|Exec=$launcher|" "$script_dir/snipux.desktop" > "$applications_dir/snipux.desktop"
+echo "Desktop entry written to $applications_dir/snipux.desktop (Exec=$launcher)"
 
 # Same .desktop file, second copy in the XDG autostart directory -- that is
 # the only difference between "launchable from the applications list" and
 # "brought back automatically at login" under the freedesktop autostart
 # spec, which GNOME (and every other compliant desktop) honours by reading
-# ~/.config/autostart/*.desktop at session start. A plain `cp` is already
-# idempotent: re-running this just overwrites the same filename, never adds
-# a second entry.
+# ~/.config/autostart/*.desktop at session start. Writing (not copying) is
+# already idempotent: re-running this just overwrites the same filename,
+# never adds a second entry.
 autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 echo "Installing autostart entry into $autostart_dir..."
 mkdir -p "$autostart_dir"
-cp "$script_dir/snipux.desktop" "$autostart_dir/snipux.desktop"
-echo "Autostart entry written to $autostart_dir/snipux.desktop"
+sed "s|^Exec=__SNIPUX_LAUNCHER__$|Exec=$launcher|" "$script_dir/snipux.desktop" > "$autostart_dir/snipux.desktop"
+echo "Autostart entry written to $autostart_dir/snipux.desktop (Exec=$launcher)"
 
 # The launcher goes into ~/.local/bin -- whether that's on PATH for a
 # *graphical* GNOME session (as opposed to the login shell this script runs
 # under) depends on how the display manager builds the session environment.
 # Check rather than assume, so a broken PATH shows up here instead of as a
-# silently dead tray icon / Super+Shift+S binding later.
+# silently dead terminal invocation later. The .desktop entries above are
+# unaffected either way, since they now carry $launcher's absolute path
+# rather than the bare "snipux" name.
 if command -v snipux >/dev/null 2>&1; then
     echo "Done. snipux is on PATH and listed in GNOME's application list."
 else
     echo "Done. snipux is installed and listed in GNOME's application list,"
     echo "but $bin_dir is not on PATH in this shell (checked: command -v snipux)."
-    echo "The .desktop entry's Exec=snipux line needs it resolvable in a"
-    echo "graphical session too -- make sure $bin_dir is on PATH there, e.g."
-    echo "by logging out and back in."
+    echo "Typing plain \"snipux\" from a terminal won't work there -- use"
+    echo "$launcher, or add $bin_dir to PATH, e.g. by logging out and back in."
 fi
 
 # Bind Super+Shift+S to the launcher via GNOME's custom-keybindings
