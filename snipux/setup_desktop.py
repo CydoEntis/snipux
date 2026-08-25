@@ -12,15 +12,17 @@ with no repository checkout present, and `install.sh` calls `run_setup()`
 (via `snipux --setup`) rather than repeating the logic -- one implementation,
 not two that drift.
 
-Every step -- desktop entry, autostart entry, GNOME shortcut -- is attempted
-and reported independently. One failing (no `gsettings`, a read-only
-`~/.config`) must not stop the rest, the same "a failure must not stop the
-next one" rule CLAUDE.md states for capture backends, applied here.
+Every step -- desktop entry, autostart entry, hicolor icon theme, GNOME
+shortcut -- is attempted and reported independently. One failing (no
+`gsettings`, a read-only `~/.config`) must not stop the rest, the same "a
+failure must not stop the next one" rule CLAUDE.md states for capture
+backends, applied here.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +34,12 @@ _LAUNCHER_PLACEHOLDER = "Exec=__SNIPUX_LAUNCHER__"
 _MEDIA_KEYS_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
 _SLOT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/"
 _SLOT_SCHEMA = f"{_MEDIA_KEYS_SCHEMA}.custom-keybinding:{_SLOT_PATH}"
+
+_LOGO_DIR = Path(__file__).resolve().parent / "design" / "logo"
+# Matches the vendored logo/snipux-<size>.png files -- SNX-81: not
+# design/logo/snipux.png (the unsized master), and not anything else that
+# could later land in the same directory.
+_LOGO_SIZE_RE = re.compile(r"^snipux-(\d+)\.png$")
 
 
 def find_console_script() -> Path | None:
@@ -172,21 +180,67 @@ def bind_gnome_shortcut(exec_path: Path) -> str:
     return f"Bound Super+Shift+S to run: {launcher_cmd}"
 
 
+def install_icons(hicolor_dir: Path | None = None) -> bool:
+    """Copy each vendored `design/logo/snipux-<size>.png` into the user's
+    hicolor icon theme, at `hicolor_dir/<size>x<size>/apps/snipux.png` --
+    the layout GNOME's app list and the window switcher actually search
+    when they resolve the desktop entry's `Icon=snipux` (SNX-81), rather
+    than a literal path the theme lookup never looks at.
+
+    Returns whether at least one size was installed, so `run_setup()` can
+    print an accurate report the same way its other steps do. Each size is
+    attempted independently and a failure on one (e.g. a read-only
+    `~/.local/share`) is reported and skipped rather than raised -- the
+    same "one step failing must not stop the rest" rule CLAUDE.md states
+    for capture backends, applied per-size here so one unwritable
+    directory doesn't also take out the sizes after it.
+    """
+    if hicolor_dir is None:
+        hicolor_dir = (
+            Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+            / "icons"
+            / "hicolor"
+        )
+
+    installed_sizes = []
+    for path in sorted(_LOGO_DIR.glob("snipux-*.png")):
+        match = _LOGO_SIZE_RE.match(path.name)
+        if match is None:
+            continue
+        size = match.group(1)
+        target_dir = hicolor_dir / f"{size}x{size}" / "apps"
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target_dir / "snipux.png")
+        except OSError as exc:
+            print(f"Note: could not install the {size}x{size} icon into {target_dir}: {exc}")
+            continue
+        installed_sizes.append(size)
+
+    if installed_sizes:
+        print(f"Icon theme entries ({', '.join(installed_sizes)}px) written under {hicolor_dir}")
+    else:
+        print(f"Note: no icon theme entries were written under {hicolor_dir}")
+
+    return bool(installed_sizes)
+
+
 def run_setup(
     *,
     exec_path: Path | None = None,
     applications_dir: Path | None = None,
     autostart_dir: Path | None = None,
+    hicolor_dir: Path | None = None,
 ) -> int:
     """The body of `snipux --setup`: desktop entry, autostart entry, GNOME
     shortcut -- everything `packaging/install.sh` used to do by hand after
     building its venv, now runnable straight from an installed copy of
     snipux with no repository checkout present.
 
-    `exec_path`/`applications_dir`/`autostart_dir` default to the real
-    console script and XDG locations, and are only ever overridden by
-    tests -- the same None-means-"build the real thing" pattern
-    `snipux/app.py` already uses for `registry`/`transport`.
+    `exec_path`/`applications_dir`/`autostart_dir`/`hicolor_dir` default to
+    the real console script and XDG locations, and are only ever
+    overridden by tests -- the same None-means-"build the real thing"
+    pattern `snipux/app.py` already uses for `registry`/`transport`.
 
     Returns 1 (and prints why, to stderr) only when the console script
     itself can't be found -- every other step below can produce a correct
@@ -221,6 +275,7 @@ def run_setup(
 
     _write_entry(applications_dir, contents, exec_path, "desktop")
     _write_entry(autostart_dir, contents, exec_path, "autostart")
+    install_icons(hicolor_dir)
     print(bind_gnome_shortcut(exec_path))
 
     return 0
