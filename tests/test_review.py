@@ -36,6 +36,36 @@ def make_image(width=800, height=600) -> QImage:
     return image
 
 
+def _press(widget, x, y):
+    from PyQt6.QtGui import QMouseEvent
+    from PyQt6.QtCore import QEvent, QPointF
+    return QMouseEvent(
+        QEvent.Type.MouseButtonPress, QPointF(x, y), QPointF(x, y),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _move(widget, x, y):
+    from PyQt6.QtGui import QMouseEvent
+    from PyQt6.QtCore import QEvent, QPointF
+    return QMouseEvent(
+        QEvent.Type.MouseMove, QPointF(x, y), QPointF(x, y),
+        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _release(widget, x, y):
+    from PyQt6.QtGui import QMouseEvent
+    from PyQt6.QtCore import QEvent, QPointF
+    return QMouseEvent(
+        QEvent.Type.MouseButtonRelease, QPointF(x, y), QPointF(x, y),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
 class TestChrome:
     def test_is_the_size_the_design_specifies(self):
         window = ReviewWindow(make_image())
@@ -128,12 +158,12 @@ class TestAnnotateMode:
 
         assert window._bar.isVisibleTo(window)
 
-    def test_the_button_becomes_done_annotating(self):
+    def test_the_button_becomes_done_editing(self):
         window = ReviewWindow(make_image())
 
         window._set_annotating(True)
 
-        assert window._annotate_button.text() == "Done annotating"
+        assert window._annotate_button.text() == "Done editing"
 
     def test_there_is_no_capture_mode_chip(self):
         # Nothing left to capture, so the chip the overlay carries is absent
@@ -285,3 +315,141 @@ class TestExport:
         reloaded = QImage(str(target))
         colours = {reloaded.pixelColor(x, 20).name() for x in range(20, 180)}
         assert "#ff0000" in colours, "the rectangle should be in the exported pixels"
+
+
+class TestEveryToolSurvivesAPaint:
+    """The crash: Blur and Pixelate are `ObscuringShape`s, which sample
+    already-rendered pixels through `apply()` and raise from `draw()`. The
+    canvas called `draw()` on every mark, so reaching for the blur tool
+    took the window down.
+    """
+
+    def _drawn(self, tool: str) -> ReviewWindow:
+        from snipux.marks import MarkStore
+
+        window = ReviewWindow(make_image(600, 400))
+        window.resize(1020, 700)
+        window._set_annotating(True)
+        window._canvas.resize(1020, 600)
+        window._canvas.set_tool(tool)
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 400, 300))
+        canvas.mouseMoveEvent(_move(canvas, 500, 380))
+        canvas.mouseReleaseEvent(_release(canvas, 500, 380))
+        return window
+
+    @pytest.mark.parametrize("tool", ["pen", "highlighter", "arrow", "rect", "step", "blur"])
+    def test_drawing_then_painting_does_not_raise(self, tool):
+        window = self._drawn(tool)
+
+        window._canvas.grab()  # a full paintEvent over the committed mark
+
+        assert len(window._store) == 1
+
+    def test_an_obscuring_mark_is_baked_rather_than_drawn(self):
+        # Painting it would raise; it has to go through the composite.
+        window = self._drawn("blur")
+
+        composite = window._canvas._composited()
+
+        assert composite is not window._canvas._image
+
+    def test_the_composite_is_cached_between_paints(self):
+        # Re-sampling every obscuring mark on every frame would stall.
+        window = self._drawn("blur")
+        first = window._canvas._composited()
+
+        assert window._canvas._composited() is first
+
+    def test_the_composite_is_recomputed_when_marks_change(self):
+        window = self._drawn("blur")
+        first = window._canvas._composited()
+
+        window._store.undo()
+
+        assert window._canvas._composited() is not first
+
+
+class TestTraysAreReachable:
+    """The other half of the report: the tools were selectable but not
+    configurable -- no pen size, no brush size, no colour -- because the
+    trays that set those live on the overlay window, and the review window
+    had none.
+    """
+
+    def _editing(self) -> ReviewWindow:
+        window = ReviewWindow(make_image())
+        window.resize(1020, 700)
+        window._set_annotating(True)
+        return window
+
+    def test_a_draw_tool_shows_the_colour_and_stroke_tray(self):
+        window = self._editing()
+
+        window._bar.select_tool("pen")
+        window._sync_tray()
+
+        assert window._tray.isVisibleTo(window._canvas)
+
+    def test_blur_replaces_it_with_the_blur_tray(self):
+        # At most one is ever up: it replaces the tray rather than joining it.
+        window = self._editing()
+
+        window._bar.select_tool("blur")
+        window._sync_tray()
+
+        assert window._blur_tray.isVisibleTo(window._canvas)
+        assert not window._tray.isVisibleTo(window._canvas)
+
+    def test_the_eraser_gets_neither(self):
+        window = self._editing()
+
+        window._bar.select_tool("eraser")
+        window._sync_tray()
+
+        assert not window._tray.isVisibleTo(window._canvas)
+        assert not window._blur_tray.isVisibleTo(window._canvas)
+
+    def test_the_stroke_slider_actually_changes_the_stroke(self):
+        window = self._editing()
+
+        window._tray.strokeChanged.emit(22)
+
+        assert window._canvas._stroke_width == 22
+
+    def test_the_swatches_actually_change_the_colour(self):
+        window = self._editing()
+
+        window._tray.colourChanged.emit("#ff0000")
+
+        assert window._canvas._ink_colour == "#ff0000"
+
+    def test_blur_strength_and_mode_reach_the_canvas(self):
+        window = self._editing()
+
+        window._blur_tray.strengthChanged.emit(14)
+        window._blur_tray.blurModeChanged.emit("pixelate")
+
+        assert window._canvas._blur_strength == 14
+        assert window._canvas._blur_mode == "pixelate"
+
+    def test_leaving_edit_mode_puts_the_trays_away(self):
+        window = self._editing()
+        window._bar.select_tool("pen")
+        window._sync_tray()
+
+        window._set_annotating(False)
+
+        assert not window._tray.isVisibleTo(window._canvas)
+
+
+class TestEditLabel:
+    def test_the_button_says_edit_not_annotate(self):
+        assert ReviewWindow(make_image())._annotate_button.text() == "Edit"
+
+    def test_and_done_editing_while_editing(self):
+        window = ReviewWindow(make_image())
+
+        window._set_annotating(True)
+
+        assert window._annotate_button.text() == "Done editing"

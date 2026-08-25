@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (
 from . import design, setup_desktop, shapes
 from .design import tokens
 from .marks import MarkStore, begin_stroke, extend_stroke
-from .overlay import FloatingBar
+from .overlay import BlurTray, FloatingBar, SettingsTray, ShapeToolPopover
 from .winchrome import AccentButton, SecondaryButton, WinWindow, _mono_font, _ui_font
 
 
@@ -73,7 +73,11 @@ class ImageCanvas(QWidget):
         self._tool: str | None = None
         self._ink_colour = tokens.INK_SWATCHES[0][1]
         self._stroke_width = tokens.Metric.STROKE_DEFAULT
+        self._blur_mode = "blur"
+        self._blur_strength = tokens.Metric.BLUR_DEFAULT
         self._in_progress: shapes.Shape | None = None
+        self._composite_key: tuple | None = None
+        self._composite: QImage = image
         self.setMouseTracking(True)
         self._store.changed.connect(self.update)
 
@@ -125,6 +129,9 @@ class ImageCanvas(QWidget):
 
     # -- annotation ------------------------------------------------------
 
+    def is_annotating(self) -> bool:
+        return self._annotating
+
     def set_annotating(self, annotating: bool) -> None:
         self._annotating = annotating
         self.setCursor(
@@ -135,8 +142,17 @@ class ImageCanvas(QWidget):
     def set_tool(self, tool: str | None) -> None:
         self._tool = tool
 
-    def set_ink(self, colour: str, stroke: int) -> None:
-        self._ink_colour, self._stroke_width = colour, stroke
+    def set_ink_colour(self, colour: str) -> None:
+        self._ink_colour = colour
+
+    def set_stroke_width(self, stroke: int) -> None:
+        self._stroke_width = stroke
+
+    def set_blur_mode(self, mode: str) -> None:
+        self._blur_mode = mode
+
+    def set_blur_strength(self, strength: int) -> None:
+        self._blur_strength = strength
 
     def rendered_image(self) -> QImage:
         """The image with every mark flattened onto it.
@@ -171,6 +187,8 @@ class ImageCanvas(QWidget):
             position,
             colour=QColor(self._ink_colour),
             stroke_width=self._stroke_width,
+            blur_mode=self._blur_mode,
+            blur_strength=self._blur_strength,
         )
         self.update()
 
@@ -191,6 +209,38 @@ class ImageCanvas(QWidget):
             self._store.add(finished)
             self.marksChanged.emit()
         self.update()
+
+    def _composited(self) -> QImage:
+        """The image with every committed obscuring mark baked in.
+
+        Cached against those marks' identity and geometry: a repaint
+        triggered by anything else -- an in-progress stroke, a resize, a
+        zoom -- must not redo the sampling every frame.
+        """
+        obscuring = [s for s in self._store.marks if isinstance(s, shapes.ObscuringShape)]
+        key = tuple(
+            (type(s).__name__, s.start.x(), s.start.y(), s.end.x(), s.end.y(),
+             getattr(s, "strength", None))
+            for s in obscuring
+        )
+        if key != self._composite_key:
+            result = self._image
+            for shape in obscuring:
+                result = shape.apply(result)
+            self._composite_key, self._composite = key, result
+        return self._composite
+
+    @staticmethod
+    def _draw_pending_region(painter: QPainter, shape) -> None:
+        from PyQt6.QtGui import QPen
+
+        rect = QRectF(shape.start, shape.end).normalized()
+        pen = QPen(QColor(tokens.Color.ACCENT))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
 
     # -- painting --------------------------------------------------------
 
@@ -231,16 +281,28 @@ class ImageCanvas(QWidget):
         painter.drawRect(rect.adjusted(-metric.REVIEW_IMG_RING, -metric.REVIEW_IMG_RING,
                                        metric.REVIEW_IMG_RING, metric.REVIEW_IMG_RING))
 
-        painter.drawImage(rect, self._image)
+        painter.drawImage(rect, self._composited())
 
-        # Ink, through the same transform the image got.
+        # Ink, through the same transform the image got. Obscuring marks are
+        # deliberately absent here: Blur and Pixelate sample already-rendered
+        # pixels via apply() and raise from draw(), so they are baked into
+        # the base image above instead -- the same split the overlay makes
+        # between `_base_layer_image` and `_paint_marks`.
         painter.save()
         painter.translate(rect.topLeft())
         painter.scale(self._scale(), self._scale())
         for shape in self._store.marks:
-            shape.draw(painter)
+            if not isinstance(shape, shapes.ObscuringShape):
+                shape.draw(painter)
         if self._in_progress is not None:
-            self._in_progress.draw(painter)
+            if isinstance(self._in_progress, shapes.ObscuringShape):
+                # An in-progress obscuring mark cannot be previewed by
+                # sampling on every mouse-move without stalling, so its
+                # region is outlined until it commits -- better than the
+                # nothing-at-all that read as the tool being broken.
+                self._draw_pending_region(painter, self._in_progress)
+            else:
+                self._in_progress.draw(painter)
         painter.restore()
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -311,15 +373,102 @@ class ReviewWindow(WinWindow):
 
         self._bar = FloatingBar(self._canvas, capture_chip=False, trailing="done")
         self._bar.hide()
-        self._bar.toolSelected.connect(self._canvas.set_tool)
+        self._bar.toolSelected.connect(self._on_tool_selected)
         self._bar.undoRequested.connect(self._store.undo)
         self._bar.redoRequested.connect(self._store.redo)
         self._bar.clearRequested.connect(self._store.clear)
+        self._bar.copyRequested.connect(self.copy)
         self._bar.saveRequested.connect(lambda: self._set_annotating(False))
+        self._bar.shapeMenuRequested.connect(self._toggle_shape_popover)
+
+        # The same trays the overlay shows, instantiated here rather than
+        # reimplemented: they are where colour, stroke width, blur mode and
+        # blur strength are actually set, and without them the bar's tools
+        # were selectable but unconfigurable -- no pen size, no brush size,
+        # no colour. `_sync_tray` shows at most one, exactly as the overlay
+        # does.
+        self._tray = SettingsTray(self._canvas)
+        self._tray.hide()
+        self._tray.colourChanged.connect(self._canvas.set_ink_colour)
+        self._tray.strokeChanged.connect(self._canvas.set_stroke_width)
+
+        self._blur_tray = BlurTray(self._canvas)
+        self._blur_tray.hide()
+        self._blur_tray.blurModeChanged.connect(self._canvas.set_blur_mode)
+        self._blur_tray.strengthChanged.connect(self._canvas.set_blur_strength)
+
+        # The rect button's Ellipse/Line/Crop submenu, for the same reason:
+        # three of the tools were unreachable without it.
+        self._shape_popover = ShapeToolPopover(self._canvas)
+        self._shape_popover.hide()
+        self._shape_popover.toolSelected.connect(self._on_shape_selected)
+
         self._store.changed.connect(self._on_edited)
 
         self._build_footer_contents()
         self._refresh_status()
+
+    def _on_tool_selected(self, tool: str) -> None:
+        self._canvas.set_tool(tool)
+        self._shape_popover.hide()
+        self._sync_tray()
+
+    def _on_shape_selected(self, shape: str) -> None:
+        self._shape_popover.hide()
+        self._bar.select_tool(shape)
+
+    def _toggle_shape_popover(self) -> None:
+        if self._shape_popover.isVisible():
+            self._shape_popover.hide()
+            return
+        active = self._bar.active_tool
+        self._shape_popover.set_tool(
+            active if active in tokens.RECT_GROUP else tokens.RECT_GROUP[0]
+        )
+        button = self._bar._tool_buttons["rect"]
+        origin = button.mapTo(self._canvas, QPoint(0, 0))
+        self._shape_popover.reposition(
+            QRect(origin, button.size()), QRectF(self._canvas.rect())
+        )
+        self._shape_popover.show()
+        self._shape_popover.raise_()
+
+    def _sync_tray(self) -> None:
+        """Show whichever tray matches the active tool, or neither.
+
+        At most one is ever visible, per the spec's "it replaces the colour
+        and stroke tray rather than sitting alongside it".
+        """
+        tool = self._bar.active_tool
+        for tray in (self._tray, self._blur_tray):
+            tray.hide()
+        # Gated on whether we are editing, not on whether the widget is
+        # mapped: `isVisible()` is false for a window that has not been
+        # shown yet, which would leave the trays down in every test and on
+        # the first paint of a window opened programmatically.
+        if not self._canvas.is_annotating():
+            return
+        tray = None
+        if tool in tokens.DRAW_TOOLS:
+            tray = self._tray
+        elif tool == "blur":
+            tray = self._blur_tray
+        if tray is None:
+            return
+        size = tray.sizeHint()
+        bar = self._bar.geometry()
+        tray.setGeometry(
+            round(bar.center().x() - size.width() / 2),
+            bar.bottom() + tokens.Metric.TRAY_OFFSET_Y,
+            size.width(),
+            size.height(),
+        )
+        # Below the bar would fall off the canvas floor here -- the bar
+        # already sits 18px from it -- so the tray goes above instead.
+        if tray.geometry().bottom() > self._canvas.height():
+            tray.move(tray.x(), bar.top() - tokens.Metric.TRAY_OFFSET_Y - size.height())
+        tray.show()
+        tray.raise_()
 
     # -- footer ----------------------------------------------------------
 
@@ -346,7 +495,7 @@ class ReviewWindow(WinWindow):
         stacked.addWidget(self._path_label)
         self.footer_left.addLayout(stacked)
 
-        self._annotate_button = SecondaryButton("Annotate")
+        self._annotate_button = SecondaryButton("Edit")
         self._annotate_button.clicked.connect(
             lambda: self._set_annotating(not self._canvas._annotating)
         )
@@ -426,8 +575,11 @@ class ReviewWindow(WinWindow):
     def _set_annotating(self, annotating: bool) -> None:
         self._canvas.set_annotating(annotating)
         self._bar.setVisible(annotating)
-        self._annotate_button.setText("Done annotating" if annotating else "Annotate")
+        self._annotate_button.setText("Done editing" if annotating else "Edit")
+        if not annotating:
+            self._shape_popover.hide()
         self._place_overlays()
+        self._sync_tray()
 
     @staticmethod
     def _display_path(path: Path | None) -> str:
