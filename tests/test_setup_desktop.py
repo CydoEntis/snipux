@@ -290,6 +290,79 @@ class TestInstallIcons:
         assert "no icon theme entries were written" in out
 
 
+class TestRenderIco:
+    """SNX-92: `render_ico()` is `install_icons()`'s Windows counterpart --
+    the same vendored `design/logo/snipux-<size>.png` files, packed into
+    one `.ico` instead of copied one by one into a hicolor theme.
+    """
+
+    HEADER = "<HHH"
+    ENTRY = "<BBBBHHII"
+
+    def _parse(self, data: bytes):
+        import struct
+
+        reserved, kind, count = struct.unpack_from(self.HEADER, data, 0)
+        entries = []
+        offset = struct.calcsize(self.HEADER)
+        for i in range(count):
+            width, height, colours, reserved2, planes, bpp, size, image_offset = (
+                struct.unpack_from(self.ENTRY, data, offset)
+            )
+            entries.append(
+                {
+                    "width": width,
+                    "height": height,
+                    "size": size,
+                    "offset": image_offset,
+                    "bytes": data[image_offset : image_offset + size],
+                }
+            )
+            offset += struct.calcsize(self.ENTRY)
+        return reserved, kind, entries
+
+    def test_header_names_an_icon_with_one_entry_per_vendored_size_up_to_256(self):
+        vendored = {
+            int(path.stem.split("-", 1)[1]): path
+            for path in setup_desktop._LOGO_DIR.glob("snipux-*.png")
+        }
+        expected_sizes = sorted(size for size in vendored if size <= 256)
+
+        data = setup_desktop.render_ico()
+
+        reserved, kind, entries = self._parse(data)
+        assert reserved == 0
+        assert kind == 1  # ICONDIR.idType: 1 means "icon", not "cursor"
+        assert [e["width"] for e in entries] == [s if s < 256 else 0 for s in expected_sizes]
+
+    def test_each_entry_is_the_vendored_png_bytes_verbatim(self):
+        vendored = {
+            int(path.stem.split("-", 1)[1]): path
+            for path in setup_desktop._LOGO_DIR.glob("snipux-*.png")
+            if int(path.stem.split("-", 1)[1]) <= 256
+        }
+
+        data = setup_desktop.render_ico()
+
+        _reserved, _kind, entries = self._parse(data)
+        for entry, (size, path) in zip(entries, sorted(vendored.items())):
+            assert entry["bytes"] == path.read_bytes()
+
+    def test_the_512px_master_is_left_out(self):
+        # ICONDIRENTRY's width/height are one byte each (0 meaning 256) --
+        # 512 has no representation there.
+        data = setup_desktop.render_ico()
+
+        _reserved, _kind, entries = self._parse(data)
+        assert all(e["width"] in range(0, 256) for e in entries)
+        assert 512 not in [e["width"] for e in entries]
+
+    def test_none_when_no_vendored_png_is_usable(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(setup_desktop, "_LOGO_DIR", tmp_path / "no-such-logo-dir")
+
+        assert setup_desktop.render_ico() is None
+
+
 class TestRunRemove:
     """SNX-83: `run_remove()` is `run_setup()`'s exact counterpart --
     everything it writes, `--remove` deletes -- so `pipx uninstall snipux`

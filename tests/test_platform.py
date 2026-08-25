@@ -15,11 +15,22 @@ are no longer stubs -- against a fake `ctypes.windll.user32`, the same
 `_patch_win32_dll`-style pattern test_capture.py already uses for
 `Win32GdiBackend`/`WindowsWindowGeometryProvider`, rather than actually
 grabbing a system-wide hotkey on whatever machine runs the suite.
+
+`TestCreateShortcut`/`TestWriteAndRemoveIcon`/`TestWindowsDesktopIntegration`
+(SNX-92) cover `WindowsPlatform.install_desktop_integration`/
+`remove_desktop_integration` for real. `_create_shortcut` (the COM
+`IShellLinkW`/`IPersistFile` call) is faked at the vtable itself
+(`_FakeShellLinkCom`), the COM counterpart of `_FakeUser32Hotkey` above;
+`install_desktop_integration`/`remove_desktop_integration`'s own tests fake
+`_create_shortcut` wholesale instead, the same "prove the orchestration
+reaches the real mechanism, which has its own tests" split
+`TestLinuxPlatform` already draws around `setup_desktop.run_setup`.
 """
 
 import ctypes
 import importlib
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -170,9 +181,10 @@ class TestLinuxPlatform:
 class TestStubPlatforms:
     """AC: macOS's implementation exists and raises a clear error naming the
     platform and the operation that isn't implemented yet. Windows'
-    `bind_shortcut`/`unbind_shortcut` are real now (SNX-91) -- see
-    `TestWindowsPlatform` below -- so it keeps only the operations still
-    unimplemented there.
+    `bind_shortcut`/`unbind_shortcut` (SNX-91) and
+    `install_desktop_integration`/`remove_desktop_integration` (SNX-92) are
+    real now -- see `TestWindowsPlatform`/`TestWindowsDesktopIntegration`
+    below -- so it keeps only the operation still unimplemented there.
     """
 
     DARWIN_OPERATIONS = (
@@ -183,11 +195,7 @@ class TestStubPlatforms:
         "default_save_folder",
     )
 
-    WINDOWS_UNIMPLEMENTED_OPERATIONS = (
-        "install_desktop_integration",
-        "remove_desktop_integration",
-        "default_save_folder",
-    )
+    WINDOWS_UNIMPLEMENTED_OPERATIONS = ("default_save_folder",)
 
     def test_every_darwin_operation_raises_naming_the_platform_and_the_operation(self):
         stub = darwin.DarwinPlatform()
@@ -384,6 +392,382 @@ class TestWindowsPlatform:
         result = platform_.unbind_shortcut()
 
         assert "Could not release" in result
+
+
+class TestGuid:
+    """`_guid()` -- the one piece of `_create_shortcut` that has nothing to
+    do with COM itself, exercised directly rather than only indirectly
+    through a real/faked `CoCreateInstance` call.
+    """
+
+    def test_parses_a_clsid_literal_into_its_fields(self):
+        # CLSID_ShellLink, byte for byte against shobjidl_core.h.
+        guid = windows._guid("{00021401-0000-0000-C000-000000000046}")
+
+        assert guid.data1 == 0x00021401
+        assert guid.data2 == 0x0000
+        assert guid.data3 == 0x0000
+        assert bytes(guid.data4) == bytes.fromhex("C000000000000046")
+
+
+class _FakeShellLinkCom:
+    """A COM object built as an actual vtable-shaped block of function
+    pointers (`ctypes` callback trampolines into this object's own
+    methods), not a plain Python double -- `_create_shortcut` talks to it
+    exactly the way it would talk to the real `IShellLinkW`/`IPersistFile`:
+    by reading `interface[0][index]` and calling through it
+    (`windows._com_call`). Faking it at that level is what proves
+    `_create_shortcut`'s vtable slot indices are the real COM layout and
+    not off by one, the same reason test_capture.py's `_FakeUser32Windows`
+    replaces `EnumWindows` itself rather than mocking
+    `WindowsWindowGeometryProvider.list_windows`.
+
+    `fail_save` simulates `IPersistFile.Save` itself failing (e.g. a
+    read-only Start Menu folder) -- every call up to that point still
+    succeeds, matching what a real HRESULT failure there looks like.
+    """
+
+    _HRESULT = ctypes.c_long
+
+    def __init__(self, fail_save=False):
+        self.path = None
+        self.description = None
+        self.icon_location = None
+        self.saved_to = None
+        self.released = []
+        self._fail_save = fail_save
+        self._keepalive = []  # ctypes callback trampolines must outlive the calls
+        self.shell_link = self._build_shell_link_vtable()
+        self.persist_file = self._build_persist_file_vtable()
+
+    def _vtable(self, size, slots):
+        entries = [0] * size
+        for index, func in slots.items():
+            self._keepalive.append(func)
+            entries[index] = ctypes.cast(func, ctypes.c_void_p).value
+        vtable_array = (ctypes.c_void_p * size)(*entries)
+        instance = (ctypes.c_void_p * 1)(ctypes.cast(vtable_array, ctypes.c_void_p))
+        self._keepalive.extend([vtable_array, instance])
+        return ctypes.cast(instance, ctypes.c_void_p)
+
+    def _build_shell_link_vtable(self):
+        def query_interface(_this, _riid, out):
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = self.persist_file.value
+            return 0
+
+        def release(_this):
+            self.released.append("shell_link")
+            return 0
+
+        def set_description(_this, text):
+            self.description = text
+            return 0
+
+        def set_icon_location(_this, path, index):
+            self.icon_location = (path, index)
+            return 0
+
+        def set_path(_this, path):
+            self.path = path
+            return 0
+
+        return self._vtable(
+            21,
+            {
+                0: ctypes.WINFUNCTYPE(
+                    self._HRESULT, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+                )(query_interface),
+                2: ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(release),
+                7: ctypes.WINFUNCTYPE(self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p)(
+                    set_description
+                ),
+                17: ctypes.WINFUNCTYPE(
+                    self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int
+                )(set_icon_location),
+                20: ctypes.WINFUNCTYPE(self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p)(set_path),
+            },
+        )
+
+    def _build_persist_file_vtable(self):
+        def release(_this):
+            self.released.append("persist_file")
+            return 0
+
+        def save(_this, filename, _remember):
+            if self._fail_save:
+                return 1  # a failing HRESULT
+            self.saved_to = filename
+            return 0
+
+        return self._vtable(
+            9,
+            {
+                2: ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(release),
+                6: ctypes.WINFUNCTYPE(
+                    self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int
+                )(save),
+            },
+        )
+
+
+def _patch_windows_com(monkeypatch, fake=None, *, cocreate_hresult=0):
+    """Points `windows.ctypes.windll.ole32` at a fake `CoCreateInstance`
+    that hands back `fake.shell_link` (a real vtable-shaped COM double --
+    see `_FakeShellLinkCom`) -- the COM counterpart of
+    `_patch_windows_hotkey_dll`. Also stands `ctypes.WINFUNCTYPE` in for
+    `windows.ctypes.WINFUNCTYPE` off Windows, the same substitution
+    test_capture.py's `_patch_windows_geometry_dll` already makes for the
+    same reason: the real one only exists under `sys.platform == "win32"`,
+    and `ctypes.CFUNCTYPE` builds the same kind of callable trampoline
+    without ever crossing into real Win32 code.
+    """
+
+    def co_create_instance(_clsid, _outer, _clsctx, _iid, out):
+        if cocreate_hresult != 0:
+            return cocreate_hresult
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = fake.shell_link.value
+        return 0
+
+    ole32 = SimpleNamespace(
+        CoInitialize=lambda _reserved: 0,
+        CoUninitialize=lambda: None,
+        CoCreateInstance=co_create_instance,
+    )
+    monkeypatch.setattr(windows.ctypes, "windll", SimpleNamespace(ole32=ole32), raising=False)
+    monkeypatch.setattr(windows.ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE, raising=False)
+
+
+class TestCreateShortcut:
+    """AC: the Start Menu/Startup entries are real `.lnk` shortcuts, built
+    through COM (`IShellLinkW`/`IPersistFile`) rather than a `.cmd` or bare
+    copy of the executable -- `_create_shortcut` is the one place that
+    happens.
+    """
+
+    def test_writes_the_target_description_and_icon_then_saves(self, monkeypatch):
+        fake = _FakeShellLinkCom()
+        _patch_windows_com(monkeypatch, fake)
+        lnk_path = Path("C:/Users/x/snipux.lnk")
+        target = Path("C:/Program Files/snipux/snipux.exe")
+        icon_path = Path("C:/Users/x/AppData/Local/snipux/snipux.ico")
+
+        result = windows._create_shortcut(
+            lnk_path, target, icon_path=icon_path, description="snipux"
+        )
+
+        assert result is True
+        # str(), not the forward-slash literal above: _create_shortcut hands
+        # COM whatever str(Path(...)) gives it, which is backslash-separated
+        # on the real Windows this suite sometimes runs directly on.
+        assert fake.path == str(target)
+        assert fake.description == "snipux"
+        assert fake.icon_location == (str(icon_path), 0)
+        assert fake.saved_to == str(lnk_path)
+        # Both interfaces released, not just the one _create_shortcut asked
+        # CoCreateInstance for -- a leaked COM reference on every --setup
+        # run is exactly the kind of bug this fake exists to catch.
+        assert fake.released == ["persist_file", "shell_link"]
+
+    def test_no_description_or_icon_skips_those_calls(self, monkeypatch):
+        fake = _FakeShellLinkCom()
+        _patch_windows_com(monkeypatch, fake)
+        lnk_path = Path("C:/x/snipux.lnk")
+
+        windows._create_shortcut(lnk_path, Path("C:/x/snipux.exe"))
+
+        assert fake.description is None
+        assert fake.icon_location is None
+        assert fake.saved_to == str(lnk_path)
+
+    def test_a_cocreateinstance_failure_is_reported_as_false_not_raised(self, monkeypatch):
+        _patch_windows_com(monkeypatch, cocreate_hresult=1)  # a failing HRESULT
+
+        result = windows._create_shortcut(Path("C:/x/snipux.lnk"), Path("C:/x/snipux.exe"))
+
+        assert result is False
+
+    def test_a_save_failure_is_reported_as_false_not_raised(self, monkeypatch):
+        fake = _FakeShellLinkCom(fail_save=True)
+        _patch_windows_com(monkeypatch, fake)
+
+        result = windows._create_shortcut(Path("C:/x/snipux.lnk"), Path("C:/x/snipux.exe"))
+
+        assert result is False
+        # Still released, even on failure -- a leak on the failure path
+        # would be worse than one on the happy path, since a broken
+        # shortcut is exactly when --setup is likely to be run again.
+        assert fake.released == ["persist_file", "shell_link"]
+
+
+class TestWriteAndRemoveIcon:
+    """`_write_icon`/`_remove_icon` -- the Windows analogue of
+    `setup_desktop.install_icons`/`remove_icons`, minus the multi-size
+    hicolor layout: Windows gets one `.ico` file built from all the
+    vendored sizes at once (`setup_desktop.render_ico`).
+    """
+
+    def test_writes_the_rendered_ico(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(setup_desktop, "render_ico", lambda: b"fake-ico-bytes")
+        icon_path = tmp_path / "snipux" / "snipux.ico"
+
+        result = windows._write_icon(icon_path)
+
+        assert result is True
+        assert icon_path.read_bytes() == b"fake-ico-bytes"
+
+    def test_no_vendored_icon_is_a_note_not_a_failure(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(setup_desktop, "render_ico", lambda: None)
+
+        result = windows._write_icon(tmp_path / "snipux.ico")
+
+        assert result is False
+        assert "generic icon" in capsys.readouterr().out
+
+    def test_removing_a_written_icon(self, tmp_path):
+        icon_path = tmp_path / "snipux.ico"
+        icon_path.write_bytes(b"x")
+
+        assert windows._remove_icon(icon_path) is True
+        assert not icon_path.exists()
+
+    def test_removing_a_missing_icon_is_harmless(self, tmp_path, capsys):
+        result = windows._remove_icon(tmp_path / "snipux.ico")
+
+        assert result is True
+        assert "nothing to remove" in capsys.readouterr().out
+
+
+class TestWindowsDesktopIntegration:
+    """AC: `snipux --setup`/`snipux --remove` on Windows create/remove a
+    Start Menu entry and a Startup (login) entry, both showing the snipux
+    icon, and running either command twice is harmless. `_create_shortcut`
+    is faked here (see `TestCreateShortcut` above for its own real COM
+    coverage) so these tests are about `install_desktop_integration`'s/
+    `remove_desktop_integration`'s own orchestration: which paths, which
+    order, which failures are fatal.
+    """
+
+    def _use_tmp_dirs(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+        monkeypatch.setattr(setup_desktop, "config_path", lambda config_dir=None: tmp_path / "config.json")
+        monkeypatch.setattr(setup_desktop, "find_console_script", lambda: Path("C:/snipux/snipux.exe"))
+
+    def test_writes_a_start_menu_and_a_startup_shortcut(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        created = []
+        monkeypatch.setattr(
+            windows,
+            "_create_shortcut",
+            lambda lnk, target, **kw: created.append((lnk, target)) or True,
+        )
+
+        exit_code = windows.WindowsPlatform().install_desktop_integration()
+
+        assert exit_code == 0
+        start_menu = tmp_path / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+        [(lnk1, target1), (lnk2, target2)] = created
+        assert lnk1 == start_menu / "snipux.lnk"
+        assert lnk2 == start_menu / "Startup" / "snipux.lnk"
+        assert target1 == target2 == Path("C:/snipux/snipux.exe")
+
+    def test_writes_the_icon_before_the_shortcuts_point_at_it(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(setup_desktop, "render_ico", lambda: b"icon-bytes")
+        icon_paths = []
+        monkeypatch.setattr(
+            windows,
+            "_create_shortcut",
+            lambda lnk, target, icon_path=None, **kw: icon_paths.append(icon_path) or True,
+        )
+
+        windows.WindowsPlatform().install_desktop_integration()
+
+        expected_icon = tmp_path / "Local" / "snipux" / "snipux.ico"
+        assert expected_icon.read_bytes() == b"icon-bytes"
+        assert icon_paths == [expected_icon, expected_icon]
+
+    def test_missing_console_script_is_fatal(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(setup_desktop, "find_console_script", lambda: None)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+
+        exit_code = windows.WindowsPlatform().install_desktop_integration()
+
+        assert exit_code == 1
+
+    def test_a_shortcut_failing_to_write_does_not_stop_the_other(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        calls = []
+
+        def flaky_create(lnk, target, **kw):
+            calls.append(lnk)
+            return "Startup" not in str(lnk)  # the Start Menu one fails
+
+        monkeypatch.setattr(windows, "_create_shortcut", flaky_create)
+
+        exit_code = windows.WindowsPlatform().install_desktop_integration()
+
+        assert exit_code == 0
+        assert len(calls) == 2  # both attempted despite the first failing
+
+    def test_an_invalid_shortcut_is_rejected_before_writing_anything(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+
+        exit_code = windows.WindowsPlatform().install_desktop_integration(shortcut="S")
+
+        assert exit_code == 1
+
+    def test_a_valid_shortcut_is_remembered(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+
+        windows.WindowsPlatform().install_desktop_integration(shortcut="Control+Alt+X")
+
+        assert setup_desktop.load_shortcut() == "Control+Alt+X"
+
+    def test_running_setup_twice_is_harmless(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+
+        first = windows.WindowsPlatform().install_desktop_integration()
+        second = windows.WindowsPlatform().install_desktop_integration()
+
+        assert first == 0
+        assert second == 0
+
+    def test_remove_deletes_both_shortcuts_and_the_icon(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+        windows.WindowsPlatform().install_desktop_integration()
+        start_menu = tmp_path / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+        icon_path = tmp_path / "Local" / "snipux" / "snipux.ico"
+        assert icon_path.exists()  # install_desktop_integration() just wrote a real one
+
+        exit_code = windows.WindowsPlatform().remove_desktop_integration()
+
+        assert exit_code == 0
+        assert not (start_menu / "snipux.lnk").exists()
+        assert not (start_menu / "Startup" / "snipux.lnk").exists()
+        assert not icon_path.exists()
+
+    def test_remove_forgets_the_remembered_shortcut(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        setup_desktop.save_shortcut("Alt+Print")
+
+        windows.WindowsPlatform().remove_desktop_integration()
+
+        assert setup_desktop.load_shortcut() == setup_desktop.DEFAULT_SHORTCUT
+
+    def test_running_remove_twice_is_harmless(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+
+        first = windows.WindowsPlatform().remove_desktop_integration()
+        second = windows.WindowsPlatform().remove_desktop_integration()
+
+        assert first == 0
+        assert second == 0
 
 
 class TestAcceleratorToWin32:
