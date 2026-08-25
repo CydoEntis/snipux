@@ -33,3 +33,8 @@ include = ["snipux", "snipux.*"]
 # even though design/fonts/ is empty in this handoff -- vendoring IBM Plex
 # later should need no packaging change, only dropping the files in.
 "snipux.design" = ["icons/*.svg", "fonts/*.ttf", "fonts/*.otf"]
+# snipux.desktop is read at runtime by setup_desktop.py via Path(__file__),
+# the same pattern as design/icons above -- SNX-73: this is what lets
+# `snipux --setup` write a real .desktop entry from an installed wheel with
+# no repository checkout present.
+"snipux" = ["snipux.desktop"]
