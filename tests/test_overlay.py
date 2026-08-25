@@ -1767,14 +1767,16 @@ class TestHandleCursors:
         assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor
 
         # Outside the selection *and* clear of every other chrome widget --
-        # (10, 10) used to qualify, but SNX-46's HintHUD now spans the
-        # window's full width for its own HUD_H=44px strip, so a move there
-        # lands on that child widget instead of reaching this one's own
-        # mouseMoveEvent at all (Qt delivers it to whichever widget is
-        # actually under the point), leaving this cursor stuck rather than
-        # unset. (280, 280) sits below the HUD, below the floating bar, and
-        # outside the selection, so it actually exercises this widget's own
-        # cursor-reset branch.
+        # (10, 10) used to qualify, but SNX-46's HintHUD spans the window's
+        # full width for its own HUD_H=44px strip whenever hints are on
+        # (SNX-65 turned that off by default, but this must hold for either
+        # state), so a move there could land on that child widget instead of
+        # reaching this one's own mouseMoveEvent at all (Qt delivers it to
+        # whichever widget is actually under the point), leaving this cursor
+        # stuck rather than unset. (280, 280) sits below the HUD, below the
+        # floating bar, and outside the selection, so it actually exercises
+        # this widget's own cursor-reset branch regardless of the HUD's
+        # visibility.
         QTest.mouseMove(overlay, QPoint(280, 280))
         assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
 
@@ -1837,7 +1839,7 @@ class TestReframing:
         assert sel.x() == 100  # anchor edge never moved
         assert sel.width() == tokens.Metric.SEL_MIN_W == 16
 
-    def test_drag_keeps_the_selection_clear_of_the_left_and_top_edges(self):
+    def test_drag_keeps_the_selection_clear_of_the_left_edge(self):
         overlay = self._overlay()
         overlay.set_selection(QRect(100, 100, 150, 100))
         press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
@@ -1846,7 +1848,11 @@ class TestReframing:
 
         sel = overlay._selection
         assert sel.x() == 0  # x >= 0
-        assert sel.y() == 52  # y >= 52, clear of the hint HUD
+        # y >= 52 (clear of the hint HUD) only applies while hints are on;
+        # this overlay's default is now off (SNX-65), so the top edge is
+        # free to reach 0 -- see TestReframingClearsTheShownHUD for the
+        # hints_enabled=True case that still clamps to _TOP_CLEARANCE.
+        assert sel.y() == 0
 
     def test_drag_keeps_the_selection_inside_the_window(self):
         overlay = self._overlay(size=(400, 400))
@@ -5166,22 +5172,24 @@ class TestHintHUDFill:
 class TestHintHUDOverlayIntegration:
     """SNX-46: `HintHUD` wired into `OverlayWindow` as `_hud`, behind the
     `hints` preference the spec's "Top hint HUD" section puts it behind --
-    default on -- and gated on this window's own visibility the same way
-    `_bar`/`_toast` already are (`TestFloatingBarIntegration`/
-    `TestOverlayWindowToasts` above document why).
+    default off as of SNX-65, since the banner read as a stray element
+    across the top of every capture rather than help -- and gated on this
+    window's own visibility the same way `_bar`/`_toast` already are
+    (`TestFloatingBarIntegration`/`TestOverlayWindowToasts` above document
+    why).
     """
 
     def _overlay(self, size=(800, 600), **kwargs):
         frame = make_frame(image_size=size, logical_size=size)
         return OverlayWindow(frame, **kwargs)
 
-    def test_hints_enabled_defaults_to_true(self):
+    def test_hints_enabled_defaults_to_false(self):
         overlay = self._overlay()
 
-        assert overlay.hints_enabled
+        assert not overlay.hints_enabled
 
     def test_hud_becomes_visible_once_the_overlay_is_shown(self):
-        overlay = self._overlay()
+        overlay = self._overlay(hints_enabled=True)
 
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
@@ -5197,14 +5205,16 @@ class TestHintHUDOverlayIntegration:
         # Mirrors
         # test_bar_stays_hidden_and_unpainted_while_the_overlay_itself_is_not_shown:
         # none of this file's other OverlayWindow pixel tests call .show()
-        # before grab()ing, so the HUD -- default on -- must not leak into
-        # any of them just because it exists as a real child widget now.
-        overlay = self._overlay()
+        # before grab()ing, so the HUD must not leak into any of them just
+        # because it exists as a real child widget -- true regardless of the
+        # preference, but hints_enabled=True is the stricter case since
+        # default-off alone would already keep it hidden here.
+        overlay = self._overlay(hints_enabled=True)
 
         assert not overlay._hud.isVisible()
 
     def test_set_hints_enabled_false_hides_the_hud_immediately(self):
-        overlay = self._overlay()
+        overlay = self._overlay(hints_enabled=True)
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         assert overlay._hud.isVisible()
@@ -5215,7 +5225,7 @@ class TestHintHUDOverlayIntegration:
         assert not overlay.hints_enabled
 
     def test_set_hints_enabled_true_shows_it_again(self):
-        overlay = self._overlay()
+        overlay = self._overlay(hints_enabled=True)
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_hints_enabled(False)
@@ -5233,8 +5243,19 @@ class TestHintHUDOverlayIntegration:
         assert not overlay.hints_enabled
         assert not overlay._hud.isVisible()
 
+    def test_constructor_can_start_with_the_preference_on(self):
+        # The AC's "still reachable... for a user who wants to see the
+        # shortcuts": a caller (or `?`, see TestHintPreferenceKeyboardToggle
+        # below) can still ask for the banner from the very first frame.
+        overlay = self._overlay(hints_enabled=True)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        assert overlay.hints_enabled
+        assert overlay._hud.isVisible()
+
     def test_hud_hides_again_once_the_overlay_itself_is_hidden(self):
-        overlay = self._overlay()
+        overlay = self._overlay(hints_enabled=True)
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         assert overlay._hud.isVisible()
@@ -5250,6 +5271,10 @@ class TestReframingClearsTheShownHUD:
     this room ahead of the HUD existing -- this asserts the two actually
     agree, per the ticket's "the HUD and that constraint have to agree,"
     rather than just trusting the arithmetic in each one's comments.
+
+    SNX-65: hints are off by default now, so every case here that means to
+    exercise the clamp constructs with `hints_enabled=True` explicitly --
+    the class name says "shown" HUD, not "possibly shown."
     """
 
     def test_top_clearance_constant_is_at_least_the_huds_own_height(self):
@@ -5257,7 +5282,7 @@ class TestReframingClearsTheShownHUD:
 
     def test_dragging_the_top_left_corner_off_screen_stops_clear_of_the_visible_hud(self):
         frame = make_frame(image_size=(400, 400), logical_size=(400, 400))
-        overlay = OverlayWindow(frame)
+        overlay = OverlayWindow(frame, hints_enabled=True)
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         assert overlay._hud.isVisible()
@@ -5273,6 +5298,25 @@ class TestReframingClearsTheShownHUD:
         # the clamped selection's top must clear it, not just equal it.
         assert overlay._selection.y() > overlay._hud.geometry().bottom()
 
+    def test_dragging_the_top_left_corner_off_screen_reaches_the_top_with_hints_off(self):
+        # SNX-65 AC: "the selection can use the screen space the HUD
+        # previously reserved at the top." With hints off (the default),
+        # `_TOP_CLEARANCE` must not hold that 52px strip shut for a bar
+        # nobody is shown -- the corner should be free to reach y == 0.
+        frame = make_frame(image_size=(400, 400), logical_size=(400, 400))
+        overlay = OverlayWindow(frame)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        assert not overlay._hud.isVisible()
+        overlay.set_selection(QRect(100, 100, 150, 100))
+        press = overlay._corner_hit_rect(Handle.TOP_LEFT).center().toPoint()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
+        QTest.mouseMove(overlay, QPoint(-50, -50))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(-50, -50))
+
+        assert overlay._selection.y() == 0
+
 
 class TestHintHUDExcludedFromExport:
     """SNX-46 AC: 'the HUD never appears in the exported image.'"""
@@ -5280,7 +5324,7 @@ class TestHintHUDExcludedFromExport:
     def test_rendered_image_is_identical_whether_or_not_the_hud_is_shown(self):
         size = (400, 400)
         frame = make_frame(image_size=size, logical_size=size)
-        overlay = OverlayWindow(frame)
+        overlay = OverlayWindow(frame, hints_enabled=True)
         overlay.set_selection(QRect(52, 52, 200, 150))
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
@@ -5294,6 +5338,58 @@ class TestHintHUDExcludedFromExport:
         without_hud = overlay.rendered_image()
 
         assert with_hud == without_hud
+
+
+class TestHintPreferenceKeyboardToggle:
+    """SNX-65 AC: the hint text stays reachable, without editing a file, for
+    a user who wants to see the shortcuts -- `?` flips `_hints_enabled` the
+    same way a caller driving `set_hints_enabled` directly would.
+    """
+
+    def _overlay(self, **kwargs):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame, **kwargs)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_question_mark_turns_the_hud_on_from_the_default_off_state(self):
+        overlay = self._overlay()
+        assert not overlay._hud.isVisible()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Question)
+
+        assert overlay.hints_enabled
+        assert overlay._hud.isVisible()
+
+    def test_question_mark_turns_the_hud_back_off(self):
+        overlay = self._overlay(hints_enabled=True)
+        assert overlay._hud.isVisible()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Question)
+
+        assert not overlay.hints_enabled
+        assert not overlay._hud.isVisible()
+
+    def test_question_mark_is_suppressed_while_shortcuts_are_suppressed(self):
+        # Mirrors the tool-letter shortcuts' own suppression while a
+        # text-editing widget has focus (_shortcuts_suppressed) -- typing
+        # "?" into a label must not also toggle the HUD out from under it.
+        # Not shown, same as TestKeyboardToolShortcuts's own suppression
+        # cases -- self.focusWidget() reports a child given focus via
+        # setFocus() regardless of whether the window is ever shown, and an
+        # actually-shown window here would hand focus to the bar's first
+        # button instead of respecting this label's setFocus() call.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Question)
+
+        assert not overlay.hints_enabled
 
 
 class TestKeyboardToolShortcuts:
