@@ -282,6 +282,17 @@ class TestPackagedDistribution:
         assert expected, "expected at least one vendored icon in the source tree"
         assert expected <= wheel_contents
 
+    def test_every_vendored_logo_file_is_in_the_wheel(self, wheel_contents):
+        # SNX-81: design/logo/*.png (the tray/app/desktop-entry artwork) is
+        # read at runtime by app.py's load_app_icon() and setup_desktop.py's
+        # install_icons() the same way icons/*.svg is read by design/
+        # __init__.py -- the same undeclared-package-data gap SNX-56 fixed
+        # for icons/*.svg would silently drop this too.
+        logo_dir = _REPO_ROOT / "snipux" / "design" / "logo"
+        expected = {f"snipux/design/logo/{path.name}" for path in logo_dir.glob("*.png")}
+        assert expected, "expected at least one vendored logo file in the source tree"
+        assert expected <= wheel_contents
+
     def test_font_files_are_in_the_wheel_when_present(self, wheel_contents):
         # design/fonts/ is empty in this handoff (see design/__init__.py),
         # so this is written to hold once IBM Plex is vendored rather than

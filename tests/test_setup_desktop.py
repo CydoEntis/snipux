@@ -68,6 +68,10 @@ class TestRenderDesktopEntry:
         # rewrites the one placeholder line.
         assert "Name=snipux" in rendered
         assert "Type=Application" in rendered
+        # SNX-81: names our own icon (installed by install_icons() into the
+        # hicolor theme), not org.gnome.Screenshot -- GNOME's own
+        # screenshot tool's icon.
+        assert "Icon=snipux" in rendered
 
 
 class TestRunSetup:
@@ -80,6 +84,7 @@ class TestRunSetup:
             exec_path=exec_path,
             applications_dir=applications_dir,
             autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
         )
 
         assert exit_code == 0
@@ -101,11 +106,13 @@ class TestRunSetup:
             exec_path=exec_path,
             applications_dir=applications_dir,
             autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
         )
         setup_desktop.run_setup(
             exec_path=exec_path,
             applications_dir=applications_dir,
             autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
         )
 
         assert list(applications_dir.iterdir()) == [applications_dir / "snipux.desktop"]
@@ -119,6 +126,7 @@ class TestRunSetup:
         exit_code = setup_desktop.run_setup(
             applications_dir=tmp_path / "applications",
             autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
         )
 
         assert exit_code == 1
@@ -150,12 +158,98 @@ class TestRunSetup:
             exec_path=exec_path,
             applications_dir=applications_dir,
             autostart_dir=autostart_dir,
+            hicolor_dir=tmp_path / "icons",
         )
 
         assert exit_code == 0
         assert (autostart_dir / "snipux.desktop").exists()
         out = capsys.readouterr().out
         assert "Note: could not write the desktop entry" in out
+
+    def test_installs_the_hicolor_icon_theme_entries(self, tmp_path):
+        hicolor_dir = tmp_path / "icons"
+
+        exit_code = setup_desktop.run_setup(
+            exec_path=Path("/opt/snipux/bin/snipux"),
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=hicolor_dir,
+        )
+
+        assert exit_code == 0
+        installed = {path.name for path in hicolor_dir.glob("*/apps/snipux.png")}
+        assert installed == {"snipux.png"}
+        # One per vendored size, not just one -- GNOME's app list and the
+        # window switcher each ask for a different resolution.
+        sizes = {path.parent.parent.name for path in hicolor_dir.glob("*/apps/snipux.png")}
+        vendored_sizes = {
+            f"{path.stem.split('-')[1]}x{path.stem.split('-')[1]}"
+            for path in setup_desktop._LOGO_DIR.glob("snipux-*.png")
+        }
+        assert sizes == vendored_sizes
+
+
+class TestInstallIcons:
+    """SNX-81: `install_icons()` is what places the vendored
+    `design/logo/snipux-<size>.png` files into the layout GNOME's app list
+    and window switcher actually search -- `hicolor_dir/<size>x<size>/
+    apps/snipux.png` -- rather than `Icon=snipux` in the desktop entry
+    resolving to nothing.
+    """
+
+    def test_copies_every_vendored_size_into_its_own_hicolor_directory(self, tmp_path):
+        hicolor_dir = tmp_path / "hicolor"
+
+        result = setup_desktop.install_icons(hicolor_dir)
+
+        assert result is True
+        for path in setup_desktop._LOGO_DIR.glob("snipux-*.png"):
+            size = path.stem.split("-", 1)[1]
+            installed = hicolor_dir / f"{size}x{size}" / "apps" / "snipux.png"
+            assert installed.read_bytes() == path.read_bytes()
+
+    def test_running_twice_leaves_the_same_single_file_per_size(self, tmp_path):
+        hicolor_dir = tmp_path / "hicolor"
+
+        setup_desktop.install_icons(hicolor_dir)
+        setup_desktop.install_icons(hicolor_dir)
+
+        for size_dir in hicolor_dir.iterdir():
+            assert [p.name for p in (size_dir / "apps").iterdir()] == ["snipux.png"]
+
+    def test_one_size_failing_to_write_does_not_stop_the_others(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        hicolor_dir = tmp_path / "hicolor"
+        failing_size_dir = hicolor_dir / "16x16"
+
+        real_mkdir = Path.mkdir
+
+        def failing_mkdir(self, *args, **kwargs):
+            if self == failing_size_dir / "apps":
+                raise PermissionError("no")
+            return real_mkdir(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", failing_mkdir)
+
+        result = setup_desktop.install_icons(hicolor_dir)
+
+        assert result is True  # at least one other size still made it
+        assert not (failing_size_dir / "apps" / "snipux.png").exists()
+        assert (hicolor_dir / "32x32" / "apps" / "snipux.png").exists()
+        out = capsys.readouterr().out
+        assert "Note: could not install the 16x16 icon" in out
+
+    def test_reports_and_returns_false_when_nothing_could_be_installed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(setup_desktop, "_LOGO_DIR", tmp_path / "no-such-logo-dir")
+
+        result = setup_desktop.install_icons(tmp_path / "hicolor")
+
+        assert result is False
+        out = capsys.readouterr().out
+        assert "no icon theme entries were written" in out
 
 
 class TestAppendSlot:

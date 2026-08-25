@@ -1,7 +1,7 @@
 import re
 
 import pytest
-from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF, Qt
+from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, QSizeF, Qt
 from PyQt6.QtGui import QGuiApplication, QImage, qRgb
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtTest import QTest
@@ -181,6 +181,53 @@ def test_main_does_not_require_a_display():
     # QT_QPA_PLATFORM=offscreen like the rest of the suite.
     exit_code = main(["--list-backends"], registry=BackendRegistry())
     assert exit_code == 0
+
+
+class TestLoadAppIcon:
+    """SNX-81: `AppController._build_icon`'s old drawn-placeholder `QIcon`
+    is now `load_app_icon()`, loading the vendored `design/logo/
+    snipux-<size>.png` files instead.
+    """
+
+    def test_uses_the_vendored_artwork(self):
+        icon = app.load_app_icon()
+
+        assert not icon.isNull()
+
+    def test_every_vendored_logo_size_is_added(self):
+        # Exercises the real, checked-in assets (not a synthetic fixture)
+        # so a corrupt or renamed logo size fails a test instead of only
+        # surfacing as a blurry tray icon at runtime.
+        expected_sizes = set()
+        for path in app._LOGO_DIR.glob("snipux-*.png"):
+            match = re.fullmatch(r"snipux-(\d+)\.png", path.name)
+            if match:
+                size = int(match.group(1))
+                expected_sizes.add(QSize(size, size))
+        assert expected_sizes, "expected at least one vendored logo size"
+
+        icon = app.load_app_icon()
+
+        assert set(icon.availableSizes()) == expected_sizes
+
+    def test_falls_back_to_a_placeholder_when_the_logo_directory_is_missing(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app, "_LOGO_DIR", tmp_path / "no-such-dir")
+
+        icon = app.load_app_icon()  # must not raise
+
+        assert not icon.isNull()
+
+    def test_falls_back_to_a_placeholder_when_every_vendored_file_is_corrupt(
+        self, monkeypatch, tmp_path
+    ):
+        (tmp_path / "snipux-32.png").write_bytes(b"not a real png")
+        monkeypatch.setattr(app, "_LOGO_DIR", tmp_path)
+
+        icon = app.load_app_icon()  # must not raise
+
+        assert not icon.isNull()
 
 
 class TestCopyImageToClipboard:
@@ -887,6 +934,49 @@ class TestAppControllerTrayMenu:
         )
 
         controller.quit_action.trigger()
+
+
+class TestAppControllerIcon:
+    """SNX-81: the tray icon and the application's window icon are both
+    the vendored `design/logo/` artwork now, not a drawn placeholder.
+    """
+
+    def test_tray_icon_is_the_vendored_artwork_not_a_drawn_placeholder(
+        self, make_controller
+    ):
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        # The old placeholder was a single 32x32 solid-colour QPixmap --
+        # more than one available size only happens once real multi-size
+        # artwork has been loaded.
+        assert len(controller._tray_icon.icon().availableSizes()) > 1
+
+    def test_sets_the_applications_window_icon_from_the_same_artwork(
+        self, make_controller
+    ):
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        window_icon = QApplication.instance().windowIcon()
+        assert not window_icon.isNull()
+        assert window_icon.cacheKey() == controller._tray_icon.icon().cacheKey()
+
+    def test_tray_still_starts_when_the_artwork_cannot_be_loaded(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # AC: a broken/missing icon must not stop the tray -- and the whole
+        # resident process -- from starting.
+        monkeypatch.setattr(app, "_LOGO_DIR", tmp_path / "no-such-dir")
+
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        assert not controller._tray_icon.icon().isNull()
+        assert controller.snip_action.text() == "Snip"
 
 
 class TestNoSystemTray:
