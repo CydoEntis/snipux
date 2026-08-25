@@ -1,3 +1,5 @@
+from dataclasses import dataclass, field
+
 import pytest
 from PyQt6.QtCore import Qt, QPointF, QRectF, QSizeF
 from PyQt6.QtGui import QColor, QFontMetrics, QFontMetricsF, QImage, QPainter, qRgb
@@ -16,6 +18,7 @@ from snipux.shapes import (
     Pen,
     Pixelate,
     Rectangle,
+    Shape,
     StepMarker,
     Text,
     apply_crop,
@@ -765,6 +768,36 @@ class TestFinalizeMark:
         assert result.start == QPointF(50, 50)
         assert result.end == QPointF(10, 10)
 
+    @pytest.mark.parametrize("shape_class", [Ellipse, Line, Crop])
+    def test_restored_shape_tools_discard_a_stray_click(self, shape_class):
+        # SNX-64: Ellipse/Line/Crop joined Arrow/Rectangle/ObscuringShape in
+        # finalize_mark's drop-threshold check when they were wired up as
+        # overlay.py mark tools -- a click too small to be a deliberate
+        # drag must not leave an invisible mark behind for any of them,
+        # same as it already didn't for Rectangle.
+        tiny = shape_class(
+            colour=RED, stroke_width=4, start=QPointF(10, 10),
+            end=QPointF(10 + DROP_THRESHOLD, 10 + DROP_THRESHOLD),
+        )
+
+        assert finalize_mark(tiny) is None
+
+    @pytest.mark.parametrize("shape_class", [Ellipse, Line, Crop])
+    def test_restored_shape_tools_keep_their_own_corner_order(self, shape_class):
+        # Unlike Rectangle, none of these three depend on a particular
+        # corner order (Ellipse/Crop's own draw()/hit_test() both already
+        # normalise internally via _rect_from_corners; Line has no notion
+        # of "corners" at all) -- so, like Arrow, they come back exactly as
+        # dragged.
+        dragged_up_left = shape_class(
+            colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10)
+        )
+
+        result = finalize_mark(dragged_up_left)
+
+        assert result.start == QPointF(50, 50)
+        assert result.end == QPointF(10, 10)
+
     def test_other_shapes_commit_unchanged(self):
         text = Text(colour=RED, stroke_width=4, point=QPointF(5, 5), text="hi")
 
@@ -1005,6 +1038,23 @@ class TestShapeHitTest:
         assert ellipse.hit_test(QPointF(50, 0)) is True  # top of the ellipse's border
         assert ellipse.hit_test(QPointF(50, 30)) is False  # centre: empty interior
 
+    def test_line_hits_along_its_own_length(self):
+        line = Line(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(100, 0))
+
+        assert line.hit_test(QPointF(50, 0)) is True  # midpoint
+        assert line.hit_test(QPointF(50, 20)) is False  # well off the line
+
+    def test_crop_hits_its_border_not_its_interior(self):
+        # SNX-64: Crop gained its own hit_test override when it was
+        # restored as a committable mark in overlay.py, mirroring
+        # Rectangle's identical "stroked outline only" reasoning above --
+        # unlike the base-class fallback it relied on before, exercised by
+        # test_unrecognised_shape_is_never_hit below.
+        crop = Crop(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(60, 60))
+
+        assert crop.hit_test(QPointF(10, 35)) is True  # left border
+        assert crop.hit_test(QPointF(35, 35)) is False  # empty interior: not a hit
+
     def test_blur_and_pixelate_hit_their_whole_filled_rect(self):
         blur = Blur(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(60, 60))
         pixelate = Pixelate(
@@ -1031,11 +1081,19 @@ class TestShapeHitTest:
         assert text.hit_test(QPointF(500, 500)) is False
 
     def test_unrecognised_shape_is_never_hit(self):
-        # Crop never joins a persistent mark list (see its own docstring),
-        # so it's never actually eraser-hit-tested in practice -- but this
-        # exercises the base class's safe default: a shape type without its
-        # own hit_test override is simply never a hit, even for a point
-        # that falls squarely inside its geometry.
-        crop = Crop(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(100, 100))
+        # Every concrete Shape shipped here now overrides hit_test (Crop
+        # gained its own in SNX-64, the last one that hadn't), so the base
+        # class's own safe default -- "a shape type without an override is
+        # simply never a hit, even for a point squarely inside its
+        # geometry" -- needs a throwaway subclass to exercise directly.
+        @dataclass
+        class _UnhandledShape(Shape):
+            start: QPointF = field(default_factory=QPointF)
+            end: QPointF = field(default_factory=QPointF)
 
-        assert crop.hit_test(QPointF(50, 50)) is False
+            def draw(self, painter):
+                pass
+
+        shape = _UnhandledShape(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(100, 100))
+
+        assert shape.hit_test(QPointF(50, 50)) is False

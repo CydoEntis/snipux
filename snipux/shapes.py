@@ -327,29 +327,37 @@ def finalize_mark(shape: Shape) -> Shape | None:
 
     - `Pen`/`Highlighter` need more than one point -- a plain click never
       reaches a second `mouseMoveEvent` to append one.
-    - `Arrow`/`Rectangle`/`ObscuringShape` (`Blur`/`Pixelate`) need their
-      bounding box to exceed `DROP_THRESHOLD` in at least one axis -- a
-      horizontal or vertical drag is a deliberate mark even though it is
-      exactly zero in the other axis, so this is an *or*, not an *and*.
+    - `Arrow`/`Rectangle`/`Ellipse`/`Line`/`Crop`/`ObscuringShape` (`Blur`/
+      `Pixelate`) need their bounding box to exceed `DROP_THRESHOLD` in at
+      least one axis -- a horizontal or vertical drag is a deliberate mark
+      even though it is exactly zero in the other axis, so this is an *or*,
+      not an *and*. SNX-64 added Ellipse/Line/Crop to this group when it
+      wired them up as overlay.py mark tools alongside Rectangle/Arrow --
+      the same stray-click-vs-deliberate-drag distinction the design doc's
+      "Marks under the minimum size are discarded on release" describes
+      applies to any two-point drag, not just the two this scoped first.
 
     `Rectangle` additionally gets its `start`/`end` normalised to
     top-left/bottom-right order here, independent of the size check --
     `draw()` already tolerates either order for the live preview (see its
     docstring), but the *committed* shape needs a stable convention for
     later callers (eraser hit-testing, `_transformed`) the way every other
-    two-point shape already has by construction. `ObscuringShape` needs no
-    such normalising: `apply()` already runs its own corners through
-    `_rect_from_corners` internally, so a raw start/end pair -- release
-    ahead of press or not -- is already what it expects.
+    two-point shape already has by construction. `Ellipse`/`Line`/`Crop`
+    keep `Arrow`'s own behaviour instead -- corner order preserved exactly
+    as dragged -- since none of their own `draw()`/`hit_test()` cares which
+    corner is which the way Rectangle's historical callers did.
+    `ObscuringShape` needs no such normalising either: `apply()` already
+    runs its own corners through `_rect_from_corners` internally, so a raw
+    start/end pair -- release ahead of press or not -- is already what it
+    expects.
 
-    Every other shape (`Line`, `Text`, `StepMarker`, `Crop`) has no
-    drag-size or corner-order notion this ticket scopes, so it is returned
-    unchanged.
+    Every other shape (`Text`, `StepMarker`) has no drag-size or
+    corner-order notion this ticket scopes, so it is returned unchanged.
     """
     if isinstance(shape, (Pen, Highlighter)):
         return shape if len(shape.points) > 1 else None
 
-    if isinstance(shape, (Arrow, Rectangle, ObscuringShape)):
+    if isinstance(shape, (Arrow, Rectangle, Ellipse, Line, Crop, ObscuringShape)):
         rect = _rect_from_corners(shape.start, shape.end)
         if rect.width() <= DROP_THRESHOLD and rect.height() <= DROP_THRESHOLD:
             return None
@@ -518,15 +526,24 @@ class Pixelate(ObscuringShape):
 
 @dataclass
 class Crop(Shape):
-    """Live marquee for the crop tool: a dashed, unfilled rectangle.
+    """A dashed, unfilled rectangle -- the visual style shared by the crop
+    marquee and, since SNX-64, the restored Crop *annotation* tool in
+    overlay.py's ink layer.
 
-    Unlike every other two-point shape, a `Crop` is never appended to a
-    persistent shape list and render() never sees a committed one — it
-    only ever exists as Canvas's transient in-progress shape during a
-    drag, purely so the drag gets the same live-preview path as
-    Rectangle/Ellipse/etc. The actual crop is performed by `apply_crop()`
-    once the drag ends, which flattens and replaces the base image instead
-    of adding to the shape list — see its docstring.
+    Historically this was only ever a transient in-progress shape: the old
+    editor.py's Canvas built one live during a crop drag, purely so the
+    drag got the same live-preview path as Rectangle/Ellipse/etc, and the
+    actual crop was performed by `apply_crop()` once the drag ended, which
+    flattens and replaces the base image rather than adding to the shape
+    list — see its docstring. `OverlayWindow._paint_in_progress_shape`
+    still borrows this same dashed style for blur/pixelate's own live
+    preview, for the same "cheap marquee, not the real effect" reason.
+
+    SNX-64 restores Crop as one of overlay.py's `_TWO_POINT_MARK_CLASSES`:
+    committed the same way Rectangle is, drawn/erased/undone the same way,
+    and included in an export the same way — a dashed box the user places
+    deliberately, not a re-crop of the capture. `hit_test` below is what
+    makes that new use erasable.
     """
 
     start: QPointF = field(default_factory=QPointF)
@@ -538,6 +555,13 @@ class Crop(Shape):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(_rect_from_corners(self.start, self.end))
+
+    def hit_test(self, point: QPointF) -> bool:
+        # The dashed stroked outline only -- same "interior isn't the
+        # shape" reasoning as Rectangle.hit_test above.
+        path = QPainterPath()
+        path.addRect(_rect_from_corners(self.start, self.end))
+        return self._stroke_hit_test(path, point)
 
 
 @dataclass
