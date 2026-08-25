@@ -1,5 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M8.4 15.2l6.6-6.6 3.4 3.4-6.6 6.6H8.4z"></path>
-  <path d="M8.4 18.6l-2.9.9.9-2.9"></path>
-  <path d="M5 21.5h7"></path>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">
+  <!-- The glyph's own ink is centred on (11.7, 15.05) and is smaller than
+       its neighbours', which put it visibly low and small in the tool bar
+       next to the pen. Centred on the 24x24 box and scaled to match, rather
+       than the paths being redrawn: the artwork is the designer's, only its
+       placement in the box was wrong. stroke-width is pre-divided by the
+       scale so the stroke still renders at the 1.55 every other icon uses. -->
+  <g transform="translate(12 12) scale(1.07) translate(-11.7 -15.05)">
+    <path d="M8.4 15.2l6.6-6.6 3.4 3.4-6.6 6.6H8.4z"></path>
+    <path d="M8.4 18.6l-2.9.9.9-2.9"></path>
+    <path d="M5 21.5h7"></path>
+  </g>
 </svg>
