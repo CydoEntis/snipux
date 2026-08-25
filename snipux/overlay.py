@@ -1945,6 +1945,25 @@ class _CaptureModeRow(QPushButton):
         self._refresh(hovered=False)
         super().leaveEvent(event)
 
+    def sizeHint(self) -> QSize:
+        # QPushButton.sizeHint() sizes off `self.text()`/`self.icon()` --
+        # both unused here, since the glyph/label/note/check pairing lives
+        # in the child QHBoxLayout instead (see class docstring), so the
+        # base implementation falls back to a near-empty placeholder height
+        # regardless of the two-line label actually painted. That's what
+        # SNX-75 found: a row measured 48x12 against the ~45px a 12.5px
+        # name over an 11px note plus 8px top/bottom padding actually needs,
+        # so the popover's QVBoxLayout gave it almost no height and the
+        # whole menu collapsed -- the same class of bug SNX-59 fixed for
+        # `_PillButton` (see its own sizeHint docstring). The child layout
+        # already knows the true height, because it was built from
+        # MENU_ROW_PAD_V plus the icon/text column's own sizeHint, and the
+        # label/note sizeHints come from the fonts they actually render in.
+        return self.layout().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
     def paintEvent(self, event) -> None:
         if self._bg_alpha is None:
             return
@@ -2037,6 +2056,18 @@ class _DelayRow(QPushButton):
         self._hovered = False
         self.update()
         super().leaveEvent(event)
+
+    def sizeHint(self) -> QSize:
+        # Same fix as `_CaptureModeRow.sizeHint` and for the same reason:
+        # this is a QPushButton whose real content lives in a child layout,
+        # so the base sizeHint() -- keyed off the unused text()/icon() --
+        # under-reports it. The popover's own height is the sum of its
+        # rows' sizeHints (AC), so a delay row that still collapsed would
+        # undersize the popover even with every mode row already fixed.
+        return self.layout().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
 
     def paintEvent(self, event) -> None:
         if not self._hovered:
@@ -2554,6 +2585,75 @@ class Toast(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Close button (SNX-80)
+# ---------------------------------------------------------------------------
+# `_bar` and the per-selection chips (the dimension chip, the frozen pill)
+# all only ever exist once a selection does -- `_sync_bar_visibility`,
+# `OverlayWindow.paintEvent`'s own `if self._selection is not None` guard --
+# but a user who opens the overlay and decides, before dragging anything at
+# all, that they don't want to snip anything has exactly as much right to a
+# visible way out as one who's already mid-annotation. SNX-65 turned off the
+# only thing (the hint HUD) that ever told anyone Escape was that way out,
+# so this is its own small piece of chrome, independent of both: shown for
+# as long as `OverlayWindow` itself is (`showEvent`/`hideEvent`, the same
+# pairing `_toast`/`_hud` already use), never gated on `_selection`,
+# `_bar.active_tool` or `_marks` the way everything else in this file is.
+
+
+class _CloseButton(QPushButton):
+    """A small round button pinned to a fixed corner of the overlay: the
+    one control guaranteed to be on screen, and clickable, from the moment
+    the overlay opens to the moment it closes.
+
+    Unlike `_IconButton` (idle-transparent, relying on the bar's own glass
+    fill for contrast against the frozen desktop underneath), this button
+    has no bar behind it -- it sits directly over whatever pixels happen to
+    be there, which could be any colour at all -- so its background is
+    always painted, not just on hover, using the same `BAR_BG`/
+    `BAR_BG_ALPHA` glass the floating bar itself uses. A plain QSS
+    `:hover` rule is enough for the hover state (no custom paintEvent
+    needed, unlike `_SwatchButton`'s two-colour ring): there is only ever
+    one fill to swap.
+    """
+
+    _SIZE = design.tokens.Metric.BTN
+    _ICON_SIZE = design.tokens.Metric.ICON
+    # How much brighter the fill reads on hover -- enough to register as a
+    # state change without a dedicated token for a control this small, the
+    # same un-tokenized-literal convention `OverlayWindow`'s own
+    # `_CORNER_BRACKET_OFFSET` and friends already follow.
+    _HOVER_ALPHA_BOOST = 0.07
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self._SIZE, self._SIZE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Names Escape by its full word, not the "Esc" abbreviation every
+        # other tooltip in this file uses for a shortcut -- this is the
+        # one place a user with the hint HUD off (SNX-65's new default)
+        # learns the keyboard route exists at all, so it spells the key
+        # out rather than assuming the abbreviation is already familiar.
+        self.setToolTip("Close — Escape")
+        self.setFlat(True)
+
+        bg = design.color("BAR_BG")
+        hover_bg = QColor(bg)
+        hover_bg.setAlphaF(min(1.0, bg.alphaF() + self._HOVER_ALPHA_BOOST))
+        self.setStyleSheet(
+            "QPushButton { border: none; border-radius: %dpx;"
+            " background: rgba(%d, %d, %d, %s); }"
+            "QPushButton:hover { background: rgba(%d, %d, %d, %s); }"
+            % (
+                self._SIZE // 2,
+                bg.red(), bg.green(), bg.blue(), bg.alphaF(),
+                hover_bg.red(), hover_bg.green(), hover_bg.blue(), hover_bg.alphaF(),
+            )
+        )
+        self.setIcon(design.icon("close", design.color("TEXT_PRIMARY")))
+        self.setIconSize(QSize(self._ICON_SIZE, self._ICON_SIZE))
+
+
+# ---------------------------------------------------------------------------
 # Delay countdown (SNX-50)
 # ---------------------------------------------------------------------------
 # docs/design/overlay-redesign.md's "Capture modes" entry for Delay is the
@@ -2674,6 +2774,33 @@ class _MarkAction:
     shape: Shape | tuple[Shape, ...]
 
 
+class _LabelLineEdit(QLineEdit):
+    """The text tool's own label editor (`OverlayWindow._text_edit`) -- a
+    plain `QLineEdit` except for one thing: it accepts the Return/Enter key
+    event it already consumed (SNX-76).
+
+    Stock `QLineEdit.keyPressEvent` deliberately leaves Return/Enter
+    unaccepted after emitting `returnPressed`/`editingFinished`, precisely
+    so a dialog's default button can still fire from inside a text field.
+    `OverlayWindow` has no default button, only the same key bound to
+    "copy and dismiss" (`keyPressEvent`'s own Enter branch) -- and Qt
+    propagates an unaccepted key event up the parent-widget chain, so the
+    very keystroke that just committed this label as a mark (`_commit_text`,
+    wired to `editingFinished`) would otherwise reach `OverlayWindow.
+    keyPressEvent` a second time and fire that shortcut too, closing the
+    overlay the user only meant to add one label to. `_shortcuts_suppressed`
+    can't catch this second delivery: `_commit_text` already hid the field
+    and dropped its focus by the time the event arrives there. Accepting the
+    event here, once the base class is done with it, is what stops that
+    second delivery from happening at all.
+    """
+
+    def keyPressEvent(self, event) -> None:
+        super().keyPressEvent(event)
+        if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+            event.accept()
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -2710,8 +2837,9 @@ class OverlayWindow(QWidget):
     - Chrome must never reach the export. `rendered_image()` flattens
       `_marks` onto the selection's crop of the frozen frame; it never
       touches `_bar`, `_tray`/`_blur_tray`, `_toast`, `_hud`, `_popover`,
-      `_shape_popover` or any other widget painted over the overlay, so
-      none of that chrome can ever leak into a copy or a save.
+      `_shape_popover`, `_close_button` or any other widget painted over
+      the overlay, so none of that chrome can ever leak into a copy or a
+      save.
 
     Everything else here is chrome and mode-handling built around those
     three constraints. `FloatingBar` (`_bar`) is the real child widget
@@ -2738,7 +2866,11 @@ class OverlayWindow(QWidget):
     copy-and-dismiss, `?` to reveal the hint HUD, and the two-stage Esc
     (`_handle_escape`) the spec leaves for us to decide -- all of it
     suppressed while a slider or a text-editing widget has focus
-    (`_shortcuts_suppressed`).
+    (`_shortcuts_suppressed`). `_close_button` (SNX-80) is Esc's visible
+    counterpart: a fixed-corner control that discards any ink and closes in
+    a single click, shown for as long as this window is regardless of
+    `_selection`, active tool or ink state -- unlike `_bar` and the chips,
+    which only exist once a selection does.
     """
 
     # Marching ants: a QTimer at ~30fps advancing the dashed pen's offset,
@@ -2763,6 +2895,11 @@ class OverlayWindow(QWidget):
     # the ticket explicitly overrides from the spec's default.
     _TOP_CLEARANCE = 52  # keeps the selection clear of the top hint HUD
     _BAR_ROOM = 130  # keeps room below the selection for the floating bar
+
+    # Close button (SNX-80): fixed distance from the window's own top-right
+    # corner, given as a literal same as every other pixel value above that
+    # neither the redesign spec nor this ticket's own handoff tokenized.
+    _CLOSE_BUTTON_MARGIN = 16
 
     # Chips above the selection (SNX-43), per docs/design/overlay-redesign.md's
     # "Chips above the selection" section: the reference gives these as
@@ -3074,6 +3211,28 @@ class OverlayWindow(QWidget):
         self._hud = HintHUD(self)
         self._hud.setGeometry(0, 0, self.width(), design.tokens.Metric.HUD_H)
         self._hud.hide()
+
+        # The close button (SNX-80): see `_CloseButton`'s own docstring and
+        # the "Close button" comment block above it for why this exists at
+        # all, and why it is neither a bar button nor per-selection chrome.
+        # Positioned once, here, the same way `_hud` above is -- this
+        # window's own geometry is set once at construction and never
+        # resized afterwards (a fullscreen overlay), so there is no
+        # resizeEvent to keep a fixed corner offset in sync with. Starts
+        # hidden, like `_bar`/`_tray`/`_toast`/`_hud`, so a caller that
+        # never shows this window (most of this file's own tests, which
+        # `grab()` an unshown widget to sample pixels) never has it painted
+        # over whatever they're sampling; `showEvent`/`hideEvent` are what
+        # bring it up and down with the window itself, unconditionally --
+        # unlike every other piece of chrome here, its visibility never
+        # depends on `_selection`, `_bar.active_tool` or `_marks`.
+        self._close_button = _CloseButton(self)
+        self._close_button.move(
+            round(self.width() - self._CLOSE_BUTTON_MARGIN - _CloseButton._SIZE),
+            self._CLOSE_BUTTON_MARGIN,
+        )
+        self._close_button.clicked.connect(self._cancel)
+        self._close_button.hide()
 
     def set_selection(self, rect: QRect | None, path: QPainterPath | None = None) -> None:
         """Set the current selection (window coordinates) and repaint.
@@ -3784,6 +3943,22 @@ class OverlayWindow(QWidget):
         self._sync_bar_undo_redo()
         self.update()
 
+    def _cancel(self) -> None:
+        """The close button's own handler (SNX-80): discard any ink and
+        close, unconditionally, in the single click a visible button gets.
+
+        Unlike `_handle_escape`'s two-stage discard-then-close -- which
+        exists so a first press can back a mid-annotation user out of their
+        ink without losing the overlay itself -- a click on a control whose
+        whole point is "leave now" doesn't get to ask for a second one.
+        `_empty_marks()` alone, not `discard()`: `discard()`'s own "Ink
+        discarded" toast would never actually be seen, since this window is
+        about to close and `hideEvent` hides `_toast` along with everything
+        else, so showing it here would just be dead code with extra steps.
+        """
+        self._empty_marks()
+        self.close()
+
     def set_eraser_active(self, active: bool) -> None:
         """Arm/disarm the eraser tool (SNX-38).
 
@@ -3921,6 +4096,10 @@ class OverlayWindow(QWidget):
         # Likewise the HUD: `_hints_enabled` defaults on and may already be
         # true before this window was ever shown.
         self._sync_hud_visibility()
+        # The close button (SNX-80): unconditional, unlike the two syncs
+        # above -- it has no preference or selection state to check, it is
+        # simply on for as long as this window is.
+        self._close_button.show()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
@@ -3931,6 +4110,7 @@ class OverlayWindow(QWidget):
         self._shape_popover.hide()
         self._toast.hide()
         self._hud.hide()
+        self._close_button.hide()
 
     def closeEvent(self, event) -> None:
         # Deliberately not hideEvent: `_start_delayed_capture` (SNX-50)
@@ -3983,12 +4163,19 @@ class OverlayWindow(QWidget):
     # docs/design/overlay-redesign.md's "Keyboard" table is the authority: a
     # tool letter from tokens.SHORTCUTS, Ctrl+Z / Ctrl+Shift+Z for undo/redo,
     # Enter to copy-and-dismiss, and Esc, whose second stage the table
-    # explicitly leaves for us to decide -- see _handle_escape. All of it is
-    # suppressed outright while a text label or a slider has focus, per the
-    # table's own closing line -- see _shortcuts_suppressed. SNX-65 adds one
-    # more the table predates: `?` toggles `_hints_enabled`, the reachable-
-    # without-a-file escape hatch for the shortcut list now that the HUD it
-    # lives in is off by default.
+    # explicitly leaves for us to decide -- see _handle_escape. The tool
+    # letters, Enter and `?` are suppressed outright while a text label or a
+    # slider has focus, per the table's own closing line -- see
+    # _shortcuts_suppressed. SNX-65 adds one more the table predates: `?`
+    # toggles `_hints_enabled`, the reachable-without-a-file escape hatch for
+    # the shortcut list now that the HUD it lives in is off by default.
+    #
+    # SNX-79: Escape and undo/redo are carved out of that suppression.
+    # Touching the stroke slider is part of ordinary use, and a focused
+    # slider or label must never leave the user with no way to close this
+    # modal, full-screen window, nor with a broken undo stack -- see
+    # keyPressEvent, which checks for those before _shortcuts_suppressed()
+    # rather than after.
 
     def _shortcuts_suppressed(self) -> bool:
         """True while keyboard focus is on a widget these shortcuts must
@@ -4022,14 +4209,59 @@ class OverlayWindow(QWidget):
         else:
             self.close()
 
-    def keyPressEvent(self, event) -> None:
-        if self._shortcuts_suppressed():
-            super().keyPressEvent(event)
-            return
+    def _abandon_text_entry(self, label: QLineEdit) -> None:
+        """Escape's first stage while a label is focused (SNX-79): empties
+        and hides the field instead of committing it as a Text mark, so
+        typing a word into a label and then hitting Escape abandons that
+        label rather than saving it.
 
+        Clearing the text before hiding matters for the real text-tool
+        editor (`_text_edit`): hiding a focused `QLineEdit` fires
+        `editingFinished` synchronously (see `_commit_text`'s own
+        docstring), and `_commit_text` only calls `add_mark`
+        `if self._text_edit.text():` -- with the field already emptied that
+        guard is false, so the existing commit path discards the label
+        itself instead of this needing a second, parallel way to do it.
+        Hiding also returns keyboard focus to this window (Qt's normal
+        behaviour when a focused child is hidden -- see `_shortcuts_
+        suppressed`'s use of `focusWidget()`), which is what lets the
+        *next* Escape reach `_handle_escape` directly instead of bubbling
+        back through here.
+
+        Takes the focused label as a parameter rather than reading
+        `self._text_edit` because `TestKeyboardShortcutSuppression` (SNX-47)
+        stands in a bare `QLineEdit` for the real editor to test suppression
+        generically -- this must abandon whichever label actually has focus.
+        """
+        label.clear()
+        label.hide()
+
+    def keyPressEvent(self, event) -> None:
         key = event.key()
         modifiers = event.modifiers()
 
+        # Escape is the way out of this modal, full-screen window and must
+        # work regardless of which child holds focus (SNX-79) -- checked
+        # ahead of _shortcuts_suppressed() so a focused slider or label never
+        # swallows it. Reaching this method at all already means the focused
+        # child declined the key itself: neither QSlider nor a plain
+        # QLineEdit handles Escape, so Qt's normal unhandled-key propagation
+        # bubbles it up here exactly as if nothing had focus.
+        if key == Qt.Key.Key_Escape:
+            focus = self.focusWidget()
+            if isinstance(focus, QLineEdit):
+                self._abandon_text_entry(focus)
+            else:
+                self._handle_escape()
+            return
+
+        # Same SNX-79 carve-out for undo/redo. A label's own Ctrl+Z /
+        # Ctrl+Shift+Z never reaches this method in the first place --
+        # QLineEdit handles those itself, for its own text-undo, before they
+        # can bubble -- so this only ever runs here with a slider (or
+        # nothing) focused, and no isinstance check is needed the way Escape
+        # above needed one.
+        #
         # Exact-equality modifier check, not bitwise: Ctrl+Shift+Z's
         # modifier set includes ControlModifier, so a bitwise "is Control
         # held" test would swallow every redo as an undo. Same trap
@@ -4043,8 +4275,8 @@ class OverlayWindow(QWidget):
             self.undo()
             return
 
-        if key == Qt.Key.Key_Escape:
-            self._handle_escape()
+        if self._shortcuts_suppressed():
+            super().keyPressEvent(event)
             return
 
         if key in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
@@ -4233,7 +4465,24 @@ class OverlayWindow(QWidget):
         typing." Mirrors editor.py's `Canvas.mousePressEvent` handling of
         `Tool.TEXT` -- the label commits later, via `_commit_text`, never
         here.
+
+        SNX-77: a click that lands away from the field never blurs it --
+        the shared `_text_edit` stays focused right through
+        `mousePressEvent`/`_start_stroke` -- so nothing forces the
+        `editingFinished` this label editor relies on to commit. Committing
+        explicitly here, before touching `_pending_text_*` or clearing the
+        field, is what a second (or third...) label needs to survive:
+        `_commit_text` reads whatever was typed into the *still-live*
+        field against the *still-old* pending point/colour/stroke-width,
+        so the label just finished keeps the position and styling it was
+        typed at rather than picking up this click's. Only once that's
+        settled do the pending fields move on to this new click, and only
+        then does the field get cleared and re-shown for it -- so an empty
+        field (nothing typed yet, or the very first label ever) still has
+        nothing to commit, per `_commit_text`'s own guard.
         """
+        if self._text_edit is not None:
+            self._commit_text()
         self._pending_text_point = pos
         self._pending_text_colour = colour
         self._pending_text_stroke_width = self._stroke_width
@@ -4245,7 +4494,7 @@ class OverlayWindow(QWidget):
 
     def _ensure_text_edit(self) -> QLineEdit:
         if self._text_edit is None:
-            self._text_edit = QLineEdit(self)
+            self._text_edit = _LabelLineEdit(self)
             # Grey hint text, not a seeded value -- see `_commit_text`'s
             # `if self._text_edit.text():` guard, same reasoning as
             # editor.py's `Canvas._ensure_text_edit`.
