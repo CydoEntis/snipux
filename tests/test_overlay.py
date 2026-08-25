@@ -2683,6 +2683,52 @@ class TestSettingsTrayComposition:
         assert tray.colour == tokens.INK_SWATCHES[0][1]
 
 
+class TestSettingsTrayFill:
+    """SNX-61: 'the settings tray paints a rounded panel behind its
+    controls' -- same glass treatment as FloatingBar, same alpha-not-opacity
+    rule (see TestFloatingBarFill above). Before this ticket, SettingsTray
+    set WA_TranslucentBackground and defined no paintEvent, so this pixel
+    read as fully transparent (alpha 0) -- background, not panel.
+    """
+
+    def test_background_pixel_is_painted_at_the_token_alpha(self):
+        tray = SettingsTray()
+        tray.resize(tray.sizeHint())
+
+        rendered = tray.grab().toImage()
+        # Top padding strip, mid-width: inside the rounded fill but above
+        # every control, so this is background only.
+        pixel = rendered.pixelColor(tray.width() // 2, 2)
+
+        expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
+        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
+        assert (pixel.red(), pixel.green(), pixel.blue()) == QColor(
+            tokens.Color.BAR_BG
+        ).getRgb()[:3]
+
+    def test_control_pixels_stay_fully_opaque_over_the_translucent_fill(self):
+        # Painting the whole widget at reduced *opacity* would leave every
+        # control pixel translucent too, at the same alpha as the
+        # background -- exactly the mistake the README warns FloatingBar
+        # away from. Scans a swatch button's whole rect and takes the max,
+        # not the min, the same way TestFloatingBarFill's equivalent test
+        # does -- a swatch is a rounded shape, so its own corner pixels sit
+        # outside the fill it paints and would otherwise read as the tray's
+        # translucent background rather than the button's own opacity.
+        tray = SettingsTray()
+        tray.resize(tray.sizeHint())
+
+        rendered = tray.grab().toImage()
+        rect = tray._swatch_buttons[tokens.INK_SWATCHES[0][1]].geometry()
+        alphas = [
+            rendered.pixelColor(x, y).alpha()
+            for x in range(rect.left(), rect.right())
+            for y in range(rect.top(), rect.bottom())
+        ]
+
+        assert max(alphas) == 255
+
+
 class TestSettingsTraySwatchSelection:
     """SNX-41: 'the selected swatch is drawn with the double ring the spec
     describes, and picking one changes the colour new marks are drawn in.'
@@ -3013,6 +3059,50 @@ class TestBlurTrayComposition:
         tray = BlurTray()
 
         assert tray.blur_mode == "blur"
+
+
+class TestBlurTrayFill:
+    """SNX-61: 'the blur tray paints the same panel treatment' as
+    SettingsTray. Before this ticket, BlurTray set WA_TranslucentBackground
+    and defined no paintEvent either, so this pixel read as fully
+    transparent -- background, not panel.
+    """
+
+    def test_background_pixel_is_painted_at_the_token_alpha(self):
+        tray = BlurTray()
+        tray.resize(tray.sizeHint())
+
+        rendered = tray.grab().toImage()
+        # Top padding strip, mid-width: inside the rounded fill but above
+        # every control, so this is background only.
+        pixel = rendered.pixelColor(tray.width() // 2, 2)
+
+        expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
+        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
+        assert (pixel.red(), pixel.green(), pixel.blue()) == QColor(
+            tokens.Color.BAR_BG
+        ).getRgb()[:3]
+
+    def test_control_pixels_stay_fully_opaque_over_the_translucent_fill(self):
+        # Same rationale as TestSettingsTrayFill's equivalent test: scans
+        # the active (Blur) segment button's whole rect and takes the max,
+        # since its own rounded corners fall outside the segment's own
+        # fill.
+        tray = BlurTray()
+        tray.resize(tray.sizeHint())
+
+        rendered = tray.grab().toImage()
+        rect = tray._well.blur_button.geometry()
+        rect = QRect(
+            tray._well.geometry().topLeft() + rect.topLeft(), rect.size()
+        )
+        alphas = [
+            rendered.pixelColor(x, y).alpha()
+            for x in range(rect.left(), rect.right())
+            for y in range(rect.top(), rect.bottom())
+        ]
+
+        assert max(alphas) == 255
 
 
 class TestBlurTraySegmentToggle:
