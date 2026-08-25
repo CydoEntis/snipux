@@ -7041,3 +7041,42 @@ class TestPressOutsideStartsANewSelection:
 
         assert overlay._selection.topLeft() == QPoint(100, 100), "resize, not restart"
         assert overlay._selection.width() > 300
+
+
+class TestOverlayIsRevealedNotAnimatedOpen:
+    """Mutter stages a newly mapped window by scaling it up into place. Over
+    a frozen desktop that reads as a page expanding across the very area
+    being captured, so the compositor is left to play that animation on
+    something invisible.
+    """
+
+    def _overlay(self):
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        return OverlayWindow(frame)
+
+    def test_it_maps_fully_transparent(self):
+        overlay = self._overlay()
+
+        overlay.show_on_screen(None)
+
+        assert overlay.windowOpacity() == 0.0
+
+    def test_the_reveal_brings_it_to_full_opacity(self):
+        overlay = self._overlay()
+        overlay.show_on_screen(None)
+
+        overlay._reveal()
+
+        assert overlay.windowOpacity() == 1.0
+
+    def test_a_reveal_after_it_closed_does_not_revive_it(self):
+        # Esc, or a forwarded second request, can close the window inside
+        # the delay; bringing it back by opacity alone would be worse than
+        # the animation ever was.
+        overlay = self._overlay()
+        overlay.show_on_screen(None)
+        overlay.close()
+
+        overlay._reveal()
+
+        assert not overlay.isVisible()

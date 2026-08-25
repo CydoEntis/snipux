@@ -626,8 +626,23 @@ class ReviewWindow(WinWindow):
     def _show_toast(self, icon_name: str, text: str) -> None:
         """Confirm an action where the user is looking -- over the image,
         not in a footer line they have no reason to re-read.
+
+        Placed clear of the floating bar rather than at the canvas floor.
+        Both want bottom centre, so left to itself the toast landed
+        underneath the bar and showed as a dark sliver poking out from it --
+        unreadable, and easy to take for a rendering fault rather than a
+        message. While editing it sits above the bar and whatever tray is
+        up; otherwise the floor is free and it uses it.
         """
-        self._toast.show_message(icon_name, text, QRectF(self._canvas.rect()))
+        area = QRectF(self._canvas.rect())
+        if self._bar.isVisible():
+            highest = min(
+                widget.geometry().top()
+                for widget in (self._bar, self._tray, self._blur_tray, self._tool_hint)
+                if widget.isVisible()
+            )
+            area.setBottom(highest - tokens.Metric.TRAY_OFFSET_Y)
+        self._toast.show_message(icon_name, text, area)
         self._toast.raise_()
 
     def _refresh_status(self) -> None:

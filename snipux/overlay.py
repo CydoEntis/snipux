@@ -4470,6 +4470,23 @@ class OverlayWindow(QWidget):
         if self._on_dismissed is not None:
             self._on_dismissed()
 
+    # How long to stay invisible while the compositor plays its map
+    # animation. GNOME's is in this range; erring slightly long costs a few
+    # imperceptible milliseconds, erring short lets the tail of the scale-up
+    # show, which is the whole point of the exercise.
+    _REVEAL_DELAY_MS = 220
+
+    def _reveal(self) -> None:
+        """Full opacity, once the compositor has finished staging the map.
+
+        Guarded on still being visible: Esc, or a second request forwarded
+        in, can close this window inside the delay, and reviving a closed
+        overlay by setting its opacity would be worse than the animation
+        ever was.
+        """
+        if self.isVisible():
+            self.setWindowOpacity(1.0)
+
     def show_on_screen(self, screen: QScreen | None) -> None:
         """Show this window, positioned for whichever session type the
         caller (`open_overlay`) already detected -- never assumed here.
@@ -4497,13 +4514,26 @@ class OverlayWindow(QWidget):
             # the frozen frame when the window appears rather than being
             # filled on the first exposure.
             self.grab()
+            # Mapped transparent, then revealed. Mutter stages a newly
+            # mapped window by scaling it up into place, and over a frozen
+            # desktop that reads as a page expanding across the very area
+            # being captured -- a recording of it shows a shrunken copy of
+            # the desktop sliding outwards. The animation cannot be turned
+            # off per window, and the one flag that skips it entirely
+            # (X11BypassWindowManagerHint) costs this window the keyboard
+            # focus it lives on -- measured, and recorded where the flags
+            # are set. So the compositor plays it on something invisible.
+            self.setWindowOpacity(0.0)
             self.show()
+            QTimer.singleShot(self._REVEAL_DELAY_MS, self._reveal)
         else:
             self.winId()
             handle = self.windowHandle()
             if handle is not None:
                 handle.setScreen(screen)
+            self.setWindowOpacity(0.0)
             self.showFullScreen()
+            QTimer.singleShot(self._REVEAL_DELAY_MS, self._reveal)
         # Above every other window and focused the moment it opens, per
         # the acceptance criterion -- WindowStaysOnTopHint alone (set in
         # __init__) keeps it on top but doesn't itself force keyboard
