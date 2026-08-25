@@ -4535,21 +4535,34 @@ class OverlayWindow(QWidget):
                     self.erase_at(event.position())
                 else:
                     self._start_stroke(event.position())
-            elif self._selection is None:
+            else:
                 # SNX-57: Region -- the default mode, armed by nothing above
                 # -- gets no selection at all otherwise: Window/Full screen/
                 # Freeform each set one before a plain press could ever
                 # reach here. A press on the empty overlay starts an
                 # ordinary rectangle drag, the same press-drag-release shape
                 # `Overlay`'s own RECTANGLE mode already uses.
+                #
+                # A press *outside* an existing selection starts a new one
+                # the same way, rather than being the no-op it used to be.
+                # Getting a selection slightly wrong is the common case, and
+                # the only way out of one was Esc -- which cancels the whole
+                # snip, frozen frame and all, so a misplaced drag cost the
+                # user the entire capture and a fresh trip through the tray.
+                # Every other snipping tool lets a press on the dimmed area
+                # start over, and the resize handles are unaffected: this
+                # branch is only reached when `_handle_at` found none, so
+                # nudging an edge still resizes rather than restarting.
+                #
+                # Marks are deliberately left alone. They live in window
+                # coordinates, not selection-relative ones, so they stay
+                # exactly where they were drawn; whatever the new selection
+                # covers is captured, and re-selecting the old region brings
+                # them all back. Clearing them here would make a stray click
+                # destroy annotation work that Ctrl+Z could not bring back.
                 self._region_drag_anchor = event.position()
                 self._selection_anchor = event.position()
                 self.set_selection(QRect(event.position().toPoint(), QSize(0, 0)))
-            # A press outside an *existing* selection is a no-op for every
-            # tool. Falling through to this no-op -- rather than the handle
-            # branch below -- is exactly what "stop event propagation at the
-            # handle" needs from this method: a stroke only ever starts when
-            # a handle wasn't hit.
             return
         # Per the spec: a handle press is a resize, never a stroke, and
         # returning here means nothing past this point runs for it.
