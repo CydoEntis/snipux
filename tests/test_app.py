@@ -21,6 +21,7 @@ from snipux.app import (
     save_image,
 )
 from snipux.capture import (
+    XwininfoWindowGeometryProvider,
     BackendRegistry,
     CaptureBackend,
     Frame,
@@ -159,15 +160,36 @@ class TestBuildDefaultGeometryProvider:
 
         assert isinstance(provider, AvailableProvider)
 
-    def test_returns_unsupported_geometry_provider_when_x11_provider_is_unavailable(
+    def test_falls_back_to_xwininfo_when_wmctrl_is_missing(self, monkeypatch):
+        # The reported bug: wmctrl is not installed by default on Ubuntu, so
+        # Window mode silently reverted to Region on a stock desktop.
+        class NoWmctrl(X11WindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        class HasXwininfo(XwininfoWindowGeometryProvider):
+            def is_available(self):
+                return True
+
+        monkeypatch.setattr(app, "X11WindowGeometryProvider", NoWmctrl)
+        monkeypatch.setattr(app, "XwininfoWindowGeometryProvider", HasXwininfo)
+
+        assert isinstance(build_default_geometry_provider(), HasXwininfo)
+
+    def test_returns_unsupported_geometry_provider_when_neither_is_available(
         self, monkeypatch
     ):
-        # Covers both Wayland and "X11 without wmctrl" at once, since
-        # is_available() is exactly what folds those two cases together.
+        # Wayland, or an X11 session with neither tool: window mode degrades
+        # to plain rectangle dragging rather than pretending to work.
         class UnavailableProvider(X11WindowGeometryProvider):
             def is_available(self):
                 return False
 
+        class NoXwininfo(XwininfoWindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        monkeypatch.setattr(app, "XwininfoWindowGeometryProvider", NoXwininfo)
         monkeypatch.setattr(app, "X11WindowGeometryProvider", UnavailableProvider)
 
         provider = build_default_geometry_provider()
