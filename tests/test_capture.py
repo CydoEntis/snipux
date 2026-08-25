@@ -792,13 +792,23 @@ class TestPortalScreenshotBackend:
         assert frame.logical_size == QSizeF(50, 40)
         assert not frame.image.isNull()
 
-    def test_capture_raises_when_response_code_is_nonzero(self, monkeypatch):
-        # response code 1 = user cancelled, 2 = other error. Either way
-        # `results` carries no "uri", so this must fail with a clear
-        # RuntimeError rather than a bare KeyError on results["uri"].
+    def test_capture_sends_modal_false_so_a_windowless_caller_still_gets_a_dialog(
+        self, monkeypatch, tmp_path
+    ):
+        # SNX-67: a process the keybinding just spawned has no window yet,
+        # so it has no parent to hand the portal for a *modal* dialog. If
+        # the request leaves `modal` at the spec default (true), GNOME's
+        # portal backend refuses without ever showing the dialog. Asserting
+        # the actual option sent is what pins this down, rather than just
+        # trusting a comment.
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
 
-        response = Mock(body=(1, {}))
+        image_path = tmp_path / "shot.png"
+        _write_placeholder_png(str(image_path))
+        response = Mock(body=(0, {"uri": ("s", image_path.as_uri())}))
+
         fake_connection = Mock(unique_name=":1.42")
         fake_filter_handle = Mock()
         fake_filter_handle.queue = Mock()
@@ -806,10 +816,78 @@ class TestPortalScreenshotBackend:
         fake_connection.recv_until_filtered = Mock(return_value=response)
         monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: fake_connection)
 
-        with pytest.raises(RuntimeError, match="response code 1"):
+        capture.PortalScreenshotBackend().capture()
+
+        sent_message = fake_connection.send.call_args[0][0]
+        _parent_window, options = sent_message.body
+        assert options["modal"] == ("b", False)
+        assert options["interactive"] == ("b", False)
+
+    @pytest.mark.parametrize(
+        "response_code,expected_text",
+        [
+            (1, "cancelled"),
+            (2, "response code 2"),
+            (3, "response code 3"),
+        ],
+    )
+    def test_capture_raises_when_response_code_is_nonzero(
+        self, monkeypatch, response_code, expected_text
+    ):
+        # response code 1 = user cancelled, 2 = other error (and anything
+        # else the spec doesn't define falls in with 2). Either way
+        # `results` carries no "uri", so this must fail with a clear
+        # RuntimeError rather than a bare KeyError on results["uri"] — and
+        # cancelled vs. error must read as distinct messages, each telling
+        # the user what to do about it, not a real portal being involved.
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+
+        response = Mock(body=(response_code, {}))
+        fake_connection = Mock(unique_name=":1.42")
+        fake_filter_handle = Mock()
+        fake_filter_handle.queue = Mock()
+        fake_connection.filter = Mock(return_value=fake_filter_handle)
+        fake_connection.recv_until_filtered = Mock(return_value=response)
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: fake_connection)
+
+        with pytest.raises(RuntimeError, match=expected_text):
             capture.PortalScreenshotBackend().capture()
 
         assert fake_connection.close.called
+
+    def test_cancelled_and_error_messages_are_distinct_and_actionable(self, monkeypatch):
+        # Belt-and-braces on top of the parametrized test above: cancelled
+        # tells the user to retry and approve the prompt, while an error
+        # points at the portal installation instead — mixing those up would
+        # send a cancelled user chasing a package install that isn't broken.
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+
+        def make_connection(response_code):
+            response = Mock(body=(response_code, {}))
+            fake_connection = Mock(unique_name=":1.42")
+            fake_filter_handle = Mock()
+            fake_filter_handle.queue = Mock()
+            fake_connection.filter = Mock(return_value=fake_filter_handle)
+            fake_connection.recv_until_filtered = Mock(return_value=response)
+            return fake_connection
+
+        monkeypatch.setattr(
+            capture, "open_dbus_connection", lambda bus: make_connection(1)
+        )
+        with pytest.raises(RuntimeError) as cancelled_excinfo:
+            capture.PortalScreenshotBackend().capture()
+
+        monkeypatch.setattr(
+            capture, "open_dbus_connection", lambda bus: make_connection(2)
+        )
+        with pytest.raises(RuntimeError) as error_excinfo:
+            capture.PortalScreenshotBackend().capture()
+
+        cancelled_message = str(cancelled_excinfo.value)
+        error_message = str(error_excinfo.value)
+        assert cancelled_message != error_message
+        assert "press the shortcut again" in cancelled_message
+        assert "xdg-desktop-portal" in error_message
 
 
 class TestGnomeShellHelperBackend:

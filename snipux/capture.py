@@ -596,7 +596,31 @@ class PortalScreenshotBackend(CaptureBackend):
             portal,
             "Screenshot",
             "sa{sv}",
-            ("", {"handle_token": ("s", handle_token)}),
+            (
+                "",
+                {
+                    "handle_token": ("s", handle_token),
+                    # A process the keybinding just spawned (see SNX-67) has
+                    # no window yet, so it has no parent to hand the portal
+                    # for a *modal* dialog — and with `modal` left at the
+                    # spec's default of true, GNOME's portal backend refuses
+                    # the request outright rather than show an unparented
+                    # modal one, with no dialog ever appearing on screen. A
+                    # long-lived resident instance can go on to open windows
+                    # of its own, so it doesn't hit this; a freshly spawned
+                    # one asking for its very first frame does. Asking for a
+                    # non-modal dialog is what lets GNOME show it regardless
+                    # of whether the caller has a window at all.
+                    "modal": ("b", False),
+                    # Explicit, not just relying on the spec default of
+                    # false: we always want the whole frozen frame handed
+                    # back untouched, never a picker that lets the user crop
+                    # before we ever see pixels — that would bypass "select
+                    # in our own overlay" from CLAUDE.md's one architectural
+                    # rule.
+                    "interactive": ("b", False),
+                },
+            ),
         )
         connection.send(message)
 
@@ -621,14 +645,26 @@ class PortalScreenshotBackend(CaptureBackend):
                 filter_handle.close()
 
             response_code, results = response.body
-            if response_code != 0:
-                # 0 = success, 1 = user cancelled (e.g. dismissed a
-                # permission/picker dialog), 2 = other error. Any non-zero
-                # code means `results` has no "uri" to read, so surface a
-                # clear failure here rather than letting a bare KeyError
-                # stand in for it below.
+            if response_code == 1:
+                # The user was shown the permission/picker dialog and
+                # dismissed it — retrying with the same action is exactly
+                # the right next step, so say that rather than the generic
+                # "did not succeed".
                 raise RuntimeError(
-                    f"portal: Screenshot request did not succeed (response code {response_code})"
+                    "portal: screenshot request was cancelled — press the "
+                    "shortcut again and approve the permission prompt"
+                )
+            if response_code != 0:
+                # Any other non-zero code (2 = error, and anything the spec
+                # doesn't define) is not something pressing the shortcut
+                # again fixes by itself, so point at the portal
+                # installation instead. Either way `results` has no "uri"
+                # to read, so this must raise here rather than letting a
+                # bare KeyError stand in for it below.
+                raise RuntimeError(
+                    f"portal: screenshot request failed (response code {response_code}) "
+                    "— check that xdg-desktop-portal and a Wayland portal "
+                    "backend (e.g. xdg-desktop-portal-gnome) are installed and running"
                 )
             uri = results["uri"][1]
             image_path = QUrl(uri).toLocalFile()
