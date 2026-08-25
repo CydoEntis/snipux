@@ -243,6 +243,54 @@ def validate_shortcut(shortcut: str) -> str | None:
     return None
 
 
+def _read_config(config_dir: Path | None = None) -> dict:
+    """The config document, or `{}` for any reason it can't be read.
+
+    Every failure -- no file, unreadable file, malformed JSON, a document
+    that isn't an object -- is `{}` rather than an exception. A corrupt
+    config must not be able to break `--setup`, which `install.sh` runs on
+    every install.
+    """
+    try:
+        document = json.loads(config_path(config_dir).read_text())
+    except (OSError, ValueError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def _write_config(key: str, value, config_dir: Path | None = None) -> bool:
+    """Set one key. False (never an exception) if it can't be written -- a
+    read-only config directory is a step-level note here, like every other
+    step in this module.
+
+    Reads and rewrites the whole document rather than replacing it, so one
+    setting is never dropped by writing another.
+    """
+    document = _read_config(config_dir)
+    document[key] = value
+    path = config_path(config_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document, indent=2) + "\n")
+    except OSError:
+        return False
+    return True
+
+
+def load_review_window(config_dir: Path | None = None) -> bool:
+    """Whether a snip opens in a review window after capture.
+
+    Off unless explicitly turned on: the overlay already annotates in place,
+    and a window that appears after every capture is a change to the core
+    flow, not a default to inherit by accident.
+    """
+    return _read_config(config_dir).get("review_window") is True
+
+
+def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("review_window", bool(enabled), config_dir)
+
+
 def load_shortcut(config_dir: Path | None = None) -> str:
     """The remembered shortcut, or `DEFAULT_SHORTCUT`.
 
@@ -251,11 +299,7 @@ def load_shortcut(config_dir: Path | None = None) -> str:
     raising. A corrupt config must not be able to break `--setup`, which
     `install.sh` runs on every install.
     """
-    path = config_path(config_dir)
-    try:
-        stored = json.loads(path.read_text()).get("shortcut")
-    except (OSError, ValueError, AttributeError):
-        return DEFAULT_SHORTCUT
+    stored = _read_config(config_dir).get("shortcut")
     if not isinstance(stored, str) or validate_shortcut(stored) is not None:
         return DEFAULT_SHORTCUT
     return stored
@@ -270,20 +314,7 @@ def save_shortcut(shortcut: str, config_dir: Path | None = None) -> bool:
     future key added to this file isn't silently dropped by an old
     `--setup`.
     """
-    path = config_path(config_dir)
-    try:
-        document = json.loads(path.read_text())
-        if not isinstance(document, dict):
-            document = {}
-    except (OSError, ValueError):
-        document = {}
-    document["shortcut"] = shortcut
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(document, indent=2) + "\n")
-    except OSError:
-        return False
-    return True
+    return _write_config("shortcut", shortcut, config_dir)
 
 
 def forget_shortcut(config_dir: Path | None = None) -> bool:
@@ -294,6 +325,77 @@ def forget_shortcut(config_dir: Path | None = None) -> bool:
     except OSError:
         return False
     return True
+
+
+# Schemas GNOME keeps its own keyboard shortcuts in. Not exhaustive by
+# design -- these are the ones that hold the bindings a user is realistically
+# about to collide with, and an unknown schema on some other desktop is a
+# missing warning, not a crash.
+_BINDING_SCHEMAS = (
+    "org.gnome.shell.keybindings",
+    "org.gnome.desktop.wm.keybindings",
+    "org.gnome.settings-daemon.plugins.media-keys",
+    "org.gnome.mutter.keybindings",
+)
+
+# `gsettings list-recursively` prints "<schema> <key> <value>", where value is
+# either a GVariant array of accelerators (['<Super>n'], @as []) or a bare
+# quoted string. One line, three fields, the rest is the value.
+_SETTING_LINE_RE = re.compile(r"^(\S+)\s+(\S+)\s+(.*)$")
+
+
+def find_shortcut_conflicts(shortcut: str) -> list[tuple[str, str]]:
+    """Every GNOME setting already bound to `shortcut`, as (schema, key).
+
+    This is the check that would have saved the trouble that prompted the
+    whole feature: GNOME accepts a duplicate binding without a word and
+    then fires whichever owner it likes, which from the losing app's side
+    is indistinguishable from being broken.
+
+    snipux's own slot is excluded -- rebinding to what is already bound is
+    not a conflict.
+
+    Blind to anything that is not a GNOME setting. An application that
+    grabs a key directly (many do) owns it just as effectively and cannot
+    be seen from here, so an empty list means "nothing in GNOME claims
+    this", never "this key is definitely free". Returns empty rather than
+    raising on any failure: no gsettings, an unreadable schema, output in
+    an unexpected shape.
+    """
+    if shutil.which("gsettings") is None:
+        return []
+
+    conflicts: list[tuple[str, str]] = []
+    for schema in _BINDING_SCHEMAS:
+        try:
+            output = subprocess.run(
+                ["gsettings", "list-recursively", schema],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        for line in output.splitlines():
+            match = _SETTING_LINE_RE.match(line.strip())
+            if match is None:
+                continue
+            found_schema, key, value = match.groups()
+            # Quoted whole-word match: '<Super>n' must not be found inside
+            # '<Super><Shift>n', and 'Print' must not match 'Print_Screen'.
+            if f"'{shortcut}'" in value:
+                conflicts.append((found_schema, key))
+    return conflicts
+
+
+def describe_conflicts(conflicts: list[tuple[str, str]]) -> str:
+    """One human sentence for `find_shortcut_conflicts`' result."""
+    if not conflicts:
+        return ""
+    names = ", ".join(key.replace("-", " ") for _, key in conflicts[:3])
+    if len(conflicts) > 3:
+        names += f", and {len(conflicts) - 3} more"
+    return f"Already used by GNOME for: {names}"
 
 
 def _append_slot(current_keybindings: str) -> str:

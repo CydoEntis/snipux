@@ -83,6 +83,13 @@ The choice is remembered in `~/.config/snipux/config.json`, so later
 every install — keep it instead of reverting to the default. `snipux
 --remove` deletes it along with everything else `--setup` wrote.
 
+Or set it from **tray → Settings…**, which records the combination you press
+rather than making you spell out the angle-bracket syntax, and warns you if
+GNOME already uses it. That warning only sees GNOME's own shortcuts — an
+application that grabs a key directly owns it just as effectively and can't
+be detected, so "No GNOME shortcut uses this" is not a promise the key is
+free.
+
 ## Using snipux
 
 snipux runs resident in the background (with a tray icon, where one is
