@@ -816,6 +816,25 @@ class _PillButton(QPushButton):
         own `_PillButton` never calls this; its label is fixed.
         """
         self._text_label.setText(text)
+        self.updateGeometry()
+
+    def sizeHint(self) -> QSize:
+        # QPushButton.sizeHint() measures `self.text()`/`self.icon()` --
+        # unused here, since the icon+label pairing lives in the child
+        # QHBoxLayout instead (see class docstring), so the base
+        # implementation falls back to a placeholder "XXXX" string in the
+        # button's own default font. That placeholder is what clipped the
+        # capture chip and Save down to a few px of label regardless of the
+        # word actually on screen (SNX-59): a fixed-looking width that
+        # wasn't derived from either the real text or the real font. The
+        # child layout already knows the true width, because it was built
+        # from `pad_left`/`pad_right`/spacing plus each child's own
+        # sizeHint -- and the text label's sizeHint comes from the font
+        # it's actually rendering in, fallback or not.
+        return self.layout().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
 
 
 class _Divider(QWidget):
