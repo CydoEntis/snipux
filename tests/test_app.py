@@ -1,9 +1,10 @@
 import re
 
 import pytest
-from PyQt6.QtCore import QPointF, QRectF, QSizeF
+from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF, Qt
 from PyQt6.QtGui import QGuiApplication, QImage, qRgb
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from snipux import app
@@ -732,6 +733,65 @@ class TestAppControllerCapture:
         # usable after the failure, not torn down by it.
         assert controller.snip_action.text() == "Snip"
         controller.start_capture()  # must not raise a second time
+
+
+class TestAppControllerOverlayDismissal:
+    """SNX-62: `OverlayWindow.copy()`/`save()` used to flatten the image,
+    toast, and return without ever dismissing the overlay -- so
+    `start_capture()`'s re-entrancy guard (which read `self._overlay.
+    isVisible()`) refused every later Snip request for the rest of the
+    session, the instant a user pressed Copy or Save once. Drives the real
+    floating-bar buttons through a real, controller-opened overlay -- not
+    `overlay.copy()`/`overlay.save()` called directly, since the bug was
+    specifically in what clicking the button did (or didn't) to the window,
+    not in `copy()`/`save()`'s own flatten-and-emit behaviour, which
+    test_overlay.py already covers.
+    """
+
+    def _start_capture_with_selection(self, make_controller):
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        controller.start_capture()
+        overlay = controller._overlay
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        return controller, overlay
+
+    def test_copy_dismisses_the_overlay_and_a_later_snip_is_not_refused(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(app, "copy_image_to_clipboard", lambda image: None)
+        controller, first_overlay = self._start_capture_with_selection(make_controller)
+
+        QTest.mouseClick(first_overlay._bar._copy_button, Qt.MouseButton.LeftButton)
+
+        # The bug: this used to still be `first_overlay`, still isVisible(),
+        # forever -- so the request below was silently swallowed.
+        assert controller._overlay is None
+
+        controller.start_capture()
+
+        assert controller._overlay is not None
+        assert controller._overlay is not first_overlay
+
+    def test_save_dismisses_the_overlay_and_a_later_snip_is_not_refused(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
+        controller, first_overlay = self._start_capture_with_selection(make_controller)
+
+        QTest.mouseClick(first_overlay._bar._save_button, Qt.MouseButton.LeftButton)
+
+        assert controller._overlay is None
+
+        controller.start_capture()
+
+        assert controller._overlay is not None
+        assert controller._overlay is not first_overlay
 
 
 class TestAppControllerTrayMenu:

@@ -2477,6 +2477,36 @@ class TestFloatingBarIntegration:
 
         assert (tmp_path / "Pictures" / "snipux").exists()
 
+    def test_copy_button_click_dismisses_the_overlay(self, monkeypatch):
+        # SNX-62: `copy()` alone -- flatten, clipboard, toast -- used to
+        # leave the overlay open, which is what let
+        # AppController.start_capture()'s re-entrancy guard refuse every
+        # later Snip request for the rest of the session. Mirrors
+        # TestKeyboardEnter's own "and closes" test above for Enter's
+        # copy-and-dismiss, but through the bar's actual button.
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        overlay = self._overlay(size=(200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+
+        QTest.mouseClick(overlay._bar._copy_button, Qt.MouseButton.LeftButton)
+
+        assert not overlay.isVisible()
+
+    def test_save_button_click_dismisses_the_overlay(self, monkeypatch, tmp_path):
+        # Same fix as test_copy_button_click_dismisses_the_overlay above,
+        # for Save.
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        overlay = self._overlay(size=(50, 50))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(0, 0, 50, 50))
+
+        QTest.mouseClick(overlay._bar._save_button, Qt.MouseButton.LeftButton)
+
+        assert not overlay.isVisible()
+
 
 class TestOverlayWindowToasts:
     """SNX-45: `copy`/`save`/`clear`/`discard` each toast the message and
