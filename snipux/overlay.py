@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable
@@ -51,7 +52,9 @@ from snipux.shapes import (
     Arrow,
     Blur,
     Crop,
+    Ellipse,
     Highlighter,
+    Line,
     ObscuringShape,
     Pen,
     Pixelate,
@@ -873,6 +876,11 @@ class FloatingBar(QWidget):
     copyRequested = pyqtSignal()
     saveRequested = pyqtSignal()
     captureChipClicked = pyqtSignal()
+    # SNX-64: rect's own button is the group's entry point for
+    # Ellipse/Line/Crop -- emitted instead of `toolSelected` when its
+    # button is clicked, the same "click opens a popover" shape
+    # `captureChipClicked` already gives the capture chip.
+    shapeMenuRequested = pyqtSignal()
 
     UNDO_SHORTCUT = "Ctrl+Z"
     REDO_SHORTCUT = "Ctrl+Shift+Z"
@@ -900,6 +908,15 @@ class FloatingBar(QWidget):
 
         self._active_tool: str | None = None
         self._tool_buttons: dict[str, _IconButton] = {}
+        # SNX-68: the last (selection, bounds_size) pair handed to
+        # `reposition` -- `set_capture_mode` replays them through it
+        # whenever the chip's label changes width, so the bar re-centres
+        # itself instead of just growing/shrinking from its own top-left
+        # corner. `None` until the first `reposition` call, which is what
+        # lets a bare `FloatingBar()` (no `OverlayWindow` around it, as in
+        # most of this module's own tests) fall back to a plain resize.
+        self._last_selection: QRect | None = None
+        self._last_bounds_size: QSize | None = None
 
         self._chip = self._build_capture_chip()
         self._chip.clicked.connect(self.captureChipClicked)
@@ -909,7 +926,14 @@ class FloatingBar(QWidget):
         for tool in design.tokens.TOOLS:
             key = _TOOL_SHORTCUT_KEYS[tool]
             button = _IconButton(tool, f"{_tool_label(tool)} — {key}")
-            button.clicked.connect(lambda checked=False, t=tool: self._on_tool_clicked(t))
+            if tool == "rect":
+                # SNX-64: a click opens the shape submenu (Rectangle/
+                # Ellipse/Line/Crop) rather than picking rect outright --
+                # `OverlayWindow._toggle_shape_popover` is what actually
+                # selects a tool, via `ShapeToolPopover.toolSelected`.
+                button.clicked.connect(self.shapeMenuRequested)
+            else:
+                button.clicked.connect(lambda checked=False, t=tool: self._on_tool_clicked(t))
             self._tool_buttons[tool] = button
             layout.addWidget(button)
         self._add_divider(layout)
@@ -990,8 +1014,22 @@ class FloatingBar(QWidget):
         `{{ mode }}` binding on the chip button itself -- the chip always
         names whichever capture mode is current, not just its own "Region"
         default from `_build_capture_chip`.
+
+        SNX-68: `_PillButton.sizeHint` (SNX-59) already measures the new
+        label correctly, but nothing re-read it after construction, so the
+        bar itself stayed at its old width and clipped whichever label
+        didn't fit in it -- "Region"'s width, the only one ever measured.
+        Replaying the last `reposition` call redoes both the sizing *and*
+        the centring in one place, the same call `_sync_bar_visibility`
+        already uses for a selection change; a label change deserves no
+        less. Falls back to a plain resize when `reposition` was never
+        called at all -- a bare `FloatingBar()` with no selection yet.
         """
         self._chip.set_text(label)
+        if self._last_selection is not None and self._last_bounds_size is not None:
+            self.reposition(self._last_selection, self._last_bounds_size)
+        else:
+            self.resize(self.sizeHint())
 
     # -- tool selection --------------------------------------------------
 
@@ -1014,11 +1052,16 @@ class FloatingBar(QWidget):
 
         The single place this is enforced, whether the change came from a
         click above or a caller driving the bar directly -- per the spec,
-        exactly one tool reads as active at a time.
+        exactly one tool reads as active at a time. SNX-64: `tool` being
+        one of `tokens.RECT_GROUP`'s Ellipse/Line/Crop -- which have no
+        button of their own -- reads as the rect button itself being
+        active, the same way picking any of them from its popover ought to
+        leave *something* in the bar showing the group is in use.
         """
         self._active_tool = tool
         for name, button in self._tool_buttons.items():
-            button.set_active(name == tool)
+            is_rect_group_member = name == "rect" and tool in design.tokens.RECT_GROUP
+            button.set_active(name == tool or is_rect_group_member)
 
     @property
     def active_tool(self) -> str | None:
@@ -1061,6 +1104,12 @@ class FloatingBar(QWidget):
         very bottom edge -- per the spec's "Floating bar" clamp rule.
         """
         metric = design.tokens.Metric
+        # SNX-68: remembered so `set_capture_mode` can replay this same
+        # call -- selection and bounds don't change just because the chip's
+        # label did, but the bar's width does, and only this method knows
+        # how to turn a width change back into a centred position.
+        self._last_selection = selection
+        self._last_bounds_size = bounds_size
         size = self.sizeHint()
         # QRectF, not the raw QRect `selection`: QRect.bottom() is
         # inclusive (top + height - 1), which would put the bar a pixel
@@ -2188,15 +2237,135 @@ class CaptureModePopover(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Shape submenu (SNX-64)
+# ---------------------------------------------------------------------------
+# Restores Ellipse, Line and Crop -- shapes.py has always fully implemented
+# all three, but nothing in the redesigned chrome ever named them, so the
+# bar only ever offered eight of the eleven tools the owner asked to keep
+# (see tokens.RECT_GROUP's own comment for the full rationale). The design
+# handoff's own guidance for a tool that doesn't fit the eight is a submenu
+# off an existing button, not a bar button of its own -- rect is that
+# button, since all four (Rectangle included) are two-point box/line marks.
+
+
+class ShapeToolPopover(QWidget):
+    """Rect's own submenu: `tokens.RECT_GROUP` as a short list of rows,
+    reusing `_CaptureModeRow` (glyph, label, note, check mark for whichever
+    is the bar's current tool) the same way `CaptureModePopover` does for
+    capture modes -- opened by `OverlayWindow._toggle_shape_popover` off
+    `FloatingBar.shapeMenuRequested`, positioned against the rect button
+    itself rather than the whole bar.
+    """
+
+    toolSelected = pyqtSignal(str)
+
+    # Same #1a1c18 BAR_BG at 97% CaptureModePopover's own _BG_ALPHA already
+    # names -- reused rather than re-derived for this second, smaller popover.
+    _BG_ALPHA = 0.97
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        metric = design.tokens.Metric
+        self.setFixedWidth(metric.MENU_W)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD
+        )
+        layout.setSpacing(0)
+
+        self._tool: str = design.tokens.RECT_GROUP[0]
+
+        self._rows: dict[str, _CaptureModeRow] = {}
+        for tool in design.tokens.RECT_GROUP:
+            row = _CaptureModeRow(
+                _tool_label(tool), tool, design.tokens.TOOL_HINTS[tool], self
+            )
+            row.clicked.connect(lambda checked=False, t=tool: self._on_row_clicked(t))
+            self._rows[tool] = row
+            layout.addWidget(row)
+
+        self._select_row(self._tool)
+
+    @property
+    def tool(self) -> str:
+        return self._tool
+
+    def set_tool(self, tool: str) -> None:
+        """Mark `tool`'s row checked without emitting `toolSelected` or
+        closing the popover -- for `_toggle_shape_popover` to seed the
+        popover with whichever group member is already active, mirroring
+        `CaptureModePopover.set_mode`'s own split from `_on_row_clicked`.
+        """
+        self._tool = tool
+        self._select_row(tool)
+
+    def _select_row(self, tool: str) -> None:
+        for name, row in self._rows.items():
+            row.set_selected(name == tool)
+
+    def _on_row_clicked(self, tool: str) -> None:
+        self.set_tool(tool)
+        self.toolSelected.emit(tool)
+        self.hide()
+
+    def reposition(self, button_geometry: QRect, window_size: QSize) -> None:
+        """Position the popover above `button_geometry` (the rect button's
+        own geometry, already mapped into this widget's parent's
+        coordinate space by the caller), horizontally centred on it and
+        clamped inside `window_size` -- mirroring
+        `CaptureModePopover.reposition`'s own centring/clamping.
+        """
+        metric = design.tokens.Metric
+        width = metric.MENU_W
+        height = self.sizeHint().height()
+
+        center_x = button_geometry.center().x()
+        left = center_x - width / 2
+        left = max(0, min(left, window_size.width() - width))
+
+        top = max(0, button_geometry.top() - height - metric.MENU_OFFSET)
+
+        self.setGeometry(round(left), round(top), width, height)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.Metric
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        bg = QColor(design.tokens.Color.BAR_BG)
+        bg.setAlphaF(self._BG_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.color("DIVIDER"))
+        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
 # Top hint HUD (SNX-46)
 # ---------------------------------------------------------------------------
 # docs/design/overlay-redesign.md's "Top hint HUD" section is the authority
-# here. It's a first-run affordance, behind a preference (`hints`) that
-# defaults on -- see `OverlayWindow.set_hints_enabled` -- and the spec's own
-# "Re-framing" section already reserves the room for it: `OverlayWindow.
-# _TOP_CLEARANCE` (52) is 8px clear of `tokens.Metric.HUD_H` (44), so the two
-# have agreed since SNX-33 landed and this ticket only has to paint into the
-# space already held open.
+# here. It's a first-run affordance, behind a preference (`hints`) --
+# see `OverlayWindow.set_hints_enabled` -- and the spec's own "Re-framing"
+# section already reserves the room for it: `OverlayWindow._TOP_CLEARANCE`
+# (52) is 8px clear of `tokens.Metric.HUD_H` (44), so the two have agreed
+# since SNX-33 landed and this ticket only has to paint into the space
+# already held open.
+#
+# SNX-65: the preference now defaults *off*. Read as a banner across the
+# whole top of every capture rather than help, it was the first thing the
+# eye landed on and competed with the snip it sits above -- exactly the
+# "first-run affordance worth hiding after N successful captures" this
+# section already called it out as. `_resize_selection` stops reserving
+# `_TOP_CLEARANCE` the moment hints are off, so the selection gets the room
+# back rather than keeping a dead strip held open for a bar nobody is
+# shown; press `?` to bring it up for the session (`keyPressEvent` below).
 
 
 class HintHUD(QWidget):
@@ -2468,8 +2637,20 @@ _FREEHAND_MARK_CLASSES = {"pen": Pen, "highlighter": Highlighter}
 # Tool name -> Shape subclass for a press-to-release two-point stroke.
 # 'blur' is deliberately absent: which of Blur/Pixelate it commits depends
 # on `_blur_mode`, decided in `OverlayWindow._start_stroke` at press time
-# rather than looked up here.
-_TWO_POINT_MARK_CLASSES = {"arrow": Arrow, "rect": Rectangle}
+# rather than looked up here. Ellipse/Line/Crop (SNX-64) are keyed in
+# alongside Arrow/Rectangle rather than needing any dispatch logic of their
+# own: `_start_stroke`/`_extend_stroke`/`mouseReleaseEvent` already only
+# ever read this dict by the bar's active tool name, so restoring the
+# three tools the redesign dropped is exactly this one addition -- see
+# `tokens.RECT_GROUP` for how a user actually reaches "ellipse"/"line"/
+# "crop" as `self._bar.active_tool` in the first place.
+_TWO_POINT_MARK_CLASSES = {
+    "arrow": Arrow,
+    "rect": Rectangle,
+    "ellipse": Ellipse,
+    "line": Line,
+    "crop": Crop,
+}
 
 
 class OverlayWindow(QWidget):
@@ -2524,8 +2705,11 @@ class OverlayWindow(QWidget):
     into this window's own many pixel-sampling tests. SNX-46 adds `HintHUD`
     (`_hud`), gated on both `self.isVisible()` (same reason as `_bar`/
     `_toast`) and `_hints_enabled` -- the preference the spec's "Top hint
-    HUD" section puts it behind, default on, toggled via
-    `set_hints_enabled` -- via `_sync_hud_visibility`. SNX-47 (this ticket)
+    HUD" section puts it behind, toggled via `set_hints_enabled` -- via
+    `_sync_hud_visibility`. SNX-65 changes the default to off (see the
+    "Top hint HUD" comment block above `HintHUD` for why) and adds the `?`
+    shortcut in `keyPressEvent` that flips it back on for anyone who wants
+    the banner. SNX-47 (this ticket)
     adds `keyPressEvent`: tool letters from `tokens.SHORTCUTS`, Ctrl+Z /
     Ctrl+Shift+Z for undo/redo, Enter to copy-and-dismiss, and the
     two-stage Esc (`_handle_escape`) the spec leaves for us to decide --
@@ -2619,6 +2803,16 @@ class OverlayWindow(QWidget):
     pixels exactly once, upstream in `capture.py`; the frame handed in here
     is already frozen, and the spec's own deviation note applies: this never
     uses `QScreen.grabWindow(0)`, which returns black on Wayland.
+
+    SNX-64 restores Ellipse, Line and Crop -- fully implemented in shapes.py
+    since before the redesign, but unreachable from this window's chrome
+    until now. `_TWO_POINT_MARK_CLASSES` gained the three alongside
+    Arrow/Rectangle, so `_start_stroke`/`_extend_stroke`/`mouseReleaseEvent`
+    need no changes of their own to draw, commit, erase, undo/redo and
+    export them exactly the way Rectangle already works; `_shape_popover`
+    (`ShapeToolPopover`) is the new chrome that makes `self._bar.
+    active_tool` able to ever *become* one of them, off the rect button's
+    own click rather than a twelfth bar button -- see `tokens.RECT_GROUP`.
     """
 
     # Marching ants: a QTimer at ~30fps advancing the dashed pen's offset,
@@ -2663,7 +2857,11 @@ class OverlayWindow(QWidget):
         self,
         frame: Frame,
         parent=None,
-        hints_enabled: bool = True,
+        # SNX-65: off by default -- see the "Top hint HUD" comment block
+        # above `HintHUD` for why. Still a constructor arg, not a deleted
+        # one, so a caller (or a test) that wants the banner from the very
+        # first frame still can.
+        hints_enabled: bool = False,
         geometry_provider: GeometryProvider | None = None,
         monitor_geometries: list[QRectF] | None = None,
         registry: BackendRegistry | None = None,
@@ -2783,6 +2981,15 @@ class OverlayWindow(QWidget):
         # the selection, per the class docstring. Paint order is the list
         # order, mirroring shapes.py's render().
         self._marks: list[Shape] = []
+        # SNX-63: cached output of `_base_layer_image` -- `(key, image)`,
+        # or None before the first paint -- so a repaint triggered by
+        # something unrelated to any committed `ObscuringShape` (an
+        # in-progress pen stroke elsewhere, a resize drag, marching ants)
+        # does not redo blur/pixelate's scale-down-then-up sampling every
+        # single frame. See that method's own docstring for what `key`
+        # covers and why equality against it is enough to know the cached
+        # image is still correct.
+        self._base_layer_cache: tuple[tuple, QImage] | None = None
         # Redo stack (SNX-39): whole marks popped off the *end* of `_marks`
         # by undo(), in the order undo() popped them -- so redo() popping
         # this list's own end and appending back to `_marks` restores each
@@ -2890,6 +3097,14 @@ class OverlayWindow(QWidget):
         self._popover.delayChanged.connect(self._on_delay_changed)
         self._bar.captureChipClicked.connect(self._toggle_capture_popover)
 
+        # SNX-64: rect's own shape submenu -- Ellipse/Line/Crop, restored
+        # alongside Rectangle -- opened off the rect button rather than the
+        # capture chip, see `ShapeToolPopover`'s own docstring.
+        self._shape_popover = ShapeToolPopover(self)
+        self._shape_popover.hide()
+        self._shape_popover.toolSelected.connect(self._on_shape_tool_selected)
+        self._bar.shapeMenuRequested.connect(self._toggle_shape_popover)
+
         # The delayed re-capture (SNX-50): `_registry` is what
         # `_finish_delayed_capture` re-grabs through -- an empty
         # `BackendRegistry` by default, the same "an inert default degrades
@@ -2921,15 +3136,15 @@ class OverlayWindow(QWidget):
         self._toast = Toast(self)
 
         # The top hint HUD (SNX-46): behind the `hints` preference the spec
-        # puts it behind, default on. A real child widget the same way
-        # `_bar`/`_toast` are -- see `_sync_hud_visibility` for the same
-        # `self.isVisible()` gate those two already use, here paired with
-        # `_hints_enabled` so turning the preference off hides the bar
-        # immediately regardless of this window's own visibility. Spans the
-        # window's full width at construction time -- this window's own
-        # geometry is set once above and never resized afterwards (a
-        # fullscreen overlay), so there is no resizeEvent to keep this in
-        # sync with.
+        # puts it behind -- SNX-65 changed the default to off. A real child
+        # widget the same way `_bar`/`_toast` are -- see `_sync_hud_visibility`
+        # for the same `self.isVisible()` gate those two already use, here
+        # paired with `_hints_enabled` so turning the preference off hides
+        # the bar immediately regardless of this window's own visibility.
+        # Spans the window's full width at construction time -- this
+        # window's own geometry is set once above and never resized
+        # afterwards (a fullscreen overlay), so there is no resizeEvent to
+        # keep this in sync with.
         self._hints_enabled = hints_enabled
         self._hud = HintHUD(self)
         self._hud.setGeometry(0, 0, self.width(), design.tokens.Metric.HUD_H)
@@ -3006,6 +3221,43 @@ class OverlayWindow(QWidget):
         self._popover.reposition(self._bar.geometry(), self.size())
         self._popover.show()
         self._popover.raise_()
+
+    # -- shape submenu (SNX-64) ----------------------------------------------
+
+    def _toggle_shape_popover(self) -> None:
+        """Open/close rect's own shape submenu from its button click.
+
+        Mirrors `_toggle_capture_popover` exactly -- a second click while
+        it's already open closes it again -- except the popover is
+        positioned against the rect *button*'s own geometry rather than the
+        whole bar's, and is seeded with whichever of `tokens.RECT_GROUP` is
+        currently active so reopening it shows the right row checked.
+        `_bar._tool_buttons["rect"].geometry()` is in the button's own
+        parent's (the bar's) coordinate space, not this window's -- `mapTo`
+        is what puts it in the same space `_shape_popover`, a direct child
+        of this window, needs for its own `setGeometry`.
+        """
+        if self._shape_popover.isVisible():
+            self._shape_popover.hide()
+            return
+        active = self._bar.active_tool
+        self._shape_popover.set_tool(
+            active if active in design.tokens.RECT_GROUP else design.tokens.RECT_GROUP[0]
+        )
+        button = self._bar._tool_buttons["rect"]
+        origin = button.mapTo(self, QPoint(0, 0))
+        self._shape_popover.reposition(QRect(origin, button.size()), self.size())
+        self._shape_popover.show()
+        self._shape_popover.raise_()
+
+    def _on_shape_tool_selected(self, tool: str) -> None:
+        """Wire a popover row pick to the same tool-selection path a bar
+        button click or a keyboard shortcut already goes through --
+        `FloatingBar.select_tool` is the one place a tool becomes active
+        (see its own docstring), so a submenu pick is a third way to reach
+        it, not a fourth copy of what picking a tool does.
+        """
+        self._bar.select_tool(tool)
 
     def _on_capture_mode_selected(self, mode: str) -> None:
         """Track the popover's chosen capture mode and update the chip's
@@ -3346,6 +3598,7 @@ class OverlayWindow(QWidget):
             self._tray.hide()
             self._blur_tray.hide()
             self._popover.hide()
+            self._shape_popover.hide()
 
     def _sync_tray_visibility(self) -> None:
         """Show/hide and reposition whichever settings tray -- draw or
@@ -3426,9 +3679,9 @@ class OverlayWindow(QWidget):
     def set_hints_enabled(self, enabled: bool) -> None:
         """Toggle the top hint HUD -- the preference docs/design/overlay-
         redesign.md's "Top hint HUD" section puts it behind (`hints`,
-        default on). Turning it off hides `_hud` immediately; turning it
-        back on shows it again as soon as `_sync_hud_visibility`'s other
-        gate -- `self.isVisible()` -- is also true, same as flipping
+        default off as of SNX-65). Turning it off hides `_hud` immediately;
+        turning it back on shows it again as soon as `_sync_hud_visibility`'s
+        other gate -- `self.isVisible()` -- is also true, same as flipping
         `_selection` does for `_bar`.
         """
         self._hints_enabled = enabled
@@ -3711,6 +3964,7 @@ class OverlayWindow(QWidget):
         self._bar.hide()
         self._tray.hide()
         self._popover.hide()
+        self._shape_popover.hide()
         self._toast.hide()
         self._hud.hide()
 
@@ -3767,7 +4021,10 @@ class OverlayWindow(QWidget):
     # Enter to copy-and-dismiss, and Esc, whose second stage the table
     # explicitly leaves for us to decide -- see _handle_escape. All of it is
     # suppressed outright while a text label or a slider has focus, per the
-    # table's own closing line -- see _shortcuts_suppressed.
+    # table's own closing line -- see _shortcuts_suppressed. SNX-65 adds one
+    # more the table predates: `?` toggles `_hints_enabled`, the reachable-
+    # without-a-file escape hatch for the shortcut list now that the HUD it
+    # lives in is off by default.
 
     def _shortcuts_suppressed(self) -> bool:
         """True while keyboard focus is on a widget these shortcuts must
@@ -3841,6 +4098,15 @@ class OverlayWindow(QWidget):
             self._bar.select_tool(tool)
             return
 
+        if key == Qt.Key.Key_Question:
+            # SNX-65: hints default off now (see the "Top hint HUD" comment
+            # block above `HintHUD`), so this is the escape hatch that keeps
+            # the full shortcut list reachable without editing a file --
+            # every button's own tooltip already names its own key, but `?`
+            # is the one place the whole list reads together.
+            self.set_hints_enabled(not self._hints_enabled)
+            return
+
         super().keyPressEvent(event)
 
     def _advance_ants(self) -> None:
@@ -3870,6 +4136,13 @@ class OverlayWindow(QWidget):
             # to the handle/eraser logic below, so it can't also start a
             # resize or an erase underneath the popover in the same press.
             self._popover.hide()
+            return
+        if self._shape_popover.isVisible() and not self._shape_popover.geometry().contains(
+            event.position().toPoint()
+        ):
+            # Same "click outside closes it" rule as the capture popover
+            # above, applied to rect's own shape submenu.
+            self._shape_popover.hide()
             return
         if self._picking_window:
             # A press while armed is always a pick, never a resize or a
@@ -4181,10 +4454,12 @@ class OverlayWindow(QWidget):
         anchored for the whole drag. Clamps are applied in the order the
         README's "Re-framing" section gives -- minimum size, `x >= 0`,
         `y >= 52`, stays inside the window, room for the floating bar --
-        with the one deliberate deviation the ticket calls for: the
-        minimum is `tokens.Metric.SEL_MIN_W/H` (16x16, not the spec's
-        200x140), and the floating-bar clamp gives way to that minimum
-        instead of the other way round.
+        with two deliberate deviations from the spec: the minimum is
+        `tokens.Metric.SEL_MIN_W/H` (16x16, not the spec's 200x140), the
+        floating-bar clamp gives way to that minimum instead of the other
+        way round, and (SNX-65) the `y >= 52` clearance itself only applies
+        while `_hints_enabled` is true -- with the HUD off there is nothing
+        left at the top to stay clear of.
         """
         handle = self._active_handle
         anchor = QRectF(self._resize_anchor)
@@ -4211,9 +4486,14 @@ class OverlayWindow(QWidget):
         # 2. x >= 0
         if free_left:
             left = max(left, 0.0)
-        # 3. y >= 52, clear of the top hint HUD.
+        # 3. y >= 52, clear of the top hint HUD -- but only while the HUD
+        # is actually the preference the user has on. SNX-65 turned hints
+        # off by default, and holding this 52px strip clamped shut for a
+        # bar nobody is shown would just deny the selection room the AC
+        # explicitly asks it get back.
         if free_top:
-            top = max(top, self._TOP_CLEARANCE)
+            top_clearance = self._TOP_CLEARANCE if self._hints_enabled else 0.0
+            top = max(top, top_clearance)
         # 4. Stays inside the window.
         if free_right:
             right = min(right, self.width())
@@ -4236,11 +4516,14 @@ class OverlayWindow(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        # Layer 1: the frozen frame, full window. This is also what keeps
-        # the selection "undimmed and at 1:1": the scrim below punches a
-        # hole out of this exact drawImage call rather than compositing a
-        # second one, so the hole shows precisely these pixels, untouched.
-        painter.drawImage(QRectF(self.rect()), self._frame.image)
+        # Layer 1: the frozen frame, full window -- with every committed
+        # Blur/Pixelate mark's effect already baked in (SNX-63; see
+        # `_base_layer_image`), not the raw capture. This is also what
+        # keeps the selection "undimmed and at 1:1": the scrim below
+        # punches a hole out of this exact drawImage call rather than
+        # compositing a second one, so the hole shows precisely these
+        # pixels, obscuring marks included, untouched.
+        painter.drawImage(QRectF(self.rect()), self._base_layer_image())
         self._paint_scrim(painter)
         if self._selection is not None:
             # Ink before the stroke/handles, matching the design's layer
@@ -4263,6 +4546,102 @@ class OverlayWindow(QWidget):
             self._paint_dimension_chip(painter)
             self._paint_frozen_pill(painter)
         painter.end()
+
+    def _window_to_frame_scale(self) -> tuple[float, float]:
+        """Ratio of `self._frame.image`'s own pixel size to this widget's
+        window-local (logical) one, along each axis -- the same conversion
+        `Overlay._paint_magnifier` above already uses to map a window/
+        logical point into the frozen frame's own pixel space. Above 1 on
+        any display with a device pixel ratio above one, where the
+        captured frame carries more pixels than the window's logical size.
+
+        Measured against `self.rect()` rather than `self._frame.
+        logical_size` -- the two are set equal at construction (
+        `setGeometry`, `_finish_delayed_capture`), but `self.rect()` is
+        what Layer 1's own `drawImage(QRectF(self.rect()), ...)` scales
+        the frame against, so an obscuring mark's sampled rect has to
+        agree with exactly that source of truth, not a merely-equal
+        second one.
+        """
+        widget_rect = self.rect()
+        if widget_rect.width() <= 0 or widget_rect.height() <= 0:
+            return 1.0, 1.0
+        return (
+            self._frame.image.width() / widget_rect.width(),
+            self._frame.image.height() / widget_rect.height(),
+        )
+
+    def _base_layer_image(self) -> QImage:
+        """Layer 1's own source pixels: `self._frame.image` with every
+        committed `ObscuringShape` mark's blur/pixelate effect actually
+        baked in, in list order -- each one sampling the output of every
+        obscuring mark before it, the same left-to-right composition
+        `shapes.render()` uses for export, via repeated `apply()` calls
+        rather than `render()` itself (which would also flatten every
+        *non*-obscuring mark permanently into the image, losing the
+        live, undo-able painter drawing `_paint_marks` below still wants
+        for those).
+
+        Fixes SNX-63: `_paint_marks` used to skip every `ObscuringShape`
+        outright with a "later ticket" comment that no later ticket ever
+        picked up, so a committed blur/pixelate was invisible until
+        export. Baking it into Layer 1 here instead of painting it inside
+        `_paint_marks` is what keeps it aligned across a re-frame for
+        free -- this method never reads `_selection` at all, only
+        `_marks` and `_frame`, so the obscured patch sits over exactly
+        the pixels it was drawn on regardless of where the selection
+        rect (and its clip) currently is.
+
+        Cached against `key` -- each obscuring mark's class, geometry and
+        `strength`, plus the frame's own identity -- and only recomputed
+        when that key actually changes, per this ticket's "does not
+        visibly stall" acceptance criterion: a repaint triggered by
+        something unrelated (an in-progress stroke elsewhere, marching
+        ants, a resize drag) must not redo the scale-down/scale-up
+        sampling for every obscuring mark on every single frame. Keying
+        on `strength` rather than just object identity is also what
+        makes an already-committed mark's on-screen look track a change
+        to its own `strength` (e.g. a settings-tray slider write) on the
+        very next repaint, instead of it staying stuck at whatever this
+        method last cached.
+
+        A mark's `start`/`end` are in this widget's own window-local
+        coordinates (see the class docstring) and need converting into
+        `self._frame.image`'s own, larger-under-HiDPI pixel space before
+        `apply()` -- which expects both its rect and the image it samples
+        to share one coordinate space -- can sample the right pixels; see
+        `_window_to_frame_scale`.
+        """
+        obscuring = [shape for shape in self._marks if isinstance(shape, ObscuringShape)]
+        key = (
+            id(self._frame),
+            tuple(
+                (
+                    type(shape).__name__,
+                    shape.start.x(),
+                    shape.start.y(),
+                    shape.end.x(),
+                    shape.end.y(),
+                    shape.strength,
+                )
+                for shape in obscuring
+            ),
+        )
+        if self._base_layer_cache is not None and self._base_layer_cache[0] == key:
+            return self._base_layer_cache[1]
+
+        image = self._frame.image
+        if obscuring:
+            scale_x, scale_y = self._window_to_frame_scale()
+            for shape in obscuring:
+                image = replace(
+                    shape,
+                    start=QPointF(shape.start.x() * scale_x, shape.start.y() * scale_y),
+                    end=QPointF(shape.end.x() * scale_x, shape.end.y() * scale_y),
+                ).apply(image)
+
+        self._base_layer_cache = (key, image)
+        return image
 
     def _paint_marks(self, painter: QPainter) -> None:
         """The ink layer: `_marks`, clipped to the selection.
@@ -4287,16 +4666,16 @@ class OverlayWindow(QWidget):
                 step_counter += 1
                 shape.number = step_counter
             if isinstance(shape, ObscuringShape):
-                # Obscuring marks sample the frozen frame's own pixels
-                # rather than paint onto a painter (see
-                # shapes.ObscuringShape.draw()) -- compositing a committed
-                # one live against a resizable selection, on every repaint,
-                # is a later ticket's concern; render_selection() (export)
-                # still handles it correctly, via render()'s own
-                # special-casing. An *in-progress* blur/pixelate drag gets
-                # a lightweight marquee instead -- see
-                # `_paint_in_progress_shape` below -- so the tool this
-                # ticket wires up isn't silently invisible while dragging.
+                # Already baked into Layer 1 by `_base_layer_image` above,
+                # in list order alongside every other obscuring mark --
+                # painting it again here would double its effect, and
+                # `draw()` isn't a real implementation to call anyway (see
+                # its own docstring). An *in-progress* blur/pixelate drag
+                # still gets a lightweight marquee instead -- see
+                # `_paint_in_progress_shape` below -- baking a live preview
+                # into Layer 1 on every mouse-move would be the exact
+                # per-frame cost this ticket's performance criterion rules
+                # out.
                 continue
             shape.draw(painter)
         if self._in_progress_shape is not None:
@@ -4739,7 +5118,9 @@ def open_overlay(
     monitor_geometries: list[QRectF],
     *,
     wayland: bool,
-    hints_enabled: bool = True,
+    # SNX-65: off by default -- see `OverlayWindow.__init__`, whose own
+    # `hints_enabled` this passes straight through.
+    hints_enabled: bool = False,
     geometry_provider: GeometryProvider | None = None,
     registry: BackendRegistry | None = None,
     on_dismissed: Callable[[], None] | None = None,

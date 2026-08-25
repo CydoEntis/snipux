@@ -22,7 +22,7 @@ with `QT_QPA_PLATFORM=offscreen`, which paints without a compositor — so
 nothing in this repo has yet proven the overlay looks right, sits at the
 right size, or lands on top of other windows on a live Wayland session.
 
-## Three deviations from the handoff — deliberate, do not revert
+## Four deviations from the handoff — deliberate, do not revert
 
 **Capture never uses `QScreen.grabWindow(0)`.** The spec says to; it returns
 black on Wayland, which is the entire reason `capture.py` has a portal backend
@@ -38,6 +38,14 @@ one.
 drops a label. A click opens a focused editor; the mark lands when the text is
 finished, and an empty label is discarded. Committing on the click alone would
 leave an empty chip behind every stray click.
+
+**The bar reaches eleven tools, not eight (SNX-64).** The spec drops Ellipse,
+Line and Crop and says not to add controls to the bar for them. The owner
+asked, before the redesign started, to keep all eleven — he'd tried them and
+they worked — which outranks the handoff here. The bar still shows eight
+buttons; rect's own button opens a small popover (`ShapeToolPopover`) that
+reaches the other three, per the handoff's own "new tools belong in a
+submenu" guidance for exactly this situation.
 
 ## Known, unticketed
 
