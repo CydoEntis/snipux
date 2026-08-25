@@ -55,6 +55,24 @@ def _never_touch_the_real_desktop(tmp_path, monkeypatch):
 
 
 class TestFindConsoleScript:
+    def test_a_frozen_bundle_is_its_own_console_script(self, tmp_path, monkeypatch):
+        # SNX-96: a PyInstaller build sets sys.frozen and sys.executable to
+        # its own .exe, which has no separate pip-generated wrapper beside
+        # it -- and the machine it targets may have no other Python for
+        # shutil.which to fall back to. That combination must resolve to
+        # the running executable itself, not fall through to either guess
+        # below (both of which this test leaves pointing at nothing, so a
+        # regression back to the old order would fail loudly).
+        exe = tmp_path / "snipux.exe"
+        exe.write_text("")
+        monkeypatch.setattr(setup_desktop.sys, "executable", str(exe))
+        monkeypatch.setattr(setup_desktop.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+
+        found = setup_desktop.find_console_script()
+
+        assert found == exe.resolve()
+
     def test_prefers_the_script_next_to_sys_executable(self, tmp_path, monkeypatch):
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()

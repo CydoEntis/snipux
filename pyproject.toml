@@ -38,6 +38,16 @@ dependencies = [
     "jeepney>=0.8",
 ]
 
+[project.optional-dependencies]
+# Build-only (SNX-96): PyInstaller bundles the interpreter, PyQt6 and
+# snipux itself into packaging/windows/snipux.spec's standalone Windows
+# executable. Nothing under snipux/ imports it, and it is deliberately an
+# extra rather than a `dependencies` entry, or an addition to
+# requirements.txt, so a plain `pip install snipux` and the
+# `pip install -r requirements.txt` the test suite runs never pull it in --
+# only `packaging/windows/build.ps1` does, via `pip install .[build-windows]`.
+build-windows = ["pyinstaller>=6.5"]
+
 [project.urls]
 Homepage = "https://github.com/CydoEntis/snipux"
 Repository = "https://github.com/CydoEntis/snipux"
