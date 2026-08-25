@@ -686,3 +686,161 @@ class TestUnbindGnomeShortcut:
         message = setup_desktop.unbind_gnome_shortcut()
 
         assert "removing the GNOME shortcut failed" in message
+
+
+class TestShortcutConfig:
+    """The remembered shortcut: `--setup --shortcut` binds and persists it,
+    and every later `--setup` (every `install.sh` performs one) keeps it
+    rather than reverting to the default.
+    """
+
+    def test_defaults_when_nothing_is_stored(self, tmp_path):
+        assert setup_desktop.load_shortcut(tmp_path) == setup_desktop.DEFAULT_SHORTCUT
+
+    def test_a_saved_shortcut_round_trips(self, tmp_path):
+        assert setup_desktop.save_shortcut("<Super><Shift>x", tmp_path)
+
+        assert setup_desktop.load_shortcut(tmp_path) == "<Super><Shift>x"
+
+    def test_a_corrupt_config_falls_back_to_the_default(self, tmp_path):
+        # A broken config must never be able to fail --setup, which
+        # install.sh runs on every install.
+        path = setup_desktop.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ this is not json")
+
+        assert setup_desktop.load_shortcut(tmp_path) == setup_desktop.DEFAULT_SHORTCUT
+
+    def test_a_stored_value_that_no_longer_validates_is_ignored(self, tmp_path):
+        path = setup_desktop.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"shortcut": "Super+Shift+S"}')
+
+        assert setup_desktop.load_shortcut(tmp_path) == setup_desktop.DEFAULT_SHORTCUT
+
+    def test_saving_preserves_other_keys_in_the_document(self, tmp_path):
+        path = setup_desktop.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"something_else": 42}')
+
+        setup_desktop.save_shortcut("<Alt>Print", tmp_path)
+
+        import json
+
+        assert json.loads(path.read_text()) == {
+            "something_else": 42,
+            "shortcut": "<Alt>Print",
+        }
+
+    def test_forget_removes_the_file(self, tmp_path):
+        setup_desktop.save_shortcut("<Alt>Print", tmp_path)
+
+        assert setup_desktop.forget_shortcut(tmp_path)
+        assert not setup_desktop.config_path(tmp_path).exists()
+
+    def test_forget_is_a_no_op_when_nothing_was_stored(self, tmp_path):
+        assert setup_desktop.forget_shortcut(tmp_path) is False
+
+
+class TestShortcutValidation:
+    """gsettings accepts any string and silently never fires a binding it
+    cannot parse -- exactly the invisible failure this feature exists to
+    escape -- so bad input is caught here instead.
+    """
+
+    @pytest.mark.parametrize(
+        "accelerator", ["<Super><Shift>x", "<Alt>Print", "Print", "F9", "<Primary><Alt>p"]
+    )
+    def test_accepts_real_accelerators(self, accelerator):
+        assert setup_desktop.validate_shortcut(accelerator) is None
+
+    def test_rejects_the_human_readable_form_people_actually_type(self):
+        problem = setup_desktop.validate_shortcut("Super+Shift+S")
+
+        assert problem is not None
+        assert "+" in problem and "<Super><Shift>x" in problem
+
+    @pytest.mark.parametrize("bad", ["", "   ", "<Super> x", "<Super><Shift>"])
+    def test_rejects_malformed_input(self, bad):
+        assert setup_desktop.validate_shortcut(bad) is not None
+
+
+class TestHumanShortcut:
+    @pytest.mark.parametrize(
+        "accelerator,expected",
+        [
+            ("<Super><Shift>s", "Super+Shift+S"),
+            ("<Super><Shift>x", "Super+Shift+X"),
+            ("<Alt>Print", "Alt+Print"),
+            ("Print", "Print"),
+        ],
+    )
+    def test_renders_the_way_docs_and_settings_panels_do(self, accelerator, expected):
+        assert setup_desktop.human_shortcut(accelerator) == expected
+
+
+class TestRunSetupWithAShortcut:
+    """`--setup --shortcut` end to end, including the reason the config
+    file exists at all: surviving the next `--setup`.
+    """
+
+    def _setup(self, tmp_path, **kwargs):
+        return setup_desktop.run_setup(
+            exec_path=Path("/opt/snipux/bin/snipux"),
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+            config_dir=tmp_path / "config",
+            **kwargs,
+        )
+
+    def test_a_given_shortcut_is_bound_and_remembered(self, tmp_path, monkeypatch):
+        bound = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "bind_gnome_shortcut",
+            lambda exec_path, shortcut=None: bound.append(shortcut) or "bound",
+        )
+
+        exit_code = self._setup(tmp_path, shortcut="<Super><Shift>x")
+
+        assert exit_code == 0
+        assert bound == ["<Super><Shift>x"]
+        assert setup_desktop.load_shortcut(tmp_path / "config") == "<Super><Shift>x"
+
+    def test_a_later_setup_keeps_it_instead_of_reverting(self, tmp_path, monkeypatch):
+        # The whole point: install.sh runs --setup on every install, and
+        # without the stored value that would stomp the user's choice back
+        # to Super+Shift+S every time.
+        bound = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "bind_gnome_shortcut",
+            lambda exec_path, shortcut=None: bound.append(shortcut) or "bound",
+        )
+        self._setup(tmp_path, shortcut="<Alt>Print")
+
+        self._setup(tmp_path)
+
+        assert bound == ["<Alt>Print", "<Alt>Print"]
+
+    def test_a_bad_shortcut_fails_before_anything_is_written(self, tmp_path, capsys):
+        exit_code = self._setup(tmp_path, shortcut="Super+Shift+S")
+
+        assert exit_code == 1
+        assert "error:" in capsys.readouterr().err
+        assert not (tmp_path / "applications").exists()
+        assert not setup_desktop.config_path(tmp_path / "config").exists()
+
+    def test_remove_forgets_the_stored_shortcut(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "unbind_gnome_shortcut", lambda: "unbound")
+        setup_desktop.save_shortcut("<Alt>Print", tmp_path / "config")
+
+        setup_desktop.run_remove(
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+            config_dir=tmp_path / "config",
+        )
+
+        assert not setup_desktop.config_path(tmp_path / "config").exists()
