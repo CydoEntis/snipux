@@ -1,19 +1,26 @@
-"""The Linux `Platform`: a thin adapter onto `snipux.setup_desktop`.
+"""The Linux `Platform`: a thin adapter onto `snipux.setup_desktop`, plus
+(SNX-86) the session-type-driven capture backend selection that used to
+live in `app.build_default_registry()`.
 
-Every operation here already exists in `setup_desktop.py` -- `.desktop`
-entries, the GNOME custom-keybinding dance, XDG paths -- and is covered by
-its own, much larger test suite (`tests/test_setup_desktop.py`) that
-predates this seam. This module does not reimplement or duplicate any of
-that; it only gives it a name in the shape `snipux/platform/__init__.py`
-defines, so callers reach it through `platform.current` instead of
-importing `setup_desktop` (a Linux specific) directly.
+Every desktop-integration operation here already exists in
+`setup_desktop.py` -- `.desktop` entries, the GNOME custom-keybinding dance,
+XDG paths -- and is covered by its own, much larger test suite
+(`tests/test_setup_desktop.py`) that predates this seam. This module does
+not reimplement or duplicate any of that; it only gives it a name in the
+shape `snipux/platform/__init__.py` defines, so callers reach it through
+`platform.current` instead of importing `setup_desktop` (a Linux specific)
+directly. `build_capture_registry()` forwards to `capture.build_linux_registry()`
+the same way -- the session-type-driven Wayland/X11/both selection is real
+logic that lives in `capture.py` alongside the registries it chooses
+between, not duplicated here.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from snipux import setup_desktop
+from snipux import capture, setup_desktop
+from snipux.capture import BackendRegistry
 
 from . import Platform
 
@@ -43,3 +50,6 @@ class LinuxPlatform(Platform):
 
     def default_save_folder(self) -> Path:
         return setup_desktop.default_save_folder()
+
+    def build_capture_registry(self) -> BackendRegistry:
+        return capture.build_linux_registry()

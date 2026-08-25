@@ -1,8 +1,12 @@
 """Controller, tray, and CLI entry point.
 
-`build_default_registry()` wires the real capture backends in, selecting
+`build_default_registry()` wires the real capture backends in by asking
+`platform.current.build_capture_registry()` (SNX-86) -- it used to pick
 `capture.py`'s X11 or Wayland registry (or both, on an unrecognised session
-type) by `detect_session_type()`.
+type) itself, by branching on `detect_session_type()` directly, but that has
+no answer at all on a platform with no notion of an X11/Wayland session
+type. See `snipux/platform/__init__.py` for why that choice now lives
+behind the platform seam instead.
 
 `copy_image_to_clipboard`/`save_image` also live here rather than in
 `overlay.py`: this is the module with no existing reason to avoid
@@ -34,8 +38,6 @@ from snipux.capture import (
     BackendRegistry,
     CaptureError,
     X11WindowGeometryProvider,
-    build_wayland_registry,
-    build_x11_registry,
     detect_session_type,
 )
 from snipux.overlay import (
@@ -44,7 +46,7 @@ from snipux.overlay import (
     UnsupportedGeometryProvider,
     open_overlay,
 )
-from snipux import setup_desktop
+from snipux import platform, setup_desktop
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
 
@@ -134,25 +136,14 @@ def load_app_icon() -> QIcon:
 def build_default_registry() -> BackendRegistry:
     """Construct the `BackendRegistry` the real app uses.
 
-    Selects by `detect_session_type()`: Wayland gets
-    `build_wayland_registry()`, X11 gets `build_x11_registry()`. An
-    unrecognised session type gets both, concatenated -- every backend
-    already gates itself with its own `is_available()`, so offering both
-    lets whatever is actually installed be found instead of failing
-    outright because the session type couldn't be determined.
+    Delegates to the platform seam (SNX-86) rather than branching on
+    `detect_session_type()` here itself -- `platform.current` already knows
+    what it can capture with (Linux's own Wayland/X11/both selection lives
+    in `platform.linux.LinuxPlatform.build_capture_registry`; a platform
+    with nothing implemented yet, like Windows or macOS, answers with a
+    registry that says so rather than an empty one or a raised error).
     """
-    session_type = detect_session_type()
-    if session_type == "wayland":
-        return build_wayland_registry()
-    if session_type == "x11":
-        return build_x11_registry()
-
-    registry = BackendRegistry()
-    for backend in build_wayland_registry():
-        registry.add(backend)
-    for backend in build_x11_registry():
-        registry.add(backend)
-    return registry
+    return platform.current.build_capture_registry()
 
 
 def build_default_geometry_provider() -> GeometryProvider:

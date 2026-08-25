@@ -1084,3 +1084,76 @@ class TestXwininfoWindowGeometryProvider:
         monkeypatch.setattr(capture.shutil, "which", lambda name: None)
 
         assert not capture.XwininfoWindowGeometryProvider().is_available()
+
+
+class TestBuildLinuxRegistry:
+    """SNX-86: `platform.linux.LinuxPlatform.build_capture_registry()`
+    forwards here -- this is where the session-type branching that used to
+    live in `app.build_default_registry()` actually lives now.
+    """
+
+    def test_returns_wayland_registry_on_a_wayland_session(self, monkeypatch):
+        _set_session_type(monkeypatch, "wayland")
+
+        registry = capture.build_linux_registry()
+
+        assert [b.name() for b in registry] == [
+            b.name() for b in capture.build_wayland_registry()
+        ]
+
+    def test_returns_x11_registry_on_an_x11_session(self, monkeypatch):
+        _set_session_type(monkeypatch, "x11")
+
+        registry = capture.build_linux_registry()
+
+        assert [b.name() for b in registry] == [
+            b.name() for b in capture.build_x11_registry()
+        ]
+
+    def test_returns_both_registries_concatenated_on_an_unknown_session(self, monkeypatch):
+        # Neither registry is preferred: every backend gates itself with its
+        # own is_available(), so offering both is how an unrecognised
+        # session type still finds whatever is actually installed instead
+        # of failing outright.
+        _set_session_type(monkeypatch, None)
+
+        registry = capture.build_linux_registry()
+
+        expected = [b.name() for b in capture.build_wayland_registry()] + [
+            b.name() for b in capture.build_x11_registry()
+        ]
+        assert [b.name() for b in registry] == expected
+
+
+class TestUnsupportedPlatformBackend:
+    """SNX-86: what `platform.windows.WindowsPlatform.build_capture_registry()`
+    and `platform.darwin.DarwinPlatform.build_capture_registry()` register in
+    place of a real backend, until one exists.
+    """
+
+    def test_is_never_available(self):
+        assert capture.UnsupportedPlatformBackend("Windows").is_available() is False
+
+    def test_unavailable_reason_names_the_platform(self):
+        backend = capture.UnsupportedPlatformBackend("Windows")
+
+        assert "Windows" in backend.unavailable_reason()
+
+    def test_capture_raises_rather_than_pretending_to_work(self):
+        backend = capture.UnsupportedPlatformBackend("Windows")
+
+        with pytest.raises(NotImplementedError):
+            backend.capture()
+
+    def test_registry_capture_reports_it_as_a_true_failure_not_silence(self):
+        # is_available() is always False, so BackendRegistry.capture() skips
+        # it entirely and CaptureError ends up with an empty failures list --
+        # the same "no backend was even available to try" case a fresh
+        # install with no tooling hits, which still has to produce a clear
+        # message rather than a bare, empty-summary exception.
+        registry = BackendRegistry([capture.UnsupportedPlatformBackend("Windows")])
+
+        with pytest.raises(CaptureError) as excinfo:
+            registry.capture()
+
+        assert excinfo.value.failures == []
