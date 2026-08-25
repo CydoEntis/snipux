@@ -2533,7 +2533,15 @@ class OverlayWindow(QWidget):
     (`_pending_capture_mode`) and re-dispatched to the same
     Window/Full screen/Freeform handling above once the new frame is in,
     so a delayed Window/Full screen/Freeform pick still does its own thing
-    on the new content instead of silently downgrading to Region.
+    on the new content instead of silently downgrading to Region. SNX-57
+    (this ticket) gives Region itself -- the default mode, and the only one
+    with no picking flag of its own -- the drag-to-create it was missing:
+    `mousePressEvent` starts a `_region_drag_anchor` press when a press
+    misses every handle and there is no selection yet, `mouseMoveEvent`
+    tracks it live, and `mouseReleaseEvent` hands off to
+    `_confirm_region_drag`, which commits it through `set_selection` like
+    any other mode's result -- discarding it instead, per the minimum-size
+    acceptance criterion, if it lands under `tokens.Metric.SEL_MIN_W/H`.
 
     Unlike `Overlay` above -- one instance per monitor, selection kept in
     absolute logical virtual-desktop coordinates so per-monitor crops tile
@@ -2683,6 +2691,19 @@ class OverlayWindow(QWidget):
         # moves. None outside a handle drag.
         self._active_handle: Handle | None = None
         self._resize_anchor: QRect | None = None
+
+        # Region-mode drag-to-create (SNX-57): window-local logical anchor
+        # of an in-progress left-button drag that is building a *brand new*
+        # selection from nothing, as opposed to `_active_handle`'s resize of
+        # an existing one. None outside such a drag. Only ever armed from
+        # `mousePressEvent` when a press misses every handle and there is no
+        # selection yet -- Window, Full screen and Freeform each already
+        # produce their own first selection through `_confirm_window_pick`/
+        # `_select_full_screen`/`_start_freeform_drag`, so this is what gives
+        # Region -- the default mode, with no picking flag of its own --
+        # the same "drag on an empty overlay" starting point the others get
+        # for free.
+        self._region_drag_anchor: QPointF | None = None
 
         # The ink layer (SNX-34): overlay-window coordinates, the same
         # space `_selection` lives in above -- never translated relative to
@@ -2940,6 +2961,10 @@ class OverlayWindow(QWidget):
         self._picking_window = False
         self._picking_freeform = False
         self._freeform_drag_path = None
+        # SNX-57: a mode switch mid-drag must not leave this armed under
+        # whatever the newly-picked mode does instead, same reasoning as
+        # `_freeform_drag_path` above.
+        self._region_drag_anchor = None
         self._capture_mode = mode
         self._bar.set_capture_mode(mode)
 
@@ -3728,11 +3753,20 @@ class OverlayWindow(QWidget):
                     self.erase_at(event.position())
                 else:
                     self._start_stroke(event.position())
-            # A press outside the selection (or with no selection at all)
-            # is a no-op for every tool. Falling through to this no-op --
-            # rather than the handle branch below -- is exactly what "stop
-            # event propagation at the handle" needs from this method: a
-            # stroke only ever starts when a handle wasn't hit.
+            elif self._selection is None:
+                # SNX-57: Region -- the default mode, armed by nothing above
+                # -- gets no selection at all otherwise: Window/Full screen/
+                # Freeform each set one before a plain press could ever
+                # reach here. A press on the empty overlay starts an
+                # ordinary rectangle drag, the same press-drag-release shape
+                # `Overlay`'s own RECTANGLE mode already uses.
+                self._region_drag_anchor = event.position()
+                self.set_selection(QRect(event.position().toPoint(), QSize(0, 0)))
+            # A press outside an *existing* selection is a no-op for every
+            # tool. Falling through to this no-op -- rather than the handle
+            # branch below -- is exactly what "stop event propagation at the
+            # handle" needs from this method: a stroke only ever starts when
+            # a handle wasn't hit.
             return
         # Per the spec: a handle press is a resize, never a stroke, and
         # returning here means nothing past this point runs for it.
@@ -3898,6 +3932,22 @@ class OverlayWindow(QWidget):
             super().mouseMoveEvent(event)
             return
 
+        if self._region_drag_anchor is not None:
+            # SNX-57: same "handled here, nothing else runs" shape the
+            # Window/Freeform branches above already use for their own
+            # in-progress picks -- a rectangle drag-to-create is never also
+            # a resize or a stroke while it's live.
+            # QRectF's two-point constructor, not QRect's -- QRect(p1, p2)
+            # treats both points as inclusive corners and would report one
+            # pixel more of width/height than the cursor has actually
+            # travelled. Mirrors `Overlay`'s own RECTANGLE-mode drag above
+            # (`QRectF(self._drag_anchor, absolute_pos).normalized()`).
+            rect = QRectF(self._region_drag_anchor, event.position()).normalized()
+            self.set_selection(rect.toRect())
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            super().mouseMoveEvent(event)
+            return
+
         if self._in_progress_shape is not None:
             self._extend_stroke(event.position())
         if self._active_handle is not None:
@@ -3933,6 +3983,13 @@ class OverlayWindow(QWidget):
             # handler above already follows for this mode.
             self._confirm_freeform_pick(event.position())
             return
+        if self._region_drag_anchor is not None:
+            # SNX-57: same "stop event propagation" rule as Freeform above
+            # -- a release with a Region drag-to-create in progress always
+            # commits or discards it, never falls through to the resize/
+            # stroke logic below.
+            self._confirm_region_drag(event.position())
+            return
         self._active_handle = None
         self._resize_anchor = None
         if self._in_progress_shape is not None:
@@ -3948,6 +4005,30 @@ class OverlayWindow(QWidget):
                 # needs a repaint: `_paint_marks` was showing this shape's
                 # live preview up to the instant of release.
                 self.update()
+
+    def _confirm_region_drag(self, pos: QPointF) -> None:
+        """End a Region-mode drag-to-create at `pos` (window coordinates)
+        and either commit or discard it. Only ever reached from
+        `mouseReleaseEvent` while `_region_drag_anchor` is set.
+
+        Discards below `tokens.Metric.SEL_MIN_W/H` -- the same floor
+        `_resize_selection` already clamps re-framing to -- rather than
+        committing an unusable sliver, per the ticket's own acceptance
+        criterion; a plain click (no movement at all) is already well
+        under that floor, so no separate misfire check is needed on top
+        of it.
+        """
+        anchor = self._region_drag_anchor
+        self._region_drag_anchor = None
+        # QRectF's two-point constructor, not QRect's -- see
+        # `mouseMoveEvent`'s own comment above on why the inclusive-corner
+        # one would over-report by a pixel on each axis.
+        rect = QRectF(anchor, pos).normalized().toRect()
+        metric = design.tokens.Metric
+        if rect.width() < metric.SEL_MIN_W or rect.height() < metric.SEL_MIN_H:
+            self.set_selection(None)
+            return
+        self.set_selection(rect)
 
     def _resize_selection(self, pos: QPointF) -> None:
         """Apply one drag-move of `self._active_handle` to the selection.
