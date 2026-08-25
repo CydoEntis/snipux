@@ -2,18 +2,56 @@
 GNOME shortcut a pip/pipx install of the wheel cannot set up on its own.
 
 No test here touches the real `~/.local/share`, `~/.config`, or `gsettings`
--- `run_setup()`'s directories and `bind_gnome_shortcut()`'s `subprocess`/
-`shutil` calls are all either passed in explicitly or monkeypatched, the
-same DI-or-monkeypatch pattern test_app.py already uses for
-`copy_image_to_clipboard`'s `wl-copy` calls.
+-- but that is enforced by `_never_touch_the_real_desktop` below, not by
+each test remembering to. It was a claim in this docstring long before it
+was true: every directory has to be passed in explicitly, and the two that
+are easiest to forget -- `config_dir` and the GNOME shortcut -- have no
+argument at most call sites at all, so omitting them silently wrote to the
+developer's own machine. `run_setup(exec_path=Path("/opt/snipux/bin/snipux"))`
+reads as a fixture and is in fact a write: it pointed a real keybinding at a
+path that does not exist, and the shortcut then did nothing until the next
+install.sh put it back.
 """
 
+import shutil
 from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 from snipux import setup_desktop
+
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_desktop(tmp_path, monkeypatch):
+    """Keep every test in this module inside tmp_path.
+
+    Everything here calls the real `run_setup`/`run_remove`, and every
+    argument a test does not pass falls back to a real location: the GNOME
+    shortcut to whatever gsettings actually has, and `config_dir` to
+    ~/.config/snipux. Nothing about the test names says so, which is
+    precisely the problem -- `run_setup(exec_path=Path("/opt/snipux/..."))`
+    reads as a fixture and is in fact a write, straight into the developer's
+    own keybinding, pointing it at a path that does not exist. Their
+    shortcut then silently does nothing until the next install.sh, which
+    looks exactly like the application being broken. It happened twice.
+
+    `shutil.which` returning None for gsettings is the whole guard: every
+    gsettings path in setup_desktop checks it first and degrades to a
+    reported note, which is behaviour worth exercising anyway. A test that
+    genuinely wants gsettings (TestBindGnomeShortcut) monkeypatches
+    `which` itself, and that overrides this.
+    """
+    real_which = shutil.which
+    monkeypatch.setattr(
+        setup_desktop.shutil, "which",
+        lambda name: None if name == "gsettings" else real_which(name),
+    )
+    monkeypatch.setattr(
+        setup_desktop, "config_path",
+        lambda config_dir=None: (config_dir or tmp_path / "config") / "config.json",
+    )
 
 
 class TestFindConsoleScript:
@@ -258,26 +296,6 @@ class TestRunRemove:
     doesn't leave a dead autostart entry, a dead keybinding, and a ghost
     application-list entry behind.
     """
-
-    @pytest.fixture(autouse=True)
-    def _never_touch_the_real_desktop(self, tmp_path, monkeypatch):
-        """Keep `--remove`'s reach inside tmp_path.
-
-        These tests call the real `run_remove`, and every argument it is not
-        given falls back to a real location: `config_dir` to
-        ~/.config/snipux, and the GNOME shortcut to whatever gsettings has.
-        Without this they deleted the developer's own config file and
-        unbound their actual keyboard shortcut on every run -- which is
-        exactly what happened, repeatedly, and looked like the application
-        losing its keybinding at random.
-        """
-        monkeypatch.setattr(
-            setup_desktop, "config_path",
-            lambda config_dir=None: (config_dir or tmp_path / "config") / "config.json",
-        )
-        monkeypatch.setattr(
-            setup_desktop, "unbind_gnome_shortcut", lambda: "Removed the shortcut."
-        )
 
     def test_removes_the_desktop_and_autostart_entries_and_reports_it(
         self, tmp_path, capsys
