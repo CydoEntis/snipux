@@ -2322,12 +2322,21 @@ class ShapeToolPopover(QWidget):
 # Top hint HUD (SNX-46)
 # ---------------------------------------------------------------------------
 # docs/design/overlay-redesign.md's "Top hint HUD" section is the authority
-# here. It's a first-run affordance, behind a preference (`hints`) that
-# defaults on -- see `OverlayWindow.set_hints_enabled` -- and the spec's own
-# "Re-framing" section already reserves the room for it: `OverlayWindow.
-# _TOP_CLEARANCE` (52) is 8px clear of `tokens.Metric.HUD_H` (44), so the two
-# have agreed since SNX-33 landed and this ticket only has to paint into the
-# space already held open.
+# here. It's a first-run affordance, behind a preference (`hints`) --
+# see `OverlayWindow.set_hints_enabled` -- and the spec's own "Re-framing"
+# section already reserves the room for it: `OverlayWindow._TOP_CLEARANCE`
+# (52) is 8px clear of `tokens.Metric.HUD_H` (44), so the two have agreed
+# since SNX-33 landed and this ticket only has to paint into the space
+# already held open.
+#
+# SNX-65: the preference now defaults *off*. Read as a banner across the
+# whole top of every capture rather than help, it was the first thing the
+# eye landed on and competed with the snip it sits above -- exactly the
+# "first-run affordance worth hiding after N successful captures" this
+# section already called it out as. `_resize_selection` stops reserving
+# `_TOP_CLEARANCE` the moment hints are off, so the selection gets the room
+# back rather than keeping a dead strip held open for a bar nobody is
+# shown; press `?` to bring it up for the session (`keyPressEvent` below).
 
 
 class HintHUD(QWidget):
@@ -2667,8 +2676,11 @@ class OverlayWindow(QWidget):
     into this window's own many pixel-sampling tests. SNX-46 adds `HintHUD`
     (`_hud`), gated on both `self.isVisible()` (same reason as `_bar`/
     `_toast`) and `_hints_enabled` -- the preference the spec's "Top hint
-    HUD" section puts it behind, default on, toggled via
-    `set_hints_enabled` -- via `_sync_hud_visibility`. SNX-47 (this ticket)
+    HUD" section puts it behind, toggled via `set_hints_enabled` -- via
+    `_sync_hud_visibility`. SNX-65 changes the default to off (see the
+    "Top hint HUD" comment block above `HintHUD` for why) and adds the `?`
+    shortcut in `keyPressEvent` that flips it back on for anyone who wants
+    the banner. SNX-47 (this ticket)
     adds `keyPressEvent`: tool letters from `tokens.SHORTCUTS`, Ctrl+Z /
     Ctrl+Shift+Z for undo/redo, Enter to copy-and-dismiss, and the
     two-stage Esc (`_handle_escape`) the spec leaves for us to decide --
@@ -2816,7 +2828,11 @@ class OverlayWindow(QWidget):
         self,
         frame: Frame,
         parent=None,
-        hints_enabled: bool = True,
+        # SNX-65: off by default -- see the "Top hint HUD" comment block
+        # above `HintHUD` for why. Still a constructor arg, not a deleted
+        # one, so a caller (or a test) that wants the banner from the very
+        # first frame still can.
+        hints_enabled: bool = False,
         geometry_provider: GeometryProvider | None = None,
         monitor_geometries: list[QRectF] | None = None,
         registry: BackendRegistry | None = None,
@@ -3091,15 +3107,15 @@ class OverlayWindow(QWidget):
         self._toast = Toast(self)
 
         # The top hint HUD (SNX-46): behind the `hints` preference the spec
-        # puts it behind, default on. A real child widget the same way
-        # `_bar`/`_toast` are -- see `_sync_hud_visibility` for the same
-        # `self.isVisible()` gate those two already use, here paired with
-        # `_hints_enabled` so turning the preference off hides the bar
-        # immediately regardless of this window's own visibility. Spans the
-        # window's full width at construction time -- this window's own
-        # geometry is set once above and never resized afterwards (a
-        # fullscreen overlay), so there is no resizeEvent to keep this in
-        # sync with.
+        # puts it behind -- SNX-65 changed the default to off. A real child
+        # widget the same way `_bar`/`_toast` are -- see `_sync_hud_visibility`
+        # for the same `self.isVisible()` gate those two already use, here
+        # paired with `_hints_enabled` so turning the preference off hides
+        # the bar immediately regardless of this window's own visibility.
+        # Spans the window's full width at construction time -- this
+        # window's own geometry is set once above and never resized
+        # afterwards (a fullscreen overlay), so there is no resizeEvent to
+        # keep this in sync with.
         self._hints_enabled = hints_enabled
         self._hud = HintHUD(self)
         self._hud.setGeometry(0, 0, self.width(), design.tokens.Metric.HUD_H)
@@ -3634,9 +3650,9 @@ class OverlayWindow(QWidget):
     def set_hints_enabled(self, enabled: bool) -> None:
         """Toggle the top hint HUD -- the preference docs/design/overlay-
         redesign.md's "Top hint HUD" section puts it behind (`hints`,
-        default on). Turning it off hides `_hud` immediately; turning it
-        back on shows it again as soon as `_sync_hud_visibility`'s other
-        gate -- `self.isVisible()` -- is also true, same as flipping
+        default off as of SNX-65). Turning it off hides `_hud` immediately;
+        turning it back on shows it again as soon as `_sync_hud_visibility`'s
+        other gate -- `self.isVisible()` -- is also true, same as flipping
         `_selection` does for `_bar`.
         """
         self._hints_enabled = enabled
@@ -3976,7 +3992,10 @@ class OverlayWindow(QWidget):
     # Enter to copy-and-dismiss, and Esc, whose second stage the table
     # explicitly leaves for us to decide -- see _handle_escape. All of it is
     # suppressed outright while a text label or a slider has focus, per the
-    # table's own closing line -- see _shortcuts_suppressed.
+    # table's own closing line -- see _shortcuts_suppressed. SNX-65 adds one
+    # more the table predates: `?` toggles `_hints_enabled`, the reachable-
+    # without-a-file escape hatch for the shortcut list now that the HUD it
+    # lives in is off by default.
 
     def _shortcuts_suppressed(self) -> bool:
         """True while keyboard focus is on a widget these shortcuts must
@@ -4048,6 +4067,15 @@ class OverlayWindow(QWidget):
         tool = _SHORTCUT_KEY_CODES.get(key)
         if tool is not None:
             self._bar.select_tool(tool)
+            return
+
+        if key == Qt.Key.Key_Question:
+            # SNX-65: hints default off now (see the "Top hint HUD" comment
+            # block above `HintHUD`), so this is the escape hatch that keeps
+            # the full shortcut list reachable without editing a file --
+            # every button's own tooltip already names its own key, but `?`
+            # is the one place the whole list reads together.
+            self.set_hints_enabled(not self._hints_enabled)
             return
 
         super().keyPressEvent(event)
@@ -4397,10 +4425,12 @@ class OverlayWindow(QWidget):
         anchored for the whole drag. Clamps are applied in the order the
         README's "Re-framing" section gives -- minimum size, `x >= 0`,
         `y >= 52`, stays inside the window, room for the floating bar --
-        with the one deliberate deviation the ticket calls for: the
-        minimum is `tokens.Metric.SEL_MIN_W/H` (16x16, not the spec's
-        200x140), and the floating-bar clamp gives way to that minimum
-        instead of the other way round.
+        with two deliberate deviations from the spec: the minimum is
+        `tokens.Metric.SEL_MIN_W/H` (16x16, not the spec's 200x140), the
+        floating-bar clamp gives way to that minimum instead of the other
+        way round, and (SNX-65) the `y >= 52` clearance itself only applies
+        while `_hints_enabled` is true -- with the HUD off there is nothing
+        left at the top to stay clear of.
         """
         handle = self._active_handle
         anchor = QRectF(self._resize_anchor)
@@ -4427,9 +4457,14 @@ class OverlayWindow(QWidget):
         # 2. x >= 0
         if free_left:
             left = max(left, 0.0)
-        # 3. y >= 52, clear of the top hint HUD.
+        # 3. y >= 52, clear of the top hint HUD -- but only while the HUD
+        # is actually the preference the user has on. SNX-65 turned hints
+        # off by default, and holding this 52px strip clamped shut for a
+        # bar nobody is shown would just deny the selection room the AC
+        # explicitly asks it get back.
         if free_top:
-            top = max(top, self._TOP_CLEARANCE)
+            top_clearance = self._TOP_CLEARANCE if self._hints_enabled else 0.0
+            top = max(top, top_clearance)
         # 4. Stays inside the window.
         if free_right:
             right = min(right, self.width())
@@ -5054,7 +5089,9 @@ def open_overlay(
     monitor_geometries: list[QRectF],
     *,
     wayland: bool,
-    hints_enabled: bool = True,
+    # SNX-65: off by default -- see `OverlayWindow.__init__`, whose own
+    # `hints_enabled` this passes straight through.
+    hints_enabled: bool = False,
     geometry_provider: GeometryProvider | None = None,
     registry: BackendRegistry | None = None,
     on_dismissed: Callable[[], None] | None = None,
