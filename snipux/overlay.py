@@ -2656,18 +2656,23 @@ _TWO_POINT_MARK_CLASSES = {
 @dataclass(frozen=True)
 class _MarkAction:
     """One entry in `OverlayWindow`'s undo/redo history (SNX-39; SNX-70
-    folds the eraser into it): `kind` is `'add'` for a mark `add_mark`
-    appended or `'erase'` for one `erase_at` removed, and `index` is its
-    position in `_marks`' draw order at the moment that action ran.
-    `undo`/`redo` invert/replay the pair -- see their own docstrings --
-    which is what lets an erase take its turn in the very same history as
-    an ordinary draw, rather than living in a slot of its own the way it
+    folds the eraser into it, SNX-72 folds `clear` in too): `kind` is
+    `'add'` for a mark `add_mark` appended, `'erase'` for one `erase_at`
+    removed, or `'clear'` for the whole mark list `clear()` emptied in one
+    step. `index` is its position in `_marks`' draw order at the moment
+    that action ran -- unused for `'clear'`, since it always empties from
+    and restores to the full list rather than one position in it. `shape`
+    holds the single removed/added `Shape` for `'add'`/`'erase'`, or the
+    tuple of every mark that was on screen for `'clear'`. `undo`/`redo`
+    invert/replay the trio -- see their own docstrings -- which is what
+    lets an erase or a clear take its turn in the very same history as an
+    ordinary draw, rather than living in a slot of its own the way each
     used to.
     """
 
     kind: str
     index: int
-    shape: Shape
+    shape: Shape | tuple[Shape, ...]
 
 
 class OverlayWindow(QWidget):
@@ -2836,6 +2841,16 @@ class OverlayWindow(QWidget):
     (`ShapeToolPopover`) is the new chrome that makes `self._bar.
     active_tool` able to ever *become* one of them, off the rect button's
     own click rather than a twelfth bar button -- see `tokens.RECT_GROUP`.
+
+    SNX-72 (this ticket) folds `clear()` into the undo/redo stack the same
+    way SNX-70 folded `erase_at` in: the trash button sits in the same bar
+    as undo/redo, right next to redo, so a mis-aimed click used to be an
+    unrecoverable way to lose every mark on screen. `clear()` now records
+    the emptied list as one `_MarkAction` (kind `'clear'`) instead of
+    calling `_empty_marks`, so it round-trips through `undo`/`redo` like
+    any other action; `discard()` (Esc) is unchanged and still wipes both
+    stacks outright via `_empty_marks`, since nothing asked for Esc itself
+    to become undoable.
     """
 
     # Marching ants: a QTimer at ~30fps advancing the dashed pen's offset,
@@ -3756,7 +3771,8 @@ class OverlayWindow(QWidget):
         mirroring `Canvas.shapes` in editor.py."""
         return tuple(self._marks)
 
-    # -- undo / redo / clear (SNX-39; SNX-70 folds the eraser in) ----------
+    # -- undo / redo / clear (SNX-39; SNX-70 folds the eraser in, SNX-72 the
+    # -- clear button) ------------------------------------------------------
     # Two stacks of `_MarkAction`s, per docs/design/overlay-redesign.md's
     # "Undo / redo": undo pops the newest action off `_undo` and inverts it
     # onto `_redo`; redo pops it back and replays it onto `_undo`. Unlike
@@ -3764,7 +3780,9 @@ class OverlayWindow(QWidget):
     # action carries its own `index` -- needed now that an 'erase' can
     # remove from the middle of `_marks`, not just the end the way an 'add'
     # always does -- so undo/redo restore exactly the draw-order position
-    # the action happened at either way.
+    # the action happened at either way. `index` is unused for a 'clear'
+    # (SNX-72), which always empties/restores the whole list rather than
+    # one position in it.
 
     @property
     def can_undo(self) -> bool:
@@ -3783,15 +3801,20 @@ class OverlayWindow(QWidget):
         removing one) is undone by reinserting it -- both read
         `_MarkAction.index`, which is what puts an undone erase back at
         exactly the draw-order position it was removed from rather than at
-        the end. A no-op with nothing to undo.
+        the end. A 'clear' action (SNX-72: `clear()` emptying the whole
+        list) is undone by restoring every mark it carries, in the same
+        draw order they were in before the clear. A no-op with nothing to
+        undo.
         """
         if not self._undo:
             return
         action = self._undo.pop()
         if action.kind == "add":
             self._marks.pop(action.index)
-        else:
+        elif action.kind == "erase":
             self._marks.insert(action.index, action.shape)
+        else:
+            self._marks = list(action.shape)
         self._redo.append(action)
         self._sync_bar_undo_redo()
         self.update()
@@ -3802,7 +3825,8 @@ class OverlayWindow(QWidget):
 
         Mirrors `undo()`: an 'add' action is redone by reinserting the mark
         at `index`; an 'erase' action is redone by removing it again from
-        that same position.
+        that same position; a 'clear' action is redone by emptying
+        `_marks` again.
 
         A no-op with nothing to redo -- either nothing has been undone yet,
         or a mark committed since (see `add_mark`) already cleared the
@@ -3813,43 +3837,62 @@ class OverlayWindow(QWidget):
         action = self._redo.pop()
         if action.kind == "add":
             self._marks.insert(action.index, action.shape)
-        else:
+        elif action.kind == "erase":
             self._marks.pop(action.index)
+        else:
+            self._marks = []
         self._undo.append(action)
         self._sync_bar_undo_redo()
         self.update()
 
     def clear(self) -> None:
-        """Discard every mark and both stacks in a single step, and toast
+        """Move every mark to the undo stack as a single step, and toast
         `Ink cleared`.
 
-        Per the spec: "Clear-ink empties both and toasts" -- and clearing
-        is explicitly *not* itself undoable, unlike an ordinary undo/redo
-        entry: the cleared marks are dropped outright rather than pushed
-        onto `_redo`, so a subsequent undo() has nothing left to pop and
-        cannot bring them back.
+        SNX-72: clear used to drop `_marks` and both stacks outright via
+        `_empty_marks` (per the spec's "Clear-ink empties both and
+        toasts"), leaving no way back -- but clear sits in the same bar as
+        undo/redo, right next to redo, and is the single most destructive
+        button in the tool. It now takes its turn in the general undo/redo
+        history instead, the same way SNX-70 folded the eraser in: the
+        whole mark list is recorded as one `_MarkAction` (kind `'clear'`)
+        and `_marks` emptied, so `undo()` restores every mark in its
+        original draw order, `redo()` re-clears, and a mark committed after
+        undoing a clear (via `add_mark`) drops it from `_redo` like any
+        other action. Clearing with nothing on screen is a no-op -- it
+        does not push an empty step, matching `undo`/`redo`'s own
+        "nothing to do" contract.
         """
-        self._empty_marks()
+        if not self._marks:
+            return
+        self._undo.append(_MarkAction("clear", 0, tuple(self._marks)))
+        self._marks = []
+        self._redo.clear()
+        self._sync_bar_undo_redo()
         self._show_toast("trash", "Ink cleared")
+        self.update()
 
     def discard(self) -> None:
-        """Discard every mark and both stacks, and toast `Ink discarded`.
+        """Discard every mark and both stacks outright, and toast
+        `Ink discarded`.
 
-        Same underlying effect as `clear()` -- per the spec's keyboard
-        table, "Esc -- discard all ink, toast Ink discarded" -- but its own
-        method and toast message, since Esc's wording is deliberately
-        distinct from the floating bar's own clear-ink button. Called by
-        `_handle_escape` (SNX-47) as the first stage of Esc's two-stage
-        behaviour, whenever there is ink present to discard.
+        Per the spec's keyboard table, "Esc -- discard all ink, toast Ink
+        discarded" -- its own method and toast message, since Esc's
+        wording is deliberately distinct from the floating bar's own
+        clear-ink button. Unlike `clear()` (SNX-72), this is *not* folded
+        into the undo/redo history: Esc is a leave-immediately gesture,
+        not a bar button living next to undo/redo where a mis-aimed click
+        is easy, so there is no ticket asking for a way back from it.
+        Called by `_handle_escape` (SNX-47) as the first stage of Esc's
+        two-stage behaviour, whenever there is ink present to discard.
         """
         self._empty_marks()
         self._show_toast("trash", "Ink discarded")
 
     def _empty_marks(self) -> None:
-        """The shared body of `clear()`/`discard()`: empty `_marks` and both
-        the undo and redo stacks, and resync the bar's undo/redo buttons,
-        without deciding which toast (if any) to show -- that choice is
-        each caller's own.
+        """`discard()`'s body: empty `_marks` and both the undo and redo
+        stacks, and resync the bar's undo/redo buttons, without deciding
+        which toast (if any) to show -- that choice is the caller's own.
         """
         self._marks = []
         self._undo = []

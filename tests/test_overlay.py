@@ -2017,7 +2017,9 @@ class TestUndoRedoClear:
     longer has a private single-slot undo of its own -- so an erase takes
     its turn in draw order alongside ordinary marks and rides the same
     Ctrl+Z / bar Undo button / redo / commit-clears-redo rules the tests
-    below already cover for `add_mark`.
+    below already cover for `add_mark`. SNX-72 folds `clear()` in the same
+    way: a clear used to drop `_marks` and both stacks outright with no way
+    back, and now takes its own turn in the same history instead.
     """
 
     RED = QColor(255, 0, 0)
@@ -2112,26 +2114,82 @@ class TestUndoRedoClear:
         overlay.redo()  # no-op: the stack this would have popped is gone
         assert overlay.marks == marks_before
 
-    def test_clear_empties_both_stacks_in_one_step(self):
+    def test_clear_moves_every_mark_to_the_undo_stack(self):
+        # SNX-72 AC: "the Undo button is enabled after a clear rather than
+        # greyed out."
         overlay = self._overlay()
         overlay.add_mark(self._mark((0, 0), (10, 10)))
         overlay.add_mark(self._mark((20, 20), (30, 30)))
-        overlay.undo()  # one mark now sits on the redo stack too
+
+        overlay.clear()
+
+        assert overlay.marks == ()
+        assert overlay.can_undo
+
+    def test_clear_still_empties_a_pre_existing_redo_stack(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+        overlay.add_mark(self._mark((20, 20), (30, 30)))
+        overlay.undo()  # one mark now sits on the redo stack
+        assert overlay.can_redo
+
+        overlay.clear()
+
+        assert not overlay.can_redo
+
+    def test_undo_after_clear_restores_every_mark_in_original_order(self):
+        # SNX-72 AC: "clearing all annotations can be undone, restoring
+        # every mark in its original draw order."
+        overlay = self._overlay()
+        first = self._mark((0, 0), (10, 10))
+        second = self._mark((20, 20), (30, 30))
+        overlay.add_mark(first)
+        overlay.add_mark(second)
+
+        overlay.clear()
+        overlay.undo()
+
+        assert overlay.marks == (first, second)
+
+    def test_redo_re_clears(self):
+        # SNX-72 AC: "redo re-clears, so the action round-trips like any
+        # other action."
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+        overlay.add_mark(self._mark((20, 20), (30, 30)))
+        overlay.clear()
+        overlay.undo()
+        assert overlay.marks != ()
+
+        overlay.redo()
+
+        assert overlay.marks == ()
+        assert overlay.can_undo
+        assert not overlay.can_redo
+
+    def test_committing_a_mark_after_undoing_a_clear_empties_the_redo_stack(self):
+        # SNX-72 AC: "committing a new mark after undoing a clear clears the
+        # redo stack, the same rule every other action follows."
+        overlay = self._overlay()
+        overlay.add_mark(self._mark((0, 0), (10, 10)))
+        overlay.clear()
+        overlay.undo()
+        assert overlay.can_redo  # the clear sitting on the redo stack
+
+        overlay.add_mark(self._mark((50, 50), (60, 60)))
+
+        assert not overlay.can_redo
+
+    def test_clear_with_nothing_to_clear_is_a_no_op(self):
+        # SNX-72 AC: "clearing when there is nothing to clear is still a
+        # no-op and does not push an empty step onto the stack."
+        overlay = self._overlay()
 
         overlay.clear()
 
         assert overlay.marks == ()
         assert not overlay.can_undo
         assert not overlay.can_redo
-
-    def test_clear_is_not_itself_undoable(self):
-        overlay = self._overlay()
-        overlay.add_mark(self._mark((0, 0), (10, 10)))
-
-        overlay.clear()
-        overlay.undo()  # must not resurrect the cleared mark
-
-        assert overlay.marks == ()
 
     def test_undo_restores_an_erased_mark_to_its_original_position(self):
         # SNX-70 AC: "erasing a mark leaves undo available, and Ctrl+Z
@@ -3054,6 +3112,11 @@ class TestOverlayWindowToasts:
 
     def test_a_toast_raised_while_the_first_is_showing_replaces_it(self):
         overlay = self._overlay()
+        # SNX-72: clear() is a no-op (no toast) with nothing to clear, so a
+        # mark must be on screen first for it to actually fire one.
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
 
         overlay.clear()
         assert overlay._toast._text_label.text() == "Ink cleared"
