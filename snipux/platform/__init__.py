@@ -13,6 +13,10 @@ three things the app asks for at its edges:
     the rest of desktop integration -- what Settings does after a user
     changes it
   * where a saved image should go when the user hasn't chosen otherwise
+  * (SNX-86) which `capture.CaptureBackend`s can even be tried here --
+    `app.build_default_registry()` used to answer this itself by branching
+    on `capture.detect_session_type()`, which has no answer at all on a
+    platform with no notion of an X11/Wayland session type
 
 This module is the one place that interface (`Platform`) is defined, and the
 one place an implementation is picked -- from `sys.platform`, at import
@@ -40,11 +44,15 @@ from __future__ import annotations
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from snipux.capture import BackendRegistry
 
 
 class Platform(ABC):
     """What the app needs from the OS it's running on. See this module's
-    own docstring for why these five operations are the whole interface.
+    own docstring for why these six operations are the whole interface.
     """
 
     @abstractmethod
@@ -80,6 +88,19 @@ class Platform(ABC):
     def default_save_folder(self) -> Path:
         """Where a snip should be saved when the user hasn't chosen
         otherwise.
+        """
+
+    @abstractmethod
+    def build_capture_registry(self) -> "BackendRegistry":
+        """The `capture.BackendRegistry` this platform can capture with.
+
+        What `app.build_default_registry()` asks for instead of branching
+        on `capture.detect_session_type()` itself (SNX-86) -- so a platform
+        with no session-type concept at all (Windows, macOS) has a real
+        answer instead of no branch matching. A platform with nothing
+        implemented yet must still return a registry that says so -- see
+        `capture.UnsupportedPlatformBackend` -- rather than an empty one or
+        a raised exception, since `--list-backends` has to work everywhere.
         """
 
 
