@@ -1475,3 +1475,52 @@ class TestASecondRequestSurfacesTheOverlay:
 
         assert controller._overlay is not None
         assert controller._overlay is not first
+
+
+class TestTheChoosersOutcomeWins:
+    """What the user picked on the chooser a moment ago beats a setting
+    they configured once.
+    """
+
+    def _controller(self, make_controller, monkeypatch, stored_review: bool):
+        monkeypatch.setattr(
+            app.setup_desktop, "load_review_window", lambda: stored_review
+        )
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+        controller.start_capture()
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+        return controller
+
+    def test_review_opens_a_window_even_when_the_setting_says_otherwise(
+        self, make_controller, monkeypatch
+    ):
+        controller = self._controller(make_controller, monkeypatch, stored_review=False)
+        controller._overlay._chooser._pick_outcome("review")
+
+        controller._overlay.copy()
+
+        assert len(controller._reviews) == 1
+
+    @pytest.mark.parametrize("outcome", ["clip", "file"])
+    def test_the_other_outcomes_open_nothing(
+        self, make_controller, monkeypatch, outcome
+    ):
+        controller = self._controller(make_controller, monkeypatch, stored_review=True)
+        controller._overlay._chooser._pick_outcome(outcome)
+
+        controller._overlay.copy()
+
+        assert controller._reviews == []
+
+    def test_an_untouched_chooser_leaves_settings_in_charge(
+        self, make_controller, monkeypatch
+    ):
+        controller = self._controller(make_controller, monkeypatch, stored_review=True)
+
+        controller._overlay.copy()
+
+        assert len(controller._reviews) == 1
