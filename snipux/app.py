@@ -613,9 +613,23 @@ class AppController:
         # property that a future dismissal path could leave stale again.
         if self._overlay is not None:
             # A Snip request arrived while an overlay is genuinely still
-            # open and in use (tray double-click, or a forwarded request
-            # from a second launch while already selecting) — no-op rather
-            # than opening a second overlay on top of the first.
+            # open -- a tray double-click, or a second shortcut press while
+            # already selecting. Opening a second overlay on top of the
+            # first would be wrong, but so was the silent no-op this used to
+            # be: an overlay the user has lost track of (they looked away,
+            # or clicked onto another screen) turns every later press of the
+            # shortcut into nothing at all, with no clue why. That is
+            # indistinguishable from the keybinding having stopped working,
+            # and was reported as exactly that.
+            #
+            # Showing the overlay they already have is both the honest
+            # answer and the actionable one -- it is right there, and Esc
+            # closes it. `_reveal` covers the case where the request landed
+            # inside the window's own opacity-0 reveal delay, which would
+            # otherwise raise something still invisible.
+            self._overlay._reveal()
+            self._overlay.raise_()
+            self._overlay.activateWindow()
             return
 
         try:
