@@ -174,6 +174,10 @@ mystery.
 
 - Python 3.10+
 - PyQt6, jeepney
+- `libxcb-cursor0` (`sudo apt install libxcb-cursor0`) — Qt 6.5+ needs it to
+  load its xcb platform plugin, and nothing else on a stock Ubuntu desktop
+  pulls it in. Without it snipux installs cleanly and then crashes on
+  launch. `packaging/install.sh` checks for it before doing anything.
 - Ubuntu 22.04+ (Wayland or X11); other desktops are expected to work but
   are not the primary target
 
