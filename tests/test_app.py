@@ -1,3 +1,4 @@
+import ctypes
 import re
 
 import pytest
@@ -31,6 +32,7 @@ from snipux.capture import (
     X11WindowGeometryProvider,
 )
 from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
+from snipux.platform import windows as windows_platform
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -1296,6 +1298,181 @@ class TestShortcutFlag:
             main(["--shortcut", "<Super><Shift>x"])
 
         assert "only means anything alongside --setup" in capsys.readouterr().err
+
+
+class TestWindowsHotkeyIntegration:
+    """SNX-91: the resident app registers a global hotkey on Windows and
+    starts a capture when it fires, even while another application has
+    focus, and Settings' Save button re-registers it without a restart.
+
+    Exercised through `AppController.install_hotkey_listener()` (what
+    `app.py`'s `_become_resident()` calls once the process is actually
+    resident, not `AppController.__init__` -- see that method's own
+    docstring) with `platform.current`'s real `RegisterHotKey` calls
+    mocked out, the same way `TestWindowsPlatform` (test_platform.py) keeps
+    the suite from grabbing a real system-wide hotkey on whatever machine
+    runs it. `HotkeyEventFilter.is_available()` is forced rather than relied
+    on, so this coverage holds regardless of which OS actually runs pytest.
+    """
+
+    def test_is_a_no_op_when_unavailable(self, make_controller, monkeypatch):
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: False))
+        install_calls = []
+        monkeypatch.setattr(
+            QApplication, "installNativeEventFilter", lambda self, f: install_calls.append(f)
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.install_hotkey_listener()
+
+        assert controller.hotkey_filter is None
+        assert install_calls == []
+
+    def test_installs_a_filter_and_registers_the_default_shortcut(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        install_calls = []
+        monkeypatch.setattr(
+            QApplication, "installNativeEventFilter", lambda self, f: install_calls.append(f)
+        )
+        bind_calls = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: bind_calls.append(shortcut)
+            or "Bound Control+Alt+S to start a snip.",
+        )
+        monkeypatch.setattr(
+            app.platform.current, "registered_shortcut", "Control+Alt+S", raising=False
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.install_hotkey_listener()
+
+        assert isinstance(controller.hotkey_filter, app.HotkeyEventFilter)
+        assert install_calls == [controller.hotkey_filter]
+        # No shortcut passed explicitly -- bind_shortcut()'s own default
+        # (fall back to setup_desktop.load_shortcut(), Control+Alt+S the
+        # first time) must reach it untouched, the same contract
+        # LinuxPlatform.bind_shortcut() already has.
+        assert bind_calls == [None]
+
+    def test_a_clash_at_startup_is_reported_through_the_tray_by_name(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(QApplication, "installNativeEventFilter", lambda self, f: None)
+        clash_message = (
+            "Control+Alt+S is already in use by another application -- "
+            "snipux cannot use it too."
+        )
+        monkeypatch.setattr(
+            app.platform.current, "bind_shortcut", lambda shortcut=None: clash_message
+        )
+        monkeypatch.setattr(app.platform.current, "registered_shortcut", None, raising=False)
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        calls = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: calls.append(message),
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.install_hotkey_listener()
+
+        assert calls == [clash_message]
+
+    def test_a_successful_bind_at_startup_is_not_reported(
+        self, make_controller, monkeypatch
+    ):
+        # A clash is the failure this AC is about; a routine successful
+        # bind at every startup is not worth a balloon every time -- see
+        # TestSnipFlag's own tray-message assertions, which this would
+        # otherwise silently inflate.
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(QApplication, "installNativeEventFilter", lambda self, f: None)
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: "Bound Control+Alt+S to start a snip.",
+        )
+        monkeypatch.setattr(
+            app.platform.current, "registered_shortcut", "Control+Alt+S", raising=False
+        )
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        calls = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: calls.append(message),
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.install_hotkey_listener()
+
+        assert calls == []
+
+    def test_pressing_the_hotkey_starts_a_capture(self, make_controller, monkeypatch):
+        # AC: the hotkey works while another application has focus -- there
+        # is no window/focus concept anywhere in reaching start_capture()
+        # this way, which is the whole point of a WM_HOTKEY thread message
+        # rather than a window event.
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(QApplication, "installNativeEventFilter", lambda self, f: None)
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: "Bound Control+Alt+S to start a snip.",
+        )
+        monkeypatch.setattr(
+            app.platform.current, "registered_shortcut", "Control+Alt+S", raising=False
+        )
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        controller.install_hotkey_listener()
+        msg = windows_platform._MSG(message=windows_platform._WM_HOTKEY)
+
+        controller.hotkey_filter.nativeEventFilter(b"windows_generic_MSG", ctypes.addressof(msg))
+
+        assert isinstance(controller._overlay, OverlayWindow)
+
+    def test_settings_saved_rebinds_through_the_platform_seam_on_windows(
+        self, make_controller, monkeypatch
+    ):
+        # AC: changing the shortcut re-registers it without restarting the
+        # app -- via platform.current.bind_shortcut(), not the Linux-only
+        # setup_desktop.bind_gnome_shortcut() path _on_settings_saved()
+        # otherwise takes.
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        bind_calls = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: bind_calls.append(shortcut)
+            or "Bound Control+Alt+X to start a snip.",
+        )
+        gnome_calls = []
+        monkeypatch.setattr(
+            app.setup_desktop,
+            "bind_gnome_shortcut",
+            lambda *a, **k: gnome_calls.append(a) or "unused",
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller._on_settings_saved()
+
+        assert bind_calls == [None]
+        assert gnome_calls == []
 
 
 class TestReviewWindowIntegration:
