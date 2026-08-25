@@ -185,6 +185,101 @@ def _patch_win32_dll(monkeypatch, user32, gdi32):
     )
 
 
+class _FakeUser32Windows:
+    """Stand-in for `ctypes.windll.user32`, covering what
+    `WindowsWindowGeometryProvider` calls: `EnumWindows`, `IsWindowVisible`,
+    `IsIconic`, `GetWindowRect`, `GetWindowTextLengthW`, `GetWindowTextW`.
+
+    `windows` is the list of `hwnd`/`visible`/`iconic`/`rect`/`title` dicts
+    `EnumWindows` should hand to the caller's callback, one at a time, in
+    the order given -- tests put them in the Z-order (topmost first) the
+    real API would visit them in.
+    """
+
+    def __init__(self, windows):
+        self._windows = {w["hwnd"]: w for w in windows}
+        self._order = [w["hwnd"] for w in windows]
+
+    def EnumWindows(self, callback, lparam):
+        for hwnd in self._order:
+            if not callback(hwnd, lparam):
+                break
+        return 1
+
+    def IsWindowVisible(self, hwnd):
+        return 1 if self._windows[hwnd]["visible"] else 0
+
+    def IsIconic(self, hwnd):
+        return 1 if self._windows[hwnd]["iconic"] else 0
+
+    def GetWindowRect(self, hwnd, rect_ref):
+        left, top, right, bottom = self._windows[hwnd]["rect"]
+        target = ctypes.cast(rect_ref, ctypes.POINTER(capture._RECT)).contents
+        target.left, target.top, target.right, target.bottom = left, top, right, bottom
+        return 1
+
+    def GetWindowTextLengthW(self, hwnd):
+        return len(self._windows[hwnd]["title"])
+
+    def GetWindowTextW(self, hwnd, buffer, _size):
+        buffer.value = self._windows[hwnd]["title"]
+        return len(buffer.value)
+
+
+class _FakeDwmapi:
+    """Stand-in for `ctypes.windll.dwmapi`'s one entry point
+    `WindowsWindowGeometryProvider` calls, `DwmGetWindowAttribute`, for both
+    attributes it asks about: `DWMWA_CLOAKED` and
+    `DWMWA_EXTENDED_FRAME_BOUNDS`.
+
+    `cloaked` maps hwnd -> truthy/falsy. `frame_bounds` maps hwnd -> an
+    (left, top, right, bottom) tuple; a hwnd missing from it makes the
+    extended-frame-bounds call fail (a non-zero HRESULT), the same as DWM
+    itself refusing to answer -- exactly the case
+    `WindowsWindowGeometryProvider._frame_bounds` falls back to
+    `GetWindowRect` for.
+    """
+
+    def __init__(self, cloaked=None, frame_bounds=None):
+        self._cloaked = cloaked or {}
+        self._frame_bounds = frame_bounds or {}
+
+    def DwmGetWindowAttribute(self, hwnd, attribute, out_ref, _size):
+        if attribute == capture.WindowsWindowGeometryProvider._DWMWA_CLOAKED:
+            target = ctypes.cast(out_ref, ctypes.POINTER(ctypes.c_int)).contents
+            target.value = 1 if self._cloaked.get(hwnd) else 0
+            return 0
+        if attribute == capture.WindowsWindowGeometryProvider._DWMWA_EXTENDED_FRAME_BOUNDS:
+            bounds = self._frame_bounds.get(hwnd)
+            if bounds is None:
+                return 1  # a failing HRESULT: DWM couldn't answer
+            left, top, right, bottom = bounds
+            target = ctypes.cast(out_ref, ctypes.POINTER(capture._RECT)).contents
+            target.left, target.top, target.right, target.bottom = left, top, right, bottom
+            return 0
+        raise AssertionError(f"unexpected DwmGetWindowAttribute attribute {attribute!r}")
+
+
+def _patch_windows_geometry_dll(monkeypatch, user32, dwmapi):
+    """Points `capture.ctypes.windll.user32`/`.dwmapi` at the given fakes,
+    the `WindowsWindowGeometryProvider` counterpart of `_patch_win32_dll`
+    above. Also stands `ctypes.WINFUNCTYPE` in for
+    `capture.ctypes.WINFUNCTYPE` when the suite runs off Windows, where the
+    real one doesn't exist at all (it's defined only under `sys.platform ==
+    "win32"` in the stdlib itself) -- `ctypes.CFUNCTYPE` builds the same
+    kind of Python-callable function pointer and is available everywhere,
+    which is all `_list_windows_uncached`'s enum callback needs from it in
+    a test that never actually crosses into real Win32 code.
+    """
+    monkeypatch.setattr(
+        capture.ctypes,
+        "windll",
+        SimpleNamespace(user32=user32, dwmapi=dwmapi),
+        raising=False,
+    )
+    monkeypatch.setattr(capture.ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE, raising=False)
+
+
 def _set_session_type(monkeypatch, session_type):
     """Sets or unsets XDG_SESSION_TYPE, matching detect_session_type()'s
     two ways of *not* being 'wayland': the env var set to something else,
@@ -1411,6 +1506,157 @@ class TestBuildWindowsRegistry:
 
         assert isinstance(frame, Frame)
         assert not frame.image.isNull()
+
+
+class TestWindowsWindowGeometryProvider:
+    """SNX-90: `EnumWindows`/`GetWindowRect`/`DwmGetWindowAttribute` via
+    ctypes -- Windows' counterpart to `TestX11WindowGeometryProvider`
+    above. Unlike X11, Windows has no "no client may enumerate other
+    windows" restriction to work around, so this is available whenever
+    `sys.platform == "win32"`, no external tool required.
+    """
+
+    def test_is_available_only_on_windows(self, monkeypatch):
+        provider = capture.WindowsWindowGeometryProvider()
+
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        assert provider.is_available() is True
+
+        monkeypatch.setattr(capture.sys, "platform", "linux")
+        assert provider.is_available() is False
+
+    def test_list_windows_uses_extended_frame_bounds_not_get_window_rect(
+        self, monkeypatch
+    ):
+        # The invisible resize border GetWindowRect would include: its
+        # rect (0,0,120,120) is padded 10px past what DWM's own extended
+        # frame bounds (10,10,100,100) report as actually visible.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False,
+              "rect": (0, 0, 120, 120), "title": "Notepad"}]
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (10, 10, 100, 100)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert windows == [("Notepad", QRectF(10, 10, 90, 90))]
+
+    def test_list_windows_falls_back_to_get_window_rect_when_dwm_fails(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False,
+              "rect": (0, 0, 50, 50), "title": "Old-style window"}]
+        )
+        # No entry for hwnd 1 in frame_bounds -- DwmGetWindowAttribute
+        # reports failure, same as a pre-DWM window.
+        dwmapi = _FakeDwmapi()
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert windows == [("Old-style window", QRectF(0, 0, 50, 50))]
+
+    def test_list_windows_skips_hidden_minimised_and_cloaked_windows(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows([
+            {"hwnd": 1, "visible": False, "iconic": False,
+             "rect": (0, 0, 50, 50), "title": "Hidden"},
+            {"hwnd": 2, "visible": True, "iconic": True,
+             "rect": (0, 0, 50, 50), "title": "Minimised"},
+            {"hwnd": 3, "visible": True, "iconic": False,
+             "rect": (0, 0, 50, 50), "title": "Cloaked"},
+            {"hwnd": 4, "visible": True, "iconic": False,
+             "rect": (0, 0, 50, 50), "title": "Visible"},
+        ])
+        dwmapi = _FakeDwmapi(
+            cloaked={3: True},
+            frame_bounds={
+                1: (0, 0, 50, 50), 2: (0, 0, 50, 50),
+                3: (0, 0, 50, 50), 4: (0, 0, 50, 50),
+            },
+        )
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+
+        windows = capture.WindowsWindowGeometryProvider().list_windows()
+
+        assert [title for title, _rect in windows] == ["Visible"]
+
+    def test_window_at_returns_the_topmost_of_several_overlapping_windows(
+        self, monkeypatch
+    ):
+        # EnumWindows visits windows front-to-back, so the first (not
+        # last) match in enumeration order must win -- unlike
+        # XwininfoWindowGeometryProvider, this needs no reversal to get
+        # there.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows([
+            {"hwnd": 1, "visible": True, "iconic": False,
+             "rect": (0, 0, 100, 100), "title": "Front"},
+            {"hwnd": 2, "visible": True, "iconic": False,
+             "rect": (0, 0, 200, 200), "title": "Back"},
+        ])
+        dwmapi = _FakeDwmapi(
+            frame_bounds={1: (0, 0, 100, 100), 2: (0, 0, 200, 200)}
+        )
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+        provider = capture.WindowsWindowGeometryProvider()
+
+        assert provider.window_at(QPointF(50, 50)) == QRectF(0, 0, 100, 100)
+        assert provider.window_at(QPointF(150, 150)) == QRectF(0, 0, 200, 200)
+        assert provider.window_at(QPointF(500, 500)) is None
+
+    def test_list_windows_reuses_cached_list_within_the_cache_window(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False,
+              "rect": (0, 0, 50, 50), "title": "W"}]
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (0, 0, 50, 50)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+        enum_windows = Mock(wraps=user32.EnumWindows)
+        monkeypatch.setattr(user32, "EnumWindows", enum_windows)
+        clock = [100.0]
+        monkeypatch.setattr(capture.time, "monotonic", lambda: clock[0])
+        provider = capture.WindowsWindowGeometryProvider()
+
+        provider.window_at(QPointF(10, 10))
+        clock[0] += 0.05
+        provider.window_at(QPointF(10, 10))
+
+        assert enum_windows.call_count == 1
+
+    def test_list_windows_refetches_once_the_cache_expires(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows(
+            [{"hwnd": 1, "visible": True, "iconic": False,
+              "rect": (0, 0, 50, 50), "title": "W"}]
+        )
+        dwmapi = _FakeDwmapi(frame_bounds={1: (0, 0, 50, 50)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+        enum_windows = Mock(wraps=user32.EnumWindows)
+        monkeypatch.setattr(user32, "EnumWindows", enum_windows)
+        clock = [100.0]
+        monkeypatch.setattr(capture.time, "monotonic", lambda: clock[0])
+        provider = capture.WindowsWindowGeometryProvider()
+
+        provider.list_windows()
+        clock[0] += capture.WindowsWindowGeometryProvider._CACHE_SECONDS + 0.01
+        provider.list_windows()
+
+        assert enum_windows.call_count == 2
+
+    def test_list_windows_is_empty_off_windows(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "linux")
+
+        assert capture.WindowsWindowGeometryProvider().list_windows() == []
 
 
 class TestUnsupportedPlatformBackend:

@@ -1073,6 +1073,153 @@ def build_windows_registry() -> BackendRegistry:
     return registry
 
 
+class _RECT(ctypes.Structure):
+    """Win32 `RECT`, shared by `GetWindowRect` and
+    `DwmGetWindowAttribute(..., DWMWA_EXTENDED_FRAME_BOUNDS, ...)` below --
+    ctypes has no symbolic version of this struct built in either, same as
+    `_BitmapInfoHeader` above.
+    """
+
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class WindowsWindowGeometryProvider:
+    """Real per-window geometry source for Windows' window-selection mode
+    (SNX-90).
+
+    Duck-types `overlay.GeometryProvider`'s shape (`is_available()`,
+    `window_at()`) without importing it, same reasoning as
+    `X11WindowGeometryProvider` above: `overlay.py` already imports `Frame`
+    from this module, so importing back would create a cycle.
+
+    Unlike X11 -- where a client cannot enumerate other windows itself on
+    Wayland, so `wmctrl`/`xwininfo` have to ask a window manager instead --
+    Windows has no such restriction: `EnumWindows` answers directly, via
+    `ctypes`, no new dependency (per CLAUDE.md).
+
+    Two Windows-specific wrinkles decide whether the result actually looks
+    right:
+
+    * `GetWindowRect` includes the invisible resize border DWM draws
+      around a modern window (a few pixels of dead space for resize
+      grabbing that is not part of what the user sees) -- padding the
+      snapped selection out unless the *extended frame bounds* DWM tracks
+      separately (`DwmGetWindowAttribute` with
+      `DWMWA_EXTENDED_FRAME_BOUNDS`) are used instead. `GetWindowRect` is
+      only a fallback, for the rare case `DwmGetWindowAttribute` itself
+      fails.
+    * A window can be enumerated by `EnumWindows` while hidden, minimised,
+      or cloaked (DWM hides a window this way during a virtual-desktop
+      switch or a suspended UWP app, without closing it) -- all three are
+      dropped here, or the picker would snap to something the user cannot
+      see.
+    """
+
+    # Mirrors X11WindowGeometryProvider._CACHE_SECONDS: overlay.py's window
+    # mode calls window_at() from mouseMoveEvent, at mouse-move frequency,
+    # so re-enumerating every window on every hover would make the
+    # highlight stutter behind the cursor.
+    _CACHE_SECONDS = 0.2
+    _DWMWA_CLOAKED = 14
+    _DWMWA_EXTENDED_FRAME_BOUNDS = 9
+
+    def __init__(self):
+        self._cache: list[tuple[str, QRectF]] | None = None
+        self._cache_time: float | None = None
+
+    def is_available(self) -> bool:
+        return sys.platform == "win32"
+
+    def list_windows(self) -> list[tuple[str, QRectF]]:
+        """(title, absolute logical rect) for every visible, non-minimised,
+        non-cloaked top-level window, topmost first.
+
+        `EnumWindows` already visits windows in top-to-bottom Z-order, so
+        -- unlike `XwininfoWindowGeometryProvider`, which has to reverse
+        `xwininfo`'s bottom-first order -- no re-sorting is needed to make
+        "the topmost window wins" (window_at()'s first match) true.
+        """
+        now = time.monotonic()
+        if (
+            self._cache is not None
+            and self._cache_time is not None
+            and now - self._cache_time < self._CACHE_SECONDS
+        ):
+            return self._cache
+        windows = self._list_windows_uncached()
+        self._cache = windows
+        self._cache_time = now
+        return windows
+
+    def _list_windows_uncached(self) -> list[tuple[str, QRectF]]:
+        if not self.is_available():
+            return []
+        user32 = ctypes.windll.user32
+        dwmapi = ctypes.windll.dwmapi
+
+        windows: list[tuple[str, QRectF]] = []
+
+        def _visit(hwnd, _lparam) -> bool:
+            if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                return True  # keep enumerating
+            if self._is_cloaked(dwmapi, hwnd):
+                return True
+            rect = self._frame_bounds(dwmapi, user32, hwnd)
+            if rect is not None:
+                windows.append((self._window_title(user32, hwnd), rect))
+            return True
+
+        # ctypes.WINFUNCTYPE is only constructed here, guarded by
+        # is_available() above -- it doesn't exist off Windows at all, so
+        # referencing it at module/class-body scope would break importing
+        # this module on Linux, where the rest of this file's tests run.
+        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(_visit)
+        user32.EnumWindows(enum_proc, 0)
+        return windows
+
+    def _is_cloaked(self, dwmapi, hwnd) -> bool:
+        cloaked = ctypes.c_int(0)
+        ok = dwmapi.DwmGetWindowAttribute(
+            hwnd, self._DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)
+        )
+        return ok == 0 and cloaked.value != 0
+
+    def _frame_bounds(self, dwmapi, user32, hwnd) -> QRectF | None:
+        rect = _RECT()
+        ok = dwmapi.DwmGetWindowAttribute(
+            hwnd,
+            self._DWMWA_EXTENDED_FRAME_BOUNDS,
+            ctypes.byref(rect),
+            ctypes.sizeof(rect),
+        )
+        if ok != 0 and not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            return None
+        return QRectF(rect.left, rect.top, width, height)
+
+    def _window_title(self, user32, hwnd) -> str:
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        return buffer.value
+
+    def window_at(self, point: QPointF) -> QRectF | None:
+        for _title, rect in self.list_windows():
+            if rect.contains(point):
+                return rect
+        return None
+
+
 class UnsupportedPlatformBackend(CaptureBackend):
     """Placeholder registered by a platform whose `Platform.build_capture_registry()`
     (see `snipux/platform/__init__.py`) has no real backend implemented yet
