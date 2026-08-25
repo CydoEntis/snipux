@@ -2843,8 +2843,8 @@ class OverlayWindow(QWidget):
         self._bar.undoRequested.connect(self.undo)
         self._bar.redoRequested.connect(self.redo)
         self._bar.clearRequested.connect(self.clear)
-        self._bar.copyRequested.connect(self.copy)
-        self._bar.saveRequested.connect(self.save)
+        self._bar.copyRequested.connect(self._on_bar_copy)
+        self._bar.saveRequested.connect(self._on_bar_save)
         self._bar.toolSelected.connect(self._on_tool_selected)
 
         # The settings tray (SNX-41): shown only while the bar's active
@@ -3668,6 +3668,28 @@ class OverlayWindow(QWidget):
         path = save_image(self.rendered_image(), directory)
         self._show_toast("save", f"Saved to ~/Pictures/{self.SAVE_SUBDIRECTORY}")
         return path
+
+    # SNX-62: the bar's Copy/Save buttons, unlike `copy()`/`save()`
+    # themselves, must also end the snip -- taking a snip should end the
+    # snip, the same as Enter's own copy-and-dismiss below already does.
+    # Wired to these wrapper methods rather than closing inside `copy()`/
+    # `save()` directly: those two stay pure flatten-and-emit actions,
+    # callable (and tested) without a close side effect, e.g. from Enter's
+    # own handler, which already pairs its own `self.close()` explicitly,
+    # or from a test asserting on `_toast` after the call -- `hideEvent`
+    # hides `_toast` along with everything else, so a `close()` buried
+    # inside `copy()`/`save()` would make that toast invisible again before
+    # a caller ever got to look at it.
+
+    def _on_bar_copy(self) -> None:
+        """The floating bar's Copy button: copy, then dismiss."""
+        self.copy()
+        self.close()
+
+    def _on_bar_save(self) -> None:
+        """The floating bar's Save button: save, then dismiss."""
+        self.save()
+        self.close()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -4720,6 +4742,7 @@ def open_overlay(
     hints_enabled: bool = True,
     geometry_provider: GeometryProvider | None = None,
     registry: BackendRegistry | None = None,
+    on_dismissed: Callable[[], None] | None = None,
 ) -> OverlayWindow:
     """Build and show the overlay for one snip, positioned for the
     caller's already-detected session type (`wayland`) rather than assumed
@@ -4729,6 +4752,13 @@ def open_overlay(
     through `OverlayWindow`'s own `on_dismissed` and close themselves the
     moment the returned window does, so a caller's bookkeeping never has
     to know they exist.
+
+    `on_dismissed` (SNX-62) is the caller's own hook for that same moment
+    -- composed with the veil-closing closure below rather than handed to
+    `OverlayWindow` in its place, so a caller (`AppController`, to drop its
+    stale `_overlay` reference the instant the session actually ends)
+    doesn't have to know whether this particular snip has veils to close at
+    all.
 
     X11 (`wayland=False`): unchanged from before this ticket -- one
     `OverlayWindow` sized to the whole virtual desktop (every entry in
@@ -4754,21 +4784,29 @@ def open_overlay(
 
     veils: list[_MonitorVeil] = []
 
-    def _close_veils() -> None:
+    def _on_overlay_dismissed() -> None:
         for veil in veils:
             veil.close()
+        if on_dismissed is not None:
+            on_dismissed()
 
     multi_monitor_wayland = wayland and len(monitor_geometries) > 1
     overlay_monitor_geometries = (
         [primary_geometry] if multi_monitor_wayland else monitor_geometries
     )
+    # None (not the closure above) whenever neither half of it would do
+    # anything -- no veils to close *and* no caller-supplied hook -- so
+    # OverlayWindow._on_dismissed stays exactly None for a plain
+    # single-window session, same as before this ticket's `on_dismissed`
+    # parameter existed.
+    needs_dismissal_hook = multi_monitor_wayland or on_dismissed is not None
     overlay = OverlayWindow(
         frame.crop(primary_geometry) if multi_monitor_wayland else frame,
         hints_enabled=hints_enabled,
         geometry_provider=geometry_provider,
         monitor_geometries=overlay_monitor_geometries,
         registry=registry,
-        on_dismissed=_close_veils if multi_monitor_wayland else None,
+        on_dismissed=_on_overlay_dismissed if needs_dismissal_hook else None,
     )
 
     if not wayland:
