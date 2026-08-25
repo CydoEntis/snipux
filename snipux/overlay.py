@@ -48,7 +48,7 @@ from PyQt6.QtWidgets import (
 
 from snipux import design
 from snipux.capture import BackendRegistry, CaptureError, Frame
-from snipux.marks import MarkStore, begin_stroke, extend_stroke
+from snipux.marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
 from snipux.shapes import (
     Arrow,
     Blur,
@@ -2831,33 +2831,6 @@ class _MarkAction:
     shape: Shape | tuple[Shape, ...]
 
 
-class _LabelLineEdit(QLineEdit):
-    """The text tool's own label editor (`OverlayWindow._text_edit`) -- a
-    plain `QLineEdit` except for one thing: it accepts the Return/Enter key
-    event it already consumed (SNX-76).
-
-    Stock `QLineEdit.keyPressEvent` deliberately leaves Return/Enter
-    unaccepted after emitting `returnPressed`/`editingFinished`, precisely
-    so a dialog's default button can still fire from inside a text field.
-    `OverlayWindow` has no default button, only the same key bound to
-    "copy and dismiss" (`keyPressEvent`'s own Enter branch) -- and Qt
-    propagates an unaccepted key event up the parent-widget chain, so the
-    very keystroke that just committed this label as a mark (`_commit_text`,
-    wired to `editingFinished`) would otherwise reach `OverlayWindow.
-    keyPressEvent` a second time and fire that shortcut too, closing the
-    overlay the user only meant to add one label to. `_shortcuts_suppressed`
-    can't catch this second delivery: `_commit_text` already hid the field
-    and dropped its focus by the time the event arrives there. Accepting the
-    event here, once the base class is done with it, is what stops that
-    second delivery from happening at all.
-    """
-
-    def keyPressEvent(self, event) -> None:
-        super().keyPressEvent(event)
-        if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
-            event.accept()
-
-
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -3190,11 +3163,10 @@ class OverlayWindow(QWidget):
         # `editingFinished` commits (or discards) them; `_committing_text`
         # guards against `hide()`'s own re-entrant `editingFinished`, same
         # as `Canvas._commit_text`'s own docstring explains.
-        self._text_edit: QLineEdit | None = None
-        self._pending_text_point: QPointF | None = None
-        self._pending_text_colour: QColor | None = None
-        self._pending_text_stroke_width: float | None = None
-        self._committing_text = False
+        # The text tool's label editor, shared with the review window's
+        # Edit mode -- see snipux/marks.py. Marks and host coordinates are
+        # the same space here, so it needs no mapping.
+        self._text_editor = TextLabelEditor(self, self._mark_store)
 
         self._dash_offset = 0.0
         self._ants_timer = QTimer(self)
@@ -4418,8 +4390,7 @@ class OverlayWindow(QWidget):
         stands in a bare `QLineEdit` for the real editor to test suppression
         generically -- this must abandon whichever label actually has focus.
         """
-        label.clear()
-        label.hide()
+        self._text_editor.abandon()
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
@@ -4648,6 +4619,23 @@ class OverlayWindow(QWidget):
 
     # -- text tool (SNX-52) -------------------------------------------------
 
+    @property
+    def _text_edit(self):
+        """The label editor's live field, or None before the first label.
+
+        A view onto `_text_editor`, which owns it -- kept because
+        `keyPressEvent` and `_shortcuts_suppressed` both need to know
+        whether a focused widget is that field, and this reads better at
+        those two sites than reaching through the editor.
+        """
+        return self._text_editor.field
+
+    def _commit_text(self) -> None:
+        """Commit whatever is in the label editor. Delegates; see
+        `marks.TextLabelEditor.commit`.
+        """
+        self._text_editor.commit()
+
     def _start_text_entry(self, pos: QPointF, colour: QColor) -> None:
         """Open the text tool's label editor at `pos`, seeded with a
         placeholder and focused for immediate typing, per
@@ -4672,50 +4660,7 @@ class OverlayWindow(QWidget):
         field (nothing typed yet, or the very first label ever) still has
         nothing to commit, per `_commit_text`'s own guard.
         """
-        if self._text_edit is not None:
-            self._commit_text()
-        self._pending_text_point = pos
-        self._pending_text_colour = colour
-        self._pending_text_stroke_width = self._stroke_width
-        text_edit = self._ensure_text_edit()
-        text_edit.clear()
-        text_edit.move(pos.toPoint())
-        text_edit.show()
-        text_edit.setFocus()
-
-    def _ensure_text_edit(self) -> QLineEdit:
-        if self._text_edit is None:
-            self._text_edit = _LabelLineEdit(self)
-            # Grey hint text, not a seeded value -- see `_commit_text`'s
-            # `if self._text_edit.text():` guard, same reasoning as
-            # editor.py's `Canvas._ensure_text_edit`.
-            self._text_edit.setPlaceholderText("Label")
-            self._text_edit.hide()
-            self._text_edit.editingFinished.connect(self._commit_text)
-        return self._text_edit
-
-    def _commit_text(self) -> None:
-        # Re-entrancy guard, not a signal disconnect: hide() below drops
-        # the field's focus and re-triggers editingFinished synchronously
-        # -- see Canvas._commit_text's own docstring for the identical
-        # reasoning this mirrors.
-        if self._committing_text:
-            return
-        self._committing_text = True
-        try:
-            if self._text_edit.text():
-                self.add_mark(
-                    Text(
-                        colour=self._pending_text_colour,
-                        stroke_width=self._pending_text_stroke_width,
-                        point=self._pending_text_point,
-                        text=self._text_edit.text(),
-                    )
-                )
-            self._text_edit.hide()
-            self._pending_text_point = None
-        finally:
-            self._committing_text = False
+        self._text_editor.begin(pos, colour, self._stroke_width)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         # SNX-48: tracked on every move regardless of mode, so

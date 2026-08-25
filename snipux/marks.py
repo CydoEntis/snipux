@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QObject, QPointF, pyqtSignal
+from PyQt6.QtCore import QObject, QPointF, Qt, pyqtSignal
+from PyQt6.QtWidgets import QLineEdit
 
 from . import shapes as shapes_module
 from .shapes import Shape
@@ -243,3 +244,140 @@ def extend_stroke(shape: Shape, point: QPointF) -> None:
         shape.points.append(point)
     else:
         shape.end = point
+
+
+class LabelLineEdit(QLineEdit):
+    """The text tool's own label editor -- a
+    plain `QLineEdit` except for one thing: it accepts the Return/Enter key
+    event it already consumed (SNX-76).
+
+    Stock `QLineEdit.keyPressEvent` deliberately leaves Return/Enter
+    unaccepted after emitting `returnPressed`/`editingFinished`, precisely
+    so a dialog's default button can still fire from inside a text field.
+    Neither host window has a default button, only the same key bound to
+    "copy and dismiss" (`keyPressEvent`'s own Enter branch) -- and Qt
+    propagates an unaccepted key event up the parent-widget chain, so the
+    very keystroke that just committed this label as a mark (`_commit_text`,
+    wired to `editingFinished`) would otherwise reach `OverlayWindow.
+    keyPressEvent` a second time and fire that shortcut too, closing the
+    overlay the user only meant to add one label to. `_shortcuts_suppressed`
+    can't catch this second delivery: `_commit_text` already hid the field
+    and dropped its focus by the time the event arrives there. Accepting the
+    event here, once the base class is done with it, is what stops that
+    second delivery from happening at all.
+    """
+
+    def keyPressEvent(self, event) -> None:
+        super().keyPressEvent(event)
+        if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+            event.accept()
+
+
+class TextLabelEditor(QObject):
+    """The text tool's click-to-type label, for any widget that hosts marks.
+
+    Extracted from `OverlayWindow` for the same reason the bar and the store
+    were: the review window's Edit mode needs the identical gesture -- click,
+    type, click elsewhere or press Enter to commit -- and a second
+    implementation of a re-entrancy-guarded commit is exactly the drift the
+    design forbids.
+
+    `host` is the widget the field is placed on. `to_document` converts a
+    host-widget point into whatever space marks are stored in: identity for
+    the overlay, which keeps both in window coordinates, and a zoom-aware
+    mapping for the review window, whose marks live in image coordinates.
+    """
+
+    def __init__(self, host, store: "MarkStore", to_document=None):
+        # Parented to the host, and deliberately keeping no Python
+        # reference back to it. `self._host = host` would close a reference
+        # cycle through the widget's own __dict__, which defers its
+        # collection to a GC pass rather than dropping it the moment the
+        # last reference goes -- and a still-mapped overlay that outlives
+        # the code that made it goes on receiving mouse events meant for
+        # its successor. `parent()` is a C++ pointer and costs nothing.
+        super().__init__(host)
+        self._store = store
+        self._to_document = to_document or (lambda point: point)
+        self._field: LabelLineEdit | None = None
+        self._point: QPointF | None = None
+        self._colour = None
+        self._stroke_width: float | None = None
+        self._committing = False
+
+    @property
+    def field(self) -> "LabelLineEdit | None":
+        """The live field, or None before the first label. Callers check it
+        to decide whether a key belongs to a focused label.
+        """
+        return self._field
+
+    def is_active(self) -> bool:
+        return self._field is not None and self._field.isVisible()
+
+    def begin(self, point: QPointF, colour, stroke_width: float) -> None:
+        """Open a label at `point` (host coordinates), seeded empty and
+        focused for immediate typing.
+
+        Any label already open commits first, against its *own* point and
+        colour rather than this click's -- a click elsewhere never blurs the
+        field, so nothing else would force the `editingFinished` the commit
+        hangs off, and the previous label would be lost.
+        """
+        if self._field is not None:
+            self.commit()
+        self._point = self._to_document(point)
+        self._colour = colour
+        self._stroke_width = stroke_width
+        field = self._ensure_field()
+        field.clear()
+        field.move(point.toPoint())
+        field.show()
+        field.setFocus()
+
+    def _ensure_field(self) -> "LabelLineEdit":
+        if self._field is None:
+            self._field = LabelLineEdit(self.parent())
+            # Grey hint text, not a seeded value -- `commit`'s own emptiness
+            # guard is what makes a label nobody typed into cost nothing.
+            self._field.setPlaceholderText("Label")
+            self._field.hide()
+            self._field.editingFinished.connect(self.commit)
+        return self._field
+
+    def commit(self) -> None:
+        """Turn whatever was typed into a `Text` mark, or nothing if the
+        field is empty.
+        """
+        # A re-entrancy guard, not a signal disconnect: hide() below drops
+        # focus and re-fires editingFinished synchronously.
+        if self._committing or self._field is None:
+            return
+        self._committing = True
+        try:
+            if self._field.text():
+                self._store.add(
+                    shapes_module.Text(
+                        colour=self._colour,
+                        stroke_width=self._stroke_width,
+                        point=self._point,
+                        text=self._field.text(),
+                    )
+                )
+            self._field.hide()
+            self._point = None
+        finally:
+            self._committing = False
+
+    def abandon(self) -> None:
+        """Escape's first stage while a label is focused: empty and hide the
+        field so nothing is committed.
+
+        Emptied *before* hiding, because hiding a focused field fires
+        `editingFinished` -- and `commit`'s emptiness guard is then what
+        makes that firing harmless.
+        """
+        if self._field is None:
+            return
+        self._field.clear()
+        self._field.hide()

@@ -45,7 +45,7 @@ from PyQt6.QtWidgets import (
 
 from . import design, setup_desktop, shapes
 from .design import tokens
-from .marks import MarkStore, begin_stroke, extend_stroke
+from .marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
 from .overlay import BlurTray, FloatingBar, SettingsTray, ShapeToolPopover
 from .winchrome import AccentButton, SecondaryButton, WinWindow, _mono_font, _ui_font
 
@@ -78,6 +78,11 @@ class ImageCanvas(QWidget):
         self._in_progress: shapes.Shape | None = None
         self._composite_key: tuple | None = None
         self._composite: QImage = image
+        # The same label editor the overlay uses. `to_image` is the only
+        # difference: the field is placed at the widget point clicked, but
+        # the mark it commits is stored in image coordinates, like every
+        # other mark here.
+        self._text_editor = TextLabelEditor(self, store, to_document=self.to_image)
         self.setMouseTracking(True)
         self._store.changed.connect(self.update)
 
@@ -132,7 +137,16 @@ class ImageCanvas(QWidget):
     def is_annotating(self) -> bool:
         return self._annotating
 
+    def abandon_text(self) -> None:
+        """Escape's first stage while a label is focused."""
+        self._text_editor.abandon()
+
+    def has_active_label(self) -> bool:
+        return self._text_editor.is_active()
+
     def set_annotating(self, annotating: bool) -> None:
+        if not annotating:
+            self._text_editor.commit()
         self._annotating = annotating
         self.setCursor(
             Qt.CursorShape.CrossCursor if annotating else Qt.CursorShape.ArrowCursor
@@ -170,6 +184,17 @@ class ImageCanvas(QWidget):
         if self._tool == "eraser":
             self._store.erase(position)
             return
+        if self._tool == "text":
+            # Placed where the click landed, in widget coordinates -- the
+            # editor converts to image coordinates for the mark itself.
+            self._text_editor.begin(
+                event.position(), QColor(self._ink_colour), self._stroke_width
+            )
+            return
+        # Any other tool ends a label still being typed, rather than
+        # abandoning it: a click elsewhere never blurs the field, so nothing
+        # else would force the commit.
+        self._text_editor.commit()
         if self._tool == "step":
             # Click only, no drag -- the same rule the overlay applies.
             self._store.add(
@@ -450,6 +475,10 @@ class ReviewWindow(WinWindow):
             return
         tray = None
         if tool in tokens.DRAW_TOOLS:
+            # The tray names the active tool and carries its hint, so it has
+            # to be told which one -- otherwise it keeps whichever it was
+            # last showing and reads as the wrong tool entirely.
+            self._tray.set_tool(tool)
             tray = self._tray
         elif tool == "blur":
             tray = self._blur_tray
@@ -565,6 +594,20 @@ class ReviewWindow(WinWindow):
                 size.width(),
                 size.height(),
             )
+
+    def keyPressEvent(self, event) -> None:
+        """Escape abandons a label being typed, then leaves edit mode, then
+        closes -- the same staged retreat the overlay offers, so a
+        half-typed label never costs the window.
+        """
+        if event.key() == Qt.Key.Key_Escape:
+            if self._canvas.has_active_label():
+                self._canvas.abandon_text()
+                return
+            if self._canvas.is_annotating():
+                self._set_annotating(False)
+                return
+        super().keyPressEvent(event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
