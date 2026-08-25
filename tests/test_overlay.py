@@ -4344,7 +4344,19 @@ class TestShapeToolPopoverOverlayIntegration:
         frame = make_frame(image_size=size, logical_size=size)
         return OverlayWindow(frame)
 
-    def test_clicking_the_rect_button_opens_the_popover(self):
+    def test_right_clicking_the_rect_button_opens_the_popover(self):
+        # Left-click is spent arming the tool, so the menu moved to the
+        # other button -- picking a tool should use it, not ask which one.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+
+        overlay._bar._tool_buttons["rect"].rightClicked.emit()
+
+        assert overlay._shape_popover.isVisible()
+
+    def test_left_clicking_the_rect_button_arms_it_without_a_menu(self):
         overlay = self._overlay()
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
@@ -4352,17 +4364,37 @@ class TestShapeToolPopoverOverlayIntegration:
 
         QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
 
-        assert overlay._shape_popover.isVisible()
+        assert overlay._bar.active_tool == "rect"
+        assert not overlay._shape_popover.isVisible()
 
-    def test_clicking_the_rect_button_again_closes_the_popover(self):
+    def test_clicking_again_advances_through_the_shape_group(self):
+        # The whole group is reachable by clicking alone, and the glyph
+        # follows so the button always shows what a drag will draw.
         overlay = self._overlay()
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        button = overlay._bar._tool_buttons["rect"]
+
+        seen = []
+        for _ in range(len(tokens.RECT_GROUP) + 1):
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            seen.append((overlay._bar.active_tool, button._icon_name))
+
+        assert [tool for tool, _icon in seen] == list(tokens.RECT_GROUP) + [
+            tokens.RECT_GROUP[0]
+        ]
+        assert all(tool == icon for tool, icon in seen), "the glyph must follow"
+
+    def test_right_clicking_again_closes_the_popover(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        overlay._bar._tool_buttons["rect"].rightClicked.emit()
         assert overlay._shape_popover.isVisible()
 
-        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        overlay._bar._tool_buttons["rect"].rightClicked.emit()
 
         assert not overlay._shape_popover.isVisible()
 
@@ -4371,7 +4403,7 @@ class TestShapeToolPopoverOverlayIntegration:
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        overlay._bar._tool_buttons["rect"].rightClicked.emit()
 
         QTest.mouseClick(overlay._shape_popover._rows["ellipse"], Qt.MouseButton.LeftButton)
 
@@ -4386,7 +4418,7 @@ class TestShapeToolPopoverOverlayIntegration:
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        overlay._bar._tool_buttons["rect"].rightClicked.emit()
 
         QTest.mouseClick(overlay._shape_popover._rows["line"], Qt.MouseButton.LeftButton)
 
@@ -4400,7 +4432,7 @@ class TestShapeToolPopoverOverlayIntegration:
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        overlay._bar._tool_buttons["rect"].rightClicked.emit()
 
         QTest.mouseClick(overlay._shape_popover._rows["crop"], Qt.MouseButton.LeftButton)
 
@@ -4423,7 +4455,7 @@ class TestShapeToolPopoverOverlayIntegration:
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        overlay._bar._tool_buttons["rect"].rightClicked.emit()
         assert overlay._shape_popover.isVisible()
         original_tool = overlay._bar.active_tool
 
@@ -4439,7 +4471,7 @@ class TestShapeToolPopoverOverlayIntegration:
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        overlay._bar._tool_buttons["rect"].rightClicked.emit()
         assert overlay._shape_popover.isVisible()
 
         overlay.hide()
@@ -4451,7 +4483,7 @@ class TestShapeToolPopoverOverlayIntegration:
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["rect"], Qt.MouseButton.LeftButton)
+        overlay._bar._tool_buttons["rect"].rightClicked.emit()
         assert overlay._shape_popover.isVisible()
 
         overlay.set_selection(None)
