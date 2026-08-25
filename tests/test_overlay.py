@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 import pytest
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt
-from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, qRgb
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QImage, QPainter, QPainterPath, qRgb
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
     QApplication,
@@ -1492,6 +1492,50 @@ class TestDrawingTools:
         QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
 
         assert overlay.marks == ()
+
+    def test_second_label_click_commits_the_first_instead_of_discarding_it(self):
+        # SNX-77: clicking to place a second label used to clear() the
+        # shared QLineEdit before editingFinished ever got a chance to
+        # commit the first one -- nothing forced focus away from the field
+        # on this path (unlike a toolbar click), so the first label's text
+        # was simply wiped. Placing several labels in a row is the ordinary
+        # way to annotate a screenshot, so both must survive.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("text")
+        overlay._ink_colour = "#123456"
+        overlay._stroke_width = 5
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "first")
+
+        # Changed before the second click, so the assertions below can tell
+        # apart "the first label kept its own colour/size" from "it silently
+        # picked up whatever the tray happens to hold at commit time."
+        overlay._ink_colour = "#abcdef"
+        overlay._stroke_width = 12
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 80))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "second")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 2
+        first, second = overlay.marks
+        assert isinstance(first, Text)
+        assert isinstance(second, Text)
+        assert first.text == "first"
+        assert second.text == "second"
+        # The first label keeps the position and styling it was typed at,
+        # not the second click's.
+        assert first.point == QPointF(30, 30)
+        assert first.colour == QColor("#123456")
+        assert first.stroke_width == 5
+        assert second.point == QPointF(80, 80)
+        assert second.colour == QColor("#abcdef")
+        assert second.stroke_width == 12
 
     def test_text_label_focus_also_suppresses_shortcuts(self):
         # The other half of SNX-47's suppression AC (see
@@ -4415,6 +4459,190 @@ class TestShapeToolPopoverOverlayIntegration:
         assert not overlay._shape_popover.isVisible()
 
 
+class TestCaptureModeRowSizing:
+    """SNX-75: `_CaptureModeRow` and `_DelayRow` are `QPushButton`s whose
+    real content -- glyph, two-line label, check mark -- lives in a child
+    layout rather than the button's own text()/icon(), the same shape
+    `_PillButton` was in for SNX-59. Left unfixed, `QPushButton.sizeHint()`
+    falls back to its placeholder-text measurement (48x12 per the ticket)
+    instead of the ~45px a 12.5px name over an 11px note plus top/bottom
+    padding actually needs, and the popover's QVBoxLayout collapses every
+    row to that sliver.
+    """
+
+    def test_capture_mode_row_size_hint_matches_its_child_layout(self):
+        row = _CaptureModeRow("Region", "crop", "Drag any rectangle")
+
+        assert row.sizeHint() == row.layout().sizeHint()
+        assert row.minimumSizeHint() == row.sizeHint()
+
+    def test_delay_row_size_hint_matches_its_child_layout(self):
+        row = _DelayRow()
+
+        assert row.sizeHint() == row.layout().sizeHint()
+        assert row.minimumSizeHint() == row.sizeHint()
+
+    def test_row_height_grows_with_the_font_it_actually_renders_with(self, monkeypatch):
+        # Acceptance criterion: "a row's height comes from the fonts and
+        # metrics it renders with, not a fixed number." Bumping the label
+        # font's own pixel size (read at construction time, same as every
+        # other row) must grow the row's sizeHint in step -- a fixed-number
+        # height wouldn't move at all.
+        small = _CaptureModeRow("Region", "crop", "Drag any rectangle")
+
+        monkeypatch.setattr(tokens.Font, "MENU_LABEL", (30.0, 500))
+        big = _CaptureModeRow("Region", "crop", "Drag any rectangle")
+
+        assert big.sizeHint().height() > small.sizeHint().height()
+
+    def test_row_is_tall_enough_for_its_glyph_and_two_line_label(self):
+        # The ticket's own arithmetic, computed from the real fonts rather
+        # than restated as a literal: a 12.5px name over an 11px note (with
+        # the row's own inter-line gap) versus the 16px glyph, whichever is
+        # taller, plus MENU_ROW_PAD_V top and bottom.
+        row = _CaptureModeRow("Full screen", "monitor", "Whole display")
+        row.resize(row.sizeHint())
+        row.grab()
+        metric = tokens.Metric
+
+        label_font = QFont(font_families().ui)
+        size, weight = tokens.Font.MENU_LABEL
+        label_font.setPixelSize(round(size))
+        label_font.setWeight(QFont.Weight(weight))
+
+        note_font = QFont(font_families().ui)
+        size, weight = tokens.Font.MENU_NOTE
+        note_font.setPixelSize(round(size))
+        note_font.setWeight(QFont.Weight(weight))
+
+        text_height = (
+            QFontMetricsF(label_font).height()
+            + row._LABEL_GAP
+            + QFontMetricsF(note_font).height()
+        )
+        content_height = max(row._ICON_SIZE, text_height)
+        min_height = content_height + 2 * metric.MENU_ROW_PAD_V
+
+        assert row.height() >= min_height
+
+
+class TestPopoverHeightReflectsItsChildren:
+    """SNX-75 acceptance: 'the popover's own height is the sum of its rows,
+    separator and padding rather than a collapsed value' -- checked against
+    the actual laid-out children, not a hand re-derived number, so this
+    would fail the same way the ticket's own 262x83 measurement did before
+    the row fix.
+    """
+
+    def test_capture_mode_popover_height_equals_its_rows_plus_separator_plus_padding(self):
+        popover = CaptureModePopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+        metric = tokens.Metric
+
+        separator = popover.findChild(_MenuSeparator)
+        children_height = (
+            sum(row.height() for row in popover._rows.values())
+            + separator.height()
+            + popover._delay_row.height()
+        )
+
+        assert popover.height() == children_height + 2 * metric.MENU_PAD
+
+    def test_capture_mode_popover_height_is_no_longer_collapsed(self):
+        # Before SNX-75, five rows collapsed to ~12px apiece (see
+        # `_CaptureModeRow`'s own docstring for the ticket's 262x83
+        # measurement) -- comfortably under 100px total. A real popover with
+        # four two-line mode rows, a separator and a delay row needs well
+        # over that.
+        popover = CaptureModePopover()
+
+        assert popover.sizeHint().height() > 150
+
+    def test_shape_tool_popover_height_equals_its_rows_plus_padding(self):
+        popover = ShapeToolPopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+        metric = tokens.Metric
+
+        children_height = sum(row.height() for row in popover._rows.values())
+
+        assert popover.height() == children_height + 2 * metric.MENU_PAD
+
+    def test_shape_tool_popover_height_is_no_longer_collapsed(self):
+        popover = ShapeToolPopover()
+
+        assert popover.sizeHint().height() > 100
+
+    def test_reposition_uses_the_corrected_uncollapsed_height(self):
+        # AC: "the popover still opens above the bar when there is room and
+        # below it when there is not, at its corrected height" -- both
+        # branches already read `self.sizeHint().height()`, so the fix here
+        # is just that height no longer being a collapsed value.
+        popover = CaptureModePopover()
+        bar_geometry = QRect(200, 400, 600, 48)
+        assert bar_geometry.top() > CaptureModePopover._UP_THRESHOLD
+
+        popover.reposition(bar_geometry, QSize(1600, 1000))
+
+        assert popover.geometry().height() > 150
+        assert popover.geometry().bottom() < bar_geometry.top()
+
+
+class TestPopoverChildrenAreNeverClippedBelowSizeHint:
+    """SNX-75 acceptance: 'a test opens each popover and fails if any child
+    is laid out smaller than its sizeHint.' `grab()` forces a real layout
+    pass offscreen, per CLAUDE.md and mirroring `TestPillButtonLabelWidth`'s
+    own convention -- `sizeHint()`/`geometry()` alone can hold stale
+    pre-layout values.
+
+    Height only, not width: every row is deliberately stretched to the
+    popover's own fixed `MENU_W` column by the parent `QVBoxLayout`
+    (`CaptureModePopover`/`ShapeToolPopover` both `setFixedWidth`), the same
+    way `_MenuSeparator`'s width is never its own sizeHint's either -- width
+    is a layout choice, not a symptom of the collapse this ticket fixes.
+    The defect this test guards, per the ticket's own measurements, is
+    rows/popovers laid out *shorter* than the content they render.
+    """
+
+    def _assert_no_child_is_clipped(self, popover: QWidget) -> None:
+        for child in popover.findChildren(QWidget):
+            granted = child.geometry().height()
+            hint = child.sizeHint().height()
+            assert granted >= hint, (
+                f"{child!r} granted {granted}px tall but its own sizeHint asks for {hint}px"
+            )
+
+    def test_capture_mode_popover_opens_with_no_child_clipped(self):
+        popover = CaptureModePopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+
+        self._assert_no_child_is_clipped(popover)
+
+    def test_shape_tool_popover_opens_with_no_child_clipped(self):
+        popover = ShapeToolPopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+
+        self._assert_no_child_is_clipped(popover)
+
+    def test_a_collapsed_row_would_fail_this_measurement(self):
+        # Proves the measurement above actually bites: forcing a row back
+        # down to a fixed height shorter than its own sizeHint reproduces
+        # exactly the collapse the ticket reports.
+        popover = CaptureModePopover()
+        popover.resize(popover.sizeHint())
+        popover.grab()
+        row = next(iter(popover._rows.values()))
+
+        row.setFixedHeight(12)
+        popover.grab()
+
+        with pytest.raises(AssertionError):
+            self._assert_no_child_is_clipped(popover)
+
+
 def _close_stray_toplevel_windows() -> None:
     """Close every top-level widget still alive from an earlier test.
 
@@ -5755,6 +5983,86 @@ class TestKeyboardEnter:
         assert overlay.isVisible()
 
 
+class TestLabelEnterDoesNotDismissOverlay:
+    """SNX-76: Return committed a focused label as a Text mark *and* went on
+    to fire OverlayWindow.keyPressEvent's own Enter shortcut in the same
+    keystroke, copying and closing the overlay the user only meant to add
+    one label to. Stock QLineEdit deliberately leaves Return unaccepted
+    after emitting editingFinished (so a dialog's default button can still
+    fire from inside a focused field), and Qt walks an unaccepted key event
+    up the parent-widget chain -- `_commit_text` had already hidden the
+    label and dropped its focus by the time that second delivery reached
+    `_shortcuts_suppressed()`, so the guard no longer saw an editor there to
+    suppress for.
+
+    Every test below delivers the key to `overlay._text_edit` itself (or,
+    for Escape, to `overlay` -- QLineEdit never claims Escape, so it always
+    reached OverlayWindow.keyPressEvent the ordinary way) the way a real
+    keystroke would, rather than calling `overlay.keyPressEvent` directly --
+    that would skip the very propagation this bug depended on and pass
+    either way.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_enter_commits_the_label_and_leaves_the_overlay_open(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+
+        QTest.keyClicks(overlay._text_edit, "hello")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 1
+        assert isinstance(overlay.marks[0], Text)
+        assert overlay.marks[0].text == "hello"
+        assert overlay._text_edit.isHidden()
+        assert overlay.isVisible()  # never copied-and-dismissed
+        assert calls == []
+
+    def test_escape_abandons_the_label_without_touching_other_marks(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._text_edit.isHidden()
+        assert len(overlay.marks) == 1
+        assert isinstance(overlay.marks[0], Rectangle)  # the earlier mark survives
+        assert overlay.isVisible()
+
+    def test_enter_with_no_label_being_edited_still_copies_and_closes(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert len(calls) == 1
+        assert not overlay.isVisible()
+
+
 class TestKeyboardEscapeTwoStage:
     """SNX-47 AC: 'Esc with marks present discards them and toasts, and Esc
     with no marks present closes the overlay without capturing.' The
@@ -5809,10 +6117,104 @@ class TestKeyboardEscapeTwoStage:
         assert not overlay.isVisible()
 
 
+class TestCloseButton:
+    """SNX-80 AC: 'the overlay shows a visible control that closes it
+    without capturing; using it discards any ink and takes no screenshot;
+    it is reachable no matter which tool is selected and whether or not
+    ink has been drawn; it does not appear in the exported image; its
+    tooltip names Escape.'
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, with_selection=True):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        if with_selection:
+            overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_visible_before_any_selection_has_been_made(self):
+        # `_bar` and the chips above the selection both only exist once a
+        # selection does -- this is the one control a user has to back out
+        # with before they've dragged anything at all.
+        overlay = self._overlay(with_selection=False)
+
+        assert overlay._close_button.isVisible()
+        assert not overlay._bar.isVisible()
+
+    def test_stays_visible_regardless_of_active_tool_and_ink_present(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        assert overlay._close_button.isVisible()
+
+    def test_hidden_while_the_overlay_itself_is_not_shown(self):
+        # Mirrors `_bar`'s own "stays hidden and unpainted" guarantee --
+        # this window is never actually shown, so nothing in it should be
+        # either.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+
+        assert not overlay._close_button.isVisible()
+
+    def test_tooltip_names_escape(self):
+        overlay = self._overlay()
+
+        assert "Escape" in overlay._close_button.toolTip()
+
+    def test_click_discards_ink_and_closes_without_capturing(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+        )
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+
+        QTest.mouseClick(overlay._close_button, Qt.MouseButton.LeftButton)
+
+        assert overlay.marks == ()
+        assert not overlay.isVisible()
+        assert calls == []  # never captured
+
+    def test_click_before_any_selection_still_closes(self):
+        overlay = self._overlay(with_selection=False)
+
+        QTest.mouseClick(overlay._close_button, Qt.MouseButton.LeftButton)
+
+        assert not overlay.isVisible()
+
+    def test_excluded_from_the_exported_image(self):
+        size = (200, 200)
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        # The selection spans the whole window, including the close
+        # button's own fixed corner position -- a leak would show up there
+        # as a pixel-colour mismatch against the frame's own base colour.
+        overlay.set_selection(QRect(0, 0, *size))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        rendered = overlay.rendered_image()
+
+        button_center = overlay._close_button.geometry().center()
+        assert rendered.pixelColor(button_center) == QColor(10, 20, 30)
+
+
 class TestKeyboardShortcutSuppression:
     """SNX-47 AC: 'none of these keys fire while a text label is being
     edited or a slider has focus, and the key reaches the focused widget
-    instead.'
+    instead.' SNX-79 carves Escape and undo/redo out of that suppression --
+    see TestEscapeAndUndoRedoBypassSuppression below for those; this class
+    now only covers the shortcuts that must keep yielding to a focused
+    slider or label.
     """
 
     RED = QColor(255, 0, 0)
@@ -5845,29 +6247,6 @@ class TestKeyboardShortcutSuppression:
         QTest.keyClick(overlay, Qt.Key.Key_P)
 
         assert overlay._bar.active_tool is None
-
-    def test_undo_does_not_fire_while_a_slider_has_focus(self):
-        overlay = self._overlay()
-        overlay.add_mark(
-            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
-        )
-        overlay._tray._slider.setFocus()
-
-        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
-
-        assert len(overlay.marks) == 1
-
-    def test_escape_does_not_discard_while_a_text_label_is_focused(self):
-        overlay = self._overlay()
-        overlay.add_mark(
-            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
-        )
-        label = QLineEdit(overlay)
-        label.setFocus()
-
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)
-
-        assert len(overlay.marks) == 1
 
     def test_enter_does_not_copy_or_close_while_a_slider_has_focus(self, monkeypatch):
         calls = []
@@ -5907,6 +6286,122 @@ class TestKeyboardShortcutSuppression:
         QTest.keyClick(label, "P")
 
         assert label.text() == "P"
+
+
+class TestEscapeAndUndoRedoBypassSuppression:
+    """SNX-79: Escape stops working once the stroke slider or a label has
+    focus, because _shortcuts_suppressed() (SNX-47, see
+    TestKeyboardShortcutSuppression above) dropped every shortcut it names
+    including Escape. Touching the stroke slider is part of ordinary use, so
+    after the first stroke-width change the user had no key left to close
+    the overlay. Escape is the way out of a modal, full-screen window and
+    must keep working regardless of which child holds focus; undo/redo are
+    named in the same acceptance criteria for the same reason.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_escape_closes_the_overlay_while_the_stroke_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay.isVisible()
+
+    def test_escape_abandons_a_focused_label_then_a_further_escape_closes(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        assert overlay._text_edit.isVisible()
+        QTest.keyClicks(overlay._text_edit, "hello")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # first stage: abandons the label
+
+        assert overlay._text_edit.isHidden()
+        assert overlay.marks == ()  # abandoned, not committed as a Text mark
+        assert overlay.isVisible()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # second stage: nothing left, closes
+
+        assert not overlay.isVisible()
+
+    def test_escape_gets_the_user_out_whether_a_slider_or_a_label_has_focus(self):
+        # The acceptance criterion in its own words: focus a slider, then a
+        # label, in turn, and Escape must get the user out of the overlay
+        # both times.
+        overlay = self._overlay()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay.isVisible()
+
+        overlay = self._overlay()
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # abandons the (bare-stand-in) label
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # nothing left to discard, closes
+
+        assert not overlay.isVisible()
+
+    def test_undo_still_fires_while_a_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+        assert overlay.marks == ()
+
+    def test_redo_still_fires_while_a_slider_has_focus(self):
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+        )
+        overlay.undo()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(
+            overlay,
+            Qt.Key.Key_Z,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        assert len(overlay.marks) == 1
+
+    def test_tool_letters_stay_suppressed_while_a_slider_has_focus_alongside_escape(self):
+        # Guards against a fix that stops suppressing everything rather than
+        # carving out just Escape and undo/redo -- the AC is explicit that
+        # tool letters must stay suppressed.
+        overlay = self._overlay()
+        overlay._tray._slider.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert overlay._bar.active_tool is None
+
+    def test_arrow_key_still_reaches_the_slider_after_the_escape_fix(self):
+        overlay = self._overlay()
+        slider = overlay._tray._slider
+        slider.setFocus()
+        original = slider.value()
+
+        QTest.keyClick(slider, Qt.Key.Key_Right)
+
+        assert slider.value() == original + slider.singleStep()
 
 
 class TestOverlayWindowOnDismissed:
