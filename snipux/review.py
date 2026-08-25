@@ -51,6 +51,7 @@ from .overlay import (
     FloatingBar,
     SettingsTray,
     ShapeToolPopover,
+    Toast,
     ToolHintStrip,
 )
 from .winchrome import AccentButton, SecondaryButton, WinWindow, _mono_font, _ui_font
@@ -69,6 +70,10 @@ class ImageCanvas(QWidget):
     """
 
     marksChanged = pyqtSignal()
+
+    # Screen pixels of aim the eraser forgives, converted to image units
+    # against the live zoom.
+    _ERASER_SLACK_PX = 7.0
 
     def __init__(self, image: QImage, store: MarkStore, parent: QWidget | None = None):
         super().__init__(parent)
@@ -188,7 +193,11 @@ class ImageCanvas(QWidget):
             return
         position = self.to_image(event.position())
         if self._tool == "eraser":
-            self._store.erase(position)
+            # Slack in image units for a few screen pixels of aim: a mark's
+            # own hit tolerance is fixed in image units, so at anything
+            # under 100% zoom it shrinks on screen to almost nothing.
+            scale = self._scale() or 1.0
+            self._store.erase(position, slack=self._ERASER_SLACK_PX / scale)
             return
         if self._tool == "text":
             # Placed where the click landed, in widget coordinates -- the
@@ -411,6 +420,12 @@ class ReviewWindow(WinWindow):
         self._bar.copyRequested.connect(self.copy)
         self._bar.saveRequested.connect(lambda: self._set_annotating(False))
         self._bar.shapeMenuRequested.connect(self._toggle_shape_popover)
+        # Hovering a tool names it. Not Qt's tooltip: that depends on a
+        # wake-up timer this bar's buttons were not feeding, and on a
+        # translucent frameless parent it is unreliable anyway. The strip is
+        # already on screen and already says exactly this.
+        self._bar.toolHovered.connect(self._preview_tool)
+        self._bar.toolUnhovered.connect(self._sync_tray)
 
         # The same trays the overlay shows, instantiated here rather than
         # reimplemented: they are where colour, stroke width, blur mode and
@@ -434,6 +449,12 @@ class ReviewWindow(WinWindow):
         # there is never an active tool the user cannot identify.
         self._tool_hint = ToolHintStrip(self._canvas)
         self._tool_hint.hide()
+
+        # The same toast the overlay uses. Copy previously changed one word
+        # in the footer, which is not where anyone is looking when they
+        # press the button they just pressed.
+        self._toast = Toast(self._canvas)
+        self._toast.hide()
 
         self._shape_popover = ShapeToolPopover(self._canvas)
         self._shape_popover.hide()
@@ -468,6 +489,30 @@ class ReviewWindow(WinWindow):
         )
         self._shape_popover.show()
         self._shape_popover.raise_()
+
+    def _preview_tool(self, tool: str) -> None:
+        """Name the tool under the cursor, without arming it.
+
+        Reverts to the active tool's own tray on leave, so hovering is
+        purely a read of what a button would do.
+        """
+        if not self._canvas.is_annotating() or tool not in tokens.TOOL_HINTS:
+            return
+        for tray in (self._tray, self._blur_tray):
+            tray.hide()
+        self._tool_hint.set_tool(tool)
+        self._tool_hint.show()
+        self._tool_hint.raise_()
+        self._place_strip(self._tool_hint)
+
+    def _place_strip(self, widget) -> None:
+        size = widget.sizeHint()
+        bar = self._bar.geometry()
+        top = bar.top() - tokens.Metric.TRAY_OFFSET_Y - size.height()
+        widget.setGeometry(
+            round(bar.center().x() - size.width() / 2), round(max(0, top)),
+            size.width(), size.height(),
+        )
 
     def _sync_tray(self) -> None:
         """Show whichever tray matches the active tool, or neither.
@@ -558,6 +603,13 @@ class ReviewWindow(WinWindow):
         self._copy_button = AccentButton("Copy")
         self._copy_button.clicked.connect(self.copy)
         self.footer_right.addWidget(self._copy_button)
+
+    def _show_toast(self, icon_name: str, text: str) -> None:
+        """Confirm an action where the user is looking -- over the image,
+        not in a footer line they have no reason to re-read.
+        """
+        self._toast.show_message(icon_name, text, QRectF(self._canvas.rect()))
+        self._toast.raise_()
 
     def _refresh_status(self) -> None:
         if self._dirty:
@@ -664,6 +716,7 @@ class ReviewWindow(WinWindow):
             clipboard.setImage(self._canvas.rendered_image())
         self._dirty = False
         self._refresh_status()
+        self._show_toast("copy", "Copied to clipboard")
 
     def save_as(self, path: Path | str | None = None) -> Path | None:
         """Write the snip where the user picks. Returns the path, or None if
@@ -694,6 +747,7 @@ class ReviewWindow(WinWindow):
         self._folder_button.setEnabled(True)
         self.title_label.setText(path.name)
         self._refresh_status()
+        self._show_toast("save", f"Saved to {self._display_path(path)}")
         return path
 
     def _suggested_path(self) -> Path:

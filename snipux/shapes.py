@@ -99,6 +99,19 @@ class Shape(ABC):
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         return pen
 
+    def interior_hit_test(self, point: QPointF) -> bool:
+        """Whether `point` falls inside this shape's *enclosed area*, for
+        the shapes that have one.
+
+        False for everything by default, and deliberately not folded into
+        `hit_test`: the stroked outline is the shape, and clicking the empty
+        middle of a box is clicking whatever is behind it. The eraser uses
+        this only as a second pass, once nothing at all was hit -- which is
+        what stops "click the box, box goes" from also meaning "click near
+        the mark inside the box, box goes".
+        """
+        return False
+
     def _stroke_hit_test(self, path: QPainterPath, point: QPointF) -> bool:
         """Shared by every stroke-only shape's hit_test: widen `path` --
         the same outline draw() strokes -- by this shape's actual painted
@@ -309,6 +322,9 @@ class Rectangle(Shape):
         path.addRect(_rect_from_corners(self.start, self.end))
         return self._stroke_hit_test(path, point)
 
+    def interior_hit_test(self, point: QPointF) -> bool:
+        return _rect_from_corners(self.start, self.end).contains(point)
+
 
 # Below this bounding-box size (in either axis) a drag is treated as a
 # stray click rather than a deliberate mark -- docs/design/overlay-redesign.md's
@@ -386,6 +402,11 @@ class Ellipse(Shape):
         path = QPainterPath()
         path.addEllipse(_rect_from_corners(self.start, self.end))
         return self._stroke_hit_test(path, point)
+
+    def interior_hit_test(self, point: QPointF) -> bool:
+        path = QPainterPath()
+        path.addEllipse(_rect_from_corners(self.start, self.end))
+        return path.contains(point)
 
 
 def _rounded_pixel_rect(rect: QRectF) -> QRect:

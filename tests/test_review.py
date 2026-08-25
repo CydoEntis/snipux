@@ -647,3 +647,161 @@ class TestToolButtonsCarryTooltips:
         window = ReviewWindow(make_image())
 
         assert window._bar._tool_buttons["eraser"].hasMouseTracking()
+
+
+class TestEraserReachesEveryMark:
+    """It looked like the eraser only worked on freehand strokes. Two
+    causes: a mark's hit tolerance is fixed in image units, so at anything
+    under 100% zoom it shrank on screen to a couple of pixels; and a box's
+    empty middle deliberately hit nothing at all.
+    """
+
+    def _store_with(self, shape):
+        from snipux.marks import MarkStore
+
+        store = MarkStore()
+        store.add(shape)
+        return store
+
+    def _two_point(self, tool):
+        from snipux.marks import begin_stroke, extend_stroke
+
+        shape = begin_stroke(
+            tool, QPointF(100, 100), colour=QColor("#e3ff4f"), stroke_width=6
+        )
+        extend_stroke(shape, QPointF(300, 250))
+        return shapes.finalize_mark(shape)
+
+    @pytest.mark.parametrize("tool", ["pen", "highlighter", "arrow", "rect",
+                                      "ellipse", "line", "blur"])
+    def test_clicking_a_mark_erases_it(self, tool):
+        shape = self._two_point(tool)
+        store = self._store_with(shape)
+        centre = QPointF(200, 175)
+
+        assert store.erase(centre) is not None, f"{tool} could not be erased"
+
+    def test_a_box_is_erased_by_clicking_inside_it(self):
+        # The empty middle used to hit nothing, which is most of why the
+        # eraser read as broken.
+        store = self._store_with(self._two_point("rect"))
+
+        assert store.erase(QPointF(200, 175)) is not None
+
+    def test_but_a_mark_inside_the_box_still_wins(self):
+        # Outlines are tested first, all of them, so clicking near the mark
+        # inside a box takes the mark rather than the box.
+        from snipux.marks import MarkStore
+
+        store = MarkStore()
+        store.add(self._two_point("rect"))
+        inner = shapes.StepMarker(
+            colour=QColor("#fff"), stroke_width=6, point=QPointF(200, 175), number=1
+        )
+        store.add(inner)
+
+        assert store.erase(QPointF(200, 175)) is inner
+
+    def test_slack_forgives_a_near_miss_on_a_thin_outline(self):
+        # What the review window passes, scaled against the live zoom.
+        store = self._store_with(self._two_point("line"))
+        near_miss = QPointF(200, 175 + 9)
+
+        assert store.erase(near_miss, slack=0.0) is None
+        store.undo() if store.can_undo else None
+        store = self._store_with(self._two_point("line"))
+        assert store.erase(near_miss, slack=12.0) is not None
+
+
+class TestShapeGroupButton:
+    """Picking a tool should use it, not ask which one. A menu round-trip
+    for every rectangle had the most-used shape behaving like the least.
+    """
+
+    def test_the_first_click_arms_the_current_shape(self):
+        window = ReviewWindow(make_image())
+
+        window._bar._on_shape_group_clicked()
+
+        assert window._bar.active_tool == "rect"
+
+    def test_clicking_again_advances_through_the_group(self):
+        window = ReviewWindow(make_image())
+
+        seen = []
+        for _ in range(len(tokens.RECT_GROUP)):
+            window._bar._on_shape_group_clicked()
+            seen.append(window._bar.active_tool)
+
+        assert seen == list(tokens.RECT_GROUP)
+
+    def test_it_wraps_back_round(self):
+        window = ReviewWindow(make_image())
+
+        for _ in range(len(tokens.RECT_GROUP) + 1):
+            window._bar._on_shape_group_clicked()
+
+        assert window._bar.active_tool == tokens.RECT_GROUP[0]
+
+    def test_the_glyph_shows_what_a_drag_will_draw(self):
+        window = ReviewWindow(make_image())
+        button = window._bar._tool_buttons["rect"]
+
+        window._bar._on_shape_group_clicked()
+        window._bar._on_shape_group_clicked()
+
+        assert window._bar.active_tool == "ellipse"
+        assert button._icon_name == "ellipse"
+
+    def test_choosing_from_the_menu_also_moves_the_glyph(self):
+        window = ReviewWindow(make_image())
+
+        window._bar.select_tool("line")
+
+        assert window._bar._tool_buttons["rect"]._icon_name == "line"
+
+
+class TestHoverNamesTheTool:
+    def test_hovering_names_the_tool_without_arming_it(self):
+        window = ReviewWindow(make_image())
+        window.resize(1020, 700)
+        window._set_annotating(True)
+        window._bar.select_tool("pen")
+        window._sync_tray()
+
+        window._bar._tool_buttons["eraser"].hovered.emit("eraser")
+
+        assert window._tool_hint._pill._text_label.text() == "Eraser"
+        assert window._bar.active_tool == "pen", "hovering must not arm anything"
+
+    def test_leaving_restores_the_active_tools_tray(self):
+        window = ReviewWindow(make_image())
+        window.resize(1020, 700)
+        window._set_annotating(True)
+        window._bar.select_tool("pen")
+        window._sync_tray()
+        window._bar._tool_buttons["eraser"].hovered.emit("eraser")
+
+        window._bar._tool_buttons["eraser"].unhovered.emit()
+
+        assert window._tray.isVisibleTo(window._canvas)
+
+
+class TestCopyConfirms:
+    def test_copy_shows_a_toast(self):
+        # A word changing in the footer is not where anyone is looking when
+        # they press the button they just pressed.
+        window = ReviewWindow(make_image(64, 64))
+        window.resize(1020, 700)
+
+        window.copy()
+
+        assert window._toast._text_label.text() == "Copied to clipboard"
+
+    def test_save_as_shows_one_too(self, tmp_path):
+        window = ReviewWindow(make_image(64, 64))
+        window.resize(1020, 700)
+
+        window.save_as(tmp_path / "shot.png")
+
+        assert "Saved to" in window._toast._text_label.text()

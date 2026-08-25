@@ -104,20 +104,43 @@ class MarkStore(QObject):
         self._redo.clear()
         self.changed.emit()
 
-    def erase(self, point: QPointF) -> Shape | None:
+    def erase(self, point: QPointF, slack: float = 0.0) -> Shape | None:
         """Remove and return the topmost mark under `point`, or None.
 
         Back to front, so an overlap resolves to the visible one. A miss
-        removes nothing and raises nothing -- not every click lands on ink,
-        and that is not an error.
+        removes nothing and raises nothing -- not every click lands on ink.
+
+        `slack` widens the click into a small ring of probes, in the same
+        units the marks are in. A shape's hit tolerance is fixed in document
+        units, so on a view that scales the document down -- the review
+        window at anything under 100% -- it shrinks to a couple of screen
+        pixels and a thin outline becomes almost unclickable. Callers that
+        scale pass the slack that restores it.
+
+        Two passes, and the order is the point. Outlines first, all of them,
+        so clicking near a mark inside a box still takes the mark. Only when
+        nothing anywhere was hit does the second pass consider enclosed
+        areas, so clicking the empty middle of a box takes the box rather
+        than doing nothing at all -- which is what made the eraser look like
+        it only worked on freehand strokes.
         """
-        for index in range(len(self._marks) - 1, -1, -1):
-            if self._marks[index].hit_test(point):
-                shape = self._marks.pop(index)
-                self._undo.append(MarkAction("erase", index, shape))
-                self._redo.clear()
-                self.changed.emit()
-                return shape
+        probes = [point]
+        if slack > 0:
+            probes += [
+                QPointF(point.x() + dx * slack, point.y() + dy * slack)
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1),
+                               (0.7, 0.7), (-0.7, 0.7), (0.7, -0.7), (-0.7, -0.7))
+            ]
+
+        for test in (lambda s, pt: s.hit_test(pt), lambda s, pt: s.interior_hit_test(pt)):
+            for index in range(len(self._marks) - 1, -1, -1):
+                shape = self._marks[index]
+                if any(test(shape, probe) for probe in probes):
+                    self._marks.pop(index)
+                    self._undo.append(MarkAction("erase", index, shape))
+                    self._redo.clear()
+                    self.changed.emit()
+                    return shape
         return None
 
     def clear(self) -> bool:

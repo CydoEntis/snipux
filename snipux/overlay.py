@@ -648,6 +648,10 @@ def _tool_label(tool: str) -> str:
 
 
 class _IconButton(QPushButton):
+    rightClicked = pyqtSignal()
+    hovered = pyqtSignal(str)
+    unhovered = pyqtSignal()
+
     """One 34px icon button in the floating bar: a tool, undo, redo, clear
     or copy. A real `QPushButton`, not a rectangle painted by some
     ancestor's paintEvent, so its tooltip and click handling come for free.
@@ -703,12 +707,34 @@ class _IconButton(QPushButton):
         super().setEnabled(enabled)
         self._refresh()
 
+    def set_icon_name(self, icon_name: str) -> None:
+        """Swap the glyph. The rect button uses this so its icon always
+        shows which of the shape group a drag will draw.
+        """
+        self._icon_name = icon_name
+        self._refresh()
+
+    def mousePressEvent(self, event) -> None:
+        """A right-click is its own signal.
+
+        The shape group needs two gestures -- use it, and choose within it
+        -- and a plain click is spent on the first, so the menu needs the
+        other. `QPushButton` reports only left presses, hence this.
+        """
+        if event.button() == Qt.MouseButton.RightButton:
+            self.rightClicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def enterEvent(self, event) -> None:
         self._refresh(hovered=True)
+        self.hovered.emit(self._icon_name)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         self._refresh(hovered=False)
+        self.unhovered.emit()
         super().leaveEvent(event)
 
     def _refresh(self, hovered: bool | None = None) -> None:
@@ -890,6 +916,10 @@ class FloatingBar(QWidget):
     # button is clicked, the same "click opens a popover" shape
     # `captureChipClicked` already gives the capture chip.
     shapeMenuRequested = pyqtSignal()
+    # Which tool the cursor is over, so a window can name it without relying
+    # on Qt's tooltip timer -- see `ToolHintStrip`.
+    toolHovered = pyqtSignal(str)
+    toolUnhovered = pyqtSignal()
 
     UNDO_SHORTCUT = "Ctrl+Z"
     REDO_SHORTCUT = "Ctrl+Shift+Z"
@@ -950,13 +980,21 @@ class FloatingBar(QWidget):
             key = _TOOL_SHORTCUT_KEYS[tool]
             button = _IconButton(tool, f"{_tool_label(tool)} — {key}")
             if tool == "rect":
-                # SNX-64: a click opens the shape submenu (Rectangle/
-                # Ellipse/Line/Crop) rather than picking rect outright --
-                # `OverlayWindow._toggle_shape_popover` is what actually
-                # selects a tool, via `ShapeToolPopover.toolSelected`.
-                button.clicked.connect(self.shapeMenuRequested)
+                # A click *uses* the shape group, it does not ask which one.
+                # Picking a tool should arm it, and making every rectangle
+                # cost a menu round-trip had the most-used shape behaving
+                # like the least-used. The first click arms whichever shape
+                # is current; each further click while it is already armed
+                # advances through `tokens.RECT_GROUP`, so the whole group
+                # is reachable by clicking alone and the glyph always shows
+                # what a drag will draw. The menu is still there for going
+                # straight to one: right-click.
+                button.clicked.connect(self._on_shape_group_clicked)
+                button.rightClicked.connect(self.shapeMenuRequested)
             else:
                 button.clicked.connect(lambda checked=False, t=tool: self._on_tool_clicked(t))
+            button.hovered.connect(self.toolHovered)
+            button.unhovered.connect(self.toolUnhovered)
             self._tool_buttons[tool] = button
             layout.addWidget(button)
         self._add_divider(layout)
@@ -1060,6 +1098,38 @@ class FloatingBar(QWidget):
 
     # -- tool selection --------------------------------------------------
 
+    def _on_shape_group_clicked(self) -> None:
+        """The rect button: arm the shape group, or advance within it.
+
+        Not a menu. The first click arms whichever of `tokens.RECT_GROUP`
+        is current; clicking again while it is already armed moves to the
+        next, wrapping, and the button's glyph follows so it always shows
+        what a drag will draw. Right-click opens the menu for jumping
+        straight to one.
+        """
+        group = design.tokens.RECT_GROUP
+        if self.active_tool in group:
+            current = group.index(self.active_tool)
+            self.select_tool(group[(current + 1) % len(group)])
+        else:
+            self.select_tool(self._shape_group_tool)
+
+    @property
+    def _shape_group_tool(self) -> str:
+        """Whichever of the group the button is currently showing."""
+        return getattr(self, "_shape_tool", design.tokens.RECT_GROUP[0])
+
+    def set_shape_group_tool(self, tool: str) -> None:
+        """Point the rect button's glyph at `tool` and remember it as the
+        group's current member, so the next plain click arms that one.
+        """
+        if tool not in design.tokens.RECT_GROUP:
+            return
+        self._shape_tool = tool
+        button = self._tool_buttons["rect"]
+        button.set_icon_name(tool)
+        button.setToolTip(f"{_tool_label(tool)} — {_TOOL_SHORTCUT_KEYS['rect']}")
+
     def _on_tool_clicked(self, tool: str) -> None:
         self.select_tool(tool)
 
@@ -1071,6 +1141,10 @@ class FloatingBar(QWidget):
         `_on_tool_clicked` -- a shortcut and a click are two ways to reach
         the same state change, not two copies of it that could drift apart.
         """
+        # A group member arms the rect button and takes over its glyph, so
+        # the bar shows what a drag will draw rather than a generic rect.
+        if tool in design.tokens.RECT_GROUP:
+            self.set_shape_group_tool(tool)
         self.set_active_tool(tool)
         self.toolSelected.emit(tool)
 
@@ -3309,6 +3383,10 @@ class OverlayWindow(QWidget):
         self._shape_popover.hide()
         self._shape_popover.toolSelected.connect(self._on_shape_tool_selected)
         self._bar.shapeMenuRequested.connect(self._toggle_shape_popover)
+        # Hovering a tool names it -- see `ToolHintStrip`. Not Qt's tooltip,
+        # which on an always-on-top frameless window is a coin toss.
+        self._bar.toolHovered.connect(self._preview_tool)
+        self._bar.toolUnhovered.connect(self._sync_tray_visibility)
 
         # The delayed re-capture (SNX-50): `_registry` is what
         # `_finish_delayed_capture` re-grabs through -- an empty
@@ -3887,6 +3965,19 @@ class OverlayWindow(QWidget):
             self._blur_tray.hide()
             self._popover.hide()
             self._shape_popover.hide()
+
+    def _preview_tool(self, tool: str) -> None:
+        """Name the tool under the cursor without arming it. Reverts on
+        leave, so hovering only ever reads.
+        """
+        if not self.isVisible() or tool not in design.tokens.TOOL_HINTS:
+            return
+        self._tray.hide()
+        self._blur_tray.hide()
+        self._tool_hint.set_tool(tool)
+        self._tool_hint.show()
+        self._tool_hint.raise_()
+        self._reposition_tray(self._tool_hint)
 
     def _sync_tray_visibility(self) -> None:
         """Show/hide and reposition whichever settings tray -- draw or
