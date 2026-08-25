@@ -6919,3 +6919,93 @@ class TestWaylandPicksTheInteractiveMonitor:
 
         assert veiled == [first, third]
 
+
+class TestPressOutsideStartsANewSelection:
+    """A press on the dimmed area outside the current selection begins a
+    fresh region drag.
+
+    It used to be a no-op, which left Esc as the only way out of a
+    selection placed slightly wrong -- and Esc cancels the whole snip,
+    frozen frame included, so a misplaced drag cost the entire capture.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self) -> OverlayWindow:
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _drag(self, overlay, start: QPoint, end: QPoint) -> None:
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start
+        )
+        for step in (0.5, 1.0):
+            QTest.mouseMove(
+                overlay,
+                QPoint(
+                    round(start.x() + (end.x() - start.x()) * step),
+                    round(start.y() + (end.y() - start.y()) * step),
+                ),
+            )
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end
+        )
+
+    def test_a_second_drag_outside_the_first_replaces_the_selection(self):
+        overlay = self._overlay()
+        self._drag(overlay, QPoint(80, 80), QPoint(280, 230))
+        assert overlay._selection == QRect(80, 80, 200, 150)
+
+        self._drag(overlay, QPoint(450, 350), QPoint(650, 500))
+
+        assert overlay._selection == QRect(450, 350, 200, 150)
+
+    def test_the_new_selection_can_be_dragged_back_over_the_old_one(self):
+        overlay = self._overlay()
+        self._drag(overlay, QPoint(400, 300), QPoint(600, 450))
+
+        # Starts outside the existing selection, finishes across it.
+        self._drag(overlay, QPoint(100, 100), QPoint(500, 380))
+
+        assert overlay._selection == QRect(100, 100, 400, 280)
+
+    def test_a_press_inside_the_selection_still_draws_rather_than_restarting(self):
+        overlay = self._overlay()
+        self._drag(overlay, QPoint(100, 100), QPoint(500, 400))
+        before = QRect(overlay._selection)
+        overlay._bar.select_tool(sorted(tokens.DRAW_TOOLS)[0])
+
+        self._drag(overlay, QPoint(200, 200), QPoint(300, 300))
+
+        assert overlay._selection == before, "a stroke must not restart the selection"
+        assert overlay._marks, "the stroke should have been committed"
+
+    def test_marks_survive_starting_a_new_selection(self):
+        # Marks are in window coordinates, so a new selection must not
+        # destroy them -- Ctrl+Z could not bring them back.
+        overlay = self._overlay()
+        self._drag(overlay, QPoint(100, 100), QPoint(500, 400))
+        overlay._bar.select_tool(sorted(tokens.DRAW_TOOLS)[0])
+        self._drag(overlay, QPoint(200, 200), QPoint(300, 300))
+        marks_before = len(overlay._marks)
+        assert marks_before
+
+        self._drag(overlay, QPoint(600, 450), QPoint(700, 550))
+
+        assert len(overlay._marks) == marks_before
+
+    def test_dragging_a_handle_still_resizes_instead_of_restarting(self):
+        overlay = self._overlay()
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 300))
+        handle = overlay._corner_hit_rect(Handle.BOTTOM_RIGHT).center().toPoint()
+
+        self._drag(overlay, handle, QPoint(500, 400))
+
+        assert overlay._selection.topLeft() == QPoint(100, 100), "resize, not restart"
+        assert overlay._selection.width() > 300
