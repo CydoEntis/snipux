@@ -42,6 +42,27 @@ if ! python3 -m venv --help >/dev/null 2>&1; then
     exit 1
 fi
 
+# Same reasoning as the venv check above, for a dependency that is not
+# Python's at all: from Qt 6.5 the xcb platform plugin links libxcb-cursor,
+# which Ubuntu does not pull in for anything else, so a stock desktop has
+# every other Qt dependency and not this one. Checked here rather than left
+# to runtime because the failure is a SIGABRT behind four lines of Qt plugin
+# text ("Could not load the Qt platform plugin \"xcb\" ... even though it was
+# found") that names the library but not the package to install -- and this
+# script's own last act is starting snipux, so without this the install
+# "succeeds" and then core-dumps.
+#
+# ldconfig, not dpkg: the library is what Qt actually dlopen()s, and asking
+# the linker cache keeps this working where the same library arrives under a
+# different package name.
+if ! ldconfig -p 2>/dev/null | grep -q 'libxcb-cursor\.so\.0'; then
+    echo "error: libxcb-cursor.so.0 is not installed." >&2
+    echo "Qt 6.5+ needs it to load its xcb platform plugin; without it" >&2
+    echo "snipux installs but crashes on launch." >&2
+    echo "Install it with: sudo apt install libxcb-cursor0" >&2
+    exit 1
+fi
+
 # Safe to re-run: rebuild the venv from scratch rather than installing over
 # whatever is already there, so a stale or half-finished environment from a
 # previous run never lingers into this one.
