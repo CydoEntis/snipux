@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  body { margin:0; background:#0a0b0d; font-family:'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color:#c8d96a; text-decoration:none; } a:hover { color:#e3ff4f; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+  input[type=range] { -webkit-appearance:none; appearance:none; height:4px; border-radius:99px; background:#33383f; outline:none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:13px; height:13px; border-radius:50%; background:#e9ecf2; border:0; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,.5); }
+  input[type=text] { font-family:'IBM Plex Mono'; }
+</style>
+</helmet>
+
+<section style="display:flex; flex-direction:column; gap:34px; padding:64px 72px 96px">
+  <header style="display:flex; flex-direction:column; gap:12px; max-width:860px">
+    <div style="display:flex; align-items:center; gap:10px">
+      <div style="width:22px; height:22px; border-radius:6px; background:#e3ff4f; display:grid; place-items:center; color:#15170e">
+        <dc-import name="Icon" glyph="cog" size="13" stroke="2.1" hint-size="13px,13px"></dc-import>
+      </div>
+      <span style="font:600 13px/1 'IBM Plex Sans'; letter-spacing:.14em; text-transform:uppercase; color:#7f8798">snipux · the two windows</span>
+    </div>
+    <h1 style="margin:0; font:600 30px/1.2 'IBM Plex Sans'; color:#eef1f6; letter-spacing:-.02em">Settings, and the review window</h1>
+    <p style="margin:0; font:400 15px/1.6 'IBM Plex Sans'; color:#98a0b0; text-wrap:pretty"><a href="#1a">1a</a> is Settings — a nav rail instead of one row floating in an empty dialog, with the shortcut recorder and its GNOME conflict check as the first thing you see. Press <span style="font-family:'IBM Plex Mono'; color:#dfe4ec">Record</span> and hit a real combination; it detects conflicts live. <a href="#1b">1b</a> is the review window that opens after a snip: it shows the shot on a workspace with a real edge, says exactly where the file went, and its <span style="font-family:'IBM Plex Mono'; color:#dfe4ec">Annotate</span> button reveals the same floating bar from the overlay rather than a second tool set — drawing here runs the same code path.</p>
+  </header>
+
+  <div style="display:flex; gap:56px; flex-wrap:wrap; align-items:flex-start">
+
+    <div id="1a" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">1a</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Settings</span>
+        <span style="font:400 12px/1 'IBM Plex Mono'; color:#6d7484">780 × 580</span>
+      </div>
+
+      <div style="width:780px; height:580px; border-radius:12px; overflow:hidden; background:#14161a; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9); display:flex; flex-direction:column">
+        <div style="height:42px; flex:none; display:flex; align-items:center; gap:10px; padding:0 10px 0 14px; background:#191c21; border-bottom:1px solid #23262d">
+          <dc-import name="Icon" glyph="cog" size="14" hint-size="14px,14px"></dc-import>
+          <span style="font:500 12.5px/1 'IBM Plex Sans'; color:#d6dae2">snipux Settings</span>
+          <div style="flex:1"></div>
+          <div style="display:flex; gap:2px; color:#7c8494">
+            <button style="width:26px; height:26px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:6px; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="minimize" size="14" hint-size="14px,14px"></dc-import></button>
+            <button style="width:26px; height:26px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:6px; cursor:pointer" style-hover="background:#c0392b; color:#fff"><dc-import name="Icon" glyph="close" size="14" hint-size="14px,14px"></dc-import></button>
+          </div>
+        </div>
+
+        <div style="flex:1; min-height:0; display:flex">
+          <div style="width:182px; flex:none; background:#191c21; border-right:1px solid #23262d; padding:12px 10px; display:flex; flex-direction:column; gap:2px">
+            <sc-for list="{{ navs }}" as="n" hint-placeholder-count="4">
+              <button onClick="{{ n.pick }}" style="display:flex; align-items:center; gap:10px; padding:9px 10px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ n.bg }}; color:{{ n.fg }}" style-hover="background:#20242b">
+                <dc-import name="Icon" glyph="{{ n.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+                <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'">{{ n.label }}</span>
+              </button>
+            </sc-for>
+            <div style="flex:1"></div>
+            <div style="padding:10px; font:400 11px/1.5 'IBM Plex Sans'; color:#5f6674">snipux 0.9.2<br>Qt 6.7 · X11</div>
+          </div>
+
+          <div style="flex:1; min-width:0; overflow:auto">
+
+            <sc-if value="{{ isCapture }}" hint-placeholder-val="{{ true }}">
+            <div style="padding:20px 22px; display:flex; flex-direction:column; gap:22px">
+              <div style="display:flex; flex-direction:column; gap:11px">
+                <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Global shortcut</span>
+                <div style="display:flex; gap:8px; align-items:center">
+                  <button onClick="{{ startRec }}" style="flex:1; height:38px; display:flex; align-items:center; justify-content:center; gap:9px; border:1px solid {{ recBorder }}; border-radius:9px; background:{{ recBg }}; color:{{ recFg }}; font:500 13px 'IBM Plex Mono'; cursor:pointer" style-hover="border-color:#3a3f49">
+                    <sc-if value="{{ recording }}" hint-placeholder-val="{{ false }}">
+                      <span style="width:7px; height:7px; border-radius:50%; background:#e3ff4f; animation:pulse 1.1s ease-in-out infinite"></span>
+                    </sc-if>{{ combo }}
+                  </button>
+                  <button onClick="{{ startRec }}" style="height:38px; padding:0 14px; border:1px solid #2f333b; border-radius:9px; background:#1c1f25; color:#d3d8e1; font:500 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="background:#252931">{{ recLabel }}</button>
+                </div>
+                <div style="display:flex; align-items:flex-start; gap:8px; padding:9px 11px; border-radius:8px; background:{{ conflict.bg }}; border:1px solid {{ conflict.border }}">
+                  <span style="color:{{ conflict.fg }}; flex:none; margin-top:1px"><dc-import name="Icon" glyph="{{ conflict.glyph }}" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+                  <span style="font:400 11.5px/1.5 'IBM Plex Sans'; color:{{ conflict.fg }}; text-wrap:pretty">{{ conflict.text }}</span>
+                </div>
+                <p style="margin:0; font:400 11.5px/1.55 'IBM Plex Sans'; color:#6d7484; text-wrap:pretty">GNOME accepts a duplicate binding silently and then fires whichever owner it likes, so a clash reads as snipux being broken. This checks GNOME's shortcut schemas before you save.</p>
+              </div>
+
+              <div style="height:1px; background:#22252c"></div>
+
+              <div style="display:flex; flex-direction:column; gap:11px">
+                <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">After capture</span>
+                <sc-for list="{{ afters }}" as="o" hint-placeholder-count="3">
+                  <button onClick="{{ o.pick }}" style="display:flex; align-items:flex-start; gap:11px; padding:11px 12px; border:1px solid {{ o.border }}; border-radius:9px; background:{{ o.bg }}; cursor:pointer; text-align:left" style-hover="border-color:#3a3f49">
+                    <span style="flex:none; width:15px; height:15px; margin-top:1px; border-radius:50%; border:1.5px solid {{ o.ring }}; display:grid; place-items:center">
+                      <span style="width:7px; height:7px; border-radius:50%; background:{{ o.dot }}"></span>
+                    </span>
+                    <span style="flex:1; display:flex; flex-direction:column; gap:3px">
+                      <span style="font:500 12.5px/1 'IBM Plex Sans'; color:{{ o.fg }}">{{ o.label }}</span>
+                      <span style="font:400 11.5px/1.45 'IBM Plex Sans'; color:#79808f">{{ o.note }}</span>
+                    </span>
+                  </button>
+                </sc-for>
+                <button onClick="{{ toggleClip }}" style="display:flex; align-items:center; gap:11px; padding:10px 12px; border:1px solid #262a31; border-radius:9px; background:transparent; cursor:pointer; text-align:left" style-hover="background:#1b1e24">
+                  <span style="flex:none; width:34px; height:19px; border-radius:99px; background:{{ clipTrack }}; padding:2px; display:flex; justify-content:{{ clipJustify }}">
+                    <span style="width:15px; height:15px; border-radius:50%; background:#f1f3e8"></span>
+                  </span>
+                  <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'; color:#d3d8e1">Always copy to clipboard too</span>
+                </button>
+              </div>
+            </div>
+            </sc-if>
+
+            <sc-if value="{{ isSaving }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:20px 22px; display:flex; flex-direction:column; gap:22px">
+              <div style="display:flex; flex-direction:column; gap:11px">
+                <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Folder</span>
+                <div style="display:flex; gap:8px">
+                  <div style="flex:1; height:36px; display:flex; align-items:center; padding:0 11px; border:1px solid #2b2f36; border-radius:9px; background:#191c21; font:400 12px 'IBM Plex Mono'; color:#c3c9d4; overflow:hidden; white-space:nowrap; text-overflow:ellipsis">~/Pictures/snipux</div>
+                  <button style="height:36px; padding:0 13px; border:1px solid #2f333b; border-radius:9px; background:#1c1f25; color:#d3d8e1; font:500 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="background:#252931">Choose…</button>
+                </div>
+              </div>
+
+              <div style="display:flex; flex-direction:column; gap:11px">
+                <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Filename</span>
+                <input type="text" value="{{ pattern }}" onChange="{{ setPattern }}" style="height:36px; padding:0 11px; border:1px solid #2b2f36; border-radius:9px; background:#191c21; color:#e4e8ef; font-size:12px; outline:none">
+                <div style="display:flex; align-items:center; gap:8px; padding:9px 11px; border-radius:8px; background:#191c21; border:1px solid #22252c">
+                  <span style="flex:none; color:#6d7484"><dc-import name="Icon" glyph="image" size="14" hint-size="14px,14px"></dc-import></span>
+                  <span style="font:400 11.5px/1 'IBM Plex Mono'; color:#c8d96a; overflow:hidden; white-space:nowrap; text-overflow:ellipsis">{{ filePreview }}</span>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:5px">
+                  <sc-for list="{{ tokens }}" as="t" hint-placeholder-count="5">
+                    <button onClick="{{ t.add }}" title="{{ t.note }}" style="padding:5px 8px; border:1px solid #2b2f36; border-radius:6px; background:transparent; color:#8a92a1; font:400 11px 'IBM Plex Mono'; cursor:pointer" style-hover="background:#22262d; color:#dfe4ec">{{ t.tok }}</button>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div style="display:flex; flex-direction:column; gap:11px">
+                <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Format</span>
+                <div style="display:flex; gap:2px; padding:2px; background:#191c21; border:1px solid #262a31; border-radius:9px">
+                  <sc-for list="{{ formats }}" as="f" hint-placeholder-count="3">
+                    <button onClick="{{ f.pick }}" style="flex:1; border:0; cursor:pointer; padding:8px 0; border-radius:7px; font:500 12px 'IBM Plex Sans'; background:{{ f.bg }}; color:{{ f.fg }}">{{ f.label }}</button>
+                  </sc-for>
+                </div>
+                <sc-if value="{{ lossy }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex; align-items:center; gap:10px">
+                    <span style="font:400 11.5px/1 'IBM Plex Sans'; color:#79808f; min-width:52px">Quality</span>
+                    <input type="range" min="40" max="100" value="{{ quality }}" onChange="{{ setQuality }}" style="flex:1">
+                    <span style="min-width:34px; text-align:right; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ quality }}%</span>
+                  </div>
+                </sc-if>
+                <button onClick="{{ toggleHidpi }}" style="display:flex; align-items:center; gap:11px; padding:10px 12px; border:1px solid #262a31; border-radius:9px; background:transparent; cursor:pointer; text-align:left" style-hover="background:#1b1e24">
+                  <span style="flex:none; width:34px; height:19px; border-radius:99px; background:{{ hidpiTrack }}; padding:2px; display:flex; justify-content:{{ hidpiJustify }}">
+                    <span style="width:15px; height:15px; border-radius:50%; background:#f1f3e8"></span>
+                  </span>
+                  <span style="flex:1; display:flex; flex-direction:column; gap:3px">
+                    <span style="font:500 12.5px/1 'IBM Plex Sans'; color:#d3d8e1">Save at native resolution</span>
+                    <span style="font:400 11.5px/1.45 'IBM Plex Sans'; color:#79808f">Writes 2× pixels on a HiDPI display. Off saves what you saw.</span>
+                  </span>
+                </button>
+              </div>
+            </div>
+            </sc-if>
+
+            <sc-if value="{{ isInk }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:20px 22px; display:flex; flex-direction:column; gap:22px">
+              <div style="display:flex; flex-direction:column; gap:11px">
+                <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Tool the overlay opens with</span>
+                <div style="display:flex; gap:3px; padding:3px; background:#191c21; border:1px solid #262a31; border-radius:10px">
+                  <sc-for list="{{ inkTools }}" as="t" hint-placeholder-count="6">
+                    <button onClick="{{ t.pick }}" title="{{ t.name }}" style="flex:1; height:34px; display:grid; place-items:center; border:0; border-radius:7px; cursor:pointer; background:{{ t.bg }}; color:{{ t.fg }}" style-hover="background:#23262d">
+                      <dc-import name="Icon" glyph="{{ t.glyph }}" size="17" hint-size="17px,17px"></dc-import>
+                    </button>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div style="display:flex; flex-direction:column; gap:11px">
+                <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Default ink</span>
+                <div style="display:flex; gap:7px">
+                  <sc-for list="{{ swatches }}" as="s" hint-placeholder-count="7">
+                    <button onClick="{{ s.pick }}" title="{{ s.name }}" style="width:30px; height:30px; padding:0; border-radius:8px; cursor:pointer; background:{{ s.hex }}; border:1px solid rgba(255,255,255,.16); box-shadow:{{ s.ring }}"></button>
+                  </sc-for>
+                </div>
+                <div style="display:flex; align-items:center; gap:10px">
+                  <span style="font:400 11.5px/1 'IBM Plex Sans'; color:#79808f; min-width:52px">Stroke</span>
+                  <input type="range" min="1" max="26" value="{{ stroke }}" onChange="{{ setStroke }}" style="flex:1">
+                  <span style="min-width:34px; text-align:right; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ stroke }}px</span>
+                </div>
+                <div style="height:44px; border-radius:9px; background:#191c21; border:1px solid #22252c; display:grid; place-items:center">
+                  <div style="width:{{ dot }}px; height:{{ dot }}px; border-radius:50%; background:{{ ink }}"></div>
+                </div>
+              </div>
+
+              <div style="display:flex; flex-direction:column; gap:9px">
+                <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Redaction</span>
+                <div style="display:flex; gap:2px; padding:2px; background:#191c21; border:1px solid #262a31; border-radius:9px">
+                  <button onClick="{{ setBlurMode }}" style="flex:1; border:0; cursor:pointer; padding:8px 0; border-radius:7px; font:500 12px 'IBM Plex Sans'; background:{{ blurBg }}; color:{{ blurFg }}">Blur</button>
+                  <button onClick="{{ setPixMode }}" style="flex:1; border:0; cursor:pointer; padding:8px 0; border-radius:7px; font:500 12px 'IBM Plex Sans'; background:{{ pixBg }}; color:{{ pixFg }}">Pixelate</button>
+                </div>
+                <p style="margin:0; font:400 11.5px/1.55 'IBM Plex Sans'; color:#6d7484; text-wrap:pretty">Baked into the exported pixels, never a removable overlay.</p>
+              </div>
+
+              <button onClick="{{ toggleRemember }}" style="display:flex; align-items:center; gap:11px; padding:10px 12px; border:1px solid #262a31; border-radius:9px; background:transparent; cursor:pointer; text-align:left" style-hover="background:#1b1e24">
+                <span style="flex:none; width:34px; height:19px; border-radius:99px; background:{{ rememberTrack }}; padding:2px; display:flex; justify-content:{{ rememberJustify }}">
+                  <span style="width:15px; height:15px; border-radius:50%; background:#f1f3e8"></span>
+                </span>
+                <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'; color:#d3d8e1">Remember my last tool instead</span>
+              </button>
+            </div>
+            </sc-if>
+
+            <sc-if value="{{ isTray }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:20px 22px; display:flex; flex-direction:column; gap:14px">
+              <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Behaviour</span>
+              <sc-for list="{{ trayToggles }}" as="t" hint-placeholder-count="4">
+                <button onClick="{{ t.toggle }}" style="display:flex; align-items:center; gap:11px; padding:11px 12px; border:1px solid #262a31; border-radius:9px; background:transparent; cursor:pointer; text-align:left" style-hover="background:#1b1e24">
+                  <span style="flex:none; width:34px; height:19px; border-radius:99px; background:{{ t.track }}; padding:2px; display:flex; justify-content:{{ t.justify }}">
+                    <span style="width:15px; height:15px; border-radius:50%; background:#f1f3e8"></span>
+                  </span>
+                  <span style="flex:1; display:flex; flex-direction:column; gap:3px">
+                    <span style="font:500 12.5px/1 'IBM Plex Sans'; color:#d3d8e1">{{ t.label }}</span>
+                    <span style="font:400 11.5px/1.45 'IBM Plex Sans'; color:#79808f">{{ t.note }}</span>
+                  </span>
+                </button>
+              </sc-for>
+            </div>
+            </sc-if>
+
+          </div>
+        </div>
+
+        <div style="height:56px; flex:none; display:flex; align-items:center; gap:10px; padding:0 16px; background:#191c21; border-top:1px solid #23262d">
+          <span style="font:400 11.5px/1 'IBM Plex Sans'; color:{{ dirtyFg }}">{{ dirtyText }}</span>
+          <div style="flex:1"></div>
+          <button onClick="{{ discard }}" style="height:34px; padding:0 14px; border:1px solid #2f333b; border-radius:9px; background:#1c1f25; color:#c3c9d4; font:500 12.5px 'IBM Plex Sans'; cursor:pointer" style-hover="background:#252931">Cancel</button>
+          <button onClick="{{ commit }}" style="height:34px; padding:0 16px; display:flex; align-items:center; gap:7px; border:0; border-radius:9px; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; cursor:pointer" style-hover="filter:brightness(1.06)">
+            <dc-import name="Icon" glyph="check" size="15" stroke="2.1" hint-size="15px,15px"></dc-import>Save
+          </button>
+        </div>
+      </div>
+
+      <p style="margin:0; max-width:780px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Four groups in a rail, so the dialog doesn't have to grow a second column every time a preference appears. Capture leads because the shortcut is the thing people come here to fix, and the conflict check sits directly under the field it judges — not in a tooltip.</p>
+    </div>
+
+    <div id="1b" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">1b</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Review window</span>
+        <span style="font:400 12px/1 'IBM Plex Mono'; color:#6d7484">1020 × 700</span>
+        <div style="display:flex; gap:2px; padding:3px; background:#15171b; border:1px solid #23262d; border-radius:9px">
+          <button onClick="{{ r.goView }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ r.tab.viewBg }}; color:{{ r.tab.viewFg }}">Review</button>
+          <button onClick="{{ r.goEdit }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ r.tab.editBg }}; color:{{ r.tab.editFg }}">Annotating</button>
+        </div>
+      </div>
+
+      <div style="width:1020px; height:700px; border-radius:12px; overflow:hidden; background:#14161a; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9); display:flex; flex-direction:column">
+        <div style="height:42px; flex:none; display:flex; align-items:center; gap:10px; padding:0 10px 0 14px; background:#191c21; border-bottom:1px solid #23262d">
+          <div style="width:18px; height:18px; border-radius:5px; background:#e3ff4f; display:grid; place-items:center; color:#15170e">
+            <dc-import name="Icon" glyph="crop" size="11" stroke="2.2" hint-size="11px,11px"></dc-import>
+          </div>
+          <span style="font:500 12.5px/1 'IBM Plex Sans'; color:#d6dae2">Screenshot from 2026-08-25 10-38-28.png</span>
+          <span style="font:400 11px/1 'IBM Plex Mono'; color:#6d7484">1377 × 936</span>
+          <div style="flex:1"></div>
+          <div style="display:flex; gap:2px; color:#7c8494">
+            <button style="width:26px; height:26px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:6px; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="minimize" size="14" hint-size="14px,14px"></dc-import></button>
+            <button style="width:26px; height:26px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:6px; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="expand" size="14" hint-size="14px,14px"></dc-import></button>
+            <button style="width:26px; height:26px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:6px; cursor:pointer" style-hover="background:#c0392b; color:#fff"><dc-import name="Icon" glyph="close" size="14" hint-size="14px,14px"></dc-import></button>
+          </div>
+        </div>
+
+        <div style="flex:1; min-height:0; position:relative; display:grid; place-items:center; background:radial-gradient(85% 75% at 50% 30%, #171a1f 0%, #0c0d10 100%); overflow:hidden; cursor:{{ r.cursor }}">
+          <div style="position:absolute; left:16px; top:14px; z-index:3; display:flex; align-items:center; gap:8px; padding:5px 10px; border-radius:7px; background:rgba(18,20,24,.88); border:1px solid #262a31; font:500 11px/1 'IBM Plex Mono'; color:#9aa2b1; white-space:nowrap; backdrop-filter:blur(6px)">
+            <dc-import name="Icon" glyph="image" size="13" hint-size="13px,13px"></dc-import>1377 × 936
+            <span style="color:#4e545f">·</span>{{ r.markLabel }}
+          </div>
+          <div style="position:absolute; right:16px; top:14px; z-index:3; display:flex; align-items:center; gap:4px; padding:4px; border-radius:8px; background:rgba(18,20,24,.88); border:1px solid #262a31; backdrop-filter:blur(6px)">
+            <button onClick="{{ r.zoomOut }}" style="width:22px; height:22px; display:grid; place-items:center; border:0; padding:0; border-radius:6px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#282c34"><dc-import name="Icon" glyph="minus" size="13" hint-size="13px,13px"></dc-import></button>
+            <span style="min-width:40px; text-align:center; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ r.zoom }}%</span>
+            <button onClick="{{ r.zoomIn }}" style="width:22px; height:22px; display:grid; place-items:center; border:0; padding:0; border-radius:6px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#282c34"><dc-import name="Icon" glyph="plus" size="13" hint-size="13px,13px"></dc-import></button>
+          </div>
+
+          <div style="transform:scale({{ r.zs }}); transition:transform .18s ease">
+            <div onPointerDown="{{ r.onDown }}" onPointerMove="{{ r.onMove }}" onPointerUp="{{ r.onUp }}" style="position:relative; width:760px; height:517px; border-radius:4px; border:1px solid #454b56; box-shadow:0 34px 74px -18px rgba(0,0,0,.9), 0 0 0 7px rgba(255,255,255,.02); touch-action:none; overflow:hidden">
+              <div style="position:absolute; inset:0; display:flex; font:400 11px/22px 'IBM Plex Mono'; color:#d6d8c8; background:#26271f">
+                <div style="width:132px; flex:none; background:#212219; border-right:1px solid #34362b; padding:14px 0">
+                  <div style="padding:0 13px 9px; font:500 9.5px/1 'IBM Plex Sans'; letter-spacing:.12em; text-transform:uppercase; color:#8d907c">spaces</div>
+                  <div style="padding:0 13px; font-size:10.5px; line-height:21px; color:#b6b9a6">
+                    <div>The COMMANDER</div>
+                    <div>aevox-web</div>
+                    <div>punchcard</div>
+                    <div style="color:#e3ff4f">snipux</div>
+                    <div>APD no Punch</div>
+                  </div>
+                </div>
+                <div style="flex:1; min-width:0; padding:14px 16px; overflow:hidden">
+                  <div>Add a Settings window, and warn about shortcuts GNOME already uses</div>
+                  <div style="color:#9ea08d">Let the keyboard shortcut be something other than Super+Shift+S</div>
+                  <div style="height:22px"></div>
+                  <div>Both built, committed, installed. Running as pid 1307530.</div>
+                  <div style="height:22px"></div>
+                  <div>Records the combination you press rather than making you spell out</div>
+                  <div><span style="color:#9fd2ff">&lt;Super&gt;&lt;Shift&gt;x</span>. Esc cancels without rebinding.</div>
+                  <div style="height:22px"></div>
+                  <div>The part that earns its place is the conflict warning — GNOME accepts</div>
+                  <div>a duplicate binding silently and fires whichever owner it likes.</div>
+                  <div style="height:22px"></div>
+                  <div style="color:#9ea08d">~/.config/snipux/profiles/default.toml</div>
+                  <div style="height:44px"></div>
+                  <div style="color:#b6b9a6">fixed six bugs including the agent-stderr deadlock.</div>
+                </div>
+              </div>
+
+              <div style="position:absolute; inset:0; pointer-events:none">
+                <sc-for list="{{ r.blurs }}" as="m" hint-placeholder-count="0">
+                  <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:{{ m.w }}px; height:{{ m.h }}px; border-radius:2px; backdrop-filter:{{ m.fx }}; background:rgba(120,120,130,.06); pointer-events:{{ m.pe }}"></div>
+                </sc-for>
+                <svg width="760" height="517" style="position:absolute; left:0; top:0; display:block">
+                  <sc-for list="{{ r.pens }}" as="m" hint-placeholder-count="0">
+                    <path d="{{ m.d }}" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" stroke-linecap="round" stroke-linejoin="round" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></path>
+                  </sc-for>
+                  <sc-for list="{{ r.rects }}" as="m" hint-placeholder-count="0">
+                    <rect x="{{ m.x }}" y="{{ m.y }}" width="{{ m.w }}" height="{{ m.h }}" rx="3" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></rect>
+                  </sc-for>
+                  <sc-for list="{{ r.arrows }}" as="m" hint-placeholder-count="0">
+                    <g onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}" opacity="{{ m.op }}">
+                      <line x1="{{ m.x1 }}" y1="{{ m.y1 }}" x2="{{ m.hx }}" y2="{{ m.hy }}" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-linecap="round"></line>
+                      <polygon points="{{ m.head }}" fill="{{ m.color }}"></polygon>
+                    </g>
+                  </sc-for>
+                </svg>
+                <sc-for list="{{ r.texts }}" as="m" hint-placeholder-count="0">
+                  <div contentEditable="{{ true }}" suppressContentEditableWarning="{{ true }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; pointer-events:auto; padding:3px 8px; border-radius:5px; background:rgba(12,14,18,.72); color:{{ m.color }}; font:600 {{ m.fs }}px/1.3 'IBM Plex Sans'; outline:none; white-space:nowrap; cursor:text; box-shadow:0 0 0 1px rgba(255,255,255,.16)">{{ m.text }}</div>
+                </sc-for>
+                <sc-for list="{{ r.steps }}" as="m" hint-placeholder-count="0">
+                  <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:26px; height:26px; border-radius:50%; display:grid; place-items:center; background:{{ m.color }}; color:#15170e; font:600 13px/1 'IBM Plex Sans'; box-shadow:0 2px 8px rgba(0,0,0,.5), 0 0 0 2px rgba(255,255,255,.9); pointer-events:{{ m.pe }}">{{ m.n }}</div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <sc-if value="{{ r.editing }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute; left:50%; bottom:18px; z-index:6; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; gap:8px">
+              <div style="display:flex; align-items:center; gap:3px; padding:7px 8px; border-radius:14px; background:rgba(26,28,24,.94); border:1px solid rgba(255,255,255,.1); box-shadow:0 24px 50px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+                <sc-for list="{{ r.tools }}" as="t" hint-placeholder-count="8">
+                  <button onClick="{{ t.pick }}" title="{{ t.title }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ t.bg }}; color:{{ t.fg }}" style-hover="background:rgba(255,255,255,.09)">
+                    <dc-import name="Icon" glyph="{{ t.glyph }}" hint-size="18px,18px"></dc-import>
+                  </button>
+                </sc-for>
+                <div style="width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 6px"></div>
+                <button title="Undo — Ctrl+Z" onClick="{{ r.undo }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:{{ r.undoFg }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="undo" hint-size="18px,18px"></dc-import></button>
+                <button title="Redo — Ctrl+Shift+Z" onClick="{{ r.redo }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:{{ r.redoFg }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="redo" hint-size="18px,18px"></dc-import></button>
+                <button title="Clear ink" onClick="{{ r.clear }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:#8f9689" style-hover="background:rgba(200,80,80,.22); color:#f5a3a3"><dc-import name="Icon" glyph="trash" hint-size="18px,18px"></dc-import></button>
+                <div style="width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 6px"></div>
+                <button onClick="{{ r.goView }}" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 13px; border-radius:10px; border:0; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="filter:brightness(1.06)"><dc-import name="Icon" glyph="check" size="16" stroke="2" hint-size="16px,16px"></dc-import>Done</button>
+              </div>
+
+              <sc-if value="{{ r.isDraw }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex; align-items:center; gap:12px; padding:8px 12px; border-radius:12px; background:rgba(26,28,24,.94); border:1px solid rgba(255,255,255,.1); box-shadow:0 18px 40px -14px rgba(0,0,0,.85); backdrop-filter:blur(16px)">
+                  <div style="display:flex; align-items:center; gap:7px; padding:3px 9px 3px 6px; border-radius:8px; background:rgba(255,255,255,.08); color:#f1f3e8; font:500 12px 'IBM Plex Sans'; white-space:nowrap">
+                    <dc-import name="Icon" glyph="{{ r.tool }}" size="14" hint-size="14px,14px"></dc-import>{{ r.toolName }}
+                  </div>
+                  <div style="width:1px; height:20px; background:rgba(255,255,255,.12)"></div>
+                  <div style="display:flex; gap:6px">
+                    <sc-for list="{{ r.swatches }}" as="s" hint-placeholder-count="7">
+                      <button onClick="{{ s.pick }}" title="{{ s.name }}" style="width:22px; height:22px; padding:0; border-radius:7px; cursor:pointer; background:{{ s.hex }}; border:1px solid rgba(255,255,255,.2); box-shadow:{{ s.ring }}"></button>
+                    </sc-for>
+                  </div>
+                  <div style="width:1px; height:20px; background:rgba(255,255,255,.12)"></div>
+                  <input type="range" min="1" max="26" value="{{ r.size }}" onChange="{{ r.setSize }}" style="width:100px">
+                  <span style="min-width:34px; font:500 11px/1 'IBM Plex Mono'; color:#c6cab8; white-space:nowrap">{{ r.size }}px</span>
+                  <div style="width:28px; height:28px; display:grid; place-items:center">
+                    <div style="width:{{ r.dot }}px; height:{{ r.dot }}px; border-radius:50%; background:{{ r.color }}"></div>
+                  </div>
+                  <div style="width:1px; height:20px; background:rgba(255,255,255,.12)"></div>
+                  <span style="font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">{{ r.hint }}</span>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ r.isBlur }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex; align-items:center; gap:12px; padding:8px 12px; border-radius:12px; background:rgba(26,28,24,.94); border:1px solid rgba(255,255,255,.1); box-shadow:0 18px 40px -14px rgba(0,0,0,.85); backdrop-filter:blur(16px)">
+                  <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.35); border-radius:8px">
+                    <button onClick="{{ r.setBlurMode }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 11.5px 'IBM Plex Sans'; background:{{ r.blurBg }}; color:{{ r.blurFg }}">Blur</button>
+                    <button onClick="{{ r.setPixMode }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 11.5px 'IBM Plex Sans'; background:{{ r.pixBg }}; color:{{ r.pixFg }}">Pixelate</button>
+                  </div>
+                  <span style="font:400 11px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">Strength</span>
+                  <input type="range" min="2" max="20" value="{{ r.strength }}" onChange="{{ r.setStrength }}" style="width:100px">
+                  <span style="min-width:20px; font:500 11px/1 'IBM Plex Mono'; color:#c6cab8">{{ r.strength }}</span>
+                  <span style="font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">{{ r.hint }}</span>
+                </div>
+              </sc-if>
+            </div>
+          </sc-if>
+        </div>
+
+        <div style="flex:none; padding:13px 16px; background:#191c21; border-top:1px solid #23262d; display:flex; align-items:center; gap:14px">
+          <div style="min-width:0; display:flex; flex-direction:column; gap:5px">
+            <div style="display:flex; align-items:center; gap:7px">
+              <span style="flex:none; color:{{ r.stateFg }}"><dc-import name="Icon" glyph="{{ r.stateGlyph }}" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+              <span style="font:500 12px/1 'IBM Plex Sans'; color:{{ r.stateFg }}; white-space:nowrap">{{ r.stateText }}</span>
+            </div>
+            <button onClick="{{ r.reveal }}" title="Show in folder" style="display:flex; align-items:center; gap:6px; padding:0; border:0; background:transparent; cursor:pointer; text-align:left" style-hover="opacity:.75">
+              <span style="font:400 11.5px/1 'IBM Plex Mono'; color:#8a92a1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis">~/Pictures/snipux/Screenshot from 2026-08-25 10-38-28.png</span>
+            </button>
+          </div>
+          <div style="flex:1"></div>
+          <button onClick="{{ r.toggleEdit }}" style="height:36px; padding:0 14px; display:flex; align-items:center; gap:7px; border:1px solid {{ r.annBorder }}; border-radius:9px; background:{{ r.annBg }}; color:{{ r.annFg }}; font:500 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="background:#252931">
+            <dc-import name="Icon" glyph="pen" size="15" hint-size="15px,15px"></dc-import>{{ r.annLabel }}
+          </button>
+          <button onClick="{{ r.reveal }}" style="height:36px; padding:0 14px; display:flex; align-items:center; gap:7px; border:1px solid #2f333b; border-radius:9px; background:#1c1f25; color:#d3d8e1; font:500 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="background:#252931"><dc-import name="Icon" glyph="window" size="15" hint-size="15px,15px"></dc-import>Show in Folder</button>
+          <button onClick="{{ r.saveAs }}" style="height:36px; padding:0 14px; display:flex; align-items:center; gap:7px; border:1px solid #2f333b; border-radius:9px; background:#1c1f25; color:#d3d8e1; font:500 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="background:#252931"><dc-import name="Icon" glyph="save" size="15" hint-size="15px,15px"></dc-import>Save As…</button>
+          <button onClick="{{ r.copy }}" style="height:36px; padding:0 16px; display:flex; align-items:center; gap:7px; border:0; border-radius:9px; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="filter:brightness(1.06)"><dc-import name="Icon" glyph="copy" size="15" stroke="1.9" hint-size="15px,15px"></dc-import>Copy</button>
+        </div>
+      </div>
+
+      <p style="margin:0; max-width:1020px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Review answers the two questions the old window couldn't: what did I capture, and where did it go — the shot has an edge and a shadow, and the path under the status line is clickable. Annotate reveals the overlay's own bar over the same image instead of a second editor, so there's one tool set and one mark model. Drawing on top marks the file re-save-able; the status line switches from “Saved” to “Edited — not saved”.</p>
+    </div>
+
+  </div>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#e3ff4f&quot;,&quot;options&quot;:[&quot;#e3ff4f&quot;,&quot;#8b9bff&quot;,&quot;#2dd4bf&quot;,&quot;#e9ecf2&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Chrome&quot;}}">
+const GNOME = {
+  'Print': 'GNOME’s “Take a screenshot”',
+  'Shift+Print': 'GNOME’s “Screenshot of an area”',
+  'Control+Alt+T': 'GNOME’s “Launch terminal”',
+  'Super+L': 'GNOME’s “Lock screen”',
+  'Control+Alt+Delete': 'GNOME’s “Log out”',
+  'Super+P': 'GNOME’s “Switch monitor”'
+};
+const NAV = [['capture','camera','Capture'],['saving','save','Saving'],['ink','pen','Annotation'],['tray','panel','Tray & startup']];
+const AFTER = [
+  ['review','Open a review window','Shows the shot, where it went, and lets you keep annotating.'],
+  ['clip','Copy and get out of the way','Straight to the clipboard, one toast, no window.'],
+  ['file','Save silently','Writes the file and says nothing. Best with a delay set.']
+];
+const SW = [['#e3ff4f','Acid'],['#ef4444','Red'],['#38bdf8','Sky'],['#10b981','Emerald'],['#a855f7','Violet'],['#ffffff','White'],['#12141a','Ink']];
+const INK_TOOLS = [['pen','Pen'],['highlighter','Highlighter'],['arrow','Arrow'],['rect','Rectangle'],['step','Numbered step'],['blur','Blur / redact']];
+const R_TOOLS = [['pen','Pen','P'],['highlighter','Highlighter','H'],['arrow','Arrow','A'],['rect','Rectangle','R'],['step','Numbered step','S'],['text','Text','T'],['blur','Blur / redact','B'],['eraser','Eraser','E']];
+const NAMES = { pen:'Pen', highlighter:'Highlighter', arrow:'Arrow', rect:'Rectangle', step:'Numbered step', text:'Text label', blur:'Blur / redact', eraser:'Eraser' };
+const HINTS = { pen:'Drag to draw freehand', highlighter:'Sweep over the line that matters', arrow:'Drag from tail to head', rect:'Drag to box something in', step:'Click to drop the next number', text:'Click, then type into the label', blur:'Drag over anything private', eraser:'Click a mark to remove it' };
+const DRAWY = ['pen','highlighter','arrow','rect','step','text'];
+const TRAY = [
+  ['startup','Start with the session','Sits in the tray so the shortcut works from login.'],
+  ['tray','Show a tray icon','Off means the shortcut is the only way in.'],
+  ['sound','Shutter sound',''],
+  ['recent','Keep the last 10 snips in the tray menu','Files stay on disk either way.']
+];
+const FMT = ['PNG','JPEG','WebP'];
+
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.uid = 200;
+    const loop = [], tail = [];
+    for (let i = 0; i <= 46; i++) { const t = i / 46 * Math.PI * 2.1 - 1.1; loop.push([300 + Math.cos(t) * 86, 150 + Math.sin(t) * 40]); }
+    const lp = loop[loop.length - 1];
+    for (let i = 1; i <= 30; i++) { const t = i / 30; tail.push([lp[0] + t * 150, lp[1] + t * 96 + Math.sin(t * 3) * 26]); }
+    const round = a => a.map(q => [Math.round(q[0]), Math.round(q[1])]);
+    this.state = {
+      nav: 'capture', combo: 'Control+Alt+S', recording: false, dirty: false,
+      after: 'review', clip: true, hidpi: true, pattern: 'Screenshot from %Y-%m-%d %H-%M-%S',
+      format: 'PNG', quality: 88, inkTool: 'pen', ink: '#e3ff4f', stroke: 5, blurMode: 'blur', remember: false,
+      trayOn: { startup: true, tray: true, sound: false, recent: true },
+      r: {
+        editing: false, tool: 'pen', color: '#e3ff4f', size: 4, strength: 8, blurMode: 'blur', zoom: 100,
+        saved: true, marks: [
+          { id:'r1', type:'pen', color:'#e3ff4f', size:4, op:1, pts: round(loop) },
+          { id:'r2', type:'pen', color:'#e3ff4f', size:4, op:1, pts: round(tail) },
+          { id:'r3', type:'blur', x:22, y:404, w:110, h:16, strength:8, mode:'blur' }
+        ], redo: []
+      }
+    };
+  }
+
+  componentDidMount() {
+    this.onKey = e => {
+      if (!this.state.recording) return;
+      e.preventDefault();
+      if (e.key === 'Escape') { this.setState({ recording: false }); return; }
+      const mods = [];
+      if (e.ctrlKey) mods.push('Control');
+      if (e.altKey) mods.push('Alt');
+      if (e.shiftKey) mods.push('Shift');
+      if (e.metaKey) mods.push('Super');
+      const k = e.key;
+      if (['Control','Alt','Shift','Meta'].indexOf(k) >= 0) return;
+      const name = k.length === 1 ? k.toUpperCase() : k;
+      this.setState({ combo: [...mods, name].join('+'), recording: false, dirty: true });
+    };
+    window.addEventListener('keydown', this.onKey);
+  }
+
+  componentWillUnmount() { window.removeEventListener('keydown', this.onKey); }
+
+  setR(patch) { this.setState(st => ({ r: { ...st.r, ...patch } })); }
+
+  rpt(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const s = 760 / rect.width;
+    return [Math.round((e.clientX - rect.left) * s), Math.round((e.clientY - rect.top) * s)];
+  }
+
+  onDown = e => {
+    const r = this.state.r;
+    if (!r.editing || r.tool === 'eraser') return;
+    const [x, y] = this.rpt(e);
+    const id = 'm' + (this.uid++);
+    const t = r.tool;
+    if (t === 'step') {
+      const n = r.marks.filter(m => m.type === 'step').length + 1;
+      this.setR({ marks: [...r.marks, { id, type:'step', color:r.color, n, x:x-13, y:y-13 }], redo: [], saved: false });
+      return;
+    }
+    if (t === 'text') {
+      this.setR({ marks: [...r.marks, { id, type:'text', color:r.color, fs:Math.max(12, r.size*3), x, y, text:'Label' }], redo: [], saved: false });
+      return;
+    }
+    let m;
+    if (t === 'pen' || t === 'highlighter') m = { id, type:t, color:r.color, size:Math.max(2, r.size * (t === 'highlighter' ? 3.5 : 1)), op: t === 'highlighter' ? .34 : 1, pts:[[x,y]] };
+    else if (t === 'blur') m = { id, type:'blur', x, y, w:0, h:0, strength:r.strength, mode:r.blurMode };
+    else m = { id, type:t, color:r.color, size:r.size, op:1, x, y, w:0, h:0 };
+    this.drag = id;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+    this.setR({ marks: [...r.marks, m], redo: [], saved: false });
+  };
+
+  onMove = e => {
+    if (!this.drag) return;
+    const [x, y] = this.rpt(e);
+    this.setState(st => ({ r: { ...st.r, marks: st.r.marks.map(m => m.id !== this.drag ? m : (m.pts ? { ...m, pts: [...m.pts, [x, y]] } : { ...m, w: x - m.x, h: y - m.y })) } }));
+  };
+
+  onUp = () => {
+    if (!this.drag) return;
+    this.drag = null;
+    this.setState(st => ({ r: { ...st.r, marks: st.r.marks.filter(m => m.pts ? m.pts.length > 1 : (Math.abs(m.w) > 3 || Math.abs(m.h) > 3 || m.type === 'step' || m.type === 'text')) } }));
+  };
+
+  delR(id) { return e => { if (e && e.stopPropagation) e.stopPropagation(); this.setState(st => ({ r: { ...st.r, marks: st.r.marks.filter(m => m.id !== id), saved: false } })); }; }
+
+  norm(m) { return { x: Math.min(m.x, m.x + m.w), y: Math.min(m.y, m.y + m.h), w: Math.abs(m.w), h: Math.abs(m.h) }; }
+
+  arrowGeom(m) {
+    const x1 = m.x, y1 = m.y, x2 = m.x + m.w, y2 = m.y + m.h;
+    const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+    const hl = Math.max(10, m.size * 3.4), hw = Math.max(7, m.size * 2.2);
+    const ux = dx / len, uy = dy / len, bx = x2 - ux * hl, by = y2 - uy * hl, px = -uy, py = ux;
+    return { x1, y1, hx: x2 - ux * hl * .55, hy: y2 - uy * hl * .55,
+      head: [x2 + ',' + y2, (bx + px * hw) + ',' + (by + py * hw), (bx - px * hw) + ',' + (by - py * hw)].join(' ') };
+  }
+
+  stamp(pattern) {
+    const map = { '%Y':'2026', '%m':'08', '%d':'25', '%H':'10', '%M':'38', '%S':'28', '%c':'3', '%w':'herdr' };
+    let out = pattern;
+    Object.keys(map).forEach(k => { out = out.split(k).join(map[k]); });
+    return out;
+  }
+
+  reviewVals() {
+    const r = this.state.r, t = r.tool;
+    const pe = r.editing && t === 'eraser' ? 'auto' : 'none';
+    const mk = m => ({ ...m, pe, onDel: r.editing && t === 'eraser' ? this.delR(m.id) : null });
+    const of_ = ty => r.marks.filter(m => m.type === ty);
+    return {
+      editing: r.editing, tool: t, toolName: NAMES[t], hint: HINTS[t], color: r.color, size: r.size, strength: r.strength,
+      dot: Math.max(4, Math.min(26, r.size * (t === 'highlighter' ? 3.5 : 1))),
+      cursor: !r.editing ? 'default' : (t === 'eraser' ? 'pointer' : 'crosshair'),
+      isDraw: r.editing && DRAWY.indexOf(t) >= 0, isBlur: r.editing && t === 'blur',
+      blurBg: r.blurMode === 'blur' ? 'rgba(255,255,255,.16)' : 'transparent', blurFg: r.blurMode === 'blur' ? '#f8faf0' : '#a8afa0',
+      pixBg: r.blurMode === 'pix' ? 'rgba(255,255,255,.16)' : 'transparent', pixFg: r.blurMode === 'pix' ? '#f8faf0' : '#a8afa0',
+      setBlurMode: () => this.setR({ blurMode: 'blur' }), setPixMode: () => this.setR({ blurMode: 'pix' }),
+      setSize: e => this.setR({ size: +e.target.value }),
+      setStrength: e => this.setR({ strength: +e.target.value }),
+      markLabel: r.marks.length === 1 ? '1 mark' : r.marks.length + ' marks',
+      zoom: r.zoom, zs: r.zoom / 100,
+      zoomIn: () => this.setR({ zoom: Math.min(160, r.zoom + 20) }),
+      zoomOut: () => this.setR({ zoom: Math.max(60, r.zoom - 20) }),
+      tools: R_TOOLS.map(([glyph, name, key]) => ({ key: glyph, glyph, title: name + ' — ' + key,
+        bg: t === glyph ? 'rgba(255,255,255,.16)' : 'transparent', fg: t === glyph ? '#f8faf0' : '#a8afa0',
+        pick: () => this.setR({ tool: glyph }) })),
+      swatches: SW.map(([hex, name]) => ({ hex, name, key: hex, ring: r.color === hex ? '0 0 0 2px #1a1c18, 0 0 0 3.5px #f1f3e8' : 'none', pick: () => this.setR({ color: hex }) })),
+      undoFg: r.marks.length ? '#d7dacb' : '#5d6157', redoFg: r.redo.length ? '#d7dacb' : '#5d6157',
+      undo: () => { const m = [...r.marks], last = m.pop(); if (last) this.setR({ marks: m, redo: [...r.redo, last], saved: false }); },
+      redo: () => { const rr = [...r.redo], next = rr.pop(); if (next) this.setR({ marks: [...r.marks, next], redo: rr, saved: false }); },
+      clear: () => this.setR({ marks: [], redo: [], saved: false }),
+      toggleEdit: () => this.setR({ editing: !r.editing }),
+      goEdit: () => this.setR({ editing: true }), goView: () => this.setR({ editing: false }),
+      annLabel: r.editing ? 'Done annotating' : 'Annotate',
+      annBg: r.editing ? '#252931' : '#1c1f25', annBorder: r.editing ? '#3a3f49' : '#2f333b', annFg: r.editing ? '#f1f3e8' : '#d3d8e1',
+      tab: { editBg: r.editing ? '#2c313c' : 'transparent', editFg: r.editing ? '#f3f5f9' : '#8d94a3',
+             viewBg: !r.editing ? '#2c313c' : 'transparent', viewFg: !r.editing ? '#f3f5f9' : '#8d94a3' },
+      stateGlyph: r.saved ? 'check' : 'pen',
+      stateFg: r.saved ? '#9ec46a' : '#c8a54a',
+      stateText: r.saved ? 'Saved' : 'Edited — not saved',
+      copy: () => this.setR({ saved: true }), saveAs: () => this.setR({ saved: true }), reveal: () => {},
+      onDown: this.onDown, onMove: this.onMove, onUp: this.onUp,
+      pens: [...of_('pen'), ...of_('highlighter')].map(m => ({ ...mk(m), d: m.pts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ') })),
+      rects: of_('rect').map(m => ({ ...mk(m), ...this.norm(m) })),
+      arrows: of_('arrow').map(m => ({ ...mk(m), ...this.arrowGeom(m) })),
+      blurs: of_('blur').map(m => { const n = this.norm(m); return { ...mk(m), ...n, fx: m.mode === 'pix' ? 'blur(' + m.strength + 'px) contrast(1.7) saturate(1.3)' : 'blur(' + m.strength + 'px)' }; }),
+      texts: of_('text').map(m => ({ ...mk(m), fs: m.fs })),
+      steps: of_('step').map(m => mk(m))
+    };
+  }
+
+  renderVals() {
+    const st = this.state;
+    const owner = GNOME[st.combo];
+    const nav = st.nav;
+    return {
+      navs: NAV.map(([id, glyph, label]) => ({ key: id, glyph, label,
+        bg: nav === id ? '#2c313c' : 'transparent', fg: nav === id ? '#f3f5f9' : '#a0a7b4',
+        pick: () => this.setState({ nav: id }) })),
+      isCapture: nav === 'capture', isSaving: nav === 'saving', isInk: nav === 'ink', isTray: nav === 'tray',
+      combo: st.recording ? 'Press a combination…' : st.combo,
+      recLabel: st.recording ? 'Cancel' : 'Record',
+      recBg: st.recording ? '#22262d' : '#191c21',
+      recBorder: st.recording ? '#e3ff4f' : '#2b2f36',
+      recFg: st.recording ? '#f1f3e8' : '#e4e8ef',
+      recording: st.recording,
+      startRec: () => this.setState({ recording: !st.recording }),
+      conflict: owner
+        ? { glyph:'close', fg:'#e8a5a5', bg:'rgba(200,80,80,.12)', border:'rgba(200,80,80,.28)', text: st.combo + ' is already ' + owner + '. GNOME will not warn you — it will just fire the wrong one.' }
+        : { glyph:'check', fg:'#a8c86a', bg:'rgba(160,200,90,.1)', border:'rgba(160,200,90,.24)', text:'No GNOME shortcut uses ' + st.combo + '.' },
+      afters: AFTER.map(([id, label, note]) => ({ key: id, label, note,
+        bg: st.after === id ? '#1e2229' : 'transparent', border: st.after === id ? '#3a3f49' : '#262a31',
+        ring: st.after === id ? '#e3ff4f' : '#4a505b', dot: st.after === id ? '#e3ff4f' : 'transparent',
+        fg: st.after === id ? '#f1f3e8' : '#c3c9d4',
+        pick: () => this.setState({ after: id, dirty: true }) })),
+      clipTrack: st.clip ? '#e3ff4f' : '#33383f', clipJustify: st.clip ? 'flex-end' : 'flex-start',
+      toggleClip: () => this.setState({ clip: !st.clip, dirty: true }),
+      hidpiTrack: st.hidpi ? '#e3ff4f' : '#33383f', hidpiJustify: st.hidpi ? 'flex-end' : 'flex-start',
+      toggleHidpi: () => this.setState({ hidpi: !st.hidpi, dirty: true }),
+      pattern: st.pattern,
+      setPattern: e => this.setState({ pattern: e.target.value, dirty: true }),
+      filePreview: '~/Pictures/snipux/' + this.stamp(st.pattern) + '.' + (st.format === 'JPEG' ? 'jpg' : st.format.toLowerCase()),
+      tokens: [['%Y','Year'],['%m','Month'],['%d','Day'],['%H','Hour'],['%M','Minute'],['%S','Second'],['%c','Counter'],['%w','Active window']].map(([tok, note]) => ({ key: tok, tok, note,
+        add: () => this.setState({ pattern: st.pattern + ' ' + tok, dirty: true }) })),
+      formats: FMT.map(label => ({ key: label, label,
+        bg: st.format === label ? '#2c313c' : 'transparent', fg: st.format === label ? '#f3f5f9' : '#8d94a3',
+        pick: () => this.setState({ format: label, dirty: true }) })),
+      lossy: st.format !== 'PNG', quality: st.quality,
+      setQuality: e => this.setState({ quality: +e.target.value, dirty: true }),
+      inkTools: INK_TOOLS.map(([glyph, name]) => ({ key: glyph, glyph, name,
+        bg: st.inkTool === glyph ? '#2c313c' : 'transparent', fg: st.inkTool === glyph ? '#f3f5f9' : '#8d94a3',
+        pick: () => this.setState({ inkTool: glyph, dirty: true }) })),
+      swatches: SW.map(([hex, name]) => ({ hex, name, key: hex,
+        ring: st.ink === hex ? '0 0 0 2px #14161a, 0 0 0 3.5px #e9ecf2' : 'none',
+        pick: () => this.setState({ ink: hex, dirty: true }) })),
+      ink: st.ink, stroke: st.stroke, dot: Math.max(4, Math.min(26, st.stroke)),
+      setStroke: e => this.setState({ stroke: +e.target.value, dirty: true }),
+      blurBg: st.blurMode === 'blur' ? '#2c313c' : 'transparent', blurFg: st.blurMode === 'blur' ? '#f3f5f9' : '#8d94a3',
+      pixBg: st.blurMode === 'pix' ? '#2c313c' : 'transparent', pixFg: st.blurMode === 'pix' ? '#f3f5f9' : '#8d94a3',
+      setBlurMode: () => this.setState({ blurMode: 'blur', dirty: true }),
+      setPixMode: () => this.setState({ blurMode: 'pix', dirty: true }),
+      rememberTrack: st.remember ? '#e3ff4f' : '#33383f', rememberJustify: st.remember ? 'flex-end' : 'flex-start',
+      toggleRemember: () => this.setState({ remember: !st.remember, dirty: true }),
+      trayToggles: TRAY.map(([id, label, note]) => ({ key: id, label, note,
+        track: st.trayOn[id] ? '#e3ff4f' : '#33383f', justify: st.trayOn[id] ? 'flex-end' : 'flex-start',
+        toggle: () => this.setState({ trayOn: { ...st.trayOn, [id]: !st.trayOn[id] }, dirty: true }) })),
+      dirtyText: st.dirty ? 'Unsaved changes' : 'Everything saved',
+      dirtyFg: st.dirty ? '#c8a54a' : '#6d7484',
+      discard: () => this.setState({ dirty: false }),
+      commit: () => this.setState({ dirty: false }),
+      r: this.reviewVals()
+    };
+  }
+}
+</script>
+</body>
+</html>

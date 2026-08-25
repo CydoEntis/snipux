@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  body { margin:0; background:#0a0b0d; font-family:'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color:#a5b4ff; text-decoration:none; } a:hover { color:#c7d0ff; }
+  @keyframes ants { to { stroke-dashoffset:-16; } }
+  input[type=range] { -webkit-appearance:none; appearance:none; height:4px; border-radius:99px; background:#33383f; outline:none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:13px; height:13px; border-radius:50%; background:#e9ecf2; border:0; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,.5); }
+</style>
+</helmet>
+
+<section style="display:flex; flex-direction:column; gap:34px; padding:64px 72px 40px">
+  <header style="display:flex; flex-direction:column; gap:12px; max-width:860px">
+    <div style="display:flex; align-items:center; gap:10px">
+      <div style="width:22px; height:22px; border-radius:6px; background:linear-gradient(150deg,#8b9bff,#5566e8); display:grid; place-items:center; color:#0e1020">
+        <dc-import name="Icon" glyph="crop" size="13" stroke="2.1" hint-size="13px,13px"></dc-import>
+      </div>
+      <span style="font:600 13px/1 'IBM Plex Sans'; letter-spacing:.14em; text-transform:uppercase; color:#7f8798">snipux · annotate in place</span>
+    </div>
+    <h1 style="margin:0; font:600 30px/1.2 'IBM Plex Sans'; color:#eef1f6; letter-spacing:-.02em">No editor window at all</h1>
+    <p style="margin:0; font:400 15px/1.6 'IBM Plex Sans'; color:#98a0b0; text-wrap:pretty">The capture never leaves the desktop. You drag a region, the screen freezes, and you draw straight onto it — the selection stays live and resizable the whole time, so there is never a question about what you are editing. One floating bar under the shot; tool settings appear as a tray only while a drawing tool is held. Draw on it below.</p>
+  </header>
+
+  <div id="2a" style="display:flex; flex-direction:column; gap:14px">
+    <div style="display:flex; align-items:center; gap:14px">
+      <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">2a</span>
+      <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">In-place overlay</span>
+      <span style="font:400 12.5px/1 'IBM Plex Sans'; color:#767d8c">Frozen desktop · live selection · floating bar</span>
+    </div>
+
+    <div style="position:relative; width:1440px; height:900px; border-radius:10px; overflow:hidden; background:#43443c; box-shadow:0 40px 90px -30px rgba(0,0,0,.9), 0 0 0 1px #2a2e36">
+
+      <div style="position:absolute; inset:0; display:flex; font:400 14px/34px 'IBM Plex Mono'; color:#e8ead9">
+        <div style="width:196px; flex:none; background:#3b3c35; border-right:1px solid #4e5047; padding:58px 0 22px">
+          <div style="padding:0 18px 14px; font:500 11px/1 'IBM Plex Sans'; letter-spacing:.12em; text-transform:uppercase; color:#9a9d8c">Workspace</div>
+          <div style="padding:0 18px; font-size:13px; line-height:30px; color:#cdd0bd">
+            <div>projects</div>
+            <div>reading the code</div>
+            <div style="color:#e8ead9">daily-report</div>
+            <div>weekly-report</div>
+            <div>TODO.md</div>
+            <div style="opacity:.6">archive</div>
+          </div>
+        </div>
+        <div style="flex:1; min-width:0; padding:62px 30px 26px; overflow:hidden">
+          <div>blocks forever on the write that overflows it. agent stops mid-tool-call, run row still says <span style="color:#9fd2ff">running</span></div>
+          <div>after a crash — you also had twenty commits changing the source under a running process.</div>
+          <div style="height:34px"></div>
+          <div>23:41 · the source is 19 hours and 21 commits ahead of the build you have been driving all day.</div>
+          <div>tells us whether the stderr drain was the whole silent-death story.</div>
+          <div>one of them is a schema I would leave alone, plus six screens in the low 300s.</div>
+          <div style="height:34px"></div>
+          <div>findings from real use, not "it will not start". that is the right direction to be pointing.</div>
+          <div>what is left reads fine; what is untested is whether it survives a day of real driving.</div>
+          <div style="height:34px"></div>
+          <div style="color:#cdd0bd">~/.config/snipux/profiles/default.toml</div>
+          <div style="height:34px"></div>
+          <div>last thing I did today, before any refactor. that is what was queued last night.</div>
+          <div style="height:34px"></div>
+          <div>caught live:</div>
+          <div style="height:68px"></div>
+          <div>3m52s and the implement step started six minutes after the stderr fix, so it is still</div>
+          <div style="height:34px"></div>
+          <div style="color:#b9bcaa">fixed six bugs including the agent-stderr deadlock behind the silent run deaths.</div>
+        </div>
+      </div>
+
+      <div style="position:absolute; left:0; right:0; top:0; height:44px; background:rgba(20,21,18,.5); display:flex; align-items:center; justify-content:center; gap:10px; font:400 12px/1 'IBM Plex Sans'; color:#d9dbcd; backdrop-filter:blur(3px)">
+        <span style="font-family:'IBM Plex Mono'; color:#fff">Esc</span> cancel
+        <span style="color:rgba(255,255,255,.3)">·</span>
+        <span style="font-family:'IBM Plex Mono'; color:#fff">Enter</span> copy &amp; dismiss
+        <span style="color:rgba(255,255,255,.3)">·</span>
+        <span style="font-family:'IBM Plex Mono'; color:#fff">drag edges</span> to re-frame without losing your ink
+      </div>
+
+      <div style="position:absolute; left:150px; top:190px; width:1040px; height:560px; box-shadow:0 0 0 9999px rgba(12,13,10,.62)">
+        <div onPointerDown="{{ c.onDown }}" onPointerMove="{{ c.onMove }}" onPointerUp="{{ c.onUp }}" style="position:absolute; inset:0; overflow:hidden; touch-action:none; cursor:{{ c.cursor }}">
+          <sc-for list="{{ c.blurs }}" as="m" hint-placeholder-count="0">
+            <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:{{ m.w }}px; height:{{ m.h }}px; border-radius:2px; backdrop-filter:{{ m.fx }}; background:rgba(120,120,130,.06); pointer-events:{{ m.pe }}"></div>
+          </sc-for>
+          <svg viewBox="0 0 1040 560" width="1040" height="560" style="position:absolute; inset:0; display:block; pointer-events:none">
+            <sc-for list="{{ c.pens }}" as="m" hint-placeholder-count="0">
+              <path d="{{ m.d }}" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" stroke-linecap="round" stroke-linejoin="round" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></path>
+            </sc-for>
+            <sc-for list="{{ c.rects }}" as="m" hint-placeholder-count="0">
+              <rect x="{{ m.x }}" y="{{ m.y }}" width="{{ m.w }}" height="{{ m.h }}" rx="3" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></rect>
+            </sc-for>
+            <sc-for list="{{ c.ellipses }}" as="m" hint-placeholder-count="0">
+              <ellipse cx="{{ m.cx }}" cy="{{ m.cy }}" rx="{{ m.rx }}" ry="{{ m.ry }}" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></ellipse>
+            </sc-for>
+            <sc-for list="{{ c.lines }}" as="m" hint-placeholder-count="0">
+              <line x1="{{ m.x1 }}" y1="{{ m.y1 }}" x2="{{ m.x2 }}" y2="{{ m.y2 }}" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" stroke-linecap="round" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></line>
+            </sc-for>
+            <sc-for list="{{ c.arrows }}" as="m" hint-placeholder-count="0">
+              <g onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}" opacity="{{ m.op }}">
+                <line x1="{{ m.x1 }}" y1="{{ m.y1 }}" x2="{{ m.hx }}" y2="{{ m.hy }}" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-linecap="round"></line>
+                <polygon points="{{ m.head }}" fill="{{ m.color }}"></polygon>
+              </g>
+            </sc-for>
+          </svg>
+          <sc-for list="{{ c.texts }}" as="m" hint-placeholder-count="0">
+            <div contentEditable="{{ true }}" suppressContentEditableWarning="{{ true }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; padding:3px 8px; border-radius:5px; background:rgba(12,14,18,.72); color:{{ m.color }}; font:600 {{ m.fs }}px/1.3 'IBM Plex Sans'; outline:none; white-space:nowrap; cursor:text; box-shadow:0 0 0 1px rgba(255,255,255,.16)">{{ m.text }}</div>
+          </sc-for>
+          <sc-for list="{{ c.steps }}" as="m" hint-placeholder-count="0">
+            <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:{{ m.d }}px; height:{{ m.d }}px; border-radius:50%; display:grid; place-items:center; background:{{ m.color }}; color:#12141a; font:600 {{ m.fs }}px/1 'IBM Plex Sans'; box-shadow:0 2px 8px rgba(0,0,0,.5), 0 0 0 2px rgba(255,255,255,.9); pointer-events:{{ m.pe }}">{{ m.n }}</div>
+          </sc-for>
+        </div>
+
+        <div style="position:absolute; inset:0; pointer-events:none">
+          <svg width="1040" height="560" style="position:absolute; inset:0; display:block; overflow:visible">
+            <rect x="0.5" y="0.5" width="1039" height="559" fill="none" stroke="rgba(255,255,255,.92)" stroke-width="1"></rect>
+            <rect x="0.5" y="0.5" width="1039" height="559" fill="none" stroke="#1b1c16" stroke-width="1" stroke-dasharray="7 7" style="animation:ants .7s linear infinite"></rect>
+          </svg>
+          <div style="position:absolute; left:-2px; top:-2px; width:26px; height:26px; border-top:4px solid #fff; border-left:4px solid #fff; border-radius:3px 0 0 0"></div>
+          <div style="position:absolute; right:-2px; top:-2px; width:26px; height:26px; border-top:4px solid #fff; border-right:4px solid #fff; border-radius:0 3px 0 0"></div>
+          <div style="position:absolute; left:-2px; bottom:-2px; width:26px; height:26px; border-bottom:4px solid #fff; border-left:4px solid #fff; border-radius:0 0 0 3px"></div>
+          <div style="position:absolute; right:-2px; bottom:-2px; width:26px; height:26px; border-bottom:4px solid #fff; border-right:4px solid #fff; border-radius:0 0 3px 0"></div>
+          <div style="position:absolute; left:50%; top:-4px; width:34px; height:8px; margin-left:-17px; background:#fff; border-radius:4px"></div>
+          <div style="position:absolute; left:50%; bottom:-4px; width:34px; height:8px; margin-left:-17px; background:#fff; border-radius:4px"></div>
+          <div style="position:absolute; left:-4px; top:50%; width:8px; height:34px; margin-top:-17px; background:#fff; border-radius:4px"></div>
+          <div style="position:absolute; right:-4px; top:50%; width:8px; height:34px; margin-top:-17px; background:#fff; border-radius:4px"></div>
+
+          <div style="position:absolute; left:0; top:-38px; display:flex; align-items:center; gap:9px; padding:6px 11px; border-radius:8px; background:#e9ecf2; color:#12141a; font:600 12px/1 'IBM Plex Mono'; white-space:nowrap; box-shadow:0 8px 22px rgba(0,0,0,.45)">
+            1040 × 560
+            <span style="color:#9ca3af">·</span>
+            <span style="font-weight:400; color:#4b5563">{{ c.markLabel }}</span>
+          </div>
+          <div style="position:absolute; right:0; top:-38px; display:flex; align-items:center; gap:7px; padding:6px 11px; border-radius:8px; background:rgba(20,21,18,.78); color:#e5e7d9; font:400 12px/1 'IBM Plex Sans'; white-space:nowrap; backdrop-filter:blur(4px)">
+            <dc-import name="Icon" glyph="pin" size="13" hint-size="13px,13px"></dc-import>Frozen
+          </div>
+        </div>
+      </div>
+
+      <div style="position:absolute; left:670px; top:770px; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; gap:8px">
+        <div style="display:flex; align-items:center; gap:3px; padding:7px 8px; border-radius:14px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); box-shadow:0 24px 50px -14px rgba(0,0,0,.9); backdrop-filter:blur(16px)">
+          <button onClick="{{ c.toggleMode }}" style="display:flex; align-items:center; gap:8px; height:34px; padding:0 9px 0 12px; border-radius:10px; border:0; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; cursor:pointer" style-hover="filter:brightness(1.06)">
+            {{ c.mode }}<dc-import name="Icon" glyph="chevron" size="14" stroke="2" hint-size="14px,14px"></dc-import>
+          </button>
+          <div style="width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 6px"></div>
+          <button title="Pen — P" onClick="{{ c.T.pen }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ c.bg.pen }}; color:{{ c.fg.pen }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="pen" hint-size="18px,18px"></dc-import></button>
+          <button title="Highlighter — H" onClick="{{ c.T.highlighter }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ c.bg.highlighter }}; color:{{ c.fg.highlighter }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="highlighter" hint-size="18px,18px"></dc-import></button>
+          <button title="Arrow — A" onClick="{{ c.T.arrow }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ c.bg.arrow }}; color:{{ c.fg.arrow }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="arrow" hint-size="18px,18px"></dc-import></button>
+          <button title="Rectangle — R" onClick="{{ c.T.rect }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ c.bg.rect }}; color:{{ c.fg.rect }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="rect" hint-size="18px,18px"></dc-import></button>
+          <button title="Numbered step — S" onClick="{{ c.T.step }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ c.bg.step }}; color:{{ c.fg.step }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="step" hint-size="18px,18px"></dc-import></button>
+          <button title="Text — T" onClick="{{ c.T.text }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ c.bg.text }}; color:{{ c.fg.text }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="text" hint-size="18px,18px"></dc-import></button>
+          <button title="Blur / redact — B" onClick="{{ c.T.blur }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ c.bg.blur }}; color:{{ c.fg.blur }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="blur" hint-size="18px,18px"></dc-import></button>
+          <button title="Eraser — E" onClick="{{ c.T.eraser }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:{{ c.bg.eraser }}; color:{{ c.fg.eraser }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="eraser" hint-size="18px,18px"></dc-import></button>
+          <div style="width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 6px"></div>
+          <button title="Undo — ⌘Z" onClick="{{ c.undo }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:{{ c.undoFg }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="undo" hint-size="18px,18px"></dc-import></button>
+          <button title="Redo — ⇧⌘Z" onClick="{{ c.redo }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:{{ c.redoFg }}" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="redo" hint-size="18px,18px"></dc-import></button>
+          <button title="Clear ink" onClick="{{ c.clear }}" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:#8f9689" style-hover="background:rgba(200,80,80,.22); color:#f5a3a3"><dc-import name="Icon" glyph="trash" hint-size="18px,18px"></dc-import></button>
+          <div style="width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 6px"></div>
+          <button title="Copy — Enter" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:10px; cursor:pointer; background:transparent; color:#d7dacb" style-hover="background:rgba(255,255,255,.09)"><dc-import name="Icon" glyph="copy" hint-size="18px,18px"></dc-import></button>
+          <button title="Save to ~/Pictures" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 13px; border-radius:10px; border:0; background:rgba(255,255,255,.1); color:#f1f3e8; font:600 12.5px 'IBM Plex Sans'; cursor:pointer" style-hover="background:rgba(255,255,255,.17)"><dc-import name="Icon" glyph="save" size="16" stroke="1.9" hint-size="16px,16px"></dc-import>Save</button>
+        </div>
+
+        <sc-if value="{{ c.isDraw }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex; align-items:center; gap:12px; padding:8px 12px; border-radius:12px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); box-shadow:0 18px 40px -14px rgba(0,0,0,.85); backdrop-filter:blur(16px)">
+            <div style="display:flex; align-items:center; gap:7px; padding:3px 9px 3px 6px; border-radius:8px; background:rgba(255,255,255,.08); color:#f1f3e8; font:500 12px 'IBM Plex Sans'; white-space:nowrap">
+              <dc-import name="Icon" glyph="{{ c.tool }}" size="14" hint-size="14px,14px"></dc-import>{{ c.toolName }}
+            </div>
+            <div style="width:1px; height:20px; background:rgba(255,255,255,.12)"></div>
+            <div style="display:flex; gap:6px">
+              <sc-for list="{{ c.swatches }}" as="s" hint-placeholder-count="7">
+                <button onClick="{{ s.pick }}" title="{{ s.name }}" style="width:22px; height:22px; padding:0; border-radius:7px; cursor:pointer; background:{{ s.hex }}; border:1px solid rgba(255,255,255,.2); box-shadow:{{ s.ring }}"></button>
+              </sc-for>
+              <button title="Custom colour" style="width:22px; height:22px; padding:0; border-radius:7px; cursor:pointer; border:1px dashed rgba(255,255,255,.32); background:transparent; color:#a8afa0; display:grid; place-items:center"><dc-import name="Icon" glyph="plus" size="12" hint-size="12px,12px"></dc-import></button>
+            </div>
+            <div style="width:1px; height:20px; background:rgba(255,255,255,.12)"></div>
+            <input type="range" min="1" max="26" value="{{ c.size }}" onChange="{{ c.setSize }}" style="width:104px">
+            <span style="min-width:34px; font:500 11px/1 'IBM Plex Mono'; color:#c6cab8; white-space:nowrap">{{ c.size }}px</span>
+            <div style="width:28px; height:28px; display:grid; place-items:center">
+              <div style="width:{{ c.dot }}px; height:{{ c.dot }}px; border-radius:50%; background:{{ c.color }}; opacity:{{ c.opv }}"></div>
+            </div>
+            <div style="width:1px; height:20px; background:rgba(255,255,255,.12)"></div>
+            <span style="font:400 11.5px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">{{ c.hint }}</span>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ c.isBlur }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex; align-items:center; gap:12px; padding:8px 12px; border-radius:12px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); box-shadow:0 18px 40px -14px rgba(0,0,0,.85); backdrop-filter:blur(16px)">
+            <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.35); border-radius:8px">
+              <button onClick="{{ c.setBlurMode }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 11.5px 'IBM Plex Sans'; background:{{ c.blurBg }}; color:{{ c.blurFg }}">Blur</button>
+              <button onClick="{{ c.setPixMode }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 11.5px 'IBM Plex Sans'; background:{{ c.pixBg }}; color:{{ c.pixFg }}">Pixelate</button>
+            </div>
+            <span style="font:400 11px/1 'IBM Plex Sans'; color:#8f9689; white-space:nowrap">Strength</span>
+            <input type="range" min="2" max="20" value="{{ c.strength }}" onChange="{{ c.setStrength }}" style="width:104px">
+            <span style="min-width:20px; font:500 11px/1 'IBM Plex Mono'; color:#c6cab8">{{ c.strength }}</span>
+          </div>
+        </sc-if>
+      </div>
+
+      <sc-if value="{{ c.modeOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; left:406px; top:528px; z-index:8; width:262px; padding:6px; border-radius:12px; background:rgba(26,28,24,.97); border:1px solid rgba(255,255,255,.12); box-shadow:0 26px 60px -12px rgba(0,0,0,.92); backdrop-filter:blur(16px)">
+          <sc-for list="{{ c.modes }}" as="m" hint-placeholder-count="4">
+            <button onClick="{{ m.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ m.bg }}; color:{{ m.fg }}" style-hover="background:rgba(255,255,255,.09)">
+              <dc-import name="Icon" glyph="{{ m.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+              <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+                <span style="font:500 12.5px/1 'IBM Plex Sans'">{{ m.label }}</span>
+                <span style="font:400 11px/1 'IBM Plex Sans'; color:#8f9689">{{ m.note }}</span>
+              </span>
+              <span style="opacity:{{ m.tick }}; color:#e3ff4f"><dc-import name="Icon" glyph="check" size="15" stroke="2" hint-size="15px,15px"></dc-import></span>
+            </button>
+          </sc-for>
+          <div style="height:1px; background:rgba(255,255,255,.1); margin:5px 4px"></div>
+          <button style="width:100%; display:flex; align-items:center; gap:10px; padding:8px 9px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:transparent; color:#a8afa0" style-hover="background:rgba(255,255,255,.09)">
+            <dc-import name="Icon" glyph="timer" size="16" hint-size="16px,16px"></dc-import>
+            <span style="flex:1; font:500 12.5px/1 'IBM Plex Sans'">Delay</span>
+            <span style="font:400 11.5px/1 'IBM Plex Mono'; color:#8f9689">Off</span>
+          </button>
+        </div>
+      </sc-if>
+    </div>
+
+    <p style="margin:0; max-width:1440px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">The bar carries eleven controls instead of the old twenty-plus, because colour and size are not controls until you are holding a pen — then they slide in as a tray under the bar and slide out again. Capture mode lives in the one yellow chip, so the bar has exactly one primary action. Compare with <a href="#1a">1a</a> and <a href="#1b">1b</a> below, which keep a separate editor window.</p>
+  </div>
+</section>
+
+<section style="display:flex; flex-direction:column; gap:34px; padding:64px 72px 96px; border-top:1px solid #1c1e23">
+  <header style="display:flex; flex-direction:column; gap:12px; max-width:820px">
+    <div style="display:flex; align-items:center; gap:10px">
+      <div style="width:22px; height:22px; border-radius:6px; background:linear-gradient(150deg,#8b9bff,#5566e8); display:grid; place-items:center; color:#0e1020">
+        <dc-import name="Icon" glyph="crop" size="13" stroke="2.1" hint-size="13px,13px"></dc-import>
+      </div>
+      <span style="font:600 13px/1 'IBM Plex Sans'; letter-spacing:.14em; text-transform:uppercase; color:#7f8798">snipux · capture &amp; annotate</span>
+    </div>
+    <h1 style="margin:0; font:600 30px/1.2 'IBM Plex Sans'; color:#eef1f6; letter-spacing:-.02em">Two takes on the toolbar</h1>
+    <p style="margin:0; font:400 15px/1.6 'IBM Plex Sans'; color:#98a0b0; text-wrap:pretty">Both fix the same three things: the screenshot now sits on a workspace with a real edge and shadow so you can see what you are editing, the 13 tools are grouped into icon clusters instead of a single text row, and tool settings are pulled out of the bar. <a href="#1a">1a</a> puts settings in a contextual second row; <a href="#1b">1b</a> puts them in a side inspector with a live annotation list. Every tool draws for real — pick one and drag on the canvas.</p>
+  </header>
+
+  <div style="display:flex; gap:56px; flex-wrap:wrap; align-items:flex-start">
+
+    <div id="1a" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#c9d2ff; padding:6px 9px; border-radius:6px">1a</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Contextual second row</span>
+        <div style="display:flex; gap:2px; padding:3px; background:#15171b; border:1px solid #23262d; border-radius:9px">
+          <button onClick="{{ a.goSelect }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ a.tab.selBg }}; color:{{ a.tab.selFg }}">1 · Select region</button>
+          <button onClick="{{ a.goEdit }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ a.tab.editBg }}; color:{{ a.tab.editFg }}">2 · Annotate</button>
+        </div>
+      </div>
+
+      <div style="position:relative; width:960px; height:660px; border-radius:14px; overflow:hidden; background:#14161a; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(255,255,255,.02) inset">
+
+        <sc-if value="{{ a.showEdit }}" hint-placeholder-val="{{ true }}">
+        <div style="position:absolute; inset:0; display:flex; flex-direction:column">
+          <div style="height:44px; flex:none; display:flex; align-items:center; gap:10px; padding:0 12px 0 14px; background:#191c21; border-bottom:1px solid #23262d">
+            <div style="width:18px; height:18px; border-radius:5px; background:linear-gradient(150deg,#8b9bff,#5566e8); display:grid; place-items:center; color:#0e1020">
+              <dc-import name="Icon" glyph="crop" size="11" stroke="2.2" hint-size="11px,11px"></dc-import>
+            </div>
+            <span style="font:500 12.5px/1 'IBM Plex Sans'; color:#d6dae2">Screenshot 2026-08-23 14.02.png</span>
+            <span style="font:400 11px/1 'IBM Plex Mono'; color:#6d7484">1080 × 680 · PNG</span>
+            <span style="display:flex; align-items:center; gap:5px; font:400 11px/1 'IBM Plex Sans'; color:#c8a54a"><span style="width:5px; height:5px; border-radius:50%; background:#c8a54a"></span>Unsaved</span>
+            <div style="flex:1"></div>
+            <div style="display:flex; gap:2px; color:#7c8494">
+              <button style="width:28px; height:28px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:7px; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="minimize" size="15" hint-size="15px,15px"></dc-import></button>
+              <button style="width:28px; height:28px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:7px; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="expand" size="15" hint-size="15px,15px"></dc-import></button>
+              <button style="width:28px; height:28px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:7px; cursor:pointer" style-hover="background:#c0392b; color:#fff"><dc-import name="Icon" glyph="close" size="15" hint-size="15px,15px"></dc-import></button>
+            </div>
+          </div>
+
+          <div style="height:{{ rowH }}px; flex:none; display:flex; align-items:center; gap:3px; padding:0 12px; background:#14161a">
+            <button title="Select &amp; move — V" onClick="{{ a.T.select }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.select }}; color:{{ a.fg.select }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="select" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 6px"></div>
+            <button title="Pen — P" onClick="{{ a.T.pen }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.pen }}; color:{{ a.fg.pen }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="pen" hint-size="18px,18px"></dc-import></button>
+            <button title="Highlighter — H" onClick="{{ a.T.highlighter }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.highlighter }}; color:{{ a.fg.highlighter }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="highlighter" hint-size="18px,18px"></dc-import></button>
+            <button title="Eraser — E" onClick="{{ a.T.eraser }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.eraser }}; color:{{ a.fg.eraser }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="eraser" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 6px"></div>
+            <button title="Arrow — A" onClick="{{ a.T.arrow }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.arrow }}; color:{{ a.fg.arrow }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="arrow" hint-size="18px,18px"></dc-import></button>
+            <button title="Line — L" onClick="{{ a.T.line }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.line }}; color:{{ a.fg.line }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="line" hint-size="18px,18px"></dc-import></button>
+            <button title="Rectangle — R" onClick="{{ a.T.rect }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.rect }}; color:{{ a.fg.rect }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="rect" hint-size="18px,18px"></dc-import></button>
+            <button title="Ellipse — O" onClick="{{ a.T.ellipse }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.ellipse }}; color:{{ a.fg.ellipse }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="ellipse" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 6px"></div>
+            <button title="Text — T" onClick="{{ a.T.text }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.text }}; color:{{ a.fg.text }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="text" hint-size="18px,18px"></dc-import></button>
+            <button title="Numbered step — S" onClick="{{ a.T.step }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.step }}; color:{{ a.fg.step }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="step" hint-size="18px,18px"></dc-import></button>
+            <button title="Blur / redact — B" onClick="{{ a.T.blur }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.blur }}; color:{{ a.fg.blur }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="blur" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 6px"></div>
+            <button title="Crop — C" onClick="{{ a.T.crop }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.crop }}; color:{{ a.fg.crop }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="crop" hint-size="18px,18px"></dc-import></button>
+            <button title="Pick colour — I" onClick="{{ a.T.eyedropper }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ a.bg.eyedropper }}; color:{{ a.fg.eyedropper }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="eyedropper" hint-size="18px,18px"></dc-import></button>
+
+            <div style="flex:1"></div>
+
+            <button title="Undo — ⌘Z" onClick="{{ a.undo }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:transparent; color:{{ a.undoFg }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="undo" hint-size="18px,18px"></dc-import></button>
+            <button title="Redo — ⇧⌘Z" onClick="{{ a.redo }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:transparent; color:{{ a.redoFg }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="redo" hint-size="18px,18px"></dc-import></button>
+            <button title="Clear all annotations" onClick="{{ a.clear }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:transparent; color:#7c8494" style-hover="background:#3a2426; color:#f08a8a"><dc-import name="Icon" glyph="trash" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 8px"></div>
+            <button style="display:flex; align-items:center; gap:7px; height:{{ btn }}px; padding:0 12px; border-radius:9px; border:1px solid #2f333b; background:#1c1f25; color:#d3d8e1; font:500 12.5px 'IBM Plex Sans'; cursor:pointer" style-hover="background:#252931; border-color:#3a3f49"><dc-import name="Icon" glyph="copy" size="15" hint-size="15px,15px"></dc-import>Copy</button>
+            <button style="display:flex; align-items:center; gap:7px; height:{{ btn }}px; padding:0 13px; border-radius:9px; border:0; background:{{ acc }}; color:#0c0f1c; font:600 12.5px 'IBM Plex Sans'; cursor:pointer; box-shadow:0 2px 10px -2px rgba(0,0,0,.6)" style-hover="filter:brightness(1.08)"><dc-import name="Icon" glyph="save" size="15" stroke="1.9" hint-size="15px,15px"></dc-import>Save</button>
+          </div>
+
+          <div style="height:{{ ctxH }}px; flex:none; display:flex; align-items:center; gap:12px; padding:0 13px; background:#191c21; border-top:1px solid #23262d; border-bottom:1px solid #23262d">
+            <div style="display:flex; align-items:center; gap:7px; padding:4px 9px 4px 7px; border-radius:7px; background:#22262d; color:#e4e8ef; font:500 12px 'IBM Plex Sans'">
+              <dc-import name="Icon" glyph="{{ a.tool }}" size="14" hint-size="14px,14px"></dc-import>{{ a.toolName }}
+            </div>
+
+            <sc-if value="{{ a.isDraw }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex; align-items:center; gap:12px">
+                <div style="width:1px; height:18px; background:#292d34"></div>
+                <div style="display:flex; gap:5px">
+                  <sc-for list="{{ a.swatches }}" as="s" hint-placeholder-count="7">
+                    <button onClick="{{ s.pick }}" title="{{ s.name }}" style="width:21px; height:21px; padding:0; border-radius:6px; cursor:pointer; background:{{ s.hex }}; border:1px solid rgba(255,255,255,.16); box-shadow:{{ s.ring }}"></button>
+                  </sc-for>
+                  <button title="Custom colour" style="width:21px; height:21px; padding:0; border-radius:6px; cursor:pointer; border:1px dashed #4a505b; background:transparent; color:#8a92a1; display:grid; place-items:center"><dc-import name="Icon" glyph="plus" size="12" hint-size="12px,12px"></dc-import></button>
+                </div>
+                <div style="width:1px; height:18px; background:#292d34"></div>
+                <span style="font:400 11px/1 'IBM Plex Sans'; color:#79808f">Size</span>
+                <input type="range" min="1" max="26" value="{{ a.size }}" onChange="{{ a.setSize }}" style="width:96px">
+                <span style="min-width:34px; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ a.size }}px</span>
+                <div style="width:26px; height:26px; display:grid; place-items:center">
+                  <div style="width:{{ a.dot }}px; height:{{ a.dot }}px; border-radius:50%; background:{{ a.color }}"></div>
+                </div>
+                <div style="width:1px; height:18px; background:#292d34"></div>
+                <span style="font:400 11px/1 'IBM Plex Sans'; color:#79808f">Opacity</span>
+                <input type="range" min="10" max="100" value="{{ a.alpha }}" onChange="{{ a.setAlpha }}" style="width:78px">
+                <span style="min-width:32px; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ a.alpha }}%</span>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ a.isBlur }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex; align-items:center; gap:12px">
+                <div style="width:1px; height:18px; background:#292d34"></div>
+                <div style="display:flex; gap:2px; padding:2px; background:#14161a; border-radius:7px; border:1px solid #262a31">
+                  <button onClick="{{ a.setBlurMode }}" style="border:0; cursor:pointer; padding:5px 10px; border-radius:5px; font:500 11.5px 'IBM Plex Sans'; background:{{ a.blurBg }}; color:{{ a.blurFg }}">Blur</button>
+                  <button onClick="{{ a.setPixMode }}" style="border:0; cursor:pointer; padding:5px 10px; border-radius:5px; font:500 11.5px 'IBM Plex Sans'; background:{{ a.pixBg }}; color:{{ a.pixFg }}">Pixelate</button>
+                </div>
+                <span style="font:400 11px/1 'IBM Plex Sans'; color:#79808f">Strength</span>
+                <input type="range" min="2" max="20" value="{{ a.strength }}" onChange="{{ a.setStrength }}" style="width:110px">
+                <span style="min-width:26px; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ a.strength }}</span>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ a.isCrop }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex; align-items:center; gap:10px; flex:1">
+                <div style="width:1px; height:18px; background:#292d34"></div>
+                <span style="font:400 11px/1 'IBM Plex Sans'; color:#79808f">Ratio</span>
+                <div style="display:flex; gap:4px">
+                  <button style="border:1px solid #3a3f49; background:#22262d; color:#e4e8ef; cursor:pointer; padding:5px 9px; border-radius:6px; font:500 11.5px 'IBM Plex Mono'">Free</button>
+                  <button style="border:1px solid #2b2f36; background:transparent; color:#8a92a1; cursor:pointer; padding:5px 9px; border-radius:6px; font:500 11.5px 'IBM Plex Mono'" style-hover="background:#1e2127">16:9</button>
+                  <button style="border:1px solid #2b2f36; background:transparent; color:#8a92a1; cursor:pointer; padding:5px 9px; border-radius:6px; font:500 11.5px 'IBM Plex Mono'" style-hover="background:#1e2127">4:3</button>
+                  <button style="border:1px solid #2b2f36; background:transparent; color:#8a92a1; cursor:pointer; padding:5px 9px; border-radius:6px; font:500 11.5px 'IBM Plex Mono'" style-hover="background:#1e2127">1:1</button>
+                </div>
+                <span style="flex:none; white-space:nowrap; font:400 11px/1 'IBM Plex Mono'; color:#6d7484">→ 940 × 604</span>
+                <div style="flex:1"></div>
+                <button onClick="{{ a.T.select }}" style="flex:none; white-space:nowrap; border:1px solid #2f333b; background:#1c1f25; color:#c3c9d4; cursor:pointer; padding:6px 11px; border-radius:7px; font:500 11.5px 'IBM Plex Sans'">Cancel</button>
+                <button onClick="{{ a.T.select }}" style="flex:none; white-space:nowrap; border:0; background:{{ acc }}; color:#0c0f1c; cursor:pointer; padding:6px 12px; border-radius:7px; font:600 11.5px 'IBM Plex Sans'">Apply crop</button>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ a.isPick }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex; align-items:center; gap:10px">
+                <div style="width:1px; height:18px; background:#292d34"></div>
+                <div style="width:21px; height:21px; border-radius:6px; background:{{ a.color }}; border:1px solid rgba(255,255,255,.16)"></div>
+                <span style="font:500 11.5px/1 'IBM Plex Mono'; color:#c3c9d4">{{ a.color }}</span>
+                <span style="font:400 11px/1 'IBM Plex Sans'; color:#6d7484">Click anywhere on the image to sample — the picked colour becomes your pen colour.</span>
+              </div>
+            </sc-if>
+
+            <div style="flex:1"></div>
+            <span style="font:400 11px/1 'IBM Plex Sans'; color:#6d7484">{{ a.hint }}</span>
+          </div>
+
+          <div style="flex:1; min-height:0; position:relative; display:grid; place-items:center; background:{{ ws }}; overflow:hidden; cursor:{{ a.cursor }}">
+            <div style="position:absolute; left:14px; top:12px; z-index:3; display:flex; align-items:center; gap:8px; padding:5px 9px; border-radius:7px; background:rgba(18,20,24,.88); border:1px solid #262a31; font:500 11px/1 'IBM Plex Mono'; color:#9aa2b1; white-space:nowrap; backdrop-filter:blur(6px)">
+              <dc-import name="Icon" glyph="image" size="13" hint-size="13px,13px"></dc-import>1080 × 680
+            </div>
+
+            <div style="transform:scale({{ a.zs }}); transition:transform .18s ease">
+              <div onPointerDown="{{ a.onDown }}" onPointerMove="{{ a.onMove }}" onPointerUp="{{ a.onUp }}" style="position:relative; width:640px; height:430px; border-radius:5px; border:1px solid #454b56; box-shadow:0 30px 70px -18px rgba(0,0,0,.85), 0 0 0 6px rgba(255,255,255,.02); touch-action:none">
+                <div style="position:absolute; inset:0; overflow:hidden; border-radius:4px; background:radial-gradient(120% 100% at 18% 0%, #2b2434 0%, #17141d 55%, #100e14 100%)">
+                  <div style="position:absolute; left:40px; top:36px; width:560px; height:358px; border-radius:8px; overflow:hidden; box-shadow:0 18px 44px rgba(0,0,0,.6); background:#2c1230">
+                    <div style="height:34px; display:flex; align-items:center; justify-content:center; background:#3b1841; color:#ecd9ee; font:500 11px/1 'IBM Plex Sans'">ubuntu@ubuntu: ~/snipux</div>
+                    <div style="padding:10px 14px; font:400 11px/18px 'IBM Plex Mono'; color:#f2e6f3">
+                      <div><span style="color:#8ce99a">ubuntu@ubuntu</span><span style="color:#cf9fd8">:~/snipux$</span> pkill -f snipux/venv/bin/snipux &amp;&amp; snipux &amp;</div>
+                      <div style="color:#c8b5cc">[1] 4998</div>
+                      <div><span style="color:#8ce99a">ubuntu@ubuntu</span><span style="color:#cf9fd8">:~/snipux$</span> snipux &amp;</div>
+                      <div style="color:#c8b5cc">[2] 5006</div>
+                      <div style="color:#c8b5cc">[1]   Exit 1      pkill -f snipux/venv/bin/snipux</div>
+                      <div><span style="color:#8ce99a">ubuntu@ubuntu</span><span style="color:#cf9fd8">:~/snipux$</span> <span style="display:inline-block; width:6px; height:12px; background:#f2e6f3; vertical-align:-2px"></span></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="position:absolute; inset:0; pointer-events:none">
+                  <sc-for list="{{ a.blurs }}" as="m" hint-placeholder-count="0">
+                    <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:{{ m.w }}px; height:{{ m.h }}px; border-radius:3px; backdrop-filter:{{ m.fx }}; background:rgba(120,120,130,.06); pointer-events:{{ m.pe }}"></div>
+                  </sc-for>
+                  <svg viewBox="0 0 640 430" width="640" height="430" style="position:absolute; inset:0; overflow:visible">
+                    <sc-for list="{{ a.pens }}" as="m" hint-placeholder-count="0">
+                      <path d="{{ m.d }}" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" stroke-linecap="round" stroke-linejoin="round" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></path>
+                    </sc-for>
+                    <sc-for list="{{ a.rects }}" as="m" hint-placeholder-count="0">
+                      <rect x="{{ m.x }}" y="{{ m.y }}" width="{{ m.w }}" height="{{ m.h }}" rx="3" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></rect>
+                    </sc-for>
+                    <sc-for list="{{ a.ellipses }}" as="m" hint-placeholder-count="0">
+                      <ellipse cx="{{ m.cx }}" cy="{{ m.cy }}" rx="{{ m.rx }}" ry="{{ m.ry }}" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></ellipse>
+                    </sc-for>
+                    <sc-for list="{{ a.lines }}" as="m" hint-placeholder-count="0">
+                      <line x1="{{ m.x1 }}" y1="{{ m.y1 }}" x2="{{ m.x2 }}" y2="{{ m.y2 }}" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" stroke-linecap="round" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></line>
+                    </sc-for>
+                    <sc-for list="{{ a.arrows }}" as="m" hint-placeholder-count="0">
+                      <g onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}" opacity="{{ m.op }}">
+                        <line x1="{{ m.x1 }}" y1="{{ m.y1 }}" x2="{{ m.hx }}" y2="{{ m.hy }}" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-linecap="round"></line>
+                        <polygon points="{{ m.head }}" fill="{{ m.color }}"></polygon>
+                      </g>
+                    </sc-for>
+                  </svg>
+                  <sc-for list="{{ a.texts }}" as="m" hint-placeholder-count="0">
+                    <div contentEditable="{{ true }}" suppressContentEditableWarning="{{ true }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; pointer-events:auto; padding:3px 7px; border-radius:5px; background:rgba(12,14,18,.72); color:{{ m.color }}; font:600 {{ m.fs }}px/1.3 'IBM Plex Sans'; outline:none; white-space:nowrap; cursor:text; box-shadow:0 0 0 1px rgba(255,255,255,.12)">{{ m.text }}</div>
+                  </sc-for>
+                  <sc-for list="{{ a.steps }}" as="m" hint-placeholder-count="0">
+                    <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:{{ m.d }}px; height:{{ m.d }}px; border-radius:50%; display:grid; place-items:center; background:{{ m.color }}; color:#fff; font:600 {{ m.fs }}px/1 'IBM Plex Sans'; box-shadow:0 2px 8px rgba(0,0,0,.5), 0 0 0 2px rgba(255,255,255,.85); pointer-events:{{ m.pe }}">{{ m.n }}</div>
+                  </sc-for>
+                </div>
+
+                <sc-if value="{{ a.isCrop }}" hint-placeholder-val="{{ false }}">
+                  <div style="position:absolute; inset:0; pointer-events:none">
+                    <div style="position:absolute; left:34px; top:26px; right:34px; bottom:26px; box-shadow:0 0 0 9999px rgba(8,9,12,.6); border:1px solid rgba(255,255,255,.9)">
+                      <div style="position:absolute; inset:0; border-left:1px solid rgba(255,255,255,.16); border-right:1px solid rgba(255,255,255,.16); margin:0 33.3%"></div>
+                      <div style="position:absolute; inset:0; border-top:1px solid rgba(255,255,255,.16); border-bottom:1px solid rgba(255,255,255,.16); margin:33.3% 0"></div>
+                      <div style="position:absolute; left:-4px; top:-4px; width:9px; height:9px; background:#fff; border-radius:2px"></div>
+                      <div style="position:absolute; right:-4px; top:-4px; width:9px; height:9px; background:#fff; border-radius:2px"></div>
+                      <div style="position:absolute; left:-4px; bottom:-4px; width:9px; height:9px; background:#fff; border-radius:2px"></div>
+                      <div style="position:absolute; right:-4px; bottom:-4px; width:9px; height:9px; background:#fff; border-radius:2px"></div>
+                      <div style="position:absolute; left:50%; top:-4px; width:16px; height:8px; margin-left:-8px; background:#fff; border-radius:2px"></div>
+                      <div style="position:absolute; left:50%; bottom:-4px; width:16px; height:8px; margin-left:-8px; background:#fff; border-radius:2px"></div>
+                    </div>
+                  </div>
+                </sc-if>
+              </div>
+            </div>
+          </div>
+
+          <div style="height:32px; flex:none; display:flex; align-items:center; gap:14px; padding:0 13px; background:#191c21; border-top:1px solid #23262d; font:400 11px/1 'IBM Plex Sans'; color:#767d8c">
+            <span style="color:#9aa2b1">{{ a.hint }}</span>
+            <div style="flex:1"></div>
+            <span style="font-family:'IBM Plex Mono'">{{ a.coords }}</span>
+            <div style="width:1px; height:14px; background:#292d34"></div>
+            <div style="display:flex; align-items:center; gap:5px">
+              <button onClick="{{ a.zoomOut }}" title="Zoom out" style="width:20px; height:20px; display:grid; place-items:center; border:0; padding:0; border-radius:5px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="minus" size="13" hint-size="13px,13px"></dc-import></button>
+              <span style="min-width:38px; text-align:center; font-family:'IBM Plex Mono'; color:#aeb5c2">{{ a.zoom }}%</span>
+              <button onClick="{{ a.zoomIn }}" title="Zoom in" style="width:20px; height:20px; display:grid; place-items:center; border:0; padding:0; border-radius:5px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="plus" size="13" hint-size="13px,13px"></dc-import></button>
+              <button onClick="{{ a.zoomFit }}" style="border:1px solid #2b2f36; background:transparent; color:#8a92a1; cursor:pointer; padding:3px 8px; border-radius:5px; font:500 10.5px 'IBM Plex Sans'" style-hover="background:#23262d; color:#d3d8e1">Fit</button>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{ a.showSelect }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 25% 10%, #2a2536 0%, #16141c 60%, #0d0c11 100%)">
+          <div style="position:absolute; left:96px; top:80px; width:420px; height:250px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:430px; top:210px; width:460px; height:320px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:30px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+            <div style="padding:12px 16px; font:400 11px/19px 'IBM Plex Mono'; color:#e8d8ea; opacity:.85">
+              <div>ubuntu@ubuntu:~/snipux$ snipux &amp;</div>
+              <div>[2] 5006</div>
+              <div>ubuntu@ubuntu:~/snipux$</div>
+            </div>
+          </div>
+          <div style="position:absolute; left:0; right:0; bottom:0; height:52px; background:rgba(10,10,14,.6); backdrop-filter:blur(10px)"></div>
+
+          <div style="position:absolute; left:200px; top:150px; right:0; height:1px; background:rgba(255,255,255,.14)"></div>
+          <div style="position:absolute; left:200px; top:0; bottom:0; width:1px; background:rgba(255,255,255,.14)"></div>
+          <div style="position:absolute; left:0; top:490px; right:0; height:1px; background:rgba(255,255,255,.14)"></div>
+          <div style="position:absolute; left:740px; top:0; bottom:0; width:1px; background:rgba(255,255,255,.14)"></div>
+
+          <div style="position:absolute; left:200px; top:150px; width:540px; height:340px; box-shadow:0 0 0 9999px rgba(8,9,12,.66); border:1px solid rgba(255,255,255,.92)">
+            <svg width="540" height="340" style="position:absolute; inset:0; display:block; overflow:visible; pointer-events:none">
+              <rect x="0.5" y="0.5" width="539" height="339" fill="none" stroke="#0c0f1c" stroke-width="1" stroke-dasharray="6 6" style="animation:ants .6s linear infinite"></rect>
+            </svg>
+            <div style="position:absolute; left:-1px; top:-30px; display:flex; align-items:center; gap:8px; padding:5px 9px; border-radius:6px; background:#e9ecf2; color:#12141a; font:600 11px/1 'IBM Plex Mono'">1080 × 680<span style="color:#6b7280">·</span><span style="color:#4b5563">2:1.26</span></div>
+            <div style="position:absolute; left:-5px; top:-5px; width:11px; height:11px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; right:-5px; top:-5px; width:11px; height:11px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; left:-5px; bottom:-5px; width:11px; height:11px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; right:-5px; bottom:-5px; width:11px; height:11px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; left:50%; top:-4px; width:18px; height:9px; margin-left:-9px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; left:50%; bottom:-4px; width:18px; height:9px; margin-left:-9px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; left:-4px; top:50%; width:9px; height:18px; margin-top:-9px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; right:-4px; top:50%; width:9px; height:18px; margin-top:-9px; background:#fff; border-radius:2px"></div>
+          </div>
+
+          <div style="position:absolute; left:200px; top:506px; display:flex; align-items:center; gap:3px; padding:6px; border-radius:12px; background:rgba(22,24,30,.94); border:1px solid #31353d; box-shadow:0 18px 40px -12px rgba(0,0,0,.85); backdrop-filter:blur(12px)">
+            <button onClick="{{ a.goEdit }}" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 12px; border-radius:8px; border:0; background:{{ acc }}; color:#0c0f1c; font:600 12.5px 'IBM Plex Sans'; cursor:pointer" style-hover="filter:brightness(1.08)"><dc-import name="Icon" glyph="pen" size="15" stroke="1.9" hint-size="15px,15px"></dc-import>Annotate</button>
+            <div style="width:1px; height:20px; background:#31353d; margin:0 5px"></div>
+            <button title="Copy to clipboard — Enter" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:8px; background:transparent; color:#c3c9d4; cursor:pointer" style-hover="background:#282c34"><dc-import name="Icon" glyph="copy" hint-size="18px,18px"></dc-import></button>
+            <button title="Save to ~/Pictures" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:8px; background:transparent; color:#c3c9d4; cursor:pointer" style-hover="background:#282c34"><dc-import name="Icon" glyph="save" hint-size="18px,18px"></dc-import></button>
+            <button title="Pin to screen" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:8px; background:transparent; color:#c3c9d4; cursor:pointer" style-hover="background:#282c34"><dc-import name="Icon" glyph="pin" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#31353d; margin:0 5px"></div>
+            <button title="Cancel — Esc" style="width:34px; height:34px; display:grid; place-items:center; border:0; padding:0; border-radius:8px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#3a2426; color:#f08a8a"><dc-import name="Icon" glyph="close" hint-size="18px,18px"></dc-import></button>
+          </div>
+
+          <div style="position:absolute; left:50%; bottom:70px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; padding:7px 12px; border-radius:10px; background:rgba(16,18,22,.9); border:1px solid #2b2f36; font:400 11px/1 'IBM Plex Sans'; color:#8a92a1; backdrop-filter:blur(10px)">
+            <span><span style="color:#dfe4ec; font-family:'IBM Plex Mono'">Space</span> window mode</span>
+            <span style="color:#3f444d">·</span>
+            <span><span style="color:#dfe4ec; font-family:'IBM Plex Mono'">F</span> full screen</span>
+            <span style="color:#3f444d">·</span>
+            <span><span style="color:#dfe4ec; font-family:'IBM Plex Mono'">↑↓</span> nudge edge</span>
+          </div>
+        </div>
+        </sc-if>
+      </div>
+
+      <p style="margin:0; max-width:960px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Settings live in a second row that only shows what the current tool needs — pick Blur and the colour swatches are replaced by strength; pick Crop and you get ratios plus Apply. The bar never holds more than one tool's worth of controls, and the status strip carries the readouts that were homeless before.</p>
+    </div>
+
+    <div id="1b" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#c9d2ff; padding:6px 9px; border-radius:6px">1b</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Side inspector</span>
+        <div style="display:flex; gap:2px; padding:3px; background:#15171b; border:1px solid #23262d; border-radius:9px">
+          <button onClick="{{ b.goSelect }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ b.tab.selBg }}; color:{{ b.tab.selFg }}">1 · Select region</button>
+          <button onClick="{{ b.goEdit }}" style="border:0; cursor:pointer; padding:6px 11px; border-radius:6px; font:500 12px 'IBM Plex Sans'; background:{{ b.tab.editBg }}; color:{{ b.tab.editFg }}">2 · Annotate</button>
+        </div>
+      </div>
+
+      <div style="position:relative; width:1060px; height:660px; border-radius:14px; overflow:hidden; background:#14161a; border:1px solid #2a2e36; box-shadow:0 40px 90px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(255,255,255,.02) inset">
+
+        <sc-if value="{{ b.showEdit }}" hint-placeholder-val="{{ true }}">
+        <div style="position:absolute; inset:0; display:flex; flex-direction:column">
+          <div style="height:44px; flex:none; display:flex; align-items:center; gap:10px; padding:0 12px 0 14px; background:#191c21; border-bottom:1px solid #23262d">
+            <div style="width:18px; height:18px; border-radius:5px; background:linear-gradient(150deg,#8b9bff,#5566e8); display:grid; place-items:center; color:#0e1020">
+              <dc-import name="Icon" glyph="crop" size="11" stroke="2.2" hint-size="11px,11px"></dc-import>
+            </div>
+            <span style="font:500 12.5px/1 'IBM Plex Sans'; color:#d6dae2">Screenshot 2026-08-23 14.02.png</span>
+            <span style="display:flex; align-items:center; gap:5px; font:400 11px/1 'IBM Plex Sans'; color:#c8a54a"><span style="width:5px; height:5px; border-radius:50%; background:#c8a54a"></span>Unsaved</span>
+            <div style="flex:1"></div>
+            <div style="display:flex; gap:2px; color:#7c8494">
+              <button style="width:28px; height:28px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:7px; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="minimize" size="15" hint-size="15px,15px"></dc-import></button>
+              <button style="width:28px; height:28px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:7px; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="expand" size="15" hint-size="15px,15px"></dc-import></button>
+              <button style="width:28px; height:28px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:7px; cursor:pointer" style-hover="background:#c0392b; color:#fff"><dc-import name="Icon" glyph="close" size="15" hint-size="15px,15px"></dc-import></button>
+            </div>
+          </div>
+
+          <div style="height:{{ rowH }}px; flex:none; display:flex; align-items:center; gap:3px; padding:0 12px; background:#14161a; border-bottom:1px solid #23262d">
+            <button title="Select &amp; move — V" onClick="{{ b.T.select }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.select }}; color:{{ b.fg.select }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="select" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 6px"></div>
+            <button title="Pen — P" onClick="{{ b.T.pen }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.pen }}; color:{{ b.fg.pen }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="pen" hint-size="18px,18px"></dc-import></button>
+            <button title="Highlighter — H" onClick="{{ b.T.highlighter }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.highlighter }}; color:{{ b.fg.highlighter }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="highlighter" hint-size="18px,18px"></dc-import></button>
+            <button title="Eraser — E" onClick="{{ b.T.eraser }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.eraser }}; color:{{ b.fg.eraser }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="eraser" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 6px"></div>
+            <button title="Arrow — A" onClick="{{ b.T.arrow }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.arrow }}; color:{{ b.fg.arrow }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="arrow" hint-size="18px,18px"></dc-import></button>
+            <button title="Line — L" onClick="{{ b.T.line }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.line }}; color:{{ b.fg.line }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="line" hint-size="18px,18px"></dc-import></button>
+            <button title="Rectangle — R" onClick="{{ b.T.rect }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.rect }}; color:{{ b.fg.rect }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="rect" hint-size="18px,18px"></dc-import></button>
+            <button title="Ellipse — O" onClick="{{ b.T.ellipse }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.ellipse }}; color:{{ b.fg.ellipse }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="ellipse" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 6px"></div>
+            <button title="Text — T" onClick="{{ b.T.text }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.text }}; color:{{ b.fg.text }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="text" hint-size="18px,18px"></dc-import></button>
+            <button title="Numbered step — S" onClick="{{ b.T.step }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.step }}; color:{{ b.fg.step }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="step" hint-size="18px,18px"></dc-import></button>
+            <button title="Blur / redact — B" onClick="{{ b.T.blur }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.blur }}; color:{{ b.fg.blur }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="blur" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 6px"></div>
+            <button title="Crop — C" onClick="{{ b.T.crop }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.crop }}; color:{{ b.fg.crop }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="crop" hint-size="18px,18px"></dc-import></button>
+            <button title="Pick colour — I" onClick="{{ b.T.eyedropper }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:{{ b.bg.eyedropper }}; color:{{ b.fg.eyedropper }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="eyedropper" hint-size="18px,18px"></dc-import></button>
+
+            <div style="flex:1"></div>
+
+            <button title="Undo — ⌘Z" onClick="{{ b.undo }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:transparent; color:{{ b.undoFg }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="undo" hint-size="18px,18px"></dc-import></button>
+            <button title="Redo — ⇧⌘Z" onClick="{{ b.redo }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:transparent; color:{{ b.redoFg }}" style-hover="background:#23262d"><dc-import name="Icon" glyph="redo" hint-size="18px,18px"></dc-import></button>
+            <button title="Clear all annotations" onClick="{{ b.clear }}" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:transparent; color:#7c8494" style-hover="background:#3a2426; color:#f08a8a"><dc-import name="Icon" glyph="trash" hint-size="18px,18px"></dc-import></button>
+            <div style="width:1px; height:20px; background:#282c33; margin:0 8px"></div>
+            <button title="Hide inspector" style="width:{{ btn }}px; height:{{ btn }}px; display:grid; place-items:center; border:0; padding:0; border-radius:9px; cursor:pointer; background:#22262d; color:#d3d8e1" style-hover="background:#2a2f37"><dc-import name="Icon" glyph="panel" hint-size="18px,18px"></dc-import></button>
+          </div>
+
+          <div style="flex:1; min-height:0; display:flex">
+            <div style="flex:1; min-width:0; position:relative; display:grid; place-items:center; background:{{ ws }}; overflow:hidden; cursor:{{ b.cursor }}">
+              <div style="position:absolute; left:14px; top:12px; z-index:3; display:flex; align-items:center; gap:8px; padding:5px 9px; border-radius:7px; background:rgba(18,20,24,.88); border:1px solid #262a31; font:500 11px/1 'IBM Plex Mono'; color:#9aa2b1; white-space:nowrap; backdrop-filter:blur(6px)">
+                <dc-import name="Icon" glyph="image" size="13" hint-size="13px,13px"></dc-import>1080 × 680
+              </div>
+              <div style="position:absolute; left:14px; bottom:12px; z-index:3; display:flex; align-items:center; gap:4px; padding:4px; border-radius:8px; background:rgba(18,20,24,.88); border:1px solid #262a31; backdrop-filter:blur(6px)">
+                <button onClick="{{ b.zoomOut }}" style="width:22px; height:22px; display:grid; place-items:center; border:0; padding:0; border-radius:6px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#282c34"><dc-import name="Icon" glyph="minus" size="13" hint-size="13px,13px"></dc-import></button>
+                <span style="min-width:40px; text-align:center; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ b.zoom }}%</span>
+                <button onClick="{{ b.zoomIn }}" style="width:22px; height:22px; display:grid; place-items:center; border:0; padding:0; border-radius:6px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#282c34"><dc-import name="Icon" glyph="plus" size="13" hint-size="13px,13px"></dc-import></button>
+              </div>
+              <div style="position:absolute; right:14px; bottom:12px; z-index:3; padding:5px 9px; border-radius:7px; background:rgba(18,20,24,.88); border:1px solid #262a31; font:400 11px/1 'IBM Plex Mono'; color:#767d8c; white-space:nowrap; backdrop-filter:blur(6px)">{{ b.coords }}</div>
+
+              <div style="transform:scale({{ b.zs }}); transition:transform .18s ease">
+                <div onPointerDown="{{ b.onDown }}" onPointerMove="{{ b.onMove }}" onPointerUp="{{ b.onUp }}" style="position:relative; width:640px; height:430px; border-radius:5px; border:1px solid #454b56; box-shadow:0 30px 70px -18px rgba(0,0,0,.85), 0 0 0 6px rgba(255,255,255,.02); touch-action:none">
+                  <div style="position:absolute; inset:0; overflow:hidden; border-radius:4px; background:radial-gradient(120% 100% at 18% 0%, #2b2434 0%, #17141d 55%, #100e14 100%)">
+                    <div style="position:absolute; left:40px; top:36px; width:560px; height:358px; border-radius:8px; overflow:hidden; box-shadow:0 18px 44px rgba(0,0,0,.6); background:#2c1230">
+                      <div style="height:34px; display:flex; align-items:center; justify-content:center; background:#3b1841; color:#ecd9ee; font:500 11px/1 'IBM Plex Sans'">ubuntu@ubuntu: ~/snipux</div>
+                      <div style="padding:10px 14px; font:400 11px/18px 'IBM Plex Mono'; color:#f2e6f3">
+                        <div><span style="color:#8ce99a">ubuntu@ubuntu</span><span style="color:#cf9fd8">:~/snipux$</span> pkill -f snipux/venv/bin/snipux &amp;&amp; snipux &amp;</div>
+                        <div style="color:#c8b5cc">[1] 4998</div>
+                        <div><span style="color:#8ce99a">ubuntu@ubuntu</span><span style="color:#cf9fd8">:~/snipux$</span> snipux &amp;</div>
+                        <div style="color:#c8b5cc">[2] 5006</div>
+                        <div style="color:#c8b5cc">[1]   Exit 1      pkill -f snipux/venv/bin/snipux</div>
+                        <div><span style="color:#8ce99a">ubuntu@ubuntu</span><span style="color:#cf9fd8">:~/snipux$</span> <span style="display:inline-block; width:6px; height:12px; background:#f2e6f3; vertical-align:-2px"></span></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style="position:absolute; inset:0; pointer-events:none">
+                    <sc-for list="{{ b.blurs }}" as="m" hint-placeholder-count="0">
+                      <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:{{ m.w }}px; height:{{ m.h }}px; border-radius:3px; backdrop-filter:{{ m.fx }}; background:rgba(120,120,130,.06); pointer-events:{{ m.pe }}"></div>
+                    </sc-for>
+                    <svg viewBox="0 0 640 430" width="640" height="430" style="position:absolute; inset:0; overflow:visible">
+                      <sc-for list="{{ b.pens }}" as="m" hint-placeholder-count="0">
+                        <path d="{{ m.d }}" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" stroke-linecap="round" stroke-linejoin="round" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></path>
+                      </sc-for>
+                      <sc-for list="{{ b.rects }}" as="m" hint-placeholder-count="0">
+                        <rect x="{{ m.x }}" y="{{ m.y }}" width="{{ m.w }}" height="{{ m.h }}" rx="3" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></rect>
+                      </sc-for>
+                      <sc-for list="{{ b.ellipses }}" as="m" hint-placeholder-count="0">
+                        <ellipse cx="{{ m.cx }}" cy="{{ m.cy }}" rx="{{ m.rx }}" ry="{{ m.ry }}" fill="none" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></ellipse>
+                      </sc-for>
+                      <sc-for list="{{ b.lines }}" as="m" hint-placeholder-count="0">
+                        <line x1="{{ m.x1 }}" y1="{{ m.y1 }}" x2="{{ m.x2 }}" y2="{{ m.y2 }}" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-opacity="{{ m.op }}" stroke-linecap="round" onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}"></line>
+                      </sc-for>
+                      <sc-for list="{{ b.arrows }}" as="m" hint-placeholder-count="0">
+                        <g onClick="{{ m.onDel }}" style="pointer-events:{{ m.pe }}" opacity="{{ m.op }}">
+                          <line x1="{{ m.x1 }}" y1="{{ m.y1 }}" x2="{{ m.hx }}" y2="{{ m.hy }}" stroke="{{ m.color }}" stroke-width="{{ m.size }}" stroke-linecap="round"></line>
+                          <polygon points="{{ m.head }}" fill="{{ m.color }}"></polygon>
+                        </g>
+                      </sc-for>
+                    </svg>
+                    <sc-for list="{{ b.texts }}" as="m" hint-placeholder-count="0">
+                      <div contentEditable="{{ true }}" suppressContentEditableWarning="{{ true }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; pointer-events:auto; padding:3px 7px; border-radius:5px; background:rgba(12,14,18,.72); color:{{ m.color }}; font:600 {{ m.fs }}px/1.3 'IBM Plex Sans'; outline:none; white-space:nowrap; cursor:text; box-shadow:0 0 0 1px rgba(255,255,255,.12)">{{ m.text }}</div>
+                    </sc-for>
+                    <sc-for list="{{ b.steps }}" as="m" hint-placeholder-count="0">
+                      <div onClick="{{ m.onDel }}" style="position:absolute; left:{{ m.x }}px; top:{{ m.y }}px; width:{{ m.d }}px; height:{{ m.d }}px; border-radius:50%; display:grid; place-items:center; background:{{ m.color }}; color:#fff; font:600 {{ m.fs }}px/1 'IBM Plex Sans'; box-shadow:0 2px 8px rgba(0,0,0,.5), 0 0 0 2px rgba(255,255,255,.85); pointer-events:{{ m.pe }}">{{ m.n }}</div>
+                    </sc-for>
+                  </div>
+
+                  <sc-if value="{{ b.isCrop }}" hint-placeholder-val="{{ false }}">
+                    <div style="position:absolute; inset:0; pointer-events:none">
+                      <div style="position:absolute; left:34px; top:26px; right:34px; bottom:26px; box-shadow:0 0 0 9999px rgba(8,9,12,.6); border:1px solid rgba(255,255,255,.9)">
+                        <div style="position:absolute; inset:0; border-left:1px solid rgba(255,255,255,.16); border-right:1px solid rgba(255,255,255,.16); margin:0 33.3%"></div>
+                        <div style="position:absolute; inset:0; border-top:1px solid rgba(255,255,255,.16); border-bottom:1px solid rgba(255,255,255,.16); margin:33.3% 0"></div>
+                        <div style="position:absolute; left:-4px; top:-4px; width:9px; height:9px; background:#fff; border-radius:2px"></div>
+                        <div style="position:absolute; right:-4px; top:-4px; width:9px; height:9px; background:#fff; border-radius:2px"></div>
+                        <div style="position:absolute; left:-4px; bottom:-4px; width:9px; height:9px; background:#fff; border-radius:2px"></div>
+                        <div style="position:absolute; right:-4px; bottom:-4px; width:9px; height:9px; background:#fff; border-radius:2px"></div>
+                      </div>
+                    </div>
+                  </sc-if>
+                </div>
+              </div>
+            </div>
+
+            <div style="width:268px; flex:none; display:flex; flex-direction:column; background:#191c21; border-left:1px solid #23262d">
+              <div style="flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column">
+                <div style="padding:14px 16px; border-bottom:1px solid #22252c; display:flex; flex-direction:column; gap:12px">
+                  <div style="display:flex; align-items:center; gap:8px">
+                    <div style="width:26px; height:26px; border-radius:7px; background:#22262d; display:grid; place-items:center; color:#dfe4ec">
+                      <dc-import name="Icon" glyph="{{ b.tool }}" size="15" hint-size="15px,15px"></dc-import>
+                    </div>
+                    <span style="font:600 13px/1 'IBM Plex Sans'; color:#e7eaf1">{{ b.toolName }}</span>
+                    <div style="flex:1"></div>
+                    <span style="font:400 10.5px/1 'IBM Plex Mono'; color:#5f6674; padding:3px 6px; border:1px solid #2b2f36; border-radius:5px">{{ b.key }}</span>
+                  </div>
+                  <p style="margin:0; font:400 11.5px/1.55 'IBM Plex Sans'; color:#79808f; text-wrap:pretty">{{ b.hint }}</p>
+                </div>
+
+                <sc-if value="{{ b.isDraw }}" hint-placeholder-val="{{ true }}">
+                <div style="padding:14px 16px; border-bottom:1px solid #22252c; display:flex; flex-direction:column; gap:13px">
+                  <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Colour</span>
+                  <div style="display:grid; grid-template-columns:repeat(8, 1fr); gap:6px">
+                    <sc-for list="{{ b.swatches }}" as="s" hint-placeholder-count="7">
+                      <button onClick="{{ s.pick }}" title="{{ s.name }}" style="height:24px; padding:0; border-radius:6px; cursor:pointer; background:{{ s.hex }}; border:1px solid rgba(255,255,255,.16); box-shadow:{{ s.ring }}"></button>
+                    </sc-for>
+                    <button title="Custom colour" style="height:24px; padding:0; border-radius:6px; cursor:pointer; border:1px dashed #4a505b; background:transparent; color:#8a92a1; display:grid; place-items:center"><dc-import name="Icon" glyph="plus" size="12" hint-size="12px,12px"></dc-import></button>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:8px; padding:7px 9px; border:1px solid #2b2f36; border-radius:8px; background:#14161a">
+                    <div style="width:16px; height:16px; border-radius:4px; background:{{ b.color }}; border:1px solid rgba(255,255,255,.16)"></div>
+                    <span style="font:500 11.5px/1 'IBM Plex Mono'; color:#c3c9d4">{{ b.color }}</span>
+                    <div style="flex:1"></div>
+                    <button onClick="{{ b.T.eyedropper }}" title="Pick from image" style="width:22px; height:22px; display:grid; place-items:center; border:0; padding:0; border-radius:5px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#22262d; color:#dfe4ec"><dc-import name="Icon" glyph="eyedropper" size="14" hint-size="14px,14px"></dc-import></button>
+                  </div>
+                </div>
+
+                <div style="padding:14px 16px; border-bottom:1px solid #22252c; display:flex; flex-direction:column; gap:14px">
+                  <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Stroke</span>
+                  <div style="display:flex; align-items:center; gap:10px">
+                    <input type="range" min="1" max="26" value="{{ b.size }}" onChange="{{ b.setSize }}" style="flex:1">
+                    <span style="min-width:34px; text-align:right; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ b.size }}px</span>
+                  </div>
+                  <div style="height:34px; border-radius:8px; background:#14161a; border:1px solid #2b2f36; display:grid; place-items:center">
+                    <div style="width:{{ b.dot }}px; height:{{ b.dot }}px; border-radius:50%; background:{{ b.color }}; opacity:{{ b.opv }}"></div>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:10px">
+                    <span style="font:400 11px/1 'IBM Plex Sans'; color:#79808f; min-width:46px">Opacity</span>
+                    <input type="range" min="10" max="100" value="{{ b.alpha }}" onChange="{{ b.setAlpha }}" style="flex:1">
+                    <span style="min-width:34px; text-align:right; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ b.alpha }}%</span>
+                  </div>
+                </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isBlur }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:14px 16px; border-bottom:1px solid #22252c; display:flex; flex-direction:column; gap:13px">
+                  <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Redaction</span>
+                  <div style="display:flex; gap:2px; padding:2px; background:#14161a; border-radius:8px; border:1px solid #262a31">
+                    <button onClick="{{ b.setBlurMode }}" style="flex:1; border:0; cursor:pointer; padding:7px 0; border-radius:6px; font:500 11.5px 'IBM Plex Sans'; background:{{ b.blurBg }}; color:{{ b.blurFg }}">Blur</button>
+                    <button onClick="{{ b.setPixMode }}" style="flex:1; border:0; cursor:pointer; padding:7px 0; border-radius:6px; font:500 11.5px 'IBM Plex Sans'; background:{{ b.pixBg }}; color:{{ b.pixFg }}">Pixelate</button>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:10px">
+                    <span style="font:400 11px/1 'IBM Plex Sans'; color:#79808f; min-width:46px">Strength</span>
+                    <input type="range" min="2" max="20" value="{{ b.strength }}" onChange="{{ b.setStrength }}" style="flex:1">
+                    <span style="min-width:20px; text-align:right; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ b.strength }}</span>
+                  </div>
+                  <p style="margin:0; font:400 11px/1.5 'IBM Plex Sans'; color:#6d7484">Baked into the pixels on export — not a removable overlay.</p>
+                </div>
+                </sc-if>
+
+                <div style="flex:1; min-height:120px; display:flex; flex-direction:column">
+                  <div style="padding:14px 16px 10px; display:flex; align-items:center; gap:8px">
+                    <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Annotations</span>
+                    <span style="font:500 10px/1 'IBM Plex Mono'; color:#8a92a1; background:#22262d; padding:3px 6px; border-radius:99px">{{ b.markCount }}</span>
+                  </div>
+                  <div style="padding:0 10px 12px; display:flex; flex-direction:column; gap:2px">
+                    <sc-for list="{{ b.list }}" as="m" hint-placeholder-count="3">
+                      <div style="display:flex; align-items:center; gap:9px; padding:7px 8px; border-radius:7px; cursor:default" style-hover="background:#20242b">
+                        <div style="width:20px; height:20px; border-radius:5px; display:grid; place-items:center; background:{{ m.chip }}; color:{{ m.color }}">
+                          <dc-import name="Icon" glyph="{{ m.glyph }}" size="13" hint-size="13px,13px"></dc-import>
+                        </div>
+                        <span style="flex:1; font:400 11.5px/1 'IBM Plex Sans'; color:#c3c9d4; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">{{ m.label }}</span>
+                        <span style="font:400 10px/1 'IBM Plex Mono'; color:#5f6674">{{ m.pos }}</span>
+                        <button onClick="{{ m.onDel }}" title="Delete" style="width:20px; height:20px; display:grid; place-items:center; border:0; padding:0; border-radius:5px; background:transparent; color:#666d7b; cursor:pointer" style-hover="background:#3a2426; color:#f08a8a"><dc-import name="Icon" glyph="close" size="12" hint-size="12px,12px"></dc-import></button>
+                      </div>
+                    </sc-for>
+                    <sc-if value="{{ b.empty }}" hint-placeholder-val="{{ false }}">
+                      <p style="margin:6px 8px; font:400 11.5px/1.55 'IBM Plex Sans'; color:#5f6674">Nothing drawn yet. Everything you add lands here so you can delete one thing without undoing five.</p>
+                    </sc-if>
+                  </div>
+                </div>
+              </div>
+
+              <div style="flex:none; padding:12px 16px 14px; border-top:1px solid #22252c; display:flex; flex-direction:column; gap:10px; background:#171a1f">
+                <div style="display:flex; align-items:center; gap:8px; font:400 11px/1 'IBM Plex Sans'; color:#79808f">
+                  <dc-import name="Icon" glyph="image" size="13" hint-size="13px,13px"></dc-import>
+                  <span style="font-family:'IBM Plex Mono'">1080 × 680</span>
+                  <span style="color:#3f444d">·</span>
+                  <span>PNG</span>
+                  <div style="flex:1"></div>
+                  <button style="display:flex; align-items:center; gap:4px; border:1px solid #2b2f36; background:transparent; color:#9aa2b1; cursor:pointer; padding:4px 7px; border-radius:6px; font:500 10.5px 'IBM Plex Sans'" style-hover="background:#22262d; color:#dfe4ec">Format<dc-import name="Icon" glyph="chevron" size="11" hint-size="11px,11px"></dc-import></button>
+                </div>
+                <div style="display:flex; gap:8px">
+                  <button style="flex:1; display:flex; align-items:center; justify-content:center; gap:7px; height:36px; border-radius:9px; border:1px solid #2f333b; background:#1c1f25; color:#d3d8e1; font:500 12.5px 'IBM Plex Sans'; cursor:pointer" style-hover="background:#252931; border-color:#3a3f49"><dc-import name="Icon" glyph="copy" size="15" hint-size="15px,15px"></dc-import>Copy</button>
+                  <button style="flex:1; display:flex; align-items:center; justify-content:center; gap:7px; height:36px; border-radius:9px; border:0; background:{{ acc }}; color:#0c0f1c; font:600 12.5px 'IBM Plex Sans'; cursor:pointer" style-hover="filter:brightness(1.08)"><dc-import name="Icon" glyph="save" size="15" stroke="1.9" hint-size="15px,15px"></dc-import>Save</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{ b.showSelect }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; inset:0; background:radial-gradient(90% 80% at 25% 10%, #2a2536 0%, #16141c 60%, #0d0c11 100%)">
+          <div style="position:absolute; left:120px; top:70px; width:440px; height:250px; border-radius:10px; background:#241a2a; box-shadow:0 20px 50px rgba(0,0,0,.5)"></div>
+          <div style="position:absolute; left:480px; top:200px; width:470px; height:330px; border-radius:10px; background:#2c1230; box-shadow:0 24px 60px rgba(0,0,0,.55)">
+            <div style="height:30px; background:#3b1841; border-radius:10px 10px 0 0"></div>
+            <div style="padding:12px 16px; font:400 11px/19px 'IBM Plex Mono'; color:#e8d8ea; opacity:.85">
+              <div>ubuntu@ubuntu:~/snipux$ snipux &amp;</div>
+              <div>[2] 5006</div>
+              <div>ubuntu@ubuntu:~/snipux$</div>
+            </div>
+          </div>
+
+          <div style="position:absolute; left:250px; top:140px; width:560px; height:350px; box-shadow:0 0 0 9999px rgba(8,9,12,.68); border:1px solid rgba(255,255,255,.92)">
+            <svg width="560" height="350" style="position:absolute; inset:0; display:block; overflow:visible; pointer-events:none">
+              <rect x="0.5" y="0.5" width="559" height="349" fill="none" stroke="#0c0f1c" stroke-width="1" stroke-dasharray="6 6" style="animation:ants .6s linear infinite"></rect>
+            </svg>
+            <div style="position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); display:flex; align-items:center; gap:9px; padding:7px 12px; border-radius:8px; background:rgba(233,236,242,.95); color:#12141a; font:600 12px/1 'IBM Plex Mono'; box-shadow:0 8px 24px rgba(0,0,0,.4)">1120 × 700<span style="color:#6b7280">·</span><span style="color:#4b5563; font-weight:400">2× HiDPI</span></div>
+            <div style="position:absolute; left:-5px; top:-5px; width:11px; height:11px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; right:-5px; top:-5px; width:11px; height:11px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; left:-5px; bottom:-5px; width:11px; height:11px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; right:-5px; bottom:-5px; width:11px; height:11px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; left:50%; top:-4px; width:18px; height:9px; margin-left:-9px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; left:50%; bottom:-4px; width:18px; height:9px; margin-left:-9px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; left:-4px; top:50%; width:9px; height:18px; margin-top:-9px; background:#fff; border-radius:2px"></div>
+            <div style="position:absolute; right:-4px; top:50%; width:9px; height:18px; margin-top:-9px; background:#fff; border-radius:2px"></div>
+
+            <div style="position:absolute; right:-96px; bottom:-96px; width:84px; height:84px; border-radius:50%; overflow:hidden; border:2px solid rgba(255,255,255,.9); box-shadow:0 12px 30px rgba(0,0,0,.6); background:repeating-conic-gradient(#3b1841 0% 25%, #2c1230 0% 50%) 0 0/12px 12px">
+              <div style="position:absolute; left:50%; top:0; bottom:0; width:1px; background:rgba(255,255,255,.5)"></div>
+              <div style="position:absolute; top:50%; left:0; right:0; height:1px; background:rgba(255,255,255,.5)"></div>
+            </div>
+            <div style="position:absolute; right:-98px; bottom:-124px; padding:4px 7px; border-radius:5px; background:rgba(233,236,242,.95); color:#12141a; font:600 10.5px/1 'IBM Plex Mono'">#3B1841</div>
+          </div>
+
+          <div style="position:absolute; left:50%; bottom:34px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; padding:9px 10px 9px 12px; border-radius:14px; background:rgba(22,24,30,.94); border:1px solid #31353d; box-shadow:0 22px 50px -14px rgba(0,0,0,.9); backdrop-filter:blur(14px)">
+            <div style="display:flex; gap:2px; padding:2px; background:#0f1114; border-radius:9px; border:1px solid #262a31">
+              <button style="display:flex; align-items:center; gap:6px; border:0; cursor:pointer; padding:7px 11px; border-radius:7px; font:500 12px 'IBM Plex Sans'; background:#2c313c; color:#f3f5f9"><dc-import name="Icon" glyph="crop" size="14" hint-size="14px,14px"></dc-import>Region</button>
+              <button style="display:flex; align-items:center; gap:6px; border:0; cursor:pointer; padding:7px 11px; border-radius:7px; font:500 12px 'IBM Plex Sans'; background:transparent; color:#8a92a1" style-hover="background:#20242b; color:#dfe4ec"><dc-import name="Icon" glyph="window" size="14" hint-size="14px,14px"></dc-import>Window</button>
+              <button style="display:flex; align-items:center; gap:6px; border:0; cursor:pointer; padding:7px 11px; border-radius:7px; font:500 12px 'IBM Plex Sans'; background:transparent; color:#8a92a1" style-hover="background:#20242b; color:#dfe4ec"><dc-import name="Icon" glyph="monitor" size="14" hint-size="14px,14px"></dc-import>Screen</button>
+            </div>
+            <div style="width:1px; height:22px; background:#31353d"></div>
+            <button style="display:flex; align-items:center; gap:6px; border:1px solid #2f333b; background:transparent; color:#9aa2b1; cursor:pointer; padding:6px 10px; border-radius:8px; font:500 11.5px 'IBM Plex Sans'" style-hover="background:#22262d; color:#dfe4ec"><dc-import name="Icon" glyph="timer" size="14" hint-size="14px,14px"></dc-import>3s delay</button>
+            <button style="display:flex; align-items:center; gap:6px; border:1px solid #2f333b; background:transparent; color:#9aa2b1; cursor:pointer; padding:6px 10px; border-radius:8px; font:500 11.5px 'IBM Plex Sans'" style-hover="background:#22262d; color:#dfe4ec"><dc-import name="Icon" glyph="cog" size="14" hint-size="14px,14px"></dc-import>Options</button>
+            <div style="width:1px; height:22px; background:#31353d"></div>
+            <button style="border:0; background:transparent; color:#8a92a1; cursor:pointer; padding:7px 10px; border-radius:8px; font:500 12px 'IBM Plex Sans'" style-hover="background:#22262d; color:#dfe4ec">Cancel</button>
+            <button onClick="{{ b.goEdit }}" style="display:flex; align-items:center; gap:7px; height:34px; padding:0 14px; border-radius:9px; border:0; background:{{ acc }}; color:#0c0f1c; font:600 12.5px 'IBM Plex Sans'; cursor:pointer" style-hover="filter:brightness(1.08)"><dc-import name="Icon" glyph="camera" size="15" stroke="1.9" hint-size="15px,15px"></dc-import>Capture</button>
+          </div>
+        </div>
+        </sc-if>
+      </div>
+
+      <p style="margin:0; max-width:1060px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">The bar stays one row forever; everything adjustable moves to the inspector, which also lists every annotation so you can delete one item without undoing your way back to it. Costs 268px of width, buys a permanent place for readouts, format and the two export buttons.</p>
+    </div>
+
+  </div>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#8b9bff&quot;,&quot;options&quot;:[&quot;#8b9bff&quot;,&quot;#2dd4bf&quot;,&quot;#f59e0b&quot;,&quot;#e9ecf2&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Chrome&quot;},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;comfortable&quot;,&quot;options&quot;:[&quot;comfortable&quot;,&quot;compact&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Chrome&quot;},&quot;backdrop&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;soft&quot;,&quot;options&quot;:[&quot;soft&quot;,&quot;flat&quot;,&quot;grid&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Workspace&quot;}}">
+const IMG_W = 640, IMG_H = 430;
+const SW = [['#ef4444','Red'],['#f59e0b','Amber'],['#10b981','Emerald'],['#38bdf8','Sky'],['#a855f7','Violet'],['#ffffff','White'],['#12141a','Ink']];
+const CSW = [['#e3ff4f','Acid'],['#ef4444','Red'],['#38bdf8','Sky'],['#10b981','Emerald'],['#a855f7','Violet'],['#ffffff','White'],['#12141a','Ink']];
+const NAT = { a:640, b:640, c:1040 };
+const MODES = [['crop','Region','Drag any rectangle'],['window','Window','Snap to a window'],['monitor','Full screen','Whole display'],['pen','Freeform','Lasso an odd shape']];
+const TOOLS = ['select','pen','highlighter','eraser','arrow','line','rect','ellipse','text','step','blur','crop','eyedropper'];
+const NAMES = { select:'Select & move', pen:'Pen', highlighter:'Highlighter', eraser:'Eraser', arrow:'Arrow', line:'Line', rect:'Rectangle', ellipse:'Ellipse', text:'Text label', step:'Numbered step', blur:'Blur / redact', crop:'Crop', eyedropper:'Colour picker' };
+const KEYS = { select:'V', pen:'P', highlighter:'H', eraser:'E', arrow:'A', line:'L', rect:'R', ellipse:'O', text:'T', step:'S', blur:'B', crop:'C', eyedropper:'I' };
+const HINTS = {
+  select:'Click an annotation to select it, drag to move.',
+  pen:'Drag on the image to draw freehand.',
+  highlighter:'Drag to sweep a translucent highlight over text.',
+  eraser:'Click any annotation to remove just that one.',
+  arrow:'Drag from tail to head — the head follows your cursor.',
+  line:'Drag to draw a straight line. Hold Shift to snap to 45°.',
+  rect:'Drag to box in the part that matters.',
+  ellipse:'Drag to draw an ellipse around a detail.',
+  text:'Click to drop a label, then type straight into it.',
+  step:'Click to drop the next number in the sequence.',
+  blur:'Drag over anything you need to redact before sharing.',
+  crop:'Drag the handles, then Apply. Original stays on disk.',
+  eyedropper:'Click the image to sample a colour into your pen.'
+};
+const DRAWY = ['pen','highlighter','arrow','line','rect','ellipse','text','step'];
+const SAMPLES = ['#8ce99a','#cf9fd8','#3b1841','#f2e6f3','#2c1230'];
+
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.uid = 100;
+    const seedA = [
+      { id:'a1', type:'highlighter', color:'#f59e0b', size:15, op:.34, pts:[[110,89],[392,89]] },
+      { id:'a2', type:'blur', color:'#000', x:104, y:152, w:186, h:16, strength:8, mode:'blur' },
+      { id:'a3', type:'arrow', color:'#ef4444', size:3, op:1, x:474, y:182, w:-74, h:-52 },
+      { id:'a4', type:'step', color:'#ef4444', n:1, x:486, y:176 }
+    ];
+    const seedB = [
+      { id:'b1', type:'rect', color:'#38bdf8', size:2, op:1, x:104, y:78, w:300, h:21 },
+      { id:'b2', type:'step', color:'#38bdf8', n:1, x:12, y:78 },
+      { id:'b3', type:'step', color:'#38bdf8', n:2, x:12, y:224 },
+      { id:'b4', type:'arrow', color:'#38bdf8', size:2, op:1, x:112, y:226, w:0, h:-30 },
+      { id:'b5', type:'text', color:'#e8f6ff', fs:12, x:70, y:230, text:'restarts cleanly — no orphan PIDs' }
+    ];
+    const loop = [], tail = [];
+    for (let i = 0; i <= 52; i++) { const t = i / 52 * Math.PI * 2.24 - 1.15; loop.push([432 + Math.cos(t) * 98, 172 + Math.sin(t) * 78]); }
+    const lx = loop[loop.length - 1][0], ly = loop[loop.length - 1][1];
+    for (let i = 0; i <= 40; i++) { const t = i / 40; tail.push([lx + t * (658 - lx), ly + t * (352 - ly) + Math.sin(t * 3.1) * 58]); }
+    for (let i = 1; i <= 30; i++) { const t = i / 30; tail.push([658 - t * 336, 352 + Math.sin(t * 2.4 + .4) * 88 + t * 24]); }
+    const round = a => a.map(p => [Math.round(p[0]), Math.round(p[1])]);
+    const seedC = [
+      { id:'c1', type:'pen', color:'#e3ff4f', size:5, op:1, pts:round(loop) },
+      { id:'c2', type:'pen', color:'#e3ff4f', size:5, op:1, pts:round(tail) }
+    ];
+    const base = { screen:'edit', tool:'pen', color:'#ef4444', size:4, alpha:100, strength:8, blurMode:'blur', zoom:100, coords:'640 × 430 px', redo:[] };
+    this.state = {
+      a:{ ...base, marks:seedA },
+      b:{ ...base, tool:'select', color:'#38bdf8', size:2, marks:seedB },
+      c:{ ...base, tool:'pen', color:'#e3ff4f', size:5, marks:seedC, modeOpen:false, mode:'Region', coords:'1040 × 560 px' }
+    };
+  }
+
+  set(ns, patch) { this.setState(st => ({ [ns]: { ...st[ns], ...patch } })); }
+
+  pt(e, ns) {
+    const r = e.currentTarget.getBoundingClientRect();
+    const s = (NAT[ns] || IMG_W) / r.width;
+    return [Math.round((e.clientX - r.left) * s), Math.round((e.clientY - r.top) * s)];
+  }
+
+  down(ns) {
+    return e => {
+      const s = this.state[ns], t = s.tool;
+      if (t === 'select' || t === 'crop' || t === 'eraser') return;
+      const [x, y] = this.pt(e, ns);
+      if (t === 'eyedropper') { this.set(ns, { color: SAMPLES[(x + y) % SAMPLES.length], tool: 'pen' }); return; }
+      const id = 'm' + (this.uid++);
+      const op = s.alpha / 100 * (t === 'highlighter' ? .34 : 1);
+      if (t === 'step') {
+        const n = s.marks.filter(m => m.type === 'step').length + 1;
+        this.set(ns, { marks: [...s.marks, { id, type:'step', color:s.color, n, x:x-11, y:y-11 }], redo: [] });
+        return;
+      }
+      if (t === 'text') {
+        this.set(ns, { marks: [...s.marks, { id, type:'text', color:s.color, fs:Math.max(11, s.size*3), x, y, text:'Label' }], redo: [] });
+        return;
+      }
+      let m;
+      if (t === 'pen' || t === 'highlighter') m = { id, type:t, color:s.color, size:Math.max(2, s.size * (t === 'highlighter' ? 3.5 : 1)), op, pts:[[x,y]] };
+      else if (t === 'blur') m = { id, type:'blur', x, y, w:0, h:0, strength:s.strength, mode:s.blurMode };
+      else m = { id, type:t, color:s.color, size:s.size, op, x, y, w:0, h:0 };
+      this.drag = { ns, id };
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+      this.set(ns, { marks: [...s.marks, m], redo: [] });
+    };
+  }
+
+  move(ns) {
+    return e => {
+      const d = this.drag;
+      if (!d || d.ns !== ns) return;
+      const [x, y] = this.pt(e, ns);
+      const marks = this.state[ns].marks.map(m => {
+        if (m.id !== d.id) return m;
+        if (m.pts) return { ...m, pts: [...m.pts, [x, y]] };
+        return { ...m, w: x - m.x, h: y - m.y };
+      });
+      this.set(ns, { marks, coords: x + ', ' + y + ' px' });
+    };
+  }
+
+  up(ns) {
+    return () => {
+      const d = this.drag;
+      if (!d || d.ns !== ns) return;
+      this.drag = null;
+      const marks = this.state[ns].marks.filter(m => m.pts ? m.pts.length > 1 : (Math.abs(m.w) > 3 || Math.abs(m.h) > 3 || m.type === 'step' || m.type === 'text'));
+      this.set(ns, { marks, coords: ns === 'c' ? '1040 × 560 px' : '640 × 430 px' });
+    };
+  }
+
+  del(ns, id) {
+    return e => {
+      if (e && e.stopPropagation) e.stopPropagation();
+      this.set(ns, { marks: this.state[ns].marks.filter(m => m.id !== id) });
+    };
+  }
+
+  norm(m) {
+    return { x: Math.min(m.x, m.x + m.w), y: Math.min(m.y, m.y + m.h), w: Math.abs(m.w), h: Math.abs(m.h) };
+  }
+
+  arrowGeom(m) {
+    const x1 = m.x, y1 = m.y, x2 = m.x + m.w, y2 = m.y + m.h;
+    const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+    const hl = Math.max(9, m.size * 3.4), hw = Math.max(6, m.size * 2.2);
+    const ux = dx / len, uy = dy / len, bx = x2 - ux * hl, by = y2 - uy * hl;
+    const px = -uy, py = ux;
+    return {
+      x1, y1, hx: x2 - ux * hl * .55, hy: y2 - uy * hl * .55,
+      head: [x2 + ',' + y2, (bx + px * hw) + ',' + (by + py * hw), (bx - px * hw) + ',' + (by - py * hw)].join(' ')
+    };
+  }
+
+  nsVals(ns) {
+    const s = this.state[ns];
+    const t = s.tool;
+    const pe = t === 'eraser' ? 'auto' : 'none';
+    const bg = {}, fg = {}, T = {};
+    TOOLS.forEach(k => {
+      const on = t === k;
+      bg[k] = on ? '#2c313c' : 'transparent';
+      fg[k] = on ? '#f3f5f9' : '#8d94a3';
+      T[k] = () => this.set(ns, { tool: k });
+    });
+    const mk = m => ({ ...m, pe, onDel: t === 'eraser' ? this.del(ns, m.id) : null });
+    const of_ = ty => s.marks.filter(m => m.type === ty);
+    const glyphOf = { pen:'pen', highlighter:'highlighter', arrow:'arrow', line:'line', rect:'rect', ellipse:'ellipse', text:'text', step:'step', blur:'blur' };
+    return {
+      tool: t, toolName: NAMES[t], key: KEYS[t], hint: HINTS[t], color: s.color, size: s.size, alpha: s.alpha,
+      strength: s.strength, zoom: s.zoom, zs: s.zoom / 100, coords: s.coords, cursor: t === 'select' ? 'default' : (t === 'eraser' ? 'pointer' : 'crosshair'),
+      dot: Math.max(4, Math.min(26, s.size * (t === 'highlighter' ? 3.5 : 1))), opv: s.alpha / 100,
+      bg, fg, T,
+      markCount: s.marks.length, empty: s.marks.length === 0,
+      markLabel: s.marks.length === 1 ? '1 mark' : s.marks.length + ' marks',
+      isDraw: DRAWY.indexOf(t) >= 0, isBlur: t === 'blur', isCrop: t === 'crop', isPick: t === 'eyedropper',
+      blurBg: s.blurMode === 'blur' ? '#2c313c' : 'transparent', blurFg: s.blurMode === 'blur' ? '#f3f5f9' : '#8d94a3',
+      pixBg: s.blurMode === 'pix' ? '#2c313c' : 'transparent', pixFg: s.blurMode === 'pix' ? '#f3f5f9' : '#8d94a3',
+      setBlurMode: () => this.set(ns, { blurMode: 'blur' }), setPixMode: () => this.set(ns, { blurMode: 'pix' }),
+      setSize: e => this.set(ns, { size: +e.target.value }),
+      setAlpha: e => this.set(ns, { alpha: +e.target.value }),
+      setStrength: e => this.set(ns, { strength: +e.target.value }),
+      swatches: (ns === 'c' ? CSW : SW).map(([hex, name]) => ({ hex, name, key: hex, ring: s.color === hex ? '0 0 0 2px #14161a, 0 0 0 3.5px #e9ecf2' : 'none', pick: () => this.set(ns, { color: hex }) })),
+      mode: s.mode, modeOpen: !!s.modeOpen,
+      toggleMode: () => this.set(ns, { modeOpen: !s.modeOpen }),
+      modes: MODES.map(([glyph, label, note]) => ({ key: label, glyph, label, note,
+        bg: s.mode === label ? 'rgba(255,255,255,.08)' : 'transparent',
+        fg: s.mode === label ? '#f3f5f9' : '#a8afbd',
+        tick: s.mode === label ? 1 : 0,
+        pick: () => this.set(ns, { mode: label, modeOpen: false }) })),
+      undoFg: s.marks.length ? '#c3c9d4' : '#4b5158',
+      redoFg: s.redo.length ? '#c3c9d4' : '#4b5158',
+      undo: () => { const m = [...s.marks]; const last = m.pop(); if (last) this.set(ns, { marks: m, redo: [...s.redo, last] }); },
+      redo: () => { const r = [...s.redo]; const next = r.pop(); if (next) this.set(ns, { marks: [...s.marks, next], redo: r }); },
+      clear: () => this.set(ns, { marks: [], redo: [] }),
+      zoomIn: () => this.set(ns, { zoom: Math.min(160, s.zoom + 20) }),
+      zoomOut: () => this.set(ns, { zoom: Math.max(60, s.zoom - 20) }),
+      zoomFit: () => this.set(ns, { zoom: 100 }),
+      screen: s.screen, showEdit: s.screen === 'edit', showSelect: s.screen === 'select',
+      goEdit: () => this.set(ns, { screen: 'edit' }), goSelect: () => this.set(ns, { screen: 'select' }),
+      tab: {
+        editBg: s.screen === 'edit' ? '#2c313c' : 'transparent', editFg: s.screen === 'edit' ? '#f3f5f9' : '#8d94a3',
+        selBg: s.screen === 'select' ? '#2c313c' : 'transparent', selFg: s.screen === 'select' ? '#f3f5f9' : '#8d94a3'
+      },
+      onDown: this.down(ns), onMove: this.move(ns), onUp: this.up(ns),
+      pens: [...of_('pen'), ...of_('highlighter')].map(m => ({ ...mk(m), d: m.pts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ') })),
+      rects: of_('rect').map(m => ({ ...mk(m), ...this.norm(m) })),
+      ellipses: of_('ellipse').map(m => { const n = this.norm(m); return { ...mk(m), cx: n.x + n.w / 2, cy: n.y + n.h / 2, rx: Math.max(1, n.w / 2), ry: Math.max(1, n.h / 2) }; }),
+      lines: of_('line').map(m => ({ ...mk(m), x1: m.x, y1: m.y, x2: m.x + m.w, y2: m.y + m.h })),
+      arrows: of_('arrow').map(m => ({ ...mk(m), ...this.arrowGeom(m) })),
+      blurs: of_('blur').map(m => { const n = this.norm(m); return { ...mk(m), ...n, fx: (m.mode === 'pix' ? 'blur(' + m.strength + 'px) contrast(1.7) saturate(1.3)' : 'blur(' + m.strength + 'px)') }; }),
+      texts: of_('text').map(m => ({ ...mk(m), fs: m.fs })),
+      steps: of_('step').map(m => ({ ...mk(m), d: 22, fs: 12 })),
+      list: s.marks.slice().reverse().map(m => ({
+        key: m.id, glyph: glyphOf[m.type] || 'select', color: m.type === 'blur' ? '#9aa2b1' : m.color,
+        chip: m.type === 'blur' ? '#22262d' : 'rgba(255,255,255,.07)',
+        label: m.type === 'text' ? '“' + m.text + '”' : (m.type === 'step' ? 'Step ' + m.n : NAMES[m.type]),
+        pos: Math.round(m.x || (m.pts ? m.pts[0][0] : 0)) + ',' + Math.round(m.y || (m.pts ? m.pts[0][1] : 0)),
+        onDel: this.del(ns, m.id)
+      }))
+    };
+  }
+
+  renderVals() {
+    const dense = (this.props.density ?? 'comfortable') === 'compact';
+    const backdrop = this.props.backdrop ?? 'soft';
+    return {
+      a: this.nsVals('a'), b: this.nsVals('b'), c: this.nsVals('c'),
+      acc: this.props.accent ?? '#8b9bff',
+      btn: dense ? 30 : 34, rowH: dense ? 44 : 52, ctxH: dense ? 40 : 46,
+      ws: backdrop === 'flat' ? '#0e0f12'
+        : backdrop === 'grid' ? 'repeating-linear-gradient(0deg,#171a1f 0 1px,transparent 1px 26px),repeating-linear-gradient(90deg,#171a1f 0 1px,transparent 1px 26px),#0d0e11'
+        : 'radial-gradient(85% 75% at 50% 32%, #171a1f 0%, #0c0d10 100%)'
+    };
+  }
+}
+</script>
+</body>
+</html>

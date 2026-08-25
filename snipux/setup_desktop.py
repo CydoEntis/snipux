@@ -35,6 +35,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .design import tokens
+
 _TEMPLATE_PATH = Path(__file__).resolve().parent / "snipux.desktop"
 _LAUNCHER_PLACEHOLDER = "Exec=__SNIPUX_LAUNCHER__"
 
@@ -42,7 +44,26 @@ _MEDIA_KEYS_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
 _SLOT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/"
 _SLOT_SCHEMA = f"{_MEDIA_KEYS_SCHEMA}.custom-keybinding:{_SLOT_PATH}"
 
-DEFAULT_SHORTCUT = "<Super><Shift>s"
+# The canonical form everywhere in snipux is the design's readable one --
+# "Control+Alt+S" -- not gsettings' "<Control><Alt>s". It is what Settings
+# shows, what the config file stores, and what the conflict check compares,
+# so there is one spelling to reason about; `to_gsettings` converts at the
+# single point that actually talks to GNOME. Modifier order is fixed at
+# Control, Alt, Shift, Super, because a permutation would quietly miss a
+# real clash.
+DEFAULT_SHORTCUT = tokens.SHORTCUT_DEFAULT
+
+_MODIFIER_ORDER = ("Control", "Alt", "Shift", "Super")
+_GSETTINGS_MODIFIERS = {
+    "Control": "<Control>",
+    "Alt": "<Alt>",
+    "Shift": "<Shift>",
+    "Super": "<Super>",
+    # gsettings also emits these spellings; accepted on the way in so a
+    # binding set by GNOME Settings round-trips rather than being rejected.
+    "Primary": "<Control>",
+    "Meta": "<Super>",
+}
 
 # GNOME accelerator syntax: zero or more <Modifier> groups followed by a key
 # name ("s", "Print", "F9"). Deliberately permissive about *which* modifiers
@@ -189,19 +210,77 @@ def remove_icons(hicolor_dir: Path | None = None) -> bool:
     return bool(removed_sizes)
 
 
-def human_shortcut(shortcut: str) -> str:
-    """`'<Super><Shift>s'` -> `'Super+Shift+S'`, for messages.
+def normalise_shortcut(shortcut: str) -> str | None:
+    """Any accepted spelling -> the canonical `Control+Alt+S`, or None if it
+    is not a shortcut at all.
 
-    gsettings' angle-bracket syntax is what the binding must be *stored*
-    as, but printing it back at the user is showing them the wire format --
-    every doc, every settings panel and this project's own README write it
-    as Super+Shift+S.
+    Accepts both the readable form and gsettings' angle-bracket one, so a
+    binding set through GNOME Settings, typed on the command line, or
+    recorded in our own window all normalise to the same string -- which is
+    what makes the conflict check able to compare them.
     """
+    if not shortcut or shortcut.strip() != shortcut or " " in shortcut:
+        return None
+
     parts = re.findall(r"<([A-Za-z]+)>", shortcut)
-    key = re.sub(r"<[A-Za-z]+>", "", shortcut)
-    if not key:
-        return shortcut
-    return "+".join(parts + [key.upper() if len(key) == 1 else key])
+    remainder = re.sub(r"<[A-Za-z]+>", "", shortcut)
+    if not parts:
+        # Readable form: split on "+", last field is the key.
+        fields = shortcut.split("+")
+        parts, remainder = fields[:-1], fields[-1]
+
+    if not remainder or not re.fullmatch(r"[A-Za-z0-9_]+", remainder):
+        return None
+
+    seen = []
+    for part in parts:
+        canonical = {
+            "control": "Control", "primary": "Control", "ctrl": "Control",
+            "alt": "Alt", "shift": "Shift", "super": "Super", "meta": "Super",
+        }.get(part.lower())
+        if canonical is None:
+            return None
+        if canonical not in seen:
+            seen.append(canonical)
+
+    key = remainder.upper() if len(remainder) == 1 else remainder
+    ordered = [m for m in _MODIFIER_ORDER if m in seen]
+    return "+".join(ordered + [key])
+
+
+def validate_shortcut(shortcut: str) -> str | None:
+    """None if `shortcut` is usable, else a one-line reason it isn't.
+
+    Worth checking rather than passing straight to gsettings, which accepts
+    any string at all and simply never fires a binding it cannot parse -- a
+    silent failure indistinguishable from the app being broken, which is the
+    whole reason this is configurable.
+    """
+    if not shortcut or shortcut.strip() != shortcut or " " in shortcut:
+        return "a shortcut cannot be empty or contain spaces"
+    normalised = normalise_shortcut(shortcut)
+    if normalised is None:
+        return (
+            f"'{shortcut}' is not a shortcut -- modifiers then a key, "
+            "e.g. 'Control+Alt+S' or 'Super+Shift+X'"
+        )
+    if "+" not in normalised:
+        # A bare key would swallow that key desktop-wide.
+        return f"'{shortcut}' needs at least one modifier, e.g. 'Control+Alt+S'"
+    return None
+
+
+def to_gsettings(shortcut: str) -> str:
+    """`Control+Alt+S` -> `<Control><Alt>s`, the only form GNOME stores."""
+    normalised = normalise_shortcut(shortcut) or shortcut
+    *modifiers, key = normalised.split("+")
+    prefix = "".join(_GSETTINGS_MODIFIERS.get(m, f"<{m}>") for m in modifiers)
+    return prefix + (key.lower() if len(key) == 1 else key)
+
+
+def human_shortcut(shortcut: str) -> str:
+    """The readable form, for messages. Already canonical in most cases."""
+    return normalise_shortcut(shortcut) or shortcut
 
 
 def config_path(config_dir: Path | None = None) -> Path:
@@ -218,29 +297,6 @@ def config_path(config_dir: Path | None = None) -> Path:
             os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
         ) / "snipux"
     return config_dir / "config.json"
-
-
-def validate_shortcut(shortcut: str) -> str | None:
-    """None if `shortcut` is usable, else a one-line reason it isn't.
-
-    Worth checking rather than passing straight to gsettings, which accepts
-    any string at all and simply never fires a binding it can't parse --
-    a silent failure that looks exactly like the app being broken, which is
-    the failure mode this whole feature exists to get away from.
-    """
-    if not shortcut or shortcut.strip() != shortcut or " " in shortcut:
-        return "a shortcut cannot be empty or contain spaces"
-    if "+" in shortcut:
-        return (
-            "use GNOME's accelerator syntax, not '+' -- "
-            f"e.g. '<Super><Shift>x', not '{shortcut}'"
-        )
-    if not _SHORTCUT_RE.match(shortcut):
-        return (
-            f"'{shortcut}' is not a GNOME accelerator -- modifiers in angle "
-            "brackets followed by a key, e.g. '<Super><Shift>x' or '<Alt>Print'"
-        )
-    return None
 
 
 def _read_config(config_dir: Path | None = None) -> dict:
@@ -289,6 +345,142 @@ def load_review_window(config_dir: Path | None = None) -> bool:
 
 def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
     return _write_config("review_window", bool(enabled), config_dir)
+
+
+def version_line() -> str:
+    """`snipux 0.1.0 / Qt 6.7 · X11` for the nav rail's footer.
+
+    The session type is read, never assumed -- CLAUDE.md's rule -- and a
+    missing Qt (impossible here, but this is also imported by `--setup`,
+    which must not need one) degrades to the version alone.
+    """
+    from importlib.metadata import PackageNotFoundError, version as _version
+
+    try:
+        ours = _version("snipux")
+    except PackageNotFoundError:
+        ours = "dev"
+    try:
+        from PyQt6.QtCore import QT_VERSION_STR
+
+        qt = f" / Qt {QT_VERSION_STR}"
+    except Exception:
+        qt = ""
+    return f"snipux {ours}{qt} · {detect_session_type()}"
+
+
+def detect_session_type() -> str:
+    """`wayland`, `x11`, or `unknown` -- detected, never assumed."""
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return "wayland"
+    if os.environ.get("DISPLAY"):
+        return "x11"
+    return os.environ.get("XDG_SESSION_TYPE", "unknown")
+
+
+def load_after_capture(config_dir: Path | None = None) -> str:
+    """Which of `tokens.AFTER_CAPTURE` applies once a snip is taken.
+
+    Defaults to the first entry (`review`)? No -- to `clip`. Opening a
+    window after every capture is a change to the core flow, and an
+    upgrading user who never asked for one should not suddenly get one.
+    """
+    stored = _read_config(config_dir).get("after_capture")
+    valid = {identifier for identifier, _label, _note in tokens.AFTER_CAPTURE}
+    return stored if stored in valid else "clip"
+
+
+def save_after_capture(value: str, config_dir: Path | None = None) -> bool:
+    return _write_config("after_capture", value, config_dir)
+
+
+def load_review_window(config_dir: Path | None = None) -> bool:
+    """Whether a snip opens in a review window -- the one thing `app.py`
+    needs from `after_capture`, kept as its own reader so the controller
+    does not have to know the vocabulary.
+    """
+    return load_after_capture(config_dir) == "review"
+
+
+def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
+    return save_after_capture("review" if enabled else "clip", config_dir)
+
+
+def load_always_copy(config_dir: Path | None = None) -> bool:
+    return _read_config(config_dir).get("always_copy") is True
+
+
+def save_always_copy(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("always_copy", bool(enabled), config_dir)
+
+
+def default_save_folder() -> Path:
+    return Path.home() / "Pictures" / "snipux"
+
+
+def load_save_folder(config_dir: Path | None = None) -> Path:
+    stored = _read_config(config_dir).get("save_folder")
+    return Path(stored) if isinstance(stored, str) and stored else default_save_folder()
+
+
+def save_save_folder(folder: str | Path, config_dir: Path | None = None) -> bool:
+    return _write_config("save_folder", str(folder), config_dir)
+
+
+def load_filename_pattern(config_dir: Path | None = None) -> str:
+    stored = _read_config(config_dir).get("filename_pattern")
+    return stored if isinstance(stored, str) and stored else tokens.FILENAME_DEFAULT
+
+
+def save_filename_pattern(pattern: str, config_dir: Path | None = None) -> bool:
+    return _write_config("filename_pattern", pattern, config_dir)
+
+
+def preview_filename(folder: str | Path, pattern: str, extension: str = "png") -> str:
+    """The full path a snip taken *now* would be written to.
+
+    Rendered live under the pattern field, so the answer to "what will this
+    actually produce" is visible while typing rather than after saving.
+    `%c` (counter) and `%w` (active window) are not strftime's, so they are
+    substituted with representative stand-ins rather than left raw.
+    """
+    import datetime
+
+    stamped = datetime.datetime.now().strftime(pattern or tokens.FILENAME_DEFAULT)
+    stamped = stamped.replace("%c", "1").replace("%w", "Firefox")
+    return str(Path(folder) / f"{stamped}.{extension}")
+
+
+def load_native_resolution(config_dir: Path | None = None) -> bool:
+    return _read_config(config_dir).get("native_resolution") is True
+
+
+def save_native_resolution(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("native_resolution", bool(enabled), config_dir)
+
+
+def load_remember_tool(config_dir: Path | None = None) -> bool:
+    return _read_config(config_dir).get("remember_tool") is True
+
+
+def save_remember_tool(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("remember_tool", bool(enabled), config_dir)
+
+
+def load_tray_toggles(config_dir: Path | None = None) -> dict:
+    """The four `tokens.TRAY_TOGGLES`, each falling back to its own default
+    rather than to False -- three of the four ship on.
+    """
+    stored = _read_config(config_dir).get("tray_toggles")
+    stored = stored if isinstance(stored, dict) else {}
+    return {
+        identifier: bool(stored.get(identifier, default))
+        for identifier, _label, _note, default in tokens.TRAY_TOGGLES
+    }
+
+
+def save_tray_toggles(values: dict, config_dir: Path | None = None) -> bool:
+    return _write_config("tray_toggles", {k: bool(v) for k, v in values.items()}, config_dir)
 
 
 def load_shortcut(config_dir: Path | None = None) -> str:
@@ -388,6 +580,105 @@ def find_shortcut_conflicts(shortcut: str) -> list[tuple[str, str]]:
     return conflicts
 
 
+# Human names for the GNOME settings people actually collide with. A key
+# absent from here still reports as a conflict -- it just names the schema
+# key instead of a sentence, which is worse copy but never a missed clash.
+_CONFLICT_NAMES = {
+    "screenshot": "GNOME's \u201cTake a screenshot\u201d",
+    "area-screenshot": "GNOME's \u201cScreenshot of an area\u201d",
+    "window-screenshot": "GNOME's \u201cScreenshot of a window\u201d",
+    "terminal": "GNOME's \u201cLaunch terminal\u201d",
+    "screensaver": "GNOME's \u201cLock screen\u201d",
+    "logout": "GNOME's \u201cLog out\u201d",
+    "toggle-overview": "GNOME's \u201cActivities overview\u201d",
+    "switch-to-workspace-left": "GNOME's \u201cWorkspace left\u201d",
+    "switch-to-workspace-right": "GNOME's \u201cWorkspace right\u201d",
+    "close": "GNOME's \u201cClose window\u201d",
+}
+
+
+def find_shortcut_conflicts_named(shortcut: str) -> list[tuple[str, str]]:
+    """Every GNOME setting already bound to `shortcut`, as (key, owner name).
+
+    The check that would have saved the trouble this whole feature exists
+    for: GNOME accepts a duplicate binding without a word and then fires
+    whichever owner it likes, which from the losing application's side is
+    indistinguishable from being broken.
+
+    Compares *normalised* forms, so a binding GNOME stores as
+    `<Primary><Alt>t` is recognised as the same thing the user just recorded
+    as `Control+Alt+T`. snipux's own slot is excluded -- rebinding to what
+    is already bound is not a conflict.
+
+    Blind to anything that is not a GNOME setting: an application that grabs
+    a key directly owns it just as effectively and cannot be seen from here,
+    which is why the window never claims a key is *free*.
+    """
+    wanted = normalise_shortcut(shortcut)
+    if wanted is None or shutil.which("gsettings") is None:
+        return []
+
+    conflicts: list[tuple[str, str]] = []
+    for schema in _BINDING_SCHEMAS:
+        try:
+            output = subprocess.run(
+                ["gsettings", "list-recursively", schema],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        for line in output.splitlines():
+            match = _SETTING_LINE_RE.match(line.strip())
+            if match is None:
+                continue
+            _found_schema, key, value = match.groups()
+            for candidate in re.findall(r"'([^']+)'", value):
+                if normalise_shortcut(candidate) != wanted:
+                    continue
+                name = _CONFLICT_NAMES.get(key)
+                conflicts.append((key, name or f"bound to {key.replace('-', ' ')}"))
+                break
+
+    # The custom-keybindings slots, which list-recursively above does not
+    # reach: they live at paths, not in a fixed schema.
+    for path in _custom_keybinding_paths():
+        if path == _SLOT_PATH:
+            continue
+        binding = _custom_keybinding_value(path, "binding")
+        if binding and normalise_shortcut(binding) == wanted:
+            label = _custom_keybinding_value(path, "name") or "another custom shortcut"
+            conflicts.append((path, f"bound to \u201c{label}\u201d"))
+    return conflicts
+
+
+def _custom_keybinding_paths() -> list[str]:
+    try:
+        raw = subprocess.run(
+            ["gsettings", "get", _MEDIA_KEYS_SCHEMA, "custom-keybindings"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return re.findall(r"'([^']+)'", raw)
+
+
+def _custom_keybinding_value(path: str, key: str) -> str:
+    try:
+        raw = subprocess.run(
+            ["gsettings", "get", f"{_MEDIA_KEYS_SCHEMA}.custom-keybinding:{path}", key],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return raw.strip("'")
+
+
 def describe_conflicts(conflicts: list[tuple[str, str]]) -> str:
     """One human sentence for `find_shortcut_conflicts`' result."""
     if not conflicts:
@@ -466,7 +757,8 @@ def bind_gnome_shortcut(exec_path: Path, shortcut: str | None = None) -> str:
         subprocess.run(["gsettings", "set", _SLOT_SCHEMA, "name", "snipux"], check=True)
         subprocess.run(["gsettings", "set", _SLOT_SCHEMA, "command", launcher_cmd], check=True)
         subprocess.run(
-            ["gsettings", "set", _SLOT_SCHEMA, "binding", shortcut], check=True
+            ["gsettings", "set", _SLOT_SCHEMA, "binding", to_gsettings(shortcut)],
+            check=True,
         )
     except (OSError, subprocess.CalledProcessError):
         return (

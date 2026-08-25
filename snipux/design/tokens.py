@@ -234,6 +234,183 @@ CAPTURE_MODES = [
 
 DELAYS = ["Off", "3s", "5s", "10s"]
 
+# ---------------------------------------------------------------------------
+# Settings and review window chrome (design_handoff_snipux)
+# ---------------------------------------------------------------------------
+# The overlay's own palette above is warm glass over a frozen desktop. These
+# two are ordinary windows and use an opaque neutral dark instead -- see
+# docs/design/handoff-windows.md, which is the authority for everything in
+# this section.
+
+class Win:
+    """Settings and review window chrome. Opaque — no alpha compositing."""
+    # Surfaces, back to front
+    WINDOW_BG       = "#14161a"   # window body / content pane
+    CHROME_BG       = "#191c21"   # title bar, nav rail, footer, inset fields
+    BORDER          = "#2a2e36"   # window outline
+    SEPARATOR       = "#23262d"   # title-bar and footer rules
+    HAIRLINE        = "#22252c"   # rules inside a content pane
+    RADIUS_NOTE     = "12px window, 9px control, 8px inset row"
+
+    # Workspace behind the reviewed image (a radial, see Gradient.WORKSPACE)
+    IMAGE_BORDER    = "#454b56"   # 1px edge on the screenshot itself
+
+    # Controls
+    CONTROL_BG      = "#1c1f25"   # secondary button fill
+    CONTROL_BG_HOVER = "#252931"
+    CONTROL_BORDER  = "#2f333b"
+    CONTROL_BORDER_HOVER = "#3a3f49"
+    FIELD_BG        = "#191c21"   # text input, inset well
+    FIELD_BORDER    = "#2b2f36"
+    SEGMENT_BORDER  = "#262a31"   # segmented-control well
+    SELECTED_BG     = "#2c313c"   # active nav row, active segment
+    ROW_HOVER       = "#20242b"
+    TOGGLE_OFF      = "#33383f"   # switch track, off
+    TOGGLE_KNOB     = "#f1f3e8"
+
+    # Text
+    TEXT_PRIMARY    = "#e7eaf1"
+    TEXT_BODY       = "#d3d8e1"
+    TEXT_TITLE      = "#d6dae2"   # title-bar label
+    TEXT_SECONDARY  = "#c3c9d4"
+    TEXT_MUTED      = "#8a92a1"
+    TEXT_NOTE       = "#79808f"   # sub-label under a control
+    TEXT_FAINT      = "#6d7484"
+    TEXT_SECTION    = "#616876"   # uppercase group heading
+    TEXT_DISABLED   = "#5f6674"
+    ICON_IDLE       = "#8d94a3"
+    ICON_ACTIVE     = "#f3f5f9"
+    TITLEBAR_ICON   = "#7c8494"
+    CLOSE_HOVER     = "#c0392b"   # GNOME-ish red, white glyph
+
+    # Status semantics — used by the conflict check and the saved/dirty line
+    OK_FG           = "#a8c86a"
+    OK_BG           = "#a0c85a"   # at 10% alpha
+    OK_BG_ALPHA     = 0.10
+    OK_BORDER       = "#a0c85a"   # at 24% alpha
+    OK_BORDER_ALPHA = 0.24
+    OK_STRONG       = "#9ec46a"   # "Saved" tick
+    WARN_FG         = "#c8a54a"   # "Unsaved changes", "Edited — not saved"
+    ERR_FG          = "#e8a5a5"
+    ERR_BG          = "#c85050"   # at 12% alpha
+    ERR_BG_ALPHA    = 0.12
+    ERR_BORDER      = "#c85050"   # at 28% alpha
+    ERR_BORDER_ALPHA = 0.28
+    PATH_FG         = "#c8d96a"   # filename preview, mono
+
+
+class Gradient:
+    # The review window's canvas behind the screenshot. Qt: QRadialGradient,
+    # centred at 50% / 30% of the viewport, radius ~0.85 × width.
+    WORKSPACE = ("radial", (0.50, 0.30), 0.85, [(0.0, "#171a1f"), (1.0, "#0c0d10")])
+
+
+class WinMetric:
+    """Settings + review window geometry. Logical pixels."""
+    SETTINGS_W       = 780
+    SETTINGS_H       = 580
+    REVIEW_W         = 1020
+    REVIEW_H         = 700
+
+    WINDOW_RADIUS    = 12
+    TITLEBAR_H       = 42
+    TITLEBAR_BTN     = 26
+    TITLEBAR_BTN_R   = 6
+    TITLEBAR_ICON    = 14
+
+    NAV_W            = 182
+
+
+# Settings nav rail
+    NAV_PAD          = (12, 10)   # v, h
+    NAV_ROW_PAD      = (9, 10)
+    NAV_ROW_RADIUS   = 8
+    NAV_ROW_GAP      = 2
+    NAV_ICON         = 16
+
+    PANE_PAD         = (20, 22)   # content pane padding, v/h
+    GROUP_GAP        = 22         # between labelled groups
+    FIELD_GAP        = 11         # within a group
+
+    CONTROL_H        = 36         # text field, secondary button
+    RECORDER_H       = 38         # the shortcut field is one step taller
+    CONTROL_RADIUS   = 9
+    FOOTER_H         = 56
+    FOOTER_BTN_H     = 34
+
+    SWITCH_W         = 34         # toggle track
+    SWITCH_H         = 19
+    SWITCH_KNOB      = 15
+    SWITCH_PAD       = 2
+    RADIO_D          = 15         # radio-card ring
+    RADIO_DOT        = 7
+    CARD_PAD         = (11, 12)
+    SETTINGS_SWATCH  = 30         # larger than the overlay's 22px tray swatch
+
+    # Review window
+    REVIEW_IMG_BORDER = 1
+    REVIEW_IMG_RING   = 7        # rgba(255,255,255,.02) outer ring
+    REVIEW_BADGE_INSET = (16, 14) # h, v from the canvas corner
+    REVIEW_BAR_BOTTOM = 18        # floating bar above the canvas floor
+    REVIEW_FOOTER_PAD = (13, 16)
+    ZOOM_STEPS        = (60, 160, 20)  # min, max, step
+
+
+# Settings nav rail, in order: (id, icon, label)
+SETTINGS_NAV = [
+    ("capture", "camera", "Capture"),
+    ("saving",  "save",   "Saving"),
+    ("ink",     "pen",    "Annotation"),
+    ("tray",    "panel",  "Tray & startup"),
+]
+
+# "After capture" — mutually exclusive, radio cards. (id, label, note)
+AFTER_CAPTURE = [
+    ("review", "Open a review window",
+     "Shows the shot, where it went, and lets you keep annotating."),
+    ("clip", "Copy and get out of the way",
+     "Straight to the clipboard, one toast, no window."),
+    ("file", "Save silently",
+     "Writes the file and says nothing. Best with a delay set."),
+]
+
+# Filename pattern tokens offered as clickable chips under the field.
+FILENAME_TOKENS = [
+    ("%Y", "Year"), ("%m", "Month"), ("%d", "Day"),
+    ("%H", "Hour"), ("%M", "Minute"), ("%S", "Second"),
+    ("%c", "Counter"), ("%w", "Active window"),
+]
+FILENAME_DEFAULT = "Screenshot from %Y-%m-%d %H-%M-%S"
+
+FORMATS = ["PNG", "JPEG", "WebP"]      # quality slider shows for the lossy two
+QUALITY_DEFAULT = 88
+
+# Tray & startup toggles: (id, label, note, default)
+TRAY_TOGGLES = [
+    ("startup", "Start with the session",
+     "Sits in the tray so the shortcut works from login.", True),
+    ("tray", "Show a tray icon",
+     "Off means the shortcut is the only way in.", True),
+    ("sound", "Shutter sound", "", False),
+    ("recent", "Keep the last 10 snips in the tray menu",
+     "Files stay on disk either way.", True),
+]
+
+# Known GNOME bindings the conflict check tests against. This is a SAMPLE —
+# the real implementation must read org.gnome.desktop.wm.keybindings,
+# org.gnome.settings-daemon.plugins.media-keys and the custom-keybindings
+# list. See README, "Shortcut conflict check".
+GNOME_KNOWN = {
+    "Print":              "GNOME's \u201cTake a screenshot\u201d",
+    "Shift+Print":        "GNOME's \u201cScreenshot of an area\u201d",
+    "Control+Alt+T":      "GNOME's \u201cLaunch terminal\u201d",
+    "Super+L":            "GNOME's \u201cLock screen\u201d",
+    "Control+Alt+Delete": "GNOME's \u201cLog out\u201d",
+    "Super+P":            "GNOME's \u201cSwitch monitor\u201d",
+}
+
+SHORTCUT_DEFAULT = "Control+Alt+S"
+
 TOOL_HINTS = {
     "pen":         "Drag to draw freehand",
     "highlighter": "Sweep over the line that matters",

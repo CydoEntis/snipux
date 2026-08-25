@@ -1,61 +1,68 @@
-"""The Settings window: a GUI for the things `snipux --setup` takes on the
-command line.
+"""The Settings window.
 
-`setup_desktop.py` is where the shortcut is validated, stored and bound, and
-it deliberately imports no Qt at all -- `--setup` runs with no display and
-must keep working that way. This module is the other half: the Qt in front
-of it. Everything here reads and writes through `setup_desktop`'s own
-functions rather than touching `config.json` or `gsettings` itself, so the
-CLI and the dialog can never disagree about what a valid shortcut is or
-where it is remembered.
+`docs/design/handoff-windows.md` section 2 is the authority. 780 x 580, a
+182px nav rail, four panes, a 56px footer. Not a modal dialog -- the user
+may well want it open while they test a snip.
 
-The one piece of real logic here is `accelerator_from_event` -- turning a
-key press into GNOME's accelerator syntax -- which has to live on this side
-because only Qt knows what was pressed.
+`setup_desktop.py` is still where a shortcut is validated, stored and bound,
+and it deliberately imports no Qt: `--setup` runs with no display. This
+module is the Qt in front of it, and goes through those same functions, so
+the CLI and the window can never disagree about what a valid shortcut is.
+
+Nothing applies live. Save commits the lot and rebinds the shortcut; Cancel
+with unsaved changes asks first.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QKeyEvent, QKeySequence
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont, QKeyEvent, QKeySequence
 from PyQt6.QtWidgets import (
-    QCheckBox,
-    QDialog,
-    QDialogButtonBox,
-    QFormLayout,
+    QButtonGroup,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from . import setup_desktop
-
-# Qt modifier -> GNOME accelerator token. <Super> rather than <Meta>, and
-# <Control> rather than <Primary>: both spellings are accepted by gsettings,
-# but these are the ones GNOME itself writes, so a binding set here reads
-# identically to one set in Settings.
-#
-# The order matters only for how the result *reads*: gtk_accelerator_parse
-# accepts modifiers in any order, so nothing breaks either way. This one
-# reproduces what GNOME already has on disk -- '<Super><Control>1' in
-# org.gnome.shell.keybindings, and this project's own '<Super><Shift>s'
-# default -- so a shortcut recorded here is byte-identical to the same
-# combination bound through GNOME Settings, rather than a permutation of it
-# that only looks different.
-_MODIFIER_TOKENS = (
-    (Qt.KeyboardModifier.MetaModifier, "<Super>"),
-    (Qt.KeyboardModifier.ControlModifier, "<Control>"),
-    (Qt.KeyboardModifier.AltModifier, "<Alt>"),
-    (Qt.KeyboardModifier.ShiftModifier, "<Shift>"),
+from . import design, setup_desktop
+from .design import tokens
+from .winchrome import (
+    AccentButton,
+    SecondaryButton,
+    SectionHeading,
+    Switch,
+    WinWindow,
+    _mono_font,
+    _ui_font,
 )
 
-# Pressed alone these are not a shortcut, they are the user still reaching
-# for one. Recording has to ignore them or the first modifier down would end
-# the capture with a meaningless accelerator.
+# Qt modifier -> the token used in the normalised name. Order is fixed at
+# Control, Alt, Shift, Super by the design, because this exact string is what
+# both the conflict check and gsettings are keyed on -- a permutation would
+# quietly miss a real clash.
+_MODIFIER_TOKENS = (
+    (Qt.KeyboardModifier.ControlModifier, "Control"),
+    (Qt.KeyboardModifier.AltModifier, "Alt"),
+    (Qt.KeyboardModifier.ShiftModifier, "Shift"),
+    (Qt.KeyboardModifier.MetaModifier, "Super"),
+)
+
+# Pressed alone these are the user still reaching for a combination, not a
+# combination. Recording ignores them rather than committing on the first
+# modifier down.
 _BARE_MODIFIER_KEYS = frozenset(
     {
         Qt.Key.Key_Control,
@@ -73,12 +80,12 @@ _BARE_MODIFIER_KEYS = frozenset(
 
 
 def accelerator_from_event(event: QKeyEvent) -> str | None:
-    """A key press -> GNOME accelerator syntax, or None if it isn't one yet.
+    """A key press -> the design's normalised name (`Control+Alt+S`), or None
+    if it is not a shortcut yet.
 
-    None means "keep listening": a bare modifier, or a key Qt cannot name.
-    Everything else comes back in the form gsettings stores --
-    `<Super><Shift>x`, `<Alt>Print` -- with single letters lowercased, the
-    way GNOME writes them.
+    None means "keep listening": a bare modifier, an unnameable key, or a
+    combination with no modifier at all -- the design requires at least one,
+    since a bare letter would swallow that key desktop-wide.
     """
     key = event.key()
     if key in _BARE_MODIFIER_KEYS or key == Qt.Key.Key_unknown:
@@ -87,38 +94,53 @@ def accelerator_from_event(event: QKeyEvent) -> str | None:
     name = QKeySequence(key).toString()
     if not name:
         return None
-    # Qt renders letters uppercase ("S"); GNOME stores them lowercase. Named
-    # keys ("Print", "F9") keep their own capitalisation.
     if len(name) == 1:
-        name = name.lower()
+        name = name.upper()
 
     modifiers = event.modifiers()
-    tokens = [token for flag, token in _MODIFIER_TOKENS if modifiers & flag]
-    accelerator = "".join(tokens) + name
-
-    # Validated here rather than trusted: Qt will happily name keys that are
-    # not accelerators, and the same rule the CLI applies should apply to a
-    # recorded one.
-    if setup_desktop.validate_shortcut(accelerator) is not None:
+    tokens_found = [token for flag, token in _MODIFIER_TOKENS if modifiers & flag]
+    if not tokens_found:
         return None
-    return accelerator
+    return "+".join(tokens_found + [name])
 
 
-class ShortcutRecorder(QPushButton):
-    """A button that, once clicked, becomes the next key press.
+class ShortcutRecorder(QWidget):
+    """The 38px field plus its Record button.
 
-    A plain text field would mean typing `<Super><Shift>x` by hand, which is
-    the syntax this dialog exists to hide.
+    A plain text input would mean typing the accelerator by hand, which is
+    the syntax this window exists to hide.
     """
 
     recorded = pyqtSignal(str)
+
+    _PULSE_MS = 550  # half of the design's 1.1s opacity cycle
 
     def __init__(self, shortcut: str, parent: QWidget | None = None):
         super().__init__(parent)
         self._shortcut = shortcut
         self._recording = False
-        self.setCheckable(True)
-        self.clicked.connect(self._toggle_recording)
+        self._dot_on = True
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        self._field = QLabel()
+        self._field.setFixedHeight(tokens.WinMetric.RECORDER_H)
+        self._field.setFont(_mono_font(13))
+        self._field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        row.addWidget(self._field, 1)
+
+        self._button = SecondaryButton("Record")
+        self._button.clicked.connect(self._toggle)
+        row.addWidget(self._button)
+
+        # Rendered only while recording, per the design -- not a permanently
+        # present dot faded in and out.
+        self._pulse = QTimer(self)
+        self._pulse.setInterval(self._PULSE_MS)
+        self._pulse.timeout.connect(self._blink)
+
         self._refresh()
 
     def shortcut_value(self) -> str:
@@ -128,23 +150,53 @@ class ShortcutRecorder(QPushButton):
         self._shortcut = shortcut
         self._refresh()
 
-    def _refresh(self) -> None:
-        if self._recording:
-            self.setText("Press a key combination…  (Esc to cancel)")
-        else:
-            self.setText(setup_desktop.human_shortcut(self._shortcut))
+    def is_recording(self) -> bool:
+        return self._recording
 
-    def _toggle_recording(self) -> None:
-        self._recording = self.isChecked()
+    def _refresh(self) -> None:
+        win = tokens.Win
         if self._recording:
-            self.grabKeyboard()
+            dot = tokens.Color.ACCENT if self._dot_on else tokens.Win.TEXT_DISABLED
+            self._field.setText(
+                f'<span style="color:{dot};">●</span>'
+                f'&nbsp;&nbsp;<span style="color:{win.TEXT_MUTED};">'
+                "Press a combination…</span>"
+            )
+            border, fill = tokens.Color.ACCENT, "#22262d"
         else:
-            self.releaseKeyboard()
+            self._field.setText(
+                f'<span style="color:{win.TEXT_PRIMARY};">{self._shortcut}</span>'
+            )
+            border, fill = win.FIELD_BORDER, win.FIELD_BG
+        self._field.setStyleSheet(
+            f"background: {fill}; border: 1px solid {border};"
+            f" border-radius: {tokens.WinMetric.CONTROL_RADIUS}px; padding: 0 11px;"
+        )
+        self._button.setText("Cancel" if self._recording else "Record")
+
+    def _blink(self) -> None:
+        self._dot_on = not self._dot_on
         self._refresh()
 
-    def _stop_recording(self) -> None:
+    def _toggle(self) -> None:
+        if self._recording:
+            self._stop()
+        else:
+            self._start()
+
+    def _start(self) -> None:
+        self._recording = True
+        self._dot_on = True
+        # Grabbed for the duration so the combination being recorded does not
+        # also fire whatever currently owns it.
+        self.grabKeyboard()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._pulse.start()
+        self._refresh()
+
+    def _stop(self) -> None:
         self._recording = False
-        self.setChecked(False)
+        self._pulse.stop()
         self.releaseKeyboard()
         self._refresh()
 
@@ -152,101 +204,573 @@ class ShortcutRecorder(QPushButton):
         if not self._recording:
             super().keyPressEvent(event)
             return
-        # Esc cancels rather than binding: a user who opened the recorder by
-        # accident needs a way out that doesn't change their shortcut, and
-        # Esc is nobody's idea of a snip key.
         if event.key() == Qt.Key.Key_Escape and not event.modifiers():
-            self._stop_recording()
+            # Cancels and keeps the old binding: someone who opened the
+            # recorder by accident needs a way out that changes nothing.
+            self._stop()
             return
         accelerator = accelerator_from_event(event)
         if accelerator is None:
-            # Still a modifier, or something unnameable -- keep listening
-            # rather than ending the capture on it.
             return
         self._shortcut = accelerator
-        self._stop_recording()
+        self._stop()
         self.recorded.emit(accelerator)
 
 
-class SettingsDialog(QDialog):
-    """Settings, reachable from the tray. Currently the shortcut and the
-    post-capture review window.
+def _rgba(token_name: str) -> str:
+    """A `Win` colour+alpha pair as a stylesheet rgba() string.
 
-    `on_saved` is called with no arguments once changes are applied, so the
-    controller that owns the tray can act on them (rebinding the shortcut,
-    picking up the new preference) without this dialog knowing what a
-    controller is.
+    Goes through `design.win_color` rather than re-typing the percentage,
+    so the alpha in the stylesheet and the alpha in tokens.py cannot drift.
+    """
+    colour = design.win_color(token_name)
+    return (
+        f"rgba({colour.red()}, {colour.green()}, {colour.blue()}, "
+        f"{colour.alphaF():.2f})"
+    )
+
+
+class ConflictBanner(QLabel):
+    """The clear/clash box directly under the recorder.
+
+    Under the field rather than in a tooltip or a dialog on Save, because a
+    clash is information about the choice being made right now.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWordWrap(True)
+        self.setFont(_ui_font(11.5, 400))
+
+    def show_for(self, shortcut: str) -> None:
+        conflicts = setup_desktop.find_shortcut_conflicts_named(shortcut)
+        win = tokens.Win
+        if conflicts:
+            owner = conflicts[0][1]
+            text = (
+                f"✕  {shortcut} is already {owner}. GNOME will not warn "
+                "you — it will just fire the wrong one."
+            )
+            fg = win.ERR_FG
+            bg, border = _rgba("ERR_BG"), _rgba("ERR_BORDER")
+        else:
+            text = f"✓  No GNOME shortcut uses {shortcut}."
+            fg = win.OK_FG
+            bg, border = _rgba("OK_BG"), _rgba("OK_BORDER")
+        self.setText(text)
+        self.setStyleSheet(
+            f"color: {fg}; background: {bg}; border: 1px solid {border};"
+            " border-radius: 8px; padding: 9px 11px;"
+        )
+
+
+class _RadioRing(QWidget):
+    """The 15px ring with its 7px dot.
+
+    Painted rather than stylesheet'd: a ring with a centred dot is two
+    concentric circles, and the qradialgradient needed to fake that in CSS
+    renders as a soft blob at this size.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._selected = False
+        self.setFixedSize(tokens.WinMetric.RADIO_D, tokens.WinMetric.RADIO_D)
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        from PyQt6.QtCore import QRectF
+        from PyQt6.QtGui import QColor, QPainter
+
+        metric = tokens.WinMetric
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        ring = QColor(tokens.Color.ACCENT if self._selected else "#4a505b")
+        painter.setPen(ring)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75))
+        if self._selected:
+            inset = (metric.RADIO_D - metric.RADIO_DOT) / 2
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(tokens.Color.ACCENT))
+            painter.drawEllipse(
+                QRectF(inset, inset, metric.RADIO_DOT, metric.RADIO_DOT)
+            )
+        painter.end()
+
+
+class RadioCard(QPushButton):
+    """One of the three mutually exclusive "After capture" behaviours.
+
+    Cards rather than a checkbox: opening a review window is one of three
+    real behaviours, and a checkbox hid the other two entirely.
+
+    A QPushButton hosting a layout does not size itself from that layout --
+    its own sizeHint is for a text label it does not have -- so the height
+    is taken from the layout explicitly, or the card collapses to a sliver
+    with its contents clipped away.
+    """
+
+    def __init__(self, label: str, note: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(
+            tokens.WinMetric.CARD_PAD[1], tokens.WinMetric.CARD_PAD[0],
+            tokens.WinMetric.CARD_PAD[1], tokens.WinMetric.CARD_PAD[0],
+        )
+        row.setSpacing(11)
+
+        self._ring = _RadioRing()
+        row.addWidget(self._ring, 0, Qt.AlignmentFlag.AlignTop)
+
+        text = QVBoxLayout()
+        text.setSpacing(3)
+        self._title = QLabel(label)
+        self._title.setFont(_ui_font(12.5, 500))
+        text.addWidget(self._title)
+        self._sub = None
+        if note:
+            self._sub = QLabel(note)
+            self._sub.setFont(_ui_font(11.5, 400))
+            self._sub.setWordWrap(True)
+            self._sub.setStyleSheet(f"color: {tokens.Win.TEXT_NOTE}; background: transparent;")
+            text.addWidget(self._sub)
+        row.addLayout(text, 1)
+
+        self.setMinimumHeight(row.sizeHint().height())
+        self.toggled.connect(lambda _checked: self._refresh())
+        self._refresh()
+
+    def _refresh(self) -> None:
+        selected = self.isChecked()
+        self._ring.set_selected(selected)
+        self._title.setStyleSheet(
+            f"color: {tokens.Win.TEXT_PRIMARY if selected else tokens.Win.TEXT_BODY};"
+            " background: transparent;"
+        )
+        background = "#1e2229" if selected else "transparent"
+        border = tokens.Win.CONTROL_BORDER_HOVER if selected else tokens.Win.SEGMENT_BORDER
+        self.setStyleSheet(
+            f"QPushButton {{ text-align: left; border-radius: 9px;"
+            f" background: {background}; border: 1px solid {border}; }}"
+            f"QPushButton:hover {{ background: {tokens.Win.ROW_HOVER}; }}"
+        )
+
+
+class SwitchRow(QWidget):
+    """Label, optional note, and a switch pushed to the right."""
+
+    def __init__(self, label: str, note: str = "", checked: bool = False, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        title = QLabel(label)
+        title.setFont(_ui_font(12.5, 500))
+        title.setStyleSheet(f"color: {tokens.Win.TEXT_BODY};")
+        text.addWidget(title)
+        if note:
+            sub = QLabel(note)
+            sub.setFont(_ui_font(11.5, 400))
+            sub.setWordWrap(True)
+            sub.setStyleSheet(f"color: {tokens.Win.TEXT_NOTE};")
+            text.addWidget(sub)
+        row.addLayout(text, 1)
+
+        self.switch = Switch()
+        self.switch.setChecked(checked)
+        row.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignTop)
+
+
+class _NavRow(QPushButton):
+    def __init__(self, icon_name: str, label: str, parent=None):
+        super().__init__(label, parent)
+        metric = tokens.WinMetric
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFont(_ui_font(12.5, 500))
+        self.setIcon(design.icon(icon_name, tokens.Win.ICON_IDLE))
+        self.setIconSize(QSize(metric.NAV_ICON, metric.NAV_ICON))
+        self._icon_name = icon_name
+        self.toggled.connect(self._refresh)
+        self._refresh(False)
+
+    def _refresh(self, checked: bool) -> None:
+        metric, win = tokens.WinMetric, tokens.Win
+        self.setIcon(
+            design.icon(self._icon_name, win.ICON_ACTIVE if checked else win.ICON_IDLE)
+        )
+        background = win.SELECTED_BG if checked else "transparent"
+        colour = win.ICON_ACTIVE if checked else win.TEXT_MUTED
+        self.setStyleSheet(
+            f"QPushButton {{ text-align: left; background: {background};"
+            f" color: {colour}; border: none;"
+            f" border-radius: {metric.NAV_ROW_RADIUS}px;"
+            f" padding: {metric.NAV_ROW_PAD[0]}px {metric.NAV_ROW_PAD[1]}px; }}"
+            + (
+                ""
+                if checked
+                else f"QPushButton:hover {{ background: {win.ROW_HOVER}; }}"
+            )
+        )
+
+
+def _pane(*widgets: QWidget) -> QWidget:
+    """A content pane: padded, top-aligned, scrollable by its caller."""
+    metric = tokens.WinMetric
+    page = QWidget()
+    column = QVBoxLayout(page)
+    column.setContentsMargins(
+        metric.PANE_PAD[1], metric.PANE_PAD[0], metric.PANE_PAD[1], metric.PANE_PAD[0]
+    )
+    column.setSpacing(metric.FIELD_GAP)
+    for widget in widgets:
+        if widget is None:
+            column.addSpacing(metric.GROUP_GAP - metric.FIELD_GAP)
+        else:
+            column.addWidget(widget)
+    column.addStretch()
+    return page
+
+
+class SettingsWindow(WinWindow):
+    """Settings. `on_saved` fires once Save has committed, so the controller
+    that owns the tray can rebind the shortcut without this window knowing
+    what a controller is.
     """
 
     def __init__(
         self,
         *,
         parent: QWidget | None = None,
-        config_dir=None,
+        config_dir: Path | None = None,
         on_saved: Callable[[], None] | None = None,
     ):
-        super().__init__(parent)
+        super().__init__(
+            "snipux Settings",
+            size=(tokens.WinMetric.SETTINGS_W, tokens.WinMetric.SETTINGS_H),
+            parent=parent,
+        )
         self._config_dir = config_dir
         self._on_saved = on_saved
+        self._dirty = False
 
-        self.setWindowTitle("snipux Settings")
-        self.setModal(False)
+        body = QHBoxLayout(self.body)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self._build_nav())
+        body.addWidget(self._build_panes(), 1)
 
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
+        self._build_footer_contents()
+        self._nav_group.buttons()[0].setChecked(True)
+        self._refresh_dirty()
 
-        self._recorder = ShortcutRecorder(setup_desktop.load_shortcut(config_dir))
+    # -- structure -------------------------------------------------------
+
+    def _build_nav(self) -> QWidget:
+        metric, win = tokens.WinMetric, tokens.Win
+        rail = QWidget()
+        rail.setFixedWidth(metric.NAV_W)
+        rail.setStyleSheet(
+            f"background: {win.CHROME_BG}; border-right: 1px solid {win.SEPARATOR};"
+        )
+        column = QVBoxLayout(rail)
+        column.setContentsMargins(
+            metric.NAV_PAD[1], metric.NAV_PAD[0], metric.NAV_PAD[1], metric.NAV_PAD[0]
+        )
+        column.setSpacing(metric.NAV_ROW_GAP)
+
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        for index, (_id, icon_name, label) in enumerate(tokens.SETTINGS_NAV):
+            # "&" in a button label is Qt's mnemonic marker: "Tray & startup"
+            # renders as "Tray _startup" unless it is doubled.
+            row = _NavRow(icon_name, label.replace("&", "&&"))
+            self._nav_group.addButton(row, index)
+            column.addWidget(row)
+        self._nav_group.idClicked.connect(self._show_pane)
+
+        column.addStretch()
+        version = QLabel(setup_desktop.version_line())
+        version.setFont(_ui_font(11, 400))
+        version.setStyleSheet(f"color: {tokens.Win.TEXT_DISABLED};")
+        column.addWidget(version)
+        return rail
+
+    def _build_panes(self) -> QWidget:
+        self._panes = QStackedWidget()
+        self._panes.setStyleSheet("background: transparent;")
+        for build in (
+            self._capture_pane,
+            self._saving_pane,
+            self._annotation_pane,
+            self._tray_pane,
+        ):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            # Panes wrap; they never scroll sideways. A horizontal scrollbar
+            # here hides the right-hand control of every row behind it.
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setStyleSheet("background: transparent;")
+            scroll.setWidget(build())
+            self._panes.addWidget(scroll)
+        return self._panes
+
+    def _show_pane(self, index: int) -> None:
+        self._panes.setCurrentIndex(index)
+
+    # -- panes -----------------------------------------------------------
+
+    def _capture_pane(self) -> QWidget:
+        self._recorder = ShortcutRecorder(setup_desktop.load_shortcut(self._config_dir))
         self._recorder.recorded.connect(self._on_recorded)
-        form.addRow("Shortcut", self._recorder)
 
-        # Sits under the recorder rather than in a message box: a conflict is
-        # a warning about a choice being made right now, not an error that
-        # should interrupt making it.
-        self._conflict_label = QLabel()
-        self._conflict_label.setWordWrap(True)
-        form.addRow("", self._conflict_label)
+        self._conflict = ConflictBanner()
+        self._conflict.show_for(self._recorder.shortcut_value())
 
-        self._review_window = QCheckBox("Open each snip in a review window")
-        self._review_window.setChecked(setup_desktop.load_review_window(config_dir))
-        form.addRow("After capture", self._review_window)
-
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        why = QLabel(
+            "GNOME accepts two applications claiming the same combination "
+            "without a word, then fires whichever it likes. This check is the "
+            "only warning you get — and it cannot see applications that "
+            "grab a key directly rather than through GNOME."
         )
-        buttons.accepted.connect(self._save)
-        buttons.rejected.connect(self.reject)
-        row = QHBoxLayout()
-        row.addWidget(buttons)
-        layout.addLayout(row)
+        why.setWordWrap(True)
+        why.setFont(_ui_font(11.5, 400))
+        why.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
 
-        self._refresh_conflicts()
+        self._after_group = QButtonGroup(self)
+        self._after_group.setExclusive(True)
+        cards = []
+        stored = setup_desktop.load_after_capture(self._config_dir)
+        for index, (identifier, label, note) in enumerate(tokens.AFTER_CAPTURE):
+            card = RadioCard(label, note)
+            card.setChecked(identifier == stored)
+            card.toggled.connect(lambda _c: self._mark_dirty())
+            self._after_group.addButton(card, index)
+            cards.append(card)
 
-    def _on_recorded(self, _accelerator: str) -> None:
-        self._refresh_conflicts()
-
-    def _refresh_conflicts(self) -> None:
-        shortcut = self._recorder.shortcut_value()
-        description = setup_desktop.describe_conflicts(
-            setup_desktop.find_shortcut_conflicts(shortcut)
+        self._also_copy = SwitchRow(
+            "Always copy to clipboard too",
+            "Orthogonal to the three above, so it is a switch and not a fourth card.",
+            setup_desktop.load_always_copy(self._config_dir),
         )
-        if description:
-            # "may not work" rather than "will not": GNOME picks a winner
-            # between duplicate bindings and does not say which.
-            self._conflict_label.setText(f"⚠ {description} — it may not work.")
+        self._also_copy.switch.toggled.connect(lambda _c: self._mark_dirty())
+
+        return _pane(
+            SectionHeading("Shortcut"),
+            self._recorder,
+            self._conflict,
+            why,
+            None,
+            SectionHeading("After capture"),
+            *cards,
+            self._also_copy,
+        )
+
+    def _saving_pane(self) -> QWidget:
+        folder_row = QHBoxLayout()
+        self._folder = QLineEdit(str(setup_desktop.load_save_folder(self._config_dir)))
+        self._folder.setReadOnly(True)
+        self._folder.setFont(_mono_font(12))
+        self._folder.setFixedHeight(tokens.WinMetric.CONTROL_H)
+        self._folder.setStyleSheet(self._field_style())
+        choose = SecondaryButton("Choose…")
+        choose.clicked.connect(self._choose_folder)
+        folder_row.addWidget(self._folder, 1)
+        folder_row.addWidget(choose)
+        folder_widget = QWidget()
+        folder_widget.setLayout(folder_row)
+        folder_row.setContentsMargins(0, 0, 0, 0)
+
+        self._filename = QLineEdit(setup_desktop.load_filename_pattern(self._config_dir))
+        self._filename.setFont(_mono_font(12))
+        self._filename.setFixedHeight(tokens.WinMetric.CONTROL_H)
+        self._filename.setStyleSheet(self._field_style())
+        self._filename.textChanged.connect(self._refresh_preview)
+
+        self._preview = QLabel()
+        self._preview.setFont(_mono_font(11.5))
+        self._preview.setStyleSheet(f"color: {tokens.Win.PATH_FG};")
+        self._preview.setWordWrap(True)
+
+        # A grid, not a row: eight chips in one line are wider than the pane,
+        # and a pane that scrolls sideways puts the controls beside them --
+        # Choose..., the switch -- off the edge of the window.
+        chips = QGridLayout()
+        chips.setSpacing(6)
+        chips.setContentsMargins(0, 0, 0, 0)
+        for index, (token, label) in enumerate(tokens.FILENAME_TOKENS):
+            chip = SecondaryButton(f"{token}  {label}")
+            chip.setFixedHeight(26)
+            chip.setFont(_ui_font(11, 500))
+            chip.clicked.connect(lambda _c, t=token: self._append_token(t))
+            chips.addWidget(chip, index // 4, index % 4)
+        chip_row = QWidget()
+        chip_row.setLayout(chips)
+
+        self._native = SwitchRow(
+            "Save at native resolution",
+            "On writes 2× pixels on HiDPI; off saves what you saw.",
+            setup_desktop.load_native_resolution(self._config_dir),
+        )
+        self._native.switch.toggled.connect(lambda _c: self._mark_dirty())
+
+        self._refresh_preview()
+        return _pane(
+            SectionHeading("Folder"),
+            folder_widget,
+            None,
+            SectionHeading("Filename"),
+            self._filename,
+            self._preview,
+            chip_row,
+            None,
+            self._native,
+        )
+
+    def _annotation_pane(self) -> QWidget:
+        note = QLabel(
+            "These set the state the overlay opens in. The tools themselves "
+            "are the overlay's own."
+        )
+        note.setWordWrap(True)
+        note.setFont(_ui_font(11.5, 400))
+        note.setStyleSheet(f"color: {tokens.Win.TEXT_NOTE};")
+
+        self._remember_tool = SwitchRow(
+            "Remember my last tool instead",
+            "When on, the tool above is only the first-run seed.",
+            setup_desktop.load_remember_tool(self._config_dir),
+        )
+        self._remember_tool.switch.toggled.connect(lambda _c: self._mark_dirty())
+
+        return _pane(
+            SectionHeading("Annotation"),
+            note,
+            None,
+            self._remember_tool,
+        )
+
+    def _tray_pane(self) -> QWidget:
+        self._tray_rows: dict[str, SwitchRow] = {}
+        rows: list[QWidget] = [SectionHeading("Tray & startup")]
+        stored = setup_desktop.load_tray_toggles(self._config_dir)
+        for identifier, label, note, default in tokens.TRAY_TOGGLES:
+            row = SwitchRow(label, note, stored.get(identifier, default))
+            row.switch.toggled.connect(lambda _c: self._mark_dirty())
+            self._tray_rows[identifier] = row
+            rows.append(row)
+        return _pane(*rows)
+
+    # -- footer ----------------------------------------------------------
+
+    def _build_footer_contents(self) -> None:
+        self._dirty_label = QLabel()
+        self._dirty_label.setFont(_ui_font(12, 400))
+        self.footer_left.addWidget(self._dirty_label)
+
+        cancel = SecondaryButton("Cancel")
+        cancel.clicked.connect(self._cancel)
+        self.footer_right.addWidget(cancel)
+
+        save = AccentButton("✓  Save")
+        save.clicked.connect(self._save)
+        self.footer_right.addWidget(save)
+
+    def _refresh_dirty(self) -> None:
+        if self._dirty:
+            self._dirty_label.setText("Unsaved changes")
+            self._dirty_label.setStyleSheet(f"color: {tokens.Win.WARN_FG};")
         else:
-            # Deliberately not "this key is free": an application that grabs
-            # a key directly, rather than through GNOME, is invisible to
-            # find_shortcut_conflicts and owns it just as effectively.
-            self._conflict_label.setText("No GNOME shortcut uses this.")
+            self._dirty_label.setText("Everything saved")
+            self._dirty_label.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
+
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+        self._refresh_dirty()
+
+    # -- behaviour -------------------------------------------------------
+
+    @staticmethod
+    def _field_style() -> str:
+        win, metric = tokens.Win, tokens.WinMetric
+        return (
+            f"QLineEdit {{ background: {win.FIELD_BG};"
+            f" border: 1px solid {win.FIELD_BORDER};"
+            f" border-radius: {metric.CONTROL_RADIUS}px;"
+            f" color: {win.TEXT_PRIMARY}; padding: 0 11px; }}"
+        )
+
+    def _on_recorded(self, accelerator: str) -> None:
+        self._conflict.show_for(accelerator)
+        self._mark_dirty()
+
+    def _choose_folder(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(self, "Save snips to", self._folder.text())
+        if chosen:
+            self._folder.setText(chosen)
+            self._refresh_preview()
+            self._mark_dirty()
+
+    def _append_token(self, token: str) -> None:
+        self._filename.setText(self._filename.text() + token)
+        self._mark_dirty()
+
+    def _refresh_preview(self) -> None:
+        self._preview.setText(
+            setup_desktop.preview_filename(self._folder.text(), self._filename.text())
+        )
+        if self.isVisible():
+            self._mark_dirty()
+
+    def _cancel(self) -> None:
+        if self._dirty:
+            answer = QMessageBox.question(
+                self,
+                "Discard changes?",
+                "Settings have been changed but not saved. Discard them?",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Discard:
+                return
+        self.close()
 
     def _save(self) -> None:
-        shortcut = self._recorder.shortcut_value()
-        setup_desktop.save_shortcut(shortcut, self._config_dir)
-        setup_desktop.save_review_window(
-            self._review_window.isChecked(), self._config_dir
+        setup_desktop.save_shortcut(self._recorder.shortcut_value(), self._config_dir)
+        setup_desktop.save_after_capture(
+            tokens.AFTER_CAPTURE[self._after_group.checkedId()][0], self._config_dir
         )
+        setup_desktop.save_always_copy(
+            self._also_copy.switch.isChecked(), self._config_dir
+        )
+        setup_desktop.save_save_folder(self._folder.text(), self._config_dir)
+        setup_desktop.save_filename_pattern(self._filename.text(), self._config_dir)
+        setup_desktop.save_native_resolution(
+            self._native.switch.isChecked(), self._config_dir
+        )
+        setup_desktop.save_remember_tool(
+            self._remember_tool.switch.isChecked(), self._config_dir
+        )
+        setup_desktop.save_tray_toggles(
+            {key: row.switch.isChecked() for key, row in self._tray_rows.items()},
+            self._config_dir,
+        )
+        self._dirty = False
+        self._refresh_dirty()
         if self._on_saved is not None:
             self._on_saved()
-        self.accept()
+        self.close()
+
+
+# `app.py` imports this name; the class was a QDialog before the redesign.
+SettingsDialog = SettingsWindow
