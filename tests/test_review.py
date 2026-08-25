@@ -917,3 +917,42 @@ class TestEraserSweeps:
         canvas.mouseMoveEvent(_move(canvas, start.x() + 100 * scale, start.y() + 200 * scale))
 
         assert len(window._store) == 1
+
+
+class TestToastClearsTheBar:
+    """Both wanted bottom centre, so the toast landed underneath the
+    floating bar and showed as a dark sliver poking out from it -- which
+    reads as a rendering fault rather than a message.
+    """
+
+    def _window(self):
+        window = ReviewWindow(make_image(900, 600))
+        window.resize(1020, 700)
+        window.show()
+        return window
+
+    def test_with_no_bar_it_uses_the_canvas_floor(self):
+        window = self._window()
+
+        window.copy()
+
+        assert window._toast.geometry().bottom() > window._canvas.height() - 80
+
+    def test_while_editing_it_sits_clear_of_the_bar(self):
+        window = self._window()
+        window._set_annotating(True)
+
+        window.copy()
+
+        assert not window._toast.geometry().intersects(window._bar.geometry())
+
+    def test_it_also_clears_whatever_tray_is_up(self):
+        window = self._window()
+        window._set_annotating(True)
+        window._bar.select_tool("pen")
+        window._sync_tray()
+
+        window.copy()
+
+        assert not window._toast.geometry().intersects(window._tray.geometry())
+        assert window._toast.geometry().bottom() <= window._tray.geometry().top()
