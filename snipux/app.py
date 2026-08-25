@@ -43,6 +43,7 @@ from snipux.overlay import (
     UnsupportedGeometryProvider,
     open_overlay,
 )
+from snipux import setup_desktop
 
 
 def copy_image_to_clipboard(image: QImage) -> None:
@@ -158,6 +159,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "starting one first if none is running yet (for binding to a "
         "key such as Print Screen)",
     )
+    group.add_argument(
+        "--setup",
+        action="store_true",
+        help="install the desktop entry, autostart entry, and GNOME "
+        "Super+Shift+S shortcut for this installed copy of snipux -- no "
+        "repository checkout needed",
+    )
     return parser
 
 
@@ -201,6 +209,12 @@ def main(
         return 0
 
     args = parser.parse_args(argv)
+
+    if args.setup:
+        # No registry/transport involved -- unlike --snip and the default
+        # resident path, this never touches capture backends or a display,
+        # so it's handled before either is ever built.
+        return setup_desktop.run_setup()
 
     if args.snip:
         # Forward to an already-resident instance when there is one. When

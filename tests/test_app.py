@@ -419,6 +419,57 @@ class TestSnipFlag:
         assert excinfo.value.code != 0
 
 
+class TestSetupFlag:
+    """SNX-73: `--setup` dispatches to `setup_desktop.run_setup()` rather
+    than building a registry or touching a display -- the desktop entry,
+    autostart entry, and GNOME shortcut it installs have nothing to do with
+    capture backends. `setup_desktop.run_setup()`'s own behaviour (what it
+    writes, how it reports failures) is covered directly in
+    test_setup_desktop.py; this only proves main() reaches it.
+    """
+
+    def test_dispatches_to_run_setup_and_returns_its_exit_code(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app.setup_desktop, "run_setup", lambda: calls.append("called") or 0
+        )
+
+        exit_code = main(["--setup"])
+
+        assert exit_code == 0
+        assert calls == ["called"]
+
+    def test_propagates_a_nonzero_exit_code_from_run_setup(self, monkeypatch):
+        monkeypatch.setattr(app.setup_desktop, "run_setup", lambda: 1)
+
+        assert main(["--setup"]) == 1
+
+    def test_does_not_build_a_registry(self, monkeypatch):
+        # A registry built here would mean --setup pays for probing real
+        # capture backends it has no use for; build_default_registry raising
+        # proves it's never called on this path.
+        monkeypatch.setattr(app.setup_desktop, "run_setup", lambda: 0)
+
+        def must_not_be_called():
+            raise AssertionError("build_default_registry() must not run for --setup")
+
+        monkeypatch.setattr(app, "build_default_registry", must_not_be_called)
+
+        main(["--setup"])
+
+    def test_mutually_exclusive_with_snip(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--setup", "--snip"])
+
+        assert excinfo.value.code != 0
+
+    def test_mutually_exclusive_with_list_backends(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--setup", "--list-backends"])
+
+        assert excinfo.value.code != 0
+
+
 class TestQLocalSocketTransportRace:
     def test_try_claim_reports_not_primary_when_listen_loses_the_race(self, monkeypatch):
         # AC: "two presses in quick succession with nothing running produce
