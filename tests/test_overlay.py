@@ -2477,6 +2477,80 @@ class TestPillButtonLabelWidth:
         assert first_tool.geometry().left() >= bar._chip.geometry().right()
 
 
+class TestCaptureChipResizesOnModeChange:
+    """SNX-68: SNX-59 fixed `_PillButton.sizeHint` to measure the label it
+    actually renders, but `FloatingBar.set_capture_mode` -- the only way
+    the chip's text ever changes after construction -- never re-read that
+    sizeHint, so the bar stayed sized for "Region" (the default, and the
+    only label ever measured at construction) and clipped every other
+    mode once picked from the popover. Unlike `TestPillButtonLabelWidth`
+    above, none of these tests call `bar.resize(bar.sizeHint())`
+    themselves -- that manual step is exactly what production code was
+    missing, so a test that also did it wouldn't catch the regression.
+    """
+
+    def _granted_vs_hint(self, label: QLabel) -> tuple[int, int]:
+        return label.geometry().width(), label.sizeHint().width()
+
+    def test_set_capture_mode_never_clips_any_mode(self):
+        # AC: "a test switches the chip through every mode and fails if
+        # any label's granted width is below its sizeHint."
+        bar = FloatingBar()
+        bar.resize(bar.sizeHint())
+        bar.grab()
+
+        for label, _icon, _note in tokens.CAPTURE_MODES:
+            bar.set_capture_mode(label)
+            bar.grab()
+
+            granted, hint = self._granted_vs_hint(bar._chip._text_label)
+            assert granted >= hint, (
+                f"{label!r} asked for {hint}px but was only granted {granted}px"
+            )
+            assert bar._chip._text_label.text() == label
+
+    def test_set_capture_mode_grows_the_bar_for_a_longer_label(self):
+        bar = FloatingBar()
+        bar.resize(bar.sizeHint())
+        bar.grab()
+        narrow_width = bar.width()
+
+        bar.set_capture_mode("Full screen")
+        bar.grab()
+
+        assert bar.width() > narrow_width
+
+    def test_set_capture_mode_with_no_prior_reposition_still_resizes(self):
+        # A bare `FloatingBar()` -- never handed a selection through
+        # `reposition` -- has nothing to recentre against, but must still
+        # grow to fit; this is the fallback branch of the fix.
+        bar = FloatingBar()
+
+        bar.set_capture_mode("Full screen")
+        bar.grab()
+
+        granted, hint = self._granted_vs_hint(bar._chip._text_label)
+        assert granted >= hint
+
+    def test_set_capture_mode_recentres_the_bar_under_the_selection(self):
+        # AC: "the bar re-centres itself under the selection after the
+        # chip changes width."
+        bar = FloatingBar()
+        selection = QRect(500, 300, 200, 150)
+        bounds = QSize(1600, 1000)
+        bar.reposition(selection, bounds)
+        bar.grab()
+        narrow_center = bar.geometry().center().x()
+
+        bar.set_capture_mode("Full screen")
+        bar.grab()
+
+        wide_center = bar.geometry().center().x()
+        expected_center = round(selection.center().x())
+        assert abs(narrow_center - expected_center) <= 1
+        assert abs(wide_center - expected_center) <= 1
+
+
 class TestFloatingBarFill:
     """SNX-40: 'the fill is 93% alpha, not 93% widget opacity, or the
     glyphs wash out' -- the ticket's own callout of the easy mistake.
@@ -3942,6 +4016,39 @@ class TestCaptureModePopoverOverlayIntegration:
         assert overlay._capture_mode == target_label
         assert overlay._bar._chip._text_label.text() == target_label
         assert not overlay._popover.isVisible()
+
+    def test_switching_back_to_region_shrinks_and_recentres_the_bar(self):
+        """SNX-68: Region's own label is short enough to fit at the bar's
+        construction-time width, which is exactly why the underlying bug
+        stayed invisible until a wider mode was picked -- and,
+        symmetrically, why switching *back* to Region is where a bar left
+        sized for that wider label would show up. Full screen (unlike
+        Region) also changes `_selection`, which already forced a
+        reposition through `set_selection` before this ticket; picking
+        Region again changes only the label, so this is the case that
+        isolates `set_capture_mode` itself needing to reposition.
+        """
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 200, 150))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        full_screen_label = tokens.CAPTURE_MODES[2][0]
+        QTest.mouseClick(overlay._popover._rows[full_screen_label], Qt.MouseButton.LeftButton)
+        wide_width = overlay._bar.width()
+        expected_center = round(overlay._selection.center().x())
+        assert abs(overlay._bar.geometry().center().x() - expected_center) <= 1
+
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        region_label = tokens.CAPTURE_MODES[0][0]
+        QTest.mouseClick(overlay._popover._rows[region_label], Qt.MouseButton.LeftButton)
+
+        # Region never touches `_selection` on its own, so the selection
+        # -- and therefore where the bar ought to be centred -- is
+        # unchanged from the Full screen pick above.
+        assert round(overlay._selection.center().x()) == expected_center
+        assert overlay._bar.width() < wide_width
+        assert abs(overlay._bar.geometry().center().x() - expected_center) <= 1
 
     def test_cycling_the_delay_row_updates_the_overlays_delay(self):
         overlay = self._overlay()
