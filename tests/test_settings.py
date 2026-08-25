@@ -7,12 +7,13 @@ from __future__ import annotations
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeyEvent
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from snipux import setup_desktop
+from snipux import platform, setup_desktop
 from snipux.design import tokens
 from snipux.settings import (
     ConflictBanner,
+    HotkeyEventFilter,
     SettingsWindow,
     ShortcutRecorder,
     accelerator_from_event,
@@ -27,6 +28,22 @@ def qapp():
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def _default_to_the_gnome_conflict_check(monkeypatch):
+    """Every test in this file builds a `SettingsWindow`/`ConflictBanner`
+    against whatever OS actually runs pytest -- forcing
+    `HotkeyEventFilter.is_available()` off by default keeps that pinned to
+    GNOME's own behaviour (the AC this file otherwise exists to protect,
+    "the Linux behaviour of this window is unchanged") regardless of that
+    host, rather than a `SettingsWindow()` on a Windows dev box silently
+    starting to probe a real, system-wide hotkey on every construction.
+    `test_app.py`'s `TestWindowsHotkeyIntegration` states this the same way,
+    explicitly, per test, rather than relying on it -- the handful of tests
+    below that want the Windows path override it back to `True`.
+    """
+    monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: False))
 
 
 def press(key: Qt.Key, modifiers=Qt.KeyboardModifier.NoModifier) -> QKeyEvent:
@@ -149,7 +166,15 @@ class TestShortcutRecorder:
 
 
 class TestConflictBanner:
+    """`HotkeyEventFilter.is_available()` -- forced rather than relied on,
+    same as `test_app.py`'s `TestWindowsHotkeyIntegration` -- is what picks
+    GNOME's introspectable check apart from Windows' probe-based one
+    (SNX-93), so this coverage holds regardless of which OS actually runs
+    the suite.
+    """
+
     def test_names_the_owner_of_a_clashing_shortcut(self, monkeypatch):
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: False))
         monkeypatch.setattr(
             setup_desktop,
             "find_shortcut_conflicts_named",
@@ -166,12 +191,55 @@ class TestConflictBanner:
 
     def test_never_claims_a_shortcut_is_free(self, monkeypatch):
         # An application that grabs a key directly is invisible to the check.
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: False))
         monkeypatch.setattr(setup_desktop, "find_shortcut_conflicts_named", lambda s: [])
         banner = ConflictBanner()
 
         banner.show_for("Control+Alt+S")
 
         assert banner.text() == "✓  No GNOME shortcut uses Control+Alt+S."
+
+    def test_on_windows_names_the_application_holding_a_taken_shortcut(self, monkeypatch):
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current,
+            "find_shortcut_conflict",
+            lambda s: "another application",
+            raising=False,
+        )
+        banner = ConflictBanner()
+
+        banner.show_for("Control+Alt+T")
+
+        text = banner.text()
+        assert "another application" in text
+        assert "Control+Alt+T" in text
+
+    def test_on_windows_calls_out_the_snipping_tool(self, monkeypatch):
+        # AC: Win+Shift+S is named as belonging to the Windows Snipping Tool.
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current,
+            "find_shortcut_conflict",
+            lambda s: "the Windows Snipping Tool",
+            raising=False,
+        )
+        banner = ConflictBanner()
+
+        banner.show_for("Shift+Super+S")
+
+        assert "the Windows Snipping Tool" in banner.text()
+
+    def test_on_windows_never_claims_a_shortcut_is_free(self, monkeypatch):
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current, "find_shortcut_conflict", lambda s: None, raising=False
+        )
+        banner = ConflictBanner()
+
+        banner.show_for("Control+Alt+S")
+
+        assert banner.text() == "✓  Control+Alt+S is free to register."
 
 
 class TestSettingsWindow:
@@ -243,6 +311,71 @@ class TestSettingsWindow:
         window._save()
 
         assert called == [True]
+
+    def test_save_refuses_a_taken_shortcut_on_windows(self, tmp_path, monkeypatch):
+        # AC: a combination that is already taken is refused with a message
+        # naming what holds it, rather than appearing to save.
+        setup_desktop.save_shortcut("Control+Alt+S", tmp_path)
+        called = []
+        window = self._window(tmp_path, on_saved=lambda: called.append(True))
+        window._recorder.set_shortcut("Control+Alt+K")
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current,
+            "find_shortcut_conflict",
+            lambda s: "another application",
+            raising=False,
+        )
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            lambda parent, title, text: warnings.append(text),
+        )
+
+        window._save()
+
+        # Nothing committed and nothing rebound -- a refusal, not a save.
+        assert setup_desktop.load_shortcut(tmp_path) == "Control+Alt+S"
+        assert called == []
+        assert len(warnings) == 1
+        assert "another application" in warnings[0]
+        assert "Control+Alt+K" in warnings[0]
+
+    def test_save_calls_out_the_snipping_tool_by_name(self, tmp_path, monkeypatch):
+        # AC: Win+Shift+S is called out as belonging to the Windows
+        # Snipping Tool if the user tries it.
+        window = self._window(tmp_path)
+        window._recorder.set_shortcut("Shift+Super+S")
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current,
+            "find_shortcut_conflict",
+            lambda s: "the Windows Snipping Tool",
+            raising=False,
+        )
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            lambda parent, title, text: warnings.append(text),
+        )
+
+        window._save()
+
+        assert "the Windows Snipping Tool" in warnings[0]
+
+    def test_save_proceeds_when_windows_reports_no_conflict(self, tmp_path, monkeypatch):
+        window = self._window(tmp_path)
+        window._recorder.set_shortcut("Control+Alt+K")
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current, "find_shortcut_conflict", lambda s: None, raising=False
+        )
+
+        window._save()
+
+        assert setup_desktop.load_shortcut(tmp_path) == "Control+Alt+K"
 
     def test_the_footer_reports_unsaved_changes(self, tmp_path):
         window = self._window(tmp_path)
