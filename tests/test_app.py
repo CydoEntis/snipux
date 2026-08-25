@@ -1323,7 +1323,7 @@ class TestReviewWindowIntegration:
         controller._overlay.set_selection(QRect(10, 10, 100, 80))
         controller._overlay.copy()
 
-        controller._reviews[0].accept()
+        controller._reviews[0].close()
 
         assert controller._reviews == []
 

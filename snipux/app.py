@@ -696,7 +696,7 @@ class AppController:
         # A list, not one slot: taking several snips in a row should leave
         # several windows open, which is most of the point of having one.
         self._reviews.append(review)
-        review.finished.connect(lambda _result, w=review: self._forget_review(w))
+        review.closed.connect(lambda w=review: self._forget_review(w))
         review.show()
         review.raise_()
         review.activateWindow()

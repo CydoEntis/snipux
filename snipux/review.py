@@ -1,27 +1,40 @@
-"""The post-capture review window: what a snip looks like after the overlay
-has closed.
+"""The review window: what a snip looks like once the overlay has closed.
 
-Off unless turned on in Settings. The overlay annotates in place and always
-has, so this is not a second editor and deliberately carries no drawing
-tools -- a second set of tools would be a second implementation to drift
-from the first, which is a good part of why the old `editor.py` was deleted
-in the overlay redesign. What it adds is the thing the overlay genuinely
-cannot: a snip that survives the moment of capture. Copy or Save dismisses
-the overlay instantly, so a snip saved to the wrong place, or copied when
-you meant to save, previously meant taking the whole capture again.
+`docs/design/handoff-windows.md` section 3 is the authority. 1020 x 700, the
+same `Win` chrome as Settings, and a canvas that answers the two questions
+the flow could not: **what did I capture**, and **where did it go**.
 
-Everything here operates on the already-flattened `QImage` the overlay hands
-over. It never touches `shapes`, `Frame`, or the mark model.
+Annotate mode reveals *the overlay's own floating bar* over the image -- the
+same widget, the same tools, the same `MarkStore`. It is not a second
+editor and must not become one; the only differences the design allows are
+that there is no capture-mode chip (nothing left to capture) and the
+trailing action is `Done` rather than Save (the footer already owns the
+exports).
+
+The one real divergence from the overlay is coordinates: marks live in
+**image** space here, not screen space, because the image is the document.
+`ImageCanvas` maps pointer positions through the current zoom, so drawing
+stays correct at any magnification and an exported mark lands where it
+looked.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QDesktopServices, QGuiApplication, QImage, QPixmap
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QGuiApplication,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPixmap,
+    QRadialGradient,
+)
 from PyQt6.QtWidgets import (
-    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -30,21 +43,237 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-# The preview is a convenience, not the artefact -- a 4K snip must not open a
-# 4K window. The image is only ever scaled down, never up, so a small snip
-# shows at its true size instead of being blown up and blurred.
-_MAX_PREVIEW = (960, 600)
+from . import design, setup_desktop, shapes
+from .design import tokens
+from .marks import MarkStore, begin_stroke, extend_stroke
+from .overlay import FloatingBar
+from .winchrome import AccentButton, SecondaryButton, WinWindow, _mono_font, _ui_font
 
 
-class ReviewWindow(QDialog):
-    """Shows `image`, with the ways out the overlay's own Copy/Save can't
-    offer once it has closed.
+class ImageCanvas(QWidget):
+    """The radial workspace, the screenshot on it, and the ink over both.
 
-    `saved_path` is where the snip already went, when it was saved rather
-    than copied -- it is what makes "Show in folder" meaningful, and its
-    absence is why that button is disabled for a copied snip rather than
-    hidden: the same window shouldn't change shape depending on how the
-    snip got here.
+    The screenshot is drawn with a border, a soft shadow and a faint outer
+    ring, because the whole point of the redesign is that **the image has an
+    edge** -- on the overlay the capture bleeds into the desktop behind it
+    and the user cannot tell where it stops.
+
+    Marks are stored in image coordinates and painted through the same
+    transform the image is, so zooming moves ink and pixels together.
+    """
+
+    marksChanged = pyqtSignal()
+
+    def __init__(self, image: QImage, store: MarkStore, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._image = image
+        self._store = store
+        self._zoom = 100
+        self._annotating = False
+        self._tool: str | None = None
+        self._ink_colour = tokens.INK_SWATCHES[0][1]
+        self._stroke_width = tokens.Metric.STROKE_DEFAULT
+        self._in_progress: shapes.Shape | None = None
+        self.setMouseTracking(True)
+        self._store.changed.connect(self.update)
+
+    # -- geometry --------------------------------------------------------
+
+    @property
+    def zoom(self) -> int:
+        return self._zoom
+
+    def set_zoom(self, percent: int) -> None:
+        low, high, _step = tokens.WinMetric.ZOOM_STEPS
+        self._zoom = max(low, min(percent, high))
+        self.update()
+
+    def _scale(self) -> float:
+        """Image pixels -> widget pixels.
+
+        The zoom percentage applies on top of a fit-to-canvas scale, so 100%
+        means "as large as this window can show it" rather than 1:1 -- a
+        1377 x 936 snip in a 1020px window is otherwise clipped at every
+        zoom level the design offers.
+        """
+        if self._image.isNull():
+            return 1.0
+        available_w = max(1, self.width() - 96)
+        available_h = max(1, self.height() - 96)
+        fit = min(available_w / self._image.width(), available_h / self._image.height(), 1.0)
+        return fit * (self._zoom / 100)
+
+    def image_rect(self) -> QRectF:
+        """Where the screenshot sits in this widget, at the current zoom."""
+        scale = self._scale()
+        width = self._image.width() * scale
+        height = self._image.height() * scale
+        return QRectF(
+            (self.width() - width) / 2, (self.height() - height) / 2, width, height
+        )
+
+    def to_image(self, point: QPointF) -> QPointF:
+        """Widget point -> image coordinates.
+
+        The design's rule, and the reason marks survive a zoom: scale by
+        `image_width / displayed_width` rather than storing what the pointer
+        happened to be over on screen.
+        """
+        rect = self.image_rect()
+        scale = self._scale() or 1.0
+        return QPointF((point.x() - rect.x()) / scale, (point.y() - rect.y()) / scale)
+
+    # -- annotation ------------------------------------------------------
+
+    def set_annotating(self, annotating: bool) -> None:
+        self._annotating = annotating
+        self.setCursor(
+            Qt.CursorShape.CrossCursor if annotating else Qt.CursorShape.ArrowCursor
+        )
+        self.update()
+
+    def set_tool(self, tool: str | None) -> None:
+        self._tool = tool
+
+    def set_ink(self, colour: str, stroke: int) -> None:
+        self._ink_colour, self._stroke_width = colour, stroke
+
+    def rendered_image(self) -> QImage:
+        """The image with every mark flattened onto it.
+
+        Marks are already in image coordinates, so unlike the overlay's own
+        export there is no translation step -- which is most of why the
+        design puts them in this space.
+        """
+        return shapes.render(self._image, list(self._store.marks))
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if not self._annotating or event.button() != Qt.MouseButton.LeftButton:
+            return
+        position = self.to_image(event.position())
+        if self._tool == "eraser":
+            self._store.erase(position)
+            return
+        if self._tool == "step":
+            # Click only, no drag -- the same rule the overlay applies.
+            self._store.add(
+                shapes.StepMarker(
+                    colour=QColor(self._ink_colour),
+                    stroke_width=self._stroke_width,
+                    point=position,
+                    number=shapes.next_step_number(list(self._store.marks)),
+                )
+            )
+            self.marksChanged.emit()
+            return
+        self._in_progress = begin_stroke(
+            self._tool,
+            position,
+            colour=QColor(self._ink_colour),
+            stroke_width=self._stroke_width,
+        )
+        self.update()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._in_progress is None:
+            return
+        extend_stroke(self._in_progress, self.to_image(event.position()))
+        self.update()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._in_progress is None:
+            return
+        shape, self._in_progress = self._in_progress, None
+        # `finalize_mark` is the overlay's own commit rule -- a stroke too
+        # small to be deliberate is dropped rather than committed.
+        finished = shapes.finalize_mark(shape)
+        if finished is not None:
+            self._store.add(finished)
+            self.marksChanged.emit()
+        self.update()
+
+    # -- painting --------------------------------------------------------
+
+    def paintEvent(self, event) -> None:
+        metric = tokens.WinMetric
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        # Workspace: a radial, centred high and left of centre per the token.
+        _kind, (cx, cy), radius, stops = tokens.Gradient.WORKSPACE
+        gradient = QRadialGradient(
+            self.width() * cx, self.height() * cy, self.width() * radius
+        )
+        for position, colour in stops:
+            gradient.setColorAt(position, QColor(colour))
+        painter.fillRect(self.rect(), gradient)
+
+        rect = self.image_rect()
+        if rect.isEmpty():
+            painter.end()
+            return
+
+        # Shadow first, then the faint ring, then the image: the ring reads
+        # as a halo around the edge rather than a second border only when it
+        # sits under the 1px stroke.
+        shadow = QColor(0, 0, 0, 90)
+        for spread in range(18, 0, -3):
+            shadow.setAlpha(max(4, 90 - spread * 4))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(shadow)
+            painter.drawRoundedRect(rect.adjusted(-spread, -spread + 4, spread, spread + 4), 6, 6)
+
+        ring = QColor(255, 255, 255)
+        ring.setAlphaF(0.02)
+        painter.setBrush(ring)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(rect.adjusted(-metric.REVIEW_IMG_RING, -metric.REVIEW_IMG_RING,
+                                       metric.REVIEW_IMG_RING, metric.REVIEW_IMG_RING))
+
+        painter.drawImage(rect, self._image)
+
+        # Ink, through the same transform the image got.
+        painter.save()
+        painter.translate(rect.topLeft())
+        painter.scale(self._scale(), self._scale())
+        for shape in self._store.marks:
+            shape.draw(painter)
+        if self._in_progress is not None:
+            self._in_progress.draw(painter)
+        painter.restore()
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QColor(tokens.Win.IMAGE_BORDER))
+        painter.drawRect(rect)
+        painter.end()
+
+
+class _Badge(QLabel):
+    """The dimension and zoom clusters that float over the canvas.
+
+    Above the image in z-order, so they are never occluded by it however
+    large the snip is.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setFont(_mono_font(11.5))
+        self.setStyleSheet(
+            "background: rgba(18, 20, 24, 0.88);"
+            f" border: 1px solid {tokens.Win.SEGMENT_BORDER};"
+            " border-radius: 8px; padding: 5px 9px;"
+            f" color: {tokens.Win.TEXT_SECONDARY};"
+        )
+
+
+class ReviewWindow(WinWindow):
+    """The window a finished snip opens in.
+
+    `saved_path` is where it already went, when it was saved rather than
+    copied. Its absence is why `Show in Folder` starts disabled rather than
+    hidden -- the window should not change shape depending on how the snip
+    arrived.
     """
 
     def __init__(
@@ -54,130 +283,218 @@ class ReviewWindow(QDialog):
         saved_path: Path | None = None,
         parent: QWidget | None = None,
     ):
-        super().__init__(parent)
+        super().__init__(
+            "snipux",
+            size=(tokens.WinMetric.REVIEW_W, tokens.WinMetric.REVIEW_H),
+            parent=parent,
+        )
         self._image = image
         self._saved_path = saved_path
+        self._dirty = False
+        self._store = MarkStore(self)
 
-        self.setWindowTitle(f"snipux — {image.width()} × {image.height()}")
-        self.setModal(False)
-
-        layout = QVBoxLayout(self)
-
-        self._preview = QLabel()
-        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setPixmap(self._preview_pixmap())
-        layout.addWidget(self._preview)
-
-        self._status = QLabel(
-            f"Saved to {self._display_path(saved_path)}"
-            if saved_path is not None
-            else "Copied to the clipboard — not saved to disk."
+        self.title_label.setText(
+            saved_path.name if saved_path is not None else "Unsaved snip"
         )
-        self._status.setWordWrap(True)
-        layout.addWidget(self._status)
+        self.title_detail.setText(f"{image.width()} × {image.height()}")
 
-        buttons = QHBoxLayout()
-        self._copy_button = QPushButton("Copy")
-        self._copy_button.clicked.connect(self.copy)
-        buttons.addWidget(self._copy_button)
+        body = QVBoxLayout(self.body)
+        body.setContentsMargins(0, 0, 0, 0)
 
-        self._save_as_button = QPushButton("Save As...")
-        self._save_as_button.clicked.connect(self.save_as)
-        buttons.addWidget(self._save_as_button)
+        self._canvas = ImageCanvas(image, self._store)
+        self._canvas.marksChanged.connect(self._on_edited)
+        body.addWidget(self._canvas)
 
-        self._folder_button = QPushButton("Show in Folder")
+        self._dimension_badge = _Badge(self._canvas)
+        self._zoom_badge = _Badge(self._canvas)
+        self._refresh_badges()
+
+        self._bar = FloatingBar(self._canvas, capture_chip=False, trailing="done")
+        self._bar.hide()
+        self._bar.toolSelected.connect(self._canvas.set_tool)
+        self._bar.undoRequested.connect(self._store.undo)
+        self._bar.redoRequested.connect(self._store.redo)
+        self._bar.clearRequested.connect(self._store.clear)
+        self._bar.saveRequested.connect(lambda: self._set_annotating(False))
+        self._store.changed.connect(self._on_edited)
+
+        self._build_footer_contents()
+        self._refresh_status()
+
+    # -- footer ----------------------------------------------------------
+
+    def _build_footer_contents(self) -> None:
+        stacked = QVBoxLayout()
+        stacked.setSpacing(1)
+        self._status = QLabel()
+        self._status.setFont(_ui_font(12, 500))
+        stacked.addWidget(self._status)
+
+        # Clickable, because users go looking for the file: the answer is in
+        # the window and it is actionable.
+        self._path_label = QPushButton()
+        self._path_label.setFlat(True)
+        self._path_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._path_label.setFont(_mono_font(11.5))
+        self._path_label.setStyleSheet(
+            f"QPushButton {{ border: none; background: transparent; text-align: left;"
+            f" color: {tokens.Win.TEXT_MUTED}; padding: 0; }}"
+            f"QPushButton:hover {{ color: {tokens.Win.TEXT_SECONDARY};"
+            " text-decoration: underline; }"
+        )
+        self._path_label.clicked.connect(self.show_in_folder)
+        stacked.addWidget(self._path_label)
+        self.footer_left.addLayout(stacked)
+
+        self._annotate_button = SecondaryButton("Annotate")
+        self._annotate_button.clicked.connect(
+            lambda: self._set_annotating(not self._canvas._annotating)
+        )
+        self.footer_right.addWidget(self._annotate_button)
+
+        self._folder_button = SecondaryButton("Show in Folder")
         self._folder_button.clicked.connect(self.show_in_folder)
-        self._folder_button.setEnabled(saved_path is not None)
-        buttons.addWidget(self._folder_button)
+        self._folder_button.setEnabled(self._saved_path is not None)
+        self.footer_right.addWidget(self._folder_button)
 
-        buttons.addStretch()
+        self._save_as_button = SecondaryButton("Save As…")
+        self._save_as_button.clicked.connect(self.save_as)
+        self.footer_right.addWidget(self._save_as_button)
 
-        self._close_button = QPushButton("Close")
-        self._close_button.clicked.connect(self.accept)
-        self._close_button.setDefault(True)
-        buttons.addWidget(self._close_button)
+        self._copy_button = AccentButton("Copy")
+        self._copy_button.clicked.connect(self.copy)
+        self.footer_right.addWidget(self._copy_button)
 
-        layout.addLayout(buttons)
+    def _refresh_status(self) -> None:
+        if self._dirty:
+            self._status.setText("✎  Edited — not saved")
+            self._status.setStyleSheet(f"color: {tokens.Win.WARN_FG};")
+        elif self._saved_path is not None:
+            self._status.setText("✓  Saved")
+            self._status.setStyleSheet(f"color: {tokens.Win.OK_STRONG};")
+        else:
+            self._status.setText("Copied to the clipboard — not saved to disk.")
+            self._status.setStyleSheet(f"color: {tokens.Win.TEXT_MUTED};")
+        self._path_label.setText(self._display_path(self._saved_path))
+        self._path_label.setEnabled(self._saved_path is not None)
+
+    def _on_edited(self) -> None:
+        """Any change to the ink makes the window dirty -- the footer says
+        so, and Copy or Save As is what clears it again.
+        """
+        self._dirty = True
+        self._refresh_status()
+        self._refresh_badges()
+
+    # -- badges ----------------------------------------------------------
+
+    def _refresh_badges(self) -> None:
+        count = len(self._store)
+        marks = "" if count == 0 else (
+            "  ·  1 mark" if count == 1 else f"  ·  {count} marks"
+        )
+        self._dimension_badge.setText(
+            f"{self._image.width()} × {self._image.height()}{marks}"
+        )
+        self._zoom_badge.setText(f"−   {self._canvas.zoom}%   +")
+        self._dimension_badge.adjustSize()
+        self._zoom_badge.adjustSize()
+        self._place_overlays()
+
+    def _place_overlays(self) -> None:
+        inset_h, inset_v = tokens.WinMetric.REVIEW_BADGE_INSET
+        self._dimension_badge.move(inset_h, inset_v)
+        self._zoom_badge.move(
+            self._canvas.width() - inset_h - self._zoom_badge.width(), inset_v
+        )
+        bar = getattr(self, "_bar", None)
+        if bar is not None and bar.isVisible():
+            size = bar.sizeHint()
+            bar.setGeometry(
+                round((self._canvas.width() - size.width()) / 2),
+                self._canvas.height() - tokens.WinMetric.REVIEW_BAR_BOTTOM - size.height(),
+                size.width(),
+                size.height(),
+            )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place_overlays()
+
+    # -- actions ---------------------------------------------------------
+
+    def _set_annotating(self, annotating: bool) -> None:
+        self._canvas.set_annotating(annotating)
+        self._bar.setVisible(annotating)
+        self._annotate_button.setText("Done annotating" if annotating else "Annotate")
+        self._place_overlays()
 
     @staticmethod
     def _display_path(path: Path | None) -> str:
-        """`~`-relative where possible: the full path of a screenshot is
-        mostly the user's own home directory read back at them.
+        """`~`-relative where possible: most of a screenshot's path is the
+        user's own home directory read back at them.
         """
         if path is None:
-            return ""
+            return "Not saved to disk"
         try:
             return f"~/{path.relative_to(Path.home())}"
         except ValueError:
             return str(path)
 
-    def _preview_pixmap(self) -> QPixmap:
-        pixmap = QPixmap.fromImage(self._image)
-        width, height = _MAX_PREVIEW
-        if pixmap.width() <= width and pixmap.height() <= height:
-            return pixmap
-        return pixmap.scaled(
-            width,
-            height,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-
     def copy(self) -> None:
-        """Put the snip on the clipboard again.
+        """Put the snip -- ink included -- on the clipboard, and clear the
+        dirty state.
 
-        Useful even for a snip that was copied on the way here: anything
-        else copied since has replaced it, and without this the only way
-        back is to re-take the capture.
+        Useful even for one copied on the way here: anything copied since
+        has replaced it.
         """
         clipboard = QGuiApplication.clipboard()
         if clipboard is not None:
-            clipboard.setImage(self._image)
-        self._status.setText("Copied to the clipboard.")
+            clipboard.setImage(self._canvas.rendered_image())
+        self._dirty = False
+        self._refresh_status()
 
     def save_as(self, path: Path | str | None = None) -> Path | None:
-        """Write the snip somewhere the user picks. Returns the path
-        written, or None if they cancelled.
+        """Write the snip where the user picks. Returns the path, or None if
+        cancelled.
 
         `path` is only ever passed by tests -- QFileDialog cannot be driven
-        from an offscreen platform, and mocking Qt's own static method to
-        test our handling of its result tests the mock, not us.
+        offscreen, and mocking Qt's own static method would test the mock.
         """
         if path is None:
             chosen, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save snip",
-                str(self._suggested_path()),
-                "PNG image (*.png)",
+                self, "Save snip", str(self._suggested_path()), "PNG image (*.png)"
             )
             if not chosen:
                 return None
             path = chosen
         path = Path(path)
-        # An extension-less filename typed into the dialog would otherwise
-        # be written as a PNG named without one, which nothing opens by
-        # double-click.
+        # An extension-less name typed into the dialog would be written as a
+        # PNG that nothing opens by double-click.
         if path.suffix == "":
             path = path.with_suffix(".png")
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not self._image.save(str(path), "PNG"):
-            self._status.setText(f"Could not write {self._display_path(path)}.")
+        if not self._canvas.rendered_image().save(str(path), "PNG"):
+            self._status.setText(f"Could not write {self._display_path(path)}")
+            self._status.setStyleSheet(f"color: {tokens.Win.ERR_FG};")
             return None
         self._saved_path = path
+        self._dirty = False
         self._folder_button.setEnabled(True)
-        self._status.setText(f"Saved to {self._display_path(path)}")
+        self.title_label.setText(path.name)
+        self._refresh_status()
         return path
 
     def _suggested_path(self) -> Path:
         if self._saved_path is not None:
             return self._saved_path
-        return Path.home() / "Pictures" / "snipux"
+        return setup_desktop.load_save_folder() / "snip.png"
 
     def show_in_folder(self) -> None:
         """Open the containing directory in the file manager.
 
-        The directory, not the file: `openUrl` on a PNG opens an image
-        viewer, which is not what "show in folder" means anywhere else.
+        The directory, not the file: opening a PNG launches an image viewer,
+        which is not what "show in folder" means anywhere else.
         """
         if self._saved_path is None:
             return

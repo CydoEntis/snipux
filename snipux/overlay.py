@@ -48,6 +48,7 @@ from PyQt6.QtWidgets import (
 
 from snipux import design
 from snipux.capture import BackendRegistry, CaptureError, Frame
+from snipux.marks import MarkStore, begin_stroke, extend_stroke
 from snipux.shapes import (
     Arrow,
     Blur,
@@ -890,8 +891,20 @@ class FloatingBar(QWidget):
     # _TOP_CLEARANCE/_BAR_ROOM already follow for prose-only constants.
     _TOP_MAX_FROM_BOTTOM = 118
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, capture_chip: bool = True, trailing: str = "save"):
+        """`capture_chip` and `trailing` exist for the review window, which
+        instantiates this very widget rather than growing a second one --
+        see `docs/design/handoff-windows.md`, "Annotate mode".
+
+        There is nothing left to capture in that window, so its bar has no
+        capture-mode chip; and its footer already owns Copy and Save As, so
+        its trailing action is `Done` instead. Those are the only two
+        differences the design allows, which is why they are the only two
+        parameters.
+        """
         super().__init__(parent)
+        self._has_capture_chip = capture_chip
+        self._trailing = trailing
         # The widget's own backdrop is transparent so paintEvent's alpha
         # fill is the only thing establishing a background colour --
         # without this attribute Qt composites the widget as opaque and the
@@ -919,6 +932,8 @@ class FloatingBar(QWidget):
         self._last_bounds: QRectF | None = None
 
         self._chip = self._build_capture_chip()
+        if not capture_chip:
+            self._chip.hide()
         self._chip.clicked.connect(self.captureChipClicked)
         layout.addWidget(self._chip)
         self._add_divider(layout)
@@ -990,10 +1005,14 @@ class FloatingBar(QWidget):
         )
 
     def _build_save_button(self) -> _PillButton:
+        """The bar's trailing action: `Save` in the overlay, `Done` in the
+        review window, whose footer already owns the exports.
+        """
         metric = design.tokens.Metric
+        done = self._trailing == "done"
         return _PillButton(
-            "save",
-            "Save",
+            "check" if done else "save",
+            "Done" if done else "Save",
             icon_size=metric.ICON,
             text_color=design.color("TEXT_PRIMARY"),
             # No token names this fill on its own; it is the same
@@ -1004,7 +1023,7 @@ class FloatingBar(QWidget):
             icon_after=False,
             pad_left=13,
             pad_right=13,
-            tooltip="Save",
+            tooltip="Done" if done else "Save",
         )
 
     # -- capture mode (SNX-44) --------------------------------------------
@@ -3119,7 +3138,12 @@ class OverlayWindow(QWidget):
         # space `_selection` lives in above -- never translated relative to
         # the selection, per the class docstring. Paint order is the list
         # order, mirroring shapes.py's render().
-        self._marks: list[Shape] = []
+        # The ink layer and its history now live in a MarkStore, which the
+        # review window's Annotate mode drives too -- see snipux/marks.py.
+        # `_marks` stays as a read-only view so this file's many painting
+        # and hit-testing sites read exactly as they did.
+        self._mark_store = MarkStore(self)
+        self._mark_store.changed.connect(self._on_marks_changed)
         # SNX-63: cached output of `_base_layer_image` -- `(key, image)`,
         # or None before the first paint -- so a repaint triggered by
         # something unrelated to any committed `ObscuringShape` (an
@@ -3140,8 +3164,7 @@ class OverlayWindow(QWidget):
         # just the newest mark -- undo/redo back to exactly the position it
         # happened at, the same way an 'add' 's end-of-list position always
         # has.
-        self._undo: list[_MarkAction] = []
-        self._redo: list[_MarkAction] = []
+
 
         # Eraser tool state. False until the floating bar's eraser button
         # (via `_on_tool_selected`) arms it through `set_eraser_active` --
@@ -3973,9 +3996,21 @@ class OverlayWindow(QWidget):
         committed after an undo makes whatever was undone unreachable by
         redo again, same as any ordinary undo/redo history.
         """
-        self._undo.append(_MarkAction("add", len(self._marks), shape))
-        self._marks.append(shape)
-        self._redo.clear()
+        self._mark_store.add(shape)
+
+    @property
+    def _marks(self) -> tuple[Shape, ...]:
+        """Read-only view of the store, so this file's painting and
+        hit-testing sites read exactly as they did before the model moved
+        out. Every mutation goes through `_mark_store`.
+        """
+        return self._mark_store.marks
+
+    def _on_marks_changed(self) -> None:
+        """The single place anything reacts to the ink layer changing --
+        the bar's undo/redo buttons and a repaint, once, however the change
+        arrived.
+        """
         self._sync_bar_undo_redo()
         self.update()
 
@@ -3983,7 +4018,7 @@ class OverlayWindow(QWidget):
     def marks(self) -> tuple[Shape, ...]:
         """Ink layer contents, in paint order. A copy, not the live list,
         mirroring `Canvas.shapes` in editor.py."""
-        return tuple(self._marks)
+        return self._mark_store.marks
 
     # -- undo / redo / clear (SNX-39; SNX-70 folds the eraser in, SNX-72 the
     # -- clear button) ------------------------------------------------------
@@ -4000,11 +4035,11 @@ class OverlayWindow(QWidget):
 
     @property
     def can_undo(self) -> bool:
-        return bool(self._undo)
+        return self._mark_store.can_undo
 
     @property
     def can_redo(self) -> bool:
-        return bool(self._redo)
+        return self._mark_store.can_redo
 
     def undo(self) -> None:
         """Invert the newest action on the undo stack and move it to the
@@ -4020,18 +4055,7 @@ class OverlayWindow(QWidget):
         draw order they were in before the clear. A no-op with nothing to
         undo.
         """
-        if not self._undo:
-            return
-        action = self._undo.pop()
-        if action.kind == "add":
-            self._marks.pop(action.index)
-        elif action.kind == "erase":
-            self._marks.insert(action.index, action.shape)
-        else:
-            self._marks = list(action.shape)
-        self._redo.append(action)
-        self._sync_bar_undo_redo()
-        self.update()
+        self._mark_store.undo()
 
     def redo(self) -> None:
         """Replay the newest action on the redo stack and move it back to
@@ -4046,18 +4070,7 @@ class OverlayWindow(QWidget):
         or a mark committed since (see `add_mark`) already cleared the
         stack.
         """
-        if not self._redo:
-            return
-        action = self._redo.pop()
-        if action.kind == "add":
-            self._marks.insert(action.index, action.shape)
-        elif action.kind == "erase":
-            self._marks.pop(action.index)
-        else:
-            self._marks = []
-        self._undo.append(action)
-        self._sync_bar_undo_redo()
-        self.update()
+        self._mark_store.redo()
 
     def clear(self) -> None:
         """Move every mark to the undo stack as a single step, and toast
@@ -4077,14 +4090,8 @@ class OverlayWindow(QWidget):
         does not push an empty step, matching `undo`/`redo`'s own
         "nothing to do" contract.
         """
-        if not self._marks:
-            return
-        self._undo.append(_MarkAction("clear", 0, tuple(self._marks)))
-        self._marks = []
-        self._redo.clear()
-        self._sync_bar_undo_redo()
-        self._show_toast("trash", "Ink cleared")
-        self.update()
+        if self._mark_store.clear():
+            self._show_toast("trash", "Ink cleared")
 
     def discard(self) -> None:
         """Discard every mark and both stacks outright, and toast
@@ -4108,11 +4115,7 @@ class OverlayWindow(QWidget):
         stacks, and resync the bar's undo/redo buttons, without deciding
         which toast (if any) to show -- that choice is the caller's own.
         """
-        self._marks = []
-        self._undo = []
-        self._redo = []
-        self._sync_bar_undo_redo()
-        self.update()
+        self._mark_store.reset()
 
     def _cancel(self) -> None:
         """The close button's own handler (SNX-80): discard any ink and
@@ -4164,15 +4167,7 @@ class OverlayWindow(QWidget):
         the private single-slot `undo_erase` this used to feed that nothing
         in the UI ever called.
         """
-        for index in range(len(self._marks) - 1, -1, -1):
-            if self._marks[index].hit_test(point):
-                shape = self._marks.pop(index)
-                self._undo.append(_MarkAction("erase", index, shape))
-                self._redo.clear()
-                self._sync_bar_undo_redo()
-                self.update()
-                return shape
-        return None
+        return self._mark_store.erase(point)
 
     def rendered_image(self) -> QImage:
         """The final exported image: `_marks` flattened onto the current
@@ -4608,25 +4603,20 @@ class OverlayWindow(QWidget):
         tool = self._bar.active_tool
         colour = QColor(self._ink_colour)
 
-        if tool in _FREEHAND_MARK_CLASSES:
-            shape_class = _FREEHAND_MARK_CLASSES[tool]
-            self._in_progress_shape = shape_class(
-                colour=colour, stroke_width=self._stroke_width, points=[pos]
-            )
-        elif tool in _TWO_POINT_MARK_CLASSES:
-            shape_class = _TWO_POINT_MARK_CLASSES[tool]
-            self._in_progress_shape = shape_class(
-                colour=colour, stroke_width=self._stroke_width, start=pos, end=pos
-            )
-        elif tool == "blur":
-            shape_class = Blur if self._blur_mode == "blur" else Pixelate
-            self._in_progress_shape = shape_class(
-                colour=colour,
-                stroke_width=self._stroke_width,
-                start=pos,
-                end=pos,
-                strength=self._blur_strength,
-            )
+        # One factory, shared with the review window's Annotate mode -- see
+        # snipux/marks.py. `step` and `text` fall through to their own
+        # click-only handling below, which is why `begin_stroke` returns
+        # None for them rather than pretending they are drags.
+        started = begin_stroke(
+            tool,
+            pos,
+            colour=colour,
+            stroke_width=self._stroke_width,
+            blur_mode=self._blur_mode,
+            blur_strength=self._blur_strength,
+        )
+        if started is not None:
+            self._in_progress_shape = started
         elif tool == "step":
             # Click only -- no drag, no `_in_progress_shape`, per the spec.
             self.add_mark(
@@ -4653,10 +4643,7 @@ class OverlayWindow(QWidget):
         `Canvas.mouseMoveEvent` makes, since both classes of shape share
         the same field names (see shapes.py's `_transformed` docstring).
         """
-        if isinstance(self._in_progress_shape, (Pen, Highlighter)):
-            self._in_progress_shape.points.append(pos)
-        else:
-            self._in_progress_shape.end = pos
+        extend_stroke(self._in_progress_shape, pos)
         self.update()
 
     # -- text tool (SNX-52) -------------------------------------------------
