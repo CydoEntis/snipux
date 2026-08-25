@@ -47,7 +47,7 @@ from snipux.overlay import (
     UnsupportedGeometryProvider,
     open_overlay,
 )
-from snipux import platform, setup_desktop
+from snipux import design, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
@@ -105,7 +105,11 @@ def save_image(image: QImage, directory: Path | str | None = None) -> Path:
     return path
 
 
-_LOGO_DIR = Path(__file__).resolve().parent / "design" / "logo"
+# design.PACKAGE_DIR (SNX-96) rather than a second Path(__file__)-based
+# guess: it already knows the difference between a source checkout/pip
+# install and a PyInstaller bundle, and this logo ships inside the bundle
+# the same way the rest of design/ does.
+_LOGO_DIR = design.PACKAGE_DIR / "design" / "logo"
 
 
 def load_app_icon() -> QIcon:

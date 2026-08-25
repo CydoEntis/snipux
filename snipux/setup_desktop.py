@@ -35,9 +35,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .design import tokens
+from .design import PACKAGE_DIR, tokens
 
-_TEMPLATE_PATH = Path(__file__).resolve().parent / "snipux.desktop"
+# PACKAGE_DIR (snipux/design/__init__.py) rather than a second
+# Path(__file__)-based guess: it already knows the difference between a
+# source checkout/pip install and a PyInstaller bundle (SNX-96), and this
+# template ships inside the bundle the same way the design assets do.
+_TEMPLATE_PATH = PACKAGE_DIR / "snipux.desktop"
 _LAUNCHER_PLACEHOLDER = "Exec=__SNIPUX_LAUNCHER__"
 
 _MEDIA_KEYS_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
@@ -75,7 +79,9 @@ _GSETTINGS_MODIFIERS = {
 # anything with whitespace in it.
 _SHORTCUT_RE = re.compile(r"^(<[A-Za-z]+>)*[A-Za-z0-9_]+$")
 
-_LOGO_DIR = Path(__file__).resolve().parent / "design" / "logo"
+# Same reasoning as _TEMPLATE_PATH above: derived from PACKAGE_DIR so this
+# resolves correctly inside a PyInstaller bundle too, not just a checkout.
+_LOGO_DIR = PACKAGE_DIR / "design" / "logo"
 # Matches the vendored logo/snipux-<size>.png files -- SNX-81: not
 # design/logo/snipux.png (the unsized master), and not anything else that
 # could later land in the same directory.
@@ -88,8 +94,16 @@ def find_console_script() -> Path | None:
     `pyproject.toml`'s `[project.scripts]` entry, not just whatever a shell
     happens to resolve "snipux" to.
 
-    `sys.executable`'s own directory is checked first: pip (and pipx, and
-    the venv `packaging/install.sh` builds) always installs a
+    `sys.frozen` (SNX-96) is checked first: a PyInstaller bundle -- the
+    Windows executable `packaging/windows/` builds -- *is* its own console
+    script, with no separate pip-generated wrapper for `sys.executable`'s
+    directory to hold, and the whole point of that bundle is to run on a
+    machine that may have no other Python at all for `shutil.which` to find
+    below. `sys.frozen` is PyInstaller's own marker for this on every
+    platform it targets, not a Windows-specific check.
+
+    Otherwise, `sys.executable`'s own directory is checked first: pip (and
+    pipx, and the venv `packaging/install.sh` builds) always installs a
     distribution's console scripts into the same `bin/` directory as the
     Python interpreter that runs them, so this is right regardless of venv,
     pipx, or `--user` layout. `sys.argv[0]` is deliberately not used for
@@ -98,6 +112,9 @@ def find_console_script() -> Path | None:
     be trusted to already be absolute. `shutil.which` is the fallback for a
     layout that guess doesn't fit.
     """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+
     candidate = Path(sys.executable).resolve().parent / "snipux"
     if candidate.is_file():
         return candidate
