@@ -7869,19 +7869,22 @@ class TestTheDestinationMenuFitsItsWidth:
         )
         return width, QFontMetricsF(_font(11, 400)), QFontMetricsF(_font(12.5, 500))
 
-    @skip_on_windows(
-        "this budget is measured against the font `_font()` actually "
-        "resolves (matching production's own paintEvent), not a hard-coded "
-        "number -- but IBM Plex isn't vendored yet (design/fonts/ is empty "
-        "in this handoff), so the resolved substitute is whatever the "
-        "platform's own GeneralFont fallback is. Linux's fallback happens to "
-        "fit the panel; Windows' offscreen-QPA fallback is markedly wider "
-        "and overruns it. Production already elides safely when that "
-        "happens (see chooser.py's `_MenuRow.paintEvent`), so this is a "
-        "no-eliding-needed guarantee that only holds where a narrow enough "
-        "font is actually available, not a regression."
-    )
     def test_every_note_fits_without_eliding(self):
+        # This budget is measured against the font `_font()` actually
+        # resolves (matching production's own paintEvent), not a hard-coded
+        # number -- but IBM Plex isn't vendored yet (design/fonts/ doesn't
+        # exist in this handoff), so the resolved substitute is whatever
+        # *this machine's* own GeneralFont fallback happens to be. That is a
+        # fact about the box the suite runs on, not the OS family: gating
+        # this on sys.platform (an earlier version of this test did) is
+        # exactly backwards, since a narrow-enough Linux fallback is not
+        # guaranteed either -- only that *some* machines have one. Skip only
+        # when the assertion would actually fail *and* the reason is the
+        # known one (no real Plex installed), rather than assuming a whole
+        # OS one way or the other; production already elides safely when a
+        # note doesn't fit (see chooser.py's `_MenuRow.paintEvent`), so this
+        # is a no-eliding-needed guarantee that only holds where a narrow
+        # enough font is actually available, not a regression.
         width, note_fm, _label_fm = self._budget()
 
         too_wide = {
@@ -7889,6 +7892,17 @@ class TestTheDestinationMenuFitsItsWidth:
             for value, note in tokens.CHOOSER_AFTER_NOTE.items()
             if note_fm.horizontalAdvance(note) > width
         }
+
+        resolved_ui = font_families().ui
+        if too_wide and resolved_ui != tokens.Font.UI:
+            pytest.skip(
+                "IBM Plex Sans is not registered on this box (design/fonts/ "
+                f"isn't vendored yet), so this budget is measured against "
+                f"whatever fallback font ({resolved_ui!r}) this machine's "
+                "Qt install substitutes instead -- wide enough here to "
+                "overrun the panel, which production already elides safely "
+                "for (see chooser.py's `_MenuRow.paintEvent`)."
+            )
 
         assert too_wide == {}, f"notes wider than {width}px: {too_wide}"
 
