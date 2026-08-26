@@ -200,6 +200,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "key such as Print Screen)",
     )
     group.add_argument(
+        "--settings",
+        action="store_true",
+        help="open the Settings window -- asking an already-running snipux "
+        "instance to raise its own if there is one, starting one first if "
+        "not (same rule --snip follows). The way in on a machine with no "
+        "tray icon, e.g. stock GNOME without the AppIndicator extension",
+    )
+    group.add_argument(
         "--setup",
         action="store_true",
         help="install the desktop entry, autostart entry, and GNOME "
@@ -320,6 +328,26 @@ def main(
         transport.send_snip_request()
         return 0
 
+    if args.settings:
+        # SNX-78: the same forward-or-become-resident shape as --snip just
+        # above, and for the same reason -- a standalone Settings window in
+        # its own short-lived process could not rebind a live Windows
+        # `RegisterHotKey` registration (that belongs to the one process
+        # that is actually resident), and would just be a second,
+        # disconnected window next to a GNOME session's already-running
+        # instance. Reaching the one process that actually owns the tray
+        # (or becoming it, if none is running yet) is what lets Save take
+        # effect without a restart on every platform, not just GNOME's.
+        if transport is None:
+            transport = QLocalSocketTransport()
+        _ensure_qapplication()
+        if transport.try_claim():
+            if registry is None:
+                registry = build_default_registry()
+            return _become_resident(registry, transport, open_settings_immediately=True)
+        transport.send_settings_request()
+        return 0
+
     if registry is None:
         registry = build_default_registry()
 
@@ -366,9 +394,24 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def listen(self, on_request: Callable[[], None]) -> None:
-        """Primary-instance only: call `on_request` once for every snip
-        request a later, non-primary launch forwards.
+    def send_settings_request(self) -> None:
+        """Ask the primary instance to raise its Settings window (SNX-78).
+        Same shape as `send_snip_request`, and for the same reason: a
+        `--settings` launch that found an instance already resident hands
+        the request to it rather than opening a second, disconnected
+        window that could never rebind that instance's own live hotkey
+        registration.
+        """
+
+    @abstractmethod
+    def listen(
+        self,
+        on_snip_request: Callable[[], None],
+        on_settings_request: Callable[[], None],
+    ) -> None:
+        """Primary-instance only: call `on_snip_request` for every snip
+        request, and `on_settings_request` for every Settings request, that
+        a later, non-primary launch forwards.
         """
 
 
@@ -380,8 +423,10 @@ class QLocalSocketTransport(Transport):
     alongside `QtCore`/`QtGui`/`QtWidgets`, the same way capture.py already
     reaches `QtGui` without declaring it separately.
 
-    The protocol is one byte: `_REQUEST_BYTE` means "take a snip", and a
-    connection that sends nothing is only asking whether anyone is home.
+    The protocol is one byte: `_REQUEST_BYTE` means "take a snip",
+    `_SETTINGS_REQUEST_BYTE` (SNX-78) means "raise the Settings window",
+    and a connection that sends nothing is only asking whether anyone is
+    home.
 
     That distinction is load-bearing, not ceremony. `try_claim()` probes by
     connecting, so when a bare connection *was* the request, every liveness
@@ -394,6 +439,7 @@ class QLocalSocketTransport(Transport):
     SERVER_NAME = "snipux-resident"
     _CONNECT_TIMEOUT_MS = 200
     _REQUEST_BYTE = b"S"
+    _SETTINGS_REQUEST_BYTE = b"T"
     # Long enough that a request is never lost to scheduling, short enough
     # that a probe (which sends nothing) doesn't hold the handler up.
     _READ_TIMEOUT_MS = 200
@@ -432,18 +478,28 @@ class QLocalSocketTransport(Transport):
         return True
 
     def send_snip_request(self) -> None:
+        self._send(self._REQUEST_BYTE)
+
+    def send_settings_request(self) -> None:
+        self._send(self._SETTINGS_REQUEST_BYTE)
+
+    def _send(self, payload: bytes) -> None:
         socket = QLocalSocket()
         socket.connectToServer(self._server_name)
         if not socket.waitForConnected(self._CONNECT_TIMEOUT_MS):
             return
-        socket.write(self._REQUEST_BYTE)
+        socket.write(payload)
         # Flushed before disconnecting: this process exits the moment
         # `main()` returns, and an unflushed byte dies with it -- the
         # request would be sent, accepted, and silently empty.
         socket.waitForBytesWritten(self._CONNECT_TIMEOUT_MS)
         socket.disconnectFromServer()
 
-    def listen(self, on_request: Callable[[], None]) -> None:
+    def listen(
+        self,
+        on_snip_request: Callable[[], None],
+        on_settings_request: Callable[[], None],
+    ) -> None:
         if self._server is None:
             raise RuntimeError("listen() called before a successful try_claim()")
 
@@ -452,14 +508,17 @@ class QLocalSocketTransport(Transport):
             if connection is None:
                 return
             # A probe sends nothing and simply times out here, which is
-            # exactly how it stays distinguishable from a request.
-            requested = (
-                connection.waitForReadyRead(self._READ_TIMEOUT_MS)
-                and connection.readAll().data().startswith(self._REQUEST_BYTE)
+            # exactly how it stays distinguishable from either request.
+            received = (
+                connection.readAll().data()
+                if connection.waitForReadyRead(self._READ_TIMEOUT_MS)
+                else b""
             )
             connection.disconnectFromServer()
-            if requested:
-                on_request()
+            if received.startswith(self._REQUEST_BYTE):
+                on_snip_request()
+            elif received.startswith(self._SETTINGS_REQUEST_BYTE):
+                on_settings_request()
 
         self._server.newConnection.connect(_accept)
 
@@ -564,7 +623,7 @@ class AppController:
                 "quit it, kill this process."
             )
 
-        self._transport.listen(self.start_capture)
+        self._transport.listen(self.start_capture, self.open_settings)
 
     def open_settings(self) -> None:
         """Show the Settings window, or raise the one already open.
@@ -797,6 +856,11 @@ class AppController:
             frame,
             geometries,
             wayland=detect_session_type() == "wayland",
+            # Read fresh for each snip, the same reasoning `_on_captured`'s
+            # own `load_review_window()` call uses -- the Settings toggle
+            # must take effect on the very next capture, not just the next
+            # launch.
+            hints_enabled=setup_desktop.load_hints_enabled(),
             geometry_provider=self._geometry_provider,
             # So a delayed capture (SNX-50's re-grab) and Window/Full
             # screen mode inside the overlay itself have the same registry
@@ -920,6 +984,7 @@ def _become_resident(
     registry: BackendRegistry,
     transport: Transport,
     start_capture_immediately: bool = False,
+    open_settings_immediately: bool = False,
 ) -> int:
     """Build the `QApplication`/`AppController` and run the event loop.
 
@@ -929,14 +994,16 @@ def _become_resident(
     itself as not primary, so becoming primary is always a precondition
     here rather than something this function repeats.
 
-    Shared by `run_resident_app()` (a bare `snipux` launch) and `main()`'s
-    `--snip` path when nothing was resident yet: refusing to start one
-    there made whether Super+Shift+S did anything at all depend on
-    invisible state the user had no way to see (SNX-53). Whether the
-    overlay opens right away is what tells the two callers apart -- a bare
-    launch opens idle to the tray, a `--snip` launch that just became
-    primary shows the overlay immediately, the same as if it had forwarded
-    to an instance that was already up.
+    Shared by `run_resident_app()` (a bare `snipux` launch), `main()`'s
+    `--snip` path, and its `--settings` path (SNX-78), whenever nothing was
+    resident yet: refusing to start one there made whether Super+Shift+S
+    did anything at all depend on invisible state the user had no way to
+    see (SNX-53), and the same would be true of a `--settings` launch on a
+    machine with no tray to fall back on. `start_capture_immediately`/
+    `open_settings_immediately` are what tell the three callers apart -- a
+    bare launch opens idle to the tray, `--snip` opens the overlay right
+    away, and `--settings` opens Settings right away, each the same as if
+    it had forwarded its request to an instance that was already up.
 
     `install_hotkey_listener()` runs here, once, for the same reason: this
     is the process that is actually resident, so it is the one that should
@@ -957,6 +1024,8 @@ def _become_resident(
     controller.run_first_launch_setup()
     if start_capture_immediately:
         controller.start_capture()
+    if open_settings_immediately:
+        controller.open_settings()
     return app.exec()
 
 

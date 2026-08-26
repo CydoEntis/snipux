@@ -484,6 +484,22 @@ def save_remember_tool(enabled: bool, config_dir: Path | None = None) -> bool:
     return _write_config("remember_tool", bool(enabled), config_dir)
 
 
+def load_hints_enabled(config_dir: Path | None = None) -> bool:
+    """Whether the overlay's top hint HUD (SNX-46) is shown from the start
+    of a session.
+
+    Off unless explicitly turned back on -- SNX-65 turned it off by
+    default, and this is the one place that default can be reversed for
+    good, rather than reaching for the overlay's own `?` escape hatch
+    every single session.
+    """
+    return _read_config(config_dir).get("hints_enabled") is True
+
+
+def save_hints_enabled(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("hints_enabled", bool(enabled), config_dir)
+
+
 def load_tray_toggles(config_dir: Path | None = None) -> dict:
     """The four `tokens.TRAY_TOGGLES`, each falling back to its own default
     rather than to False -- three of the four ship on.

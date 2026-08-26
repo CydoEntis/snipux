@@ -33,6 +33,7 @@ from snipux.capture import (
 )
 from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
 from snipux.platform import windows as windows_platform
+from snipux.settings import SettingsDialog
 
 FILL_COLOR = qRgb(10, 20, 30)
 
@@ -424,12 +425,25 @@ class FakeTransport(Transport):
         if primary_on_request is not None:
             primary_on_request()
 
-    def listen(self, on_request) -> None:
+    def send_settings_request(self) -> None:
+        self._state["forwarded_settings_requests"] += 1
+        primary_on_settings_request = self._state["primary_on_settings_request"]
+        if primary_on_settings_request is not None:
+            primary_on_settings_request()
+
+    def listen(self, on_request, on_settings_request) -> None:
         self._state["primary_on_request"] = on_request
+        self._state["primary_on_settings_request"] = on_settings_request
 
 
 def make_transport_state() -> dict:
-    return {"claimed": False, "forwarded_requests": 0, "primary_on_request": None}
+    return {
+        "claimed": False,
+        "forwarded_requests": 0,
+        "forwarded_settings_requests": 0,
+        "primary_on_request": None,
+        "primary_on_settings_request": None,
+    }
 
 
 class TestSnipFlag:
@@ -538,6 +552,78 @@ class TestSnipFlag:
     def test_mutually_exclusive_with_list_backends(self):
         with pytest.raises(SystemExit) as excinfo:
             main(["--snip", "--list-backends"])
+
+        assert excinfo.value.code != 0
+
+
+class TestSettingsFlag:
+    """SNX-78: `--settings` follows the same forward-or-become-resident
+    shape `TestSnipFlag` above already covers for `--snip`, and for the
+    same reason -- it is the way in on a machine with no tray icon to
+    click "Settings..." on (stock GNOME without the AppIndicator
+    extension).
+    """
+
+    def test_forwards_to_an_already_running_instance(self):
+        state = make_transport_state()
+        state["claimed"] = True  # simulates a resident instance already running
+
+        exit_code = main(["--settings"], transport=FakeTransport(state))
+
+        assert exit_code == 0
+        assert state["forwarded_settings_requests"] == 1
+        # The *settings* request forwarded, never a snip -- a machine with
+        # no tray asking to configure snipux must not also take a capture.
+        assert state["forwarded_requests"] == 0
+
+    def test_starts_a_resident_instance_and_opens_settings_when_nothing_is_running(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        state = make_transport_state()  # fresh: nothing resident yet
+
+        try:
+            exit_code = main(
+                ["--settings"], registry=registry, transport=FakeTransport(state)
+            )
+
+            assert exit_code == 0
+            assert state["forwarded_settings_requests"] == 0
+            assert len(created) == 1
+            # Stayed resident, same as --snip's own equivalent test -- the
+            # *next* --settings (or --snip) is forwarded to it rather than
+            # this whole dance repeating and racing a second instance.
+            assert state["primary_on_settings_request"] is not None
+            # And Settings opened immediately, the whole point of running
+            # the flag, rather than only reaching an idle tray a Settings
+            # request would still have to be forwarded to.
+            assert isinstance(created[0]._settings, SettingsDialog)
+            # No overlay: --settings must not also start a capture.
+            assert created[0]._overlay is None
+        finally:
+            if created and created[0]._settings is not None:
+                created[0]._settings.close()
+            if created:
+                created[0]._tray_icon.hide()
+
+    def test_mutually_exclusive_with_snip(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--settings", "--snip"])
+
+        assert excinfo.value.code != 0
+
+    def test_mutually_exclusive_with_list_backends(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--settings", "--list-backends"])
 
         assert excinfo.value.code != 0
 
@@ -791,10 +877,23 @@ class TestTransportSingleInstance:
         second = FakeTransport(state)
         first.try_claim()
         received = []
-        first.listen(lambda: received.append(True))
+        first.listen(lambda: received.append(True), lambda: None)
 
         second.try_claim()
         second.send_snip_request()
+
+        assert received == [True]
+
+    def test_forwarded_settings_request_reaches_the_primarys_listener(self):
+        state = make_transport_state()
+        first = FakeTransport(state)
+        second = FakeTransport(state)
+        first.try_claim()
+        received = []
+        first.listen(lambda: None, lambda: received.append(True))
+
+        second.try_claim()
+        second.send_settings_request()
 
         assert received == [True]
 
@@ -846,6 +945,25 @@ class TestAppControllerCapture:
         # picks Region/Window/Full screen/Freeform now, so nothing here
         # constructs the old editor.py window either.
         assert isinstance(controller._overlay, OverlayWindow)
+
+    def test_start_capture_reads_the_hint_bar_preference_fresh_from_settings(
+        self, make_controller, monkeypatch
+    ):
+        # AC (SNX-78): toggling the hint-bar preference in Settings takes
+        # effect on the very next snip, the same "read fresh, not cached at
+        # startup" rule `_on_captured`'s own `load_review_window()` call
+        # already follows for the after-capture behaviour.
+        monkeypatch.setattr(app.setup_desktop, "load_hints_enabled", lambda cd=None: True)
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        controller = make_controller(
+            registry,
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+
+        controller.start_capture()
+
+        assert controller._overlay.hints_enabled is True
 
     def test_start_capture_passes_the_controllers_geometry_provider_to_the_overlay(
         self, make_controller
@@ -1815,7 +1933,7 @@ class TestSnipRequestProtocol:
         server = app.QLocalSocketTransport(name)
         assert server.try_claim()
         fired = []
-        server.listen(lambda: fired.append(True))
+        server.listen(lambda: fired.append(True), lambda: None)
 
         probe = app.QLocalSocketTransport(name)
         assert probe.try_claim() is False  # the probe connects, then gives up
@@ -1841,7 +1959,7 @@ class TestSnipRequestProtocol:
         server = app.QLocalSocketTransport(name)
         assert server.try_claim()
         fired = []
-        server.listen(lambda: fired.append(True))
+        server.listen(lambda: fired.append(True), lambda: None)
 
         client = app.QLocalSocketTransport(name)
         client.send_snip_request()
@@ -1852,6 +1970,37 @@ class TestSnipRequestProtocol:
                 break
 
         assert fired == [True]
+
+    @skip_on_windows(
+        "Same nested-wait timing gap test_a_real_request_is_delivered "
+        "documents for the snip byte -- the settings byte goes through the "
+        "identical _accept() path, on the identical Windows named-pipe "
+        "backend."
+    )
+    def test_a_settings_request_is_delivered_and_never_fires_a_snip(self, tmp_path):
+        # SNX-78: --settings and --snip share one connection handler
+        # (`_accept()`), dispatching on which byte arrived -- proving the
+        # settings byte reaches `on_settings_request`, and only that
+        # callback, is what proves the dispatch (not just the byte) is
+        # correct.
+        name = f"snipux-test-settings-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        snip_fired, settings_fired = [], []
+        server.listen(
+            lambda: snip_fired.append(True), lambda: settings_fired.append(True)
+        )
+
+        client = app.QLocalSocketTransport(name)
+        client.send_settings_request()
+        for _ in range(20):
+            QApplication.processEvents()
+            QTest.qWait(20)
+            if settings_fired:
+                break
+
+        assert settings_fired == [True]
+        assert snip_fired == []
 
 
 class TestASecondRequestSurfacesTheOverlay:
