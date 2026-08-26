@@ -530,10 +530,15 @@ class SettingsWindow(WinWindow):
         self._nav_group.idClicked.connect(self._show_pane)
 
         column.addStretch()
-        version = QLabel(setup_desktop.version_line())
-        version.setFont(_ui_font(11, 400))
-        version.setStyleSheet(f"color: {tokens.Win.TEXT_DISABLED};")
-        column.addWidget(version)
+        self._version_label = QLabel(setup_desktop.version_line())
+        self._version_label.setFont(_ui_font(11, 400))
+        self._version_label.setStyleSheet(f"color: {tokens.Win.TEXT_DISABLED};")
+        # The rail's width is fixed (NAV_W); a version/Qt/session-type line
+        # can run longer than that on some platforms, and this label has no
+        # room to grow into. Wrap rather than let Qt silently clip it to a
+        # single line -- the "unknow" truncation this exists to fix.
+        self._version_label.setWordWrap(True)
+        column.addWidget(self._version_label)
         return rail
 
     def _build_panes(self) -> QWidget:
@@ -697,8 +702,8 @@ class SettingsWindow(WinWindow):
         self._show_hints = SwitchRow(
             "Show the hint bar",
             "Esc discard ink · Enter copy & close, across the top of the "
-            "overlay. SNX-65 turned this off by default; press ? in the "
-            "overlay to reveal it for one session without changing this.",
+            "overlay. Off by default; press ? in the overlay to reveal it "
+            "for one session without changing this.",
             setup_desktop.load_hints_enabled(self._config_dir),
         )
         self._show_hints.switch.toggled.connect(lambda _c: self._mark_dirty())

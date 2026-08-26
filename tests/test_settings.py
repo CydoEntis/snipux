@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeyEvent
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QAbstractButton, QApplication, QLabel, QMessageBox
 
 from snipux import platform, setup_desktop
 from snipux.design import tokens
@@ -18,6 +20,11 @@ from snipux.settings import (
     ShortcutRecorder,
     accelerator_from_event,
 )
+
+# An internal tracker id (SNX-105, PROJ-42, ...) reads as a leaked note to
+# anyone outside the team maintaining this -- AC: none may appear in text a
+# user of the running app can actually see.
+_TICKET_ID = re.compile(r"\b[A-Z]{2,6}-\d+\b")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -312,6 +319,22 @@ class TestSettingsWindow:
 
         assert window._show_hints.switch.isChecked() is False
 
+    def test_the_hint_bar_description_says_what_it_does_not_why(self, tmp_path):
+        # AC: the description names what the switch controls and how to see
+        # it for one session, without citing the ticket that changed the
+        # default -- that reasoning means nothing to a user reading Settings.
+        window = self._window(tmp_path)
+
+        # SwitchRow doesn't keep its note QLabel as a named attribute, so
+        # find it the way a user would see it: the one other QLabel in the
+        # row besides the title.
+        labels = [c.text() for c in window._show_hints.findChildren(QLabel)]
+        note = next(t for t in labels if t != "Show the hint bar")
+
+        assert "press ? in the overlay" in note
+        assert "Esc discard ink" in note
+        assert not _TICKET_ID.search(note)
+
     def test_the_hint_bar_toggle_reads_back_through_the_named_setting(self, tmp_path):
         setup_desktop.save_hints_enabled(True, tmp_path)
 
@@ -410,6 +433,23 @@ class TestSettingsWindow:
 
         assert "Everything saved" in window._dirty_label.text()
 
+    def test_the_nav_rail_footer_wraps_rather_than_clips_the_version_line(self, tmp_path):
+        # AC: not clipped at the width the panel gives it. The nav rail is
+        # a fixed width (tokens.WinMetric.NAV_W) the label can't grow past,
+        # so a version/Qt/platform line too long for one line at that width
+        # must wrap onto another rather than being cut off mid-word, the
+        # way the ticket's "Qt 6.11.0 - unknow" was.
+        window = self._window(tmp_path)
+        label = window._version_label
+        window.grab()  # a full paintEvent -- CLAUDE.md's offscreen pattern
+
+        assert label.wordWrap() is True
+        # Proves wrapping is load-bearing here, not just set and unused:
+        # the text is wider than the width the rail actually granted the
+        # label, so without word wrap this exact case would still clip.
+        single_line_width = label.fontMetrics().horizontalAdvance(label.text())
+        assert single_line_width > label.width()
+
     def test_the_filename_preview_shows_a_real_path(self, tmp_path):
         window = self._window(tmp_path)
 
@@ -428,3 +468,52 @@ class TestSettingsWindow:
         window._save()
 
         assert setup_desktop.load_review_window(tmp_path) is True
+
+    def test_no_visible_text_in_the_window_names_a_ticket(self, tmp_path):
+        # AC: a test fails if any user-facing string contains a ticket
+        # identifier. Every pane is built eagerly in __init__ (see
+        # _build_panes), so a single window instance covers all four,
+        # including whichever isn't the one currently on top.
+        window = self._window(tmp_path)
+
+        texts = [window.windowTitle()]
+        for label in window.findChildren(QLabel):
+            texts.append(label.text())
+        for button in window.findChildren(QAbstractButton):
+            texts.append(button.text())
+            texts.append(button.toolTip())
+
+        offenders = [t for t in texts if t and _TICKET_ID.search(t)]
+        assert offenders == []
+
+
+class TestVersionLine:
+    """`setup_desktop.version_line()`'s trailing field -- what
+    `TestSettingsWindow`'s footer test above renders, tested here without a
+    `SettingsWindow` in the way.
+    """
+
+    def test_shows_the_session_type_on_linux(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.sys, "platform", "linux")
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+
+        assert setup_desktop.version_line().endswith("wayland")
+
+    def test_shows_a_platform_name_on_windows_rather_than_an_always_unknown_session_type(
+        self, monkeypatch
+    ):
+        # AC: Windows has no session-type concept, so the field must not be
+        # the "unknown" `detect_session_type()` would always report there.
+        monkeypatch.setattr(setup_desktop.sys, "platform", "win32")
+
+        line = setup_desktop.version_line()
+
+        assert line.endswith("Windows")
+        assert "unknown" not in line
+
+    def test_shows_a_platform_name_on_macos(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.sys, "platform", "darwin")
+
+        assert setup_desktop.version_line().endswith("macOS")
