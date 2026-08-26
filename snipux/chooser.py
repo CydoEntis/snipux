@@ -706,7 +706,7 @@ class Chooser(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         self._mode = tokens.CAPTURE_MODES[0][0]
-        self._after = tokens.AFTER_CAPTURE[0][0]
+        self._after = tokens.AFTER_DEFAULT
         self._delay = tokens.DELAY_DEFAULT
         self._phase = "choosing"
         self._menu: _Menu | None = None
@@ -950,9 +950,9 @@ class Chooser(QWidget):
 # coming from `CHOOSER_AFTER_NOTE`. The ids stay the shared spine, so a
 # destination cannot exist on one surface and not the other.
 _AFTER_ROWS = [
+    ("instant", "copy", "Instant", tokens.CHOOSER_AFTER_NOTE["instant"]),
+    ("edit", "pen", "Edit", tokens.CHOOSER_AFTER_NOTE["edit"]),
     ("review", "eye", "Review", tokens.CHOOSER_AFTER_NOTE["review"]),
-    ("clip", "copy", "Copy", tokens.CHOOSER_AFTER_NOTE["clip"]),
-    ("file", "save", "Save", tokens.CHOOSER_AFTER_NOTE["file"]),
 ]
 
 
@@ -960,7 +960,7 @@ def _after_display(identifier: str) -> tuple[str, str]:
     for value, icon, label, _note in _AFTER_ROWS:
         if value == identifier:
             return icon, label
-    return "eye", "Review"
+    return _after_display(tokens.AFTER_DEFAULT)
 
 
 def _delay_label(value: str) -> str:

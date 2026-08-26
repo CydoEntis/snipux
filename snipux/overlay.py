@@ -3855,6 +3855,26 @@ class OverlayWindow(QWidget):
 
         self._sync_chooser_visibility()
 
+    def _commit_selection(self, rect, path: QPainterPath | None = None) -> None:
+        """A selection stops being provisional here.
+
+        The four capture modes each arrive by their own route -- a region
+        drag's release, a click on a window, Full screen's immediate snap,
+        a lasso's release -- and this is the one moment all four agree the
+        user has actually chosen something. `instant` (`tokens.
+        AFTER_CAPTURE`) finishes the snip from here, which is why it needs
+        a funnel of its own rather than hanging off `set_selection`: that
+        one also runs on every mouse-move of a live drag, and finishing on
+        the first pixel of a drag is not what "instant" means.
+
+        Identical to Copy on the floating bar, deliberately -- same
+        `copy()`, same dismissal, same toast. Instant is not a second way
+        to finish a snip, it is the same one with nothing in front of it.
+        """
+        self.set_selection(rect, path=path)
+        if self.outcome == "instant":
+            self._on_bar_copy()
+
     def _confirm_window_pick(self, pos: QPointF) -> None:
         """Snap `_selection` to the window under `pos` (this widget's own
         window-local coordinates) and disarm picking. Only ever reached
@@ -3872,7 +3892,7 @@ class OverlayWindow(QWidget):
         if rect is None:
             return
         self._picking_window = False
-        self.set_selection(self._to_local_rect(rect).toRect())
+        self._commit_selection(self._to_local_rect(rect).toRect())
 
     def _select_full_screen(self) -> None:
         """Set `_selection` to the whole display the cursor is on, per
@@ -3895,7 +3915,7 @@ class OverlayWindow(QWidget):
             else QPointF(self.width() / 2, self.height() / 2)
         )
         rect = self._monitor_at(self._to_absolute(cursor))
-        self.set_selection(self._to_local_rect(rect).toRect())
+        self._commit_selection(self._to_local_rect(rect).toRect())
 
     # -- Freeform capture mode (SNX-49) --------------------------------------
     # docs/design/overlay-redesign.md's "Capture modes" entry for Freeform is
@@ -3963,7 +3983,7 @@ class OverlayWindow(QWidget):
             self.set_selection(None)
             return
         self._picking_freeform = False
-        self.set_selection(bounds, path=path)
+        self._commit_selection(bounds, path=path)
 
     def _monitor_at(self, absolute_point: QPointF) -> QRectF:
         """The `_monitor_geometries` entry containing `absolute_point`
@@ -5218,7 +5238,7 @@ class OverlayWindow(QWidget):
         if rect.width() < metric.SEL_MIN_W or rect.height() < metric.SEL_MIN_H:
             self.set_selection(None)
             return
-        self.set_selection(rect)
+        self._commit_selection(rect)
 
     def _resize_selection(self, pos: QPointF) -> None:
         """Apply one drag-move of `self._active_handle` to the selection.
