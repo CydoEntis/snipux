@@ -367,7 +367,7 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
 def version_line() -> str:
     """`snipux 0.1.0 / Qt 6.7 · X11` for the nav rail's footer.
 
-    The session type is read, never assumed -- CLAUDE.md's rule -- and a
+    The trailing field is read, never assumed -- CLAUDE.md's rule -- and a
     missing Qt (impossible here, but this is also imported by `--setup`,
     which must not need one) degrades to the version alone.
     """
@@ -383,7 +383,18 @@ def version_line() -> str:
         qt = f" / Qt {QT_VERSION_STR}"
     except Exception:
         qt = ""
-    return f"snipux {ours}{qt} · {detect_session_type()}"
+    return f"snipux {ours}{qt} · {_platform_field()}"
+
+
+def _platform_field() -> str:
+    """The version line's trailing field: a session type on Linux, where
+    it is a real, runtime-detected fact worth showing -- a platform name
+    everywhere else, where there is no session-type concept to detect and
+    `detect_session_type()` would otherwise report 'unknown' on every run.
+    """
+    if sys.platform.startswith("linux"):
+        return detect_session_type()
+    return {"win32": "Windows", "darwin": "macOS"}.get(sys.platform, sys.platform)
 
 
 def detect_session_type() -> str:
