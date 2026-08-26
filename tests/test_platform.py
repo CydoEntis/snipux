@@ -780,6 +780,26 @@ class TestWindowsDesktopIntegration:
         assert lnk2 == start_menu / "Startup" / "snipux.lnk"
         assert target1 == target2 == Path("C:/snipux/snipux.exe")
 
+    def test_says_nothing_about_the_shortcut_needing_a_restart(self, monkeypatch, tmp_path, capsys):
+        """SNX-101: `AppController.run_first_launch_setup()` calls this from
+        the already-resident process, and only after
+        `install_hotkey_listener()` has already bound the shortcut in that
+        same process -- so by the time this runs, the shortcut is already
+        live, not "pending until next start". This function must not claim
+        otherwise (or say anything about the shortcut's registration status
+        at all -- that is `bind_shortcut()`'s own return value to report,
+        surfaced through the tray/Settings, not a console line here).
+        """
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+
+        windows.WindowsPlatform().install_desktop_integration()
+
+        output = capsys.readouterr().out
+        assert "restart" not in output.lower()
+        assert "next time" not in output.lower()
+        assert "registered" not in output.lower()
+
     def test_writes_the_icon_before_the_shortcuts_point_at_it(self, monkeypatch, tmp_path):
         self._use_tmp_dirs(monkeypatch, tmp_path)
         monkeypatch.setattr(setup_desktop, "render_ico", lambda: b"icon-bytes")

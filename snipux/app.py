@@ -1014,6 +1014,14 @@ def _become_resident(
     reason: whether desktop integration has ever run is a real, one-time
     action against the OS (writing files, binding a shortcut), not
     something every `AppController` a test builds should also trigger.
+
+    Called in exactly this order, not the other way around: on a genuinely
+    first-ever launch, `install_hotkey_listener()` has already bound the
+    real shortcut by the time `run_first_launch_setup()` runs -- so the
+    shortcut works immediately, with nothing left for a restart to pick up
+    later (SNX-101). `WindowsPlatform.install_desktop_integration()`
+    depends on this ordering too: it says nothing about when the shortcut
+    takes effect, exactly because it never runs before this already has.
     """
     # Already built by whoever called `try_claim()` -- see
     # `_ensure_qapplication`, which must run before the claim, not after.
