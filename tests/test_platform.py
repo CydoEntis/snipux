@@ -261,7 +261,8 @@ class TestReservedTop:
 
     def test_wayland_asks_nothing_and_reserves_nothing(self, monkeypatch):
         # `show_on_screen` fullscreens the overlay onto one output there,
-        # and GNOME hides its top bar for a fullscreen window.
+        # and GNOME hides its top bar for a fullscreen window -- watched
+        # happen on a real GNOME Wayland session for SNX-110.
         def fail(*a, **k):
             raise AssertionError("there is no _NET_WORKAREA on Wayland")
 
@@ -269,6 +270,22 @@ class TestReservedTop:
         platform_impl = self._linux(monkeypatch, session="wayland")
 
         assert platform_impl.reserved_top(_FakeScreen(QRect(0, 0, 1920, 1080))) == 0
+
+    def test_wayland_reads_a_real_reservation_rather_than_assuming_none(self, monkeypatch):
+        # SNX-110 AC: "if GNOME does reserve space on Wayland, it is read
+        # rather than assumed away." There is no `_NET_WORKAREA` to shell
+        # out for on Wayland, but Qt's own `availableGeometry()` is still
+        # asked (the `portable` line runs unconditionally) -- so a
+        # compositor that did carve out top-edge space would already show
+        # up here, not get flattened to 0.
+        def fail(*a, **k):
+            raise AssertionError("there is no _NET_WORKAREA on Wayland")
+
+        monkeypatch.setattr(linux.subprocess, "run", fail)
+        platform_impl = self._linux(monkeypatch, session="wayland")
+        screen = _FakeScreen(QRect(0, 0, 1920, 1080), QRect(0, 32, 1920, 1048))
+
+        assert platform_impl.reserved_top(screen) == 32
 
     def test_an_offscreen_qt_platform_asks_nothing(self, monkeypatch):
         # The headless suite runs inside a real X11 login session, so
