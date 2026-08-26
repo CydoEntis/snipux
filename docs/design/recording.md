@@ -3,17 +3,21 @@
 Not built. This is the shape of it, sliced into tickets, with the research
 already done so the tickets can be written without redoing it.
 
-**What it does:** a switch between screenshotting and recording; region or
-full-screen recording; and then the same three destinations stills have —
-clipboard, save, or a window where you trim it and export as mp4 / webm /
-gif. Two things the tool does, not two tools.
+**What it does in v1:** a switch between screenshotting and recording;
+region or full-screen recording; and then copy the file or save it. Two
+things the tool does, not two tools.
+
+**What it deliberately does not do in v1:** trimming, and exporting to
+mp4 / webm / gif. That is the whole reason there is no ffmpeg — see below.
 
 ## Decided
 
-- **ffmpeg is in.** Not a Python dependency — an external tool, the same
-  category `maim`, `grim` and `wmctrl` already are, reported unavailable
-  the same way when it is missing. It does the recording where there is no
-  better route, and it does all of the exporting regardless.
+- **No ffmpeg, and therefore no editing in v1.** ffmpeg is 212MB on
+  Windows, and the portable exe exists so one file can be handed to
+  someone. Recording itself needs no ffmpeg on the routes that matter;
+  only trimming and format conversion do. So v1 records and lands a file,
+  and editing waits. This is a scope decision, not a technical one — the
+  research below still stands if it is revisited.
 - **Copy puts the file on the clipboard**, the way the Windows Snipping
   Tool does it — see "The clipboard" below, because the mechanism is worth
   knowing before ticket 6.
@@ -93,18 +97,36 @@ The rest, in the order a registry should try them:
 **`QScreenCapture` is not a Wayland answer.** Qt does not support screen
 capture there, so the Qt route is Windows and X11 only.
 
-## What ffmpeg is and isn't for
+## Why there is no ffmpeg, and what that costs
 
-Recording prefers the routes that need nothing: `org.gnome.Shell.Screencast`
-on GNOME (which is the primary target and the only Wayland answer), Qt's
-own recorder on Windows if it proves out. ffmpeg is the general fallback —
-X11 on a non-GNOME desktop, Windows if the Qt route disappoints.
+Recording does not need it. `org.gnome.Shell.Screencast` records a region
+straight to a file on GNOME under both X11 and Wayland, and Qt's own
+recorder should do the same on Windows. Playback needs nothing either —
+`QMediaPlayer` is already in PyQt6.
 
-Exporting is ffmpeg's outright: trimming, mp4 and webm transcoding, and
-especially GIF, which needs a two-pass `palettegen`/`paletteuse` or it
-looks terrible. There is no version of this feature where ffmpeg is
-optional for export, which is why it is a stated requirement rather than a
-per-backend nicety.
+Only editing needs it: trimming, mp4/webm transcoding, and GIF, which
+wants a two-pass `palettegen`/`paletteuse` or it looks terrible. There is
+no version of *editing* where ffmpeg is optional, which is exactly why
+dropping editing drops ffmpeg.
+
+**What this costs, stated plainly:**
+
+- **No trimming.** You record, and you keep what you recorded. Cutting the
+  first few seconds off is usually the first thing anyone wants, and v1
+  cannot do it.
+- **No format choice.** You get whatever the backend produces — webm from
+  GNOME, whatever Qt writes on Windows.
+- **No GIF.**
+- **Non-GNOME X11 cannot record at all.** `ffmpeg -f x11grab` was that
+  route, and `QScreenCapture` does not work on Wayland. GNOME is the
+  primary target, so this is acceptable — but it is a real gap, not a
+  rounding error.
+
+**The one thing this hangs on:** Windows recording now depends entirely on
+Qt's `QScreenCapture` + `QMediaRecorder`, with no ffmpeg fallback behind
+it. That route is unproven. Spike it before writing any other ticket — if
+it does not work, v1 records on GNOME only, and that is worth knowing
+before eight tickets are built on the assumption it does.
 
 ## Where it shows up in the UI
 
@@ -119,8 +141,8 @@ Freeform recording is close to meaningless — video is rectangular. Grey
 them out rather than hiding them, and let the hint say why.
 
 **"Then" changes.** There is no annotate-in-place for a video, so `edit`
-has no meaning on the recording side. Recording's three are Instant, Save
-and **Trim** (the new window).
+has no meaning on the recording side. Recording's two in v1 are **Instant**
+and **Save**. `Trim` is where the third would go when editing lands.
 
 **The clipboard: copy the file, not the frames.** This is what the Windows
 Snipping Tool actually does with a recording, and it is why its result
@@ -157,9 +179,10 @@ global hotkey doubling as stop, with an optional floating pill placed
 outside the recorded rect when there is room for one. This is its own
 design question and its own ticket.
 
-## The trim window
+## The trim window — deferred, kept for when editing lands
 
-Same role `review.py` plays for stills.
+**Not in v1.** Everything below needs ffmpeg and is recorded here so the
+research is not redone. Same role `review.py` plays for stills.
 
 - Preview with `QMediaPlayer` + `QVideoWidget` — no new dependency.
 - A scrubber with in/out handles. Trim maths is ordinary and testable.
@@ -174,15 +197,20 @@ Same role `review.py` plays for stills.
 
 ## Settings this adds
 
-Frame rate, quality/bitrate, draw-the-cursor or not, where recordings save,
-default export format. All of it is ordinary `setup_desktop` config plus
-rows in the Settings pane, following what's already there.
+Frame rate, quality/bitrate, draw-the-cursor or not, and where recordings
+save. Ordinary `setup_desktop` config plus rows in the Settings pane,
+following what's already there. Default export format waits for editing.
 
 ## Out of scope for v1
 
+- **Editing** — decided. Trimming, mp4/webm/gif export and the trim window
+  all wait, because all of them need ffmpeg and none of them is needed to
+  record. The UI should not show a Trim destination it cannot honour.
 - **Audio** — decided. Microphone and system audio mean device selection,
   sync and permissions, and roughly double the backend surface. v1 records
   silent and says so.
+- **Non-GNOME X11 and non-GNOME Wayland** — no route without ffmpeg or a
+  PipeWire dependency respectively.
 - Window recording and freeform recording.
 - Pause/resume mid-recording.
 - Annotating a video.
@@ -206,11 +234,20 @@ not a done-when for any of them.
 
 ## The tickets
 
-In dependency order. 1–4 are plumbing, 5–9 make it record, 10–12 make it
-useful, 13–14 widen it.
+Nine, in dependency order, and a spike before any of them. 1-4 are
+plumbing, 5-9 make it record and land a file. Editing's tickets are gone
+with ffmpeg; the trim window and export are written up above for whoever
+picks them back up.
+
+**0. Spike: can Qt record on Windows?** Throwaway. `QScreenCapture` +
+   `QMediaRecorder` against a region of a real desktop, to a file that
+   plays. Not a ticket, not merged - an answer.
+   *Decides:* whether Windows is in v1 at all. There is no ffmpeg fallback
+   behind it any more, so if this fails, v1 is GNOME-only and that is a
+   scope conversation, not a bug.
 
 1. **`recording.py`: the recorder seam.** `RecordingBackend` ABC +
-   `RecorderRegistry`, mirroring `capture.py`'s pattern exactly — try in
+   `RecorderRegistry`, mirroring `capture.py`'s pattern exactly - try in
    order, collect failures, report together. No backend behind it yet.
    *Done when:* the registry picks and reports with no real recorder, the
    way `UnsupportedPlatformBackend` already does for capture.
@@ -220,29 +257,30 @@ useful, 13–14 widen it.
    *Done when:* a region records to a file on GNOME/Wayland **and**
    GNOME/X11, both watched.
 
-3. **The ffmpeg x11grab backend.** With the usual "unavailable, and here's
-   why" when ffmpeg isn't on PATH.
-   *Done when:* it records on an X11 session with GNOME's D-Bus route
-   forced off, and reports itself unavailable cleanly without ffmpeg.
+3. **The Windows recorder backend.** Qt's `QScreenCapture` +
+   `QMediaRecorder`, on whatever the spike learned. Reports itself
+   unavailable with a reason where Qt cannot do it - notably Wayland.
+   *Done when:* a region records to a playable file on Windows.
 
 4. **`Platform.build_recording_registry()`.** The seam decides which
-   recorders an OS may try, same as capture. Linux real; Windows and macOS
-   raise `UnimplementedPlatformError` naming themselves.
+   recorders an OS may try, same as capture. Linux and Windows real; macOS
+   raises `UnimplementedPlatformError` naming itself.
 
 5. **The stills/record switch in the chooser.** UI and state only, nothing
    wired to a recorder yet. Includes narrowing the mode list and swapping
-   the "then" list per side.
+   the "then" list per side. The "then" list is Instant and Save; do not
+   offer Trim.
 
-6. **Recording's own "then" vocabulary.** Instant / Save / Trim, plus
+6. **Recording's own "then" vocabulary.** Instant / Save, plus
    `copy_file_to_clipboard(path)` next to the existing image one.
    *Done when:* a recording pastes as a file into Nautilus and as an
-   attachment into a chat app on Linux, and into Explorer on Windows —
+   attachment into a chat app on Linux, and into Explorer on Windows -
    Qt's `CF_HDROP` mapping is the part to actually watch happen rather
    than assume.
 
-7. **Commit → record.** `_commit_selection` starts the recorder for the
+7. **Commit -> record.** `_commit_selection` starts the recorder for the
    committed rect and closes the overlay. The delay setting should apply
-   here too — a countdown before recording starts is more useful than
+   here too - a countdown before recording starts is more useful than
    before a still.
 
 8. **The recording HUD.** Stop control, elapsed time, the hotkey doubling
@@ -250,40 +288,33 @@ useful, 13–14 widen it.
    recording" problem for full-screen.
 
 9. **Landing the file.** Save folder, filename pattern, the toast, and
-   cleaning up the temp file on discard or crash.
+   cleaning up the temp file on discard or crash. Plus the fps, cursor and
+   folder settings rows.
 
-10. **The trim window.** Preview, scrubber, in/out handles. No export yet.
-
-11. **Export.** mp4 / webm / gif, the GIF palette pass, and the
-    lossless-vs-exact trim decision made explicit.
-
-12. **Settings rows.** fps, cursor, folder, default format.
-
-13. **The Windows recorder backend.** `ffmpeg -f gdigrab` is the
-    straightforward one now that ffmpeg is in; Qt's `QScreenCapture` +
-    `QMediaRecorder` is worth a spike first only if shipping the portable
-    exe without an ffmpeg beside it matters — which is a packaging
-    question (SNX-104's single-file exe) more than a recording one.
-
-14. **Non-GNOME Wayland.** Portal ScreenCast + PipeWire — the only
-    remaining route that would force a real Python dependency. Keep it
-    last: it is worth nothing until everything above works, and by then
-    the question is whether anyone is actually running snipux on wlroots.
+**Dropped with ffmpeg**, and what they were: the ffmpeg `x11grab` backend
+(non-GNOME X11 recording), the trim window, and export to mp4/webm/gif.
+**Never scheduled:** non-GNOME Wayland, which needs portal ScreenCast plus
+a real PipeWire dependency and is worth nothing until everything above
+works.
 
 ## Where this will hurt
 
-- **Wayland**, if the target ever widens past GNOME. Ticket 14 is a
-  different kind of problem from every other ticket here.
+- **Windows rests on one unproven route.** Dropping ffmpeg removed the
+  fallback behind Qt's recorder. Ticket 0 exists because of that, and it
+  is the only thing in this plan that can invalidate the rest of it.
+- **Non-GNOME Linux cannot record.** X11 without GNOME lost its only
+  route with ffmpeg; non-GNOME Wayland never had one. Acceptable while
+  GNOME is the target, and a real gap if that changes.
 - **The control surface is inside the recording** on full-screen. There is
   no clean answer, only trade-offs.
 - **Disk.** A long full-screen recording is large, it is being written
   while the app is otherwise idle, and nothing in this codebase has ever
-  had to think about running out of space.
-- **Packaging.** ffmpeg being a stated requirement is easy on Linux and
-  awkward for the portable Windows exe, which exists precisely so someone
-  can be handed one file. Either that file grows an ffmpeg beside it, or
-  Windows recording uses Qt and only export needs the tool. Worth settling
-  before ticket 13, not during it.
+  had to think about running out of space. Worse without trimming: what
+  you record is what you keep.
+- **The missing trim will be felt immediately.** Cutting the start off a
+  clip is the first thing anyone reaches for. v1 not having it is a
+  deliberate trade for not shipping 212MB, and it should be revisited once
+  recording actually works rather than treated as settled forever.
 - **A green suite proves very little here** — more than anywhere else in
   this project, which is already a project where that is the warning at the
   bottom of TODO.md.
