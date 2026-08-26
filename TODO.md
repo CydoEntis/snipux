@@ -37,6 +37,20 @@ cross-compile:
 
     powershell -File packaging\windows\build.ps1
 
+And **square Linear up with this branch**, which is further ahead than its
+one ticket:
+
+- **SNX-108 is done** — close it. It asked for the chooser fix alone.
+- **Four changes on the branch have no ticket at all**: the same press bug
+  in the overlay's own chrome, the GNOME top bar hiding the chooser, the
+  "then" menu becoming Instant / Edit / Review, and a refused Window mode
+  reaching the chooser. Worth filing after the fact so the history is not
+  one ticket wide.
+- **Two follow-ups want tickets of their own**: verifying the top bar fix
+  on Wayland, and the instant-save gap the dead "Always copy to clipboard
+  too" switch is the obvious home for. Both are written up under "Left open
+  by that branch" below.
+
 ## Left open by that branch
 
 **The top bar fix is unverified on Wayland.** It reserves nothing there on
