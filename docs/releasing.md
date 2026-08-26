@@ -119,3 +119,46 @@ install via pipx instead (Smart App Control) — see the README's Windows
 section for what that looks like from the user's side. If snipux's user
 base or distribution model changes enough that the warning itself becomes
 the blocker, that's the trigger to revisit this, not a fixed schedule.
+
+# Regenerating the app icon
+
+`snipux/design/logo/` vendors the same `snipux-<size>.png` files onto both
+platforms: `setup_desktop.install_icons()` copies them into the Linux
+hicolor theme, and `setup_desktop.render_ico()` (via
+`packaging/windows/build_icon.py`) packs them into the Windows `.ico`
+`build.ps1` above embeds. Fixing a size here fixes both surfaces at once —
+there is nothing else to update.
+
+The set is produced two different ways, by size (SNX-102):
+
+- **48px and up** (`snipux-48.png` through `snipux-512.png`) are a smooth
+  downscale of `snipux.png`, the 1284px master. At these sizes the master's
+  full scene — the outer rounded container, the title-bar dots, the dashed
+  selection marquee, the inner window, the cursor — still has enough pixels
+  per element to survive being scaled down. These are hand-exported from
+  the master today; there is no script for this half, and none is needed
+  until the master artwork itself changes.
+- **16, 24 and 32px** are drawn directly, by
+  `snipux/design/logo/generate_small_icons.py`, from simplified artwork
+  instead of a downscale of the master. Below 48px the master's detail
+  gets maybe two pixels per element and a smooth downscale just averages
+  it into an indistinct blur — the actual bug SNX-102 fixed. The fix is
+  the standard one for detailed marks at icon sizes: drop the container
+  and the chrome, and enlarge the one element that still identifies the
+  app at a glance, which for snipux is the green selection marquee (here,
+  its four corner brackets — a continuous dashed outline dissolves into a
+  ring at this pen width) with its cursor.
+
+Regenerate the small sizes after changing that design (colours,
+proportions, the cursor shape) — or just to confirm nothing has drifted —
+with:
+
+```sh
+QT_QPA_PLATFORM=offscreen python snipux/design/logo/generate_small_icons.py
+```
+
+This overwrites `snipux-16.png`, `snipux-24.png` and `snipux-32.png` in
+place and nothing else; `build_icon.py` and `install_icons()` both already
+pick up whatever sizes are sitting in `snipux/design/logo/`, so no other
+step or code change is needed to ship a regenerated icon on either
+platform.
