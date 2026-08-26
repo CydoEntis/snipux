@@ -34,7 +34,9 @@ classifiers = [
 # Matches requirements.txt's two runtime packages. pytest stays a
 # dev/test-only dependency -- no snipux/*.py module imports it.
 dependencies = [
-    "PyQt6>=6.5",
+    # >=6.8: QVideoFrameInput (SNX-118's Windows region-recording path) is
+    # a Qt 6.8 addition -- see requirements.txt for the same floor.
+    "PyQt6>=6.8",
     "jeepney>=0.8",
 ]
 

@@ -1,4 +1,8 @@
-PyQt6>=6.5
+# >=6.8: QMediaCaptureSession.setVideoFrameInput()/QVideoFrameInput (SNX-118's
+# Windows region-recording path) is a Qt 6.8 addition. An unpinned floor
+# would let `pip install` succeed and then fail at import/runtime on an
+# older PyQt6.
+PyQt6>=6.8
 jeepney>=0.8
 pytest>=8.0
 # Build-only, dev/test dependencies: test_design.py builds an actual wheel
