@@ -50,6 +50,16 @@ different here than on Linux; only *how* the grab happens changes per
 platform, and that logic lives in `capture.py` alongside the backends it
 chooses between, not duplicated in this module. See `capture.py` for the
 qt-native/Win32-GDI backends themselves.
+
+`reattach_console()` (SNX-100) is unrelated to any of the above: it is
+what lets `packaging/windows/snipux.spec` build a *windowed* snipux.exe --
+no console popping up behind the tray on every launch -- while
+`--list-backends`/`--setup`/`--remove`/`--snip` still print when actually
+run from a terminal. `app.py`'s `cli()` calls it before anything else, the
+same "this is the one seam" reasoning as every other operation here, done
+through a bare function rather than a `Platform` method because it has to
+run before `platform.current` is of any use to anyone -- it is about
+whether `print()` itself works yet, not about picking an implementation.
 """
 
 from __future__ import annotations
@@ -419,6 +429,76 @@ def _remove_shortcut(lnk_path: Path, label: str) -> bool:
         return False
     print(f"{label} entry removed from {lnk_path}")
     return True
+
+
+# AttachConsole's own pseudo-process-id (winbase.h: `((DWORD)-1)`) meaning
+# "the console of whatever process started this one", not a real pid to
+# look up.
+_ATTACH_PARENT_PROCESS = -1
+
+# The one AttachConsole failure that means "this process already has a
+# console of its own" (GetLastError, winerror.h) rather than "there was
+# nothing to attach to" -- see reattach_console()'s own docstring for why
+# that distinction is the whole point.
+_ERROR_ACCESS_DENIED = 5
+
+
+def reattach_console() -> None:
+    """SNX-100: let a *windowed*-subsystem snipux.exe (see
+    `packaging/windows/snipux.spec`'s own comment on why it is built that
+    way rather than `console=True`) still print to a terminal it was
+    actually launched from, while never popping a console window of its
+    own when it wasn't.
+
+    A windowed-subsystem process is never handed its parent's console just
+    because the parent happens to have one -- unlike a console-subsystem
+    process (plain `python.exe`, or the pip-installed `snipux` console
+    script), which inherits one automatically. That is exactly why a
+    windowed build is silent when double-clicked from Explorer (nothing to
+    inherit -- Explorer has no console either) but *also* silent when run
+    as `snipux --list-backends` from a terminal, unless it asks that
+    terminal for its console back itself. `AttachConsole(
+    ATTACH_PARENT_PROCESS)` is that ask: it succeeds when whatever started
+    this process had a console (a terminal), and fails when it didn't
+    (Explorer, a Start Menu/Startup shortcut, or Inno Setup's own [Run]
+    step launching the freshly-installed exe) -- which is also how this
+    tells the two cases apart, rather than guessing from `sys.argv`.
+
+    `sys.stdout`/`sys.stderr` are reopened against the newly-attached
+    console's `CONOUT$` device on success -- PyInstaller's windowed
+    bootloader starts both as `None` (there was no console to hand them a
+    handle to yet), so a bare `print()` before this point would already
+    have crashed with an `AttributeError`, not merely gone missing.
+
+    Failing to attach is not reported as an error: it means precisely "no
+    console was available", the double-click/shortcut/installer case this
+    whole function exists to keep silent. `sys.stdout`/`sys.stderr` are
+    still pointed at `os.devnull` in that case, not left as `None` --
+    setup_desktop.py and this module both fall back to a plain `print()`
+    for dozens of "here's what happened" notes, and every one of those
+    must have somewhere harmless to write instead of crashing the first
+    time it runs with nothing attached.
+
+    A no-op everywhere but Windows, and a no-op on Windows too when this
+    process already has a console of its own (`ERROR_ACCESS_DENIED`,
+    e.g. `python -m snipux`, or the pip-installed console script, both of
+    which start with a real, already-working console inherited the
+    ordinary way) -- `sys.stdout`/`sys.stderr` are already good streams
+    there, and reopening them would be redundant at best.
+    """
+    if sys.platform != "win32":
+        return
+
+    if ctypes.windll.kernel32.AttachConsole(_ATTACH_PARENT_PROCESS):
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+        sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+        return
+
+    if ctypes.GetLastError() == _ERROR_ACCESS_DENIED:
+        return
+
+    sys.stdout = open(os.devnull, "w")
+    sys.stderr = open(os.devnull, "w")
 
 
 class _MSG(ctypes.Structure):

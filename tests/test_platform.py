@@ -907,6 +907,109 @@ class TestAcceleratorToWin32:
         assert windows._accelerator_to_win32("") is None
 
 
+class TestReattachConsole:
+    """SNX-100: `snipux.spec` now builds a windowed exe (no console of its
+    own), so `reattach_console()` is what lets a terminal launch
+    (`snipux --list-backends` etc.) still see its output, while a launch
+    with no console anywhere in its parent chain (Explorer, a Start
+    Menu/Startup shortcut, the installer's own [Run] step) stays silent
+    without crashing the first time something calls `print()`.
+
+    `sys.stdout`/`sys.stderr` are restored after every test that lets
+    `reattach_console()` actually reassign them -- this suite's own output
+    capturing depends on them being the real thing again by the time this
+    test returns control to pytest.
+    """
+
+    def test_a_non_windows_platform_never_touches_ctypes_windll(self, monkeypatch):
+        monkeypatch.setattr(windows.sys, "platform", "linux")
+        # windows.ctypes.windll is deliberately left unpatched: reaching
+        # for it at all off Windows would itself raise, so this only
+        # passes if reattach_console() returns before ever getting there.
+
+        windows.reattach_console()  # must not raise
+
+    def test_attaches_and_reopens_stdio_when_launched_from_a_terminal(self, monkeypatch):
+        monkeypatch.setattr(windows.sys, "platform", "win32")
+        monkeypatch.setattr(
+            windows.ctypes,
+            "windll",
+            SimpleNamespace(kernel32=SimpleNamespace(AttachConsole=lambda pid: 1)),
+            raising=False,
+        )
+        opened = []
+        fake_streams = [SimpleNamespace(write=lambda s: None) for _ in range(2)]
+
+        def fake_open(path, mode, **kwargs):
+            opened.append(path)
+            return fake_streams[len(opened) - 1]
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        original_stdout, original_stderr = sys.stdout, sys.stderr
+        try:
+            windows.reattach_console()
+
+            assert opened == ["CONOUT$", "CONOUT$"]
+            assert sys.stdout is fake_streams[0]
+            assert sys.stderr is fake_streams[1]
+        finally:
+            sys.stdout, sys.stderr = original_stdout, original_stderr
+
+    def test_redirects_to_devnull_when_no_console_is_available(self, monkeypatch):
+        # Explorer, a Start Menu/Startup shortcut, or the installer's own
+        # [Run] step: none of those parents has a console for
+        # AttachConsole to find, which is a plain failure distinct from
+        # "this process already has one" (ERROR_ACCESS_DENIED, covered
+        # below).
+        monkeypatch.setattr(windows.sys, "platform", "win32")
+        monkeypatch.setattr(
+            windows.ctypes,
+            "windll",
+            SimpleNamespace(kernel32=SimpleNamespace(AttachConsole=lambda pid: 0)),
+            raising=False,
+        )
+        monkeypatch.setattr(windows.ctypes, "GetLastError", lambda: 6, raising=False)
+        opened = []
+        fake_streams = [SimpleNamespace(write=lambda s: None) for _ in range(2)]
+
+        def fake_open(path, mode, **kwargs):
+            opened.append(path)
+            return fake_streams[len(opened) - 1]
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        original_stdout, original_stderr = sys.stdout, sys.stderr
+        try:
+            windows.reattach_console()
+
+            assert opened == [windows.os.devnull, windows.os.devnull]
+            assert sys.stdout is fake_streams[0]
+            assert sys.stderr is fake_streams[1]
+        finally:
+            sys.stdout, sys.stderr = original_stdout, original_stderr
+
+    def test_does_nothing_when_this_process_already_has_a_console(self, monkeypatch):
+        # python -m snipux / the pip-installed console script: both start
+        # with a real, already-working console inherited the ordinary way,
+        # so AttachConsole fails with ERROR_ACCESS_DENIED rather than
+        # finding nothing -- sys.stdout/stderr must be left alone.
+        monkeypatch.setattr(windows.sys, "platform", "win32")
+        monkeypatch.setattr(
+            windows.ctypes,
+            "windll",
+            SimpleNamespace(kernel32=SimpleNamespace(AttachConsole=lambda pid: 0)),
+            raising=False,
+        )
+        monkeypatch.setattr(windows.ctypes, "GetLastError", lambda: 5, raising=False)
+        opened = []
+        monkeypatch.setattr(
+            "builtins.open", lambda path, mode, **kwargs: opened.append(path)
+        )
+
+        windows.reattach_console()
+
+        assert opened == []
+
+
 class TestHotkeyEventFilter:
     """AC: the hotkey works while another application has focus -- this is
     the mechanism that makes that true. `RegisterHotKey(None, ...)` posts

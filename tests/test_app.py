@@ -778,8 +778,17 @@ class TestQLocalSocketTransportRace:
 
 
 class TestCli:
+    """`reattach_console` (SNX-100) is stubbed out in every test here, the
+    same reasoning `TestWindowsHotkeyIntegration` already applies to
+    `RegisterHotKey`: it is a real Win32 call on whatever machine runs this
+    suite, and cli() must reach it on every dispatch path without this
+    file's own assertions depending on (or corrupting) this process's
+    actual stdout/stderr.
+    """
+
     def test_dispatches_to_main_when_given_arguments(self, monkeypatch):
         monkeypatch.setattr(app.sys, "argv", ["snipux", "--list-backends"])
+        monkeypatch.setattr(app, "reattach_console", lambda: None)
         calls = []
         monkeypatch.setattr(app, "main", lambda: calls.append("main"))
         monkeypatch.setattr(
@@ -792,6 +801,7 @@ class TestCli:
 
     def test_dispatches_to_run_resident_app_when_given_none(self, monkeypatch):
         monkeypatch.setattr(app.sys, "argv", ["snipux"])
+        monkeypatch.setattr(app, "reattach_console", lambda: None)
         calls = []
         monkeypatch.setattr(app, "main", lambda: calls.append("main"))
         monkeypatch.setattr(
@@ -801,6 +811,22 @@ class TestCli:
         cli()
 
         assert calls == ["run_resident_app"]
+
+    def test_reattaches_the_console_before_dispatching(self, monkeypatch):
+        # Order matters (SNX-100's own acceptance criterion): main()/
+        # run_resident_app() may print before returning, so the console
+        # must already be sorted out by the time either one is reached.
+        monkeypatch.setattr(app.sys, "argv", ["snipux"])
+        calls = []
+        monkeypatch.setattr(app, "reattach_console", lambda: calls.append("reattach"))
+        monkeypatch.setattr(app, "main", lambda: calls.append("main"))
+        monkeypatch.setattr(
+            app, "run_resident_app", lambda: calls.append("run_resident_app")
+        )
+
+        cli()
+
+        assert calls == ["reattach", "run_resident_app"]
 
 
 class FakeCaptureBackend(CaptureBackend):
