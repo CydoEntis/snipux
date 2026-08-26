@@ -34,19 +34,22 @@ was right; only the claim was invented. **Wayland remains unverified.**
 `dist` because two running Snipux processes hold that file. Close them, then
 move it across.
 
-**Then the decision the recording plan is waiting on**, from
-`docs/design/recording.md`: ffmpeg is a stated requirement, which is awkward
-for the portable Windows exe that exists precisely so someone can be handed a
-single file. Its own note says settle that before ticket 13. It is worth
-settling before ticket 1 - it may change which backend Windows uses at all,
-since the Qt route (`QScreenCapture` + `QMediaRecorder`) avoids the external
-tool entirely.
+**Then start recording.** The scope question is settled: **v1 records, it
+does not edit, and there is no ffmpeg.** ffmpeg is 212MB on Windows and the
+portable exe exists so one file can be handed over; recording never needed
+it, only trimming and format conversion did.
+
+Start with **ticket 0, the spike** in `docs/design/recording.md`: can Qt's
+`QScreenCapture` + `QMediaRecorder` record a region of a real Windows
+desktop to a playable file? Dropping ffmpeg removed the fallback behind it,
+so that answer decides whether Windows is in v1 at all. Throwaway code, not
+a ticket.
 
 ## The next feature: screen recording
 
-Planned, not built, in **`docs/design/recording.md`** — sliced into
-fourteen tickets in dependency order, with the backend research already
-done so they can be written without redoing it.
+Planned, not built, in **`docs/design/recording.md`** — now nine tickets
+plus a spike, with the backend research already done so they can be written
+without redoing it.
 
 The two things to read first if you read nothing else: recording does *not*
 break the one architectural rule (the frozen frame stays how you choose;
@@ -55,15 +58,15 @@ recording starts once you have chosen, so selection code is untouched), and
 X11 and Wayland with no new dependency — which is the answer to what would
 otherwise be the feature's biggest risk.
 
-Three decisions are made in it: **ffmpeg is a stated requirement** (an
-external tool like `maim`/`grim`, not a Python dependency), **copy puts the
-file on the clipboard** the way the Windows Snipping Tool does — `CF_HDROP`
-on Windows, `text/uri-list` on Linux, one Qt call for both — and **v1
-records no audio**.
+Decisions made in it: **no ffmpeg and therefore no editing in v1**, **copy
+puts the file on the clipboard** the way the Windows Snipping Tool does —
+`CF_HDROP` on Windows, `text/uri-list` on Linux, one Qt call for both — and
+**v1 records no audio**.
 
-The one that surfaced from those: ffmpeg is awkward for the portable
-Windows exe, which exists so someone can be handed a single file. Settle
-that before ticket 13.
+Two consequences of dropping ffmpeg, written down rather than discovered:
+Windows now rests entirely on Qt's recorder with no fallback, and non-GNOME
+X11 can no longer record at all. The trim window's research stays in the
+doc, marked deferred, so it is not redone when editing comes back.
 
 ## Left open by that branch
 
