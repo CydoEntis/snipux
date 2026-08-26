@@ -70,9 +70,21 @@ class LinuxPlatform(Platform):
         it vanished outright.
 
         The property itself is the only source that knows. Wayland has no
-        equivalent to read and does not need one: `show_on_screen`
-        fullscreens the overlay onto a single output there, and GNOME
-        hides its top bar for a fullscreen window.
+        `_NET_WORKAREA` equivalent to shell out for, and does not need one:
+        `show_on_screen` fullscreens the overlay onto a single output
+        there, and GNOME hides its top bar for a fullscreen window --
+        watched happen on a real GNOME Wayland session for SNX-110, the
+        first launch of this codebase on Wayland at all.
+
+        That is a reason to skip the X11-only `xprop` fallback below, not
+        a reason to stop asking Qt: `portable` above is still a real query
+        -- `QScreen.availableGeometry()`, read whatever the session type --
+        so a compositor that *did* reserve top-edge space on Wayland would
+        already have been returned by the line above this comment, before
+        session type is even consulted. Returning `portable` here again
+        (rather than a hardcoded `0`) is what keeps that true: zero comes
+        back because Wayland genuinely reserved nothing, never because
+        this function gave up asking.
         """
         portable = super().reserved_top(screen)
         if portable or capture.detect_session_type() != "x11":
