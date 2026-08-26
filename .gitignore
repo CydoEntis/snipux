@@ -30,3 +30,5 @@ Thumbs.db
 # Local scratch output
 selftest-out/
 *.local.*
+dist-new/
+build-new/
