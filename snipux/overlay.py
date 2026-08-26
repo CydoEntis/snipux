@@ -3823,9 +3823,15 @@ class OverlayWindow(QWidget):
         itself" against) would leave the chip reading "Window" for a mode
         that can never produce anything -- indistinguishable from a bug.
         Instead this toasts an explanation and reverts `_capture_mode`,
-        the chip label, and the popover's own selected row back to
-        Region, mirroring `CaptureModePopover.set_mode`'s own "seeding
-        the popover from elsewhere" use case.
+        the chip label, the popover's own selected row and the chooser
+        back to Region, mirroring `CaptureModePopover.set_mode`'s own
+        "seeding the popover from elsewhere" use case.
+
+        The chooser is in that list because it is a third surface showing
+        the same value: without it the tab read "Window" -- a mode that had
+        just been refused -- while the chip beneath read "Region".
+        `arm=False` for the same reason `_on_capture_mode_selected` uses
+        it, one surface originating each change.
         """
         if not self._geometry_provider.is_available():
             self._show_toast("window", "Window capture isn't available on this session")
@@ -3833,6 +3839,7 @@ class OverlayWindow(QWidget):
             self._capture_mode = fallback
             self._bar.set_capture_mode(fallback)
             self._popover.set_mode(fallback)
+            self._chooser.set_mode(fallback, arm=False)
             return
         self._picking_window = True
         # Whatever was selected before (if anything) is not a Window-mode
