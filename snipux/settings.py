@@ -604,12 +604,13 @@ class SettingsWindow(WinWindow):
             self._after_group.addButton(card, index)
             cards.append(card)
 
-        self._also_copy = SwitchRow(
-            "Always copy to clipboard too",
-            "Orthogonal to the three above, so it is a switch and not a fourth card.",
-            setup_desktop.load_always_copy(self._config_dir),
+        self._instant_saves = SwitchRow(
+            "Save instead of copying",
+            "Only changes Capture and finish above -- on writes the file "
+            "and skips the clipboard; off copies, same as today.",
+            setup_desktop.load_instant_saves(self._config_dir),
         )
-        self._also_copy.switch.toggled.connect(lambda _c: self._mark_dirty())
+        self._instant_saves.switch.toggled.connect(lambda _c: self._mark_dirty())
 
         return _pane(
             SectionHeading("Shortcut"),
@@ -619,7 +620,7 @@ class SettingsWindow(WinWindow):
             None,
             SectionHeading("After capture"),
             *cards,
-            self._also_copy,
+            self._instant_saves,
         )
 
     def _saving_pane(self) -> QWidget:
@@ -822,8 +823,8 @@ class SettingsWindow(WinWindow):
         setup_desktop.save_after_capture(
             tokens.AFTER_CAPTURE[self._after_group.checkedId()][0], self._config_dir
         )
-        setup_desktop.save_always_copy(
-            self._also_copy.switch.isChecked(), self._config_dir
+        setup_desktop.save_instant_saves(
+            self._instant_saves.switch.isChecked(), self._config_dir
         )
         setup_desktop.save_save_folder(self._folder.text(), self._config_dir)
         setup_desktop.save_filename_pattern(self._filename.text(), self._config_dir)
