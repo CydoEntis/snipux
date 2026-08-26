@@ -16,7 +16,15 @@ from __future__ import annotations
 from typing import Callable
 
 from PyQt6.QtCore import QPoint, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPainterPath
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QGuiApplication,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QHBoxLayout,
@@ -28,6 +36,46 @@ from PyQt6.QtWidgets import (
 
 from . import design
 from .design import tokens
+
+# SNX-102's small-size artwork, purpose-drawn to stay legible at 16/24/32px
+# rather than a downscale of the detailed master -- see
+# design/logo/generate_small_icons.py. The title bar mark below picks only
+# from these three; reaching for the 48px+ files (still a downscale of the
+# master) once the title bar wants more resolution would silently reintroduce
+# the blur this ticket exists to remove.
+_LOGO_DIR = design.PACKAGE_DIR / "design" / "logo"
+_SMALL_MARK_SIZES = (16, 24, 32)
+_TITLEBAR_MARK_SIZE = 16  # logical px
+
+
+def _title_bar_mark_pixmap() -> QPixmap:
+    """The snipux mark for the title bar, at the small artwork size closest
+    to the screen's actual pixel density.
+
+    Returns a null QPixmap if the artwork cannot be loaded -- a missing or
+    unreadable `design/logo/` must not stop the window from opening, the
+    same "a failure must not stop the rest" rule `app.py`'s
+    `load_app_icon()` follows for the tray icon (SNX-81); the caller falls
+    back to the plain accent square this used to always be.
+    """
+    screen = QGuiApplication.primaryScreen()
+    dpr = screen.devicePixelRatio() if screen is not None else 1.0
+    physical = round(_TITLEBAR_MARK_SIZE * dpr)
+
+    size = next((s for s in _SMALL_MARK_SIZES if s >= physical), _SMALL_MARK_SIZES[-1])
+    pixmap = QPixmap(str(_LOGO_DIR / f"snipux-{size}.png"))
+    if pixmap.isNull():
+        return pixmap
+
+    if pixmap.width() != physical:
+        pixmap = pixmap.scaled(
+            physical,
+            physical,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    pixmap.setDevicePixelRatio(dpr)
+    return pixmap
 
 
 def _ui_font(size: float, weight: int) -> QFont:
@@ -211,11 +259,19 @@ class WinWindow(QWidget):
         row.setContentsMargins(13, 0, 8, 0)
         row.setSpacing(9)
 
-        # The accent square is the app mark -- a 10px block rather than the
-        # full logo, which at 42px tall would be illegible anyway.
+        # The app mark, drawn from SNX-102's small-size artwork rather than
+        # the plain accent square this used to be (SNX-106) -- see
+        # _title_bar_mark_pixmap(). A null pixmap (artwork missing/broken)
+        # falls back to that square rather than leaving the label blank.
         mark = QLabel()
-        mark.setFixedSize(10, 10)
-        mark.setStyleSheet(f"background: {tokens.Color.ACCENT}; border-radius: 3px;")
+        mark.setFixedSize(_TITLEBAR_MARK_SIZE, _TITLEBAR_MARK_SIZE)
+        pixmap = _title_bar_mark_pixmap()
+        if pixmap.isNull():
+            mark.setFixedSize(10, 10)
+            mark.setStyleSheet(f"background: {tokens.Color.ACCENT}; border-radius: 3px;")
+        else:
+            mark.setPixmap(pixmap)
+        self.title_mark = mark
         row.addWidget(mark)
 
         self.title_label = QLabel(title)
