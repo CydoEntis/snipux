@@ -18,6 +18,9 @@ three things the app asks for at its edges:
     on `capture.detect_session_type()`, which has no answer at all on a
     platform with no notion of an X11/Wayland session type
 
+`reserved_top()` joins `ensure_stable_install()` as an operation with a
+portable default rather than a required one -- see its own docstring.
+
 This module is the one place that interface (`Platform`) is defined, and the
 one place an implementation is picked -- from `sys.platform`, at import
 time, into the module-level `current`. Nothing outside this package should
@@ -134,6 +137,28 @@ class Platform(ABC):
         every other operation on this interface.
         """
         return None
+
+
+    def reserved_top(self, screen) -> int:
+        """Logical pixels of `screen`'s top edge that the desktop's own
+        chrome owns -- a GNOME top bar, a Windows taskbar docked to the
+        top -- and will paint over an always-on-top window regardless of
+        what that window thinks it covers.
+
+        Chrome placement only. The capture still grabs the whole virtual
+        desktop in one shot, per CLAUDE.md's one rule; this decides where
+        the pre-snip chooser and the close button may be *drawn*, which is
+        an entirely different question from what is in the frame.
+
+        Not one of the six required operations: `QScreen` answers it
+        portably wherever the platform tells Qt the truth, so the default
+        below is that portable answer and a platform overrides it only
+        where Qt is wrong (`LinuxPlatform`, under X11). Zero is always a
+        safe answer -- it is what every version before this returned, and
+        the cost of being wrong is chrome drawn slightly low, never a
+        capture that misses pixels.
+        """
+        return max(0, screen.availableGeometry().top() - screen.geometry().top())
 
 
 class UnimplementedPlatformError(NotImplementedError):

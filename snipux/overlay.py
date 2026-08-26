@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from snipux import design, setup_desktop
+from snipux import design, platform, setup_desktop
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
@@ -3342,6 +3342,11 @@ class OverlayWindow(QWidget):
         # and `_active_handle` for the same press, so a resize and a
         # stroke can never be in progress at once. See `_start_stroke`.
         self._in_progress_shape: Shape | None = None
+        # Monitor top-left -> logical pixels of that monitor's top edge the
+        # desktop's own chrome owns. Cached because `_chrome_bounds` runs at
+        # mouse-move frequency and the Linux answer shells out; the desktop's
+        # panels do not move mid-snip, and a snip is seconds long.
+        self._reserved_top_cache: dict[tuple[int, int], int] = {}
 
         # The text tool (SNX-52): a lazily-built QLineEdit that mirrors
         # editor.py's `Canvas._ensure_text_edit`/`_commit_text` -- a click
@@ -4072,7 +4077,13 @@ class OverlayWindow(QWidget):
         if self._selection is not None or not self.isVisible():
             self._chooser.hide_all()
             return
-        self._chooser.set_screen(self._active_screen_rect(), self.geometry().topLeft())
+        screen_rect = self._active_screen_rect()
+        # The chooser hangs from the top edge, so it is the surface the
+        # desktop's own bar hides -- give it the edge it can actually use.
+        self._chooser.set_screen(
+            screen_rect.adjusted(0, self._reserved_top(screen_rect), 0, 0),
+            self.geometry().topLeft(),
+        )
 
     def _active_screen_rect(self) -> QRectF:
         """The monitor the snip opened on, in absolute coordinates.
@@ -4177,6 +4188,24 @@ class OverlayWindow(QWidget):
                 self._tool_hint.show()
                 self._reposition_tray(self._tool_hint)
 
+    def _reserved_top(self, monitor: QRectF) -> int:
+        """Logical pixels of `monitor`'s top edge that the desktop's own
+        chrome owns -- see `platform.Platform.reserved_top`. `monitor` is
+        absolute, the space `_monitor_geometries` is in.
+
+        Everything this window draws against a monitor's top edge has to
+        clear it: on GNOME the shell paints its bar over an always-on-top
+        window, so a chooser hung flush from that edge is behind it and a
+        close button in that corner cannot be clicked.
+        """
+        key = (round(monitor.x()), round(monitor.y()))
+        if key not in self._reserved_top_cache:
+            screen = QGuiApplication.screenAt(monitor.center().toPoint())
+            self._reserved_top_cache[key] = (
+                platform.current.reserved_top(screen) if screen is not None else 0
+            )
+        return self._reserved_top_cache[key]
+
     def _reposition_close_button(self) -> None:
         """Put the close button in the top-right corner of `_chrome_bounds`
         -- the monitor the selection is on, or the fallback monitor before
@@ -4193,9 +4222,10 @@ class OverlayWindow(QWidget):
         why nothing caught it.
         """
         bounds = self._chrome_bounds()
+        reserved = self._reserved_top(bounds.translated(QPointF(self.geometry().topLeft())))
         self._close_button.move(
             round(bounds.right() - self._CLOSE_BUTTON_MARGIN - _CloseButton._SIZE),
-            round(bounds.top() + self._CLOSE_BUTTON_MARGIN),
+            round(bounds.top() + reserved + self._CLOSE_BUTTON_MARGIN),
         )
 
     def _reposition_tray(self, tray: QWidget) -> None:
