@@ -62,14 +62,16 @@ run before `platform.current` is of any use to anyone -- it is about
 whether `print()` itself works yet, not about picking an implementation.
 
 `_ensure_stable_copy()`/`ensure_stable_install()` (SNX-103) are what make
-the portable `snipux.exe` safe to distribute at all: Smart App Control
-blocks `snipux-setup.exe` outright, so the single-file PyInstaller build
-is the real Windows distribution route, and until now nothing stopped its
-Start Menu/Startup shortcuts from pointing at wherever the user happened
-to double-click it from -- typically Downloads, which most people clean
-out sooner or later. `_ensure_stable_copy()` relocates a running portable
-build to `_portable_exe_path()` (the same `%LOCALAPPDATA%\\snipux`
-directory `_icon_path()` already writes into) before
+the portable `snipux.exe` safe to distribute at all: it is the *only*
+Windows distribution route now that the Inno Setup installer is gone
+(SNX-104 -- Smart App Control blocked it outright, with no way to click
+through; see the README's Smart App Control section), and until now
+nothing stopped its Start Menu/Startup shortcuts from pointing at
+wherever the user happened to double-click it from -- typically
+Downloads, which most people clean out sooner or later.
+`_ensure_stable_copy()` relocates a running portable build to
+`_portable_exe_path()` (the same `%LOCALAPPDATA%\\snipux` directory
+`_icon_path()` already writes into) before
 `install_desktop_integration()` ever points a shortcut at anything, and
 `ensure_stable_install()` is the `Platform` hook `app._become_resident()`
 calls on *every* launch that becomes resident -- not gated behind
@@ -599,8 +601,7 @@ def reattach_console() -> None:
     terminal for its console back itself. `AttachConsole(
     ATTACH_PARENT_PROCESS)` is that ask: it succeeds when whatever started
     this process had a console (a terminal), and fails when it didn't
-    (Explorer, a Start Menu/Startup shortcut, or Inno Setup's own [Run]
-    step launching the freshly-installed exe) -- which is also how this
+    (Explorer, a Start Menu/Startup shortcut) -- which is also how this
     tells the two cases apart, rather than guessing from `sys.argv`.
 
     `sys.stdout`/`sys.stderr` are reopened against the newly-attached
@@ -610,8 +611,8 @@ def reattach_console() -> None:
     have crashed with an `AttributeError`, not merely gone missing.
 
     Failing to attach is not reported as an error: it means precisely "no
-    console was available", the double-click/shortcut/installer case this
-    whole function exists to keep silent. `sys.stdout`/`sys.stderr` are
+    console was available", the double-click/shortcut case this whole
+    function exists to keep silent. `sys.stdout`/`sys.stderr` are
     still pointed at `os.devnull` in that case, not left as `None` --
     setup_desktop.py and this module both fall back to a plain `print()`
     for dozens of "here's what happened" notes, and every one of those

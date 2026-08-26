@@ -48,59 +48,50 @@ Bump `version` in `pyproject.toml` (and `__version__` in
 second upload of a version number that has already been published, even if
 the previous upload was later deleted.
 
-# Releasing the Windows installer
+# Releasing the Windows exe
 
-SNX-96 already produces a standalone `snipux.exe` that runs with no Python
-installed. SNX-97 wraps that one file in a real installer, so a user does not
-also need to know where to put it. This needs a Windows machine (or a VM) with
-Python 3.10+ and pip on PATH, plus [Inno Setup 6](https://jrsoftware.org/isdl.php)
-(`winget install JRSoftware.InnoSetup`) installed anywhere — the packaging
-equivalent of the PyPI account this page's other half assumes. `build.ps1`
-finds `ISCC.exe` itself: on PATH if it's there, otherwise in the machine-wide
-Program Files locations or the per-user `LocalAppData\Programs` one that a
-plain `winget install` (no admin prompt) actually uses, so nothing needs to
-be added to PATH by hand (SNX-99).
+SNX-96 produces a standalone `snipux.exe` that runs with no Python
+installed — the sole Windows release artifact (SNX-104: the Inno Setup
+installer that used to wrap it, SNX-97, is gone; see "Why there's no
+installer" below). This needs a Windows machine (or a VM) with Python
+3.10+ and pip on PATH.
 
 ```powershell
 powershell -File packaging\windows\build.ps1
 ```
 
-This one command does both halves: builds `dist\snipux.exe` with PyInstaller
-(`packaging\windows\snipux.spec`), then feeds it to Inno Setup
-(`packaging\windows\snipux.iss`) to produce `dist\snipux-setup.exe`. The
-version reported in the installer, and later in Add/Remove Programs, is read
-straight out of `pyproject.toml` — the same `version` bumped above, not a
-second place to remember.
+This builds `dist\snipux.exe` with PyInstaller
+(`packaging\windows\snipux.spec`) and nothing else — there is no
+Add/Remove Programs entry to stamp a version into the way the installer
+used to, so unlike the PyPI half above there is no version to bump first.
 
-What running `snipux-setup.exe` actually does:
+What running `snipux.exe` actually does on first launch: relocates itself
+to a stable location under the user's own `%LocalAppData%\snipux` (so a
+later cleanup of the Downloads folder it was likely run from doesn't break
+it), and sets up a Start Menu shortcut, a Startup entry, and the Ctrl+Alt+S
+hotkey binding (SNX-95/103) — the same three things `snipux --setup` writes
+for a pip/pipx install. `snipux --remove` undoes all of it.
 
-- Installs to the user's own `%LocalAppData%\Programs\snipux` by default, no
-  administrator prompt — Inno's `PrivilegesRequired=lowest` combined with
-  `{autopf}` in `snipux.iss`. Choosing a machine-wide Program Files install
-  from the installer's UI (or `/ALLUSERS` on its command line) is still
-  possible, and is the only case that prompts for elevation.
-- Registers snipux in Add/Remove Programs with the app icon and the version
-  above. A fixed `AppId` (a GUID baked into `snipux.iss`, never regenerated
-  release to release) is what makes installing a newer version overwrite the
-  old one's files and reuse that one entry, rather than leaving two snipux
-  entries side by side.
-- Places the exe and nothing else. It deliberately does not create a Start
-  Menu shortcut, a Startup entry, or a hotkey binding of its own — snipux
-  already does all three itself, the first time it actually runs (SNX-95),
-  and the installer would only be duplicating that. The installer does launch
-  snipux once after a finished install so that first run actually happens
-  without the user having to go find the exe themselves.
-- On uninstall, runs `snipux.exe --remove` (undoing everything the first
-  launch above set up) before deleting the exe itself, after first killing
-  any snipux process still running — both so the exe isn't locked and so the
-  `RegisterHotKey` registration a running instance holds is released. Nothing
-  snipux ever wrote is left behind.
+### Why there's no installer
 
-### Why the installer isn't signed
+SNX-97 originally wrapped `snipux.exe` in an Inno Setup installer,
+`snipux-setup.exe`, so a user wouldn't need to know where to put the file.
+SNX-104 removed it: Smart App Control, a Windows 11 feature that is on by
+default on a meaningful share of clean installs, blocked that installer
+outright — no "Run anyway" the way SmartScreen offers, just a message that
+read like the file was corrupt. For those users the installer did not
+merely inconvenience, it did not work at all. The portable exe is not
+blocked by Smart App Control, and since it already sets itself up on first
+run (see above), it delivers what the installer was for without the thing
+that broke it. A build artifact nobody can run is worse than none — someone
+will try it — so the installer was deleted rather than left in the
+repository. Don't re-add one without re-reading this.
 
-`snipux-setup.exe` and `snipux.exe` are shipped unsigned, on purpose, and
-that decision is recorded here so it isn't rediscovered — and re-debated —
-the next time someone notices SmartScreen complaining about a release.
+### Why the exe isn't signed
+
+`snipux.exe` is shipped unsigned, on purpose, and that decision is
+recorded here so it isn't rediscovered — and re-debated — the next time
+someone notices SmartScreen complaining about a release.
 
 A certificate that Windows actually trusts (an EV or OV code-signing
 certificate from a CA in Microsoft's trusted list) costs a few hundred

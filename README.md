@@ -31,37 +31,46 @@ drawing on an image already held in memory.
 
 ### Windows
 
-Windows has a standalone installer (SNX-96/97) — no Python, and no terminal,
-required:
+Windows ships as a single standalone `snipux.exe` (SNX-96) — no Python, and
+no terminal, required, and no installer to run first:
 
-1. Download `snipux-setup.exe` from the
+1. Download `snipux.exe` from the
    [Releases page](https://github.com/CydoEntis/snipux/releases) (newest
    release, under Assets).
-2. Run it. It installs to your own user folder — no administrator prompt —
-   and launches snipux once it's done.
+2. Run it. The first run sets itself up — it relocates itself into your own
+   user folder, adds a Start Menu shortcut and a Startup entry, and
+   registers the Ctrl+Alt+S shortcut — the same as `snipux --setup` does
+   for the pipx route below. No administrator prompt.
 
-**Windows will interrupt that with a warning first**, and it's worth knowing
-exactly what you'll see so it doesn't look like the download failed:
+**Windows will interrupt that with a SmartScreen warning first**, and it's
+worth knowing exactly what you'll see so it doesn't look like the download
+failed: a blue box reading **"Windows protected your PC"**, with smaller
+text underneath naming "an unrecognized app". This is Microsoft Defender
+SmartScreen's standard reaction to *any* downloaded executable without a
+paid code-signing certificate — it is not a virus warning and not a sign
+the download is broken. Click **More info**, then **Run anyway**. (See
+[Why the exe isn't signed](docs/releasing.md#why-the-exe-isnt-signed) for
+the reasoning behind that certificate not existing.)
 
-- **SmartScreen.** A blue box reading **"Windows protected your PC"**, with
-  smaller text underneath naming "an unrecognized app". This is Microsoft
-  Defender SmartScreen's standard reaction to *any* downloaded executable
-  without a paid code-signing certificate — it is not a virus warning and
-  not a sign the download is broken. Click **More info**, then **Run
-  anyway**. (See [Why the installer isn't signed](docs/releasing.md#why-the-installer-isnt-signed)
-  for the reasoning behind that certificate not existing.)
-- **Smart App Control.** A stricter, opt-in Windows 11 feature (off by
-  default, but sometimes on out of the box on new PCs) that can block the
-  installer outright instead of just warning — the message reads like the
-  file is corrupt or unsafe, not like a policy decision, and there is no
-  "Run anyway" the way there is for SmartScreen. If that happens: either
-  install with pipx instead (below), which runs through the already-trusted
-  `python.exe` rather than a new unsigned executable, or turn Smart App
-  Control off yourself (Windows Security → App & browser control → Smart
-  App Control → Off) — Microsoft only lets it be turned back on by
-  reinstalling Windows, so that's a bigger step than it sounds.
+**There is deliberately no installer.** An earlier version of snipux
+shipped one (built with Inno Setup), and it ran straight into Smart App
+Control — a stricter, opt-in Windows 11 feature that is nonetheless on by
+default on a meaningful share of clean Windows 11 installs. Smart App
+Control blocked that installer outright: the message read like the file
+was corrupt or unsafe, not like a policy decision, and unlike SmartScreen
+there was no "More info → Run anyway" to click through — so for those
+users the installer did not just inconvenience, it did not work at all.
+Signing would satisfy Smart App Control, but costs a few hundred dollars a
+year and, since 2023, requires a hardware token (see
+[docs/releasing.md](docs/releasing.md#why-the-exe-isnt-signed)); that has
+been considered and declined. The portable exe above is not blocked by
+Smart App Control, and since it installs itself on first run it delivers
+what the installer was for without the thing that broke it — so don't
+re-add one without re-reading this. If you ever do hit Smart App Control
+blocking the exe itself, `pipx` (below) runs through the already-trusted
+`python.exe` instead of a new unsigned executable.
 
-Once installed, snipux's shortcut is **Ctrl+Alt+S**, not Windows'
+Once running, snipux's shortcut is **Ctrl+Alt+S**, not Windows'
 Win+Shift+S — that combination already belongs to the Windows Snipping
 Tool, and Windows won't hand the same combination to a second app. Change
 it from tray → Settings…, the same as on Linux.
@@ -69,9 +78,9 @@ it from tray → Settings…, the same as on Linux.
 **snipux has to actually be running for Ctrl+Alt+S to do anything.** Unlike
 GNOME's shortcut on Linux, which the desktop itself owns, Windows' hotkey is
 a registration the snipux process holds only while it's alive. That's what
-autostart is for: the installer's first run sets up a Startup-folder entry
-(the same thing `snipux --setup` does), so snipux is already running by the
-time you'd want to press the shortcut, from the next login onward.
+autostart is for: the first run's Startup-folder entry means snipux is
+already running by the time you'd want to press the shortcut, from the next
+login onward.
 
 Already have Python? `pipx` works identically on Windows — see below.
 
