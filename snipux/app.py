@@ -1022,10 +1022,26 @@ def _become_resident(
     later (SNX-101). `WindowsPlatform.install_desktop_integration()`
     depends on this ordering too: it says nothing about when the shortcut
     takes effect, exactly because it never runs before this already has.
+
+    `platform.current.ensure_stable_install()` (SNX-103) runs first, ahead
+    of either: a portable Windows build relocates itself to a stable
+    per-user location here, on *every* launch that gets this far, not just
+    a first one -- unlike `run_first_launch_setup()` just below, which
+    only ever calls into desktop integration once and then stays silent
+    forever after, this has to keep running so that a newer download run
+    over an already-set-up older install still replaces it. It has to
+    happen before `run_first_launch_setup()` reaches
+    `install_desktop_integration()`, too: that is what points the Start
+    Menu/Startup shortcuts at the relocated copy instead of wherever this
+    process happened to be launched from. A no-op everywhere this isn't a
+    portable build (see `Platform.ensure_stable_install()`'s own
+    docstring), so this costs every other platform nothing.
     """
     # Already built by whoever called `try_claim()` -- see
     # `_ensure_qapplication`, which must run before the claim, not after.
     app = _ensure_qapplication()
+
+    platform.current.ensure_stable_install()
 
     controller = AppController(registry, transport)
     controller.install_hotkey_listener()
