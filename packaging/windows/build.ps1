@@ -50,25 +50,33 @@ try {
     $version = $versionMatch.Matches[0].Groups[1].Value
 
     # Not on PATH by default -- the Inno Setup installer adds a Start Menu
-    # shortcut for the IDE, not ISCC.exe itself to PATH -- so both the
-    # common install locations are checked before giving up with a clear
-    # instruction, the same "fail fast, name the fix" style `find_console_script`
-    # / `install_desktop_integration` already use for their own missing
-    # prerequisites.
+    # shortcut for the IDE, not ISCC.exe itself to PATH -- so every known
+    # install location is checked before giving up with a clear instruction,
+    # the same "fail fast, name the fix" style `find_console_script` /
+    # `install_desktop_integration` already use for their own missing
+    # prerequisites. `winget install JRSoftware.InnoSetup` -- the fix this
+    # same error message recommends -- defaults to a per-user install (no
+    # admin prompt), which lands under LocalAppData\Programs rather than the
+    # machine-wide Program Files locations below, so that path is checked
+    # too rather than only covering the install this script's own advice
+    # doesn't actually produce.
+    $candidates = @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+        "$env:LocalAppData\Programs\Inno Setup 6\ISCC.exe"
+    )
     $iscc = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
     if ($iscc) {
         $isccPath = $iscc.Source
     } else {
-        $candidates = @(
-            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
-        )
         $isccPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     }
     if (-not $isccPath) {
-        throw "ISCC.exe (Inno Setup) not found on PATH or in its default install " +
-            "location. Install it from https://jrsoftware.org/isdl.php (or " +
-            "winget install JRSoftware.InnoSetup), then re-run this script."
+        $searched = @("PATH") + $candidates
+        throw "ISCC.exe (Inno Setup) not found. Searched:`n  - " +
+            ($searched -join "`n  - ") + "`nInstall it from " +
+            "https://jrsoftware.org/isdl.php (or winget install " +
+            "JRSoftware.InnoSetup), then re-run this script."
     }
 
     & $isccPath "/DMyAppVersion=$version" "packaging\windows\snipux.iss"
