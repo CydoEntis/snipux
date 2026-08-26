@@ -5129,6 +5129,23 @@ class TestInstantCapture:
         assert len(reported) == 1
         assert reported[0][1] is None, "nothing was written to disk"
 
+    def test_instant_saves_setting_writes_a_file_instead_of_copying(self, monkeypatch, tmp_path):
+        # SNX-111 AC: kept, and honoured -- Instant can now be asked to
+        # save without copying, which is the "Save silently" destination
+        # the old three-way menu (review/clip/file) lost when `clip` and
+        # `file` were collapsed into today's single `instant`.
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_instant_saves", lambda *a, **k: True)
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._overlay()
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert copied == [], "the whole point is that it does not also copy"
+        assert (tmp_path / "Pictures" / "snipux").exists()
+        assert not overlay.isVisible()
+
 
 class TestCaptureModeFullScreenIntegration:
     """SNX-48 AC: picking Full screen in the popover sets `_selection` to

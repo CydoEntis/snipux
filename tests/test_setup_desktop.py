@@ -1115,3 +1115,36 @@ class TestAfterCaptureRenames:
         setup_desktop.save_after_capture("nonsense", tmp_path)
 
         assert setup_desktop.load_after_capture(tmp_path) == "edit"
+
+
+class TestInstantSaves:
+    """SNX-111: `load_instant_saves` is what lets `instant` write a file
+    instead of copying -- the "Save silently" destination the "then" menu
+    rename (clip/file -> edit) otherwise had no way left to reach.
+    """
+
+    def test_nothing_stored_means_instant_still_copies(self, tmp_path):
+        # The default has to stay what `instant` already does, since an
+        # upgrading user who never opens Settings must see no change.
+        assert setup_desktop.load_instant_saves(tmp_path) is False
+
+    def test_round_trips_through_save_and_load(self, tmp_path):
+        setup_desktop.save_instant_saves(True, tmp_path)
+
+        assert setup_desktop.load_instant_saves(tmp_path) is True
+
+    def test_turning_it_off_again_is_not_stuck_on(self, tmp_path):
+        setup_desktop.save_instant_saves(True, tmp_path)
+        setup_desktop.save_instant_saves(False, tmp_path)
+
+        assert setup_desktop.load_instant_saves(tmp_path) is False
+
+    def test_the_old_dead_always_copy_key_is_not_read_as_this_one(self, tmp_path):
+        # `always_copy` was written by Settings and read by no one --
+        # wiring a new key for the real preference must not accidentally
+        # resurrect the old one's stored value, and a config still
+        # carrying it from before this ticket must load without error.
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text('{"always_copy": true}')
+
+        assert setup_desktop.load_instant_saves(tmp_path) is False

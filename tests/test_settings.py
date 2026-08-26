@@ -306,7 +306,7 @@ class TestSettingsWindow:
         window = self._window(tmp_path)
         window._recorder.set_shortcut("Control+Alt+K")
         self._choose_after(window, "review")
-        window._also_copy.switch.setChecked(True)
+        window._instant_saves.switch.setChecked(True)
         window._filename.setText("shot-%Y")
         window._native.switch.setChecked(True)
         window._show_hints.switch.setChecked(True)
@@ -315,10 +315,38 @@ class TestSettingsWindow:
 
         assert setup_desktop.load_shortcut(tmp_path) == "Control+Alt+K"
         assert setup_desktop.load_after_capture(tmp_path) == "review"
-        assert setup_desktop.load_always_copy(tmp_path) is True
+        assert setup_desktop.load_instant_saves(tmp_path) is True
         assert setup_desktop.load_filename_pattern(tmp_path) == "shot-%Y"
         assert setup_desktop.load_native_resolution(tmp_path) is True
         assert setup_desktop.load_hints_enabled(tmp_path) is True
+
+    def test_instant_saves_is_off_by_default(self, tmp_path):
+        # AC (SNX-111): an upgrading user who never touches this switch
+        # must not have Instant capture start writing files instead of
+        # copying -- opening with nothing stored must show it off.
+        window = self._window(tmp_path)
+
+        assert window._instant_saves.switch.isChecked() is False
+
+    def test_instant_saves_label_names_the_choice_it_makes(self, tmp_path):
+        # AC: the label must say what the switch does, not "always copy
+        # to clipboard too" -- that described a setting nothing read.
+        window = self._window(tmp_path)
+
+        labels = [c.text() for c in window._instant_saves.findChildren(QLabel)]
+        assert "Save instead of copying" in labels
+        note = next(t for t in labels if t != "Save instead of copying")
+        assert "Capture and finish" in note
+
+    def test_an_old_dead_always_copy_value_does_not_leak_into_the_new_switch(self, tmp_path):
+        # A config written while this setting was still inert (SNX-111)
+        # must load without error, and must not be read as the new
+        # preference -- the two keys mean different things.
+        setup_desktop.config_path(tmp_path).write_text('{"always_copy": true}')
+
+        window = self._window(tmp_path)
+
+        assert window._instant_saves.switch.isChecked() is False
 
     def test_the_hint_bar_toggle_offers_the_preference_snx_65_turned_off(self, tmp_path):
         # AC: Settings offers the hint-bar preference SNX-65 turned off by
