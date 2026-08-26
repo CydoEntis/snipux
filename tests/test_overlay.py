@@ -7526,6 +7526,47 @@ class TestCaptureChooser:
         assert panel.top() == round(screen.y() - overlay.geometry().top())
         assert abs(panel.center().x() - (screen.center().x() - overlay.geometry().left())) <= 2
 
+    def test_the_panel_clears_whatever_the_desktop_reserves_up_there(
+        self, monkeypatch
+    ):
+        # GNOME paints its top bar over an always-on-top window, so a panel
+        # hung flush against that edge is behind it -- 32px of a 54px panel
+        # on the measured desktop, and all 26px of the armed tab.
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_top", lambda screen: 32
+        )
+        overlay = self._overlay()
+
+        screen = overlay._active_screen_rect()
+        top = round(screen.y() - overlay.geometry().top())
+        assert overlay._chooser.panel.geometry().top() == top + 32
+
+    def test_the_armed_tab_clears_it_too(self, monkeypatch):
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_top", lambda screen: 32
+        )
+        overlay = self._overlay()
+
+        overlay._chooser.set_mode("Freeform")
+
+        screen = overlay._active_screen_rect()
+        top = round(screen.y() - overlay.geometry().top())
+        assert overlay._chooser.tab.geometry().top() == top + 32
+
+    def test_the_close_button_clears_it_as_well(self, monkeypatch):
+        # Same corner, same bar: a close button under it cannot be clicked,
+        # and it is the only visible way to cancel a snip.
+        overlay = self._overlay()
+        flush = overlay._close_button.geometry().top()
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_top", lambda screen: 32
+        )
+        overlay._reserved_top_cache.clear()
+
+        overlay._reposition_close_button()
+
+        assert overlay._close_button.geometry().top() == flush + 32
+
     def test_the_delay_defaults_to_none_and_is_selectable(self):
         overlay = self._overlay()
         assert overlay._chooser.delay == tokens.DELAY_DEFAULT

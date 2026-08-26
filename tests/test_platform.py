@@ -34,6 +34,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PyQt6.QtCore import QRect
 
 import snipux.platform as platform_pkg
 from snipux import setup_desktop
@@ -183,6 +184,123 @@ class TestLinuxPlatform:
         # `sys.frozen`) is already in a location a package manager
         # manages, so `Platform`'s base implementation is what runs here.
         assert linux.LinuxPlatform().ensure_stable_install() is None
+
+
+class _FakeScreen:
+    """Just the two rects `reserved_top` reads off a `QScreen`."""
+
+    def __init__(self, geometry, available=None):
+        self._geometry = geometry
+        self._available = available if available is not None else geometry
+
+    def geometry(self):
+        return self._geometry
+
+    def availableGeometry(self):
+        return self._available
+
+
+class TestReservedTop:
+    """How much of a monitor's top edge the desktop's own chrome owns.
+
+    Chrome placement only -- the capture is untouched by this. Zero is the
+    safe answer everywhere, which is what every platform without an
+    override returns.
+    """
+
+    def _linux(self, monkeypatch, *, session="x11", qt_platform="xcb", xprop=None):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: session)
+        monkeypatch.setattr(linux.QGuiApplication, "platformName", staticmethod(lambda: qt_platform))
+        if xprop is not None:
+            monkeypatch.setattr(
+                linux.subprocess,
+                "run",
+                lambda *a, **k: SimpleNamespace(stdout=xprop),
+            )
+        return linux.LinuxPlatform()
+
+    def test_the_portable_answer_is_the_gap_qt_already_reports(self):
+        # Windows and macOS inherit this: Qt is told the truth there.
+        screen = _FakeScreen(QRect(0, 0, 1920, 1080), QRect(0, 40, 1920, 1040))
+
+        assert windows.WindowsPlatform().reserved_top(screen) == 40
+        assert darwin.DarwinPlatform().reserved_top(screen) == 40
+
+    def test_no_gap_reported_is_no_inset(self):
+        screen = _FakeScreen(QRect(0, 0, 1920, 1080))
+
+        assert windows.WindowsPlatform().reserved_top(screen) == 0
+
+    def test_x11_falls_back_to_the_work_area_qt_did_not_pass_on(self, monkeypatch):
+        # The measured case: GNOME reserves 32px and Qt reports none of it.
+        platform_impl = self._linux(
+            monkeypatch, xprop="_NET_WORKAREA(CARDINAL) = 0, 32, 6400, 1337\n"
+        )
+        screen = _FakeScreen(QRect(1920, 0, 2560, 1440))
+
+        assert platform_impl.reserved_top(screen) == 32
+
+    def test_a_monitor_mounted_below_the_desktops_top_edge_is_already_clear(self, monkeypatch):
+        # The work area is one rect for the whole virtual desktop, so a
+        # monitor hung lower than its top is past the bar by definition.
+        platform_impl = self._linux(
+            monkeypatch, xprop="_NET_WORKAREA(CARDINAL) = 0, 32, 6400, 1337\n"
+        )
+
+        assert platform_impl.reserved_top(_FakeScreen(QRect(0, 201, 1920, 1080))) == 0
+
+    def test_qt_having_an_answer_already_wins_without_shelling_out(self, monkeypatch):
+        def fail(*a, **k):
+            raise AssertionError("xprop must not run when Qt already knows")
+
+        monkeypatch.setattr(linux.subprocess, "run", fail)
+        platform_impl = self._linux(monkeypatch)
+
+        screen = _FakeScreen(QRect(0, 0, 1920, 1080), QRect(0, 27, 1920, 1053))
+        assert platform_impl.reserved_top(screen) == 27
+
+    def test_wayland_asks_nothing_and_reserves_nothing(self, monkeypatch):
+        # `show_on_screen` fullscreens the overlay onto one output there,
+        # and GNOME hides its top bar for a fullscreen window.
+        def fail(*a, **k):
+            raise AssertionError("there is no _NET_WORKAREA on Wayland")
+
+        monkeypatch.setattr(linux.subprocess, "run", fail)
+        platform_impl = self._linux(monkeypatch, session="wayland")
+
+        assert platform_impl.reserved_top(_FakeScreen(QRect(0, 0, 1920, 1080))) == 0
+
+    def test_an_offscreen_qt_platform_asks_nothing(self, monkeypatch):
+        # The headless suite runs inside a real X11 login session, so
+        # `XDG_SESSION_TYPE` says x11 while nothing is painting over
+        # anything. Without this the result would depend on whether the
+        # developer running the suite has a GNOME bar.
+        def fail(*a, **k):
+            raise AssertionError("no shell to hide behind under offscreen")
+
+        monkeypatch.setattr(linux.subprocess, "run", fail)
+        platform_impl = self._linux(monkeypatch, qt_platform="offscreen")
+
+        assert platform_impl.reserved_top(_FakeScreen(QRect(0, 0, 1920, 1080))) == 0
+
+    @pytest.mark.parametrize(
+        "stdout", ["", "_NET_WORKAREA(CARDINAL) = \n", "nonsense", "_NET_WORKAREA = a, b, c, d\n"]
+    )
+    def test_an_unreadable_answer_reserves_nothing(self, monkeypatch, stdout):
+        platform_impl = self._linux(monkeypatch, xprop=stdout)
+
+        assert platform_impl.reserved_top(_FakeScreen(QRect(0, 0, 1920, 1080))) == 0
+
+    def test_a_missing_xprop_reserves_nothing(self, monkeypatch):
+        # Same "degrade, never raise" rule the wmctrl-backed window
+        # provider already follows.
+        def missing(*a, **k):
+            raise FileNotFoundError("xprop")
+
+        monkeypatch.setattr(linux.subprocess, "run", missing)
+        platform_impl = self._linux(monkeypatch)
+
+        assert platform_impl.reserved_top(_FakeScreen(QRect(0, 0, 1920, 1080))) == 0
 
 
 class TestStubPlatforms:

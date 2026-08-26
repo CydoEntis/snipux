@@ -17,7 +17,10 @@ between, not duplicated here.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+
+from PyQt6.QtGui import QGuiApplication
 
 from snipux import capture, setup_desktop
 from snipux.capture import BackendRegistry
@@ -53,3 +56,77 @@ class LinuxPlatform(Platform):
 
     def build_capture_registry(self) -> BackendRegistry:
         return capture.build_linux_registry()
+
+    def reserved_top(self, screen) -> int:
+        """GNOME's top bar, which Qt does not report here.
+
+        `QScreen.availableGeometry()` comes back equal to `geometry()` for
+        every monitor on Ubuntu/GNOME under X11 -- measured on a three
+        monitor desktop where `_NET_WORKAREA` said `0, 32, 6400, 1337`, so
+        the shell had reserved 32px and Qt passed none of it on. The base
+        implementation's portable answer is therefore zero here, and the
+        chooser hung its 54px panel flush against an edge the shell was
+        already painting 32px of its own over. The armed tab is 26px, so
+        it vanished outright.
+
+        The property itself is the only source that knows. Wayland has no
+        equivalent to read and does not need one: `show_on_screen`
+        fullscreens the overlay onto a single output there, and GNOME
+        hides its top bar for a fullscreen window.
+        """
+        portable = super().reserved_top(screen)
+        if portable or capture.detect_session_type() != "x11":
+            return portable
+        if QGuiApplication.platformName() != "xcb":
+            # An offscreen or minimal Qt platform has no shell painting
+            # over anything, whatever `XDG_SESSION_TYPE` still says about
+            # the login session -- and the headless suite runs inside a
+            # real X11 login. Without this it would shell out to `xprop`
+            # and inset chrome by a developer's own GNOME bar, which is a
+            # test that passes or fails depending on whose desk it runs on.
+            return portable
+        return _x11_reserved_top(screen)
+
+
+def _x11_reserved_top(screen) -> int:
+    """`_NET_WORKAREA`'s top offset, as it applies to `screen`.
+
+    The property is a single rect for the whole virtual desktop, so it can
+    say how much of the desktop's top edge is spoken for but not which
+    monitor is showing the bar. A monitor whose own top edge sits at the
+    desktop's top gets the inset; one mounted lower is already clear of it
+    and gets nothing.
+
+    Two monitors both flush with the desktop's top edge would both be
+    inset, even though only one carries the bar. That is the harmless
+    direction to be wrong in -- chrome drawn 32px low on one monitor,
+    against chrome that cannot be clicked at all -- and beats guessing
+    from which monitor is primary, since a bar can be moved.
+
+    Shells out to `xprop` and returns 0 if anything at all goes wrong,
+    the same "degrade, never raise" rule `X11WindowGeometryProvider`
+    already follows around `wmctrl`.
+    """
+    try:
+        result = subprocess.run(
+            ["xprop", "-root", "_NET_WORKAREA"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+
+    _, _, values = result.stdout.partition("=")
+    numbers = []
+    for field in values.split(",")[:4]:
+        try:
+            numbers.append(int(field.strip()))
+        except ValueError:
+            return 0
+    if len(numbers) < 4:
+        return 0
+
+    workarea_top = numbers[1]
+    return max(0, workarea_top - screen.geometry().top())
