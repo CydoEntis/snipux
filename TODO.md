@@ -1,4 +1,4 @@
-# Next: two asks from real use, and a branch waiting on a PR
+# Next: merge the branch, then a new feature
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
@@ -10,52 +10,47 @@ implemented.** macOS is stubbed.
 
     gh pr create --head punch/SNX-108
 
-**SNX-108 is fixed and pushed, not merged.** Four commits on
-`punch/SNX-108`, 1,211 tests passing:
+**`punch/SNX-108` is done and pushed, not merged.** Six code commits, 1,242
+tests passing, and run by hand on a real GNOME/X11 desktop:
 
-- the chooser's own widgets swallow their mouse presses (the ticket)
-- the same fix for the overlay's eight chrome widgets — the floating bar
-  had it too, and there it threw away the selection you had just dragged
-- a refused Window mode now reaches the chooser, not just the chip
-- `verify_bug.py` deleted
+- **SNX-108** — the chooser's widgets swallow their own mouse presses. A
+  press a widget does not accept goes to its parent, and the parent is the
+  overlay, which reads one as the start of a region drag.
+- **The same bug in the overlay's own chrome.** Every painted chrome widget
+  had it; on the floating bar it threw away the selection just dragged out.
+- **The GNOME top bar was hiding the chooser.** `Platform.reserved_top()`
+  is the new seam. `availableGeometry()` is not the fix — Qt reports no
+  strut at all on X11, so Linux reads `_NET_WORKAREA` instead.
+- **The "then" menu now asks where you edit** — Instant / Edit / Review, in
+  place of Review / Copy / Save. `instant` is new; the other two existed
+  under other names.
+- **A refused Window mode reaches the chooser**, not just the chip.
+- `verify_bug.py` deleted.
 
 Four tests fail on Linux and failed before this branch: three in
 `TestCreateShortcut` need `ctypes.WINFUNCTYPE` and can only run on Windows,
-one asserts a font metric this box does not reproduce. Neither is a
-regression; both are worth a marker eventually.
+one asserts a font metric this box does not reproduce. Both sets are worth
+a skip marker rather than a red suite.
 
-Then **rebuild `dist\snipux.exe`** — the prebuilt one predates SNX-108, and
-PyInstaller cannot cross-compile, so it has to happen on Windows:
+Then **rebuild `dist\snipux.exe`** on Windows — PyInstaller cannot
+cross-compile:
 
     powershell -File packaging\windows\build.ps1
 
-## Both of those are built now
+## Left open by that branch
 
-On the same branch, after the write-up below turned out to be short work.
+**The top bar fix is unverified on Wayland.** It reserves nothing there on
+purpose: `show_on_screen` fullscreens the overlay onto one output and GNOME
+hides its bar for a fullscreen window. That reasoning has not been watched
+happen. One launch on a Wayland session settles it.
 
-**The top bar.** `Platform.reserved_top(screen)` is the new seam: a
-portable default off `QScreen`, overridden on Linux to read `_NET_WORKAREA`
-under X11, where Qt reports no strut at all. The chooser and the close
-button both clear it. Chrome placement only — the capture is untouched.
+**Instant always copies.** There is no copy-vs-save preference to read, so
+instant-save cannot be asked for. The obvious home for one already exists
+and does nothing:
 
-**The menu.** Instant / Edit / Review, in place of Review / Copy / Save.
-`instant` is the new path and hangs off `_commit_selection`, a funnel for
-the four routes a selection arrives by. Stored `clip`/`file` read back as
-`edit`; the default is still `edit`.
-
-Two things found on the way, both dead settings promising behaviour that
-never existed:
-
-- `clip` vs `file` made no difference to anything. Nothing but `app.py:902`
-  ever read the value, and it only asked whether it said `review`. Folded
-  into `edit` by this branch.
-- **"Always copy to clipboard too" still does nothing.** `load_always_copy`
-  is written by Settings and read by nobody. Left alone here — wiring it is
-  its own decision, not a rename.
-
-Still open on the menu: **instant always copies.** Instant-save has no way
-to be asked for, because there is no copy-vs-save preference to read — the
-switch above is the obvious place to put one, once it does anything.
+**"Always copy to clipboard too" is a dead setting.** `load_always_copy` is
+written by Settings and read by no one. Wiring it is its own decision --
+either it starts meaning something, or it comes out.
 
 ## Installing
 
@@ -95,7 +90,7 @@ command, package, imports and repo stay `snipux`.
 
 ## The trap this project keeps falling into
 
-A green suite here is weak evidence. All 1,211 tests run headless — no
+A green suite here is weak evidence. All 1,242 tests run headless — no
 compositor, no window manager, no keyboard. That suite was green while the app
 shipped: a package that could not import, an overlay with no way to select,
 invisible blur, a toolbar clipped to single letters, a terminal window on
@@ -121,8 +116,8 @@ display here has ever had a scale factor other than 1.0.
 **macOS**, entirely. The seam exists so it slots in without rework; it needs a
 real Mac for the Screen Recording and Accessibility permissions.
 
-**The Linux side has now been run** — once, on X11, after the platform seam
-moved Linux code behind an interface. It took one launch to surface the top
-bar hiding the chooser, which the whole headless suite had nothing to say
-about. Wayland has not been run since the port at all, and that is the
-primary session type.
+**Wayland, since the Windows port.** X11 has now been run from
+`punch/SNX-108` and it took one launch to surface the top bar hiding the
+chooser -- something the whole headless suite had nothing to say about.
+Wayland is the primary session type and has not been run since the platform
+seam went in.
