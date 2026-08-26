@@ -29,81 +29,33 @@ PyInstaller cannot cross-compile, so it has to happen on Windows:
 
     powershell -File packaging\windows\build.ps1
 
-## Next up — written down, not ticketed
+## Both of those are built now
 
-Both came out of actually running the thing on Linux.
+On the same branch, after the write-up below turned out to be short work.
 
-### The GNOME top bar hides the chooser
+**The top bar.** `Platform.reserved_top(screen)` is the new seam: a
+portable default off `QScreen`, overridden on Linux to read `_NET_WORKAREA`
+under X11, where Qt reports no strut at all. The chooser and the close
+button both clear it. Chrome placement only — the capture is untouched.
 
-The panel hangs flush from the monitor's top edge and the shell's top bar is
-drawn straight over it. More than half of the 54px panel is gone. The armed
-tab is 26px, so it disappears completely.
+**The menu.** Instant / Edit / Review, in place of Review / Copy / Save.
+`instant` is the new path and hangs off `_commit_selection`, a funnel for
+the four routes a selection arrives by. Stored `clip`/`file` read back as
+`edit`; the default is still `edit`.
 
-Measured on the dev box (Ubuntu GNOME, **X11**, three monitors):
+Two things found on the way, both dead settings promising behaviour that
+never existed:
 
-    _NET_WORKAREA                0, 32, 6400, 1337   <- 32px reserved, top
-    QScreen.geometry()           1920,0 2560x1440
-    QScreen.availableGeometry()  1920,0 2560x1440    <- identical: no strut
+- `clip` vs `file` made no difference to anything. Nothing but `app.py:902`
+  ever read the value, and it only asked whether it said `review`. Folded
+  into `edit` by this branch.
+- **"Always copy to clipboard too" still does nothing.** `load_always_copy`
+  is written by Settings and read by nobody. Left alone here — wiring it is
+  its own decision, not a rename.
 
-**`availableGeometry()` is not the fix.** Qt reports it equal to
-`geometry()` on all three monitors here, so the obvious one-liner in
-`_active_screen_rect()` changes nothing. `_NET_WORKAREA` holds the real
-number, is X11-only, and is one rect for the entire virtual desktop — it
-cannot say which monitor the bar is on.
-
-**Check first whether this is X11-only.** On Wayland `show_on_screen`
-fullscreens the overlay onto one output and GNOME hides its top bar for
-fullscreen windows; on X11 the overlay is a plain always-on-top window sized
-to the whole virtual desktop, which the shell is happy to paint over. If it
-only bites on X11 the problem shrinks a lot.
-
-Shapes worth weighing, none chosen:
-
-- a top inset from the platform seam — `platform/linux.py` reads
-  `_NET_WORKAREA` under X11 and returns 0 elsewhere — with the chooser
-  hanging from `top + inset`
-- stop hanging flush when something else owns the edge: float the panel
-  just below it
-- make the X11 overlay genuinely fullscreen so the shell hides its own bar
-
-Whatever wins, only chrome placement moves. The capture still covers the
-whole virtual desktop in one shot, per the one architectural rule.
-
-`_Tab`'s docstring claims the 26px it occupies "on GNOME is the top bar's
-territory anyway, so in practice it costs nothing" — that is exactly
-backwards, and belongs in the same change.
-
-### The "then" menu should ask about editing, not destination
-
-Today it offers three destinations — Review / Copy / Save (`review`, `clip`,
-`file` in `tokens.AFTER_CAPTURE`). Wanted instead: **instant capture**,
-**capture + edit**, **capture and open the GUI to edit**.
-
-That is a different axis. The menu currently answers *where the shot goes*;
-the ask is *where you edit it*. Against what exists:
-
-- **capture + edit** — today's default. The overlay always lets you annotate
-  in place, and you press Copy or Save to finish.
-- **capture and open the GUI** — today's `review`, which opens `review.py`'s
-  window once the overlay closes.
-- **instant capture** — **does not exist.** Every snip lands in the
-  annotate-capable overlay and waits. `clip` and `file` only decide whether a
-  review window opens afterwards; `app.py:902` is the only reader of
-  `outcome` in the codebase.
-
-So the real new work is the instant path: selection released, straight to the
-destination, overlay gone.
-
-The open question is that destination is orthogonal to flow, so where does
-"copy vs save" go? Cheapest coherent answer: only the instant flow needs it
-settled up front, because the other two end with the user pressing Copy or
-Save themselves. Instant takes the Settings default, and the panel keeps
-three triggers instead of growing a fourth.
-
-Touches `tokens.AFTER_CAPTURE` and `CHOOSER_AFTER_NOTE` (shared ids, two
-lengths of prose), the Settings radio cards, `setup_desktop`'s
-`load_review_window`/`save_review_window`, and needs a migration for configs
-already holding `review`/`clip`/`file`.
+Still open on the menu: **instant always copies.** Instant-save has no way
+to be asked for, because there is no copy-vs-save preference to read — the
+switch above is the obvious place to put one, once it does anything.
 
 ## Installing
 
