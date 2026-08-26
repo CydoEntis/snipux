@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from snipux import setup_desktop
+from snipux.design import tokens
 
 
 
@@ -1073,3 +1074,44 @@ class TestRunSetupWithAShortcut:
         )
 
         assert setup_desktop.load_setup_complete(tmp_path / "config") is False
+
+
+class TestAfterCaptureRenames:
+    """`clip` and `file` were two names for one behaviour, and both are
+    now `edit`. A stored copy of either has to keep behaving the same.
+    """
+
+    @pytest.mark.parametrize("stored", ["clip", "file"])
+    def test_the_old_destination_names_read_back_as_edit(self, tmp_path, stored):
+        setup_desktop.save_after_capture(stored, tmp_path)
+
+        assert setup_desktop.load_after_capture(tmp_path) == "edit"
+
+    @pytest.mark.parametrize("stored", ["clip", "file"])
+    def test_neither_old_name_turns_the_review_window_on(self, tmp_path, stored):
+        # `app.py` asks only this question of the setting, and the answer
+        # for both of these was, and stays, no.
+        setup_desktop.save_after_capture(stored, tmp_path)
+
+        assert setup_desktop.load_review_window(tmp_path) is False
+
+    def test_review_is_untouched_by_the_rename(self, tmp_path):
+        setup_desktop.save_after_capture("review", tmp_path)
+
+        assert setup_desktop.load_after_capture(tmp_path) == "review"
+        assert setup_desktop.load_review_window(tmp_path) is True
+
+    def test_nothing_stored_still_means_annotate_in_place(self, tmp_path):
+        # Not `instant`: that would finish an upgrading user's next snip
+        # before they saw it, off a setting they never touched.
+        assert setup_desktop.load_after_capture(tmp_path) == "edit"
+
+    def test_turning_the_review_window_off_lands_on_the_default(self, tmp_path):
+        setup_desktop.save_review_window(False, tmp_path)
+
+        assert setup_desktop.load_after_capture(tmp_path) == tokens.AFTER_DEFAULT
+
+    def test_an_unknown_value_falls_back_rather_than_being_trusted(self, tmp_path):
+        setup_desktop.save_after_capture("nonsense", tmp_path)
+
+        assert setup_desktop.load_after_capture(tmp_path) == "edit"

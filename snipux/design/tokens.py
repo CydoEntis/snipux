@@ -365,14 +365,30 @@ SETTINGS_NAV = [
 ]
 
 # "After capture" — mutually exclusive, radio cards. (id, label, note)
+# What happens once the selection is made. One axis, three answers, in
+# order of how much of your attention each one asks for.
+#
+# It used to be a destination -- review / clip / file -- but two of those
+# three were the same behaviour under different names: `clip` and `file`
+# both meant "annotate in place and press a button when you're done", and
+# nothing anywhere read which of the two it was. What a user actually picks
+# between is where the editing happens, so that is what this asks.
 AFTER_CAPTURE = [
-    ("review", "Open a review window",
-     "Shows the shot, where it went, and lets you keep annotating."),
-    ("clip", "Copy and get out of the way",
-     "Straight to the clipboard, one toast, no window."),
-    ("file", "Save silently",
-     "Writes the file and says nothing. Best with a delay set."),
+    ("instant", "Capture and finish",
+     "Straight to the clipboard the moment the selection is made -- no "
+     "overlay, no toolbar, nothing to dismiss."),
+    ("edit", "Capture and annotate",
+     "The frozen frame stays up with the tools on it. Copy or save when "
+     "you are done."),
+    ("review", "Capture and review",
+     "Opens the review window afterwards, which annotates too."),
 ]
+
+# The one an upgrading user gets, and what `Chooser` starts on before
+# Settings seeds it. Not `AFTER_CAPTURE[0]`: the list is ordered for the
+# Settings pane to read down, and the default is a separate decision --
+# annotating in place is what every version before this did.
+AFTER_DEFAULT = "edit"
 
 # Filename pattern tokens offered as clickable chips under the field.
 FILENAME_TOKENS = [
@@ -525,9 +541,9 @@ DELAY_DEFAULT = "No delay"
 # Same decision, two surfaces, two lengths -- the identifiers stay shared so
 # there is still one list of destinations.
 CHOOSER_AFTER_NOTE = {
+    "instant": "Straight to the clipboard, no overlay.",
+    "edit": "Annotate in place, then copy or save.",
     "review": "Opens the review window to edit.",
-    "clip": "Straight to the clipboard, no window.",
-    "file": "Writes the file and says nothing.",
 }
 
 

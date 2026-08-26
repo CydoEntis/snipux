@@ -4995,6 +4995,141 @@ class TestCaptureModeWindowIntegration:
         provider.window_at.assert_not_called()
 
 
+class TestInstantCapture:
+    """`instant` finishes the snip the moment the selection is made --
+    no overlay to dismiss, no button to press.
+
+    The other two answers to "then" both leave the frozen frame up; this
+    is the only one that ends the session itself, so what it must never do
+    is end it early. A live drag calls `set_selection` on every mouse
+    move, and finishing on the first pixel of one is not instant capture,
+    it is a broken drag.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self, outcome="instant", size=(800, 600)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(
+            frame, geometry_provider=_FakeWindowProvider(QRectF(30, 30, 200, 150))
+        )
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._chooser.set_after(outcome)
+        return overlay
+
+    def _drag(self, overlay, start, end):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(overlay, QPoint((start.x() + end.x()) // 2, (start.y() + end.y()) // 2))
+        QTest.mouseMove(overlay, end)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=end)
+
+    def test_a_region_drag_copies_and_closes_on_release(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._overlay()
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert len(copied) == 1
+        assert copied[0].size() == QSize(300, 250)
+        assert not overlay.isVisible()
+
+    def test_nothing_is_copied_part_way_through_the_drag(self, monkeypatch):
+        # The whole reason this hangs off a commit funnel and not
+        # `set_selection`, which runs on every move of a live drag.
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._overlay()
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        QTest.mouseMove(overlay, QPoint(250, 220))
+        QTest.mouseMove(overlay, QPoint(400, 350))
+
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_a_drag_too_small_to_commit_copies_nothing(self, monkeypatch):
+        # Below the 16x16 floor is a discarded misfire, not a snip -- and
+        # a misfire that copied the screen and vanished would be the worst
+        # possible reading of "instant".
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._overlay()
+
+        self._drag(overlay, QPoint(100, 100), QPoint(105, 104))
+
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_picking_a_window_copies_it_immediately(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._overlay()
+        overlay._chooser.set_mode("Window")
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+
+        assert len(copied) == 1
+        assert not overlay.isVisible()
+
+    def test_full_screen_copies_without_a_click_at_all(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._overlay()
+
+        overlay._chooser.set_mode("Full screen")
+
+        assert len(copied) == 1
+        assert not overlay.isVisible()
+
+    def test_edit_leaves_the_frame_up_with_the_bar_on_it(self, monkeypatch):
+        # The default, and the behaviour every version before this had.
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._overlay(outcome="edit")
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert copied == []
+        assert overlay.isVisible()
+        assert overlay._bar.isVisibleTo(overlay)
+
+    def test_review_leaves_the_frame_up_too(self, monkeypatch):
+        # `review` is about what opens *after* the overlay, so the overlay
+        # itself behaves exactly as `edit` does.
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._overlay(outcome="review")
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_it_reports_the_capture_the_same_way_copy_always_has(self, monkeypatch):
+        # `app.py` opens the review window off this hook; instant is the
+        # ordinary Copy path, so it reports like one.
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        reported = []
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(
+            frame, on_captured=lambda image, path: reported.append((image, path))
+        )
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._chooser.set_after("instant")
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert len(reported) == 1
+        assert reported[0][1] is None, "nothing was written to disk"
+
+
 class TestCaptureModeFullScreenIntegration:
     """SNX-48 AC: picking Full screen in the popover sets `_selection` to
     the whole display the cursor is on, immediately -- no drag or click

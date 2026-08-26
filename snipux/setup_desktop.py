@@ -406,16 +406,26 @@ def detect_session_type() -> str:
     return os.environ.get("XDG_SESSION_TYPE", "unknown")
 
 
+# The two destinations that turned out to be one behaviour. `clip` and
+# `file` both meant "annotate in place, then press a button" -- the only
+# reader of this value ever asked was whether it said `review` -- so a
+# stored copy of either is what is now called `edit`, and nobody's snip
+# behaves differently for the rename.
+_AFTER_CAPTURE_RENAMES = {"clip": "edit", "file": "edit"}
+
+
 def load_after_capture(config_dir: Path | None = None) -> str:
     """Which of `tokens.AFTER_CAPTURE` applies once a snip is taken.
 
-    Defaults to the first entry (`review`)? No -- to `clip`. Opening a
-    window after every capture is a change to the core flow, and an
-    upgrading user who never asked for one should not suddenly get one.
+    Defaults to `tokens.AFTER_DEFAULT` (`edit`), not the list's first
+    entry. Opening a window after every capture, or finishing the snip
+    without ever showing one, are both changes to the core flow, and an
+    upgrading user who never asked for either should not get one.
     """
     stored = _read_config(config_dir).get("after_capture")
+    stored = _AFTER_CAPTURE_RENAMES.get(stored, stored)
     valid = {identifier for identifier, _label, _note in tokens.AFTER_CAPTURE}
-    return stored if stored in valid else "clip"
+    return stored if stored in valid else tokens.AFTER_DEFAULT
 
 
 def save_after_capture(value: str, config_dir: Path | None = None) -> bool:
@@ -431,7 +441,7 @@ def load_review_window(config_dir: Path | None = None) -> bool:
 
 
 def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
-    return save_after_capture("review" if enabled else "clip", config_dir)
+    return save_after_capture("review" if enabled else tokens.AFTER_DEFAULT, config_dir)
 
 
 def load_always_copy(config_dir: Path | None = None) -> bool:

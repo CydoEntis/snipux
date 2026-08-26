@@ -293,10 +293,19 @@ class TestSettingsWindow:
 
         assert setup_desktop.load_shortcut(tmp_path) == tokens.SHORTCUT_DEFAULT
 
+    @staticmethod
+    def _choose_after(window, identifier: str) -> None:
+        """Pick an after-capture card by its id rather than its position:
+        the list is ordered for reading, and that order is a display
+        decision the rest of the app has no part in.
+        """
+        index = [row[0] for row in tokens.AFTER_CAPTURE].index(identifier)
+        window._after_group.buttons()[index].setChecked(True)
+
     def test_save_commits_every_pane(self, tmp_path):
         window = self._window(tmp_path)
         window._recorder.set_shortcut("Control+Alt+K")
-        window._after_group.buttons()[0].setChecked(True)  # "review"
+        self._choose_after(window, "review")
         window._also_copy.switch.setChecked(True)
         window._filename.setText("shot-%Y")
         window._native.switch.setChecked(True)
@@ -463,7 +472,7 @@ class TestSettingsWindow:
         # app.py asks "is the review window on"; Settings stores one of three
         # behaviours. The two must agree.
         window = self._window(tmp_path)
-        window._after_group.buttons()[0].setChecked(True)  # "review"
+        self._choose_after(window, "review")
 
         window._save()
 
