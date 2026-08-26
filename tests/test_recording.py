@@ -1,4 +1,5 @@
 import threading
+import time
 from unittest.mock import Mock
 
 from jeepney import HeaderFields
@@ -574,6 +575,8 @@ class FakeRecorder:
         self.output_location = None
         self.record_calls = 0
         self.stop_calls = 0
+        self.video_frame_rate = None
+        self.set_video_frame_rate_calls = []
         self._state = QMediaRecorder.RecorderState.StoppedState
 
     def setMediaFormat(self, media_format):
@@ -581,6 +584,10 @@ class FakeRecorder:
 
     def setOutputLocation(self, url):
         self.output_location = url
+
+    def setVideoFrameRate(self, frame_rate):
+        self.video_frame_rate = frame_rate
+        self.set_video_frame_rate_calls.append(frame_rate)
 
     def record(self):
         self.record_calls += 1
@@ -872,6 +879,22 @@ class TestCropFrame:
             for col in range(2):
                 assert _read_pixel(cropped, row, col) == row * 10 + col
 
+    def test_preserves_the_source_frames_start_and_end_time(self):
+        # SNX-125: a freshly constructed QVideoFrame defaults startTime()/
+        # endTime() to -1 (untimed). Nothing else in this module ever
+        # copies the source frame's real capture timestamps onto the
+        # cropped copy, so the encoder fell back to laying whatever it
+        # received down at its own nominal spacing -- this is the direct
+        # regression test for that.
+        source = _make_frame(4, 4, lambda row, col: 1)
+        source.setStartTime(123_456)
+        source.setEndTime(156_789)
+
+        cropped = _crop_frame(source, QRect(0, 0, 2, 2))
+
+        assert cropped.startTime() == 123_456
+        assert cropped.endTime() == 156_789
+
 
 class TestRegionCropWorker:
     def test_does_nothing_when_no_frame_is_pending(self):
@@ -954,6 +977,91 @@ class TestRegionCropWorker:
 
         assert len(frame_input.sent_frames) == 1
 
+    def test_the_surviving_frame_carries_its_own_timing_not_the_dropped_ones(self):
+        # SNX-125: coalescing to "at most one pending frame" is correct and
+        # load-bearing (see the class docstring) -- the bug was never the
+        # dropping itself, only that the frame which survived carried no
+        # timing. Two source frames with distinct real timestamps, both
+        # delivered before the encoder asks for one: the frame that reaches
+        # sendVideoFrame() must carry the *second* (surviving) frame's own
+        # start/end time, not the first's and not an average of the two.
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+        first = _make_frame(4, 4, lambda row, col: 10)
+        first.setStartTime(0)
+        first.setEndTime(33_333)
+        second = _make_frame(4, 4, lambda row, col: 20)
+        second.setStartTime(33_333)
+        second.setEndTime(66_666)
+
+        worker.on_frame(first)
+        worker.on_frame(second)
+        worker.on_ready_to_send()
+
+        assert len(frame_input.sent_frames) == 1
+        sent = frame_input.sent_frames[0]
+        assert sent.startTime() == 33_333
+        assert sent.endTime() == 66_666
+
+
+class TestRegionCropWorkerDuration:
+    """The ticket's own acceptance criterion: "a test records for a fixed
+    wall-clock interval and fails if the output duration disagrees with
+    it." Per docs/design/recording.md's "what a green suite will and will
+    not prove", an actual playable-file duration check needs a real
+    Windows session with a monitor, which is out of pytest's reach
+    entirely -- but the fault this ticket fixes lives in `_RegionCropWorker`
+    (SNX-125's own diagnosis: "nothing carries timing onto the cropped
+    frames"), so a real timed run *through that worker* is both reachable
+    headlessly and a genuine wall-clock test, not a synthetic-timestamp
+    proxy for one.
+
+    This drives frames through the exact on_frame()/on_ready_to_send()
+    sequence `_start_region` wires up for `record_seconds` of actual
+    elapsed time (`time.monotonic()`, not precomputed arithmetic), stamping
+    each frame from real elapsed time at the moment it arrives -- the same
+    way `QScreenCapture` stamps a real one -- with roughly half coalesced
+    away (two on_frame() calls per on_ready_to_send(), same as
+    TestRegionCropWorker's coalescing tests). It then asserts the timing
+    carried by what actually reached the encoder reconstructs the *actual*
+    wall-clock interval that really elapsed, not a target duration assumed
+    in advance. A worker that dropped timing (today's pre-fix code) would
+    hand every surviving frame the default, untimed -1/-1, and this would
+    fail loudly instead of passing on arithmetic alone.
+    """
+
+    def test_records_for_a_fixed_wall_clock_interval(self):
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+
+        record_seconds = 0.5
+        frame_interval_seconds = 1 / 30  # QScreenCapture's own rough cadence
+
+        wall_clock_start = time.monotonic()
+        i = 0
+        while time.monotonic() - wall_clock_start < record_seconds:
+            frame = _make_frame(4, 4, lambda row, col: i % 251)
+            frame.setStartTime(round((time.monotonic() - wall_clock_start) * 1_000_000))
+            time.sleep(frame_interval_seconds)
+            frame.setEndTime(round((time.monotonic() - wall_clock_start) * 1_000_000))
+            worker.on_frame(frame)
+            if i % 2 == 1:  # the encoder only asks for every second arrival
+                worker.on_ready_to_send()
+            i += 1
+        # Flush whatever's left pending -- otherwise a run that ends on an
+        # even i strands the last, most-recent frame unsent and the
+        # reconstructed interval undershoots the real elapsed time it
+        # should be checked against.
+        worker.on_ready_to_send()
+        wall_clock_elapsed_us = round((time.monotonic() - wall_clock_start) * 1_000_000)
+
+        assert frame_input.sent_frames
+        first_sent = frame_input.sent_frames[0]
+        last_sent = frame_input.sent_frames[-1]
+        assert last_sent.endTime() - first_sent.startTime() == pytest.approx(
+            wall_clock_elapsed_us, rel=0.15
+        )
+
 
 def _windows_backend(**overrides):
     factories = dict(
@@ -992,6 +1100,21 @@ class TestWindowsRecorderBackendAvailability:
 
 
 class TestWindowsRecorderBackendFullScreenStart:
+    """SNX-125 checked this path for the same "recordings play back sped
+    up" fault and confirmed it needs no fix: `_start_full_screen()` wires
+    `QScreenCapture` straight into the same `QMediaCaptureSession` as
+    `QMediaRecorder`, with no `QVideoSink`, no `_crop_frame()`, and no
+    application code at all between capture and recorder --
+    `test_never_constructs_the_interception_machinery` below already
+    proves that structurally. Qt's own `QVideoFrame`s carry real capture
+    timestamps by construction; the region path only broke once
+    `_crop_frame()` started constructing fresh, unstamped frames instead
+    of passing one of Qt's own through. There's no code left on this path
+    for that bug to live in, so it gets no symmetrical
+    `setVideoFrameRate()` call either -- that would pay the path that
+    already works for a fix aimed at the one that didn't.
+    """
+
     PATH = "C:/tmp/snipux-recording.mp4"
 
     def test_wires_screen_capture_straight_to_the_recorder(self):
@@ -1104,6 +1227,40 @@ class TestWindowsRecorderBackendRegionStart:
 
         with pytest.raises(RuntimeError, match="disk full"):
             backend.start(self.RECT, self.PATH)
+
+    def test_does_not_declare_a_frame_rate_before_any_frame_has_arrived(self):
+        # No hardcoded 30fps (or any other nominal value): until the
+        # worker has actually measured something, there's nothing genuine
+        # to declare, so setVideoFrameRate() must not have been called yet.
+        backend = _windows_backend()
+
+        backend.start(self.RECT, self.PATH)
+
+        assert backend._recorder.set_video_frame_rate_calls == []
+
+    def test_declares_the_measured_frame_rate_once_enough_frames_have_arrived(self, qapp):
+        backend = _windows_backend()
+        backend.start(self.RECT, self.PATH)
+
+        # ~15fps -- distinctly different from any nominal 30fps-class
+        # default, so a test that hardcoded either the old default or an
+        # unrelated guess would fail this.
+        interval_us = round(1_000_000 / 15)
+        sample_count = _RegionCropWorker._FRAME_RATE_SAMPLE_FRAMES
+        for i in range(sample_count):
+            frame = _make_frame(4, 4, lambda row, col: i % 251)
+            frame.setStartTime(i * interval_us)
+            frame.setEndTime((i + 1) * interval_us)
+            backend._worker.on_frame(frame)
+
+        # frame_rate_measured is delivered via an explicit QueuedConnection
+        # (see _start_region) -- it lands once the event loop it's queued
+        # on is pumped, same as any other cross-thread Qt signal.
+        qapp.processEvents()
+
+        assert backend._recorder.set_video_frame_rate_calls == pytest.approx(
+            [15.0], rel=0.01
+        )
 
 
 class TestWindowsRecorderBackendStop:
