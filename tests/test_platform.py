@@ -1138,8 +1138,8 @@ class TestReattachConsole:
     own), so `reattach_console()` is what lets a terminal launch
     (`snipux --list-backends` etc.) still see its output, while a launch
     with no console anywhere in its parent chain (Explorer, a Start
-    Menu/Startup shortcut, the installer's own [Run] step) stays silent
-    without crashing the first time something calls `print()`.
+    Menu/Startup shortcut) stays silent without crashing the first time
+    something calls `print()`.
 
     `sys.stdout`/`sys.stderr` are restored after every test that lets
     `reattach_console()` actually reassign them -- this suite's own output
@@ -1182,11 +1182,10 @@ class TestReattachConsole:
             sys.stdout, sys.stderr = original_stdout, original_stderr
 
     def test_redirects_to_devnull_when_no_console_is_available(self, monkeypatch):
-        # Explorer, a Start Menu/Startup shortcut, or the installer's own
-        # [Run] step: none of those parents has a console for
-        # AttachConsole to find, which is a plain failure distinct from
-        # "this process already has one" (ERROR_ACCESS_DENIED, covered
-        # below).
+        # Explorer or a Start Menu/Startup shortcut: neither of those
+        # parents has a console for AttachConsole to find, which is a
+        # plain failure distinct from "this process already has one"
+        # (ERROR_ACCESS_DENIED, covered below).
         monkeypatch.setattr(windows.sys, "platform", "win32")
         monkeypatch.setattr(
             windows.ctypes,

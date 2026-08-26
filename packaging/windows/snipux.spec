@@ -88,9 +88,9 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     # Windowed, not console (SNX-100): a tray app popping a black terminal
-    # window behind it on every launch -- double-click, Start Menu,
-    # Startup, or the installer's own first-run -- looked broken rather
-    # than merely quiet, and was the first thing a new user saw. This used
+    # window behind it on every launch -- double-click, Start Menu, or
+    # Startup -- looked broken rather than merely quiet, and was the first
+    # thing a new user saw. This used
     # to be console=True specifically so --setup/--remove/--snip/
     # --list-backends could still print (SNX-96's own acceptance
     # criterion), but that traded away silence in the one case that
@@ -101,9 +101,8 @@ exe = EXE(
     # `app.py`'s `cli()`, is what makes both halves true at once:
     # `AttachConsole(ATTACH_PARENT_PROCESS)` reattaches to a real caller's
     # console when there is one (a terminal), and points stdout/stderr at
-    # `os.devnull` instead when there isn't (Explorer, a shortcut, the
-    # installer) -- so print() never crashes, and no window ever appears
-    # on its own.
+    # `os.devnull` instead when there isn't (Explorer, a shortcut) -- so
+    # print() never crashes, and no window ever appears on its own.
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,

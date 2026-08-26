@@ -114,10 +114,11 @@ class Platform(ABC):
         platform inherits unless it overrides this.
 
         `WindowsPlatform` is the one override today: a portable, single-
-        file `snipux.exe` (the actual Windows distribution route, since
-        Smart App Control blocks the installer outright) has no package
-        manager behind it at all, so it has to make that guarantee about
-        itself. `app._become_resident()` calls this once, on every launch
+        file `snipux.exe` (the only Windows distribution route -- SNX-104
+        dropped the Inno Setup installer that Smart App Control was
+        blocking outright) has no package manager behind it at all, so it
+        has to make that guarantee about itself. `app._become_resident()`
+        calls this once, on every launch
         that becomes the resident instance, before it does anything that
         might point a shortcut at this process's own, possibly-about-to-
         be-deleted launch location.
