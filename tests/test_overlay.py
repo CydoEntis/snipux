@@ -7403,6 +7403,139 @@ class TestCaptureChooser:
         assert overlay._chooser.delay == "5s"
 
 
+class TestTheChooserTakesItsOwnClicks:
+    """SNX-108: a press on the chooser must never reach the overlay.
+
+    Everything above drives the chooser through `set_mode`/`reopen`, and
+    that is exactly the seam this bug lived in: the state machine was right
+    and no click could get to it. A widget that leaves a press unaccepted
+    hands it to its parent -- the overlay -- which reads a press with no
+    selection as the start of a region drag, so clicking `Region` armed a
+    region capture and dropped the user into the overlay with the chooser
+    gone. These press the widgets themselves.
+    """
+
+    def _overlay(self, size=(1200, 800)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    @staticmethod
+    def _centre(widget):
+        return QPoint(widget.width() // 2, widget.height() // 2)
+
+    def _press(self, widget):
+        QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=self._centre(widget))
+
+    def _click(self, widget):
+        QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=self._centre(widget))
+
+    @pytest.mark.parametrize(
+        "trigger", ["mode_trigger", "after_trigger", "delay_trigger"]
+    )
+    def test_a_press_on_a_trigger_starts_no_capture(self, trigger):
+        overlay = self._overlay()
+
+        self._press(getattr(overlay._chooser.panel, trigger))
+
+        # A selection at all -- even the empty one a drag opens with -- is
+        # what stands the chooser down and puts the floating bar up.
+        assert overlay._selection is None
+        assert overlay._chooser.panel.isVisibleTo(overlay)
+
+    def test_a_press_on_the_panel_itself_starts_no_capture(self):
+        # The gaps between the triggers and the word "then" are the panel's
+        # own background, and a press that lands there is still a press on
+        # the chooser.
+        overlay = self._overlay()
+
+        self._press(overlay._chooser.panel)
+
+        assert overlay._selection is None
+        assert overlay._chooser.panel.isVisibleTo(overlay)
+
+    def test_a_press_on_the_armed_tab_starts_no_capture(self):
+        overlay = self._overlay()
+        overlay._chooser.set_mode("Freeform")
+
+        self._press(overlay._chooser.tab)
+
+        assert overlay._selection is None
+        assert overlay._chooser.tab.isVisibleTo(overlay)
+
+    def test_clicking_a_trigger_opens_its_menu(self):
+        overlay = self._overlay()
+
+        self._click(overlay._chooser.panel.mode_trigger)
+
+        assert overlay._chooser._menu_kind == "mode"
+
+    def test_clicking_through_to_a_row_arms_that_mode(self):
+        # The whole gesture the video showed failing: click the trigger,
+        # then click a row in the menu it opened.
+        # Freeform rather than Window: a headless session has no window
+        # geometry provider, so Window would fall back to Region and prove
+        # nothing about the click that got there.
+        overlay = self._overlay()
+
+        self._click(overlay._chooser.panel.mode_trigger)
+        self._click(overlay._chooser._menu._rows["Freeform"])
+
+        assert overlay._chooser.mode == "Freeform"
+        assert overlay._chooser.phase == "armed"
+        assert overlay._capture_mode == "Freeform"
+
+    def test_clicking_the_tab_reopens_the_panel(self):
+        overlay = self._overlay()
+        overlay._chooser.set_mode("Freeform")
+
+        self._click(overlay._chooser.tab)
+
+        assert overlay._chooser.phase == "choosing"
+
+    def test_sliding_off_a_trigger_before_releasing_is_not_a_click(self):
+        # Consuming the press makes this widget Qt's implicit mouse
+        # grabber, so the release comes back here wherever it happens.
+        # Pressing a control and sliding away from it means "no".
+        overlay = self._overlay()
+        trigger = overlay._chooser.panel.mode_trigger
+
+        self._press(trigger)
+        QTest.mouseRelease(trigger, Qt.MouseButton.LeftButton, pos=QPoint(-200, 400))
+
+        assert overlay._chooser._menu is None
+
+    def test_sliding_off_a_menu_row_before_releasing_picks_nothing(self):
+        overlay = self._overlay()
+        self._click(overlay._chooser.panel.mode_trigger)
+        row = overlay._chooser._menu._rows["Freeform"]
+
+        QTest.mousePress(row, Qt.MouseButton.LeftButton, pos=self._centre(row))
+        QTest.mouseRelease(row, Qt.MouseButton.LeftButton, pos=QPoint(-200, 400))
+
+        assert overlay._chooser.mode == "Region"
+        assert overlay._chooser.phase == "choosing"
+        assert overlay._capture_mode == "Region"
+
+    def test_double_clicking_a_trigger_starts_no_capture(self):
+        # Qt sends a second press as a `MouseButtonDblClick`, and a widget
+        # that ignores that gets the press-propagating default back --
+        # which is the same leak by another event type. Clicking twice
+        # because nothing seemed to happen is exactly how the bug was hit.
+        overlay = self._overlay()
+        trigger = overlay._chooser.panel.mode_trigger
+
+        QTest.mouseDClick(
+            trigger, Qt.MouseButton.LeftButton, pos=self._centre(trigger)
+        )
+
+        assert overlay._selection is None
+        assert overlay._chooser.panel.isVisibleTo(overlay)
+
+
 class TestTheDestinationMenuFitsItsWidth:
     """The menu is a fixed 270px and its notes are prose.
 
