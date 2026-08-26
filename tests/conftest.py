@@ -6,9 +6,21 @@ whatever the developer is sitting at -- CLAUDE.md is explicit that day-to-day
 development happens on Windows and in an Ubuntu VM. A red run that nobody can
 trust is worse than no run at all, so a handful of tests that exercise
 genuinely OS-specific behaviour (real window activation semantics, named-pipe
-timing, a font substitute only available on one platform) are marked with
-`skip_on_windows` rather than fixed to "pass everywhere" or silently deleted.
-That keeps the *reason* for the platform gap in the suite's own output.
+timing) are marked with `skip_on_windows` rather than fixed to "pass
+everywhere" or silently deleted. That keeps the *reason* for the platform gap
+in the suite's own output.
+
+A test whose only platform dependency is *which fallback font this machine
+happens to have installed* is a different case, and does not belong behind
+`skip_on_windows` -- that is a fact about the box running the suite, not
+about the OS family (an earlier version of
+`TestTheDestinationMenuFitsItsWidth.test_every_note_fits_without_eliding` in
+test_overlay.py assumed otherwise, and was wrong on at least one real Linux
+machine). That test instead skips itself at runtime, naming the actual
+fallback family it resolved, only once it has confirmed the assertion would
+fail for the known cause -- IBM Plex not being vendored (design/fonts/
+doesn't exist in this handoff) -- rather than assuming a whole OS one way or
+the other.
 """
 
 import sys
