@@ -122,7 +122,7 @@ class TestRenderDesktopEntry:
         assert "__SNIPUX_LAUNCHER__" not in rendered
         # The rest of the bundled template is untouched -- this only ever
         # rewrites the one placeholder line.
-        assert "Name=snipux" in rendered
+        assert "Name=Snipux" in rendered
         assert "Type=Application" in rendered
         # SNX-81: names our own icon (installed by install_icons() into the
         # hicolor theme), not org.gnome.Screenshot -- GNOME's own

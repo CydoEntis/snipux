@@ -486,7 +486,7 @@ class SettingsWindow(WinWindow):
         on_saved: Callable[[], None] | None = None,
     ):
         super().__init__(
-            "snipux Settings",
+            "Snipux Settings",
             size=(tokens.WinMetric.SETTINGS_W, tokens.WinMetric.SETTINGS_H),
             parent=parent,
         )
@@ -814,7 +814,7 @@ class SettingsWindow(WinWindow):
                 QMessageBox.warning(
                     self,
                     "Shortcut already in use",
-                    f"{shortcut} is already used by {holder} -- snipux cannot "
+                    f"{shortcut} is already used by {holder} -- Snipux cannot "
                     "register it too. Choose a different combination.",
                 )
                 return

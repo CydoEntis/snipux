@@ -365,7 +365,7 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
 
 
 def version_line() -> str:
-    """`snipux 0.1.0 / Qt 6.7 · X11` for the nav rail's footer.
+    """`Snipux 0.1.0 / Qt 6.7 · X11` for the nav rail's footer.
 
     The trailing field is read, never assumed -- CLAUDE.md's rule -- and a
     missing Qt (impossible here, but this is also imported by `--setup`,
@@ -383,7 +383,7 @@ def version_line() -> str:
         qt = f" / Qt {QT_VERSION_STR}"
     except Exception:
         qt = ""
-    return f"snipux {ours}{qt} · {_platform_field()}"
+    return f"Snipux {ours}{qt} · {_platform_field()}"
 
 
 def _platform_field() -> str:

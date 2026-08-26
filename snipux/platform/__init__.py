@@ -166,7 +166,7 @@ def _select() -> Platform:
         from . import darwin
 
         return darwin.DarwinPlatform()
-    raise RuntimeError(f"snipux has no platform support for {sys.platform!r}")
+    raise RuntimeError(f"Snipux has no platform support for {sys.platform!r}")
 
 
 # Selected once, at import time (the acceptance criterion this exists to

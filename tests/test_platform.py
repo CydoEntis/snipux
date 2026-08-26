@@ -375,7 +375,7 @@ class TestWindowsPlatform:
 
         result = windows.WindowsPlatform().unbind_shortcut()
 
-        assert "No snipux shortcut is currently registered" in result
+        assert "No Snipux shortcut is currently registered" in result
         assert user32.unregistered == []
 
     def test_unbind_releases_a_registered_shortcut(self, monkeypatch):

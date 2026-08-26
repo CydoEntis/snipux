@@ -542,13 +542,19 @@ def _write_shortcut(lnk_path: Path, target: Path, icon_path: Path | None, label:
     The filename never changes between runs, so a second `--setup`
     overwrites the first shortcut rather than adding a duplicate, the same
     "no extra bookkeeping needed" property `_write_entry()` has on Linux.
+
+    `description="Snipux"` (SNX-107) is the `.lnk`'s own display-text field
+    -- the COM analogue of the `.desktop` entry's `Name=` -- so the shortcut
+    reads as the product name without touching `lnk_path`'s filename, which
+    a second `--setup` still has to find unchanged to overwrite rather than
+    duplicate.
     """
     try:
         lnk_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         print(f"Note: could not create {lnk_path.parent} for the {label} entry: {exc}")
         return False
-    if not _create_shortcut(lnk_path, target, icon_path=icon_path):
+    if not _create_shortcut(lnk_path, target, icon_path=icon_path, description="Snipux"):
         print(f"Note: could not write the {label} entry at {lnk_path}.")
         return False
     print(f"{label} entry written to {lnk_path} (target={target})")
@@ -875,7 +881,7 @@ class WindowsPlatform(Platform):
         if translated is None:
             return (
                 f"'{setup_desktop.human_shortcut(shortcut)}' is not a key "
-                "combination snipux can register on Windows."
+                "combination Snipux can register on Windows."
             )
 
         # Released first, always -- so rebinding to a new combination swaps
@@ -890,7 +896,7 @@ class WindowsPlatform(Platform):
             if error == _ERROR_HOTKEY_ALREADY_REGISTERED:
                 return (
                     f"{setup_desktop.human_shortcut(shortcut)} is already in use by "
-                    "another application -- snipux cannot use it too."
+                    "another application -- Snipux cannot use it too."
                 )
             return (
                 f"Could not bind {setup_desktop.human_shortcut(shortcut)} "
@@ -913,7 +919,7 @@ class WindowsPlatform(Platform):
         re-register it", not this method.
         """
         if self.registered_shortcut is None:
-            return "No snipux shortcut is currently registered."
+            return "No Snipux shortcut is currently registered."
 
         shortcut = self.registered_shortcut
         self.registered_shortcut = None
