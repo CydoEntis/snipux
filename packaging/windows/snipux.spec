@@ -87,19 +87,24 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    # A console, always -- not just for --setup/--remove/--snip/
-    # --list-backends (SNX-96's own acceptance criterion that these work
-    # from the built executable: "work" includes a user being able to see
-    # what they printed), but because the resident tray app also prints
-    # notes on the paths it takes when there is no tray at all (app.py's
-    # `run_resident_app`) and reports like `_report_shortcut`'s fall back
-    # to `print()` with no tray available -- console=False would silently
-    # discard all of that rather than just hiding a window nothing here
-    # currently needs hidden. Trading away a console-free tray launch is
-    # the deliberate, documented choice; not needing one at all would mean
-    # teaching the resident app to attach to a caller's console on demand,
-    # which is future work through the platform seam, not this spec.
-    console=True,
+    # Windowed, not console (SNX-100): a tray app popping a black terminal
+    # window behind it on every launch -- double-click, Start Menu,
+    # Startup, or the installer's own first-run -- looked broken rather
+    # than merely quiet, and was the first thing a new user saw. This used
+    # to be console=True specifically so --setup/--remove/--snip/
+    # --list-backends could still print (SNX-96's own acceptance
+    # criterion), but that traded away silence in the one case that
+    # actually mattered (the resident tray app, launched with no
+    # arguments) to keep it in the ones that don't need a window at all --
+    # a terminal running one of those flags is still there to attach to.
+    # `snipux.platform.windows.reattach_console()`, called first thing by
+    # `app.py`'s `cli()`, is what makes both halves true at once:
+    # `AttachConsole(ATTACH_PARENT_PROCESS)` reattaches to a real caller's
+    # console when there is one (a terminal), and points stdout/stderr at
+    # `os.devnull` instead when there isn't (Explorer, a shortcut, the
+    # installer) -- so print() never crashes, and no window ever appears
+    # on its own.
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

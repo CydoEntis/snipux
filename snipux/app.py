@@ -48,7 +48,7 @@ from snipux.overlay import (
     open_overlay,
 )
 from snipux import design, platform, setup_desktop
-from snipux.platform.windows import HotkeyEventFilter
+from snipux.platform.windows import HotkeyEventFilter, reattach_console
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
 
@@ -1014,6 +1014,14 @@ def _become_resident(
     reason: whether desktop integration has ever run is a real, one-time
     action against the OS (writing files, binding a shortcut), not
     something every `AppController` a test builds should also trigger.
+
+    Called in exactly this order, not the other way around: on a genuinely
+    first-ever launch, `install_hotkey_listener()` has already bound the
+    real shortcut by the time `run_first_launch_setup()` runs -- so the
+    shortcut works immediately, with nothing left for a restart to pick up
+    later (SNX-101). `WindowsPlatform.install_desktop_integration()`
+    depends on this ordering too: it says nothing about when the shortcut
+    takes effect, exactly because it never runs before this already has.
     """
     # Already built by whoever called `try_claim()` -- see
     # `_ensure_qapplication`, which must run before the claim, not after.
@@ -1063,7 +1071,15 @@ def cli() -> int:
     reproduces `__main__.py`'s dispatch rule (arguments present -> the
     display-free CLI diagnostics in `main()`; none -> the resident,
     tray-icon app) as an importable function instead.
+
+    `reattach_console()` (SNX-100) runs first, before anything else here
+    has a chance to `print()` -- this is the one function every launch
+    path (`python -m snipux`, the pip-installed console script, and the
+    windowed PyInstaller build) actually goes through, which is what makes
+    it the right place for a step that has to happen before any of the
+    below can safely write to stdout/stderr at all.
     """
+    reattach_console()
     if sys.argv[1:]:
         return main()
     return run_resident_app()
