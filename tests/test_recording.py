@@ -1,8 +1,11 @@
+import threading
 from unittest.mock import Mock
 
 from jeepney import HeaderFields
 
-from PyQt6.QtCore import QRectF
+from PyQt6.QtCore import QRect, QRectF, QSize, Qt, QThread
+from PyQt6.QtMultimedia import QMediaRecorder, QVideoFrame, QVideoFrameFormat
+from PyQt6.QtWidgets import QApplication
 
 import pytest
 
@@ -12,7 +15,24 @@ from snipux.recording import (
     RecorderRegistry,
     RecordingBackend,
     RecordingError,
+    WindowsRecorderBackend,
+    _bytes_per_pixel,
+    _clamp_rect_to_frame,
+    _crop_frame,
+    _rect_to_screen_pixels,
+    _RegionCropWorker,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def qapp():
+    # WindowsRecorderBackend's region path reads QGuiApplication.primaryScreen()
+    # -- None without a live QGuiApplication, even offscreen -- same reason
+    # test_capture.py's Qt-native X11 backend tests need this fixture.
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
 
 
 class FakeBackend(RecordingBackend):
@@ -473,3 +493,759 @@ class TestBuildLinuxRegistry:
         registry = recording.build_linux_registry()
 
         assert [backend.name() for backend in registry] == ["gnome-screencast"]
+
+
+# --- WindowsRecorderBackend -------------------------------------------------
+#
+# None of QScreenCapture/QVideoSink/QMediaRecorder/QVideoFrameInput can
+# produce a real frame stream under QT_QPA_PLATFORM=offscreen -- there is no
+# real screen for QScreenCapture to capture pixels *from*. So, mirroring
+# GnomeScreencastBackend's tests monkeypatching open_dbus_connection instead
+# of talking to a real session bus, these substitute small fakes (through
+# WindowsRecorderBackend's constructor-injected factories) for the Qt
+# Multimedia objects and drive them synchronously.
+#
+# What these tests can prove, per docs/design/recording.md's "what a green
+# suite will and will not prove": which branch runs and what it constructs;
+# the crop-rect and byte-copy arithmetic; that sendVideoFrame is only ever
+# called in response to a ready signal, and that a frame arriving before the
+# next one replaces rather than queues; error-signal-to-exception wiring;
+# stop()'s teardown order; and that the crop actually executes on a
+# different thread than the one that delivered the frame. What they cannot
+# prove -- a real recording plays back, and 28fps at 1280x720 -- needs a
+# real Windows session with a monitor and is out of pytest's reach entirely.
+
+
+class _FakeSignal:
+    """A minimal stand-in for a pyqtSignal on the plain (non-QObject) fakes
+    below: enough for production code's `.connect(slot, type)` /
+    `.disconnect(slot)` / (test-side) `.emit(*args)` to work, without
+    needing a real Qt signal or a real cross-thread event loop for the
+    fakes that don't need one -- see `_QueuedSignal` further down for the
+    two spots (`QVideoSink`/`QVideoFrameInput`) that do.
+    """
+
+    def __init__(self):
+        self.connections = []
+
+    def connect(self, slot, type=None):
+        self.connections.append((slot, type))
+
+    def disconnect(self, slot=None):
+        if slot is None:
+            self.connections = []
+            return
+        before = len(self.connections)
+        self.connections = [(s, t) for s, t in self.connections if s != slot]
+        if len(self.connections) == before:
+            raise TypeError("disconnect() failed: not connected")
+
+    def emit(self, *args):
+        for slot, _type in list(self.connections):
+            slot(*args)
+
+
+class FakeScreenCapture:
+    def __init__(self, fail_message=None):
+        self.errorOccurred = _FakeSignal()
+        self._fail_message = fail_message
+        self.active_calls = []
+
+    def setActive(self, active):
+        self.active_calls.append(active)
+        if active and self._fail_message:
+            self.errorOccurred.emit(None, self._fail_message)
+
+
+class FakeRecorder:
+    """Mirrors the real `QMediaRecorder` contract `WindowsRecorderBackend`
+    actually uses: `errorChanged` (not `errorOccurred`) plus `error()`/
+    `errorString()` -- see `WindowsRecorderBackend._wire_errors()`'s
+    docstring for why `errorOccurred` itself is unusable in this
+    PyQt6/QtMultimedia build.
+    """
+
+    def __init__(self, fail_message=None):
+        self.errorChanged = _FakeSignal()
+        self._fail_message = fail_message
+        self._error = QMediaRecorder.Error.NoError
+        self._error_string = ""
+        self.media_format = None
+        self.output_location = None
+        self.record_calls = 0
+        self.stop_calls = 0
+        self._state = QMediaRecorder.RecorderState.StoppedState
+
+    def setMediaFormat(self, media_format):
+        self.media_format = media_format
+
+    def setOutputLocation(self, url):
+        self.output_location = url
+
+    def record(self):
+        self.record_calls += 1
+        self._state = QMediaRecorder.RecorderState.RecordingState
+        if self._fail_message:
+            self._error = QMediaRecorder.Error.ResourceError
+            self._error_string = self._fail_message
+            self.errorChanged.emit()
+
+    def stop(self):
+        self.stop_calls += 1
+        # Fakes settle synchronously -- real QMediaRecorder.stop() isn't
+        # documented as synchronous, which is exactly why
+        # WindowsRecorderBackend._wait_for_stopped() checks recorderState()
+        # rather than assuming.
+        self._state = QMediaRecorder.RecorderState.StoppedState
+
+    def recorderState(self):
+        return self._state
+
+    def error(self):
+        return self._error
+
+    def errorString(self):
+        return self._error_string
+
+
+class FakeCaptureSession:
+    def __init__(self):
+        self.screen_capture = None
+        self.recorder = None
+        self.video_sink = None
+        self.video_frame_input = None
+
+    def setScreenCapture(self, screen_capture):
+        self.screen_capture = screen_capture
+
+    def setRecorder(self, recorder):
+        self.recorder = recorder
+
+    def setVideoSink(self, video_sink):
+        self.video_sink = video_sink
+
+    def setVideoFrameInput(self, video_frame_input):
+        self.video_frame_input = video_frame_input
+
+
+class FakeVideoSink:
+    def __init__(self):
+        self.videoFrameChanged = _FakeSignal()
+
+
+class FakeVideoFrameInput:
+    def __init__(self):
+        self.readyToSendVideoFrame = _FakeSignal()
+        self.sent_frames = []
+
+    def sendVideoFrame(self, frame):
+        self.sent_frames.append(frame)
+
+
+class FakeThread(QThread):
+    """A real `QThread` subclass, not a plain fake -- `_RegionCropWorker
+    .moveToThread()` is a real `QObject` method and PyQt rejects anything
+    that isn't an actual `QThread` there. Overriding `start()`/`quit()`/
+    `wait()` records calls without ever spinning a real OS thread or event
+    loop; `TestRegionCropRunsOffTheDeliveryThread` is the one test that
+    needs a real running thread and uses a bare `QThread` instead of this.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.start_calls = 0
+        self.quit_calls = 0
+        self.wait_calls = 0
+
+    def start(self):
+        self.start_calls += 1
+
+    def quit(self):
+        self.quit_calls += 1
+
+    def wait(self):
+        self.wait_calls += 1
+
+
+def _make_frame(width, height, pixel_value_at):
+    """A real `QVideoFrame`, `Format_BGRA8888`, with every pixel's four
+    bytes set to `pixel_value_at(row, col)` -- real because `_crop_frame`
+    maps/reads/writes actual `QVideoFrame` buffers, which is exactly the
+    row-wise-vs-toImage() distinction this ticket cares about, and PyQt6's
+    QtMultimedia value types (unlike QScreenCapture itself) work fine
+    under `QT_QPA_PLATFORM=offscreen`.
+    """
+    frame = QVideoFrame(
+        QVideoFrameFormat(
+            QSize(width, height), QVideoFrameFormat.PixelFormat.Format_BGRA8888
+        )
+    )
+    assert frame.map(QVideoFrame.MapMode.WriteOnly)
+    try:
+        stride = frame.bytesPerLine(0)
+        bits = frame.bits(0)
+        bits.setsize(stride * height)
+        for row in range(height):
+            row_bytes = bytearray(stride)
+            for col in range(width):
+                value = pixel_value_at(row, col) & 0xFF
+                row_bytes[col * 4 : col * 4 + 4] = bytes([value, value, value, value])
+            bits[row * stride : row * stride + stride] = bytes(row_bytes)
+    finally:
+        frame.unmap()
+    return frame
+
+
+def _read_pixel(frame, row, col):
+    assert frame.map(QVideoFrame.MapMode.ReadOnly)
+    try:
+        stride = frame.bytesPerLine(0)
+        bits = frame.bits(0)
+        bits.setsize(stride * frame.height())
+        offset = row * stride + col * 4
+        return bits[offset][0]
+    finally:
+        frame.unmap()
+
+
+class TestRectToScreenPixels:
+    def test_maps_a_rect_at_the_screen_origin_with_no_scaling(self):
+        rect = QRectF(10, 20, 100, 50)
+        screen_geometry = QRectF(0, 0, 1920, 1080)
+
+        pixel_rect = _rect_to_screen_pixels(rect, screen_geometry, 1.0)
+
+        assert pixel_rect == QRect(10, 20, 100, 50)
+
+    def test_subtracts_the_screens_own_origin_first(self):
+        # A monitor above/left of the primary sits at a negative logical
+        # origin -- the rect must be made screen-local before scaling, the
+        # same way Frame.crop() in capture.py does.
+        rect = QRectF(-1900, 50, 200, 100)
+        screen_geometry = QRectF(-1920, 0, 1920, 1080)
+
+        pixel_rect = _rect_to_screen_pixels(rect, screen_geometry, 1.0)
+
+        assert pixel_rect == QRect(20, 50, 200, 100)
+
+    def test_scales_by_the_device_pixel_ratio(self):
+        rect = QRectF(10, 20, 100, 50)
+        screen_geometry = QRectF(0, 0, 1920, 1080)
+
+        pixel_rect = _rect_to_screen_pixels(rect, screen_geometry, 2.0)
+
+        assert pixel_rect == QRect(20, 40, 200, 100)
+
+    def test_rounds_left_top_right_bottom_independently_not_width_height(self):
+        # Same reasoning as Frame.crop() and
+        # GnomeScreencastBackend._call_screencast_area(): rounding width
+        # separately from x can drift a pixel off the position-derived
+        # edges under fractional scaling.
+        rect = QRectF(10.4, 20.6, 99.5, 49.2)
+        screen_geometry = QRectF(0, 0, 1920, 1080)
+        ratio = 1.0
+
+        pixel_rect = _rect_to_screen_pixels(rect, screen_geometry, ratio)
+
+        left = round(rect.left())
+        top = round(rect.top())
+        width = round(rect.left() + rect.width()) - left
+        height = round(rect.top() + rect.height()) - top
+        assert pixel_rect == QRect(left, top, width, height)
+
+
+class TestClampRectToFrame:
+    def test_passes_through_a_rect_already_inside_the_frame(self):
+        assert _clamp_rect_to_frame(QRect(2, 1, 3, 2), 6, 4) == QRect(2, 1, 3, 2)
+
+    def test_clamps_the_right_and_bottom_edges(self):
+        # What _rect_to_screen_pixels() can hand back for a region dragged
+        # flush against a screen edge, once device-pixel-ratio rounding is
+        # in play: an edge one pixel past the frame's real buffer.
+        assert _clamp_rect_to_frame(QRect(1278, 718, 4, 4), 1280, 720) == QRect(
+            1278, 718, 2, 2
+        )
+
+    def test_clamps_a_left_top_origin_before_zero(self):
+        assert _clamp_rect_to_frame(QRect(-2, -2, 4, 4), 1280, 720) == QRect(0, 0, 2, 2)
+
+    def test_a_rect_already_flush_with_the_frame_edge_is_unchanged(self):
+        assert _clamp_rect_to_frame(QRect(1180, 620, 100, 100), 1280, 720) == QRect(
+            1180, 620, 100, 100
+        )
+
+
+class TestRectToScreenPixelsAtTheScreenEdgeUnderScaling:
+    def test_a_region_hanging_past_the_screen_edge_is_clamped_not_corrupted(self):
+        # The review's specific worry: a region dragged to (or past) the
+        # exact edge of the screen, combined with a non-1.0 device pixel
+        # ratio, produces a pixel rect that reaches past the frame
+        # QScreenCapture actually delivers. A small stand-in screen keeps
+        # _make_frame()'s pixel-by-pixel fill fast; the ratio and the
+        # overshoot are what matter here, not the resolution.
+        screen_geometry = QRectF(0, 0, 50, 40)
+        ratio = 2.0
+        rect = QRectF(45, 35, 10, 10)  # right/bottom edges land past the screen
+
+        pixel_rect = _rect_to_screen_pixels(rect, screen_geometry, ratio)
+        frame_width = round(screen_geometry.width() * ratio)
+        frame_height = round(screen_geometry.height() * ratio)
+        assert pixel_rect.left() + pixel_rect.width() > frame_width  # the overshoot exists
+        assert pixel_rect.top() + pixel_rect.height() > frame_height
+
+        clamped = _clamp_rect_to_frame(pixel_rect, frame_width, frame_height)
+        assert clamped.left() + clamped.width() == frame_width
+        assert clamped.top() + clamped.height() == frame_height
+
+        # Cropping a real, frame-sized source with the *unclamped* rect
+        # must not corrupt the last row/column or throw -- it comes back
+        # clamped to the frame automatically.
+        source = _make_frame(frame_width, frame_height, lambda row, col: (row + col) % 251)
+        cropped = _crop_frame(source, pixel_rect)
+        assert cropped.width() == clamped.width()
+        assert cropped.height() == clamped.height()
+        for row in range(cropped.height()):
+            for col in range(cropped.width()):
+                expected = (clamped.top() + row + clamped.left() + col) % 251
+                assert _read_pixel(cropped, row, col) == expected
+
+
+class TestBytesPerPixel:
+    def test_bgra8888_is_four_bytes(self):
+        assert _bytes_per_pixel(QVideoFrameFormat.PixelFormat.Format_BGRA8888) == 4
+
+
+class TestCropFrame:
+    def test_extracts_the_requested_sub_rectangle_row_wise(self):
+        source = _make_frame(6, 4, lambda row, col: row * 10 + col)
+
+        cropped = _crop_frame(source, QRect(2, 1, 3, 2))
+
+        assert cropped.width() == 3
+        assert cropped.height() == 2
+        for row in range(2):
+            for col in range(3):
+                expected = (1 + row) * 10 + (2 + col)
+                assert _read_pixel(cropped, row, col) == expected & 0xFF
+
+    def test_does_not_touch_pixels_outside_the_crop(self):
+        source = _make_frame(4, 4, lambda row, col: 200)
+
+        cropped = _crop_frame(source, QRect(1, 1, 2, 2))
+
+        assert cropped.width() == 2
+        assert cropped.height() == 2
+
+    def test_source_frame_is_unmapped_after_cropping(self):
+        source = _make_frame(4, 4, lambda row, col: 1)
+
+        _crop_frame(source, QRect(0, 0, 2, 2))
+
+        assert not source.isMapped()
+
+    def test_clamps_a_rect_hanging_one_pixel_past_the_right_and_bottom_edges(self):
+        # What a region dragged flush against a screen edge can produce
+        # after _rect_to_screen_pixels()'s device-pixel-ratio rounding:
+        # right/bottom one pixel past the source frame's actual buffer.
+        # Slicing at the unclamped offsets would read (and size the output
+        # frame) past the end of the last row instead of raising or
+        # corrupting silently.
+        source = _make_frame(4, 4, lambda row, col: row * 10 + col)
+
+        cropped = _crop_frame(source, QRect(2, 2, 3, 3))
+
+        assert cropped.width() == 2
+        assert cropped.height() == 2
+        for row in range(2):
+            for col in range(2):
+                expected = (2 + row) * 10 + (2 + col)
+                assert _read_pixel(cropped, row, col) == expected & 0xFF
+
+    def test_clamps_a_rect_starting_before_the_top_left_origin(self):
+        source = _make_frame(4, 4, lambda row, col: row * 10 + col)
+
+        cropped = _crop_frame(source, QRect(-1, -1, 3, 3))
+
+        assert cropped.width() == 2
+        assert cropped.height() == 2
+        for row in range(2):
+            for col in range(2):
+                assert _read_pixel(cropped, row, col) == row * 10 + col
+
+
+class TestRegionCropWorker:
+    def test_does_nothing_when_no_frame_is_pending(self):
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+
+        worker.on_ready_to_send()
+
+        assert frame_input.sent_frames == []
+
+    def test_sends_the_cropped_pending_frame_when_ready(self):
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+        frame = _make_frame(4, 4, lambda row, col: 1)
+
+        worker.on_frame(frame)
+        worker.on_ready_to_send()
+
+        assert len(frame_input.sent_frames) == 1
+        assert frame_input.sent_frames[0].width() == 2
+        assert frame_input.sent_frames[0].height() == 2
+
+    def test_a_second_frame_replaces_the_pending_one_rather_than_queuing(self):
+        # The 47-of-48-dropped failure mode was calling sendVideoFrame()
+        # while the encoder was still refusing. Coalescing to "at most one
+        # pending frame" avoids that by construction: a frame that arrives
+        # before the next readyToSendVideoFrame supersedes the previous
+        # one, and sendVideoFrame() is only ever called from
+        # on_ready_to_send.
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+        first = _make_frame(4, 4, lambda row, col: 10)
+        second = _make_frame(4, 4, lambda row, col: 20)
+
+        worker.on_frame(first)
+        worker.on_frame(second)
+        worker.on_ready_to_send()
+
+        assert len(frame_input.sent_frames) == 1
+        assert _read_pixel(frame_input.sent_frames[0], 0, 0) == 20
+
+    def test_ready_signal_with_nothing_pending_after_a_send_sends_nothing_more(self):
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+        frame = _make_frame(4, 4, lambda row, col: 5)
+
+        worker.on_frame(frame)
+        worker.on_ready_to_send()
+        worker.on_ready_to_send()
+
+        assert len(frame_input.sent_frames) == 1
+
+    def test_a_ready_signal_arriving_before_the_first_frame_still_sends_it(self):
+        # Confirmed by hand against the real QVideoFrameInput:
+        # readyToSendVideoFrame fires once immediately, before any frame
+        # has been delivered. A worker that only ever sent from inside
+        # on_ready_to_send (bailing out when nothing was pending yet)
+        # missed that edge and then stalled forever -- nothing calls
+        # sendVideoFrame(), so no later readyToSendVideoFrame ever fires,
+        # and zero frames reach the recorder. This is the race that
+        # produced a real, empty 0-byte output file.
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+        frame = _make_frame(4, 4, lambda row, col: 7)
+
+        worker.on_ready_to_send()
+        worker.on_frame(frame)
+
+        assert len(frame_input.sent_frames) == 1
+
+    def test_does_not_send_a_second_time_until_ready_fires_again(self):
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+        first = _make_frame(4, 4, lambda row, col: 1)
+        second = _make_frame(4, 4, lambda row, col: 2)
+
+        worker.on_ready_to_send()
+        worker.on_frame(first)  # sent immediately -- ready was already true
+        worker.on_frame(second)  # not ready again yet -- must not send
+
+        assert len(frame_input.sent_frames) == 1
+
+
+def _windows_backend(**overrides):
+    factories = dict(
+        screen_capture_factory=FakeScreenCapture,
+        capture_session_factory=FakeCaptureSession,
+        recorder_factory=FakeRecorder,
+        video_sink_factory=FakeVideoSink,
+        video_frame_input_factory=FakeVideoFrameInput,
+        thread_factory=FakeThread,
+        # FakeRecorder.stop() settles synchronously, so these tests don't
+        # need (and shouldn't pay for) the real settle delay
+        # _wait_for_stopped() uses against the actual asynchronous muxer
+        # -- see that method's docstring in recording.py.
+        stop_settle_seconds=0,
+    )
+    factories.update(overrides)
+    return WindowsRecorderBackend(**factories)
+
+
+class TestWindowsRecorderBackendAvailability:
+    def test_available_on_windows(self, monkeypatch):
+        monkeypatch.setattr(recording.sys, "platform", "win32")
+
+        backend = WindowsRecorderBackend()
+
+        assert backend.is_available() is True
+        assert backend.unavailable_reason() is None
+
+    def test_unavailable_elsewhere_with_a_reason(self, monkeypatch):
+        monkeypatch.setattr(recording.sys, "platform", "linux")
+
+        backend = WindowsRecorderBackend()
+
+        assert backend.is_available() is False
+        assert backend.unavailable_reason() is not None
+
+
+class TestWindowsRecorderBackendFullScreenStart:
+    PATH = "C:/tmp/snipux-recording.mp4"
+
+    def test_wires_screen_capture_straight_to_the_recorder(self):
+        video_sink_factory = Mock(wraps=FakeVideoSink)
+        video_frame_input_factory = Mock(wraps=FakeVideoFrameInput)
+        thread_factory = Mock(wraps=FakeThread)
+        backend = _windows_backend(
+            video_sink_factory=video_sink_factory,
+            video_frame_input_factory=video_frame_input_factory,
+            thread_factory=thread_factory,
+        )
+
+        backend.start(None, self.PATH)
+
+        assert backend._session.screen_capture is backend._screen_capture
+        assert backend._session.recorder is backend._recorder
+        assert backend._screen_capture.active_calls == [True]
+        assert backend._recorder.record_calls == 1
+
+    def test_never_constructs_the_interception_machinery(self):
+        # The acceptance criterion that full screen "should not pay for"
+        # cropping has to be true structurally: none of the region path's
+        # objects exist at all, not merely unused.
+        video_sink_factory = Mock(wraps=FakeVideoSink)
+        video_frame_input_factory = Mock(wraps=FakeVideoFrameInput)
+        thread_factory = Mock(wraps=FakeThread)
+        backend = _windows_backend(
+            video_sink_factory=video_sink_factory,
+            video_frame_input_factory=video_frame_input_factory,
+            thread_factory=thread_factory,
+        )
+
+        backend.start(None, self.PATH)
+
+        assert video_sink_factory.called is False
+        assert video_frame_input_factory.called is False
+        assert thread_factory.called is False
+
+    def test_sets_mpeg4_h264_explicitly(self):
+        backend = _windows_backend()
+
+        backend.start(None, self.PATH)
+
+        media_format = backend._recorder.media_format
+        assert media_format.fileFormat() == recording.QMediaFormat.FileFormat.MPEG4
+        assert media_format.videoCodec() == recording.QMediaFormat.VideoCodec.H264
+
+    def test_raises_when_the_screen_capture_reports_an_error(self):
+        backend = _windows_backend(
+            screen_capture_factory=lambda: FakeScreenCapture(fail_message="access denied")
+        )
+
+        with pytest.raises(RuntimeError, match="access denied"):
+            backend.start(None, self.PATH)
+
+    def test_raises_when_the_recorder_reports_an_error(self):
+        backend = _windows_backend(
+            recorder_factory=lambda: FakeRecorder(fail_message="no codec available")
+        )
+
+        with pytest.raises(RuntimeError, match="no codec available"):
+            backend.start(None, self.PATH)
+
+
+class TestWindowsRecorderBackendRegionStart:
+    RECT = QRectF(10, 20, 200, 100)
+    PATH = "C:/tmp/snipux-recording-region.mp4"
+
+    def test_wires_capture_to_a_sink_and_frame_input_to_the_recorder_on_separate_sessions(
+        self,
+    ):
+        backend = _windows_backend()
+
+        backend.start(self.RECT, self.PATH)
+
+        capture_session = backend._capture_session
+        encode_session = backend._encode_session
+        assert capture_session is not encode_session
+        assert capture_session.screen_capture is backend._screen_capture
+        assert capture_session.video_sink is backend._video_sink
+        assert capture_session.recorder is None
+        assert encode_session.video_frame_input is backend._frame_input
+        assert encode_session.recorder is backend._recorder
+        assert encode_session.screen_capture is None
+
+    def test_moves_the_worker_to_the_thread_and_starts_it(self):
+        backend = _windows_backend()
+
+        backend.start(self.RECT, self.PATH)
+
+        assert backend._worker_thread.start_calls == 1
+
+    def test_connects_frame_delivery_with_an_explicit_queued_connection(self):
+        backend = _windows_backend()
+
+        backend.start(self.RECT, self.PATH)
+
+        [(slot, connection_type)] = backend._video_sink.videoFrameChanged.connections
+        assert slot == backend._worker.on_frame
+        assert connection_type == Qt.ConnectionType.QueuedConnection
+
+        [(slot, connection_type)] = backend._frame_input.readyToSendVideoFrame.connections
+        assert slot == backend._worker.on_ready_to_send
+        assert connection_type == Qt.ConnectionType.QueuedConnection
+
+    def test_raises_and_tears_down_the_thread_when_the_recorder_errors(self):
+        backend = _windows_backend(
+            recorder_factory=lambda: FakeRecorder(fail_message="disk full")
+        )
+
+        with pytest.raises(RuntimeError, match="disk full"):
+            backend.start(self.RECT, self.PATH)
+
+
+class TestWindowsRecorderBackendStop:
+    def test_full_screen_deactivates_capture_before_stopping_the_recorder(self):
+        calls = []
+
+        class OrderedScreenCapture(FakeScreenCapture):
+            def setActive(self, active):
+                calls.append(("screen_capture.setActive", active))
+                super().setActive(active)
+
+        class OrderedRecorder(FakeRecorder):
+            def stop(self):
+                calls.append(("recorder.stop", None))
+                super().stop()
+
+        backend = _windows_backend(
+            screen_capture_factory=OrderedScreenCapture, recorder_factory=OrderedRecorder
+        )
+        backend.start(None, "C:/tmp/out.mp4")
+        calls.clear()
+
+        backend.stop()
+
+        assert calls == [("screen_capture.setActive", False), ("recorder.stop", None)]
+
+    def test_region_stops_capture_then_the_worker_thread_then_the_recorder(self):
+        calls = []
+
+        class OrderedScreenCapture(FakeScreenCapture):
+            def setActive(self, active):
+                calls.append(("screen_capture.setActive", active))
+                super().setActive(active)
+
+        class OrderedThread(FakeThread):
+            def quit(self):
+                calls.append(("thread.quit", None))
+                super().quit()
+
+            def wait(self):
+                calls.append(("thread.wait", None))
+                super().wait()
+
+        class OrderedRecorder(FakeRecorder):
+            def stop(self):
+                calls.append(("recorder.stop", None))
+                super().stop()
+
+        backend = _windows_backend(
+            screen_capture_factory=OrderedScreenCapture,
+            thread_factory=OrderedThread,
+            recorder_factory=OrderedRecorder,
+        )
+        backend.start(QRectF(0, 0, 100, 100), "C:/tmp/out-region.mp4")
+        calls.clear()
+
+        backend.stop()
+
+        assert calls == [
+            ("screen_capture.setActive", False),
+            ("thread.quit", None),
+            ("thread.wait", None),
+            ("recorder.stop", None),
+        ]
+
+    def test_region_disconnects_frame_delivery_before_stopping(self):
+        backend = _windows_backend()
+        backend.start(QRectF(0, 0, 100, 100), "C:/tmp/out-region.mp4")
+        video_sink = backend._video_sink
+
+        backend.stop()
+
+        assert video_sink.videoFrameChanged.connections == []
+
+    def test_waits_for_the_recorder_to_actually_reach_stopped_state(self):
+        # FakeRecorder.stop() settles synchronously, so this mainly proves
+        # _wait_for_stopped() doesn't hang or raise when the state is
+        # already correct -- the real assertion is that stop() calls
+        # recorderState() at all rather than trusting stop() blindly.
+        backend = _windows_backend()
+        backend.start(None, "C:/tmp/out.mp4")
+
+        backend.stop()  # must not raise or hang
+
+        assert backend._recorder is None
+
+
+class TestBuildWindowsRegistry:
+    def test_registers_the_qt_native_backend(self):
+        registry = recording.build_windows_registry()
+
+        assert [backend.name() for backend in registry] == ["qt-native"]
+
+
+class TestRegionCropRunsOffTheDeliveryThread:
+    """The one test in this file that needs a real `QThread` and real Qt
+    signals rather than the plain fakes above: `_FakeSignal.emit()` calls
+    its slot synchronously on whatever thread calls `emit()`, which cannot
+    tell a same-thread bug apart from a correctly-queued one. A real
+    `pyqtSignal` with an explicit `QueuedConnection`, delivered by a real
+    `QThread`'s event loop, can -- and this is exactly what the spike's
+    29fps->17fps regression was about: cropping inline in the delivery
+    thread's handler instead of off of it.
+    """
+
+    def test_on_frame_runs_on_the_worker_thread_not_the_calling_thread(self):
+        from PyQt6.QtCore import QObject, pyqtSignal
+
+        class RealSignalSink(QObject):
+            videoFrameChanged = pyqtSignal(object)
+
+        class RealSignalFrameInput(QObject):
+            readyToSendVideoFrame = pyqtSignal()
+
+            def __init__(self):
+                super().__init__()
+                self.sent_from_thread = []
+                self.done = threading.Event()
+
+            def sendVideoFrame(self, frame):
+                self.sent_from_thread.append(threading.current_thread())
+                self.done.set()
+
+        sink = RealSignalSink()
+        frame_input = RealSignalFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+        thread = QThread()
+        worker.moveToThread(thread)
+        sink.videoFrameChanged.connect(worker.on_frame, Qt.ConnectionType.QueuedConnection)
+        frame_input.readyToSendVideoFrame.connect(
+            worker.on_ready_to_send, Qt.ConnectionType.QueuedConnection
+        )
+        thread.start()
+        try:
+            calling_thread = threading.current_thread()
+            frame = _make_frame(4, 4, lambda row, col: 42)
+
+            sink.videoFrameChanged.emit(frame)
+            frame_input.readyToSendVideoFrame.emit()
+
+            assert frame_input.done.wait(timeout=5.0), "worker never called sendVideoFrame"
+            assert frame_input.sent_from_thread[0] is not calling_thread
+        finally:
+            thread.quit()
+            thread.wait()

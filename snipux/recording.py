@@ -6,20 +6,33 @@ backends in order, collect every failure, report them together, never let
 one failure stop the next (CLAUDE.md's "a backend that fails must not stop
 the next one" applies here too). Recording is stateful -- started and
 stopped, not produced in one call -- so `start()`/`stop()` replace
-`capture()`, but the try/collect/raise shape is unchanged. No real backend
-lives here yet; later tickets register one behind the platform seam, the
-same way `build_x11_registry()`/`build_wayland_registry()` do for capture.
+`capture()`, but the try/collect/raise shape is unchanged. `GnomeScreencastBackend`
+(SNX-117) is the Linux backend; `WindowsRecorderBackend` (SNX-118) is
+Windows's, registered behind `build_windows_registry()` the same way
+`build_linux_registry()` registers the GNOME one.
 """
 
 from __future__ import annotations
 
 import sys
+import time
 from abc import ABC, abstractmethod
 
 from jeepney import DBusAddress, new_method_call
 from jeepney.io.blocking import open_dbus_connection
 
-from PyQt6.QtCore import QRectF
+from PyQt6.QtCore import QCoreApplication, QObject, QRect, QRectF, Qt, QThread, QUrl
+from PyQt6.QtGui import QGuiApplication, QImage
+from PyQt6.QtMultimedia import (
+    QMediaCaptureSession,
+    QMediaFormat,
+    QMediaRecorder,
+    QScreenCapture,
+    QVideoFrame,
+    QVideoFrameFormat,
+    QVideoFrameInput,
+    QVideoSink,
+)
 
 
 class RecordingBackend(ABC):
@@ -370,4 +383,511 @@ def build_linux_registry() -> RecorderRegistry:
     """
     registry = RecorderRegistry()
     registry.add(GnomeScreencastBackend())
+    return registry
+
+
+def _rect_to_screen_pixels(rect: QRectF, screen_geometry: QRectF, ratio: float) -> QRect:
+    """Map `rect` (absolute logical virtual-desktop coordinates, per
+    `RecordingBackend.start()`) into the pixel space of the `QVideoFrame`
+    `QScreenCapture` delivers for the screen with logical geometry
+    `screen_geometry` and device-pixel ratio `ratio`.
+
+    A pure function of its arguments -- no `QScreen` touched -- so the
+    crop-rect arithmetic is unit-testable without a display, the same
+    reason `Frame.crop()` in capture.py stays a plain calculation. Same
+    left/top/right/bottom-independently-rounded, width/height-as-difference
+    pattern as `Frame.crop()` and `GnomeScreencastBackend
+    ._call_screencast_area()`: an independently-rounded width/height can
+    drift a pixel off the position-derived edges under fractional scaling.
+    """
+    local_left = rect.left() - screen_geometry.left()
+    local_top = rect.top() - screen_geometry.top()
+
+    left = round(local_left * ratio)
+    top = round(local_top * ratio)
+    right = round((local_left + rect.width()) * ratio)
+    bottom = round((local_top + rect.height()) * ratio)
+
+    return QRect(left, top, right - left, bottom - top)
+
+
+def _bytes_per_pixel(pixel_format: "QVideoFrameFormat.PixelFormat") -> int:
+    """Bytes per pixel for a `QVideoFrame` pixel format, via the `QImage`
+    format Qt itself considers equivalent -- there is no direct
+    bytes-per-pixel accessor on `QVideoFrameFormat`. Used to size the
+    row-wise crop copy in `_crop_frame()`.
+    """
+    image_format = QVideoFrameFormat.imageFormatFromPixelFormat(pixel_format)
+    depth = QImage(1, 1, image_format).depth()
+    if depth <= 0 or depth % 8 != 0:
+        raise RuntimeError(
+            f"qt-native: pixel format {pixel_format!r} isn't a whole number of "
+            "bytes per pixel, can't crop it row-wise"
+        )
+    return depth // 8
+
+
+def _clamp_rect_to_frame(pixel_rect: QRect, frame_width: int, frame_height: int) -> QRect:
+    """Clamp `pixel_rect` to `frame`'s actual pixel bounds.
+
+    `_rect_to_screen_pixels()`'s screen-geometry-times-device-pixel-ratio
+    arithmetic is an estimate of the frame `QScreenCapture` will actually
+    deliver, not a guarantee of it -- a region dragged flush against a
+    screen edge, combined with device-pixel-ratio rounding (CLAUDE.md:
+    "coordinates are the sharp edge here"), can round the estimate one
+    pixel past the frame's real buffer. `frame.width()`/`frame.height()`
+    are the one place that actually knows the true bounds, so clamping
+    against them here, right before `_crop_frame()` slices `src_bits` at
+    the computed offsets, is what stops a one-pixel-over rect from reading
+    (or writing) past the end of a row.
+    """
+    left = max(0, min(pixel_rect.left(), frame_width))
+    top = max(0, min(pixel_rect.top(), frame_height))
+    right = max(left, min(pixel_rect.left() + pixel_rect.width(), frame_width))
+    bottom = max(top, min(pixel_rect.top() + pixel_rect.height(), frame_height))
+    return QRect(left, top, right - left, bottom - top)
+
+
+def _crop_frame(frame: QVideoFrame, pixel_rect: QRect) -> QVideoFrame:
+    """Return a new `QVideoFrame` covering `pixel_rect` of `frame`, copied
+    row-wise in `frame`'s own native pixel format.
+
+    The spike measured this at 1.52ms/frame, versus 5.47ms going through
+    `toImage()`/`convertToFormat()` -- the difference between sustaining
+    30fps and not, so this must never round-trip through `QImage`.
+    `frame` is unmapped in a `finally`, mirroring CLAUDE.md's "never leave
+    a QPainter open across a read of the pixmap it is painting" -- an
+    unmapped-too-late or never-unmapped `QVideoFrame` is the same class of
+    bug.
+
+    `pixel_rect` is clamped to `frame`'s own `width()`/`height()` before
+    any byte-slicing happens -- see `_clamp_rect_to_frame()`.
+    """
+    pixel_rect = _clamp_rect_to_frame(pixel_rect, frame.width(), frame.height())
+    pixel_format = frame.surfaceFormat().pixelFormat()
+    bytes_per_pixel = _bytes_per_pixel(pixel_format)
+    row_bytes = pixel_rect.width() * bytes_per_pixel
+
+    out_frame = QVideoFrame(QVideoFrameFormat(pixel_rect.size(), pixel_format))
+    if not out_frame.map(QVideoFrame.MapMode.WriteOnly):
+        raise RuntimeError("qt-native: could not map cropped video frame for writing")
+
+    if not frame.map(QVideoFrame.MapMode.ReadOnly):
+        out_frame.unmap()
+        raise RuntimeError("qt-native: could not map source video frame for reading")
+    try:
+        src_stride = frame.bytesPerLine(0)
+        dst_stride = out_frame.bytesPerLine(0)
+        src_bits = frame.bits(0)
+        src_bits.setsize(src_stride * frame.height())
+        dst_bits = out_frame.bits(0)
+        dst_bits.setsize(dst_stride * pixel_rect.height())
+
+        left_offset = pixel_rect.left() * bytes_per_pixel
+        for row in range(pixel_rect.height()):
+            src_start = (pixel_rect.top() + row) * src_stride + left_offset
+            dst_start = row * dst_stride
+            dst_bits[dst_start : dst_start + row_bytes] = bytes(
+                src_bits[src_start : src_start + row_bytes]
+            )
+    finally:
+        frame.unmap()
+        out_frame.unmap()
+    return out_frame
+
+
+class _RegionCropWorker(QObject):
+    """Crops and forwards frames off the frame-delivery thread.
+
+    Lives on its own `QThread` (see `WindowsRecorderBackend._start_region`)
+    -- the spike measured cropping and sending inline in the
+    `QVideoSink.videoFrameChanged` handler halving throughput, 29fps to
+    17fps. `on_frame` and `on_ready_to_send` are connected to
+    `videoFrameChanged`/`readyToSendVideoFrame` with an explicit
+    `Qt.ConnectionType.QueuedConnection`, so both run on this worker's
+    thread regardless of which thread emits the signal.
+
+    Holds at most one pending frame: an arriving frame *replaces* whatever
+    is already pending rather than queuing behind it, since the goal is a
+    smooth 30fps *output*, not encoding every captured frame at whatever
+    rate the encoder can chew through. `sendVideoFrame()` is only ever
+    called once `readyToSendVideoFrame` has actually fired -- never
+    speculatively -- which is what respects `QVideoFrameInput`'s
+    backpressure: the spike's own failure mode, calling `sendVideoFrame()`
+    while the encoder was still busy, dropped 47 of 48 frames.
+
+    Tracks readiness explicitly (`_ready`) rather than sending only from
+    inside `on_ready_to_send`, confirmed necessary by hand:
+    `readyToSendVideoFrame` is edge-triggered and, in practice, fires once
+    immediately on construction -- *before* the first frame has arrived.
+    A version that only ever sent from `on_ready_to_send` (checking for a
+    pending frame and giving up if there wasn't one yet) missed that first
+    edge, found no frame waiting, and then waited forever: nothing calls
+    `sendVideoFrame()`, so no further `readyToSendVideoFrame` ever fires,
+    and zero frames ever reach the recorder -- a real, reproduced stall,
+    not a hypothetical one. Recording readiness and consuming it from
+    *both* `on_frame` and `on_ready_to_send` (whichever of the two events
+    happens second triggers the send) fixes that regardless of which
+    order they arrive in, while still never sending unless `_ready` says
+    the encoder actually asked for a frame.
+    """
+
+    def __init__(self, frame_input: QVideoFrameInput, pixel_rect: QRect):
+        super().__init__()
+        self._frame_input = frame_input
+        self._pixel_rect = pixel_rect
+        self._pending: QVideoFrame | None = None
+        self._ready = False
+
+    def on_frame(self, frame: QVideoFrame) -> None:
+        self._pending = frame
+        if self._ready:
+            self._send_pending()
+
+    def on_ready_to_send(self) -> None:
+        self._ready = True
+        if self._pending is not None:
+            self._send_pending()
+
+    def _send_pending(self) -> None:
+        frame, self._pending = self._pending, None
+        self._ready = False
+        self._frame_input.sendVideoFrame(_crop_frame(frame, self._pixel_rect))
+
+
+class WindowsRecorderBackend(RecordingBackend):
+    """Qt's `QScreenCapture` + `QMediaRecorder`, per the SNX-118 spike
+    (measured on Windows 11, PyQt6 6.11) and `docs/design/recording.md`'s
+    ticket 3.
+
+    Two genuinely different paths, branching in `start()` on whether `rect`
+    is given, not one pipeline with cropping made a no-op -- the acceptance
+    criterion that full screen must not pay for interception has to be true
+    structurally, not by a fast no-op branch inside a shared path:
+
+    * **Full screen** (`rect is None`): one `QMediaCaptureSession` wiring
+      `QScreenCapture` straight to `QMediaRecorder`. No `QVideoSink`, no
+      `QVideoFrameInput`, no worker thread -- none of that machinery is
+      even constructed.
+    * **Region**: the spike's two-session design. `QScreenCapture` ->
+      `QVideoSink` on one session (interception only, never touches the
+      recorder); `QVideoFrameInput` -> `QMediaRecorder` on a second
+      session (encoding only, never touches the raw screen), with
+      `_RegionCropWorker` on its own `QThread` between them.
+
+    Records the primary screen -- `QScreenCapture` has no region support of
+    its own (confirmed by the spike: no rect/crop/area method, it captures
+    a whole `QScreen`), and there is no ticket yet for choosing which
+    monitor a region on a multi-monitor desktop belongs to, so, like
+    `QtNativeX11Backend.capture()` in capture.py, one session-wide screen
+    and device-pixel ratio is what's used. A region that doesn't lie on the
+    primary screen will record the wrong pixels; that is a real gap, not
+    an oversight, and belongs to whichever ticket adds monitor selection.
+
+    Every Qt object involved is built by a constructor-injectable factory
+    (`screen_capture_factory`, `capture_session_factory`,
+    `recorder_factory`, `video_sink_factory`, `video_frame_input_factory`,
+    `thread_factory`), all defaulting to the real Qt classes, so tests can
+    substitute fakes -- there is no way to make `QScreenCapture` produce a
+    real frame stream under `QT_QPA_PLATFORM=offscreen` with no real
+    desktop behind it, the same reason `GnomeScreencastBackend`'s tests
+    monkeypatch `open_dbus_connection` rather than talk to a real session
+    bus.
+    """
+
+    def __init__(
+        self,
+        screen_capture_factory=QScreenCapture,
+        capture_session_factory=QMediaCaptureSession,
+        recorder_factory=QMediaRecorder,
+        video_sink_factory=QVideoSink,
+        video_frame_input_factory=QVideoFrameInput,
+        thread_factory=QThread,
+        stop_settle_seconds: float = 1.0,
+    ):
+        self._screen_capture_factory = screen_capture_factory
+        self._capture_session_factory = capture_session_factory
+        self._recorder_factory = recorder_factory
+        self._video_sink_factory = video_sink_factory
+        self._video_frame_input_factory = video_frame_input_factory
+        self._thread_factory = thread_factory
+        # See _wait_for_stopped()'s docstring: real, load-bearing settle
+        # time for the muxer's asynchronous finalization, not a cosmetic
+        # default -- tests that don't care about it pass 0 here rather
+        # than eating the real delay.
+        self._stop_settle_seconds = stop_settle_seconds
+
+        # Full screen: one session, no interception.
+        self._session = None
+        self._screen_capture = None
+        self._recorder = None
+
+        # Region: capture-only session, encode-only session, and the
+        # worker thread that bridges them. `_worker_thread` being set is
+        # what `stop()` uses to tell which path is live.
+        self._capture_session = None
+        self._video_sink = None
+        self._encode_session = None
+        self._frame_input = None
+        self._worker = None
+        self._worker_thread = None
+
+    def name(self) -> str:
+        return "qt-native"
+
+    def is_available(self) -> bool:
+        return sys.platform == "win32"
+
+    def unavailable_reason(self) -> str | None:
+        return None if self.is_available() else "qt-native recording is Windows-only"
+
+    def _media_format(self) -> QMediaFormat:
+        """MPEG4/H264, explicitly -- not left to default-construct.
+
+        This exact combination is what the spike verified plays back with
+        no external ffmpeg, using PyQt6's bundled FFmpeg-backend media
+        plugin. An unset/auto format is how a build would quietly stop
+        being the thing the spike actually validated.
+        """
+        media_format = QMediaFormat(QMediaFormat.FileFormat.MPEG4)
+        media_format.setVideoCodec(QMediaFormat.VideoCodec.H264)
+        return media_format
+
+    def _wire_errors(self, screen_capture, recorder, errors: list[str]) -> None:
+        """Collect failures from `screen_capture` and `recorder` into
+        `errors`, so `_start_full_screen`/`_start_region` can raise instead
+        of returning normally on failure -- same shape as
+        `GnomeScreencastBackend.start()` turning a `(success, filename)`
+        reply into a `RuntimeError`.
+
+        `QScreenCapture.errorOccurred` connects directly. `QMediaRecorder
+        .errorOccurred` does not: connecting *anything* to it -- even a
+        bare `print`, with no lambda involved -- raises `TypeError:
+        connect() failed between (QMediaRecorder::Error,QString) and
+        unislot()` in this PyQt6 6.11.0 / Qt 6.11.1 QtMultimedia build,
+        reproduced standalone and independent of the slot's own signature.
+        That is a binding-level failure on Qt's side, not a mistake in the
+        slot passed here, so the actual plan (wire the signal Qt exposes
+        for "the recorder failed") is followed via `errorChanged` instead:
+        a plain no-arg NOTIFY signal that connects fine and, confirmed by
+        triggering a real recorder error, fires for the exact same
+        underlying failure `errorOccurred` would have reported --
+        `error()`/`errorString()` read back the same information
+        `errorOccurred`'s arguments would have carried.
+        """
+        screen_capture.errorOccurred.connect(lambda _err, msg: errors.append(msg))
+
+        def _on_recorder_error_changed() -> None:
+            if recorder.error() != QMediaRecorder.Error.NoError:
+                errors.append(recorder.errorString())
+
+        recorder.errorChanged.connect(_on_recorder_error_changed)
+
+    def start(self, rect: QRectF | None, path: str) -> None:
+        if rect is None:
+            self._start_full_screen(path)
+        else:
+            self._start_region(rect, path)
+
+    def _start_full_screen(self, path: str) -> None:
+        session = self._capture_session_factory()
+        screen_capture = self._screen_capture_factory()
+        recorder = self._recorder_factory()
+        recorder.setMediaFormat(self._media_format())
+        recorder.setOutputLocation(QUrl.fromLocalFile(path))
+
+        errors: list[str] = []
+        self._wire_errors(screen_capture, recorder, errors)
+
+        session.setScreenCapture(screen_capture)
+        session.setRecorder(recorder)
+        screen_capture.setActive(True)
+        recorder.record()
+
+        if errors:
+            raise RuntimeError(f"qt-native: {errors[0]}")
+
+        self._session = session
+        self._screen_capture = screen_capture
+        self._recorder = recorder
+
+    def _start_region(self, rect: QRectF, path: str) -> None:
+        screen = QGuiApplication.primaryScreen()
+        pixel_rect = _rect_to_screen_pixels(
+            rect, QRectF(screen.geometry()), screen.devicePixelRatio()
+        )
+
+        capture_session = self._capture_session_factory()
+        screen_capture = self._screen_capture_factory()
+        video_sink = self._video_sink_factory()
+
+        encode_session = self._capture_session_factory()
+        frame_input = self._video_frame_input_factory()
+        recorder = self._recorder_factory()
+        recorder.setMediaFormat(self._media_format())
+        recorder.setOutputLocation(QUrl.fromLocalFile(path))
+
+        errors: list[str] = []
+        self._wire_errors(screen_capture, recorder, errors)
+
+        worker = _RegionCropWorker(frame_input, pixel_rect)
+        worker_thread = self._thread_factory()
+        worker.moveToThread(worker_thread)
+        # Explicit QueuedConnection rather than relying on Qt's implicit
+        # auto-connect (which would already queue, since emitter and
+        # worker end up on different threads) -- so a later refactor that
+        # accidentally constructs the worker on the wrong thread doesn't
+        # silently regress the crop back onto the delivery thread.
+        video_sink.videoFrameChanged.connect(
+            worker.on_frame, Qt.ConnectionType.QueuedConnection
+        )
+        frame_input.readyToSendVideoFrame.connect(
+            worker.on_ready_to_send, Qt.ConnectionType.QueuedConnection
+        )
+        worker_thread.start()
+
+        capture_session.setScreenCapture(screen_capture)
+        capture_session.setVideoSink(video_sink)
+        encode_session.setVideoFrameInput(frame_input)
+        encode_session.setRecorder(recorder)
+
+        screen_capture.setActive(True)
+        recorder.record()
+
+        if errors:
+            worker_thread.quit()
+            worker_thread.wait()
+            raise RuntimeError(f"qt-native: {errors[0]}")
+
+        self._capture_session = capture_session
+        self._screen_capture = screen_capture
+        self._video_sink = video_sink
+        self._encode_session = encode_session
+        self._frame_input = frame_input
+        self._recorder = recorder
+        self._worker = worker
+        self._worker_thread = worker_thread
+
+    def stop(self) -> None:
+        if self._worker_thread is not None:
+            self._stop_region()
+        else:
+            self._stop_full_screen()
+
+    def _stop_full_screen(self) -> None:
+        if self._screen_capture is not None:
+            self._screen_capture.setActive(False)
+        if self._recorder is not None:
+            self._recorder.stop()
+            self._wait_for_stopped(self._recorder)
+        self._session = None
+        self._screen_capture = None
+        self._recorder = None
+
+    def _stop_region(self) -> None:
+        # Opposite order from _start_region's wiring: stop new frames from
+        # arriving first, then unwind the worker thread (so no crop is
+        # left mid-flight when the recorder goes away), then stop the
+        # recorder last. Stopping the recorder first would race a queued
+        # frame still landing after encoding has ended.
+        if self._screen_capture is not None:
+            self._screen_capture.setActive(False)
+        if self._video_sink is not None and self._worker is not None:
+            try:
+                self._video_sink.videoFrameChanged.disconnect(self._worker.on_frame)
+            except TypeError:
+                pass  # already disconnected -- nothing left to do
+        if self._worker_thread is not None:
+            self._worker_thread.quit()
+            self._worker_thread.wait()
+        if self._recorder is not None:
+            self._recorder.stop()
+            self._wait_for_stopped(self._recorder)
+
+        self._capture_session = None
+        self._screen_capture = None
+        self._video_sink = None
+        self._encode_session = None
+        self._frame_input = None
+        self._recorder = None
+        self._worker = None
+        self._worker_thread = None
+
+    def _wait_for_stopped(
+        self,
+        recorder: QMediaRecorder,
+        stopped_timeout: float = 3.0,
+        poll_interval: float = 0.02,
+    ) -> None:
+        """Block until `recorder.recorderState()` actually reaches
+        `StoppedState`, then hold for a further, real, wall-clock settle
+        period before returning.
+
+        `QMediaRecorder.stop()` is not documented as synchronous, and the
+        "playable file" acceptance criterion needs the container's moov
+        atom actually written before `stop()` returns, not just the call
+        having been made -- so the first loop checks state rather than
+        assuming. Polling needs an actual `time.sleep()` between checks,
+        not just repeated `processEvents()` calls with no pause between
+        them -- confirmed by hand that spinning `processEvents()` back to
+        back with no sleep never once observes the state change, even
+        after 50 calls, because the real transition happens on a Windows
+        Media Foundation worker thread that needs actual elapsed wall time
+        to post its result back, not just event-loop turns to *deliver*
+        one if it were already queued.
+
+        Reaching `StoppedState` alone turned out not to be enough either,
+        confirmed the same way: a file opened with `QMediaPlayer`
+        immediately after `stop()` returned came back "moov atom not
+        found" and unplayable, even though the state machine already said
+        stopped, while the same file opened a couple of seconds later (a
+        fresh process, plenty more wall time elapsed) played fine. There
+        is no more precise signal to wait on instead of a further timed
+        hold: `recorderStateChanged` and `errorOccurred` both carry a
+        nested `QMediaRecorder` enum argument, and connecting *anything*
+        to either -- confirmed independent of the slot's own signature --
+        raises `TypeError: connect() failed ... and unislot()` in this
+        exact PyQt6 6.11.0 / Qt 6.11.1 build (see `_wire_errors()`), and
+        `actualLocationChanged` did not fire at all in the same manual
+        check. So this holds, still pumping the event loop, for
+        `self._stop_settle_seconds` (empirically ~1s was enough) after
+        `StoppedState` first appears -- a real, load-bearing wait, not a
+        cosmetic one; shortening or dropping it reintroduces the
+        unplayable-file failure this was written to fix.
+
+        Bounded rather than looped forever throughout: with no
+        `QCoreApplication` instance, or a recorder that never reports
+        `StoppedState` within `stopped_timeout`, there's nothing more this
+        can usefully wait on, and a bounded wait fails visibly (an
+        unplayable file) instead of hanging the process.
+        """
+        app = QCoreApplication.instance()
+        if app is None:
+            return
+
+        deadline = time.monotonic() + stopped_timeout
+        reached_stopped = False
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if recorder.recorderState() == QMediaRecorder.RecorderState.StoppedState:
+                reached_stopped = True
+                break
+            time.sleep(poll_interval)
+
+        if not reached_stopped:
+            return
+
+        settle_deadline = time.monotonic() + self._stop_settle_seconds
+        while time.monotonic() < settle_deadline:
+            app.processEvents()
+            time.sleep(poll_interval)
+
+
+def build_windows_registry() -> RecorderRegistry:
+    """The real Windows `RecorderRegistry`.
+
+    One backend today, mirroring `build_linux_registry()`'s shape.
+    """
+    registry = RecorderRegistry()
+    registry.add(WindowsRecorderBackend())
     return registry
