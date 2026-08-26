@@ -4975,6 +4975,10 @@ class TestCaptureModeWindowIntegration:
         assert overlay._capture_mode == self.REGION_LABEL
         assert overlay._bar._chip._text_label.text() == self.REGION_LABEL
         assert overlay._popover.mode == self.REGION_LABEL
+        # The chooser is the third surface showing this value: leaving it
+        # on "Window" would have its tab naming a mode that was just
+        # refused while the chip below it read "Region".
+        assert overlay._chooser.mode == self.REGION_LABEL
         assert overlay._toast.isVisible()
         assert "window" in overlay._toast._text_label.text().lower()
 
@@ -7389,7 +7393,13 @@ class TestCaptureChooser:
 
     def _overlay(self, size=(1200, 800)):
         frame = make_frame(image_size=size, logical_size=size)
-        overlay = OverlayWindow(frame)
+        # With a provider that can answer, Window is a mode this session
+        # actually has. Without one the overlay refuses it and puts every
+        # surface back to Region -- correct, and not what this class is
+        # asking about.
+        overlay = OverlayWindow(
+            frame, geometry_provider=_FakeWindowProvider(QRectF(0, 0, 100, 100))
+        )
         overlay.setGeometry(0, 0, *size)
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
