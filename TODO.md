@@ -1,86 +1,74 @@
-# Next: use it, and find what the tests still cannot see
+# Next: use it, on both platforms
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
 
-Everything through **SNX-72** is merged (PRs #6–#19). `main` runs 648 tests.
-The overlay redesign is in and the separate editor window is gone.
+Everything through **SNX-107** is merged. `main` runs 1,184 tests, 14 skipped.
+**Linux and Windows are both implemented.** macOS is stubbed.
 
-Spec: `docs/design/overlay-redesign.md` (open
-`docs/design/Snipux Overlay.dc.html` in Chrome — it is interactive and is the
-behavioural authority). Tokens: `snipux/design/tokens.py`.
+## Installing
 
-## What to do next
+    pipx install git+https://github.com/CydoEntis/snipux.git
+    snipux
 
-    cd ~/snipux && git pull
-    bash packaging/install.sh
+First launch sets itself up — desktop entry, autostart, and the shortcut.
+`snipux --remove` undoes all of it before `pipx uninstall snipux`.
 
-The installer starts snipux itself and writes an autostart entry, so the
-shortcut works immediately and after a reboot.
+**Windows without Python:** build `dist\snipux.exe` with
+`packaging\windows\build.ps1` and hand over that one file. It installs itself
+on first run.
 
-**Then use it for ten minutes.** Everything below is unproven until you do.
+## Deviations and decisions — deliberate, do not revert
 
-## The lesson this project has already taught, twice
+**No Windows installer.** Smart App Control blocks unsigned installers
+outright on default Windows 11 — a refusal, not a warning the user can click
+through. The portable exe is not blocked. Signing is ~$200-400/yr plus a
+hardware token, and was declined. Do not rebuild the Inno Setup script
+without knowing this.
 
-**A green test suite here is weak evidence.** All 648 tests run under
-`QT_QPA_PLATFORM=offscreen`, which has no compositor, no window manager and no
-keyboard. That suite was green while the app shipped a package that could not
-import, an overlay with no way to make a selection, invisible blur, and a
-toolbar clipped to single letters. Every one was found by running it.
+**Capture never uses `QScreen.grabWindow(0)` on Linux** — black on Wayland.
 
-Two specific traps, both of which bit:
-
-- **Do not seed state the app never sets.** A check that calls
-  `set_selection()` before testing drawing proves drawing works *given* a
-  selection, while nothing on the real path creates one. Start from what
-  `app.py` actually constructs. `AppController` is the entry point worth
-  driving.
-- **Grep for "later ticket" after any big change.** Three real bugs came from
-  agents deferring work in a comment where no later ticket existed.
-
-## Deviations from the handoff — deliberate, do not revert
-
-**Capture never uses `QScreen.grabWindow(0)`.** It returns black on Wayland,
-which is why `capture.py` has a portal backend at all.
-
-**Minimum selection is 16x16, not 200x140**, so a taskbar icon or one line of
-text stays snippable.
-
-**Text labels commit in two stages**, not on the click, so a stray click leaves
-no empty chip.
+**Minimum selection is 16x16**, not the handoff's 200x140, so a taskbar icon
+stays snippable.
 
 **Eleven tools, not the handoff's eight.** Ellipse, Line and Crop live in a
-popover off the rect button — the bar still shows eight.
+popover off the rect button.
 
-**The hint HUD is off by default.** It read as a stray banner over every
-capture. Shortcuts stay discoverable through tooltips.
+**The hint HUD is off by default.**
 
-## Open questions for the next session
+**Windows uses Ctrl+Alt+S.** Win+Shift+S belongs to the Windows Snipping Tool
+and `RegisterHotKey` refuses it outright.
 
-**Does the shortcut work now?** The last failure was the portal refusing a
-screenshot to a freshly spawned process; SNX-67 asks for a non-modal dialog,
-which GNOME should grant without a parent window. Unverified on hardware. If it
-still fails, the tray now reports why — read the message, it names the backend
-and the response code.
+**Snipux is capitalised in display text and lowercase in anything typed** —
+the command, package, imports and repo stay `snipux`.
 
-**Only one capture backend exists on GNOME.** `grim` is wlroots-only, so the
-portal is it. One refusal and there is no fallback. Worth deciding whether to
-add one.
+## The trap this project keeps falling into
 
-## Known, unticketed
+A green test suite here is weak evidence. All 1,184 tests run headless, with
+no compositor, no window manager and no keyboard. That suite was green while
+the app shipped: a package that could not import, an overlay with no way to
+make a selection, invisible blur, a toolbar clipped to single letters, a
+terminal window on every launch, and an icon that was an unreadable smudge.
+Every one was found by running it.
 
-**`snipux/overlay.py` is over 5,000 lines** — the window plus every chrome
-widget. Splitting the chrome into `snipux/chrome.py` is the obvious next cut,
-and it gets harder with every feature.
+Two specific habits that catch these:
 
-IBM Plex is not vendored, so the layout renders in a fallback family it was not
-tuned for. Drop the OFL `.ttf` files into `snipux/design/fonts/` — the loader
-already looks there and the packaging already ships them.
+- **Do not seed state the app never sets.** A check that calls
+  `set_selection()` before testing drawing proves nothing about the path that
+  creates a selection. Start from what `app.py` actually constructs.
+- **Grep for "later ticket" after any big change.** Several real bugs were
+  agents deferring work in a comment where no such ticket existed.
 
 ## What has never been tested
 
-Anything on a machine that is not the VirtualBox VM: **multiple monitors,
-fractional scaling, and X11**.
+**Fractional display scaling.** Multi-monitor is now covered properly — three
+displays including one at negative coordinates, verified on real Windows
+hardware — but no display in this project has ever had a scale factor other
+than 1.0. That is the classic place coordinate bugs hide.
 
-**Freeform, Window, Full screen and the capture delay** have never run against
-a live compositor — only synthetic frames. Region is the trusted path.
+**macOS**, entirely. The seam is there so it slots in without rework, but it
+needs a real Mac.
+
+**The Linux side since the Windows port.** The platform seam moved Linux code
+behind an interface; the suite covers it, but nobody has run Snipux on Linux
+since.
