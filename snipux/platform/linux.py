@@ -12,7 +12,8 @@ shape `snipux/platform/__init__.py` defines, so callers reach it through
 directly. `build_capture_registry()` forwards to `capture.build_linux_registry()`
 the same way -- the session-type-driven Wayland/X11/both selection is real
 logic that lives in `capture.py` alongside the registries it chooses
-between, not duplicated here.
+between, not duplicated here. `build_recording_registry()` (SNX-119)
+forwards to `recording.build_linux_registry()` for the same reason.
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ from pathlib import Path
 
 from PyQt6.QtGui import QGuiApplication
 
-from snipux import capture, setup_desktop
+from snipux import capture, recording, setup_desktop
 from snipux.capture import BackendRegistry
+from snipux.recording import RecorderRegistry
 
 from . import Platform
 
@@ -56,6 +58,9 @@ class LinuxPlatform(Platform):
 
     def build_capture_registry(self) -> BackendRegistry:
         return capture.build_linux_registry()
+
+    def build_recording_registry(self) -> RecorderRegistry:
+        return recording.build_linux_registry()
 
     def reserved_top(self, screen) -> int:
         """GNOME's top bar, which Qt does not report here.

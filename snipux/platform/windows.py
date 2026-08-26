@@ -49,7 +49,9 @@ run selection against that frozen frame) is what makes capture itself no
 different here than on Linux; only *how* the grab happens changes per
 platform, and that logic lives in `capture.py` alongside the backends it
 chooses between, not duplicated in this module. See `capture.py` for the
-qt-native/Win32-GDI backends themselves.
+qt-native/Win32-GDI backends themselves. `build_recording_registry()`
+(SNX-119) forwards to `recording.build_windows_registry()` for the same
+reason.
 
 `reattach_console()` (SNX-100) is unrelated to any of the above: it is
 what lets `packaging/windows/snipux.spec` build a *windowed* snipux.exe --
@@ -94,8 +96,9 @@ from typing import Callable
 
 from PyQt6.QtCore import QAbstractNativeEventFilter
 
-from snipux import capture, setup_desktop
+from snipux import capture, recording, setup_desktop
 from snipux.capture import BackendRegistry
+from snipux.recording import RecorderRegistry
 
 from . import Platform, UnimplementedPlatformError
 
@@ -977,3 +980,6 @@ class WindowsPlatform(Platform):
 
     def build_capture_registry(self) -> BackendRegistry:
         return capture.build_windows_registry()
+
+    def build_recording_registry(self) -> RecorderRegistry:
+        return recording.build_windows_registry()

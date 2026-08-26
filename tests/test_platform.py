@@ -37,7 +37,7 @@ import pytest
 from PyQt6.QtCore import QRect
 
 import snipux.platform as platform_pkg
-from snipux import setup_desktop
+from snipux import recording, setup_desktop
 from snipux.platform import Platform, UnimplementedPlatformError, darwin, linux, windows
 
 
@@ -177,6 +177,12 @@ class TestLinuxPlatform:
         monkeypatch.setattr(setup_desktop, "default_save_folder", lambda: tmp_path)
 
         assert linux.LinuxPlatform().default_save_folder() == tmp_path
+
+    def test_build_recording_registry_delegates_to_recording(self, monkeypatch):
+        sentinel = object()
+        monkeypatch.setattr(recording, "build_linux_registry", lambda: sentinel)
+
+        assert linux.LinuxPlatform().build_recording_registry() is sentinel
 
     def test_ensure_stable_install_is_a_noop_by_default(self):
         # SNX-103: only WindowsPlatform overrides this -- a Linux install
@@ -335,6 +341,7 @@ class TestStubPlatforms:
         "bind_shortcut",
         "unbind_shortcut",
         "default_save_folder",
+        "build_recording_registry",
     )
 
     WINDOWS_UNIMPLEMENTED_OPERATIONS = ("default_save_folder",)
@@ -534,6 +541,12 @@ class TestWindowsPlatform:
         result = platform_.unbind_shortcut()
 
         assert "Could not release" in result
+
+    def test_build_recording_registry_delegates_to_recording(self, monkeypatch):
+        sentinel = object()
+        monkeypatch.setattr(recording, "build_windows_registry", lambda: sentinel)
+
+        assert windows.WindowsPlatform().build_recording_registry() is sentinel
 
 
 class TestFindShortcutConflict:
