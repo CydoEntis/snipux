@@ -293,6 +293,7 @@ class TestSettingsWindow:
         window._also_copy.switch.setChecked(True)
         window._filename.setText("shot-%Y")
         window._native.switch.setChecked(True)
+        window._show_hints.switch.setChecked(True)
 
         window._save()
 
@@ -301,6 +302,22 @@ class TestSettingsWindow:
         assert setup_desktop.load_always_copy(tmp_path) is True
         assert setup_desktop.load_filename_pattern(tmp_path) == "shot-%Y"
         assert setup_desktop.load_native_resolution(tmp_path) is True
+        assert setup_desktop.load_hints_enabled(tmp_path) is True
+
+    def test_the_hint_bar_toggle_offers_the_preference_snx_65_turned_off(self, tmp_path):
+        # AC: Settings offers the hint-bar preference SNX-65 turned off by
+        # default -- opening with nothing stored must show it off, matching
+        # `load_hints_enabled`'s own documented default.
+        window = self._window(tmp_path)
+
+        assert window._show_hints.switch.isChecked() is False
+
+    def test_the_hint_bar_toggle_reads_back_through_the_named_setting(self, tmp_path):
+        setup_desktop.save_hints_enabled(True, tmp_path)
+
+        window = self._window(tmp_path)
+
+        assert window._show_hints.switch.isChecked() is True
 
     def test_save_calls_back_so_the_shortcut_can_be_rebound(self, tmp_path):
         # Remembering a shortcut is not binding it: GNOME only knows about

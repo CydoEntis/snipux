@@ -694,11 +694,21 @@ class SettingsWindow(WinWindow):
         )
         self._remember_tool.switch.toggled.connect(lambda _c: self._mark_dirty())
 
+        self._show_hints = SwitchRow(
+            "Show the hint bar",
+            "Esc discard ink · Enter copy & close, across the top of the "
+            "overlay. SNX-65 turned this off by default; press ? in the "
+            "overlay to reveal it for one session without changing this.",
+            setup_desktop.load_hints_enabled(self._config_dir),
+        )
+        self._show_hints.switch.toggled.connect(lambda _c: self._mark_dirty())
+
         return _pane(
             SectionHeading("Annotation"),
             note,
             None,
             self._remember_tool,
+            self._show_hints,
         )
 
     def _tray_pane(self) -> QWidget:
@@ -817,6 +827,9 @@ class SettingsWindow(WinWindow):
         )
         setup_desktop.save_remember_tool(
             self._remember_tool.switch.isChecked(), self._config_dir
+        )
+        setup_desktop.save_hints_enabled(
+            self._show_hints.switch.isChecked(), self._config_dir
         )
         setup_desktop.save_tray_toggles(
             {key: row.switch.isChecked() for key, row in self._tray_rows.items()},
