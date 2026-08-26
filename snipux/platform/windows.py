@@ -591,6 +591,22 @@ class WindowsPlatform(Platform):
         and this only has to make sure the right value is on record for it
         to read.
 
+        This used to end by printing "<shortcut> will be registered the
+        next time snipux starts" -- true of a bare `snipux --setup` run,
+        which never holds a `RegisterHotKey` registration of its own, but
+        false of the one caller that actually matters (SNX-101):
+        `AppController.run_first_launch_setup()` calls this from the
+        already-resident process, and only after `install_hotkey_listener()`
+        has already bound the shortcut in that same process -- so the
+        shortcut this note claimed was still pending had, in fact, already
+        been working since before this function was even called. Printing
+        it anyway was also a console line a windowed build has no console
+        to show (SNX-100), so it was silent noise on top of being wrong.
+        This function says nothing about the shortcut at all now;
+        `bind_shortcut()`'s own return value, surfaced through
+        `AppController._report_shortcut()` (the tray, or Settings), is the
+        one place that ever reports whether it actually took.
+
         Returns 1 (and prints why, to stderr) only when the console script
         itself can't be found -- every other step can still report its own
         outcome without it, mirroring `setup_desktop.run_setup()`'s own
@@ -627,9 +643,6 @@ class WindowsPlatform(Platform):
         _write_shortcut(
             _startup_dir() / "snipux.lnk", exec_path, icon_path if has_icon else None, "Startup"
         )
-
-        remembered = setup_desktop.human_shortcut(shortcut or setup_desktop.load_shortcut())
-        print(f"{remembered} will be registered the next time snipux starts.")
 
         return 0
 
