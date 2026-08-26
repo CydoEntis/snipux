@@ -444,12 +444,29 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
     return save_after_capture("review" if enabled else tokens.AFTER_DEFAULT, config_dir)
 
 
-def load_always_copy(config_dir: Path | None = None) -> bool:
-    return _read_config(config_dir).get("always_copy") is True
+def load_instant_saves(config_dir: Path | None = None) -> bool:
+    """Whether `instant` (`tokens.AFTER_CAPTURE`) writes the file instead
+    of copying to the clipboard -- the one thing `overlay.py`'s
+    `_commit_selection` needs to know to finish an instant snip.
+
+    Defaults to `False`, i.e. copy: that is what `instant` has always
+    done, since it is the direct descendant of the old `clip` destination
+    ("Copy and get out of the way"), and an upgrading user who never
+    opens Settings should not have their instant snips silently start
+    writing files instead of landing on the clipboard.
+
+    Stored under `instant_saves`, not the old dead `always_copy` key --
+    that one was written by Settings and read by nobody (SNX-111), and
+    its name no longer describes an exclusive choice between copy and
+    save. A config with `always_copy` still in it is simply ignored here,
+    not migrated: the key never did anything, so there is no prior
+    behaviour to carry forward.
+    """
+    return _read_config(config_dir).get("instant_saves") is True
 
 
-def save_always_copy(enabled: bool, config_dir: Path | None = None) -> bool:
-    return _write_config("always_copy", bool(enabled), config_dir)
+def save_instant_saves(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("instant_saves", bool(enabled), config_dir)
 
 
 def default_save_folder() -> Path:
