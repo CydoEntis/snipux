@@ -685,6 +685,14 @@ class _FakeShellLinkCom:
         return ctypes.cast(instance, ctypes.c_void_p)
 
     def _build_shell_link_vtable(self):
+        # ctypes.CFUNCTYPE, not the real stdcall ctypes.WINFUNCTYPE: the
+        # latter is only defined under sys.platform == "win32" in the
+        # stdlib itself, so building this vtable with it would blow up
+        # constructing the fake before a test ever reaches
+        # _patch_windows_com() to patch anything -- and _patch_windows_com()
+        # already points windows.ctypes.WINFUNCTYPE at ctypes.CFUNCTYPE for
+        # every platform, so _create_shortcut() calls back into these slots
+        # with the same convention they were built with either way.
         def query_interface(_this, _riid, out):
             ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = self.persist_file.value
             return 0
@@ -708,17 +716,17 @@ class _FakeShellLinkCom:
         return self._vtable(
             21,
             {
-                0: ctypes.WINFUNCTYPE(
+                0: ctypes.CFUNCTYPE(
                     self._HRESULT, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
                 )(query_interface),
-                2: ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(release),
-                7: ctypes.WINFUNCTYPE(self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p)(
+                2: ctypes.CFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(release),
+                7: ctypes.CFUNCTYPE(self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p)(
                     set_description
                 ),
-                17: ctypes.WINFUNCTYPE(
+                17: ctypes.CFUNCTYPE(
                     self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int
                 )(set_icon_location),
-                20: ctypes.WINFUNCTYPE(self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p)(set_path),
+                20: ctypes.CFUNCTYPE(self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p)(set_path),
             },
         )
 
@@ -736,8 +744,8 @@ class _FakeShellLinkCom:
         return self._vtable(
             9,
             {
-                2: ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(release),
-                6: ctypes.WINFUNCTYPE(
+                2: ctypes.CFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(release),
+                6: ctypes.CFUNCTYPE(
                     self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int
                 )(save),
             },
