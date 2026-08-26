@@ -1,55 +1,46 @@
-# Next: merge the branch, then a new feature
+# Next: a decision, then screen recording
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
 
-Everything through **SNX-107** is merged. **Linux and Windows are both
-implemented.** macOS is stubbed.
+Everything through **SNX-115** is merged. `main` runs 1,241 tests, 14 skipped,
+green on Windows. **Linux and Windows are both implemented.** macOS is stubbed.
+
+## Done since you left
+
+- **SNX-109** - the suite was red on both platforms. On Windows a test was
+  doing a real `RegisterHotKey`, so it passed or failed depending on what else
+  held Ctrl+Alt+S; two Snipux instances were running, and it failed. Stubbed,
+  with no production code changed.
+- **SNX-111** - the dead "Always copy to clipboard too" switch is now a real
+  instant-saves-vs-copies preference, defaulting to copy so an upgrade does not
+  silently start writing files.
+- **SNX-110** - `reserved_top()` now returns the real `availableGeometry()`
+  query on Wayland rather than a hardcoded zero, so a compositor that does
+  reserve space is honoured.
+- **Linear squared up.** SNX-108 closed; SNX-112-115 filed and closed for the
+  four changes that shipped with no ticket. Filing those open would have let a
+  run rebuild already-merged work.
+
+**One correction worth knowing about.** SNX-110's comment claimed GNOME hiding
+its top bar for a fullscreen window had been "watched happen on a real GNOME
+Wayland session ... the first launch of this codebase on Wayland at all". It
+had not - that ticket was built on Windows. Corrected in `839bf26`. The code
+was right; only the claim was invented. **Wayland remains unverified.**
 
 ## Pick up here
 
-    gh pr create --head punch/SNX-108
+**A rebuilt exe is waiting at `dist-new`.** It could not be written into
+`dist` because two running Snipux processes hold that file. Close them, then
+move it across.
 
-**`punch/SNX-108` is done and pushed, not merged.** Six code commits, 1,242
-tests passing, and run by hand on a real GNOME/X11 desktop:
-
-- **SNX-108** — the chooser's widgets swallow their own mouse presses. A
-  press a widget does not accept goes to its parent, and the parent is the
-  overlay, which reads one as the start of a region drag.
-- **The same bug in the overlay's own chrome.** Every painted chrome widget
-  had it; on the floating bar it threw away the selection just dragged out.
-- **The GNOME top bar was hiding the chooser.** `Platform.reserved_top()`
-  is the new seam. `availableGeometry()` is not the fix — Qt reports no
-  strut at all on X11, so Linux reads `_NET_WORKAREA` instead.
-- **The "then" menu now asks where you edit** — Instant / Edit / Review, in
-  place of Review / Copy / Save. `instant` is new; the other two existed
-  under other names.
-- **A refused Window mode reaches the chooser**, not just the chip.
-- `verify_bug.py` deleted.
-
-Four tests fail on Linux and failed before this branch: three in
-`TestCreateShortcut` need `ctypes.WINFUNCTYPE` and can only run on Windows,
-one asserts a font metric this box does not reproduce. Both sets are worth
-a skip marker rather than a red suite.
-
-Then **rebuild `dist\snipux.exe`** on Windows — PyInstaller cannot
-cross-compile:
-
-    powershell -File packaging\windows\build.ps1
-
-And **square Linear up with this branch**, which is further ahead than its
-one ticket:
-
-- **SNX-108 is done** — close it. It asked for the chooser fix alone.
-- **Four changes on the branch have no ticket at all**: the same press bug
-  in the overlay's own chrome, the GNOME top bar hiding the chooser, the
-  "then" menu becoming Instant / Edit / Review, and a refused Window mode
-  reaching the chooser. Worth filing after the fact so the history is not
-  one ticket wide.
-- **Two follow-ups want tickets of their own**: verifying the top bar fix
-  on Wayland, and the instant-save gap the dead "Always copy to clipboard
-  too" switch is the obvious home for. Both are written up under "Left open
-  by that branch" below.
+**Then the decision the recording plan is waiting on**, from
+`docs/design/recording.md`: ffmpeg is a stated requirement, which is awkward
+for the portable Windows exe that exists precisely so someone can be handed a
+single file. Its own note says settle that before ticket 13. It is worth
+settling before ticket 1 - it may change which backend Windows uses at all,
+since the Qt route (`QScreenCapture` + `QMediaRecorder`) avoids the external
+tool entirely.
 
 ## The next feature: screen recording
 
@@ -76,18 +67,8 @@ that before ticket 13.
 
 ## Left open by that branch
 
-**The top bar fix is unverified on Wayland.** It reserves nothing there on
-purpose: `show_on_screen` fullscreens the overlay onto one output and GNOME
-hides its bar for a fullscreen window. That reasoning has not been watched
-happen. One launch on a Wayland session settles it.
-
-**Instant always copies.** There is no copy-vs-save preference to read, so
-instant-save cannot be asked for. The obvious home for one already exists
-and does nothing:
-
-**"Always copy to clipboard too" is a dead setting.** `load_always_copy` is
-written by Settings and read by no one. Wiring it is its own decision --
-either it starts meaning something, or it comes out.
+**The top bar fix is still unverified on Wayland**, and so is everything else
+about Wayland since the platform seam went in. One launch settles it.
 
 ## Installing
 
