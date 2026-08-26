@@ -1,14 +1,18 @@
-# Builds a standalone snipux.exe (SNX-96) and wraps it in a real Windows
-# installer (SNX-97) that runs on a machine with no Python installed. Run
-# from a checkout with Python 3.10+ and pip on PATH, and Inno Setup
-# installed (https://jrsoftware.org/isdl.php, or `winget install
-# JRSoftware.InnoSetup`) for the second half:
+# Builds a standalone snipux.exe (SNX-96) that runs on a machine with no
+# Python installed. Run from a checkout with Python 3.10+ and pip on PATH:
 #
 #   powershell -File packaging\windows\build.ps1
 #
-# Produces dist\snipux.exe and dist\snipux-setup.exe. Every path below is
-# resolved relative to this script, not the caller's working directory,
-# so it can be run from anywhere.
+# Produces dist\snipux.exe -- the sole Windows release artifact (SNX-104:
+# the Inno Setup installer this script used to also build is gone, because
+# Smart App Control blocks it outright on a meaningful share of clean
+# Windows 11 installs with no way to click through; see the README's Smart
+# App Control section and docs/releasing.md). The exe installs itself --
+# Start Menu/Startup shortcut, hotkey, a stable install location -- the
+# first time it runs (SNX-95/103), which is what let the installer go
+# without losing what it was for. Every path below is resolved relative to
+# this script, not the caller's working directory, so it can be run from
+# anywhere.
 
 $ErrorActionPreference = "Stop"
 
@@ -28,60 +32,11 @@ try {
     # uses on Linux, so the .exe Explorer shows one instead of a generic
     # icon -- snipux.spec picks this up if present and falls back to none
     # if this step is skipped, fails, or finds nothing to build from.
-    # snipux.iss (below) reuses the same file for the installer's own icon
-    # and the Add/Remove Programs entry.
     python packaging/windows/build_icon.py
 
     pyinstaller packaging/windows/snipux.spec --noconfirm
 
     Write-Host "Built $(Join-Path $RepoRoot 'dist\snipux.exe')"
-
-    # pyproject.toml's `[project] version`, read with a plain regex rather
-    # than `tomllib` (stdlib only since 3.11; this project's own floor is
-    # 3.10 -- see pyproject.toml's `requires-python`) or a dependency this
-    # is the only caller of. Passed to Inno Setup below so the installer
-    # and the Add/Remove Programs entry it registers report the real
-    # release version instead of snipux.iss's own placeholder default.
-    $versionMatch = Select-String -Path (Join-Path $RepoRoot "pyproject.toml") `
-        -Pattern '^version\s*=\s*"([^"]+)"'
-    if (-not $versionMatch) {
-        throw "Could not find version = `"...`" in pyproject.toml"
-    }
-    $version = $versionMatch.Matches[0].Groups[1].Value
-
-    # Not on PATH by default -- the Inno Setup installer adds a Start Menu
-    # shortcut for the IDE, not ISCC.exe itself to PATH -- so every known
-    # install location is checked before giving up with a clear instruction,
-    # the same "fail fast, name the fix" style `find_console_script` /
-    # `install_desktop_integration` already use for their own missing
-    # prerequisites. `winget install JRSoftware.InnoSetup` -- the fix this
-    # same error message recommends -- defaults to a per-user install (no
-    # admin prompt), which lands under LocalAppData\Programs rather than the
-    # machine-wide Program Files locations below, so that path is checked
-    # too rather than only covering the install this script's own advice
-    # doesn't actually produce.
-    $candidates = @(
-        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-        "$env:LocalAppData\Programs\Inno Setup 6\ISCC.exe"
-    )
-    $iscc = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
-    if ($iscc) {
-        $isccPath = $iscc.Source
-    } else {
-        $isccPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    }
-    if (-not $isccPath) {
-        $searched = @("PATH") + $candidates
-        throw "ISCC.exe (Inno Setup) not found. Searched:`n  - " +
-            ($searched -join "`n  - ") + "`nInstall it from " +
-            "https://jrsoftware.org/isdl.php (or winget install " +
-            "JRSoftware.InnoSetup), then re-run this script."
-    }
-
-    & $isccPath "/DMyAppVersion=$version" "packaging\windows\snipux.iss"
-
-    Write-Host "Built $(Join-Path $RepoRoot 'dist\snipux-setup.exe')"
 }
 finally {
     Pop-Location

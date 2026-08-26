@@ -103,6 +103,38 @@ class Platform(ABC):
         a raised exception, since `--list-backends` has to work everywhere.
         """
 
+    def ensure_stable_install(self) -> Path | None:
+        """SNX-103: relocate this running process to a stable, durable
+        location before anything else points at it, if that is even a
+        thing this platform's distribution needs. Not one of the six
+        required operations above -- most platforms have no answer to
+        give: a `pip`/`pipx` install or a source checkout already runs
+        from a location a package manager, not this app, is responsible
+        for keeping stable, so the default here is a plain no-op every
+        platform inherits unless it overrides this.
+
+        `WindowsPlatform` is the one override today: a portable, single-
+        file `snipux.exe` (the only Windows distribution route -- SNX-104
+        dropped the Inno Setup installer that Smart App Control was
+        blocking outright) has no package manager behind it at all, so it
+        has to make that guarantee about itself. `app._become_resident()`
+        calls this once, on every launch
+        that becomes the resident instance, before it does anything that
+        might point a shortcut at this process's own, possibly-about-to-
+        be-deleted launch location.
+
+        Returns the stable path this process relocated itself to, or
+        `None` when there was nothing to relocate -- either this base
+        no-op, or a real override that had nothing to do (already running
+        from that stable location, or not a build that needs one at all).
+        Never raises: a platform that can't relocate itself reports why
+        through whatever channel its own override already uses for a note
+        (see e.g. `WindowsPlatform.install_desktop_integration`'s), the
+        same "a step that can't run is reported, not crashed on" rule as
+        every other operation on this interface.
+        """
+        return None
+
 
 class UnimplementedPlatformError(NotImplementedError):
     """Raised by a stub platform implementation (`windows.py`/`darwin.py`
@@ -134,7 +166,7 @@ def _select() -> Platform:
         from . import darwin
 
         return darwin.DarwinPlatform()
-    raise RuntimeError(f"snipux has no platform support for {sys.platform!r}")
+    raise RuntimeError(f"Snipux has no platform support for {sys.platform!r}")
 
 
 # Selected once, at import time (the acceptance criterion this exists to

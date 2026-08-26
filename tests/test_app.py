@@ -1484,6 +1484,41 @@ class TestRunResidentApp:
         finally:
             created[0]._tray_icon.hide()
 
+    def test_running_resident_calls_ensure_stable_install(self, monkeypatch):
+        # SNX-103: proves _become_resident() reaches
+        # platform.current.ensure_stable_install() -- unlike
+        # run_first_launch_setup() just above, this has to run on *every*
+        # launch that becomes resident, not just the first, so a newer
+        # portable download run over an already-set-up older install
+        # still relocates itself rather than the record above staying
+        # silent forever after the first launch.
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+
+        calls = []
+        monkeypatch.setattr(
+            app.platform.current, "ensure_stable_install", lambda: calls.append(True) or None
+        )
+
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+
+        state = make_transport_state()
+        transport = FakeTransport(state)
+
+        try:
+            result = run_resident_app(registry=BackendRegistry(), transport=transport)
+
+            assert result == 0
+            assert calls == [True]
+        finally:
+            created[0]._tray_icon.hide()
+
 
 class TestShortcutFlag:
     """`--shortcut` modifies `--setup` rather than being an action itself."""

@@ -177,6 +177,13 @@ class TestLinuxPlatform:
 
         assert linux.LinuxPlatform().default_save_folder() == tmp_path
 
+    def test_ensure_stable_install_is_a_noop_by_default(self):
+        # SNX-103: only WindowsPlatform overrides this -- a Linux install
+        # (a source checkout, or pip/pipx, neither of which sets
+        # `sys.frozen`) is already in a location a package manager
+        # manages, so `Platform`'s base implementation is what runs here.
+        assert linux.LinuxPlatform().ensure_stable_install() is None
+
 
 class TestStubPlatforms:
     """AC: macOS's implementation exists and raises a clear error naming the
@@ -368,7 +375,7 @@ class TestWindowsPlatform:
 
         result = windows.WindowsPlatform().unbind_shortcut()
 
-        assert "No snipux shortcut is currently registered" in result
+        assert "No Snipux shortcut is currently registered" in result
         assert user32.unregistered == []
 
     def test_unbind_releases_a_registered_shortcut(self, monkeypatch):
@@ -746,6 +753,163 @@ class TestWriteAndRemoveIcon:
         assert "nothing to remove" in capsys.readouterr().out
 
 
+class TestPortableSelfInstall:
+    """SNX-103: `_ensure_stable_copy()`/`_portable_exe_path()`/
+    `_remove_stable_copy()` -- what relocates a portable `snipux.exe` to
+    `%LOCALAPPDATA%\\snipux\\snipux.exe` before any shortcut is ever built,
+    so the Start Menu/Startup entries `TestWindowsDesktopIntegration`
+    covers below survive the original download being moved or deleted.
+
+    `sys.frozen`/`sys.executable` are monkeypatched directly on the shared
+    `sys` module (`windows.sys` *is* `sys`) -- the same pattern this file's
+    `TestReattachConsole` already uses for `sys.platform` -- since that is
+    the only thing PyInstaller actually sets to mark a frozen build; there
+    is no fake to inject instead.
+    """
+
+    def _use_tmp_local_app_data(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+
+    def _make_frozen(self, monkeypatch, exe_path: Path) -> None:
+        exe_path.parent.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(windows.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(windows.sys, "executable", str(exe_path))
+
+    def test_a_non_portable_build_is_a_noop(self, monkeypatch, tmp_path):
+        # AC: "none of this happens for a pip or pipx install" -- neither
+        # sets sys.frozen, so this must return before touching the
+        # filesystem at all.
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows.sys, "frozen", False, raising=False)
+
+        assert windows._ensure_stable_copy() is None
+        assert not (tmp_path / "Local" / "snipux" / "snipux.exe").exists()
+
+    def test_first_run_copies_itself_to_the_stable_location_before_anything_else(
+        self, monkeypatch, tmp_path
+    ):
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        download = tmp_path / "Downloads" / "snipux.exe"
+        self._make_frozen(monkeypatch, download)
+        download.write_bytes(b"v1-bytes")
+
+        result = windows._ensure_stable_copy()
+
+        target = tmp_path / "Local" / "snipux" / "snipux.exe"
+        assert result == target
+        assert target.read_bytes() == b"v1-bytes"
+
+    def test_running_the_installed_copy_does_not_copy_itself_again(self, monkeypatch, tmp_path):
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        target = tmp_path / "Local" / "snipux" / "snipux.exe"
+        self._make_frozen(monkeypatch, target)
+        target.write_bytes(b"already-installed")
+
+        def _must_not_copy(*args, **kwargs):
+            raise AssertionError("must not copy the installed exe onto itself")
+
+        monkeypatch.setattr(windows.shutil, "copy2", _must_not_copy)
+
+        result = windows._ensure_stable_copy()
+
+        assert result == target
+        assert target.read_bytes() == b"already-installed"
+
+    def test_rerunning_the_same_download_does_not_recopy_or_nest_directories(
+        self, monkeypatch, tmp_path
+    ):
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        download = tmp_path / "Downloads" / "snipux.exe"
+        self._make_frozen(monkeypatch, download)
+        download.write_bytes(b"same-build-bytes")
+        target_dir = tmp_path / "Local" / "snipux"
+        target_dir.mkdir(parents=True)
+        target = target_dir / "snipux.exe"
+        target.write_bytes(b"same-build-bytes")  # same size -- already up to date
+
+        def _must_not_copy(*args, **kwargs):
+            raise AssertionError("must not recopy an unchanged download")
+
+        monkeypatch.setattr(windows.shutil, "copy2", _must_not_copy)
+
+        result = windows._ensure_stable_copy()
+
+        assert result == target
+        assert [p.name for p in target_dir.iterdir()] == ["snipux.exe"]
+
+    def test_a_newer_version_replaces_the_older_install_rather_than_nesting(
+        self, monkeypatch, tmp_path
+    ):
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        download = tmp_path / "Downloads" / "snipux-new.exe"
+        self._make_frozen(monkeypatch, download)
+        download.write_bytes(b"v2-bytes-a-different-length")
+        target_dir = tmp_path / "Local" / "snipux"
+        target_dir.mkdir(parents=True)
+        target = target_dir / "snipux.exe"
+        target.write_bytes(b"v1")
+
+        result = windows._ensure_stable_copy()
+
+        assert result == target
+        assert target.read_bytes() == b"v2-bytes-a-different-length"
+        # Replaced in place, under the one fixed filename -- not left
+        # alongside a second, older copy.
+        assert [p.name for p in target_dir.iterdir()] == ["snipux.exe"]
+
+    def test_deleting_the_original_download_afterwards_leaves_the_copy_working(
+        self, monkeypatch, tmp_path
+    ):
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        download = tmp_path / "Downloads" / "snipux.exe"
+        self._make_frozen(monkeypatch, download)
+        download.write_bytes(b"v1-bytes")
+        target = windows._ensure_stable_copy()
+
+        download.unlink()
+
+        assert target.exists()
+        assert target.read_bytes() == b"v1-bytes"
+
+    def test_a_copy_failure_is_a_note_not_a_crash(self, monkeypatch, tmp_path, capsys):
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        download = tmp_path / "Downloads" / "snipux.exe"
+        self._make_frozen(monkeypatch, download)
+        download.write_bytes(b"v1-bytes")
+
+        def _boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(windows.shutil, "copy2", _boom)
+
+        result = windows._ensure_stable_copy()
+
+        assert result is None
+        assert "could not copy" in capsys.readouterr().err
+
+    def test_removing_the_relocated_copy(self, monkeypatch, tmp_path):
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        exe_path = tmp_path / "Local" / "snipux" / "snipux.exe"
+        exe_path.parent.mkdir(parents=True)
+        exe_path.write_bytes(b"x")
+
+        assert windows._remove_stable_copy(exe_path) is True
+        assert not exe_path.exists()
+
+    def test_removing_a_copy_that_was_never_installed_is_harmless(self, tmp_path, capsys):
+        exe_path = tmp_path / "snipux" / "snipux.exe"
+
+        result = windows._remove_stable_copy(exe_path)
+
+        assert result is True
+        assert "nothing to remove" in capsys.readouterr().out
+
+    def test_ensure_stable_install_forwards_to_ensure_stable_copy(self, monkeypatch):
+        monkeypatch.setattr(windows, "_ensure_stable_copy", lambda: Path("C:/stable/snipux.exe"))
+
+        assert windows.WindowsPlatform().ensure_stable_install() == Path("C:/stable/snipux.exe")
+
+
 class TestWindowsDesktopIntegration:
     """AC: `snipux --setup`/`snipux --remove` on Windows create/remove a
     Start Menu entry and a Startup (login) entry, both showing the snipux
@@ -866,6 +1030,35 @@ class TestWindowsDesktopIntegration:
         assert first == 0
         assert second == 0
 
+    def test_a_portable_build_points_both_shortcuts_at_the_relocated_copy(
+        self, monkeypatch, tmp_path
+    ):
+        # SNX-103: a frozen build's own exec_path (find_console_script()
+        # returning wherever it was launched from) must be swapped out for
+        # `_ensure_stable_copy()`'s stable path before either shortcut is
+        # written -- not the original, possibly-in-Downloads location.
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        download = tmp_path / "Downloads" / "snipux.exe"
+        download.parent.mkdir(parents=True)
+        download.write_bytes(b"portable-build-bytes")
+        monkeypatch.setattr(windows.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(windows.sys, "executable", str(download))
+        monkeypatch.setattr(setup_desktop, "find_console_script", lambda: download.resolve())
+        created = []
+        monkeypatch.setattr(
+            windows,
+            "_create_shortcut",
+            lambda lnk, target, **kw: created.append((lnk, target)) or True,
+        )
+
+        exit_code = windows.WindowsPlatform().install_desktop_integration()
+
+        assert exit_code == 0
+        stable_copy = tmp_path / "Local" / "snipux" / "snipux.exe"
+        [(_, target1), (_, target2)] = created
+        assert target1 == target2 == stable_copy
+        assert stable_copy.read_bytes() == b"portable-build-bytes"
+
     def test_remove_deletes_both_shortcuts_and_the_icon(self, monkeypatch, tmp_path):
         self._use_tmp_dirs(monkeypatch, tmp_path)
         monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
@@ -880,6 +1073,19 @@ class TestWindowsDesktopIntegration:
         assert not (start_menu / "snipux.lnk").exists()
         assert not (start_menu / "Startup" / "snipux.lnk").exists()
         assert not icon_path.exists()
+
+    def test_remove_deletes_the_relocated_portable_copy(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+        exe_dir = tmp_path / "Local" / "snipux"
+        exe_dir.mkdir(parents=True)
+        exe_path = exe_dir / "snipux.exe"
+        exe_path.write_bytes(b"installed-copy")
+
+        exit_code = windows.WindowsPlatform().remove_desktop_integration()
+
+        assert exit_code == 0
+        assert not exe_path.exists()
 
     def test_remove_forgets_the_remembered_shortcut(self, monkeypatch, tmp_path):
         self._use_tmp_dirs(monkeypatch, tmp_path)
@@ -932,8 +1138,8 @@ class TestReattachConsole:
     own), so `reattach_console()` is what lets a terminal launch
     (`snipux --list-backends` etc.) still see its output, while a launch
     with no console anywhere in its parent chain (Explorer, a Start
-    Menu/Startup shortcut, the installer's own [Run] step) stays silent
-    without crashing the first time something calls `print()`.
+    Menu/Startup shortcut) stays silent without crashing the first time
+    something calls `print()`.
 
     `sys.stdout`/`sys.stderr` are restored after every test that lets
     `reattach_console()` actually reassign them -- this suite's own output
@@ -976,11 +1182,10 @@ class TestReattachConsole:
             sys.stdout, sys.stderr = original_stdout, original_stderr
 
     def test_redirects_to_devnull_when_no_console_is_available(self, monkeypatch):
-        # Explorer, a Start Menu/Startup shortcut, or the installer's own
-        # [Run] step: none of those parents has a console for
-        # AttachConsole to find, which is a plain failure distinct from
-        # "this process already has one" (ERROR_ACCESS_DENIED, covered
-        # below).
+        # Explorer or a Start Menu/Startup shortcut: neither of those
+        # parents has a console for AttachConsole to find, which is a
+        # plain failure distinct from "this process already has one"
+        # (ERROR_ACCESS_DENIED, covered below).
         monkeypatch.setattr(windows.sys, "platform", "win32")
         monkeypatch.setattr(
             windows.ctypes,

@@ -195,14 +195,14 @@ def _build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--snip",
         action="store_true",
-        help="ask an already-running snipux instance to start a capture, "
+        help="ask an already-running Snipux instance to start a capture, "
         "starting one first if none is running yet (for binding to a "
         "key such as Print Screen)",
     )
     group.add_argument(
         "--settings",
         action="store_true",
-        help="open the Settings window -- asking an already-running snipux "
+        help="open the Settings window -- asking an already-running Snipux "
         "instance to raise its own if there is one, starting one first if "
         "not (same rule --snip follows). The way in on a machine with no "
         "tray icon, e.g. stock GNOME without the AppIndicator extension",
@@ -211,7 +211,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--setup",
         action="store_true",
         help="install the desktop entry, autostart entry, and GNOME "
-        "Super+Shift+S shortcut for this installed copy of snipux -- no "
+        "Super+Shift+S shortcut for this installed copy of Snipux -- no "
         "repository checkout needed",
     )
     group.add_argument(
@@ -617,7 +617,7 @@ class AppController:
             # no tray, but quitting needs a real answer now that there's no
             # Quit menu item visible to click.
             print(
-                "No system tray detected -- snipux will run without a tray "
+                "No system tray detected -- Snipux will run without a tray "
                 "icon or menu. It is still listening for snip requests "
                 "(e.g. via `snipux --snip`, typically bound to a key); to "
                 "quit it, kill this process."
@@ -680,7 +680,7 @@ class AppController:
         rather than each inlining the same tray-or-print check.
         """
         if self._tray_available:
-            self._tray_icon.showMessage("snipux", message, QSystemTrayIcon.MessageIcon.Information)
+            self._tray_icon.showMessage("Snipux", message, QSystemTrayIcon.MessageIcon.Information)
         else:
             print(message)
 
@@ -767,7 +767,7 @@ class AppController:
         setup_desktop.save_setup_complete(True)
         shortcut = setup_desktop.human_shortcut(setup_desktop.load_shortcut())
         self._report_shortcut(
-            f"snipux is set up: it starts at login, and {shortcut} starts a "
+            f"Snipux is set up: it starts at login, and {shortcut} starts a "
             "snip. Change the shortcut any time in Settings."
         )
 
@@ -1022,10 +1022,26 @@ def _become_resident(
     later (SNX-101). `WindowsPlatform.install_desktop_integration()`
     depends on this ordering too: it says nothing about when the shortcut
     takes effect, exactly because it never runs before this already has.
+
+    `platform.current.ensure_stable_install()` (SNX-103) runs first, ahead
+    of either: a portable Windows build relocates itself to a stable
+    per-user location here, on *every* launch that gets this far, not just
+    a first one -- unlike `run_first_launch_setup()` just below, which
+    only ever calls into desktop integration once and then stays silent
+    forever after, this has to keep running so that a newer download run
+    over an already-set-up older install still replaces it. It has to
+    happen before `run_first_launch_setup()` reaches
+    `install_desktop_integration()`, too: that is what points the Start
+    Menu/Startup shortcuts at the relocated copy instead of wherever this
+    process happened to be launched from. A no-op everywhere this isn't a
+    portable build (see `Platform.ensure_stable_install()`'s own
+    docstring), so this costs every other platform nothing.
     """
     # Already built by whoever called `try_claim()` -- see
     # `_ensure_qapplication`, which must run before the claim, not after.
     app = _ensure_qapplication()
+
+    platform.current.ensure_stable_install()
 
     controller = AppController(registry, transport)
     controller.install_hotkey_listener()
