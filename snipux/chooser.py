@@ -103,7 +103,42 @@ def _glass(painter, rect, radii, fill_alpha=tokens.ChooserColor.PANEL_BG_ALPHA) 
     painter.drawPath(path)
 
 
-class _MenuRow(QWidget):
+class _Surface(QWidget):
+    """A chooser widget that clicks, and so must swallow its own presses.
+
+    Every widget on this surface is a child of the overlay, and a Qt widget
+    that leaves a mouse press unaccepted lets it propagate to its parent.
+    The overlay reads a press with no selection as the start of a region
+    drag -- right for the overlay, whose docstring says so, and wrong for
+    chrome sitting on top of it. Clicking `Region` therefore started a
+    region capture instead of opening its menu (SNX-108), and the same was
+    true of every other trigger, the tab, and the panel's own background.
+
+    The press stops here; the click still happens on release. Subclasses
+    that act on release must check `_released_inside` first: accepting the
+    press makes this widget Qt's implicit mouse grabber, so a release that
+    lands somewhere else entirely still arrives here, and pressing a
+    control then sliding away from it is how a user says "no".
+
+    The two passive pieces -- `_Pill` and `_Legend` -- deliberately stay out
+    of this: nothing there is clickable, and a press that lands on them
+    belongs to the drag underneath.
+
+    `overlay._Chrome` is the same fix for the floating bar, the trays, the
+    popovers, the toast and the HUD, which all had it too.
+    """
+
+    def mousePressEvent(self, event) -> None:
+        event.accept()
+
+    def _released_inside(self, event) -> bool:
+        return (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        )
+
+
+class _MenuRow(_Surface):
     """One row of a dropdown. Painted rather than styled because the
     destination menu's rows are two lines and the mode menu's carry a
     shortcut glyph and a tick -- more than a stylesheet can lay out.
@@ -144,7 +179,7 @@ class _MenuRow(QWidget):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
+        if self._released_inside(event):
             self.clicked.emit(self._value)
 
     def paintEvent(self, event) -> None:
@@ -268,7 +303,7 @@ class _Menu(QWidget):
         painter.end()
 
 
-class _Trigger(QWidget):
+class _Trigger(_Surface):
     """One of the row's three dropdown triggers: icon, label, chevron."""
 
     clicked = pyqtSignal()
@@ -324,7 +359,7 @@ class _Trigger(QWidget):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
+        if self._released_inside(event):
             self.clicked.emit()
 
     def paintEvent(self, event) -> None:
@@ -485,7 +520,7 @@ class _Legend(QWidget):
         painter.end()
 
 
-class _Tab(QWidget):
+class _Tab(_Surface):
     """What the panel collapses to once a mode is armed.
 
     26px of the monitor's top edge -- which on GNOME is the top bar's
@@ -536,7 +571,7 @@ class _Tab(QWidget):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
+        if self._released_inside(event):
             self.clicked.emit()
 
     def paintEvent(self, event) -> None:
@@ -589,7 +624,7 @@ class _Tab(QWidget):
         painter.end()
 
 
-class ChooserPanel(QWidget):
+class ChooserPanel(_Surface):
     """The 54px row itself: mode, "then", destination, delay.
 
     Square top corners and 14px bottom corners, with no top border, so it
