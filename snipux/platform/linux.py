@@ -72,9 +72,11 @@ class LinuxPlatform(Platform):
         The property itself is the only source that knows. Wayland has no
         `_NET_WORKAREA` equivalent to shell out for, and does not need one:
         `show_on_screen` fullscreens the overlay onto a single output
-        there, and GNOME hides its top bar for a fullscreen window --
-        watched happen on a real GNOME Wayland session for SNX-110, the
-        first launch of this codebase on Wayland at all.
+        there, and GNOME hides its top bar for a fullscreen window. That
+        is reasoning, not an observation: this codebase has still never
+        been launched on a Wayland session, so it remains unverified (see
+        TODO.md). Treat it as the expectation to check first if the
+        chooser ever turns up hidden on Wayland.
 
         That is a reason to skip the X11-only `xprop` fallback below, not
         a reason to stop asking Qt: `portable` above is still a real query
