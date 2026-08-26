@@ -132,7 +132,7 @@ def _missing_backend_advice() -> str:
     than falling through to Linux's.
     """
     if sys.platform == "win32":
-        return "check that this build of snipux includes Windows capture support"
+        return "check that this build of Snipux includes Windows capture support"
     session_type = detect_session_type()
     if session_type == "wayland":
         return "install grim (e.g. `sudo apt install grim`)"

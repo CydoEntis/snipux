@@ -405,7 +405,7 @@ class ReviewWindow(WinWindow):
         parent: QWidget | None = None,
     ):
         super().__init__(
-            "snipux",
+            "Snipux",
             size=(tokens.WinMetric.REVIEW_W, tokens.WinMetric.REVIEW_H),
             parent=parent,
         )

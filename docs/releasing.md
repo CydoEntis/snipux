@@ -1,4 +1,4 @@
-# Releasing snipux to PyPI
+# Releasing Snipux to PyPI
 
 Publishing needs a PyPI account with ownership of the `snipux` project name
 and an API token for it — only the account owner has that token, and it must
@@ -102,12 +102,12 @@ than as an importable file — so it isn't a one-time purchase that then
 sits in CI; it's an ongoing subscription plus a physical dongle someone has
 to hold and plug in to sign each release, or a paid cloud-HSM signing
 service standing in for it. That is a real, continuing cost for a free,
-unpaid tool at snipux's scale, and it buys exactly one thing: SmartScreen
+unpaid tool at Snipux's scale, and it buys exactly one thing: SmartScreen
 and Smart App Control treat the binary as recognized instead of warning
 about or blocking it. Users still get the app either way, just with an
 extra click (SmartScreen's More info → Run anyway) or, rarely, a need to
 install via pipx instead (Smart App Control) — see the README's Windows
-section for what that looks like from the user's side. If snipux's user
+section for what that looks like from the user's side. If Snipux's user
 base or distribution model changes enough that the warning itself becomes
 the blocker, that's the trigger to revisit this, not a fixed schedule.
 
@@ -136,7 +136,7 @@ The set is produced two different ways, by size (SNX-102):
   it into an indistinct blur — the actual bug SNX-102 fixed. The fix is
   the standard one for detailed marks at icon sizes: drop the container
   and the chrome, and enlarge the one element that still identifies the
-  app at a glance, which for snipux is the green selection marquee (here,
+  app at a glance, which for Snipux is the green selection marquee (here,
   its four corner brackets — a continuous dashed outline dissolves into a
   ring at this pen width) with its cursor.
 

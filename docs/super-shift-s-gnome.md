@@ -1,15 +1,15 @@
-# Binding Super+Shift+S to snipux on GNOME
+# Binding Super+Shift+S to Snipux on GNOME
 
-Binding a key is the desktop's job, not the application's — snipux never
+Binding a key is the desktop's job, not the application's — Snipux never
 grabs keys globally (see `docs/SPEC.md`, "Resident process and hotkey"). This
 page is the entire mechanism: there is no code-side fallback, and once the
 binding is set up GNOME runs `snipux --snip` for you.
 
-`--snip` asks an *already-running* snipux instance to start a capture, and
+`--snip` asks an *already-running* Snipux instance to start a capture, and
 starts one itself first if nothing was running yet -- so the very first press
 after login (or after a crash) still shows the capture overlay, rather than
-depending on something else having started snipux first. Either way, install
-snipux (this page assumes `packaging/install.sh` has already been run) so
+depending on something else having started Snipux first. Either way, install
+Snipux (this page assumes `packaging/install.sh` has already been run) so
 `snipux --snip` is resolvable when GNOME runs the command below.
 
 ## `snipux --setup` does this for you
@@ -22,7 +22,7 @@ itself: it appends a `custom-keybindings` slot named `snipux`, sets its
 graphical GNOME session), and sets its `binding` to `<Super><Shift>s`. It
 reads the existing `custom-keybindings` list first and appends to it, so any
 shortcuts you already had configured are kept. Running `snipux --setup`
-again (via a re-run of `install.sh`, or directly once snipux is installed)
+again (via a re-run of `install.sh`, or directly once Snipux is installed)
 reuses the same `snipux` slot rather than adding a second one.
 
 If `gsettings` isn't available, or setting the shortcut otherwise fails,
@@ -39,7 +39,7 @@ reboot without you doing anything by hand. Running `--setup` again just
 overwrites the same filename, so this never produces a second entry.
 
 Finally, `install.sh` itself (not `--setup`, which only handles the desktop
-entry, autostart entry, and shortcut) starts snipux at the end of a
+entry, autostart entry, and shortcut) starts Snipux at the end of a
 successful install, so the keybinding works immediately rather than only
 after the next login. It skips this — printing that it could not start the
 app, rather than failing the install — on a machine with no graphical
@@ -65,7 +65,7 @@ desktops or if you'd rather not have install.sh touch GNOME settings at all.
 
 ## Why Super+Shift+S
 
-snipux exists to restore the Windows Snipping Tool workflow, and that
+Snipux exists to restore the Windows Snipping Tool workflow, and that
 workflow's muscle memory is Windows key + Shift + S. On Linux the key
 labelled with the Windows logo is called **Super**, so the GNOME binding
 string for that combination is `<Super><Shift>s`. It also does not collide
@@ -126,7 +126,7 @@ uses.
 ## 4. Try it
 
 Press Super+Shift+S. The screen freezes into the selection overlay, whether
-or not snipux happened to be running already. If instead nothing happens,
+or not Snipux happened to be running already. If instead nothing happens,
 check that `snipux --snip` succeeds when run by hand from a terminal.
 
 ## Prefer Print Screen instead?
@@ -138,8 +138,8 @@ page is unchanged.
 
 ## Note
 
-This is deliberately not a global-hotkey library, nor anything snipux grabs
-itself. GNOME owns the key binding; snipux only answers the request once
+This is deliberately not a global-hotkey library, nor anything Snipux grabs
+itself. GNOME owns the key binding; Snipux only answers the request once
 GNOME runs the command above. If you use another desktop, look for its
 equivalent custom-shortcut mechanism and point it at the same
 `snipux --snip` command.
