@@ -53,9 +53,13 @@ the previous upload was later deleted.
 SNX-96 already produces a standalone `snipux.exe` that runs with no Python
 installed. SNX-97 wraps that one file in a real installer, so a user does not
 also need to know where to put it. This needs a Windows machine (or a VM) with
-Python 3.10+, pip, and [Inno Setup 6](https://jrsoftware.org/isdl.php)
-(`winget install JRSoftware.InnoSetup`) all on PATH — the packaging equivalent
-of the PyPI account this page's other half assumes.
+Python 3.10+ and pip on PATH, plus [Inno Setup 6](https://jrsoftware.org/isdl.php)
+(`winget install JRSoftware.InnoSetup`) installed anywhere — the packaging
+equivalent of the PyPI account this page's other half assumes. `build.ps1`
+finds `ISCC.exe` itself: on PATH if it's there, otherwise in the machine-wide
+Program Files locations or the per-user `LocalAppData\Programs` one that a
+plain `winget install` (no admin prompt) actually uses, so nothing needs to
+be added to PATH by hand (SNX-99).
 
 ```powershell
 powershell -File packaging\windows\build.ps1
