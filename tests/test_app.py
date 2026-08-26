@@ -519,6 +519,24 @@ class TestSnipFlag:
         monkeypatch.setattr(
             QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
         )
+        # This goes through main() -> _become_resident(), which really
+        # calls install_hotkey_listener() -- a genuine RegisterHotKey
+        # against the OS on Windows. Left unmocked, that call's own success
+        # or failure (e.g. "already in use by another application" if a
+        # real Snipux -- or a previous, still-registered test run -- holds
+        # the key) shows up as a second, unrelated tray message and makes
+        # this test's outcome depend on what else is running on the
+        # machine. Stubbing bind_shortcut() to a routine success (see
+        # TestInstallHotkeyListener's own tests for this same pattern)
+        # keeps this test about the capture-failure message alone.
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: "Bound Control+Alt+S to start a snip.",
+        )
+        monkeypatch.setattr(
+            app.platform.current, "registered_shortcut", "Control+Alt+S", raising=False
+        )
         calls = []
         monkeypatch.setattr(
             QSystemTrayIcon,
