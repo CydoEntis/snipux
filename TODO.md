@@ -51,6 +51,24 @@ one ticket:
   too" switch is the obvious home for. Both are written up under "Left open
   by that branch" below.
 
+## The next feature: screen recording
+
+Planned, not built, in **`docs/design/recording.md`** — sliced into
+fourteen tickets in dependency order, with the backend research already
+done so they can be written without redoing it.
+
+The two things to read first if you read nothing else: recording does *not*
+break the one architectural rule (the frozen frame stays how you choose;
+recording starts once you have chosen, so selection code is untouched), and
+`org.gnome.Shell.Screencast` records a region to a file on GNOME under both
+X11 and Wayland with no new dependency — which is the answer to what would
+otherwise be the feature's biggest risk.
+
+Three decisions are called out in that document rather than made: whether
+ffmpeg becomes a stated requirement (export wants it even if recording does
+not), what "copy to clipboard" means for a video, and whether v1 records
+audio (recommended: no).
+
 ## Left open by that branch
 
 **The top bar fix is unverified on Wayland.** It reserves nothing there on
