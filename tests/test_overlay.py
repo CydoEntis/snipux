@@ -7184,6 +7184,128 @@ class TestPressOutsideStartsANewSelection:
         assert overlay._selection.width() > 300
 
 
+class TestAPressOnChromeIsNotAPressOnTheOverlay:
+    """The bar, the trays, the popovers, the toast and the HUD swallow
+    their own presses -- see `overlay._Chrome`.
+
+    The class above is the rule this one is the exception to: a press on
+    the dimmed frame starts a fresh region drag, which is right for the
+    frame and ruinous for the chrome sitting on it. Missing a tool button
+    by a pixel and hitting the bar's own background threw away the
+    selection the user had just dragged out.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self) -> OverlayWindow:
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _selected(self, overlay) -> QRect:
+        """A real drag, the way the app's own only path to a selection
+        goes -- never `set_selection`, which would prove nothing about the
+        press that follows it.
+        """
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(150, 150))
+        QTest.mouseMove(overlay, QPoint(550, 450))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(550, 450))
+        assert overlay._selection == QRect(150, 150, 400, 300)
+        return QRect(overlay._selection)
+
+    @staticmethod
+    def _background_of(widget) -> QPoint:
+        """A point on `widget` that belongs to `widget` itself rather than
+        to one of its buttons -- the near miss this is all about.
+        """
+        pos = QPoint(widget.width() - 4, widget.height() // 2)
+        assert widget.childAt(pos) is None, "meant to be its own background"
+        return pos
+
+    def _press(self, widget, pos=None) -> None:
+        QTest.mousePress(
+            widget,
+            Qt.MouseButton.LeftButton,
+            pos=pos or QPoint(widget.width() // 2, widget.height() // 2),
+        )
+
+    def test_a_press_on_the_bars_own_background_keeps_the_selection(self):
+        overlay = self._overlay()
+        before = self._selected(overlay)
+
+        self._press(overlay._bar, self._background_of(overlay._bar))
+
+        assert overlay._selection == before
+        assert overlay._region_drag_anchor is None
+
+    def test_a_press_on_a_divider_inside_the_bar_stops_at_the_bar(self):
+        # The dividers, pills and separators carry nothing of their own:
+        # their presses reach a container that consumes, which is why
+        # `_Chrome` is only on the containers.
+        overlay = self._overlay()
+        before = self._selected(overlay)
+        divider = overlay._bar.findChild(_Divider)
+
+        self._press(divider)
+
+        assert overlay._selection == before
+
+    def test_a_press_on_the_popovers_background_neither_closes_nor_draws(self):
+        # The popover opens over the selection, so a leaked press here
+        # lands where the armed tool draws -- it has to be armed for this
+        # to be asking anything.
+        overlay = self._overlay()
+        before = self._selected(overlay)
+        overlay._bar.select_tool(sorted(tokens.DRAW_TOOLS)[0])
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        assert overlay._popover.isVisible()
+
+        self._press(overlay._popover, self._background_of(overlay._popover))
+
+        assert overlay._popover.isVisible(), "only a press outside closes it"
+        assert overlay._selection == before
+        assert overlay._in_progress_shape is None
+
+    def test_a_press_on_the_toast_keeps_the_selection(self):
+        overlay = self._overlay()
+        before = self._selected(overlay)
+        overlay._show_toast("copy", "Copied to clipboard")
+
+        self._press(overlay._toast)
+
+        assert overlay._selection == before
+
+    def test_a_press_on_the_hud_keeps_the_selection(self):
+        # Full-width chrome, so this is the one that costs something: the
+        # strip it covers can no longer be dragged through. A toolbar
+        # behaves the same way everywhere else.
+        overlay = self._overlay()
+        overlay.set_hints_enabled(True)
+        before = self._selected(overlay)
+        assert overlay._hud.isVisible()
+
+        self._press(overlay._hud)
+
+        assert overlay._selection == before
+
+    def test_the_frame_around_the_chrome_still_starts_a_new_selection(self):
+        # The fix must not spread: everything that is not chrome still
+        # behaves the way the class above documents.
+        overlay = self._overlay()
+        self._selected(overlay)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(650, 500))
+        QTest.mouseMove(overlay, QPoint(720, 560))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(720, 560))
+
+        assert overlay._selection == QRect(650, 500, 70, 60)
+
+
 class TestOverlayIsRevealedNotAnimatedOpen:
     """Mutter stages a newly mapped window by scaling it up into place. Over
     a frozen desktop that reads as a page expanding across the very area
