@@ -60,12 +60,32 @@ same "this is the one seam" reasoning as every other operation here, done
 through a bare function rather than a `Platform` method because it has to
 run before `platform.current` is of any use to anyone -- it is about
 whether `print()` itself works yet, not about picking an implementation.
+
+`_ensure_stable_copy()`/`ensure_stable_install()` (SNX-103) are what make
+the portable `snipux.exe` safe to distribute at all: Smart App Control
+blocks `snipux-setup.exe` outright, so the single-file PyInstaller build
+is the real Windows distribution route, and until now nothing stopped its
+Start Menu/Startup shortcuts from pointing at wherever the user happened
+to double-click it from -- typically Downloads, which most people clean
+out sooner or later. `_ensure_stable_copy()` relocates a running portable
+build to `_portable_exe_path()` (the same `%LOCALAPPDATA%\\snipux`
+directory `_icon_path()` already writes into) before
+`install_desktop_integration()` ever points a shortcut at anything, and
+`ensure_stable_install()` is the `Platform` hook `app._become_resident()`
+calls on *every* launch that becomes resident -- not gated behind
+`run_first_launch_setup()`'s one-time record, since a newer download run
+over an older install still has to replace it, and that record has
+already been set from the first launch onward. Both are no-ops off a
+portable build (`sys.frozen` unset, e.g. a pip/pipx install or a source
+checkout), which is what keeps this off the one case the ticket says must
+be untouched.
 """
 
 from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Callable
@@ -343,6 +363,15 @@ def _startup_dir() -> Path:
     return _start_menu_dir() / "Startup"
 
 
+def _local_app_data_dir() -> Path:
+    """`%LOCALAPPDATA%`, or its fallback when unset -- the one place this
+    module reads that environment variable, shared by `_icon_path()` and
+    `_portable_exe_path()` (SNX-103) rather than each guessing it
+    separately.
+    """
+    return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+
+
 def _icon_path() -> Path:
     """Where the `.ico` built from the vendored PNGs
     (`setup_desktop.render_ico`) is written -- `%LOCALAPPDATA%\\snipux`,
@@ -352,8 +381,118 @@ def _icon_path() -> Path:
     around) cache of something built from files already vendored in the
     package.
     """
-    local_app_data = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-    return Path(local_app_data) / "snipux" / "snipux.ico"
+    return _local_app_data_dir() / "snipux" / "snipux.ico"
+
+
+def _portable_exe_path() -> Path:
+    """SNX-103: the stable, per-user home a portable `snipux.exe` copies
+    itself to on first run -- the same `%LOCALAPPDATA%\\snipux` directory
+    `_icon_path()` already writes the generated `.ico` into, not a second
+    per-user cache location invented for this.
+
+    Named `snipux.exe` unconditionally, never after whatever the download
+    happened to be called (`snipux-1.4.0-portable.exe`, `snipux (1).exe`,
+    ...) -- a fixed filename is what makes `_ensure_stable_copy()`
+    *overwrite* this file on a later run rather than leave two versions
+    sitting side by side, which is the whole of what makes "a newer
+    version replaces an older install" true: nothing has to notice or
+    clean up the old one, because there never is one once the copy lands.
+    """
+    return _local_app_data_dir() / "snipux" / "snipux.exe"
+
+
+def _ensure_stable_copy() -> Path | None:
+    """SNX-103: if this process is a self-contained, portable `snipux.exe`
+    (PyInstaller's own `sys.frozen` marker -- the same check
+    `setup_desktop.find_console_script()` already makes first, and for the
+    same reason: a build like this has no separate console-script wrapper
+    to point at, it *is* the thing to point at), copy it to
+    `_portable_exe_path()` and return that path -- so a caller building a
+    shortcut points it at a location durable against the user cleaning out
+    Downloads, rather than at wherever this process happened to be run
+    from.
+
+    Returns `None` when there is nothing to relocate: this is not a
+    portable build at all (`sys.frozen` unset -- a `pip`/`pipx` install or
+    a source checkout, both already in a stable location a package
+    manager, not this function, is responsible for), which is exactly the
+    "none of this happens for a pip or pipx install" acceptance criterion
+    -- the check below is the first thing this function does, before it
+    touches the filesystem at all.
+
+    A no-op, returning the already-stable path without copying anything,
+    when this process is already running from `_portable_exe_path()` --
+    the ordinary case once installed, since every shortcut
+    `install_desktop_integration()` writes points there. Also a no-op,
+    for the same reason but cheaper to check, when whatever already sits
+    at the target is the same size as this process's own executable: two
+    different builds of a PyQt6-bundling, multi-megabyte single-file exe
+    matching in size by coincidence is not a real risk worth a slower,
+    full-content comparison on every launch, and it is what stops a
+    portable build re-run from its original download location (rather
+    than from the shortcut this function already pointed at the copy)
+    from re-copying dozens of megabytes to itself on every single launch.
+
+    Otherwise copies over whatever is already at the target -- most often
+    an older version's copy -- rather than refusing or renaming around it:
+    combined with `_portable_exe_path()`'s fixed filename, this is what
+    makes running a newer download replace an older install instead of
+    the two ever coexisting.
+
+    Never raises. A copy that fails -- a read-only target directory, or
+    the target file still locked by an older version of snipux that is
+    still running under it -- is a note, not a fatal error, the same "a
+    step that can't run is reported, not crashed on" rule every other step
+    in this module follows; the caller falls back to wherever this
+    process was actually launched from, exactly as if this function did
+    not exist.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+
+    current = Path(sys.executable).resolve()
+    target = _portable_exe_path()
+
+    try:
+        if target.exists() and (
+            current.samefile(target) or target.stat().st_size == current.stat().st_size
+        ):
+            return target
+    except OSError:
+        pass
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(current, target)
+    except OSError as exc:
+        print(f"Note: could not copy snipux to {target}: {exc}", file=sys.stderr)
+        return None
+
+    print(f"snipux copied to {target}")
+    return target
+
+
+def _remove_stable_copy(exe_path: Path) -> bool:
+    """The counterpart to `_ensure_stable_copy()` (SNX-103): removes the
+    portable build's relocated copy, the exact "report plainly, don't
+    fail on an already-gone file" shape `_remove_icon()` above already
+    uses. Deleting a file this very process may currently be running as
+    (`snipux --remove` invoked from the relocated copy itself) is
+    ordinarily still allowed by Windows -- unlinking a running exe's
+    directory entry does not require the still-mapped image underneath it
+    to be unlocked -- but any refusal is still a note here, not raised,
+    the same as every other removal step in this module.
+    """
+    if not exe_path.exists():
+        print(f"{exe_path} not found -- nothing to remove")
+        return True
+    try:
+        exe_path.unlink()
+    except OSError as exc:
+        print(f"Note: could not remove {exe_path}: {exc}")
+        return False
+    print(f"Removed {exe_path}")
+    return True
 
 
 def _write_icon(icon_path: Path) -> bool:
@@ -611,6 +750,20 @@ class WindowsPlatform(Platform):
         itself can't be found -- every other step can still report its own
         outcome without it, mirroring `setup_desktop.run_setup()`'s own
         "one missing prerequisite is fatal, everything else is a note" split.
+
+        `_ensure_stable_copy()` (SNX-103) runs next, before either
+        shortcut is written: a portable `snipux.exe` relocates itself to
+        `_portable_exe_path()` at this point, and the shortcuts below are
+        pointed at that stable copy rather than at `exec_path` itself
+        whenever relocation actually happened -- which is also what
+        `ensure_stable_install()` (called separately, once per launch, by
+        `app._become_resident()`) has usually already done by the time
+        this runs, so the second call here is normally the cheap,
+        already-in-place no-op `_ensure_stable_copy()`'s own docstring
+        describes. A no-op for anything that isn't a portable build (a
+        pip/pipx install, a source checkout), which is what leaves
+        `exec_path` -- the console script `find_console_script()` found --
+        untouched for those.
         """
         if shortcut is not None:
             problem = setup_desktop.validate_shortcut(shortcut)
@@ -634,6 +787,10 @@ class WindowsPlatform(Platform):
             )
             return 1
 
+        stable_copy = _ensure_stable_copy()
+        if stable_copy is not None:
+            exec_path = stable_copy
+
         icon_path = _icon_path()
         has_icon = _write_icon(icon_path)
 
@@ -649,19 +806,45 @@ class WindowsPlatform(Platform):
     def remove_desktop_integration(self) -> int:
         """The exact counterpart to `install_desktop_integration()`:
         deletes the Start Menu shortcut, the Startup shortcut, the
-        generated `.ico`, and the remembered shortcut choice -- mirroring
-        `setup_desktop.run_remove()` step for step. Always returns 0, the
-        same reasoning `run_remove()` states for its own return: every step
-        already reports its own failure or absence as a note rather than
-        raising.
+        generated `.ico`, the relocated portable-build copy (SNX-103), and
+        the remembered shortcut choice -- mirroring `setup_desktop.
+        run_remove()` step for step. Always returns 0, the same reasoning
+        `run_remove()` states for its own return: every step already
+        reports its own failure or absence as a note rather than raising.
+
+        `_portable_exe_path()` is attempted unconditionally, the same as
+        the icon and both shortcuts above it -- it reports "nothing to
+        remove" and moves on when there was never a portable copy to
+        begin with (a pip/pipx install, a source checkout), rather than
+        this method first checking `sys.frozen` to decide whether to try.
         """
         _remove_shortcut(_start_menu_dir() / "snipux.lnk", "Start Menu")
         _remove_shortcut(_startup_dir() / "snipux.lnk", "Startup")
         _remove_icon(_icon_path())
+        _remove_stable_copy(_portable_exe_path())
         if setup_desktop.forget_shortcut():
             print(f"Removed {setup_desktop.config_path()}.")
 
         return 0
+
+    def ensure_stable_install(self) -> Path | None:
+        """SNX-103: `Platform`'s optional hook (see its own docstring for
+        why this one isn't part of the required six), overridden here to
+        forward to `_ensure_stable_copy()`.
+
+        `app._become_resident()` calls this once, on every launch that
+        becomes the resident instance -- deliberately not folded into
+        `install_desktop_integration()` alone, even though that also calls
+        `_ensure_stable_copy()` (see its own docstring): the latter only
+        runs on the one launch that either explicitly asked for `--setup`
+        or has never set up before, per `run_first_launch_setup()`'s
+        one-time record, so relying on it alone would leave a *newer*
+        portable download run over an already-set-up older install never
+        relocating itself at all, in direct contradiction of SNX-103's own
+        "running a newer version over an older install replaces it"
+        acceptance criterion.
+        """
+        return _ensure_stable_copy()
 
     def bind_shortcut(self, shortcut: str | None = None) -> str:
         """(Re)register the global hotkey via Win32's `RegisterHotKey` --
