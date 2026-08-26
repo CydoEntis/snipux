@@ -3870,10 +3870,19 @@ class OverlayWindow(QWidget):
         Identical to Copy on the floating bar, deliberately -- same
         `copy()`, same dismissal, same toast. Instant is not a second way
         to finish a snip, it is the same one with nothing in front of it.
+
+        `load_instant_saves` (SNX-111) is the one thing that turns this
+        into Save instead: `edit`/`review` already have a bar to press
+        Copy or Save on, but `instant` skips the bar entirely, so without
+        this check it could never do anything but copy -- the "Save
+        silently" destination the old three-way menu had lost.
         """
         self.set_selection(rect, path=path)
         if self.outcome == "instant":
-            self._on_bar_copy()
+            if setup_desktop.load_instant_saves():
+                self._on_bar_save()
+            else:
+                self._on_bar_copy()
 
     def _confirm_window_pick(self, pos: QPointF) -> None:
         """Snap `_selection` to the window under `pos` (this widget's own
