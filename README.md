@@ -1,4 +1,4 @@
-# snipux
+# Snipux
 
 A Windows Snipping Tool workalike for Linux.
 
@@ -16,7 +16,7 @@ against.
 Linux has capable screenshot tools, but the Ubuntu/GNOME/Wayland combination is
 where most of them get awkward — Wayland deliberately forbids applications from
 reading the screen whenever they like, so every capture has to go through a
-permission broker, and the tools that predate that constraint fight it. snipux
+permission broker, and the tools that predate that constraint fight it. Snipux
 treats it as the primary target rather than an afterthought.
 
 ## How it works
@@ -31,53 +31,62 @@ drawing on an image already held in memory.
 
 ### Windows
 
-Windows has a standalone installer (SNX-96/97) — no Python, and no terminal,
-required:
+Windows ships as a single standalone `snipux.exe` (SNX-96) — no Python, and
+no terminal, required, and no installer to run first:
 
-1. Download `snipux-setup.exe` from the
+1. Download `snipux.exe` from the
    [Releases page](https://github.com/CydoEntis/snipux/releases) (newest
    release, under Assets).
-2. Run it. It installs to your own user folder — no administrator prompt —
-   and launches snipux once it's done.
+2. Run it. The first run sets itself up — it relocates itself into your own
+   user folder, adds a Start Menu shortcut and a Startup entry, and
+   registers the Ctrl+Alt+S shortcut — the same as `snipux --setup` does
+   for the pipx route below. No administrator prompt.
 
-**Windows will interrupt that with a warning first**, and it's worth knowing
-exactly what you'll see so it doesn't look like the download failed:
+**Windows will interrupt that with a SmartScreen warning first**, and it's
+worth knowing exactly what you'll see so it doesn't look like the download
+failed: a blue box reading **"Windows protected your PC"**, with smaller
+text underneath naming "an unrecognized app". This is Microsoft Defender
+SmartScreen's standard reaction to *any* downloaded executable without a
+paid code-signing certificate — it is not a virus warning and not a sign
+the download is broken. Click **More info**, then **Run anyway**. (See
+[Why the exe isn't signed](docs/releasing.md#why-the-exe-isnt-signed) for
+the reasoning behind that certificate not existing.)
 
-- **SmartScreen.** A blue box reading **"Windows protected your PC"**, with
-  smaller text underneath naming "an unrecognized app". This is Microsoft
-  Defender SmartScreen's standard reaction to *any* downloaded executable
-  without a paid code-signing certificate — it is not a virus warning and
-  not a sign the download is broken. Click **More info**, then **Run
-  anyway**. (See [Why the installer isn't signed](docs/releasing.md#why-the-installer-isnt-signed)
-  for the reasoning behind that certificate not existing.)
-- **Smart App Control.** A stricter, opt-in Windows 11 feature (off by
-  default, but sometimes on out of the box on new PCs) that can block the
-  installer outright instead of just warning — the message reads like the
-  file is corrupt or unsafe, not like a policy decision, and there is no
-  "Run anyway" the way there is for SmartScreen. If that happens: either
-  install with pipx instead (below), which runs through the already-trusted
-  `python.exe` rather than a new unsigned executable, or turn Smart App
-  Control off yourself (Windows Security → App & browser control → Smart
-  App Control → Off) — Microsoft only lets it be turned back on by
-  reinstalling Windows, so that's a bigger step than it sounds.
+**There is deliberately no installer.** An earlier version of Snipux
+shipped one (built with Inno Setup), and it ran straight into Smart App
+Control — a stricter, opt-in Windows 11 feature that is nonetheless on by
+default on a meaningful share of clean Windows 11 installs. Smart App
+Control blocked that installer outright: the message read like the file
+was corrupt or unsafe, not like a policy decision, and unlike SmartScreen
+there was no "More info → Run anyway" to click through — so for those
+users the installer did not just inconvenience, it did not work at all.
+Signing would satisfy Smart App Control, but costs a few hundred dollars a
+year and, since 2023, requires a hardware token (see
+[docs/releasing.md](docs/releasing.md#why-the-exe-isnt-signed)); that has
+been considered and declined. The portable exe above is not blocked by
+Smart App Control, and since it installs itself on first run it delivers
+what the installer was for without the thing that broke it — so don't
+re-add one without re-reading this. If you ever do hit Smart App Control
+blocking the exe itself, `pipx` (below) runs through the already-trusted
+`python.exe` instead of a new unsigned executable.
 
-Once installed, snipux's shortcut is **Ctrl+Alt+S**, not Windows'
+Once running, Snipux's shortcut is **Ctrl+Alt+S**, not Windows'
 Win+Shift+S — that combination already belongs to the Windows Snipping
 Tool, and Windows won't hand the same combination to a second app. Change
 it from tray → Settings…, the same as on Linux.
 
-**snipux has to actually be running for Ctrl+Alt+S to do anything.** Unlike
+**Snipux has to actually be running for Ctrl+Alt+S to do anything.** Unlike
 GNOME's shortcut on Linux, which the desktop itself owns, Windows' hotkey is
-a registration the snipux process holds only while it's alive. That's what
-autostart is for: the installer's first run sets up a Startup-folder entry
-(the same thing `snipux --setup` does), so snipux is already running by the
-time you'd want to press the shortcut, from the next login onward.
+a registration the Snipux process holds only while it's alive. That's what
+autostart is for: the first run's Startup-folder entry means Snipux is
+already running by the time you'd want to press the shortcut, from the next
+login onward.
 
 Already have Python? `pipx` works identically on Windows — see below.
 
 ### Linux
 
-snipux isn't published to PyPI — publishing there isn't planned. This is a
+Snipux isn't published to PyPI — publishing there isn't planned. This is a
 private repository, so install straight from it with
 [pipx](https://pipx.pypa.io/):
 
@@ -101,7 +110,7 @@ github.com, so the HTTPS clone `pipx` does under the hood authenticates
 automatically. Don't paste a personal access token into the URL — the `gh`
 credential helper is the supported way to reach a private repo over HTTPS.
 
-Either route gives snipux and its dependencies their own isolated
+Either route gives Snipux and its dependencies their own isolated
 environment and puts a `snipux` launcher on PATH. Then run:
 
 ```sh
@@ -143,9 +152,9 @@ application that grabs a key directly owns it just as effectively and can't
 be detected, so "No GNOME shortcut uses this" is not a promise the key is
 free.
 
-## Using snipux
+## Using Snipux
 
-snipux runs resident in the background (with a tray icon, where one is
+Snipux runs resident in the background (with a tray icon, where one is
 available) so the shortcut reaches an already-warm process instead of
 paying startup cost on every snip.
 
@@ -241,7 +250,7 @@ as `--setup`.
 **No tray icon.** Stock Ubuntu/GNOME ships no legacy tray icon support at
 all unless the
 [AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/)
-GNOME Shell extension is installed and enabled. Without it, snipux still
+GNOME Shell extension is installed and enabled. Without it, Snipux still
 runs and still answers the shortcut — it just prints a notice to stdout on
 startup and has no tray icon or Quit menu item, so quit it by killing the
 process. Install the extension if you want the icon and menu back.
@@ -252,7 +261,7 @@ prompt itself. If a capture reports the request was cancelled, press the
 shortcut again and approve the prompt when it appears. If it instead
 reports the request failed outright, check that `xdg-desktop-portal` and a
 desktop-appropriate portal backend (e.g. `xdg-desktop-portal-gnome`) are
-installed and running — snipux can't get pixels if the portal that owns
+installed and running — Snipux can't get pixels if the portal that owns
 them refuses, or isn't there at all. `snipux --list-backends` shows which
 capture backends this session has available and why the others aren't.
 
@@ -275,7 +284,7 @@ mystery.
 - PyQt6, jeepney
 - `libxcb-cursor0` (`sudo apt install libxcb-cursor0`) — Qt 6.5+ needs it to
   load its xcb platform plugin, and nothing else on a stock Ubuntu desktop
-  pulls it in. Without it snipux installs cleanly and then crashes on
+  pulls it in. Without it Snipux installs cleanly and then crashes on
   launch. `packaging/install.sh` checks for it before doing anything.
 - Ubuntu 22.04+ (Wayland or X11); other desktops are expected to work but
   are not the primary target
