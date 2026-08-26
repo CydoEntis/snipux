@@ -892,7 +892,32 @@ class _Divider(QWidget):
         )
 
 
-class FloatingBar(QWidget):
+class _Chrome(QWidget):
+    """A chrome widget that sits over the frame and swallows its own presses.
+
+    A Qt widget that leaves a mouse press unaccepted hands it to its
+    parent, and every class below is a child of `OverlayWindow` -- whose
+    press handler reads a press as ink, a resize, or the start of a fresh
+    region drag, depending on where it lands. A click that missed a tool
+    button by a pixel and hit the bar's own background therefore threw away
+    the selection the user had just dragged out and started a new one under
+    the bar. Chrome is opaque: a press that lands on it stops there.
+
+    Only the containers need this. The dividers, pills and separators they
+    hold are children of a container that consumes, so their presses stop
+    at the same place. The cost is that a solid strip of chrome -- the top
+    HUD, when hints are on -- can no longer be dragged through, which is
+    how a toolbar behaves everywhere else.
+
+    `chooser._Surface` is this same fix on the pre-snip chooser (SNX-108);
+    together they are the whole of the overlay's own chrome.
+    """
+
+    def mousePressEvent(self, event) -> None:
+        event.accept()
+
+
+class FloatingBar(_Chrome):
     """The overlay redesign's floating bar: capture chip, eight tool
     buttons, undo/redo/clear, copy and save, per
     docs/design/overlay-redesign.md's "Floating bar" section -- eleven
@@ -1479,7 +1504,7 @@ class _PreviewDot(QWidget):
         painter.end()
 
 
-class SettingsTray(QWidget):
+class SettingsTray(_Chrome):
     """The overlay redesign's settings tray: an active-tool pill, the ink
     swatches, a custom-colour button, a stroke slider/readout and a live
     preview dot, per docs/design/overlay-redesign.md's "Settings tray"
@@ -1786,7 +1811,7 @@ class _BlurModeWell(QWidget):
         painter.end()
 
 
-class ToolHintStrip(QWidget):
+class ToolHintStrip(_Chrome):
     """Names the active tool and says what it does, for tools the settings
     tray does not cover.
 
@@ -1844,7 +1869,7 @@ class ToolHintStrip(QWidget):
         painter.end()
 
 
-class BlurTray(QWidget):
+class BlurTray(_Chrome):
     """The overlay redesign's blur tray: the Blur/Pixelate toggle, a
     strength slider/readout and the tool hint, per
     docs/design/overlay-redesign.md's "Blur tray" paragraph.
@@ -2297,7 +2322,7 @@ class _MenuSeparator(QWidget):
         painter.end()
 
 
-class CaptureModePopover(QWidget):
+class CaptureModePopover(_Chrome):
     """The overlay redesign's capture-mode popover: `tokens.CAPTURE_MODES`
     as a list of rows, a separator, then the delay row -- per
     docs/design/overlay-redesign.md's "Capture-mode popover" section.
@@ -2469,7 +2494,7 @@ class CaptureModePopover(QWidget):
 # button, since all four (Rectangle included) are two-point box/line marks.
 
 
-class ShapeToolPopover(QWidget):
+class ShapeToolPopover(_Chrome):
     """Rect's own submenu: `tokens.RECT_GROUP` as a short list of rows,
     reusing `_CaptureModeRow` (glyph, label, note, check mark for whichever
     is the bar's current tool) the same way `CaptureModePopover` does for
@@ -2592,7 +2617,7 @@ class ShapeToolPopover(QWidget):
 # shown; press `?` to bring it up for the session (`keyPressEvent` below).
 
 
-class HintHUD(QWidget):
+class HintHUD(_Chrome):
     """The overlay's full-width top hint bar, per docs/design/overlay-
     redesign.md's "Top hint HUD" section: `Esc discard ink · Enter copy &
     dismiss · P H A R S T B E pick a tool · drag any edge to re-frame -- the
@@ -2678,7 +2703,7 @@ class HintHUD(QWidget):
 # ---------------------------------------------------------------------------
 
 
-class Toast(QWidget):
+class Toast(_Chrome):
     """The overlay redesign's toast: bottom centre, above everything, per
     docs/design/overlay-redesign.md's "Toast" section.
 
