@@ -64,10 +64,15 @@ recording starts once you have chosen, so selection code is untouched), and
 X11 and Wayland with no new dependency — which is the answer to what would
 otherwise be the feature's biggest risk.
 
-Three decisions are called out in that document rather than made: whether
-ffmpeg becomes a stated requirement (export wants it even if recording does
-not), what "copy to clipboard" means for a video, and whether v1 records
-audio (recommended: no).
+Three decisions are made in it: **ffmpeg is a stated requirement** (an
+external tool like `maim`/`grim`, not a Python dependency), **copy puts the
+file on the clipboard** the way the Windows Snipping Tool does — `CF_HDROP`
+on Windows, `text/uri-list` on Linux, one Qt call for both — and **v1
+records no audio**.
+
+The one that surfaced from those: ffmpeg is awkward for the portable
+Windows exe, which exists so someone can be handed a single file. Settle
+that before ticket 13.
 
 ## Left open by that branch
 
