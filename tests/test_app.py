@@ -2,7 +2,7 @@ import ctypes
 import re
 
 import pytest
-from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, QSizeF, Qt
+from PyQt6.QtCore import QMimeData, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QUrl
 from PyQt6.QtGui import QGuiApplication, QImage, qRgb
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtTest import QTest
@@ -18,7 +18,9 @@ from snipux.app import (
     build_default_geometry_provider,
     build_default_registry,
     cli,
+    copy_file_to_clipboard,
     copy_image_to_clipboard,
+    finish_recording,
     main,
     run_resident_app,
     save_image,
@@ -372,6 +374,128 @@ class TestCopyImageToClipboard:
         copy_image_to_clipboard(image)  # must not raise
 
         assert QGuiApplication.clipboard().image() == image
+
+
+class TestCopyFileToClipboard:
+    """These tests prove the shape of the `QMimeData` this code builds on
+    an offscreen Qt clipboard (right URLs, right GNOME flavour, right bytes
+    piped to `wl-copy`). They cannot prove a real Nautilus/Explorer/Slack
+    window actually paints a file icon -- per docs/design/recording.md,
+    that half needs a human on a real GNOME session and a real Windows box.
+    """
+
+    def test_puts_a_file_url_on_the_qt_clipboard(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app.shutil, "which", lambda binary: None)
+        path = tmp_path / "clip.mp4"
+        path.write_bytes(b"fake video bytes")
+
+        copy_file_to_clipboard(path)
+
+        urls = QGuiApplication.clipboard().mimeData().urls()
+        assert urls == [QUrl.fromLocalFile(str(path))]
+
+    def test_sets_the_gnome_special_flavour_alongside_the_url_list(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app.shutil, "which", lambda binary: None)
+        # A space in the directory name forces QUrl to percent-encode --
+        # a path that happened to look the same hand-formatted wouldn't
+        # actually exercise that.
+        directory = tmp_path / "a b"
+        directory.mkdir()
+        path = directory / "clip.mp4"
+        path.write_bytes(b"fake video bytes")
+
+        copy_file_to_clipboard(path)
+
+        mime = QGuiApplication.clipboard().mimeData()
+        expected = b"copy\n" + QUrl.fromLocalFile(str(path)).toString().encode()
+        assert bytes(mime.data("x-special/gnome-copied-files").data()) == expected
+
+    def test_pipes_the_uri_list_to_wl_copy_when_present_on_path(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        calls = []
+
+        def fake_run(argv, input=None, check=None):
+            calls.append((argv, input))
+
+        monkeypatch.setattr(app.subprocess, "run", fake_run)
+        path = tmp_path / "clip.mp4"
+        path.write_bytes(b"fake video bytes")
+
+        copy_file_to_clipboard(path)
+
+        assert len(calls) == 1
+        argv, piped_bytes = calls[0]
+        assert argv == ["wl-copy", "--type", "text/uri-list"]
+        expected_uri = QUrl.fromLocalFile(str(path)).toString()
+        assert piped_bytes.decode() == expected_uri + "\n"
+
+    def test_does_not_raise_when_wl_copy_binary_vanishes_before_running(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+        def raising_run(*args, **kwargs):
+            raise FileNotFoundError("wl-copy")
+
+        monkeypatch.setattr(app.subprocess, "run", raising_run)
+        path = tmp_path / "clip.mp4"
+        path.write_bytes(b"fake video bytes")
+
+        copy_file_to_clipboard(path)  # must not raise
+
+        urls = QGuiApplication.clipboard().mimeData().urls()
+        assert urls == [QUrl.fromLocalFile(str(path))]
+
+    def test_does_not_raise_and_falls_back_to_qt_clipboard_when_wl_copy_absent(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app.shutil, "which", lambda binary: None)
+        calls = []
+        monkeypatch.setattr(
+            app.subprocess, "run", lambda *a, **k: calls.append((a, k))
+        )
+        path = tmp_path / "clip.mp4"
+        path.write_bytes(b"fake video bytes")
+
+        copy_file_to_clipboard(path)  # must not raise
+
+        assert calls == []
+        urls = QGuiApplication.clipboard().mimeData().urls()
+        assert urls == [QUrl.fromLocalFile(str(path))]
+
+
+class TestFinishRecording:
+    """As with `TestCopyFileToClipboard`, these prove the clipboard/no-op
+    dispatch this code performs, not that a human sees a pasted file on a
+    real desktop -- see that class's docstring.
+    """
+
+    def test_instant_copies_the_finished_file_to_the_clipboard(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app.shutil, "which", lambda binary: None)
+        path = tmp_path / "clip.mp4"
+        path.write_bytes(b"fake video bytes")
+
+        finish_recording(path, "instant")
+
+        urls = QGuiApplication.clipboard().mimeData().urls()
+        assert urls == [QUrl.fromLocalFile(str(path))]
+
+    def test_save_does_not_touch_the_clipboard(self, tmp_path):
+        sentinel = QMimeData()
+        sentinel.setText("sentinel")
+        QGuiApplication.clipboard().setMimeData(sentinel)
+        path = tmp_path / "clip.mp4"
+        path.write_bytes(b"fake video bytes")
+
+        finish_recording(path, "save")
+
+        assert QGuiApplication.clipboard().mimeData().text() == "sentinel"
 
 
 class TestSaveImage:
