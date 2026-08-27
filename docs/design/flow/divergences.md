@@ -100,3 +100,35 @@ things the handoff itself leaves unresolved.
   does not edit). Until it exists, Open on the record side is not offered.
 - **Freeform** — "Still open" #1 says it has no interaction design and
   behaves as a region drag in the prototype. It stays as it is today.
+
+---
+
+## 4 · No IBM Plex
+
+**The handoff says** the chrome is IBM Plex Sans and every numeral, dimension,
+clock, size and shortcut is IBM Plex Mono, both shipped with the app, and that
+"sizes are fixed and the layout is tuned to them".
+
+**We use the fonts already in use** — whatever `_ui_font()`/`_mono_font()`
+resolve to on the platform. `design/fonts/` stays empty.
+
+### Why
+
+Vendoring two font families is a licensing, packaging and bundle-size task
+that has nothing to do with the flow being redesigned, and it would land in
+every build (PyInstaller bundle included) before a single bar was rebuilt.
+Called explicitly, by the person who has to look at it: *"u dont need to
+match the fonts if its a pain in the ass"*.
+
+### What this costs, so it is not a surprise later
+
+The handoff's fixed sizes are tuned to Plex's metrics. A substituted font
+has different advance widths, so anything sized to fit exact text -- the
+clock, the dimension chip, the menu widths in `FlowMetric` -- must be
+measured with `QFontMetrics` rather than trusted to the token. There is
+already one test skipped for exactly this reason (`test_overlay.py`, the
+nav-rail budget measured against a fallback face), so the failure mode is
+known: text overruns a panel that the token said would hold it.
+
+Build to the tokens, but let anything text-sized grow to its own
+`sizeHint()` rather than pinning it.
