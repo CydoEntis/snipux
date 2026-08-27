@@ -520,6 +520,59 @@ class TestSettingsWindow:
 
         assert setup_desktop.load_review_window(tmp_path) is True
 
+    @staticmethod
+    def _choose_recording_after(window, identifier: str) -> None:
+        index = [row[0] for row in tokens.RECORDING_AFTER].index(identifier)
+        window._recording_after_group.buttons()[index].setChecked(True)
+
+    def test_recording_destination_round_trips_through_settings(self, tmp_path):
+        # The point of the row: recording's destination could only be set on
+        # the chooser, per-capture. There was no way to say what it should
+        # default to.
+        window = self._window(tmp_path)
+
+        self._choose_recording_after(window, "save")
+        window._save()
+
+        assert setup_desktop.load_recording_after(tmp_path) == "save"
+
+    def test_recording_folder_and_pattern_round_trip(self, tmp_path):
+        window = self._window(tmp_path)
+        destination = tmp_path / "clips"
+
+        window._recording_folder.setText(str(destination))
+        window._recording_filename.setText("Clip %Y")
+        window._save()
+
+        assert setup_desktop.load_recording_folder(tmp_path) == destination
+        assert setup_desktop.load_recording_filename_pattern(tmp_path) == "Clip %Y"
+
+    def test_the_recording_preview_names_a_video_not_a_screenshot(self, tmp_path):
+        # The recording pane's preview must be its own: sharing the stills
+        # one is exactly how a video came to be named "Screenshot from
+        # ....mp4", and a preview that showed .png would keep promising it.
+        window = self._window(tmp_path)
+
+        window._recording_filename.setText("Clip %Y")
+
+        preview = window._recording_preview.text()
+        assert preview.endswith(".mp4")
+        assert "Clip " in preview
+        assert preview != window._preview.text()
+
+    def test_the_recording_rows_do_not_disturb_the_stills_ones(self, tmp_path):
+        # Two sets of folder/filename rows on one pane, and they must stay
+        # independent -- the whole complaint was that recordings and stills
+        # shared one.
+        window = self._window(tmp_path)
+
+        window._recording_folder.setText(str(tmp_path / "clips"))
+        window._recording_filename.setText("Clip %Y")
+        window._save()
+
+        assert setup_desktop.load_save_folder(tmp_path) != (tmp_path / "clips")
+        assert setup_desktop.load_filename_pattern(tmp_path) != "Clip %Y"
+
     def test_recording_rows_seed_from_the_stored_values(self, tmp_path):
         # AC: both new rows are seeded from setup_desktop's own loads, not
         # some independent default the window invents.

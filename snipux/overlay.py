@@ -3434,6 +3434,7 @@ class OverlayWindow(QWidget):
         self._chooser.fireImmediately.connect(self._on_chooser_immediate)
         self._chooser.cancelled.connect(self._cancel)
         self._chooser.set_after(setup_desktop.load_after_capture())
+        self._chooser.set_record_after_default(setup_desktop.load_recording_after())
         # `kind` (the stills/record switch) has no Settings surface the way
         # `after` does -- the chooser itself is the only place it is ever
         # set, so it is loaded the same way but persisted on every change

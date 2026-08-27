@@ -511,6 +511,66 @@ def save_filename_pattern(pattern: str, config_dir: Path | None = None) -> bool:
     return _write_config("filename_pattern", pattern, config_dir)
 
 
+def default_recording_folder() -> Path:
+    """Where recordings go when nothing is stored.
+
+    `~/Videos`, not `default_save_folder()`'s `~/Pictures`: recordings used
+    to share the stills folder outright, which put video files in among
+    screenshots. Hardcoded the same way `default_save_folder()` is rather
+    than routed through `platform.current` -- that seam's own
+    `default_save_folder` is not on this path either (nothing calls it),
+    and inventing a second, inconsistent convention for the recording
+    twin of an existing function would be the surprising choice. macOS
+    calls this folder "Movies" and a localized Linux desktop may call it
+    something else again; both are wrong here for the same reason
+    `default_save_folder()` is already wrong there, and are worth fixing
+    together rather than only for the newer of the two.
+    """
+    return Path.home() / "Videos" / "snipux"
+
+
+def load_recording_folder(config_dir: Path | None = None) -> Path:
+    stored = _read_config(config_dir).get("recording_folder")
+    return (
+        Path(stored)
+        if isinstance(stored, str) and stored
+        else default_recording_folder()
+    )
+
+
+def save_recording_folder(folder: str | Path, config_dir: Path | None = None) -> bool:
+    return _write_config("recording_folder", str(folder), config_dir)
+
+
+def load_recording_filename_pattern(config_dir: Path | None = None) -> str:
+    stored = _read_config(config_dir).get("recording_filename_pattern")
+    return (
+        stored
+        if isinstance(stored, str) and stored
+        else tokens.RECORDING_FILENAME_DEFAULT
+    )
+
+
+def save_recording_filename_pattern(
+    pattern: str, config_dir: Path | None = None
+) -> bool:
+    return _write_config("recording_filename_pattern", pattern, config_dir)
+
+
+def load_recording_after(config_dir: Path | None = None) -> str:
+    """The destination a recording defaults to -- what the chooser's record
+    side opens on, rather than a constant it could only be changed away
+    from per-capture.
+    """
+    stored = _read_config(config_dir).get("recording_after")
+    valid = {identifier for identifier, _label, _note in tokens.RECORDING_AFTER}
+    return stored if stored in valid else tokens.RECORD_AFTER_DEFAULT
+
+
+def save_recording_after(after: str, config_dir: Path | None = None) -> bool:
+    return _write_config("recording_after", after, config_dir)
+
+
 def preview_filename(folder: str | Path, pattern: str, extension: str = "png") -> str:
     """The full path a snip taken *now* would be written to.
 

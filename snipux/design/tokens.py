@@ -615,13 +615,40 @@ RECORD_DISABLED_MODES = {
 # Review or Trim -- there is no annotate-in-place for a video, and Trim is
 # where a third destination lands once editing exists (recording.md ticket
 # 6+, not this one). "save" is a destination id that exists only here, not
-# in `AFTER_CAPTURE` (stills-only) -- Save's actual behaviour is ticket 6's,
-# this ticket is UI/state only.
+# in `AFTER_CAPTURE` (stills-only).
+#
+# These two are genuine alternatives, and the wording says which is which.
+# They were not always: landing a recording used to move the file into the
+# save folder *unconditionally* and only then consider `after`, so "instant"
+# both copied to the clipboard and left a file behind, while "save" was a
+# no-op that took credit for the move. A user who chose the clipboard got a
+# file anyway, in a folder they were never shown, and nothing in either
+# label said so.
 CHOOSER_RECORD_AFTER_NOTE = {
-    "instant": "Straight to the clipboard, no overlay.",
-    "save": "Save the recording to a file.",
+    "instant": "Copy to the clipboard. No file is kept.",
+    "save": "Save to your recordings folder.",
 }
 RECORD_AFTER_DEFAULT = "instant"
+
+# The same two, for Settings' own Recording pane to read down -- the
+# `(id, label, note)` shape `AFTER_CAPTURE` already uses, so RadioCard
+# renders both panes from one structure. Recording's destination had no
+# Settings row at all before this: it could only be set on the chooser,
+# per-capture, with no way to say what it should default to.
+RECORDING_AFTER = [
+    ("instant", "Copy to the clipboard",
+     "The finished video goes to the clipboard and the file is deleted. "
+     "Paste it somewhere that accepts a file."),
+    ("save", "Save to a folder",
+     "The finished video is moved into your recordings folder, under the "
+     "filename pattern below."),
+]
+
+# Recordings get their own default name, not the stills one. Sharing
+# FILENAME_DEFAULT meant a video landed called "Screenshot from
+# 2026-08-27 15-54-01.mp4" -- the wrong noun for the thing, in a folder
+# full of actual screenshots.
+RECORDING_FILENAME_DEFAULT = "Recording from %Y-%m-%d %H-%M-%S"
 
 # Settings' Saving pane (recording.md ticket 9): what a GNOME recording asks
 # `org.gnome.Shell.Screencast` for absent any stored preference. 30 is a

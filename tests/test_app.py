@@ -89,6 +89,13 @@ def _recordings_land_in_a_temp_folder(monkeypatch, tmp_path):
     override this back with their own explicit folder.
     """
     monkeypatch.setattr(app.setup_desktop, "load_save_folder", lambda cd=None: tmp_path)
+    # Recordings have their own folder now (~/Videos/snipux, not the stills
+    # ~/Pictures/snipux they used to borrow), so isolating only the stills
+    # one would let a landed recording escape into this developer's real
+    # home directory.
+    monkeypatch.setattr(
+        app.setup_desktop, "load_recording_folder", lambda cd=None: tmp_path
+    )
 
 
 def make_image(size=(20, 10), fill_color=FILL_COLOR) -> QImage:
@@ -2209,14 +2216,23 @@ class TestAppControllerRecorderUnavailable:
 
 class TestAppControllerLandingRecording:
     """SNX-124 (recording.md ticket 9): what happens to the temp file once
-    a recording actually stops -- move it into the configured save
-    folder/filename convention, act on `after`, and toast where it went.
+    a recording actually stops.
+
+    The two destinations are genuine alternatives now: "save" moves the
+    file into the *recording* folder under the *recording* filename
+    pattern, and "instant" copies to the clipboard and moves nothing.
+    Landing used to move unconditionally and only then look at `after`, so
+    "instant" did both -- and into the stills folder, under the stills
+    pattern, which is how a video came to be called "Screenshot from
+    ....mp4". These tests default to `after="save"` because that is the
+    destination that lands anything at all.
+
     `_recordings_land_in_a_temp_folder` (this file's own autouse fixture)
-    already points `load_save_folder()` at `tmp_path`; tests here read
+    points `load_recording_folder()` at `tmp_path`; tests here read
     `tmp_path` directly to check what actually landed there.
     """
 
-    def _start_a_recording(self, make_controller, monkeypatch, after="instant"):
+    def _start_a_recording(self, make_controller, monkeypatch, after="save"):
         monkeypatch.setattr(
             QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
         )
@@ -2255,27 +2271,53 @@ class TestAppControllerLandingRecording:
 
         landed = next(tmp_path.iterdir())
         expected = setup_desktop.preview_filename(
-            tmp_path, setup_desktop.load_filename_pattern(), extension="mp4"
+            tmp_path,
+            setup_desktop.load_recording_filename_pattern(),
+            extension="mp4",
         )
         assert landed == Path(expected)
 
-    def test_instant_copies_the_landed_path_not_the_temp_path(
+    def test_instant_copies_the_temp_file_and_lands_nothing(
         self, make_controller, monkeypatch, tmp_path
     ):
+        # The inverse of what this file asserted before the two
+        # destinations became real alternatives. Choosing the clipboard
+        # must not also leave a file in the recordings folder -- that was
+        # the whole complaint: a user picked "copy" and got a file too, in
+        # a folder they were never shown.
         controller, backend = self._start_a_recording(
             make_controller, monkeypatch, after="instant"
         )
+        _rect, temp_path = backend.start_calls[0]
         copied = []
         monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: copied.append(path))
 
         controller._stop_recording()
 
-        assert len(copied) == 1
-        assert copied[0].parent == tmp_path
-        assert copied[0].exists()
+        assert copied == [Path(temp_path)]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_instant_leaves_the_copied_file_on_disk(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # copy_file_to_clipboard puts a *reference* on the clipboard, not
+        # the video's bytes, so deleting the file after copying would hand
+        # the user a clipboard entry that pastes nothing. "No file is
+        # kept" means none in the recordings folder; the temp copy has to
+        # outlive the copy itself, and the next startup's sweep is what
+        # eventually takes it.
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, after="instant"
+        )
+        _rect, temp_path = backend.start_calls[0]
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None)
+
+        controller._stop_recording()
+
+        assert Path(temp_path).exists()
 
     def test_save_performs_no_clipboard_action(self, make_controller, monkeypatch, tmp_path):
-        controller, backend = self._start_a_recording(make_controller, monkeypatch, after="save")
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
         copied = []
         monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: copied.append(path))
 
@@ -2491,6 +2533,10 @@ class TestAppControllerRecordingDiskSpace:
         # -- two tray notifications for one event, with the first liable to
         # be clipped before it's read. There must be exactly one toast, and
         # it must still say where the file went.
+        #
+        # Explicitly after="save": "where it landed" is only a question for
+        # the destination that lands anything, and the record side's
+        # default is the clipboard.
         monkeypatch.setattr(
             QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
         )
@@ -2508,7 +2554,7 @@ class TestAppControllerRecordingDiskSpace:
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
         )
 
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off", "save")
 
         assert len(calls) == 1
         landed = next(tmp_path.iterdir())

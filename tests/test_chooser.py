@@ -47,6 +47,35 @@ class TestTheKindDefaultsToStills:
 
 
 class TestClickingTheSwitchTogglesKind:
+    def test_the_record_side_opens_on_the_configured_destination(self):
+        # Recording's destination is a Settings row now. The chooser used
+        # to reset to tokens.RECORD_AFTER_DEFAULT on every switch to the
+        # record side, so a stored preference had nowhere to take effect.
+        chooser = Chooser(parent=None)
+        chooser.set_record_after_default("save")
+
+        chooser.set_kind("record")
+
+        assert chooser.after == "save"
+
+    def test_the_record_default_applies_immediately_when_already_recording(self):
+        chooser = Chooser(parent=None)
+        chooser.set_kind("record")
+
+        chooser.set_record_after_default("save")
+
+        assert chooser.after == "save"
+
+    def test_a_stills_only_destination_is_refused_as_a_record_default(self):
+        # "review" is a stills id; nothing downstream of a recording knows
+        # what to do with it, so it must not become the record side's seed.
+        chooser = Chooser(parent=None)
+
+        chooser.set_record_after_default("review")
+        chooser.set_kind("record")
+
+        assert chooser.after == tokens.RECORD_AFTER_DEFAULT
+
     def test_it_flips_to_record(self):
         chooser = Chooser(parent=None)
 
