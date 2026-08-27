@@ -15,6 +15,11 @@ pattern for backends; `overlay.py` is scoped to widget/painting code).
 `app.py` has no reason to import `overlay.py`'s `OverlayWindow.copy`/`save`,
 so `overlay.py` importing these two functions from here (deferred, to avoid
 a circular import) stays one-directional.
+
+`copy_file_to_clipboard`/`finish_recording` sit next to them for the same
+reason: recording has no bitmap to put on the clipboard, only a file, so
+copying it is a sibling function rather than a branch inside
+`copy_image_to_clipboard`.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QBuffer, QIODevice, QRectF
+from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QRectF, QUrl
 from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QImage, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
@@ -83,6 +88,66 @@ def copy_image_to_clipboard(image: QImage) -> None:
         )
     except (OSError, subprocess.CalledProcessError):
         pass  # Qt clipboard already holds the image; this sink is best-effort
+
+
+def copy_file_to_clipboard(path: Path) -> None:
+    """Place a *reference* to the file at `path` on the clipboard -- the way
+    Windows Snipping Tool does it, and the only way a recording can be
+    copied since there is no bitmap to put there instead.
+
+    A sibling to `copy_image_to_clipboard`, not a branch inside it: the
+    `QMimeData` shape is different (a URL list, not image bytes) and so are
+    the flavours involved. `QMimeData.setUrls` with a `QUrl.fromLocalFile`
+    is the whole of what makes Qt's clipboard backend map this to `CF_HDROP`
+    on Windows and `text/uri-list` on Linux -- there is nothing to branch on
+    `sys.platform` for here.
+
+    This function does not touch the filesystem beyond reading `path` to
+    build the URL -- it does not create, move, or check that the file
+    exists. Copy is save-then-copy: it's the caller's job to have written a
+    real file first.
+    """
+    url = QUrl.fromLocalFile(str(path))
+
+    mime = QMimeData()
+    mime.setUrls([url])
+    # Nautilus (and other GNOME file managers) ignore text/uri-list for
+    # paste and want this flavour instead: an operation word ("copy") then
+    # one URI per line, on the *same* QMimeData. QUrl.toString() is what
+    # gets percent-encoding right for a path with spaces or non-ASCII
+    # characters -- do not hand-format the file:// string.
+    mime.setData("x-special/gnome-copied-files", b"copy\n" + url.toString().encode())
+    QGuiApplication.clipboard().setMimeData(mime)
+
+    if shutil.which("wl-copy") is None:
+        return
+
+    try:
+        subprocess.run(
+            ["wl-copy", "--type", "text/uri-list"],
+            input=(url.toString() + "\n").encode(),
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pass  # Qt clipboard already holds the file reference; best-effort sink
+
+
+def finish_recording(path: Path, after: str) -> None:
+    """Carry out whichever of recording's two destinations `after` names.
+
+    The backends behind `platform.current.build_recording_registry()`
+    already write straight to `path` while recording runs, so by the time
+    this is called the file exists on disk either way -- there is no
+    flatten-then-write step here the way stills has. "Instant" copies the
+    finished file; "Save" is a no-op, because the file is already where it
+    needs to be.
+
+    Written as "only 'instant' acts" rather than "only 'save' is inert" so
+    that a third destination added later stays inert here by default
+    instead of silently being treated as a copy.
+    """
+    if after == "instant":
+        copy_file_to_clipboard(path)
 
 
 def save_image(image: QImage, directory: Path | str | None = None) -> Path:
