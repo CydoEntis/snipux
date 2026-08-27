@@ -17,6 +17,9 @@ three things the app asks for at its edges:
     `app.build_default_registry()` used to answer this itself by branching
     on `capture.detect_session_type()`, which has no answer at all on a
     platform with no notion of an X11/Wayland session type
+  * (SNX-119) which `recording.RecordingBackend`s can even be tried here --
+    the same seam as the line above, one operation later: nothing outside
+    `platform/` should branch on `sys.platform` to pick a recorder either
 
 `reserved_top()` joins `ensure_stable_install()` as an operation with a
 portable default rather than a required one -- see its own docstring.
@@ -51,11 +54,12 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from snipux.capture import BackendRegistry
+    from snipux.recording import RecorderRegistry
 
 
 class Platform(ABC):
     """What the app needs from the OS it's running on. See this module's
-    own docstring for why these six operations are the whole interface.
+    own docstring for why these seven operations are the whole interface.
     """
 
     @abstractmethod
@@ -104,6 +108,21 @@ class Platform(ABC):
         implemented yet must still return a registry that says so -- see
         `capture.UnsupportedPlatformBackend` -- rather than an empty one or
         a raised exception, since `--list-backends` has to work everywhere.
+        """
+
+    @abstractmethod
+    def build_recording_registry(self) -> "RecorderRegistry":
+        """The `recording.RecorderRegistry` this platform can record with
+        (SNX-119) -- what a caller asks for instead of branching on
+        `sys.platform` itself, the same seam `build_capture_registry()`
+        already is for capture.
+
+        Unlike `build_capture_registry()`, a platform with nothing
+        implemented yet raises `UnimplementedPlatformError` here rather
+        than handing back a registry containing a placeholder backend:
+        recording has no `--list-backends`-style caller yet that needs a
+        real answer on every platform, and `recording.py` has no
+        `UnsupportedPlatformBackend` of its own to construct one from.
         """
 
     def ensure_stable_install(self) -> Path | None:
