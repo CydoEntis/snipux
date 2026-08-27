@@ -29,11 +29,12 @@ import datetime
 import shutil
 import subprocess
 import sys
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QRectF, QUrl
+from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QRectF, QTimer, QUrl
 from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QImage, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
@@ -54,6 +55,7 @@ from snipux.overlay import (
 )
 from snipux import design, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
+from snipux.recording import RecorderRegistry, RecordingError
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
 
@@ -603,6 +605,7 @@ class AppController:
         transport: Transport,
         monitor_geometries: list[QRectF] | None = None,
         geometry_provider: GeometryProvider | None = None,
+        recorder_registry: RecorderRegistry | None = None,
     ):
         # Must happen before any overlay window is ever shown. Without it,
         # Qt's default behavior quits the whole application the moment the
@@ -628,6 +631,39 @@ class AppController:
             if geometry_provider is not None
             else build_default_geometry_provider()
         )
+
+        # Same None -> "build the real thing" pattern as `geometry_provider`
+        # above, but a platform with nothing behind this seam yet (macOS
+        # today) must not stop `AppController` from constructing at all --
+        # the same "a failure must not stop the rest" rule
+        # `run_first_launch_setup`'s own `UnimplementedPlatformError`
+        # handling already follows for desktop integration, applied here.
+        # `_recorder_registry` stays None in that case and the remembered
+        # message is what `_on_recording_requested` reports later, rather
+        # than raising out of `__init__` the moment a snip is actually
+        # requested.
+        self._recorder_registry: RecorderRegistry | None = None
+        self._recorder_unavailable_message: str | None = None
+        if recorder_registry is not None:
+            self._recorder_registry = recorder_registry
+        else:
+            try:
+                self._recorder_registry = platform.current.build_recording_registry()
+            except platform.UnimplementedPlatformError as exc:
+                self._recorder_unavailable_message = str(exc)
+
+        # Ticket 8 (the recording HUD/stop path) reads this; this ticket
+        # only writes it, as the seam ticket 8 needs.
+        self._active_recording: tuple | None = None
+        # Held on self, not the overlay -- see `_on_recording_requested`'s
+        # own docstring for why: `_commit_selection`'s record branch closes
+        # the overlay right after handing off the rect, and `closeEvent`
+        # drops `AppController`'s own last reference to it (`_overlay =
+        # None`) synchronously, in the same call. A timer that depended on
+        # an `OverlayWindow` about to lose its last reference must not fire
+        # reliably -- `DelayCountdown`'s own docstring flags this exact bug
+        # for a different widget.
+        self._recording_delay_timer: QTimer | None = None
 
         self._overlay: OverlayWindow | None = None
         # Held for the same reason `_overlay` is: a parentless widget is
@@ -938,6 +974,9 @@ class AppController:
             # Fires only for a real capture, never for a cancelled snip --
             # see `OverlayWindow._report_capture`.
             on_captured=self._on_captured,
+            # SNX-122: fires only for the record side of the chooser -- see
+            # `_on_recording_requested`.
+            on_recording_requested=self._on_recording_requested,
         )
         # Stored on self, not left as a local: a parentless widget is fair
         # game for Python's GC to collect out from under the still-open
@@ -988,6 +1027,84 @@ class AppController:
         """
         if window in self._reviews:
             self._reviews.remove(window)
+
+    def _on_recording_requested(self, rect: QRectF | None, delay: str) -> None:
+        """Start recording `rect` (absolute logical virtual-desktop
+        coordinates, or None for the whole desktop), once `delay` has
+        elapsed -- `OverlayWindow._commit_selection`'s record branch calls
+        this and closes itself right after, per SNX-122.
+
+        The delay is parsed here, not in overlay.py: `design.tokens.DELAYS`
+        values ("Off"/"3s"/"5s"/"10s") already pass through overlay.py
+        unparsed everywhere else (the popover, `_tick_delay`), and this is
+        the only place a recording delay is turned into seconds, so there's
+        nothing to keep in sync by keeping it in one place.
+
+        No visible countdown here -- `DelayCountdown` is overlay.py's own
+        widget for a *frame that hasn't been grabbed yet*, and recording's
+        frozen frame is already behind the closed overlay by the time this
+        runs; a recording HUD is ticket 8's, not this one's.
+        """
+        if self._recorder_registry is None:
+            self._report_shortcut(self._recorder_unavailable_message)
+            return
+
+        # `start_capture`'s re-entrancy guard only blocks a second overlay
+        # while the first is genuinely still open -- and the record branch
+        # of `_commit_selection` closes the overlay right after calling
+        # this, which (via `_on_overlay_dismissed`) clears `self._overlay`
+        # in the same call. So a second shortcut press, before this
+        # countdown fires or this recording stops, sails straight through
+        # `start_capture` and lands here again. Overwriting
+        # `_recording_delay_timer`/`_active_recording` in that case would
+        # drop the only Python reference keeping the pending `QTimer` alive
+        # and lose the handle ticket 8 needs to stop the first recording --
+        # so this refuses the second request and says why, rather than
+        # silently discarding the first one.
+        if self._recording_delay_timer is not None or self._active_recording is not None:
+            self._report_shortcut(
+                "Snipux is already recording, or about to start -- finish that "
+                "recording before starting another."
+            )
+            return
+
+        # ticket 9 owns the real filename/save-folder convention; this is a
+        # placeholder in the same spirit as capture.py's own tempfile-backed
+        # capture path.
+        tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        tmp.close()
+        path = tmp.name
+
+        def _begin() -> None:
+            # The countdown (if any) has now fired, so the pending-request
+            # guard above must stop counting this one -- otherwise every
+            # recording after the first non-"Off" delay would permanently
+            # refuse the next, long after this timer is done firing.
+            self._recording_delay_timer = None
+            try:
+                backend = self._recorder_registry.start(rect, path)
+            except RecordingError as exc:
+                # Nothing was ever written to this placeholder path -- an
+                # empty file left behind here isn't a discarded recording
+                # for ticket 9 to clean up, it's a start that never
+                # happened at all.
+                Path(path).unlink(missing_ok=True)
+                self._report_shortcut(str(exc))
+                return
+            self._active_recording = (backend, path)
+
+        if delay == "Off":  # design.tokens.DELAYS[0]
+            _begin()
+            return
+
+        seconds = int(delay.rstrip("s"))
+        # No QObject parent -- `AppController` isn't one -- so the strong
+        # Python reference this assignment creates is what keeps the timer
+        # alive until it fires, the same role a parent would otherwise play.
+        self._recording_delay_timer = QTimer()
+        self._recording_delay_timer.setSingleShot(True)
+        self._recording_delay_timer.timeout.connect(_begin)
+        self._recording_delay_timer.start(seconds * 1000)
 
     def _on_overlay_dismissed(self) -> None:
         """Called once, by `OverlayWindow`'s own `on_dismissed` hook, the
