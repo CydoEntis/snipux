@@ -1,6 +1,8 @@
 import ctypes
 import re
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PyQt6.QtCore import QMimeData, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QUrl
@@ -12,6 +14,7 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 from conftest import skip_on_windows
 from snipux import app
 from snipux import overlay as overlay_module
+from snipux import setup_desktop
 from snipux.app import (
     AppController,
     QLocalSocketTransport,
@@ -74,6 +77,18 @@ def _assume_setup_already_ran(monkeypatch):
     exercise the real "nothing has run yet" branch.
     """
     monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+
+
+@pytest.fixture(autouse=True)
+def _recordings_land_in_a_temp_folder(monkeypatch, tmp_path):
+    """A stopped recording now lands somewhere real (recording.md ticket
+    9's `_land_recording`) -- default that destination to pytest's own
+    `tmp_path` rather than this developer's actual `~/Pictures/snipux`,
+    the same isolation `_assume_setup_already_ran` above gives
+    `run_first_launch_setup`. Tests that care about the landed path
+    override this back with their own explicit folder.
+    """
+    monkeypatch.setattr(app.setup_desktop, "load_save_folder", lambda cd=None: tmp_path)
 
 
 def make_image(size=(20, 10), fill_color=FILL_COLOR) -> QImage:
@@ -1090,6 +1105,7 @@ def make_controller():
         monitor_geometries=None,
         geometry_provider=None,
         recorder_registry=None,
+        disk_usage=shutil.disk_usage,
     ):
         controller = AppController(
             registry,
@@ -1097,6 +1113,7 @@ def make_controller():
             monitor_geometries=monitor_geometries,
             geometry_provider=geometry_provider,
             recorder_registry=recorder_registry,
+            disk_usage=disk_usage,
         )
         controllers.append(controller)
         return controller
@@ -1423,7 +1440,13 @@ class TestAppControllerRecording:
         assert started_rect == rect
         # ticket 8's own seam: the backend that actually started, held
         # alongside the path it's writing to, for a later `.stop()`.
-        assert controller._active_recording == (backend, path)
+        # ticket 9 adds the third element: `after`, defaulted here since
+        # this call only passed (rect, delay) -- see `_on_recording_requested`.
+        assert controller._active_recording == (
+            backend,
+            path,
+            app.design.tokens.RECORD_AFTER_DEFAULT,
+        )
 
     def test_a_non_off_delay_defers_the_start(self, make_controller):
         backend = FakeRecordingBackend()
@@ -1905,6 +1928,371 @@ class TestAppControllerRecorderUnavailable:
             controller._tray_icon.hide()
 
 
+class TestAppControllerLandingRecording:
+    """SNX-124 (recording.md ticket 9): what happens to the temp file once
+    a recording actually stops -- move it into the configured save
+    folder/filename convention, act on `after`, and toast where it went.
+    `_recordings_land_in_a_temp_folder` (this file's own autouse fixture)
+    already points `load_save_folder()` at `tmp_path`; tests here read
+    `tmp_path` directly to check what actually landed there.
+    """
+
+    def _start_a_recording(self, make_controller, monkeypatch, after="instant"):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off", after)
+        return controller, backend
+
+    def test_stopping_moves_the_temp_file_into_the_save_folder(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
+        _rect, temp_path = backend.start_calls[0]
+
+        controller._stop_recording()
+
+        assert not Path(temp_path).exists()
+        landed = list(tmp_path.iterdir())
+        assert len(landed) == 1
+        assert landed[0].suffix == ".mp4"
+
+    def test_the_landed_filename_matches_preview_filenames_own_computation(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # AC: the real filename is the same computation Settings' own
+        # preview label renders, not a second, independent guess at it.
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
+
+        controller._stop_recording()
+
+        landed = next(tmp_path.iterdir())
+        expected = setup_desktop.preview_filename(
+            tmp_path, setup_desktop.load_filename_pattern(), extension="mp4"
+        )
+        assert landed == Path(expected)
+
+    def test_instant_copies_the_landed_path_not_the_temp_path(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, after="instant"
+        )
+        copied = []
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: copied.append(path))
+
+        controller._stop_recording()
+
+        assert len(copied) == 1
+        assert copied[0].parent == tmp_path
+        assert copied[0].exists()
+
+    def test_save_performs_no_clipboard_action(self, make_controller, monkeypatch, tmp_path):
+        controller, backend = self._start_a_recording(make_controller, monkeypatch, after="save")
+        copied = []
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: copied.append(path))
+
+        controller._stop_recording()
+
+        assert copied == []
+        assert len(list(tmp_path.iterdir())) == 1
+
+    def test_a_normal_stop_reports_the_landed_path_through_the_tray(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller._stop_recording()
+
+        assert len(calls) == 1
+        landed = next(tmp_path.iterdir())
+        assert str(landed) in calls[0][1]
+
+    def test_a_failed_move_is_reported_not_raised(self, make_controller, monkeypatch):
+        # Review finding: `shutil.move` into the save folder is a real
+        # cross-filesystem copy whenever the two don't share a mount, which
+        # needs free space precisely in the disk-exhaustion scenario ticket
+        # 9 is about -- an `OSError` out of it must become a toast, not an
+        # exception escaping a Qt slot (the HUD stop button, the hotkey
+        # handler, or the disk-space tick itself).
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
+        monkeypatch.setattr(
+            app.shutil, "move", lambda *a, **k: (_ for _ in ()).throw(OSError("No space left on device"))
+        )
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller._stop_recording()  # must not raise
+
+        assert len(calls) == 1
+        assert "failed" in calls[0][1].lower()
+        assert controller._active_recording is None
+        assert controller._stopping_recording is False
+
+
+class TestAppControllerDiscardRecording:
+    """SNX-124 (recording.md ticket 9): the tray's own 'Discard recording'
+    action -- stop the backend and throw the temp file away, no move, no
+    clipboard, a distinct tray message.
+    """
+
+    def _start_a_recording(self, make_controller, monkeypatch):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        return controller, backend
+
+    def test_discard_action_is_enabled_while_recording_and_disabled_after(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._start_a_recording(make_controller, monkeypatch)
+
+        assert controller.discard_action.isEnabled() is True
+
+        controller._stop_recording()
+
+        assert controller.discard_action.isEnabled() is False
+
+    def test_discard_stops_the_backend_and_deletes_the_temp_file(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
+        _rect, temp_path = backend.start_calls[0]
+
+        controller._discard_recording()
+
+        assert backend.stop_calls == [True]
+        assert not Path(temp_path).exists()
+        # No move: the save folder this file's autouse fixture points at
+        # must stay empty.
+        assert list(tmp_path.iterdir()) == []
+
+    def test_discard_performs_no_clipboard_action(self, make_controller, monkeypatch):
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
+        copied = []
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: copied.append(path))
+
+        controller._discard_recording()
+
+        assert copied == []
+
+    def test_discard_reports_a_distinct_message_from_a_normal_stop(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller._discard_recording()
+
+        assert len(calls) == 1
+        assert "discard" in calls[0][1].lower()
+
+    def test_discarding_with_nothing_recording_is_a_noop(self, make_controller):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+
+        controller._discard_recording()  # must not raise
+
+        assert controller._active_recording is None
+
+
+class TestAppControllerRecordingTempFileCleanup:
+    """SNX-124 (recording.md ticket 9): a temp file left by a previous
+    crashed run must not accumulate -- `AppController.__init__` sweeps
+    `app._recording_temp_dir()` before anything else runs.
+    """
+
+    def test_a_leftover_file_is_deleted_on_construction(self, make_controller):
+        leftover = app._recording_temp_dir() / "crashed-recording.mp4"
+        leftover.write_bytes(b"leftover")
+
+        make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+
+        assert not leftover.exists()
+
+    def test_recording_temp_files_are_created_under_the_dedicated_subdirectory(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+        )
+
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+
+        _rect, path = backend.start_calls[0]
+        assert Path(path).parent == app._recording_temp_dir()
+
+
+class TestAppControllerRecordingDiskSpace:
+    """SNX-124 (recording.md ticket 9): running out of disk during a
+    recording is reported, not failed silently -- piggybacked on the
+    once-a-second elapsed-time tick via an injected `disk_usage` factory.
+    """
+
+    def _disk_usage_reporting(self, free_bytes):
+        return lambda path: SimpleNamespace(free=free_bytes)
+
+    def test_low_free_space_stops_the_recording_within_one_tick(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+            disk_usage=self._disk_usage_reporting(1024),
+        )
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        # `_start_recording_ui` fires the elapsed-time tick once immediately
+        # (SNX-123 ticket 8, so a recording stopped inside the first second
+        # still shows 0:00 somewhere) -- the low-disk check piggybacks on
+        # that same tick, so low free space is caught on this very first
+        # one, with no separate explicit tick needed.
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+
+        assert backend.stop_calls == [True]
+        assert controller._active_recording is None
+        assert any("disk" in call[1].lower() for call in calls)
+
+    def test_low_disk_stop_shows_one_toast_naming_where_it_landed(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Review finding: `_check_recording_disk_space()` used to call
+        # `_stop_recording()` (which itself toasts "Recording saved to
+        # ..."), then show its own, separate low-disk message right after
+        # -- two tray notifications for one event, with the first liable to
+        # be clipped before it's read. There must be exactly one toast, and
+        # it must still say where the file went.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+            disk_usage=self._disk_usage_reporting(1024),
+        )
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+
+        assert len(calls) == 1
+        landed = next(tmp_path.iterdir())
+        assert str(landed) in calls[0][1]
+        assert "disk" in calls[0][1].lower()
+
+    def test_watches_the_temp_files_own_filesystem_not_the_save_folder(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Review finding: the file actually growing during a recording
+        # lives under `_recording_temp_dir()` (system temp), not the save
+        # folder `_land_recording` only moves into once the recording is
+        # done -- a tmpfs-mounted temp dir can fill up long before the save
+        # folder's own free space would ever look low, so the check must
+        # stat the former, not the latter.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        queried = []
+
+        def _disk_usage(path):
+            queried.append(path)
+            return SimpleNamespace(free=10 * 1024 * 1024 * 1024)
+
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+            disk_usage=_disk_usage,
+        )
+
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+
+        _rect, path = backend.start_calls[0]
+        assert queried == [str(Path(path).parent)]
+        assert queried[0] != str(tmp_path)
+
+    def test_plenty_of_free_space_does_not_touch_the_recording(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+            disk_usage=self._disk_usage_reporting(10 * 1024 * 1024 * 1024),
+        )
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+
+        controller._on_recording_tick()
+
+        assert backend.stop_calls == []
+        assert controller._active_recording is not None
+
+
 class TestAppControllerOverlayDismissal:
     """SNX-62: `OverlayWindow.copy()`/`save()` used to flatten the image,
     toast, and return without ever dismissing the overlay -- so
@@ -1976,12 +2364,22 @@ class TestAppControllerTrayMenu:
         assert controller.snip_action.text() == "Snip"
         assert controller.quit_action.text() == "Quit"
         # Settings sits between them: it is the second thing anyone opens a
-        # tray menu for, and it must not be below Quit.
+        # tray menu for, and it must not be below Quit. Discard recording
+        # (recording.md ticket 9) sits after it, disabled until a
+        # recording is actually active -- see TestAppControllerDiscard.
         assert [action.text() for action in controller._tray_icon.contextMenu().actions()] == [
             "Snip",
             "Settings...",
+            "Discard recording",
             "Quit",
         ]
+
+    def test_discard_action_starts_disabled(self, make_controller):
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        assert controller.discard_action.isEnabled() is False
 
     def test_snip_action_starts_a_capture(self, make_controller):
         # Asserts on the real effect of triggering the action, not on

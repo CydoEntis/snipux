@@ -506,6 +506,47 @@ class TestSettingsWindow:
 
         assert setup_desktop.load_review_window(tmp_path) is True
 
+    def test_recording_rows_seed_from_the_stored_values(self, tmp_path):
+        # AC: both new rows are seeded from setup_desktop's own loads, not
+        # some independent default the window invents.
+        setup_desktop.save_recording_frame_rate(24, tmp_path)
+        setup_desktop.save_recording_draw_cursor(False, tmp_path)
+
+        window = self._window(tmp_path)
+
+        assert window._frame_rate.spin.value() == 24
+        assert window._draw_cursor.switch.isChecked() is False
+
+    def test_recording_rows_default_to_the_documented_values(self, tmp_path):
+        window = self._window(tmp_path)
+
+        assert window._frame_rate.spin.value() == tokens.RECORDING_FRAME_RATE_DEFAULT
+        assert window._draw_cursor.switch.isChecked() is True
+
+    def test_changing_the_frame_rate_marks_the_window_dirty(self, tmp_path):
+        window = self._window(tmp_path)
+
+        window._frame_rate.spin.setValue(15)
+
+        assert "Unsaved changes" in window._dirty_label.text()
+
+    def test_changing_draw_cursor_marks_the_window_dirty(self, tmp_path):
+        window = self._window(tmp_path)
+
+        window._draw_cursor.switch.setChecked(False)
+
+        assert "Unsaved changes" in window._dirty_label.text()
+
+    def test_save_persists_the_recording_rows(self, tmp_path):
+        window = self._window(tmp_path)
+        window._frame_rate.spin.setValue(15)
+        window._draw_cursor.switch.setChecked(False)
+
+        window._save()
+
+        assert setup_desktop.load_recording_frame_rate(tmp_path) == 15
+        assert setup_desktop.load_recording_draw_cursor(tmp_path) is False
+
     def test_no_visible_text_in_the_window_names_a_ticket(self, tmp_path):
         # AC: a test fails if any user-facing string contains a ticket
         # identifier. Every pane is built eagerly in __init__ (see

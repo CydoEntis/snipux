@@ -623,6 +623,22 @@ CHOOSER_RECORD_AFTER_NOTE = {
 }
 RECORD_AFTER_DEFAULT = "instant"
 
+# Settings' Saving pane (recording.md ticket 9): what a GNOME recording asks
+# `org.gnome.Shell.Screencast` for absent any stored preference. 30 is a
+# plain, ordinary default frame rate -- not a measurement of anything, unlike
+# WindowsRecorderBackend's own rate (SNX-125), which is real inter-arrival
+# timing and deliberately never touches this constant or the Settings row
+# behind it.
+RECORDING_FRAME_RATE_DEFAULT = 30
+
+# recording.md ticket 9's disk-space guard: below this many free bytes on
+# the save folder's filesystem, `AppController` stops the active recording
+# rather than let it run the disk to zero. Not user-configurable and not a
+# measurement of anything -- a plain, generous floor (a few seconds of even
+# a large full-screen capture) meant to leave headroom for landing the file
+# itself (the move/copy in `AppController._land_recording`) to still fit.
+RECORDING_MIN_FREE_BYTES = 200 * 1024 * 1024
+
 TOOL_HINTS = {
     "pen":         "Drag to draw freehand",
     "highlighter": "Sweep over the line that matters",

@@ -43,6 +43,8 @@ from PyQt6.QtMultimedia import (
     QVideoSink,
 )
 
+from . import setup_desktop
+
 
 class RecordingBackend(ABC):
     """A way of recording a region of the virtual desktop on a particular
@@ -287,6 +289,27 @@ class GnomeScreencastBackend(RecordingBackend):
             reply = self._call_screencast_area(rect, path)
         self._finish_start(reply, path)
 
+    @staticmethod
+    def _screencast_options() -> dict:
+        """The `a{sv}` options dict shared by `ScreencastArea` and
+        `Screencast` -- ticket 9's settings, read fresh on every call the
+        same way `overlay.py` re-reads `load_hints_enabled()` per snip,
+        rather than cached at construction: a Settings change must take
+        effect on the next recording, not the next process restart.
+
+        jeepney's low-level API wants each `a{sv}` entry as its own
+        `(dbus-signature, value)` pair, not a bare value -- `draw-cursor` is
+        `org.gnome.Shell.Screencast`'s boolean option for whether the
+        cursor is composited into the recording, `framerate` its integer
+        frames-per-second request. Both key spellings are GNOME Shell's
+        own; there is no live GNOME session in this environment to confirm
+        them against, so this is best-effort, per the ticket.
+        """
+        return {
+            "draw-cursor": ("b", setup_desktop.load_recording_draw_cursor()),
+            "framerate": ("i", setup_desktop.load_recording_frame_rate()),
+        }
+
     def _call_screencast_area(self, rect: QRectF, path: str):
         """Issue `ScreencastArea(iiiisa{sv})` for `rect` and return the reply."""
         # Round left/top/right/bottom independently and take the
@@ -313,10 +336,7 @@ class GnomeScreencastBackend(RecordingBackend):
                     right - left,
                     bottom - top,
                     path,
-                    # draw-cursor / framerate / pipeline plug in here once
-                    # ticket 9's Settings pane exists to set them; nothing
-                    # upstream has an opinion on them yet.
-                    {},
+                    self._screencast_options(),
                 ),
             )
             return connection.send_and_get_reply(message)
@@ -336,9 +356,7 @@ class GnomeScreencastBackend(RecordingBackend):
                 "sa{sv}",
                 (
                     path,
-                    # Same options placeholder as ScreencastArea -- see
-                    # the comment there.
-                    {},
+                    self._screencast_options(),
                 ),
             )
             return connection.send_and_get_reply(message)
@@ -654,6 +672,16 @@ class WindowsRecorderBackend(RecordingBackend):
     and device-pixel ratio is what's used. A region that doesn't lie on the
     primary screen will record the wrong pixels; that is a real gap, not
     an oversight, and belongs to whichever ticket adds monitor selection.
+
+    Deliberately does not read either of ticket 9's Settings rows the way
+    `GnomeScreencastBackend` does. Frame rate: SNX-125 measures the real
+    inter-arrival rate off `_RegionCropWorker` and declares exactly that to
+    the container (see `_apply_measured_frame_rate` in `_start_region`) --
+    a nominal request from Settings would be a second, conflicting opinion
+    about a number this class has already gone to real effort to get right
+    from measurement instead of a guess. Draw-cursor: `QScreenCapture`
+    exposes no such toggle at all -- there is nothing here to wire it to,
+    not an oversight.
 
     Every Qt object involved is built by a constructor-injectable factory
     (`screen_capture_factory`, `capture_session_factory`,

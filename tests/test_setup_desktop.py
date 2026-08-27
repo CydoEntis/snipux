@@ -1179,3 +1179,55 @@ class TestKindPersistence:
         setup_desktop.config_path(tmp_path).write_text('{"kind": "nonsense"}')
 
         assert setup_desktop.load_kind(tmp_path) == tokens.KIND_DEFAULT
+
+
+class TestRecordingFrameRatePersistence:
+    """SNX-124 ticket 9: `GnomeScreencastBackend` reads this back to build
+    its `framerate` D-Bus option; `WindowsRecorderBackend` never does (its
+    own docstring explains why -- SNX-125's measured rate).
+    """
+
+    def test_nothing_stored_means_the_documented_default(self, tmp_path):
+        assert (
+            setup_desktop.load_recording_frame_rate(tmp_path)
+            == tokens.RECORDING_FRAME_RATE_DEFAULT
+        )
+
+    def test_round_trips_through_save_and_load(self, tmp_path):
+        setup_desktop.save_recording_frame_rate(24, tmp_path)
+
+        assert setup_desktop.load_recording_frame_rate(tmp_path) == 24
+
+    def test_a_non_int_stored_value_falls_back_rather_than_being_trusted(self, tmp_path):
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text('{"recording_frame_rate": "fast"}')
+
+        assert (
+            setup_desktop.load_recording_frame_rate(tmp_path)
+            == tokens.RECORDING_FRAME_RATE_DEFAULT
+        )
+
+
+class TestRecordingDrawCursorPersistence:
+    """SNX-124 ticket 9: the other new recording row -- read by
+    `GnomeScreencastBackend`'s `draw-cursor` D-Bus option, never by
+    `WindowsRecorderBackend` (`QScreenCapture` exposes no such toggle).
+    """
+
+    def test_nothing_stored_defaults_to_true(self, tmp_path):
+        # Unlike most switches here, an upgrading user who never opens
+        # Settings must keep seeing the cursor exactly as before this
+        # setting existed -- off-by-default would silently change existing
+        # recordings' contents.
+        assert setup_desktop.load_recording_draw_cursor(tmp_path) is True
+
+    def test_round_trips_through_save_and_load(self, tmp_path):
+        setup_desktop.save_recording_draw_cursor(False, tmp_path)
+
+        assert setup_desktop.load_recording_draw_cursor(tmp_path) is False
+
+    def test_turning_it_back_on_is_not_stuck_off(self, tmp_path):
+        setup_desktop.save_recording_draw_cursor(False, tmp_path)
+        setup_desktop.save_recording_draw_cursor(True, tmp_path)
+
+        assert setup_desktop.load_recording_draw_cursor(tmp_path) is True

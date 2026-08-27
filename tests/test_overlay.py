@@ -5203,14 +5203,15 @@ class TestCommitToRecord:
 
     def test_a_region_drag_hands_off_the_absolute_rect_and_closes(self):
         requests = []
-        overlay = self._overlay(on_recording_requested=lambda rect, delay: requests.append((rect, delay)))
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)))
 
         self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
 
         assert len(requests) == 1
-        rect, delay = requests[0]
+        rect, delay, after = requests[0]
         assert rect == QRectF(100, 100, 300, 250)
         assert delay == tokens.DELAYS[0]  # "Off", the default
+        assert after == tokens.RECORD_AFTER_DEFAULT  # "instant", the chooser's own default
         assert not overlay.isVisible()
 
     def test_a_region_drag_on_a_monitor_left_of_and_above_the_primary_translates_the_rect(self):
@@ -5219,7 +5220,7 @@ class TestCommitToRecord:
         # must be a real translate, not a mirror.
         requests = []
         overlay = self._overlay(
-            on_recording_requested=lambda rect, delay: requests.append((rect, delay)),
+            on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)),
             logical_origin=(-500, -300),
             monitor_geometries=[
                 QRectF(-500, -300, 600, 600),
@@ -5230,7 +5231,7 @@ class TestCommitToRecord:
         self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
 
         assert len(requests) == 1
-        rect, _delay = requests[0]
+        rect, _delay, _after = requests[0]
         assert rect == QRectF(-400, -200, 300, 250)
 
     def test_full_screen_hands_off_none_rather_than_the_monitors_own_rect(self):
@@ -5238,12 +5239,12 @@ class TestCommitToRecord:
         # monitor's geometry would look right by accident if the `None`
         # branch were missing.
         requests = []
-        overlay = self._overlay(on_recording_requested=lambda rect, delay: requests.append((rect, delay)))
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)))
 
         overlay._chooser.set_mode("Full screen")
 
         assert len(requests) == 1
-        rect, _delay = requests[0]
+        rect, _delay, _after = requests[0]
         assert rect is None
         assert not overlay.isVisible()
 
@@ -5252,7 +5253,7 @@ class TestCommitToRecord:
         # app.py does -- so the assertion is "the right value reaches the
         # callback", not "N seconds elapse".
         requests = []
-        overlay = self._overlay(on_recording_requested=lambda rect, delay: requests.append((rect, delay)))
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)))
         overlay._on_delay_changed(tokens.DELAYS[1])  # "3s"
 
         self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
@@ -5260,8 +5261,25 @@ class TestCommitToRecord:
         assert requests[0][1] == tokens.DELAYS[1]
 
     @pytest.mark.parametrize("after", ["instant", "save"])
+    def test_the_chosen_after_reaches_the_callback_as_a_third_argument(self, after):
+        # SNX-124 ticket 9: app.py's `_on_recording_requested` needs to know
+        # which of record's "then" vocabulary was picked so it can land or
+        # copy the finished file accordingly -- this is the handoff half of
+        # that, `outcome` (== `self._chooser.after`) passed through, not
+        # dropped on the floor the way it used to be.
+        requests = []
+        overlay = self._overlay(
+            on_recording_requested=lambda rect, delay, after: requests.append(after)
+        )
+        overlay._chooser.set_after(after)
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert requests == [after]
+
+    @pytest.mark.parametrize("after", ["instant", "save"])
     def test_closes_regardless_of_after(self, after):
-        overlay = self._overlay(on_recording_requested=lambda rect, delay: None)
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
         overlay._chooser.set_after(after)
 
         self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
@@ -5274,7 +5292,7 @@ class TestCommitToRecord:
         requests = []
         frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
         overlay = OverlayWindow(
-            frame, on_recording_requested=lambda rect, delay: requests.append((rect, delay))
+            frame, on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after))
         )
         overlay._chooser.set_after("edit")  # stays open; nothing else to assert on
         overlay.setGeometry(0, 0, 600, 600)

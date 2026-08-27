@@ -36,6 +36,20 @@ def qapp():
     return app
 
 
+@pytest.fixture(autouse=True)
+def _pinned_recording_settings(monkeypatch):
+    """`GnomeScreencastBackend._screencast_options()` (SNX-124 ticket 9)
+    reads `setup_desktop.load_recording_draw_cursor`/`load_recording_frame_rate`
+    fresh on every call -- with no override, that hits whatever config
+    directory this box's real user happens to have, which is exactly the
+    kind of environment-dependent read a test suite must not depend on.
+    Pinned here to the documented defaults; individual tests override
+    either one to check the value actually reaches the D-Bus call.
+    """
+    monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
+    monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
+
+
 class FakeBackend(RecordingBackend):
     """Small `RecordingBackend` implementation for exercising the registry,
     mirroring `test_capture.py`'s `FakeBackend` style rather than mocking
@@ -340,7 +354,13 @@ class TestGnomeScreencastBackendStart:
     RECT = QRectF(10.4, 20.6, 99.5, 49.2)
     PATH = "/tmp/snipux-recording.webm"
 
-    def test_calls_screencast_area_with_rounded_geometry_and_no_options(self, monkeypatch):
+    def test_calls_screencast_area_with_rounded_geometry_and_configured_options(
+        self, monkeypatch
+    ):
+        # SNX-124 ticket 9: draw-cursor/framerate now come from Settings
+        # (setup_desktop), not the `{}` placeholder ticket 1 left behind.
+        monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
+        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
@@ -359,7 +379,24 @@ class TestGnomeScreencastBackendStart:
         top = round(self.RECT.top())
         width = round(self.RECT.left() + self.RECT.width()) - left
         height = round(self.RECT.top() + self.RECT.height()) - top
-        assert message.body == (left, top, width, height, self.PATH, {})
+        options = {"draw-cursor": ("b", True), "framerate": ("i", 30)}
+        assert message.body == (left, top, width, height, self.PATH, options)
+
+    def test_screencast_area_options_reflect_disabled_cursor_and_a_different_rate(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            recording.setup_desktop, "load_recording_draw_cursor", lambda: False
+        )
+        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 15)
+        connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
+        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+
+        GnomeScreencastBackend().start(self.RECT, self.PATH)
+
+        message = connection.send_and_get_reply.call_args[0][0]
+        options = message.body[-1]
+        assert options == {"draw-cursor": ("b", False), "framerate": ("i", 15)}
 
     def test_closes_the_connection_after_a_successful_call(self, monkeypatch):
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
@@ -401,7 +438,11 @@ class TestGnomeScreencastBackendStartWholeScreen:
 
     PATH = "/tmp/snipux-recording-fullscreen.webm"
 
-    def test_calls_screencast_with_no_geometry_and_no_options(self, monkeypatch):
+    def test_calls_screencast_with_no_geometry_and_configured_options(self, monkeypatch):
+        # SNX-124 ticket 9: same options as ScreencastArea -- see that
+        # class's own test for why this is no longer a bare `{}`.
+        monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
+        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
@@ -413,7 +454,8 @@ class TestGnomeScreencastBackendStartWholeScreen:
         )
         assert message.header.fields[HeaderFields.member] == "Screencast"
         assert message.header.fields[HeaderFields.signature] == "sa{sv}"
-        assert message.body == (self.PATH, {})
+        options = {"draw-cursor": ("b", True), "framerate": ("i", 30)}
+        assert message.body == (self.PATH, options)
 
     def test_closes_the_connection_after_a_successful_call(self, monkeypatch):
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
