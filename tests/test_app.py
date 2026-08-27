@@ -417,9 +417,10 @@ class TestCopyFileToClipboard:
         self, monkeypatch, tmp_path
     ):
         monkeypatch.setattr(app.shutil, "which", lambda binary: None)
-        # A space in the directory name forces QUrl to percent-encode --
-        # a path that happened to look the same hand-formatted wouldn't
-        # actually exercise that.
+        # A space in the directory name is what forces percent-encoding,
+        # and it is not a corner case: the default filename pattern
+        # ("Screenshot from %Y-%m-%d %H-%M-%S") always contains spaces, so
+        # every recording copied to the clipboard goes through this.
         directory = tmp_path / "a b"
         directory.mkdir()
         path = directory / "clip.mp4"
@@ -428,8 +429,19 @@ class TestCopyFileToClipboard:
         copy_file_to_clipboard(path)
 
         mime = QGuiApplication.clipboard().mimeData()
-        expected = b"copy\n" + QUrl.fromLocalFile(str(path)).toString().encode()
-        assert bytes(mime.data("x-special/gnome-copied-files").data()) == expected
+        payload = bytes(mime.data("x-special/gnome-copied-files").data())
+        operation, _, uri = payload.partition(b"\n")
+
+        assert operation == b"copy"
+        # Spelled out rather than recomputed through the same QUrl call the
+        # implementation makes. Asserting `toString()` against `toString()`
+        # is exactly what let the unescaped form ship: the test agreed with
+        # the bug. A URI with a raw space in it is not a URI.
+        assert b" " not in uri
+        assert uri.endswith(b"/a%20b/clip.mp4")
+        # Both flavours ride on one QMimeData and must name the same file
+        # the same way.
+        assert uri == bytes(mime.urls()[0].toEncoded())
 
     def test_pipes_the_uri_list_to_wl_copy_when_present_on_path(
         self, monkeypatch, tmp_path
@@ -441,7 +453,9 @@ class TestCopyFileToClipboard:
             calls.append((argv, input))
 
         monkeypatch.setattr(app.subprocess, "run", fake_run)
-        path = tmp_path / "clip.mp4"
+        directory = tmp_path / "a b"
+        directory.mkdir()
+        path = directory / "clip.mp4"
         path.write_bytes(b"fake video bytes")
 
         copy_file_to_clipboard(path)
@@ -449,8 +463,10 @@ class TestCopyFileToClipboard:
         assert len(calls) == 1
         argv, piped_bytes = calls[0]
         assert argv == ["wl-copy", "--type", "text/uri-list"]
-        expected_uri = QUrl.fromLocalFile(str(path)).toString()
-        assert piped_bytes.decode() == expected_uri + "\n"
+        # Same rule as the GNOME flavour, and spelled out for the same
+        # reason -- text/uri-list carries URIs, so this one is escaped too.
+        assert b" " not in piped_bytes
+        assert piped_bytes.endswith(b"/a%20b/clip.mp4\n")
 
     def test_does_not_raise_when_wl_copy_binary_vanishes_before_running(
         self, monkeypatch, tmp_path
@@ -1309,75 +1325,108 @@ class TestAppControllerCapture:
 
 
 class TestPlaceRecordingHud:
-    """SNX-123 ticket 8: `_place_recording_hud` is a pure function of plain
-    `QRectF`/`QSize` values, unit-tested directly the same way
-    test_recording.py tests `_rect_to_screen_pixels` -- no `QApplication`
-    widgets involved.
+    """SNX-123 ticket 8, reshaped by the recording-flow fixes:
+    `_place_recording_hud` is a pure function of plain `QRectF`/`QSize`
+    values, unit-tested directly the same way test_recording.py tests
+    `_rect_to_screen_pixels` -- no `QApplication` widgets involved.
     """
 
-    HUD_SIZE = QSize(150, 44)
+    HUD_SIZE = QSize(220, 44)
+    SCREEN = QRectF(0, 0, 1000, 800)
 
-    def test_none_for_a_full_screen_recording(self):
-        # The recorded area *is* the desktop bounds for a full-screen
-        # recording, so there is never room outside it, by construction --
-        # this is what makes "not shown in a full-screen recording" true
-        # structurally, not by a separate check.
-        result = _place_recording_hud(None, QRectF(0, 0, 1000, 800), self.HUD_SIZE)
-        assert result is None
+    def test_sits_top_centre_of_the_screen(self):
+        rect = QRectF(100, 300, 200, 150)
 
-    def test_places_below_the_rect_when_there_is_room(self):
-        rect = QRectF(100, 100, 200, 150)
-        desktop_bounds = QRectF(0, 0, 1000, 800)
-
-        result = _place_recording_hud(rect, desktop_bounds, self.HUD_SIZE)
+        result = _place_recording_hud(rect, [self.SCREEN], self.HUD_SIZE)
 
         assert result is not None
-        assert result.width() == 150
-        assert result.height() == 44
+        assert result.top() == round(self.SCREEN.top() + 12.0)
+        assert result.left() == round(self.SCREEN.center().x() - 220 / 2)
+
+    def test_the_position_does_not_depend_on_where_the_region_is(self):
+        # The rule this replaced centred the pill on an edge of the
+        # *region*, so a region in the middle of the screen put the pill
+        # in the middle of the screen, with nothing tying its position to
+        # anywhere the user could predict.
+        first = _place_recording_hud(
+            QRectF(10, 500, 40, 40), [self.SCREEN], self.HUD_SIZE
+        )
+        second = _place_recording_hud(
+            QRectF(700, 200, 250, 300), [self.SCREEN], self.HUD_SIZE
+        )
+
+        assert first is not None
+        assert first == second
+
+    def test_a_full_screen_recording_still_gets_somewhere_to_arm_from(self):
+        # This returned None before, which made "no pill in a full-screen
+        # recording" true by construction. Arming needs a visible Start for
+        # a full-screen recording as much as any other, so that rule moved
+        # to `_start_recording_ui`, which takes the pill down at the moment
+        # recording actually begins.
+        result = _place_recording_hud(None, [self.SCREEN], self.HUD_SIZE)
+
+        assert result is not None
+        assert result.top() == round(self.SCREEN.top() + 12.0)
+
+    def test_moves_below_a_region_that_covers_the_top_of_the_screen(self):
+        rect = QRectF(0, 0, 1000, 200)
+
+        result = _place_recording_hud(rect, [self.SCREEN], self.HUD_SIZE)
+
+        assert result is not None
         assert result.top() == round(rect.bottom() + 12.0)
-        assert result.left() == round(rect.center().x() - 150 / 2)
 
-    def test_falls_back_to_above_when_there_is_no_room_below(self):
-        # Flush against the bottom of the desktop: no room below.
-        rect = QRectF(100, 700, 200, 90)
-        desktop_bounds = QRectF(0, 0, 1000, 800)
+    def test_never_overlaps_the_recorded_area(self):
+        # The pill sitting inside the recording is the one thing top-centre
+        # placement could newly get wrong, so it is checked across the
+        # shapes that reach for the fallback rather than just one.
+        for rect in (
+            QRectF(0, 0, 1000, 200),
+            QRectF(300, 0, 400, 100),
+            QRectF(0, 0, 600, 60),
+            QRectF(450, 30, 100, 500),
+            QRectF(100, 300, 200, 150),
+        ):
+            result = _place_recording_hud(rect, [self.SCREEN], self.HUD_SIZE)
+            assert result is not None, rect
+            assert not QRectF(result).intersects(rect), rect
 
-        result = _place_recording_hud(rect, desktop_bounds, self.HUD_SIZE)
-
-        assert result is not None
-        assert result.top() == round(rect.top() - 12.0 - 44)
-
-    def test_falls_back_to_the_right_when_there_is_no_room_above_or_below(self):
-        # Flush against both the top and bottom -- taller than the desktop
-        # minus a HUD-and-margin's worth of headroom on either side.
-        rect = QRectF(100, 0, 200, 800)
-        desktop_bounds = QRectF(0, 0, 1000, 800)
-
-        result = _place_recording_hud(rect, desktop_bounds, self.HUD_SIZE)
-
-        assert result is not None
-        assert result.left() == round(rect.right() + 12.0)
-
-    def test_none_when_no_candidate_fits_anywhere(self):
-        # The rect fills the entire desktop bounds: no room on any side.
+    def test_none_when_the_region_leaves_nowhere_to_put_it(self):
         rect = QRectF(0, 0, 1000, 800)
-        desktop_bounds = QRectF(0, 0, 1000, 800)
 
-        result = _place_recording_hud(rect, desktop_bounds, self.HUD_SIZE)
+        assert _place_recording_hud(rect, [self.SCREEN], self.HUD_SIZE) is None
 
-        assert result is None
+    def test_none_without_any_monitor_geometry(self):
+        assert _place_recording_hud(QRectF(0, 0, 10, 10), [], self.HUD_SIZE) is None
 
-    def test_clamps_perpendicular_to_stay_inside_desktop_bounds(self):
-        # Centred under a rect flush against the left edge would otherwise
-        # push the HUD's left edge into negative x.
-        rect = QRectF(0, 300, 40, 40)
-        desktop_bounds = QRectF(0, 0, 1000, 800)
+    def test_uses_the_monitor_the_recording_is_actually_on(self):
+        # Including one at negative coordinates, the arrangement this
+        # project already tests against real multi-monitor hardware.
+        left_monitor = QRectF(-1920, 0, 1920, 1080)
+        rect = QRectF(-1500, 400, 300, 200)
 
-        result = _place_recording_hud(rect, desktop_bounds, self.HUD_SIZE)
+        result = _place_recording_hud(
+            rect, [self.SCREEN, left_monitor], self.HUD_SIZE
+        )
 
         assert result is not None
-        assert result.left() >= 0
-        assert desktop_bounds.contains(QRectF(result))
+        assert result.top() == round(left_monitor.top() + 12.0)
+        assert result.left() == round(left_monitor.center().x() - 220 / 2)
+
+    def test_falls_back_to_the_union_for_a_region_between_two_monitors(self):
+        # A centre landing in the gap between two non-adjacent monitors
+        # belongs to neither; the union is the only rect that contains it.
+        right_monitor = QRectF(1200, 0, 1000, 800)
+        rect = QRectF(1000, 100, 200, 200)
+
+        result = _place_recording_hud(
+            rect, [self.SCREEN, right_monitor], self.HUD_SIZE
+        )
+
+        assert result is not None
+        union = self.SCREEN.united(right_monitor)
+        assert result.left() == round(union.center().x() - 220 / 2)
 
 
 class FakeRecordingBackend(RecordingBackend):
@@ -1408,11 +1457,30 @@ class FakeRecordingBackend(RecordingBackend):
         self.start_calls.append((rect, path))
         if self._start_error is not None:
             raise self._start_error
+        # Honours the path it was handed, as WindowsRecorderBackend does;
+        # GNOME's renaming is exercised in test_recording.py instead.
+        return path
 
     def stop(self):
         self.stop_calls.append(True)
         if self._stop_error is not None:
             raise self._stop_error
+
+
+def _record(controller, rect, delay="Off", after=None):
+    """Arm a recording and press Start, the way a user does.
+
+    Committing a selection only *arms* a recording (the pill's "Start
+    recording" state); these tests are about what happens once one is
+    genuinely running, so they go through both halves. The tests that are
+    specifically about the gap between the two call the two methods
+    directly instead.
+    """
+    if after is None:
+        controller._on_recording_requested(rect, delay)
+    else:
+        controller._on_recording_requested(rect, delay, after)
+    controller._begin_armed_recording()
 
 
 class TestAppControllerRecording:
@@ -1423,7 +1491,9 @@ class TestAppControllerRecording:
     `TestCommitToRecord`.
     """
 
-    def test_an_off_delay_starts_recording_synchronously(self, make_controller):
+    def test_committing_arms_and_the_start_press_begins_an_off_delay_recording(
+        self, make_controller
+    ):
         backend = FakeRecordingBackend()
         registry = RecorderRegistry([backend])
         controller = make_controller(
@@ -1434,6 +1504,16 @@ class TestAppControllerRecording:
         rect = QRectF(10, 20, 300, 200)
 
         controller._on_recording_requested(rect, "Off")
+
+        # Committing a selection only arms: nothing is recording yet, and
+        # the pill is offering to start. This gap is the whole point --
+        # there used to be no moment between choosing and recording, so
+        # every recording opened with the user getting ready.
+        assert backend.start_calls == []
+        assert controller._armed_recording is not None
+        assert controller._recording_hud.state() == app.RecordingHud.ARMED
+
+        controller._begin_armed_recording()
 
         assert len(backend.start_calls) == 1
         started_rect, path = backend.start_calls[0]
@@ -1448,7 +1528,9 @@ class TestAppControllerRecording:
             app.design.tokens.RECORD_AFTER_DEFAULT,
         )
 
-    def test_a_non_off_delay_defers_the_start(self, make_controller):
+    def test_a_non_off_delay_counts_down_on_the_pill_before_starting(
+        self, make_controller
+    ):
         backend = FakeRecordingBackend()
         registry = RecorderRegistry([backend])
         controller = make_controller(
@@ -1459,16 +1541,26 @@ class TestAppControllerRecording:
 
         controller._on_recording_requested(QRectF(0, 0, 100, 100), "3s")
 
+        # Armed, but not counting: the countdown belongs to Start, not to
+        # committing the selection.
         assert backend.start_calls == []
-        assert controller._recording_delay_timer is not None
-        assert controller._recording_delay_timer.isSingleShot()
+        assert controller._countdown_timer is None
+
+        controller._begin_armed_recording()
+
+        assert backend.start_calls == []
+        assert controller._countdown_timer is not None
+        assert controller._recording_hud.state() == app.RecordingHud.COUNTING
 
         # Mirrors test_overlay.py's own `overlay._delay_timer.timeout.emit()`
         # convention for SNX-50's delayed capture -- firing the signal
         # directly rather than waiting out 3 real seconds.
-        controller._recording_delay_timer.timeout.emit()
+        timer = controller._countdown_timer
+        for _ in range(3):
+            timer.timeout.emit()
 
         assert len(backend.start_calls) == 1
+        assert controller._recording_hud.state() == app.RecordingHud.RECORDING
 
     def test_a_recording_error_is_reported_through_the_tray(
         self, make_controller, monkeypatch
@@ -1488,7 +1580,7 @@ class TestAppControllerRecording:
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
         )
 
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
 
         assert len(calls) == 1
         assert "boom" in calls[0][1]
@@ -1508,7 +1600,7 @@ class TestAppControllerRecording:
             recorder_registry=registry,
         )
 
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
 
         assert "boom" in capsys.readouterr().out
 
@@ -1521,7 +1613,7 @@ class TestAppControllerRecording:
             recorder_registry=registry,
         )
 
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
 
         # The path handed to `backend.start` is the placeholder tempfile
         # `_on_recording_requested` creates before calling it -- a start
@@ -1531,7 +1623,7 @@ class TestAppControllerRecording:
         _, path = backend.start_calls[0]
         assert not Path(path).exists()
 
-    def test_a_second_commit_to_record_while_a_delay_is_pending_is_refused(
+    def test_a_second_commit_to_record_while_one_is_counting_down_is_refused(
         self, make_controller, monkeypatch
     ):
         monkeypatch.setattr(
@@ -1550,21 +1642,23 @@ class TestAppControllerRecording:
         )
 
         controller._on_recording_requested(QRectF(0, 0, 100, 100), "3s")
-        first_timer = controller._recording_delay_timer
-        controller._on_recording_requested(QRectF(0, 0, 50, 50), "Off")
+        controller._begin_armed_recording()
+        first_timer = controller._countdown_timer
+        _record(controller, QRectF(0, 0, 50, 50), "Off")
 
         # The second request must not have clobbered the first countdown,
         # nor started a recording of its own.
-        assert controller._recording_delay_timer is first_timer
+        assert controller._countdown_timer is first_timer
         assert backend.start_calls == []
         assert len(calls) == 1
 
-        first_timer.timeout.emit()
+        for _ in range(3):
+            first_timer.timeout.emit()
 
         assert len(backend.start_calls) == 1
         assert backend.start_calls[0][0] == QRectF(0, 0, 100, 100)
-        # The guard released once the pending countdown actually fired.
-        assert controller._recording_delay_timer is None
+        # The guard released once the countdown actually fired.
+        assert controller._countdown_timer is None
 
     def test_a_second_commit_to_record_while_one_is_active_is_refused(
         self, make_controller, monkeypatch
@@ -1584,13 +1678,153 @@ class TestAppControllerRecording:
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
         )
 
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
         active = controller._active_recording
-        controller._on_recording_requested(QRectF(0, 0, 50, 50), "Off")
+        _record(controller, QRectF(0, 0, 50, 50), "Off")
 
         assert len(backend.start_calls) == 1
         assert controller._active_recording is active
         assert len(calls) == 1
+
+
+class TestAppControllerArmingARecording:
+    """The gap between "I have chosen what to record" and "it is
+    recording", which did not exist before: committing a selection started
+    a backend on the spot, so the opening seconds of every recording were
+    of the user getting ready.
+    """
+
+    def _controller(self, make_controller, monkeypatch, geometries=None):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=geometries or [QRectF(0, 0, 800, 600)],
+        )
+        return controller, backend
+
+    def test_the_pill_offers_to_start_and_names_the_action(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._controller(make_controller, monkeypatch)
+
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "Off")
+
+        assert backend.start_calls == []
+        assert controller._recording_hud is not None
+        assert controller._recording_hud.state() == app.RecordingHud.ARMED
+        # Legible without being told: the label says what a click does.
+        assert "Start" in controller._recording_hud._label.text()
+
+    def test_clicking_the_pill_starts_an_armed_recording(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "Off")
+
+        controller._on_hud_activated()
+
+        assert len(backend.start_calls) == 1
+        assert controller._recording_hud.state() == app.RecordingHud.RECORDING
+        assert "Stop" in controller._recording_hud._label.text()
+
+    def test_the_capture_hotkey_starts_an_armed_recording(
+        self, make_controller, monkeypatch
+    ):
+        # The pill and the hotkey always do the same thing, so a machine
+        # with nowhere to put a pill still has a way in.
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "Off")
+
+        controller.start_capture()
+
+        assert len(backend.start_calls) == 1
+        assert controller._overlay is None
+
+    def test_the_countdown_pill_counts_down_and_names_the_action(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "3s")
+
+        controller._begin_armed_recording()
+
+        assert controller._recording_hud.state() == app.RecordingHud.COUNTING
+        assert "3" in controller._recording_hud._label.text()
+        assert "Cancel" in controller._recording_hud._label.text()
+
+        controller._countdown_timer.timeout.emit()
+
+        assert "2" in controller._recording_hud._label.text()
+
+    def test_clicking_during_the_countdown_cancels_without_recording(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "3s")
+        controller._begin_armed_recording()
+        _rect, _delay, _after, path = controller._armed_recording
+
+        controller._on_hud_activated()
+
+        assert backend.start_calls == []
+        assert controller._armed_recording is None
+        assert controller._countdown_timer is None
+        assert controller._recording_hud is None
+        # The reserved temp file goes with it -- the next crash sweep
+        # could not tell an abandoned reservation from a recording that
+        # was genuinely cut short.
+        assert not Path(path).exists()
+
+    def test_the_hotkey_cancels_during_the_countdown(self, make_controller, monkeypatch):
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "3s")
+        controller._begin_armed_recording()
+
+        controller.start_capture()
+
+        assert backend.start_calls == []
+        assert controller._armed_recording is None
+        assert controller._overlay is None
+
+    def test_a_second_start_press_does_not_stack_a_second_countdown(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "3s")
+        controller._begin_armed_recording()
+        first_timer = controller._countdown_timer
+
+        controller._begin_armed_recording()
+
+        # A second timer would strand the first, still counting towards a
+        # recording nothing holds a handle to.
+        assert controller._countdown_timer is first_timer
+
+    def test_a_full_screen_recording_shows_the_pill_to_arm_then_hides_it(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._controller(make_controller, monkeypatch)
+
+        controller._on_recording_requested(None, "Off")
+
+        # Nothing is being captured yet, so a Start control is safe here --
+        # and without one there would be no way to begin a full-screen
+        # recording at all.
+        assert controller._recording_hud is not None
+        assert controller._recording_hud.state() == app.RecordingHud.ARMED
+
+        controller._begin_armed_recording()
+
+        # The moment it could film itself, it goes; the tray tooltip
+        # carries elapsed time from here, as it always did for this case.
+        assert len(backend.start_calls) == 1
+        assert controller._recording_hud is None
+        assert controller._tray_icon.toolTip() == "0:00"
 
 
 class TestAppControllerRecordingHud:
@@ -1613,7 +1847,7 @@ class TestAppControllerRecordingHud:
             recorder_registry=registry,
             monitor_geometries=monitor_geometries,
         )
-        controller._on_recording_requested(rect, "Off")
+        _record(controller, rect, "Off")
         return controller, backend
 
     def test_capture_hotkey_stops_an_active_recording_instead_of_starting_a_second_one(
@@ -1688,7 +1922,7 @@ class TestAppControllerRecordingHud:
             recorder_registry=registry,
             monitor_geometries=[QRectF(0, 0, 800, 600)],
         )
-        controller._on_recording_requested(QRectF(50, 50, 200, 150), "Off")
+        _record(controller, QRectF(50, 50, 200, 150), "Off")
 
         controller.start_capture()
 
@@ -1740,16 +1974,19 @@ class TestAppControllerRecordingHud:
         clock = iter([100.0, 100.0, 165.0])
         monkeypatch.setattr(app.time, "monotonic", lambda: next(clock))
 
-        controller._on_recording_requested(QRectF(50, 50, 200, 150), "Off")
+        _record(controller, QRectF(50, 50, 200, 150), "Off")
 
         assert controller._tray_icon.toolTip() == "0:00"
         assert controller._recording_hud is not None
-        assert controller._recording_hud._label.text() == "0:00"
+        # The pill names the action, not just the time -- clicking it
+        # stops the recording, and nothing used to say so.
+        assert controller._recording_hud._label.text() == "Stop  ·  0:00"
+        assert controller._recording_hud.state() == app.RecordingHud.RECORDING
 
         controller._on_recording_tick()
 
         assert controller._tray_icon.toolTip() == "1:05"
-        assert controller._recording_hud._label.text() == "1:05"
+        assert controller._recording_hud._label.text() == "Stop  ·  1:05"
 
     def test_no_hud_for_a_full_screen_recording(self, make_controller, monkeypatch):
         controller, _backend = self._start_a_recording(
@@ -1796,7 +2033,7 @@ class TestAppControllerRecordingHud:
         clock = iter([100.0, 100.0])
         monkeypatch.setattr(app.time, "monotonic", lambda: next(clock))
 
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
 
         assert controller._recording_hud is None
         assert "0:00" in capsys.readouterr().out
@@ -1851,7 +2088,7 @@ class TestAppControllerRecordingHud:
             recorder_registry=registry,
             monitor_geometries=[QRectF(0, 0, 800, 600)],
         )
-        controller._on_recording_requested(QRectF(50, 50, 200, 150), "Off")
+        _record(controller, QRectF(50, 50, 200, 150), "Off")
         calls = []
         monkeypatch.setattr(
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
@@ -1919,7 +2156,7 @@ class TestAppControllerRecorderUnavailable:
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
         )
         try:
-            controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+            _record(controller, QRectF(0, 0, 100, 100), "Off")
 
             assert len(calls) == 1
             assert "macOS" in calls[0][1]
@@ -1949,7 +2186,7 @@ class TestAppControllerLandingRecording:
             recorder_registry=registry,
             monitor_geometries=[QRectF(0, 0, 800, 600)],
         )
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off", after)
+        _record(controller, QRectF(0, 0, 100, 100), "Off", after)
         return controller, backend
 
     def test_stopping_moves_the_temp_file_into_the_save_folder(
@@ -2062,7 +2299,7 @@ class TestAppControllerDiscardRecording:
             recorder_registry=registry,
             monitor_geometries=[QRectF(0, 0, 800, 600)],
         )
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
         return controller, backend
 
     def test_discard_action_is_enabled_while_recording_and_disabled_after(
@@ -2157,7 +2394,7 @@ class TestAppControllerRecordingTempFileCleanup:
             recorder_registry=registry,
         )
 
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
 
         _rect, path = backend.start_calls[0]
         assert Path(path).parent == app._recording_temp_dir()
@@ -2197,7 +2434,7 @@ class TestAppControllerRecordingDiskSpace:
         # still shows 0:00 somewhere) -- the low-disk check piggybacks on
         # that same tick, so low free space is caught on this very first
         # one, with no separate explicit tick needed.
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
 
         assert backend.stop_calls == [True]
         assert controller._active_recording is None
@@ -2229,7 +2466,7 @@ class TestAppControllerRecordingDiskSpace:
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
         )
 
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
 
         assert len(calls) == 1
         landed = next(tmp_path.iterdir())
@@ -2264,7 +2501,7 @@ class TestAppControllerRecordingDiskSpace:
             disk_usage=_disk_usage,
         )
 
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
 
         _rect, path = backend.start_calls[0]
         assert queried == [str(Path(path).parent)]
@@ -2285,7 +2522,7 @@ class TestAppControllerRecordingDiskSpace:
             monitor_geometries=[QRectF(0, 0, 800, 600)],
             disk_usage=self._disk_usage_reporting(10 * 1024 * 1024 * 1024),
         )
-        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "Off")
 
         controller._on_recording_tick()
 

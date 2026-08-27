@@ -14,11 +14,12 @@ Windows's, registered behind `build_windows_registry()` the same way
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from abc import ABC, abstractmethod
 
-from jeepney import DBusAddress, new_method_call
+from jeepney import DBusAddress, MessageType, new_method_call
 from jeepney.io.blocking import open_dbus_connection
 
 from PyQt6.QtCore import (
@@ -69,9 +70,16 @@ class RecordingBackend(ABC):
         return None
 
     @abstractmethod
-    def start(self, rect: QRectF | None, path: str) -> None:
+    def start(self, rect: QRectF | None, path: str) -> str:
         """Begin recording to `path`: `rect` (absolute logical coordinates)
-        if given, or the whole virtual desktop when `rect` is None."""
+        if given, or the whole virtual desktop when `rect` is None.
+
+        Returns the path actually written, which is not always `path`: on
+        GNOME, Shell picks the container and renames to suit it, so `path`
+        is a request and the return value is the answer. Callers must keep
+        what comes back -- it is the only file that will exist when
+        `stop()` returns.
+        """
 
     @abstractmethod
     def stop(self) -> None:
@@ -165,15 +173,18 @@ class RecorderRegistry:
         """
         return [(b.name(), b.unavailable_reason()) for b in self._backends if not b.is_available()]
 
-    def start(self, rect: QRectF | None, path: str) -> RecordingBackend:
+    def start(self, rect: QRectF | None, path: str) -> tuple[RecordingBackend, str]:
         """Try available backends in order; return the first that starts
         recording `rect` (or the whole virtual desktop, when `rect` is
         None) to `path` successfully.
 
         Unlike `BackendRegistry.capture()`, which hands back the value a
-        backend produced, this hands back *which backend* started --
-        recording is stateful, so the caller needs to hold onto it to call
-        `.stop()` later. A backend raising in `start()` does not stop the
+        backend produced, this hands back *which backend* started, paired
+        with the path it is actually writing -- recording is stateful, so
+        the caller needs the backend to call `.stop()` later, and the path
+        because a backend may not have honoured the one it was given (see
+        `RecordingBackend.start()`). Returning them together makes the
+        second impossible to forget. A backend raising in `start()` does not stop the
         next one from being tried. If every available backend fails, raises
         `RecordingError` carrying all collected failures. Always passes
         `unavailable=self.unavailable()` too, so a caller catching
@@ -184,8 +195,7 @@ class RecorderRegistry:
         failures: list[tuple[str, Exception]] = []
         for backend in self.available():
             try:
-                backend.start(rect, path)
-                return backend
+                return backend, backend.start(rect, path)
             except Exception as exc:  # noqa: BLE001 - collected, not swallowed
                 failures.append((backend.name(), exc))
         raise RecordingError(failures, unavailable=self.unavailable())
@@ -193,18 +203,55 @@ class RecorderRegistry:
 
 class GnomeScreencastBackend(RecordingBackend):
     """`org.gnome.Shell.Screencast`, following `GnomeShellHelperBackend` in
-    capture.py: manual D-Bus calls over jeepney, no wrapper library, same
-    object path (`/org/gnome/Shell`) but a different interface living at
-    it. Records a region straight to a file and works on GNOME under both
-    X11 and Wayland -- the primary route, since it's the only one that
-    answers "how do you record on Wayland at all"
-    (docs/design/recording.md).
+    capture.py: manual D-Bus calls over jeepney, no wrapper library.
+    Records a region straight to a file and works on GNOME under both X11
+    and Wayland -- the primary route, since it's the only one that answers
+    "how do you record on Wayland at all" (docs/design/recording.md).
+
+    Three facts about Shell's own behaviour drive the shape of this class.
+    All three were measured against a live GNOME Shell 46 session; every
+    one of them contradicts what this file previously assumed, and each
+    alone was enough to stop a recording from ever working:
+
+    * **The recording dies with the D-Bus connection that started it.**
+      Shell keys the in-progress screencast to the calling connection, so
+      closing it once `ScreencastArea` returns leaves a truncated,
+      duration-less file (measured: frozen at 4029 bytes, `duration=N/A`)
+      and makes a later `StopScreencast()` from a fresh connection answer
+      `False`. `_connection` is therefore opened by `start()` and held
+      until `stop()`. Do not "tidy" this back into the open-call-close
+      shape `GnomeShellHelperBackend.capture()` uses: that shape is right
+      for a one-shot call and fatal for a stateful one.
+
+    * **Shell chooses the container, and so the file extension.** It
+      appends `.webm` to any path not already ending that way, so the file
+      that appears is not the file that was asked for. `start()` returns
+      the `filename_used` Shell reports instead of rejecting it.
+
+    * **The interface moved.** GNOME 41 split Screencast out of the main
+      shell object into a service of its own; Shell 46 answers only at the
+      new address and returns "No such interface" at the old one.
     """
 
-    _BUS_NAME = "org.gnome.Shell"
-    _OBJECT_PATH = "/org/gnome/Shell"
+    # (bus name, object path), current layout first, legacy second -- see
+    # the class docstring. Tried in order rather than either being assumed,
+    # the same collect-and-report habit CLAUDE.md asks of capture backends.
+    _ADDRESSES = (
+        ("org.gnome.Shell.Screencast", "/org/gnome/Shell/Screencast"),
+        ("org.gnome.Shell", "/org/gnome/Shell"),
+    )
     _INTERFACE = "org.gnome.Shell.Screencast"
     _PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
+
+    def __init__(self):
+        # The live recording's lifeline, held from start() to stop() -- see
+        # the class docstring for why closing it early truncates the file.
+        self._connection = None
+        # Which of `_ADDRESSES` answered, remembered by the availability
+        # probe so start()/stop() address the same object without probing
+        # again -- and so both halves of one recording are guaranteed to
+        # talk to the same one.
+        self._address = None
 
     def name(self) -> str:
         return "gnome-screencast"
@@ -216,41 +263,84 @@ class GnomeScreencastBackend(RecordingBackend):
         result = self._screencast_supported()
         return None if result is True else result
 
+    @staticmethod
+    def _reply_error(reply) -> str | None:
+        """The D-Bus error text carried by `reply`, or None if `reply` is
+        not an error.
+
+        jeepney's blocking API *returns* an error message rather than
+        raising it, and an error body is a bare `(message,)` -- the same
+        arity a `Properties.Get` reply has. Unpacking one as the other is
+        how "No such interface" surfaced as `ValueError: too many values
+        to unpack (expected 2)`, discarding the one sentence that said
+        what was actually wrong.
+        """
+        if getattr(reply.header, "message_type", None) is not MessageType.error:
+            return None
+        body = getattr(reply, "body", None) or ()
+        return str(body[0]) if body else "unspecified D-Bus error"
+
+    def _address_or_default(self) -> tuple[str, str]:
+        """The address the availability probe settled on, or the current
+        layout if nothing has probed yet.
+
+        `start()` deliberately does not probe on its own: a probe costs a
+        `Properties.Get` round trip, and `RecorderRegistry.start()` has
+        always called `available()` (and so `is_available()`) immediately
+        beforehand, which is what fills `_address` in.
+        """
+        return self._address or self._ADDRESSES[0]
+
     def _screencast_supported(self) -> bool | str:
-        """True if `ScreencastSupported` is set, otherwise a reason string.
+        """True if `ScreencastSupported` is set at one of `_ADDRESSES`,
+        otherwise a reason string naming what each address answered.
 
         Unlike `GnomeShellHelperBackend.is_available()`'s cheap
-        `XDG_SESSION_TYPE` guess, this makes a real
-        `org.freedesktop.DBus.Properties.Get` round trip on every call --
-        a Wayland-but-not-GNOME session would sail past a session-type gate
-        and only fail once `start()` was already attempted, and this
-        ticket's acceptance criterion is specifically about
+        `XDG_SESSION_TYPE` guess, this makes real `Properties.Get` round
+        trips -- a Wayland-but-not-GNOME session would sail past a
+        session-type gate and only fail once `start()` was already
+        attempted, and the acceptance criterion is specifically about
         `org.gnome.Shell.Screencast`'s own availability, not the session
-        type. `RecorderRegistry.start()` calls `available()` (and so this)
-        once per attempt, not in a hot loop, so the round trip is worth
-        paying for a real answer instead of a guess -- do not "fix" this
-        back to an env-var check.
+        type. `RecorderRegistry.start()` calls this once per attempt, not
+        in a hot loop, so the round trip is worth paying for a real answer
+        instead of a guess -- do not "fix" this back to an env-var check.
 
         Folds "why not" into the return value rather than a bare bool
-        because a `Properties.Get` failure has several distinct shapes
-        (connection refused, no such interface, no such property, a
-        malformed reply) worth naming individually rather than collapsing
-        into one generic message.
+        because a failure has several distinct shapes (connection refused,
+        no such interface, no such property, a malformed reply) worth
+        naming individually rather than collapsing into one message.
         """
         try:
             connection = open_dbus_connection(bus="SESSION")
-            try:
-                properties = DBusAddress(
-                    self._OBJECT_PATH,
-                    bus_name=self._BUS_NAME,
-                    interface=self._PROPERTIES_INTERFACE,
-                )
-                message = new_method_call(
-                    properties, "Get", "ss", (self._INTERFACE, "ScreencastSupported")
-                )
-                reply = connection.send_and_get_reply(message)
-            finally:
-                connection.close()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            return f"{type(exc).__name__}: {exc}"
+        reasons = []
+        try:
+            for bus_name, object_path in self._ADDRESSES:
+                outcome = self._query_supported(connection, bus_name, object_path)
+                if outcome is True:
+                    self._address = (bus_name, object_path)
+                    return True
+                reasons.append(f"{object_path}: {outcome}")
+        finally:
+            connection.close()
+        return "; ".join(reasons)
+
+    def _query_supported(self, connection, bus_name: str, object_path: str) -> bool | str:
+        """Ask one address whether screencasting is supported."""
+        try:
+            properties = DBusAddress(
+                object_path,
+                bus_name=bus_name,
+                interface=self._PROPERTIES_INTERFACE,
+            )
+            message = new_method_call(
+                properties, "Get", "ss", (self._INTERFACE, "ScreencastSupported")
+            )
+            reply = connection.send_and_get_reply(message)
+            error = self._reply_error(reply)
+            if error is not None:
+                return error
             # A Properties.Get reply's body is a single variant, which
             # jeepney's low-level API represents as a (signature, value)
             # pair -- not a bare bool -- so this must unwrap one level
@@ -263,18 +353,23 @@ class GnomeScreencastBackend(RecordingBackend):
             return "org.gnome.Shell.Screencast reports ScreencastSupported=False"
         return True
 
-    def start(self, rect: QRectF | None, path: str) -> None:
-        """Begin recording to `path`: `rect` via `ScreencastArea`, or the
-        whole virtual desktop via bare `Screencast` when `rect` is None.
+    def start(self, rect: QRectF | None, path: str) -> str:
+        """Begin recording to `path` -- `rect` via `ScreencastArea`, or the
+        whole virtual desktop via bare `Screencast` when `rect` is None --
+        and return the path Shell reports it is actually writing.
 
-        `path` must be absolute. Older Shell versions are known to resolve
-        a non-absolute filename against their own videos directory instead
-        of the caller's working directory, and every downstream consumer
-        of this path (stat, move, clipboard reference) needs it to be the
-        exact file GNOME wrote -- so the filename each method hands back is
-        compared against `path` in `_finish_start()` rather than trusted
-        blindly, the same way `GnomeShellHelperBackend.capture()` reads its
-        reply's filename back rather than trusting its own input.
+        `path` is a request, not a guarantee: Shell picks the container and
+        renames accordingly (see the class docstring), so the return value
+        is the only path that will exist when `stop()` returns. It must be
+        absolute; older Shell versions resolve a relative filename against
+        their own videos directory rather than the caller's working
+        directory, and every downstream consumer (stat, move, clipboard
+        reference) needs a path it can find.
+
+        The connection opened here stays open -- it is what keeps the
+        recording alive -- and is closed by `stop()`, or immediately if
+        starting fails, so a failed start leaks neither a socket nor a
+        half-started server-side recording.
 
         `rect` is None specifically for "the whole screen", not a
         monitor-sized region: a monitor-sized rect isn't reliably
@@ -283,11 +378,22 @@ class GnomeScreencastBackend(RecordingBackend):
         of them, so callers that mean the whole virtual desktop must say so
         by omitting `rect` rather than by passing its dimensions.
         """
-        if rect is None:
-            reply = self._call_screencast(path)
-        else:
-            reply = self._call_screencast_area(rect, path)
-        self._finish_start(reply, path)
+        bus_name, object_path = self._address_or_default()
+        connection = open_dbus_connection(bus="SESSION")
+        try:
+            shell = DBusAddress(
+                object_path, bus_name=bus_name, interface=self._INTERFACE
+            )
+            if rect is None:
+                reply = self._call_screencast(connection, shell, path)
+            else:
+                reply = self._call_screencast_area(connection, shell, rect, path)
+            actual_path = self._finish_start(reply, path)
+        except Exception:
+            connection.close()
+            raise
+        self._connection = connection
+        return actual_path
 
     @staticmethod
     def _screencast_options() -> dict:
@@ -298,19 +404,19 @@ class GnomeScreencastBackend(RecordingBackend):
         effect on the next recording, not the next process restart.
 
         jeepney's low-level API wants each `a{sv}` entry as its own
-        `(dbus-signature, value)` pair, not a bare value -- `draw-cursor` is
-        `org.gnome.Shell.Screencast`'s boolean option for whether the
-        cursor is composited into the recording, `framerate` its integer
-        frames-per-second request. Both key spellings are GNOME Shell's
-        own; there is no live GNOME session in this environment to confirm
-        them against, so this is best-effort, per the ticket.
+        `(dbus-signature, value)` pair, not a bare value. `draw-cursor` is
+        Shell's boolean option for whether the cursor is composited into
+        the recording, `framerate` its integer frames-per-second request.
+        Both spellings are confirmed accepted by a live GNOME Shell 46
+        session, which recorded real-time video with them (5.05s of wall
+        clock producing a 5028ms file).
         """
         return {
             "draw-cursor": ("b", setup_desktop.load_recording_draw_cursor()),
             "framerate": ("i", setup_desktop.load_recording_frame_rate()),
         }
 
-    def _call_screencast_area(self, rect: QRectF, path: str):
+    def _call_screencast_area(self, connection, shell, rect: QRectF, path: str):
         """Issue `ScreencastArea(iiiisa{sv})` for `rect` and return the reply."""
         # Round left/top/right/bottom independently and take the
         # difference for width/height, not independently-rounded
@@ -321,79 +427,91 @@ class GnomeScreencastBackend(RecordingBackend):
         right = round(rect.left() + rect.width())
         bottom = round(rect.top() + rect.height())
 
-        connection = open_dbus_connection(bus="SESSION")
-        try:
-            shell = DBusAddress(
-                self._OBJECT_PATH, bus_name=self._BUS_NAME, interface=self._INTERFACE
-            )
-            message = new_method_call(
-                shell,
-                "ScreencastArea",
-                "iiiisa{sv}",
-                (
-                    left,
-                    top,
-                    right - left,
-                    bottom - top,
-                    path,
-                    self._screencast_options(),
-                ),
-            )
-            return connection.send_and_get_reply(message)
-        finally:
-            connection.close()
+        message = new_method_call(
+            shell,
+            "ScreencastArea",
+            "iiiisa{sv}",
+            (
+                left,
+                top,
+                right - left,
+                bottom - top,
+                path,
+                self._screencast_options(),
+            ),
+        )
+        return connection.send_and_get_reply(message)
 
-    def _call_screencast(self, path: str):
+    def _call_screencast(self, connection, shell, path: str):
         """Issue whole-desktop `Screencast(sa{sv})` and return the reply."""
-        connection = open_dbus_connection(bus="SESSION")
-        try:
-            shell = DBusAddress(
-                self._OBJECT_PATH, bus_name=self._BUS_NAME, interface=self._INTERFACE
-            )
-            message = new_method_call(
-                shell,
-                "Screencast",
-                "sa{sv}",
-                (
-                    path,
-                    self._screencast_options(),
-                ),
-            )
-            return connection.send_and_get_reply(message)
-        finally:
-            connection.close()
+        message = new_method_call(
+            shell,
+            "Screencast",
+            "sa{sv}",
+            (
+                path,
+                self._screencast_options(),
+            ),
+        )
+        return connection.send_and_get_reply(message)
 
-    def _finish_start(self, reply, path: str) -> None:
-        """Shared success/filename check for both `start()` D-Bus calls."""
+    @staticmethod
+    def _finish_start(reply, path: str) -> str:
+        """Shared success/filename handling for both `start()` calls;
+        returns the filename Shell says it is writing.
+
+        That filename is authoritative and routinely *not* `path` -- Shell
+        appends `.webm` to anything not already named that way. This check
+        used to reject any mismatch, which meant every real GNOME
+        recording failed here *after* Shell had already started one,
+        orphaning both the server-side recording and the file. A
+        non-absolute answer is still refused, for the reason `start()`
+        gives.
+        """
+        error = GnomeScreencastBackend._reply_error(reply)
+        if error is not None:
+            raise RuntimeError(f"gnome-screencast: {error}")
         success, filename = reply.body
         if not success:
             raise RuntimeError("gnome-screencast: recording start reported failure")
-        if filename != path:
+        if not filename or not os.path.isabs(str(filename)):
             raise RuntimeError(
-                f"gnome-screencast: recorded to {filename!r} instead of the "
-                f"requested {path!r}"
+                f"gnome-screencast: reported a non-absolute recording path "
+                f"{filename!r} for the requested {path!r}"
             )
+        return str(filename)
 
     def stop(self) -> None:
-        """End the recording via `StopScreencast()`.
+        """End the recording via `StopScreencast()`, on the very connection
+        `start()` opened.
 
-        Opens its own connection rather than reusing one held from
-        `start()` -- GNOME Shell tracks the in-progress recording
-        server-side, keyed to the caller's D-Bus unique name, not to any
-        handle this process holds, so there's nothing to keep open between
-        the two calls. Same open-call-close shape as
-        `GnomeShellHelperBackend.capture()`.
+        Reusing that connection is load-bearing, not tidiness: Shell keys
+        the in-progress recording to the calling connection, and a
+        `StopScreencast()` from any other one answers `False` while leaving
+        the real recording running (measured on Shell 46). The connection
+        is closed here whatever happens, since the recording is over either
+        way and a held-open socket would otherwise outlive it.
         """
-        connection = open_dbus_connection(bus="SESSION")
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError(
+                "gnome-screencast: stop() called with no recording in progress"
+            )
+        bus_name, object_path = self._address_or_default()
         try:
             shell = DBusAddress(
-                self._OBJECT_PATH, bus_name=self._BUS_NAME, interface=self._INTERFACE
+                object_path, bus_name=bus_name, interface=self._INTERFACE
             )
-            message = new_method_call(shell, "StopScreencast")
-            reply = connection.send_and_get_reply(message)
+            reply = connection.send_and_get_reply(
+                new_method_call(shell, "StopScreencast")
+            )
         finally:
             connection.close()
+            self._connection = None
 
+        error = self._reply_error(reply)
+        if error is not None:
+            raise RuntimeError(f"gnome-screencast: StopScreencast() failed: {error}")
         (success,) = reply.body
         if not success:
             raise RuntimeError("gnome-screencast: StopScreencast() reported failure")
@@ -782,11 +900,15 @@ class WindowsRecorderBackend(RecordingBackend):
 
         recorder.errorChanged.connect(_on_recorder_error_changed)
 
-    def start(self, rect: QRectF | None, path: str) -> None:
+    def start(self, rect: QRectF | None, path: str) -> str:
+        """Returns `path` unchanged: unlike GNOME, `QMediaRecorder` writes
+        exactly the file it is handed, so there is nothing to correct.
+        """
         if rect is None:
             self._start_full_screen(path)
         else:
             self._start_region(rect, path)
+        return path
 
     def _start_full_screen(self, path: str) -> None:
         session = self._capture_session_factory()

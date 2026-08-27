@@ -4,7 +4,17 @@ from unittest.mock import Mock
 
 import pytest
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt
-from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QImage, QPainter, QPainterPath, qRgb
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QGuiApplication,
+    QIcon,
+    QImage,
+    QPainter,
+    QPainterPath,
+    qRgb,
+)
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
     QApplication,
@@ -80,7 +90,33 @@ from snipux.overlay import (
 BASE_COLOR = qRgb(10, 20, 30)
 
 
+def pixel(image, x, y=None):
+    """Sample `image` at a *logical* point.
+
+    `QWidget.grab()` hands back a pixmap at the display's device pixel
+    ratio, so on a fractionally-scaled display a logical point is not an
+    image index: at 1.5x, logical (100, 100) is image pixel (150, 150).
+    Every pixel assertion in this file is written in the logical
+    coordinates the painting code itself works in, and reading them
+    straight off the grabbed image is what pinned the whole file to a
+    scale factor of 1.0 -- 26 tests here failed under QT_SCALE_FACTOR=1.5
+    while the painting they check was provably correct.
+
+    Safe on a plain `QImage` too, which reports a ratio of 1.0 and so
+    passes the coordinates through untouched. That is why the handful of
+    reads against source frames (`frame.image`, `frame.crop(...).image`)
+    are left indexing directly: they are never grabbed, so there is
+    nothing to convert.
+    """
+    ratio = image.devicePixelRatio()
+    if y is None:  # the QPoint overload this file also uses
+        return image.pixelColor(round(x.x() * ratio), round(x.y() * ratio))
+    return image.pixelColor(round(x * ratio), round(y * ratio))
+
+
 @pytest.fixture(scope="module", autouse=True)
+
+
 def qapp():
     # PyQt6 needs a live QApplication to construct any QWidget, even
     # offscreen. Module-scoped so every test in this file shares one.
@@ -165,8 +201,8 @@ class TestVeil:
         rendered = overlay.grab().toImage()
         base_color = QColor(10, 20, 30)
 
-        assert rendered.pixelColor(70, 70) == base_color
-        outside = rendered.pixelColor(10, 10)
+        assert pixel(rendered, 70, 70) == base_color
+        outside = pixel(rendered, 10, 10)
         assert outside != base_color
         assert outside.red() < base_color.red()
 
@@ -178,7 +214,7 @@ class TestVeil:
         base_color = QColor(10, 20, 30)
 
         for x, y in [(10, 10), (100, 100), (190, 190)]:
-            assert rendered.pixelColor(x, y) != base_color
+            assert pixel(rendered, x, y) != base_color
 
     def test_selection_spanning_two_monitors_dims_each_correctly(self):
         image = QImage(400, 200, QImage.Format.Format_RGB32)
@@ -197,12 +233,12 @@ class TestVeil:
         base_color = QColor(10, 20, 30)
 
         left_image = overlays[0].grab().toImage()
-        assert left_image.pixelColor(170, 70) == base_color  # inside, on the left
-        assert left_image.pixelColor(10, 10) != base_color  # outside
+        assert pixel(left_image, 170, 70) == base_color  # inside, on the left
+        assert pixel(left_image, 10, 10) != base_color  # outside
 
         right_image = overlays[1].grab().toImage()
-        assert right_image.pixelColor(20, 100) == base_color  # inside, on the right
-        assert right_image.pixelColor(190, 190) != base_color  # outside
+        assert pixel(right_image, 20, 100) == base_color  # inside, on the right
+        assert pixel(right_image, 190, 190) != base_color  # outside
 
 
 class TestSizeReadout:
@@ -243,7 +279,7 @@ class TestMagnifier:
             QSizeF(Overlay.MAGNIFIER_BOX_SIZE, Overlay.MAGNIFIER_BOX_SIZE),
         )
         center = box_rect.center()
-        sampled = rendered.pixelColor(round(center.x()), round(center.y()))
+        sampled = pixel(rendered, round(center.x()), round(center.y()))
 
         assert sampled == Overlay.CROSSHAIR_COLOR
 
@@ -273,7 +309,7 @@ class TestMagnifier:
         # crosshair line itself (covered by the crosshair test above),
         # while staying inside the magnified marker region.
         sample_point = box_rect.center() + QPointF(15, 15)
-        sampled = rendered.pixelColor(round(sample_point.x()), round(sample_point.y()))
+        sampled = pixel(rendered, round(sample_point.x()), round(sample_point.y()))
 
         assert sampled == marker_color
 
@@ -301,7 +337,7 @@ class TestMagnifier:
         )
         center = box_rect.center()
         assert QRectF(overlay.rect()).contains(center)
-        sampled = rendered.pixelColor(round(center.x()), round(center.y()))
+        sampled = pixel(rendered, round(center.x()), round(center.y()))
 
         assert sampled == Overlay.CROSSHAIR_COLOR
 
@@ -447,9 +483,9 @@ class TestFreeformMode:
 
         rendered = overlay.grab().toImage()
         base_color = QColor(10, 20, 30)
-        assert rendered.pixelColor(30, 30) == base_color  # inside the stem
-        assert rendered.pixelColor(80, 100) == base_color  # inside the foot
-        assert rendered.pixelColor(80, 40) != base_color  # in the notch: dimmed
+        assert pixel(rendered, 30, 30) == base_color  # inside the stem
+        assert pixel(rendered, 80, 100) == base_color  # inside the foot
+        assert pixel(rendered, 80, 40) != base_color  # in the notch: dimmed
 
     def test_veil_follows_the_path_live_mid_drag(self):
         frame = make_frame()
@@ -466,8 +502,8 @@ class TestFreeformMode:
 
         rendered = overlay.grab().toImage()
         base_color = QColor(10, 20, 30)
-        assert rendered.pixelColor(30, 30) == base_color  # inside the traced shape
-        assert rendered.pixelColor(25, 75) != base_color  # in the bbox, outside it: dimmed
+        assert pixel(rendered, 30, 30) == base_color  # inside the traced shape
+        assert pixel(rendered, 25, 75) != base_color  # in the bbox, outside it: dimmed
 
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=self._NOTCH_CORNER)
 
@@ -809,7 +845,7 @@ class TestFullScreenMode:
             # unrelated to what this test is checking — that the veil
             # itself has no dimmed hole anywhere.
             for x, y in [(10, 190), (100, 100), (190, 190)]:
-                assert rendered.pixelColor(x, y) == base_color
+                assert pixel(rendered, x, y) == base_color
 
 
 class TestOverlayWindow:
@@ -837,7 +873,7 @@ class TestOverlayWindow:
 
         rendered = overlay.grab().toImage()
 
-        assert rendered.pixelColor(70, 70) == QColor(10, 20, 30)
+        assert pixel(rendered, 70, 70) == QColor(10, 20, 30)
 
     def test_selection_is_undimmed_at_1_to_1(self):
         # image_size == logical_size (no scaling), so the undimmed hole
@@ -854,7 +890,7 @@ class TestOverlayWindow:
         rendered = overlay.grab().toImage()
 
         for x, y in [(60, 60), (75, 75), (90, 90)]:
-            assert rendered.pixelColor(x, y) == QColor(10, 20, 30)
+            assert pixel(rendered, x, y) == QColor(10, 20, 30)
 
     def test_scrim_outside_selection_uses_the_dim_token_colour_and_alpha(self):
         frame = make_frame()
@@ -863,7 +899,7 @@ class TestOverlayWindow:
 
         rendered = overlay.grab().toImage()
         expected = _blend(QColor(10, 20, 30), design_color("DIM"))
-        sampled = rendered.pixelColor(10, 10)
+        sampled = pixel(rendered, 10, 10)
 
         # Small tolerance for Qt's own (premultiplied-alpha) rounding vs.
         # the plain-float blend computed in _blend above.
@@ -890,9 +926,9 @@ class TestOverlayWindow:
         rendered = overlay.grab().toImage()
         base_color = QColor(10, 20, 30)
 
-        assert rendered.pixelColor(30, 30) == base_color  # inside the stem
-        assert rendered.pixelColor(80, 100) == base_color  # inside the foot
-        assert rendered.pixelColor(80, 40) != base_color  # in the notch: dimmed
+        assert pixel(rendered, 30, 30) == base_color  # inside the stem
+        assert pixel(rendered, 80, 100) == base_color  # inside the foot
+        assert pixel(rendered, 80, 40) != base_color  # in the notch: dimmed
 
     def test_no_selection_dims_the_whole_window(self):
         frame = make_frame()
@@ -902,7 +938,7 @@ class TestOverlayWindow:
         base_color = QColor(10, 20, 30)
 
         for x, y in [(10, 10), (100, 100), (190, 190)]:
-            assert rendered.pixelColor(x, y) != base_color
+            assert pixel(rendered, x, y) != base_color
 
     def test_selection_is_held_in_window_not_absolute_coordinates(self):
         # logical_origin != (0, 0) simulates a monitor away from the
@@ -918,7 +954,7 @@ class TestOverlayWindow:
 
         rendered = overlay.grab().toImage()
 
-        assert rendered.pixelColor(10, 10) == QColor(10, 20, 30)
+        assert pixel(rendered, 10, 10) == QColor(10, 20, 30)
 
     def test_scrim_is_painted_by_the_widget_itself_not_a_child_widget(self):
         # Per the spec: a translucent child stacked over the *whole window*
@@ -986,7 +1022,7 @@ class TestOverlayWindowMarks:
 
         rendered = overlay.grab().toImage()
 
-        assert rendered.pixelColor(20, 50) == self.RED  # left border
+        assert pixel(rendered, 20, 50) == self.RED  # left border
 
     def test_mark_outside_the_selection_is_clipped_not_painted(self):
         frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
@@ -996,7 +1032,7 @@ class TestOverlayWindowMarks:
 
         rendered = overlay.grab().toImage()
 
-        assert rendered.pixelColor(20, 20) != self.RED
+        assert pixel(rendered, 20, 20) != self.RED
 
     def test_mark_reappears_once_the_selection_grows_back_over_it(self):
         # The mark was never deleted by the clip above -- it was only
@@ -1011,7 +1047,7 @@ class TestOverlayWindowMarks:
         overlay.set_selection(QRect(0, 0, 200, 200))
         rendered = overlay.grab().toImage()
 
-        assert rendered.pixelColor(10, 20) == self.RED  # left border
+        assert pixel(rendered, 10, 20) == self.RED  # left border
 
     def test_reframing_leaves_a_mark_over_the_same_content(self):
         # A mark drawn inside the selection must stay over the same pixels
@@ -1023,10 +1059,10 @@ class TestOverlayWindowMarks:
         overlay.set_selection(QRect(0, 0, 100, 100))
         overlay.add_mark(self._mark((20, 20), (40, 40)))
 
-        before = overlay.grab().toImage().pixelColor(20, 30)
+        before = pixel(overlay.grab().toImage(), 20, 30)
 
         overlay.set_selection(QRect(0, 0, 150, 150))
-        after = overlay.grab().toImage().pixelColor(20, 30)
+        after = pixel(overlay.grab().toImage(), 20, 30)
 
         assert before == self.RED
         assert after == self.RED
@@ -1042,7 +1078,7 @@ class TestOverlayWindowMarks:
         assert result.width() == 100
         assert result.height() == 100
         # (60, 60) in window coordinates is (10, 10) inside the crop.
-        assert result.pixelColor(10, 20) == self.RED
+        assert pixel(result, 10, 20) == self.RED
 
     def test_rendered_image_contains_a_restored_shape_tools_mark(self):
         # SNX-64: same export path as the test above, but drawn through the
@@ -1068,7 +1104,7 @@ class TestOverlayWindowMarks:
 
         # (80, 100) in window coordinates -- the ellipse's own leftmost
         # point, vertically centred -- is (30, 50) inside the crop.
-        assert result.pixelColor(30, 50) == self.RED
+        assert pixel(result, 30, 50) == self.RED
 
 
 class TestOverlayWindowObscuringMarks:
@@ -1095,7 +1131,7 @@ class TestOverlayWindowObscuringMarks:
         # outline (the in-progress preview's own look) could never account
         # for the difference.
         raw = frame.image.pixelColor(70, 70)
-        rendered = overlay.grab().toImage().pixelColor(70, 70)
+        rendered = pixel(overlay.grab().toImage(), 70, 70)
         assert rendered != raw
 
     def test_committed_pixelate_shows_its_blocks_on_screen(self):
@@ -1128,8 +1164,8 @@ class TestOverlayWindowObscuringMarks:
         block_width = patch // (patch // strength)
         row = offset + 40
         probe_a, probe_b = offset + 1, offset + block_width + 1
-        assert rendered.pixelColor(probe_a, row) == rendered.pixelColor(offset + 3, row)
-        assert rendered.pixelColor(probe_a, row) != rendered.pixelColor(probe_b, row)
+        assert pixel(rendered, probe_a, row) == pixel(rendered, offset + 3, row)
+        assert pixel(rendered, probe_a, row) != pixel(rendered, probe_b, row)
 
     def test_on_screen_result_matches_the_exported_image_for_the_same_mark(self):
         frame = make_gradient_frame()
@@ -1145,7 +1181,7 @@ class TestOverlayWindowObscuringMarks:
         # The selection spans the whole window at its own (0, 0) origin,
         # so window coordinates and the exported crop's coordinates are
         # the same pixels here -- a direct probe comparison is valid.
-        assert on_screen.pixelColor(70, 70) == exported.pixelColor(70, 70)
+        assert pixel(on_screen, 70, 70) == pixel(exported, 70, 70)
 
     def test_changing_strength_on_an_already_committed_mark_updates_its_look(self):
         # Inset from the selection's own edges for the same reason as
@@ -1174,7 +1210,7 @@ class TestOverlayWindowObscuringMarks:
         low_strength = overlay.grab().toImage()
         # A pixel just past the low-strength block boundary already read
         # differently from the block before it...
-        assert low_strength.pixelColor(probe_a, row) != low_strength.pixelColor(probe_b, row)
+        assert pixel(low_strength, probe_a, row) != pixel(low_strength, probe_b, row)
 
         # ...simulates the settings tray's strength slider retuning the
         # mark just drawn, still committed, still the same object.
@@ -1183,7 +1219,7 @@ class TestOverlayWindowObscuringMarks:
         high_strength = overlay.grab().toImage()
         # The coarser block now spans both probes, so they read equal --
         # proof the already-committed mark's look actually changed.
-        assert high_strength.pixelColor(probe_a, row) == high_strength.pixelColor(probe_b, row)
+        assert pixel(high_strength, probe_a, row) == pixel(high_strength, probe_b, row)
 
     def test_reframing_keeps_an_obscuring_mark_aligned_to_its_own_pixels(self):
         # Same property TestOverlayWindowMarks's own
@@ -1197,10 +1233,10 @@ class TestOverlayWindowObscuringMarks:
             Blur(colour=QColor("#ff0000"), stroke_width=4, start=QPointF(20, 20), end=QPointF(60, 60))
         )
 
-        before = overlay.grab().toImage().pixelColor(40, 40)
+        before = pixel(overlay.grab().toImage(), 40, 40)
 
         overlay.set_selection(QRect(0, 0, 150, 150))
-        after = overlay.grab().toImage().pixelColor(40, 40)
+        after = pixel(overlay.grab().toImage(), 40, 40)
 
         assert before == after
 
@@ -1458,7 +1494,7 @@ class TestDrawingTools:
         QTest.mouseMove(overlay, QPoint(80, 60))
 
         rendered = overlay.grab().toImage()
-        assert rendered.pixelColor(20, 40) == QColor("#ff0000")  # left edge of the live preview
+        assert pixel(rendered, 20, 40) == QColor("#ff0000")  # left edge of the live preview
 
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
 
@@ -1749,7 +1785,7 @@ class TestSelectionStroke:
 
         rendered = overlay.grab().toImage()
         row = [
-            rendered.pixelColor(x, 50).getRgb()[:3]
+            pixel(rendered, x, 50).getRgb()[:3]
             for x in range(bracket_right, handle_left)
         ]
 
@@ -1837,7 +1873,7 @@ class TestCornerBrackets:
         for y in range(box_left, box_left + tokens.Metric.CORNER_LEN):
             # Sample a column comfortably inside the arm's length, away from
             # the rounded tip and the inner elbow.
-            if rendered.pixelColor(self.SEL.left() + 15, y) == QColor(255, 255, 255):
+            if pixel(rendered, self.SEL.left() + 15, y) == QColor(255, 255, 255):
                 white_rows += 1
         assert white_rows == tokens.Metric.CORNER_W
 
@@ -1872,7 +1908,7 @@ class TestEdgeHandles:
 
         for handle in (Handle.TOP, Handle.BOTTOM, Handle.LEFT, Handle.RIGHT):
             center = overlay._edge_handle_rect(handle).center()
-            sampled = rendered.pixelColor(round(center.x()), round(center.y()))
+            sampled = pixel(rendered, round(center.x()), round(center.y()))
             assert sampled == QColor(255, 255, 255), handle
 
 
@@ -2477,7 +2513,7 @@ class TestCopy:
         assert len(calls) == 1
         copied = calls[0]
         assert isinstance(copied, QImage)
-        assert copied.pixelColor(20, 50) == self.RED  # the rectangle's left border
+        assert pixel(copied, 20, 50) == self.RED  # the rectangle's left border
 
     def test_copy_after_annotation_reflects_marks_made_since_open(self, monkeypatch):
         # The bug this ticket fixes: a real editor.py Editor copied the raw
@@ -2498,8 +2534,8 @@ class TestCopy:
 
         assert len(calls) == 2
         before, after = calls
-        assert before.pixelColor(20, 50) != self.RED
-        assert after.pixelColor(20, 50) == self.RED
+        assert pixel(before, 20, 50) != self.RED
+        assert pixel(after, 20, 50) == self.RED
 
 
 class TestSave:
@@ -2541,7 +2577,7 @@ class TestSave:
         path = overlay.save()
 
         saved = QImage(str(path))
-        assert saved.pixelColor(5, 20) == self.RED  # the rectangle's left border
+        assert pixel(saved, 5, 20) == self.RED  # the rectangle's left border
 
 
 class TestToast:
@@ -2870,11 +2906,11 @@ class TestFloatingBarFill:
         rendered = bar.grab().toImage()
         # Top padding strip, mid-width: inside the rounded fill but above
         # every button, so this is background only.
-        pixel = rendered.pixelColor(bar.width() // 2, 2)
+        sampled = pixel(rendered, bar.width() // 2, 2)
 
         expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
-        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
-        assert (pixel.red(), pixel.green(), pixel.blue()) == QColor(
+        assert sampled.alpha() == pytest.approx(expected_alpha, abs=2)
+        assert (sampled.red(), sampled.green(), sampled.blue()) == QColor(
             tokens.Color.BAR_BG
         ).getRgb()[:3]
 
@@ -2894,7 +2930,7 @@ class TestFloatingBarFill:
         rendered = bar.grab().toImage()
         rect = bar._tool_buttons["pen"].geometry()
         alphas = [
-            rendered.pixelColor(x, y).alpha()
+            pixel(rendered, x, y).alpha()
             for x in range(rect.left(), rect.right())
             for y in range(rect.top(), rect.bottom())
         ]
@@ -3349,7 +3385,7 @@ class TestToastExcludedFromExport:
         rendered = overlay.rendered_image()
 
         toast_center = overlay._toast.geometry().center()
-        assert rendered.pixelColor(toast_center) == QColor(10, 20, 30)
+        assert pixel(rendered, toast_center) == QColor(10, 20, 30)
 
 
 class TestSettingsTrayVisibility:
@@ -3461,11 +3497,11 @@ class TestSettingsTrayFill:
         rendered = tray.grab().toImage()
         # Top padding strip, mid-width: inside the rounded fill but above
         # every control, so this is background only.
-        pixel = rendered.pixelColor(tray.width() // 2, 2)
+        sampled = pixel(rendered, tray.width() // 2, 2)
 
         expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
-        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
-        assert (pixel.red(), pixel.green(), pixel.blue()) == QColor(
+        assert sampled.alpha() == pytest.approx(expected_alpha, abs=2)
+        assert (sampled.red(), sampled.green(), sampled.blue()) == QColor(
             tokens.Color.BAR_BG
         ).getRgb()[:3]
 
@@ -3484,7 +3520,7 @@ class TestSettingsTrayFill:
         rendered = tray.grab().toImage()
         rect = tray._swatch_buttons[tokens.INK_SWATCHES[0][1]].geometry()
         alphas = [
-            rendered.pixelColor(x, y).alpha()
+            pixel(rendered, x, y).alpha()
             for x in range(rect.left(), rect.right())
             for y in range(rect.top(), rect.bottom())
         ]
@@ -3541,7 +3577,7 @@ class TestSettingsTraySwatchSelection:
         button.resize(button.sizeHint())
 
         rendered = button.grab().toImage()
-        center = rendered.pixelColor(button.width() // 2, button.height() // 2)
+        center = pixel(rendered, button.width() // 2, button.height() // 2)
 
         assert (center.red(), center.green(), center.blue()) == QColor(hex_colour).getRgb()[:3]
 
@@ -3553,11 +3589,11 @@ class TestSettingsTraySwatchSelection:
         button.resize(button.sizeHint())
 
         rendered = button.grab().toImage()
-        center = rendered.pixelColor(button.width() // 2, button.height() // 2)
+        center = pixel(rendered, button.width() // 2, button.height() // 2)
         # The outermost pixel: the light ring painted flush against the
         # button's own edge, at mid-height so it falls on the ring's flat
         # side rather than its rounded corner.
-        edge = rendered.pixelColor(0, button.height() // 2)
+        edge = pixel(rendered, 0, button.height() // 2)
 
         assert (center.red(), center.green(), center.blue()) == QColor(hex_colour).getRgb()[:3]
         assert (edge.red(), edge.green(), edge.blue()) == QColor(
@@ -3838,11 +3874,11 @@ class TestBlurTrayFill:
         rendered = tray.grab().toImage()
         # Top padding strip, mid-width: inside the rounded fill but above
         # every control, so this is background only.
-        pixel = rendered.pixelColor(tray.width() // 2, 2)
+        sampled = pixel(rendered, tray.width() // 2, 2)
 
         expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
-        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
-        assert (pixel.red(), pixel.green(), pixel.blue()) == QColor(
+        assert sampled.alpha() == pytest.approx(expected_alpha, abs=2)
+        assert (sampled.red(), sampled.green(), sampled.blue()) == QColor(
             tokens.Color.BAR_BG
         ).getRgb()[:3]
 
@@ -3860,7 +3896,7 @@ class TestBlurTrayFill:
             tray._well.geometry().topLeft() + rect.topLeft(), rect.size()
         )
         alphas = [
-            rendered.pixelColor(x, y).alpha()
+            pixel(rendered, x, y).alpha()
             for x in range(rect.left(), rect.right())
             for y in range(rect.top(), rect.bottom())
         ]
@@ -5736,8 +5772,8 @@ class TestFreeformExport:
         # top-left, so these are that crop's local pixel coordinates --
         # (15,55)/(45,15) in the pre-crop, window-local space the path
         # itself is defined in, shifted back by the selection's origin.
-        assert rendered.pixelColor(5, 45).alpha() == 255  # inside the triangle
-        assert rendered.pixelColor(35, 5).alpha() == 0  # excluded corner
+        assert pixel(rendered, 5, 45).alpha() == 255  # inside the triangle
+        assert pixel(rendered, 35, 5).alpha() == 0  # excluded corner
 
     def test_cropped_to_the_bounding_box_size(self):
         overlay = self._overlay_with_triangular_lasso()
@@ -5755,7 +5791,7 @@ class TestFreeformExport:
 
         rendered = overlay.rendered_image()
 
-        assert rendered.pixelColor(15, 15).alpha() == 255
+        assert pixel(rendered, 15, 15).alpha() == 255
 
     def test_saved_png_preserves_the_transparency(self, monkeypatch, tmp_path):
         monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
@@ -5764,8 +5800,8 @@ class TestFreeformExport:
         path = overlay.save()
 
         saved = QImage(str(path))
-        assert saved.pixelColor(5, 45).alpha() == 255
-        assert saved.pixelColor(35, 5).alpha() == 0
+        assert pixel(saved, 5, 45).alpha() == 255
+        assert pixel(saved, 35, 5).alpha() == 0
 
 
 def _mark(start=(10, 10), end=(20, 20)):
@@ -5964,7 +6000,7 @@ class TestChipsPixels:
 
         rendered = overlay.grab().toImage()
 
-        assert rendered.pixelColor(sample) == design_color("CHIP_LIGHT_BG")
+        assert pixel(rendered, sample) == design_color("CHIP_LIGHT_BG")
 
     def test_frozen_pill_paints_its_dark_background_at_the_token_alpha(self):
         overlay = self._overlay()
@@ -5979,7 +6015,7 @@ class TestChipsPixels:
         # DIM-blended, same as the scrim's own token colour/alpha.
         scrimmed = _blend(QColor(10, 20, 30), design_color("DIM"))
         expected = _blend(scrimmed, design_color("CHIP_DARK_BG"))
-        sampled = rendered.pixelColor(sample)
+        sampled = pixel(rendered, sample)
 
         assert sampled.red() == pytest.approx(expected.red(), abs=2)
         assert sampled.green() == pytest.approx(expected.green(), abs=2)
@@ -6012,7 +6048,7 @@ class TestChipsExcludedFromExport:
 
         base = QColor(10, 20, 30)
         for x, y in [(0, 0), (199, 0), (0, 119), (199, 119), (100, 60)]:
-            assert rendered.pixelColor(x, y) == base
+            assert pixel(rendered, x, y) == base
 
 
 class TestHintHUDComposition:
@@ -6099,16 +6135,16 @@ class TestHintHUDFill:
         hud.resize(hud.sizeHint().width() + 400, tokens.Metric.HUD_H)
 
         rendered = hud.grab().toImage()
-        pixel = rendered.pixelColor(2, 2)
+        sampled = pixel(rendered, 2, 2)
 
         expected_alpha = round(tokens.Color.HUD_BG_ALPHA * 255)
         expected_rgb = QColor(tokens.Color.HUD_BG).getRgb()[:3]
-        assert pixel.alpha() == pytest.approx(expected_alpha, abs=2)
+        assert sampled.alpha() == pytest.approx(expected_alpha, abs=2)
         # abs=1, not exact equality: a 50%-alpha fill's premultiplied RGB
         # can round either way, the same one-off drift TestOverlayWindow's
         # own DIM-scrim test (_blend) already tolerates for the same reason.
         for sampled, expected in zip(
-            (pixel.red(), pixel.green(), pixel.blue()), expected_rgb
+            (sampled.red(), sampled.green(), sampled.blue()), expected_rgb
         ):
             assert sampled == pytest.approx(expected, abs=1)
 
@@ -6691,7 +6727,7 @@ class TestCloseButton:
         rendered = overlay.rendered_image()
 
         button_center = overlay._close_button.geometry().center()
-        assert rendered.pixelColor(button_center) == QColor(10, 20, 30)
+        assert pixel(rendered, button_center) == QColor(10, 20, 30)
 
 
 class TestKeyboardShortcutSuppression:
@@ -6962,7 +6998,7 @@ class TestMonitorVeil:
         veil = overlay_module._MonitorVeil(monitor_frame)
 
         assert veil.size() == QSize(100, 50)
-        sampled = veil.grab().toImage().pixelColor(10, 10)
+        sampled = pixel(veil.grab().toImage(), 10, 10)
         expected = _blend(QColor(10, 20, 30), overlay_module.Overlay.VEIL_COLOR)
         assert sampled.red() == pytest.approx(expected.red(), abs=2)
         assert sampled.green() == pytest.approx(expected.green(), abs=2)
@@ -7701,6 +7737,16 @@ class TestCaptureChooser:
     """
 
     def _overlay(self, size=(1200, 800)):
+        # Clamped to the screen this process actually has. `_reserved_top`
+        # resolves a monitor through `QGuiApplication.screenAt()`, so a
+        # synthetic desktop bigger than the real (offscreen) screen puts
+        # its own centre off-screen, that lookup misses, and the overlay
+        # silently reserves nothing -- which is indistinguishable here from
+        # the bug these tests exist to catch. The offscreen screen shrinks
+        # as the scale factor rises, so leaving this unclamped pins the
+        # class to a scale factor of 1.0.
+        available = QGuiApplication.primaryScreen().geometry()
+        size = (min(size[0], available.width()), min(size[1], available.height()))
         frame = make_frame(image_size=size, logical_size=size)
         # With a provider that can answer, Window is a mode this session
         # actually has. Without one the overlay refuses it and puts every
