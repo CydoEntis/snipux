@@ -600,7 +600,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _print_backends(registry: BackendRegistry) -> None:
+def _print_backends(registry, heading: str | None = None) -> None:
+    """Print one registry's backends. `registry` is a `BackendRegistry` or
+    a `RecorderRegistry` -- this only needs `__len__`/`__iter__` and the
+    name/availability trio both already satisfy, so recording backends are
+    reportable without a second copy of this.
+    """
+    if heading is not None:
+        print(heading)
     if len(registry) == 0:
         # An empty registry is expected today (no real backends exist yet),
         # but the output must never be silently empty in a way that looks
@@ -622,10 +629,17 @@ def main(
     argv: list[str] | None = None,
     registry: BackendRegistry | None = None,
     transport: "Transport | None" = None,
+    recorder_registry=None,
 ) -> int:
     """CLI entry point. Accepts an optional `registry` to stay testable
     without needing real backend availability on the machine running the
     tests, and an optional `transport` (same DI shape) for `--snip`.
+
+    `recorder_registry` is the same DI shape again, for `--list-backends`.
+    Injected rather than always built from `platform.current` so the tests
+    below assert against backends they name themselves -- SNX-126's rule,
+    that a test must not pass or fail by what the machine running it
+    happens to have.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -717,7 +731,11 @@ def main(
         registry = build_default_registry()
 
     if args.list_backends:
-        _print_backends(registry)
+        _print_backends(registry, heading="capture backends:")
+        if recorder_registry is None:
+            recorder_registry = platform.current.build_recording_registry()
+        print()
+        _print_backends(recorder_registry, heading="recording backends:")
         return 0
 
     parser.print_help()

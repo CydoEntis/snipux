@@ -16,6 +16,23 @@
 
 $ErrorActionPreference = "Stop"
 
+# $ErrorActionPreference governs PowerShell's own errors; it does nothing
+# about a *native* executable that exits non-zero. python and pyinstaller
+# are both native here, so without this every step below could fail and
+# the script would still run on to print "Built ...". It did exactly that:
+# a PyInstaller run that died with "PermissionError: Access is denied" on
+# dist\snipux.exe (the previous build was still running and holding the
+# file) reported success and left the stale exe in place, which is a
+# uniquely bad way to fail -- the next thing anyone does is run the binary
+# they were just told was rebuilt.
+function Invoke-Checked {
+    param([string]$What, [scriptblock]$Command)
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "$What failed with exit code $LASTEXITCODE"
+    }
+}
+
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Push-Location $RepoRoot
 try {
@@ -24,19 +41,40 @@ try {
     # `build-windows` extra -- deliberately not in requirements.txt, so
     # `pip install -r requirements.txt` (what the test suite installs from)
     # never pulls in a build-only tool it has no use for.
-    python -m pip install --quiet -r requirements.txt
-    python -m pip install --quiet ".[build-windows]"
+    Invoke-Checked "pip install -r requirements.txt" {
+        python -m pip install --quiet -r requirements.txt
+    }
+    Invoke-Checked "pip install .[build-windows]" {
+        python -m pip install --quiet ".[build-windows]"
+    }
 
     # The Start Menu/Startup-shortcut icon (setup_desktop.render_ico(),
     # SNX-92) built once here from the same vendored PNGs `install_icons()`
     # uses on Linux, so the .exe Explorer shows one instead of a generic
     # icon -- snipux.spec picks this up if present and falls back to none
     # if this step is skipped, fails, or finds nothing to build from.
-    python packaging/windows/build_icon.py
+    Invoke-Checked "build_icon.py" {
+        python packaging/windows/build_icon.py
+    }
 
-    pyinstaller packaging/windows/snipux.spec --noconfirm
+    # The exe cannot be overwritten while a previous build of it is
+    # running -- a resident tray app holds its own image open -- and that
+    # is the single most likely way this step fails, so say so rather than
+    # leaving the caller with a raw PermissionError.
+    $ExePath = Join-Path $RepoRoot 'dist\snipux.exe'
+    $Running = Get-Process -Name snipux -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $ExePath }
+    if ($Running) {
+        throw ("$ExePath is running (pid $($Running.Id -join ', ')) and cannot " +
+               "be overwritten. Close Snipux from its tray icon, or stop it " +
+               "with: Stop-Process -Name snipux")
+    }
 
-    Write-Host "Built $(Join-Path $RepoRoot 'dist\snipux.exe')"
+    Invoke-Checked "pyinstaller" {
+        pyinstaller packaging/windows/snipux.spec --noconfirm
+    }
+
+    Write-Host "Built $ExePath"
 }
 finally {
     Pop-Location
