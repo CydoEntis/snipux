@@ -1881,14 +1881,31 @@ class AppController:
             self._stopping_recording = False
 
     def _land_recording(self, path: str, after: str, *, reason: str | None = None) -> None:
-        """Move a just-stopped recording from its temp `path` into
-        `setup_desktop.load_save_folder()`, under a name from
-        `setup_desktop.preview_filename()` (recording.md ticket 9), then
-        carry out `after` through `finish_recording` -- the same two
-        functions stills already use for folder/filename, and the same
-        function an instant still's clipboard destination goes through, so
-        recording's real filename is provably the same computation
-        Settings' own preview label renders.
+        """Carry out whichever destination `after` names for a just-stopped
+        recording sitting at its temp `path`.
+
+        The two destinations are genuine alternatives now. This used to
+        move the file into the save folder *unconditionally* and only then
+        consider `after`, so "copy to the clipboard" also left a file
+        behind -- in the stills folder, under the stills filename pattern,
+        so a video landed as "Screenshot from ....mp4" among actual
+        screenshots. A user who asked for the clipboard got a file they
+        were never told about, and "save" took credit for a move that had
+        already happened whatever they picked.
+
+        **Save** moves into `setup_desktop.load_recording_folder()` under
+        `setup_desktop.load_recording_filename_pattern()` -- recording's
+        own folder and own pattern, not the stills ones it used to borrow.
+
+        **Instant** copies and does not move. The file stays in
+        `_recording_temp_dir()`, which is not a detail that can be tidied
+        away: `copy_file_to_clipboard` puts a *reference* on the clipboard,
+        not the video's bytes, so deleting the file would leave the user
+        holding a clipboard entry that pastes nothing. "No file is kept"
+        means none in the recordings folder; the temp copy is swept by
+        `_clean_up_crashed_recording_temp_files()` at the next startup,
+        which is the longest a clipboard reference could plausibly outlive
+        the session that made it anyway.
 
         `reason` is `_stop_recording()`'s low-disk message, when this call
         came from `_check_recording_disk_space()` -- folded into the one
@@ -1906,7 +1923,15 @@ class AppController:
         source of a failed cross-filesystem move is left where it is, for
         the next crash-cleanup sweep to find).
         """
-        folder = setup_desktop.load_save_folder()
+        if after == "instant":
+            finish_recording(Path(path), after)
+            if reason is not None:
+                self._report_shortcut(f"{reason} Copied to the clipboard.")
+            else:
+                self._report_shortcut("Recording copied to the clipboard.")
+            return
+
+        folder = setup_desktop.load_recording_folder()
         folder.mkdir(parents=True, exist_ok=True)
         # The extension comes from the file that actually exists rather
         # than a fixed "mp4": the backend chose the container (GNOME writes
@@ -1915,7 +1940,9 @@ class AppController:
         extension = Path(path).suffix.lstrip(".") or "mp4"
         destination = Path(
             setup_desktop.preview_filename(
-                folder, setup_desktop.load_filename_pattern(), extension=extension
+                folder,
+                setup_desktop.load_recording_filename_pattern(),
+                extension=extension,
             )
         )
         shutil.move(path, destination)

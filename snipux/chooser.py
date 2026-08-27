@@ -816,6 +816,14 @@ class Chooser(QWidget):
 
         self._mode = tokens.CAPTURE_MODES[0][0]
         self._after = tokens.AFTER_DEFAULT
+        # What the record side falls back to when this chooser switches to
+        # it. A constant until recording's destination gained a Settings
+        # row -- it could only ever be changed per-capture, on this
+        # surface, with no way to say what it should open on. Seeded by
+        # `OverlayWindow` from `setup_desktop.load_recording_after()`;
+        # kept as a plain attribute with a token default so a Chooser built
+        # without one (every test that does) behaves exactly as before.
+        self._record_after_default = tokens.RECORD_AFTER_DEFAULT
         self._delay = tokens.DELAY_DEFAULT
         self._kind = "stills"
         self._phase = "choosing"
@@ -893,6 +901,21 @@ class Chooser(QWidget):
         self.modeChosen.emit(mode)
         self._layout()
 
+    def set_record_after_default(self, after: str) -> None:
+        """Seed what the record side opens on, from Settings.
+
+        Applied on the next switch *to* the record side rather than
+        immediately: this is the default a record capture starts from, not
+        an override of a choice already made on the surface -- the same
+        distinction `set_after(arm=False)` draws for the stills side.
+        """
+        if after not in dict.fromkeys(value for value, *_ in _RECORD_AFTER_ROWS):
+            return
+        self._record_after_default = after
+        if self._kind == "record":
+            self._after = after
+            self._refresh_triggers()
+
     def set_after(self, after: str) -> None:
         self._after = after
         self._refresh_triggers()
@@ -927,7 +950,7 @@ class Chooser(QWidget):
             if self._mode in tokens.RECORD_DISABLED_MODES:
                 self._mode = tokens.CAPTURE_MODES[0][0]
             if self._after not in dict.fromkeys(value for value, *_ in _RECORD_AFTER_ROWS):
-                self._after = tokens.RECORD_AFTER_DEFAULT
+                self._after = self._record_after_default
         self._refresh_triggers()
         self.kindChanged.emit(kind)
 

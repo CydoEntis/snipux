@@ -729,7 +729,54 @@ class SettingsWindow(WinWindow):
         )
         self._draw_cursor.switch.toggled.connect(lambda _c: self._mark_dirty())
 
+        # Recording's destination, folder and filename. None of these had a
+        # Settings surface before: the destination could only be set on the
+        # chooser, per-capture, and recordings had no folder or pattern of
+        # their own at all -- they borrowed the stills ones above, which is
+        # how a video landed in ~/Pictures/snipux called "Screenshot from
+        # ....mp4".
+        self._recording_after_group = QButtonGroup(self)
+        self._recording_after_group.setExclusive(True)
+        recording_cards = []
+        stored_after = setup_desktop.load_recording_after(self._config_dir)
+        for index, (identifier, label, note) in enumerate(tokens.RECORDING_AFTER):
+            card = RadioCard(label, note)
+            card.setChecked(identifier == stored_after)
+            card.toggled.connect(lambda _c: self._mark_dirty())
+            self._recording_after_group.addButton(card, index)
+            recording_cards.append(card)
+
+        recording_folder_row = QHBoxLayout()
+        self._recording_folder = QLineEdit(
+            str(setup_desktop.load_recording_folder(self._config_dir))
+        )
+        self._recording_folder.setReadOnly(True)
+        self._recording_folder.setFont(_mono_font(12))
+        self._recording_folder.setFixedHeight(tokens.WinMetric.CONTROL_H)
+        self._recording_folder.setStyleSheet(self._field_style())
+        choose_recording = SecondaryButton("Choose…")
+        choose_recording.clicked.connect(self._choose_recording_folder)
+        recording_folder_row.addWidget(self._recording_folder, 1)
+        recording_folder_row.addWidget(choose_recording)
+        recording_folder_widget = QWidget()
+        recording_folder_widget.setLayout(recording_folder_row)
+        recording_folder_row.setContentsMargins(0, 0, 0, 0)
+
+        self._recording_filename = QLineEdit(
+            setup_desktop.load_recording_filename_pattern(self._config_dir)
+        )
+        self._recording_filename.setFont(_mono_font(12))
+        self._recording_filename.setFixedHeight(tokens.WinMetric.CONTROL_H)
+        self._recording_filename.setStyleSheet(self._field_style())
+        self._recording_filename.textChanged.connect(self._refresh_recording_preview)
+
+        self._recording_preview = QLabel()
+        self._recording_preview.setFont(_mono_font(11.5))
+        self._recording_preview.setStyleSheet(f"color: {tokens.Win.PATH_FG};")
+        self._recording_preview.setWordWrap(True)
+
         self._refresh_preview()
+        self._refresh_recording_preview()
         return _pane(
             SectionHeading("Folder"),
             folder_widget,
@@ -743,6 +790,14 @@ class SettingsWindow(WinWindow):
             SectionHeading("Recording"),
             self._frame_rate,
             self._draw_cursor,
+            None,
+            SectionHeading("When a recording finishes"),
+            *recording_cards,
+            None,
+            SectionHeading("Recordings folder"),
+            recording_folder_widget,
+            self._recording_filename,
+            self._recording_preview,
         )
 
     def _annotation_pane(self) -> QWidget:
@@ -839,6 +894,33 @@ class SettingsWindow(WinWindow):
             self._refresh_preview()
             self._mark_dirty()
 
+    def _choose_recording_folder(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Save recordings to", self._recording_folder.text()
+        )
+        if chosen:
+            self._recording_folder.setText(chosen)
+            self._refresh_recording_preview()
+            self._mark_dirty()
+
+    def _refresh_recording_preview(self) -> None:
+        """The recording twin of `_refresh_preview`.
+
+        `extension="mp4"` rather than the stills default of "png" -- this
+        label is a promise about a video's name, and on GNOME even the
+        extension is not this app's to choose (Shell picks the container),
+        so it is illustrative of the pattern, not of the container.
+        """
+        self._recording_preview.setText(
+            setup_desktop.preview_filename(
+                self._recording_folder.text(),
+                self._recording_filename.text(),
+                extension="mp4",
+            )
+        )
+        if self.isVisible():
+            self._mark_dirty()
+
     def _append_token(self, token: str) -> None:
         self._filename.setText(self._filename.text() + token)
         self._mark_dirty()
@@ -897,6 +979,16 @@ class SettingsWindow(WinWindow):
         )
         setup_desktop.save_recording_draw_cursor(
             self._draw_cursor.switch.isChecked(), self._config_dir
+        )
+        setup_desktop.save_recording_after(
+            tokens.RECORDING_AFTER[self._recording_after_group.checkedId()][0],
+            self._config_dir,
+        )
+        setup_desktop.save_recording_folder(
+            self._recording_folder.text(), self._config_dir
+        )
+        setup_desktop.save_recording_filename_pattern(
+            self._recording_filename.text(), self._config_dir
         )
         setup_desktop.save_remember_tool(
             self._remember_tool.switch.isChecked(), self._config_dir

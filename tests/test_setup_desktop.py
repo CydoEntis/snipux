@@ -1181,6 +1181,73 @@ class TestKindPersistence:
         assert setup_desktop.load_kind(tmp_path) == tokens.KIND_DEFAULT
 
 
+class TestRecordingDestinationPersistence:
+    """Recording's folder, filename pattern and destination.
+
+    All three are new: recordings used to borrow the stills folder and the
+    stills filename pattern outright, which put videos in ~/Pictures/snipux
+    named "Screenshot from ....mp4", and the destination could only be set
+    on the chooser per-capture with nothing to default it from.
+    """
+
+    def test_the_default_recording_folder_is_not_the_stills_one(self, tmp_path):
+        assert (
+            setup_desktop.default_recording_folder()
+            != setup_desktop.default_save_folder()
+        )
+        assert setup_desktop.default_recording_folder().parent.name == "Videos"
+
+    def test_nothing_stored_means_the_default_folder(self, tmp_path):
+        assert (
+            setup_desktop.load_recording_folder(tmp_path)
+            == setup_desktop.default_recording_folder()
+        )
+
+    def test_folder_round_trips(self, tmp_path):
+        setup_desktop.save_recording_folder(tmp_path / "clips", tmp_path)
+
+        assert setup_desktop.load_recording_folder(tmp_path) == tmp_path / "clips"
+
+    def test_the_default_filename_pattern_says_recording_not_screenshot(self, tmp_path):
+        pattern = setup_desktop.load_recording_filename_pattern(tmp_path)
+
+        assert pattern == tokens.RECORDING_FILENAME_DEFAULT
+        assert "Recording" in pattern
+        assert "Screenshot" not in pattern
+
+    def test_filename_pattern_round_trips(self, tmp_path):
+        setup_desktop.save_recording_filename_pattern("Clip %Y", tmp_path)
+
+        assert setup_desktop.load_recording_filename_pattern(tmp_path) == "Clip %Y"
+
+    def test_setting_the_recording_folder_leaves_the_stills_folder_alone(self, tmp_path):
+        setup_desktop.save_recording_folder(tmp_path / "clips", tmp_path)
+        setup_desktop.save_recording_filename_pattern("Clip %Y", tmp_path)
+
+        assert setup_desktop.load_save_folder(tmp_path) != tmp_path / "clips"
+        assert setup_desktop.load_filename_pattern(tmp_path) != "Clip %Y"
+
+    def test_nothing_stored_means_the_documented_destination(self, tmp_path):
+        assert setup_desktop.load_recording_after(tmp_path) == tokens.RECORD_AFTER_DEFAULT
+
+    def test_destination_round_trips(self, tmp_path):
+        setup_desktop.save_recording_after("save", tmp_path)
+
+        assert setup_desktop.load_recording_after(tmp_path) == "save"
+
+    def test_an_unknown_stored_destination_falls_back_rather_than_being_trusted(
+        self, tmp_path
+    ):
+        # "edit"/"review" are stills-only ids; nothing downstream of
+        # `_land_recording` knows what to do with one, and treating an
+        # unrecognised value as a destination would silently mean "not
+        # instant", i.e. save, for a user who never asked to save.
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text('{"recording_after": "review"}')
+
+        assert setup_desktop.load_recording_after(tmp_path) == tokens.RECORD_AFTER_DEFAULT
+
+
 class TestRecordingFrameRatePersistence:
     """SNX-124 ticket 9: `GnomeScreencastBackend` reads this back to build
     its `framerate` D-Bus option; `WindowsRecorderBackend` never does (its
