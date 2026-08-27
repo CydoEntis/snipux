@@ -1925,10 +1925,18 @@ class AppController:
         """
         if after == "instant":
             finish_recording(Path(path), after)
+            # The recording wording, not the stills one (locked capture-flow
+            # handoff): a video goes on the clipboard as a file *reference*,
+            # so it pastes into a file manager, a chat or an upload field and
+            # does nothing at all in an image editor or a text box. "Copied
+            # to the clipboard" is true and tells the user nothing about
+            # which of those will work -- it is what produced "looks like its
+            # in my clip board but its hard to know that".
+            copied = design.tokens.DESTINATION_WORDING["instant"]["record"][2]
             if reason is not None:
-                self._report_shortcut(f"{reason} Copied to the clipboard.")
+                self._report_shortcut(f"{reason} {copied}.")
             else:
-                self._report_shortcut("Recording copied to the clipboard.")
+                self._report_shortcut(f"{copied}.")
             return
 
         folder = setup_desktop.load_recording_folder()

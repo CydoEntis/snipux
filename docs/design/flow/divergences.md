@@ -1,0 +1,102 @@
+# Divergences from the locked capture-flow handoff
+
+`README.md` in this directory is marked **LOCKED**. These are the points we
+build differently anyway, each with the reason, so nobody reads the handoff
+later and "fixes" the code back to it. Same purpose as
+`../pre-snip-chooser.md` serves for the chooser handoff.
+
+Everything not listed here is built as written.
+
+---
+
+## 1 · Copy does not write a file
+
+**The handoff says** (`tokens_flow.ALWAYS_WRITE_FILE = True`):
+
+> All three write the file first — Copy and Open included. A capture that
+> exists only on a clipboard is one Ctrl+C from gone.
+
+**We do not,** for Copy. Copy puts the capture on the clipboard and leaves
+no file in the save folder. Save and Open still write.
+
+### Why
+
+The handoff is answering a real complaint — "every bug report starts with
+'where did it go'" — and it is the same complaint that reached us:
+
+> idk where it saved it or if it did looks likt its in my clip board but
+> its hard to know that
+
+But the cause was not that the file was missing. It was that the file
+existed when the user had not asked for one. `_land_recording()` moved
+every recording into the save folder and only *then* looked at the
+destination, so "copy to the clipboard" also silently saved, into a folder
+the user was never shown, under the stills filename pattern. The two
+destinations described themselves as alternatives and were not.
+
+So we fixed it the other way round: the destination you pick is the only
+thing that happens, and the toast says what happened. "Where did it go" is
+answered by the toast naming the destination, not by always writing a file
+in case.
+
+Always-write also has a cost the handoff does not weigh: a user who only
+ever copies accumulates a folder of files they never asked for and will
+not think to clean up.
+
+### The one place this leaks
+
+A recording copied to the clipboard **does** leave its temp file on disk,
+because `copy_file_to_clipboard()` puts a *reference* there rather than the
+video's bytes -- deleting it would hand the user a clipboard entry that
+pastes nothing. That file lives in the recording temp dir and is swept at
+the next startup, not in the save folder. "No file is kept" means none
+where the user keeps things.
+
+Stills are unaffected: an image goes on the clipboard as image data, so
+there is nothing to keep.
+
+---
+
+## 2 · Audio is Windows-only, and says so
+
+**The handoff** gives every recording bar an audio dropdown —
+`AUDIO_SOURCES`: System, Mic, Muted — with no platform caveat.
+
+**We build the control as designed**, and on Linux offer only *Muted*,
+with the other two disabled and carrying the reason.
+
+### Why
+
+`org.gnome.Shell.Screencast` has no audio at all: there is no option to
+pass and nothing to wire a control to. Audio on Linux would mean capturing
+from PipeWire ourselves and muxing it, which is a different piece of work
+from this redesign and would pull in a dependency the project has so far
+refused (CLAUDE.md: adding a fourth is a decision worth raising in the
+ticket).
+
+A control that is visible and does nothing is the failure mode this
+handoff already names elsewhere — "a control that opens a menu it can't act
+on is a lie" — so the options that cannot work are disabled and say why,
+exactly as `RECORD_DISABLED_MODES` already does for Window and Freeform on
+the record side.
+
+Windows gets all three.
+
+---
+
+## 3 · Not built yet, and why
+
+Listed here rather than silently skipped. None are refusals; all three are
+things the handoff itself leaves unresolved.
+
+- **Pause/resume** — the handoff's own "Still open" #2 does not say whether
+  a paused recording is one continuous file or segments concatenated on
+  stop. `QMediaRecorder` can pause on Windows; GNOME's screencast cannot,
+  so on Linux it would have to be stop-and-restart, which is precisely the
+  semantics question left open. Needs deciding before it is built.
+- **"Open" for a recording** — specified as "player with trim, mute and GIF
+  export", which the handoff's "Still open" #3 says is described but not
+  designed. Trim is separately deferred (`recording.md`: v1 records, it
+  does not edit). Until it exists, Open on the record side is not offered.
+- **Freeform** — "Still open" #1 says it has no interaction design and
+  behaves as a region drag in the prototype. It stays as it is today.

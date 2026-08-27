@@ -591,6 +591,38 @@ MODE_KEYS = {"R": "Region", "W": "Window", "F": "Full screen", "L": "Freeform"}
 # On the record side nothing fires immediately -- see RECORD_DISABLED_MODES.
 IMMEDIATE_MODES = ["Full screen"]
 
+# Destinations, from the locked capture-flow handoff (docs/design/flow/).
+# Merged one structure at a time as each gains a consumer rather than all at
+# once: FlowMetric/FlowColor/STAGES/AUDIO_SOURCES land with the bars that
+# read them, and CAPTURE_MODES/DELAYS/SHORTCUTS need their existing
+# consumers changed first (the handoff's CAPTURE_MODES carries a shortcut
+# letter this one does not, its DELAYS says "No delay" where this says
+# "Off", and its SHORTCUTS is the stage-level map rather than this file's
+# tool letters).
+#
+# What this slice is for: **Copy is not the same operation for a
+# recording.** A still goes on the clipboard as image data and pastes
+# anywhere. A video can only go on as a file *reference* -- it pastes into
+# a file manager, Slack or an upload field, and does nothing in an image
+# editor or a text box. Reporting both as "Copied to the clipboard" is
+# what produced "looks like its in my clip board but its hard to know
+# that": true, and useless for working out what to do next.
+#
+# `(label, note, toast)` per kind. The handoff also gives Open, which is
+# not offered on the record side yet -- see docs/design/flow/divergences.md.
+DESTINATION_WORDING = {
+    "instant": {
+        "stills": ("Copy", "Image on the clipboard, paste anywhere.",
+                   "Copied to clipboard"),
+        "record": ("Copy file", "File reference -- paste into a chat or folder.",
+                   "File copied -- paste into a chat or folder"),
+    },
+    "save": {
+        "stills": ("Save", "Straight to your snips folder.", "Saved to"),
+        "record": ("Save", "Straight to your recordings folder.", "Saved to"),
+    },
+}
+
 # The stills/record switch, docs/design/recording.md ticket 5. UI and state
 # only here -- nothing behind either side is wired to a recorder yet.
 #
