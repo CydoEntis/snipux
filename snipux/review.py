@@ -20,6 +20,7 @@ looked.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QUrl, pyqtSignal
@@ -388,6 +389,123 @@ class _Badge(QLabel):
         )
 
 
+class _ZoomStep(QLabel):
+    """One end of the zoom cluster -- the "−" or the "+" -- as a real hit
+    target.
+
+    A QLabel rather than a QPushButton so the cluster keeps the badge's
+    flat look with no per-button chrome to override; the interactivity it
+    was missing is the `clicked` signal and the pointing-hand cursor, not
+    a frame.
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, glyph: str, parent: QWidget | None = None):
+        super().__init__(glyph, parent)
+        self.setFont(_mono_font(11.5))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._enabled_look = True
+        self._restyle()
+
+    def set_enabled_look(self, enabled: bool) -> None:
+        """Dim at the end of the range, so a click that cannot do anything
+        does not look like one that can."""
+        if enabled == self._enabled_look:
+            return
+        self._enabled_look = enabled
+        self._restyle()
+
+    def _restyle(self) -> None:
+        colour = tokens.Win.TEXT_SECONDARY if self._enabled_look else tokens.Win.TEXT_FAINT
+        self.setStyleSheet(f"background: transparent; border: none; color: {colour};")
+
+    def mousePressEvent(self, event) -> None:
+        # Emitted even when dimmed: the canvas clamps, and swallowing the
+        # click here would mean two places deciding what the limits are.
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            return
+        super().mousePressEvent(event)
+
+
+class _ZoomBadge(QWidget):
+    """The canvas's top-right zoom cluster: minus / percentage / plus,
+    `WinMetric.ZOOM_STEPS` (60-160% in steps of 20).
+
+    This was a plain `_Badge` -- the "−" and "+" were characters inside one
+    QLabel's text with nothing behind them. `ImageCanvas.set_zoom()` was
+    fully implemented, clamping to the same range and rescaling the marks
+    along with the image, and *nothing in the app ever called it*: the
+    control the handoff specifies as interactive read "100%" and did
+    nothing at any point in the window's life.
+
+    Three children rather than one label hit-tested by x: the glyphs are
+    the hit targets, so they may as well *be* the widgets, and a mono
+    font's advance width stops being load-bearing for whether a click
+    lands.
+    """
+
+    zoomChanged = pyqtSignal(int)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        low, high, step = tokens.WinMetric.ZOOM_STEPS
+        self._low, self._high, self._step = low, high, step
+        self._zoom = 100
+
+        self.setStyleSheet(
+            "background: rgba(18, 20, 24, 0.88);"
+            f" border: 1px solid {tokens.Win.SEGMENT_BORDER};"
+            " border-radius: 8px;"
+        )
+
+        self._minus = _ZoomStep("−", self)
+        self._percent = QLabel(self)
+        self._percent.setFont(_mono_font(11.5))
+        self._percent.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._percent.setStyleSheet(
+            f"background: transparent; border: none; color: {tokens.Win.TEXT_SECONDARY};"
+        )
+        self._plus = _ZoomStep("+", self)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(9, 5, 9, 5)
+        row.setSpacing(9)
+        row.addWidget(self._minus)
+        row.addWidget(self._percent)
+        row.addWidget(self._plus)
+
+        self._minus.clicked.connect(lambda: self._nudge(-self._step))
+        self._plus.clicked.connect(lambda: self._nudge(self._step))
+        self._sync()
+
+    @property
+    def zoom(self) -> int:
+        return self._zoom
+
+    def set_zoom(self, percent: int) -> None:
+        """Adopt `percent` without emitting -- for following the canvas,
+        which is the authority on what the zoom actually clamped to."""
+        self._zoom = max(self._low, min(percent, self._high))
+        self._sync()
+
+    def _nudge(self, delta: int) -> None:
+        target = max(self._low, min(self._zoom + delta, self._high))
+        if target == self._zoom:
+            return
+        self._zoom = target
+        self._sync()
+        self.zoomChanged.emit(target)
+
+    def _sync(self) -> None:
+        self._percent.setText(f"{self._zoom}%")
+        self._minus.set_enabled_look(self._zoom > self._low)
+        self._plus.set_enabled_look(self._zoom < self._high)
+        self.adjustSize()
+
+
 class ReviewWindow(WinWindow):
     """The window a finished snip opens in.
 
@@ -427,7 +545,8 @@ class ReviewWindow(WinWindow):
         body.addWidget(self._canvas)
 
         self._dimension_badge = _Badge(self._canvas)
-        self._zoom_badge = _Badge(self._canvas)
+        self._zoom_badge = _ZoomBadge(self._canvas)
+        self._zoom_badge.zoomChanged.connect(self._on_zoom_changed)
         self._refresh_badges()
 
         self._bar = FloatingBar(self._canvas, capture_chip=False, trailing="done")
@@ -676,10 +795,15 @@ class ReviewWindow(WinWindow):
         self._dimension_badge.setText(
             f"{self._image.width()} × {self._image.height()}{marks}"
         )
-        self._zoom_badge.setText(f"−   {self._canvas.zoom}%   +")
+        # The canvas is the authority on what the zoom clamped to, so the
+        # badge follows it rather than the two keeping separate counts.
+        self._zoom_badge.set_zoom(self._canvas.zoom)
         self._dimension_badge.adjustSize()
-        self._zoom_badge.adjustSize()
         self._place_overlays()
+
+    def _on_zoom_changed(self, percent: int) -> None:
+        self._canvas.set_zoom(percent)
+        self._refresh_badges()
 
     def _place_overlays(self) -> None:
         inset_h, inset_v = tokens.WinMetric.REVIEW_BADGE_INSET
@@ -728,13 +852,19 @@ class ReviewWindow(WinWindow):
 
     @staticmethod
     def _display_path(path: Path | None) -> str:
-        """`~`-relative where possible: most of a screenshot's path is the
+        r"""`~`-relative where possible: most of a screenshot's path is the
         user's own home directory read back at them.
+
+        `os.sep`, not a literal "/": `relative_to()` renders with the
+        platform's own separator, so hardcoding the Unix one produced
+        "~/Pictures\snipux\Screenshot from ....png" on Windows -- one path
+        spelled two ways in the same string, in the label whose whole job
+        is telling the user where their file is.
         """
         if path is None:
             return "Not saved to disk"
         try:
-            return f"~/{path.relative_to(Path.home())}"
+            return f"~{os.sep}{path.relative_to(Path.home())}"
         except ValueError:
             return str(path)
 

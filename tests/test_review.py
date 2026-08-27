@@ -9,11 +9,13 @@ the `Done` trailing action.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor, QImage
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from snipux import shapes
@@ -101,17 +103,117 @@ class TestStatusAndPath:
     def test_paths_under_home_are_shown_relative_to_it(self):
         path = Path.home() / "Pictures" / "snipux" / "shot.png"
 
-        # `_display_path` joins "~/" onto `str(path.relative_to(...))`, which
-        # carries the platform's own separator (backslash on Windows) --
-        # normalise before comparing rather than hard-coding the Linux one.
-        displayed = ReviewWindow._display_path(path).replace("\\", "/")
-        assert displayed == "~/Pictures/snipux/shot.png"
+        displayed = ReviewWindow._display_path(path)
+
+        assert displayed == f"~{os.sep}Pictures{os.sep}snipux{os.sep}shot.png"
+
+    def test_the_displayed_path_uses_one_separator_throughout(self):
+        # This test used to normalise backslashes to forward slashes before
+        # comparing, with a comment calling the mix expected -- so it passed
+        # while the footer mixed the two separators in one path on Windows. `_display_path` hardcoded "~/" and let
+        # `relative_to()` supply the platform's own separator for the rest,
+        # spelling one path two ways in the label whose only job is saying
+        # where the file is.
+        displayed = ReviewWindow._display_path(
+            Path.home() / "Pictures" / "snipux" / "shot.png"
+        )
+
+        foreign = "/" if os.sep == "\\" else "\\"
+        assert foreign not in displayed
 
     def test_show_in_folder_is_disabled_until_there_is_a_file(self, tmp_path):
         assert not ReviewWindow(make_image())._folder_button.isEnabled()
         assert ReviewWindow(
             make_image(), saved_path=tmp_path / "shot.png"
         )._folder_button.isEnabled()
+
+
+class TestZoomCluster:
+    """The canvas's top-right zoom control.
+
+    It shipped as a plain `_Badge`: the "−" and "+" were characters inside
+    one QLabel's text with nothing behind them. `ImageCanvas.set_zoom()`
+    was fully implemented and *nothing in the app ever called it*, so the
+    control the handoff specifies as interactive (minus / percentage /
+    plus, 60-160% in steps of 20) read "100%" and did nothing for the
+    whole life of the window. These tests are about the picture actually
+    changing, not the number.
+    """
+
+    def test_clicking_plus_actually_enlarges_the_drawn_image(self):
+        window = ReviewWindow(make_image(400, 300))
+        window.resize(1000, 700)
+        before = window._canvas.image_rect().width()
+
+        QTest.mouseClick(window._zoom_badge._plus, Qt.MouseButton.LeftButton)
+
+        assert window._canvas.zoom == 120
+        assert window._canvas.image_rect().width() > before
+
+    def test_clicking_minus_actually_shrinks_the_drawn_image(self):
+        window = ReviewWindow(make_image(400, 300))
+        window.resize(1000, 700)
+        before = window._canvas.image_rect().width()
+
+        QTest.mouseClick(window._zoom_badge._minus, Qt.MouseButton.LeftButton)
+
+        assert window._canvas.zoom == 80
+        assert window._canvas.image_rect().width() < before
+
+    def test_it_steps_by_the_amount_the_design_specifies(self):
+        _low, _high, step = tokens.WinMetric.ZOOM_STEPS
+        window = ReviewWindow(make_image())
+        start = window._canvas.zoom
+
+        QTest.mouseClick(window._zoom_badge._plus, Qt.MouseButton.LeftButton)
+
+        assert window._canvas.zoom == start + step
+
+    def test_it_clamps_at_both_ends_of_the_designed_range(self):
+        low, high, _step = tokens.WinMetric.ZOOM_STEPS
+        window = ReviewWindow(make_image())
+
+        for _ in range(20):
+            QTest.mouseClick(window._zoom_badge._minus, Qt.MouseButton.LeftButton)
+        assert window._canvas.zoom == low
+
+        for _ in range(40):
+            QTest.mouseClick(window._zoom_badge._plus, Qt.MouseButton.LeftButton)
+        assert window._canvas.zoom == high
+
+    def test_the_percentage_follows_the_canvas(self):
+        window = ReviewWindow(make_image())
+
+        QTest.mouseClick(window._zoom_badge._plus, Qt.MouseButton.LeftButton)
+
+        assert window._zoom_badge._percent.text() == f"{window._canvas.zoom}%"
+
+    def test_each_end_dims_when_there_is_nowhere_further_to_go(self):
+        low, high, _step = tokens.WinMetric.ZOOM_STEPS
+        window = ReviewWindow(make_image())
+
+        for _ in range(20):
+            QTest.mouseClick(window._zoom_badge._minus, Qt.MouseButton.LeftButton)
+        assert window._zoom_badge._minus._enabled_look is False
+        assert window._zoom_badge._plus._enabled_look is True
+
+        for _ in range(40):
+            QTest.mouseClick(window._zoom_badge._plus, Qt.MouseButton.LeftButton)
+        assert window._zoom_badge._plus._enabled_look is False
+        assert window._zoom_badge._minus._enabled_look is True
+
+    def test_zooming_repaints_the_canvas_differently(self):
+        # The strongest form of the assertion: not "the number changed" but
+        # "the pixels did". A canvas that tracked zoom without redrawing
+        # would satisfy every test above and still look frozen.
+        window = ReviewWindow(make_image(200, 150))
+        window.resize(900, 700)
+        before = window._canvas.grab().toImage()
+
+        QTest.mouseClick(window._zoom_badge._plus, Qt.MouseButton.LeftButton)
+        after = window._canvas.grab().toImage()
+
+        assert before != after
 
 
 class TestBadges:
