@@ -15,6 +15,7 @@ Windows's, registered behind `build_windows_registry()` the same way
 from __future__ import annotations
 
 import os
+import posixpath
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -466,7 +467,12 @@ class GnomeScreencastBackend(RecordingBackend):
         recording failed here *after* Shell had already started one,
         orphaning both the server-side recording and the file. A
         non-absolute answer is still refused, for the reason `start()`
-        gives.
+        gives -- asked of `posixpath`, not `os.path`, because the answer
+        comes from GNOME Shell and is always a POSIX path whatever
+        interpreter reads it. `os.path.isabs()` is `ntpath.isabs()` on a
+        Windows dev box, which since Python 3.13 calls a drive-less
+        `/tmp/out.webm` *not* absolute -- enough to fail this backend's
+        tests there while they pass on the Linux box that actually runs it.
         """
         error = GnomeScreencastBackend._reply_error(reply)
         if error is not None:
@@ -474,7 +480,7 @@ class GnomeScreencastBackend(RecordingBackend):
         success, filename = reply.body
         if not success:
             raise RuntimeError("gnome-screencast: recording start reported failure")
-        if not filename or not os.path.isabs(str(filename)):
+        if not filename or not posixpath.isabs(str(filename)):
             raise RuntimeError(
                 f"gnome-screencast: reported a non-absolute recording path "
                 f"{filename!r} for the requested {path!r}"
