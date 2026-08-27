@@ -18,15 +18,27 @@ class -- see `windows.py`'s docstring for why: `--list-backends` and
 not an exception. It answers with a registry containing one
 `capture.UnsupportedPlatformBackend`, naming this platform. No real backend
 is constructed here -- that is later work, not this ticket's.
+
+`build_recording_registry()` (SNX-119) is not an exception the way
+`build_capture_registry()` is: it raises `UnimplementedPlatformError`
+naming itself and the operation, same as every other method above.
+Recording has no `--list-backends`-style caller yet that needs a real,
+always-answering registry, and `recording.py` has no
+`UnsupportedPlatformBackend` of its own to hand back one that says so --
+see `Platform.build_recording_registry()`'s own docstring.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from snipux.capture import BackendRegistry, UnsupportedPlatformBackend
 
 from . import Platform, UnimplementedPlatformError
+
+if TYPE_CHECKING:
+    from snipux.recording import RecorderRegistry
 
 _PLATFORM_NAME = "macOS"
 
@@ -51,3 +63,6 @@ class DarwinPlatform(Platform):
         registry = BackendRegistry()
         registry.add(UnsupportedPlatformBackend(_PLATFORM_NAME))
         return registry
+
+    def build_recording_registry(self) -> "RecorderRegistry":
+        raise UnimplementedPlatformError(_PLATFORM_NAME, "build_recording_registry")
