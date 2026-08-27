@@ -2297,6 +2297,31 @@ class TestAppControllerLandingRecording:
         assert copied == [Path(temp_path)]
         assert list(tmp_path.iterdir()) == []
 
+    def test_the_copy_toast_says_what_a_video_on_the_clipboard_can_do(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Locked capture-flow handoff: Copy is not the same operation for a
+        # recording. A still goes on as image data and pastes anywhere; a
+        # video goes on as a file *reference* and does nothing in an image
+        # editor or a text box. Reporting both as "Copied to the clipboard"
+        # is true and useless -- it is what produced "looks like its in my
+        # clip board but its hard to know that".
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, after="instant"
+        )
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None)
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *a, **k: calls.append(a)
+        )
+
+        controller._stop_recording()
+
+        assert len(calls) == 1
+        message = calls[0][1]
+        assert "chat or folder" in message
+        assert "Copied to clipboard" not in message
+
     def test_instant_leaves_the_copied_file_on_disk(
         self, make_controller, monkeypatch, tmp_path
     ):
