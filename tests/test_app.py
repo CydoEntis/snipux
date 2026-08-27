@@ -1408,6 +1408,9 @@ class FakeRecordingBackend(RecordingBackend):
         self.start_calls.append((rect, path))
         if self._start_error is not None:
             raise self._start_error
+        # Honours the path it was handed, as WindowsRecorderBackend does;
+        # GNOME's renaming is exercised in test_recording.py instead.
+        return path
 
     def stop(self):
         self.stop_calls.append(True)

@@ -1358,7 +1358,7 @@ class AppController:
             # refuse the next, long after this timer is done firing.
             self._recording_delay_timer = None
             try:
-                backend = self._recorder_registry.start(rect, path)
+                backend, actual_path = self._recorder_registry.start(rect, path)
             except RecordingError as exc:
                 # Nothing was ever written to this placeholder path -- an
                 # empty file left behind here isn't a discarded recording
@@ -1367,7 +1367,15 @@ class AppController:
                 Path(path).unlink(missing_ok=True)
                 self._report_shortcut(str(exc))
                 return
-            self._active_recording = (backend, path, after)
+            if actual_path != path:
+                # The backend wrote somewhere else -- GNOME renames to
+                # match the container it picked -- so the reserved
+                # placeholder is an empty file nothing will ever write to.
+                # Dropping it here rather than leaving it for the next
+                # crash sweep matters because that sweep cannot tell it
+                # apart from a recording genuinely cut short.
+                Path(path).unlink(missing_ok=True)
+            self._active_recording = (backend, actual_path, after)
             self._start_recording_ui(rect)
 
         if delay == "Off":  # design.tokens.DELAYS[0]
@@ -1623,9 +1631,14 @@ class AppController:
         """
         folder = setup_desktop.load_save_folder()
         folder.mkdir(parents=True, exist_ok=True)
+        # The extension comes from the file that actually exists rather
+        # than a fixed "mp4": the backend chose the container (GNOME writes
+        # WebM whatever path it was handed), and landing VP8 under a .mp4
+        # name misreports it to every player and file manager downstream.
+        extension = Path(path).suffix.lstrip(".") or "mp4"
         destination = Path(
             setup_desktop.preview_filename(
-                folder, setup_desktop.load_filename_pattern(), extension="mp4"
+                folder, setup_desktop.load_filename_pattern(), extension=extension
             )
         )
         shutil.move(path, destination)
