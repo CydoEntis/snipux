@@ -1,4 +1,4 @@
-# Next: try recording on a real screen
+# Next: fix the recording flow
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
@@ -6,25 +6,36 @@ shape of the plan, the decisions already made, and how to pick it up.
 Everything through **SNX-127** is merged. `main` runs 1,431 tests, 14 skipped.
 **Zero open tickets.** Linux and Windows are both implemented; macOS is stubbed.
 
-## Recording is in, and no human has watched it work
+## Recording works, and the flow around it is wrong
 
-Backends, the chooser switch, commit-to-record, the HUD and file landing all
-merged. A fresh `dist\snipux.exe` (48MB) is built from this commit.
+It was tried on a real screen for the first time on 2026-08-27. It records --
+and every complaint was about the flow, not the capture. Three things to fix,
+in the order they bite:
 
-    dist\snipux.exe
+**Selecting an area starts the recording immediately.** There is no moment
+between "I have chosen what to record" and "it is recording", so the first
+seconds are always of getting ready. Committing a selection should arm the
+recording, not begin it: an explicit start, then a countdown (3-2-1, the way
+`DelayCountdown` already does it for stills) so there is time to prepare.
+`_commit_selection` -> `_on_recording_requested` is where the two are welded
+together today; the delay argument already threads through that call, so the
+countdown has somewhere to live.
 
-Then Ctrl+Alt+S, flip the chooser to **record**, drag a region, stop with the
-same shortcut.
+**Stopping made no sense.** The stop control is the whole HUD pill -- clicking
+anywhere on it stops -- and nothing says so. Ctrl+Alt+S also stops. Whatever
+the answer is, it has to be legible without being told.
 
-**Verified, and how:** a region records to a playable mp4 on Windows at ~30fps
-with real-time playback -- 10 seconds recorded gives a 9893ms file, and five
-runs in a row all produced files. The whole user path was driven end to end
-through `AppController`: overlay opens, chooser switches to record, committing
-a selection requests a recording with the right rect, delay and destination.
+**The HUD floats in the middle of the screen.** It should sit at the top, the
+way the chooser and floating bar do. `_place_recording_hud` in `app.py` picks
+below/above/right/left of the recorded rect and centres on that edge, so a
+region in the middle of the screen puts the pill in the middle of the screen.
+That preference order is the thing to replace, not the widget.
 
-**Not verified:** any of it on screen. Nothing proves the HUD appears, that the
-stop control is reachable, or that the file lands where the toast says. That is
-the ten minutes this needs.
+**Still unwatched underneath all that:** whether the file lands where the toast
+says. The mechanics are verified -- a region records to a playable mp4 at
+real-time speed, 10 seconds in giving a 9893ms file, five runs in a row all
+producing files -- and the path through `AppController` is driven end to end by
+the suite. A fresh `dist\snipux.exe` is built from this commit.
 
 ## Unverified on Linux, and uncheckable from Windows
 
