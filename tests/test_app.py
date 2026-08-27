@@ -1,5 +1,6 @@
 import ctypes
 import re
+from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QMimeData, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QUrl
@@ -35,6 +36,7 @@ from snipux.capture import (
 )
 from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
 from snipux.platform import windows as windows_platform
+from snipux.recording import RecorderRegistry, RecordingBackend, RecordingError
 from snipux.settings import SettingsDialog
 
 FILL_COLOR = qRgb(10, 20, 30)
@@ -1080,12 +1082,19 @@ def make_controller():
     """
     controllers = []
 
-    def _make(registry, transport, monitor_geometries=None, geometry_provider=None):
+    def _make(
+        registry,
+        transport,
+        monitor_geometries=None,
+        geometry_provider=None,
+        recorder_registry=None,
+    ):
         controller = AppController(
             registry,
             transport,
             monitor_geometries=monitor_geometries,
             geometry_provider=geometry_provider,
+            recorder_registry=recorder_registry,
         )
         controllers.append(controller)
         return controller
@@ -1268,6 +1277,259 @@ class TestAppControllerCapture:
         # usable after the failure, not torn down by it.
         assert controller.snip_action.text() == "Snip"
         controller.start_capture()  # must not raise a second time
+
+
+class FakeRecordingBackend(RecordingBackend):
+    """Mirrors test_recording.py's own `FakeBackend` -- a small
+    `RecordingBackend` implementation for exercising `AppController`'s
+    recording seam without a real recorder, recording every `start()` call
+    it receives rather than mocking the ABC.
+    """
+
+    def __init__(self, backend_name="fake", available=True, start_error=None):
+        self._name = backend_name
+        self._available = available
+        self._start_error = start_error
+        self.start_calls = []
+
+    def name(self):
+        return self._name
+
+    def is_available(self):
+        return self._available
+
+    def unavailable_reason(self):
+        return None
+
+    def start(self, rect, path):
+        self.start_calls.append((rect, path))
+        if self._start_error is not None:
+            raise self._start_error
+
+    def stop(self):
+        pass
+
+
+class TestAppControllerRecording:
+    """SNX-122: `_on_recording_requested` is app.py's half of "committing a
+    selection on the recording side ... starts the recorder on that rect"
+    -- `OverlayWindow._commit_selection`'s record branch is what calls it,
+    covered from the overlay.py side in test_overlay.py's own
+    `TestCommitToRecord`.
+    """
+
+    def test_an_off_delay_starts_recording_synchronously(self, make_controller):
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+        )
+        rect = QRectF(10, 20, 300, 200)
+
+        controller._on_recording_requested(rect, "Off")
+
+        assert len(backend.start_calls) == 1
+        started_rect, path = backend.start_calls[0]
+        assert started_rect == rect
+        # ticket 8's own seam: the backend that actually started, held
+        # alongside the path it's writing to, for a later `.stop()`.
+        assert controller._active_recording == (backend, path)
+
+    def test_a_non_off_delay_defers_the_start(self, make_controller):
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+        )
+
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "3s")
+
+        assert backend.start_calls == []
+        assert controller._recording_delay_timer is not None
+        assert controller._recording_delay_timer.isSingleShot()
+
+        # Mirrors test_overlay.py's own `overlay._delay_timer.timeout.emit()`
+        # convention for SNX-50's delayed capture -- firing the signal
+        # directly rather than waiting out 3 real seconds.
+        controller._recording_delay_timer.timeout.emit()
+
+        assert len(backend.start_calls) == 1
+
+    def test_a_recording_error_is_reported_through_the_tray(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend(start_error=RuntimeError("boom"))
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+        )
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+
+        assert len(calls) == 1
+        assert "boom" in calls[0][1]
+        assert controller._active_recording is None
+
+    def test_a_recording_error_prints_on_stdout_with_no_tray_available(
+        self, make_controller, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+        backend = FakeRecordingBackend(start_error=RuntimeError("boom"))
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+        )
+
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+
+        assert "boom" in capsys.readouterr().out
+
+    def test_a_recording_error_removes_the_placeholder_temp_file(self, make_controller):
+        backend = FakeRecordingBackend(start_error=RuntimeError("boom"))
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+        )
+
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+
+        # The path handed to `backend.start` is the placeholder tempfile
+        # `_on_recording_requested` creates before calling it -- a start
+        # that never happened shouldn't leave an empty file behind for
+        # ticket 9 to trip over later.
+        assert len(backend.start_calls) == 1
+        _, path = backend.start_calls[0]
+        assert not Path(path).exists()
+
+    def test_a_second_commit_to_record_while_a_delay_is_pending_is_refused(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+        )
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "3s")
+        first_timer = controller._recording_delay_timer
+        controller._on_recording_requested(QRectF(0, 0, 50, 50), "Off")
+
+        # The second request must not have clobbered the first countdown,
+        # nor started a recording of its own.
+        assert controller._recording_delay_timer is first_timer
+        assert backend.start_calls == []
+        assert len(calls) == 1
+
+        first_timer.timeout.emit()
+
+        assert len(backend.start_calls) == 1
+        assert backend.start_calls[0][0] == QRectF(0, 0, 100, 100)
+        # The guard released once the pending countdown actually fired.
+        assert controller._recording_delay_timer is None
+
+    def test_a_second_commit_to_record_while_one_is_active_is_refused(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+        )
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+        active = controller._active_recording
+        controller._on_recording_requested(QRectF(0, 0, 50, 50), "Off")
+
+        assert len(backend.start_calls) == 1
+        assert controller._active_recording is active
+        assert len(calls) == 1
+
+
+class TestAppControllerRecorderUnavailable:
+    """A platform with nothing behind `build_recording_registry()` yet
+    (macOS today) must not stop `AppController` from constructing -- the
+    same "a failure must not stop the rest" rule
+    `run_first_launch_setup`'s own `UnimplementedPlatformError` handling
+    already follows for desktop integration, applied here (SNX-122).
+    """
+
+    def _raise_unimplemented(self):
+        raise app.platform.UnimplementedPlatformError("macOS", "build_recording_registry")
+
+    def test_construction_survives_an_unimplemented_recording_seam(self, monkeypatch):
+        monkeypatch.setattr(
+            app.platform.current, "build_recording_registry", self._raise_unimplemented
+        )
+
+        controller = AppController(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        try:
+            assert controller._recorder_registry is None
+        finally:
+            controller._tray_icon.hide()
+
+    def test_a_later_commit_to_record_reports_the_remembered_message(self, monkeypatch):
+        monkeypatch.setattr(
+            app.platform.current, "build_recording_registry", self._raise_unimplemented
+        )
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        controller = AppController(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+        try:
+            controller._on_recording_requested(QRectF(0, 0, 100, 100), "Off")
+
+            assert len(calls) == 1
+            assert "macOS" in calls[0][1]
+            assert "build_recording_registry" in calls[0][1]
+        finally:
+            controller._tray_icon.hide()
 
 
 class TestAppControllerOverlayDismissal:
