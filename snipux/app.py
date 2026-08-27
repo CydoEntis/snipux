@@ -36,7 +36,16 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QRect, QRectF, QSize, Qt, QTimer, QUrl
-from PyQt6.QtGui import QColor, QFont, QGuiApplication, QIcon, QImage, QPainter, QPixmap
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QGuiApplication,
+    QIcon,
+    QImage,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget
 
@@ -277,78 +286,135 @@ def _build_recording_tray_icon(icon: QIcon) -> QIcon:
     return QIcon(pixmap)
 
 
-def _place_recording_hud(
-    rect: QRectF | None, desktop_bounds: QRectF, hud_size: QSize, margin: float = 12.0
-) -> QRect | None:
-    """Find a spot for the floating stop/elapsed-time pill outside the
-    recorded area, or `None` if there isn't room for one.
+def _screen_for(rect: QRectF | None, geometries: list[QRectF]) -> QRectF | None:
+    """The monitor a recording of `rect` belongs to, or None if there are
+    no geometries to choose from.
 
-    `rect is None` means a full-screen recording -- the recorded area *is*
-    `desktop_bounds` in that case, so there is never room outside it, by
-    construction. This is what makes "not shown in a full-screen
-    recording" true structurally, rather than by a separate check
-    somewhere else.
+    Chosen by the recorded area's centre so a recording on a second
+    display gets its pill on that display, rather than on whichever
+    monitor happens to come first. `rect is None` is a full-screen
+    recording, which has no centre worth testing -- the first geometry
+    (the primary screen, in the order Qt reports them) is the answer.
 
-    Otherwise, tries candidate placements outside `rect` in a fixed
-    preference order (below, above, right, left), each centred on the
-    relevant edge of `rect` and clamped, perpendicular to that edge, to
-    stay inside `desktop_bounds`. The first candidate whose full geometry
-    still fits inside `desktop_bounds` wins; if none do, there is no room.
-
-    Only checked against the union bounding box of every monitor, not gaps
-    between non-adjacent ones -- the same simplification
-    `WindowsRecorderBackend` already accepts for "primary screen only".
+    A rect spanning two monitors, or one whose centre lands in the gap
+    between two non-adjacent ones, falls back to the union of them all:
+    the only rect guaranteed to contain the recorded area.
     """
+    if not geometries:
+        return None
     if rect is None:
+        return geometries[0]
+    centre = rect.center()
+    for geometry in geometries:
+        if geometry.contains(centre):
+            return geometry
+    union = geometries[0]
+    for geometry in geometries[1:]:
+        union = union.united(geometry)
+    return union
+
+
+def _place_recording_hud(
+    rect: QRectF | None,
+    geometries: list[QRectF],
+    hud_size: QSize,
+    margin: float = 12.0,
+) -> QRect | None:
+    """Find a spot for the recording pill: top-centre of the screen the
+    recording is on, moved clear of the recorded area when that is where
+    the recording happens to be.
+
+    Top-centre because that is where the chooser and the floating bar
+    already sit, so the pill turns up where the user is already looking.
+    The rule this replaces took the first of below/above/right/left of the
+    recorded rect that fit, each centred on that edge -- which put the pill
+    in the middle of the screen for any region in the middle of the screen,
+    with nothing tying its position to anywhere predictable.
+
+    Staying clear of `rect` is what keeps the pill out of the recording
+    itself, and is why top-centre is a preference rather than a rule: a
+    region that covers the top of the screen would otherwise be filmed with
+    the pill sitting in it. Below the recorded area is the only fallback,
+    and there is deliberately no "above" one: the fallbacks are reached
+    only when the recorded area covers the top-centre strip, and anything
+    that does leaves no room above itself on the same screen by
+    definition. `None` means nothing fits and the caller shows no pill.
+
+    `rect is None` (a full-screen recording) still gets a placement, unlike
+    the previous version, which returned None and made "no pill in a
+    full-screen recording" true by construction. Arming needs a visible
+    Start for a full-screen recording too, so that rule now lives in
+    `_start_recording_ui`, which takes the pill down at the moment
+    recording actually begins -- the first moment it could contaminate
+    anything.
+    """
+    screen = _screen_for(rect, geometries)
+    if screen is None:
         return None
 
     width, height = hud_size.width(), hud_size.height()
+    x = screen.center().x() - width / 2
+    x = min(max(x, screen.left()), screen.right() - width)
 
-    def clamp_x(x: float) -> float:
-        return min(max(x, desktop_bounds.left()), desktop_bounds.right() - width)
-
-    def clamp_y(y: float) -> float:
-        return min(max(y, desktop_bounds.top()), desktop_bounds.bottom() - height)
-
-    centered_x = clamp_x(rect.center().x() - width / 2)
-    centered_y = clamp_y(rect.center().y() - height / 2)
-
-    candidates = [
-        QRectF(centered_x, rect.bottom() + margin, width, height),  # below
-        QRectF(centered_x, rect.top() - margin - height, width, height),  # above
-        QRectF(rect.right() + margin, centered_y, width, height),  # right
-        QRectF(rect.left() - margin - width, centered_y, width, height),  # left
-    ]
+    candidates = [QRectF(x, screen.top() + margin, width, height)]
+    if rect is not None:
+        candidates.append(QRectF(x, rect.bottom() + margin, width, height))
 
     for candidate in candidates:
-        if desktop_bounds.contains(candidate):
-            return QRect(round(candidate.x()), round(candidate.y()), width, height)
+        if not screen.contains(candidate):
+            continue
+        if rect is not None and candidate.intersects(rect):
+            continue
+        return QRect(round(candidate.x()), round(candidate.y()), width, height)
     return None
 
 
 class RecordingHud(QWidget):
-    """The floating stop/elapsed-time pill shown outside the recorded rect
-    while a recording is in progress (SNX-123 ticket 8).
+    """The floating pill a recording is driven from, from armed to stopped
+    (SNX-123 ticket 8, reshaped by the recording-flow fixes).
+
+    One widget with three states rather than three widgets, because all
+    three answer the same question -- "what happens if I click this?" --
+    at different moments, and one pill that changes is less to follow than
+    three that appear and vanish.
+
+    **The label always names the action a click performs**: "Start
+    recording", "Cancel", "Stop". This is the whole point of the shape.
+    The pill used to be a bare elapsed-time readout whose entire surface
+    silently stopped the recording -- the click target was everything and
+    nothing said so, and a user who had not been told could not have
+    guessed. Do not shorten these back to a bare time.
+
+    The glyph reinforces the word rather than replacing it: a filled dot
+    for armed (record), a hollow ring while counting (pending), a filled
+    square for recording (the universal stop).
 
     Deliberately parentless and frameless/always-on-top, the same shape as
     `overlay.py`'s `DelayCountdown` -- a HUD standing in for a window
-    rather than living inside one. Lives here, not in `overlay.py`:
-    `overlay.py`'s module docstring already establishes a one-directional
-    dependency (it imports from `app.py`, never the reverse), and this
-    widget has no reason to invert that just to be reused.
-
-    The whole pill is the click target -- there is exactly one action it
-    offers, so a separate button inside it would be redundant chrome.
+    rather than living inside one. Lives here, not in `overlay.py`, so the
+    dependency between those two modules stays one-directional.
     """
 
-    # `_place_recording_hud` is called with this, so the two never drift
-    # out of sync.
-    SIZE = QSize(150, 44)
+    ARMED = "armed"
+    COUNTING = "counting"
+    RECORDING = "recording"
 
-    def __init__(self, on_stop: Callable[[], None]):
+    # Wide enough for "Start recording" in the label's own font with the
+    # glyph and both margins clear of it. `_place_recording_hud` is called
+    # with this, so the two never drift out of sync.
+    SIZE = QSize(220, 44)
+
+    _GLYPH_SIZE = 10
+    _GLYPH_MARGIN = 14
+
+    def __init__(self, on_activate: Callable[[], None]):
         # No parent, ever -- see the class docstring.
         super().__init__(None)
-        self._on_stop = on_stop
+        # One callback, not one per state: the pill reports that it was
+        # clicked and `AppController` decides what that means now, so the
+        # widget never has to hold the controller's state machine too.
+        self._on_activate = on_activate
+        self._state = self.ARMED
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         )
@@ -356,7 +422,7 @@ class RecordingHud(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(self.SIZE)
 
-        self._label = QLabel("0:00", self)
+        self._label = QLabel(self)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setGeometry(0, 0, self.SIZE.width(), self.SIZE.height())
         # A click must reach this widget's own mousePressEvent, not stop at
@@ -368,11 +434,30 @@ class RecordingHud(QWidget):
         self._label.setFont(font)
         self._label.setStyleSheet(f"color: {design.color('TEXT_PRIMARY').name()};")
 
+        self.set_armed()
+
+    def state(self) -> str:
+        return self._state
+
+    def set_armed(self) -> None:
+        self._state = self.ARMED
+        self._label.setText("Start recording")
+        self.update()
+
+    def set_counting(self, seconds: int) -> None:
+        self._state = self.COUNTING
+        # The count is what changed, but the word is what makes the click
+        # target legible, so both stay on the pill.
+        self._label.setText(f"Cancel  ·  {seconds}")
+        self.update()
+
     def set_elapsed(self, text: str) -> None:
-        self._label.setText(text)
+        self._state = self.RECORDING
+        self._label.setText(f"Stop  ·  {text}")
+        self.update()
 
     def mousePressEvent(self, event) -> None:
-        self._on_stop()
+        self._on_activate()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -381,17 +466,32 @@ class RecordingHud(QWidget):
         painter.setBrush(design.color("BAR_BG"))
         radius = self.SIZE.height() / 2
         painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
-
-        dot_diameter = 10
-        dot_margin = 14
-        painter.setBrush(design.color("DANGER_SOLID"))
-        painter.drawEllipse(
-            dot_margin,
-            round(self.SIZE.height() / 2 - dot_diameter / 2),
-            dot_diameter,
-            dot_diameter,
-        )
+        self._paint_glyph(painter)
         painter.end()
+
+    def _paint_glyph(self, painter) -> None:
+        size = self._GLYPH_SIZE
+        left = self._GLYPH_MARGIN
+        top = round(self.SIZE.height() / 2 - size / 2)
+        accent = design.color("DANGER_SOLID")
+
+        if self._state == self.COUNTING:
+            # Hollow: nothing is being captured yet. An outline needs a pen
+            # rather than the brush the other two states fill with, so both
+            # are set explicitly here instead of inheriting paintEvent's.
+            pen = QPen(accent)
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(left, top, size, size)
+            painter.setPen(Qt.PenStyle.NoPen)
+            return
+
+        painter.setBrush(accent)
+        if self._state == self.RECORDING:
+            painter.drawRect(left, top, size, size)
+        else:
+            painter.drawEllipse(left, top, size, size)
 
 
 def build_default_registry() -> BackendRegistry:
@@ -867,6 +967,20 @@ class AppController:
         # for a different widget.
         self._recording_delay_timer: QTimer | None = None
 
+        # (rect, delay, after, path) for a recording that has been chosen
+        # but not yet started -- what the pill offers "Start recording"
+        # for. Deliberately separate from `_active_recording`, which only
+        # ever exists once a backend is genuinely running: keeping "chosen"
+        # and "running" in one attribute is what made committing a
+        # selection and beginning to record the same instant.
+        self._armed_recording: tuple | None = None
+        # Non-None exactly while the pre-recording countdown is running,
+        # which is also how every other method here asks whether it is --
+        # see `_stop_countdown_timer`. Parentless for the same reason as
+        # `_recording_delay_timer` above.
+        self._countdown_timer: QTimer | None = None
+        self._countdown_remaining = 0
+
         # True for the whole duration of a `_stop_recording()` call, not
         # just around `backend.stop()` itself -- `WindowsRecorderBackend
         # .stop()` pumps `QApplication.processEvents()` while it blocks
@@ -1135,6 +1249,19 @@ class AppController:
             self._stop_recording()
             return
 
+        # The same hotkey drives the armed and counting states, so it
+        # always does whatever the pill currently says it does -- the two
+        # controls never disagree, and a machine with nowhere to put a
+        # pill still has a way to start and cancel a recording. Ordered
+        # most-advanced-state-first for the same reason
+        # `_on_hud_activated` is.
+        if self._countdown_timer is not None:
+            self._cancel_armed_recording()
+            return
+        if self._armed_recording is not None:
+            self._begin_armed_recording()
+            return
+
         # No mode parameter: unlike the old per-monitor Overlay, a single
         # OverlayWindow starts in Region and lets its own capture-mode
         # popover switch to Window/Full screen/Freeform after the fact, so
@@ -1290,32 +1417,32 @@ class AppController:
         delay: str,
         after: str = design.tokens.RECORD_AFTER_DEFAULT,
     ) -> None:
-        """Start recording `rect` (absolute logical virtual-desktop
-        coordinates, or None for the whole desktop), once `delay` has
-        elapsed -- `OverlayWindow._commit_selection`'s record branch calls
-        this and closes itself right after, per SNX-122.
+        """*Arm* a recording of `rect` (absolute logical virtual-desktop
+        coordinates, or None for the whole desktop) --
+        `OverlayWindow._commit_selection`'s record branch calls this and
+        closes itself right after, per SNX-122.
+
+        Committing a selection used to start the backend on the spot, so
+        there was no moment between "I have chosen what to record" and "it
+        is recording" and the opening seconds of every recording were of
+        the user getting ready. Arming splits those two into separate,
+        deliberate acts: this method only decides *what* would be recorded
+        and puts up a pill offering to start it. `_begin_armed_recording()`
+        is the other half.
 
         `after` is `OverlayWindow.outcome` at the moment the selection was
         committed ("instant" or "save", record's own "then" vocabulary) --
-        held alongside the backend and path in `_active_recording` so
+        carried through the armed tuple and into `_active_recording` so
         `_stop_recording()` knows, once the file is finally real, whether
         to land-and-copy or just land (recording.md ticket 9's
         `_land_recording`). Defaulting to `tokens.RECORD_AFTER_DEFAULT`
         keeps every caller that only ever passed `(rect, delay)` working
         unchanged.
 
-        The delay is parsed here, not in overlay.py: `design.tokens.DELAYS`
-        values ("Off"/"3s"/"5s"/"10s") already pass through overlay.py
-        unparsed everywhere else (the popover, `_tick_delay`), and this is
-        the only place a recording delay is turned into seconds, so there's
-        nothing to keep in sync by keeping it in one place.
-
-        No visible countdown here -- `DelayCountdown` is overlay.py's own
-        widget for a *frame that hasn't been grabbed yet*, and recording's
-        frozen frame is already behind the closed overlay by the time this
-        runs. The recording HUD itself (ticket 8) only comes up once
-        `_begin()` below has actually started a backend -- see
-        `_start_recording_ui`.
+        `delay` is carried unparsed and only turned into seconds in
+        `_begin_armed_recording()`, which is the one place that needs a
+        number -- `design.tokens.DELAYS` values ("Off"/"3s"/"5s"/"10s")
+        pass through overlay.py unparsed everywhere else.
         """
         if self._recorder_registry is None:
             self._report_shortcut(self._recorder_unavailable_message)
@@ -1326,14 +1453,17 @@ class AppController:
         # of `_commit_selection` closes the overlay right after calling
         # this, which (via `_on_overlay_dismissed`) clears `self._overlay`
         # in the same call. So a second shortcut press, before this
-        # countdown fires or this recording stops, sails straight through
-        # `start_capture` and lands here again. Overwriting
-        # `_recording_delay_timer`/`_active_recording` in that case would
-        # drop the only Python reference keeping the pending `QTimer` alive
-        # and lose the handle ticket 8 needs to stop the first recording --
-        # so this refuses the second request and says why, rather than
-        # silently discarding the first one.
-        if self._recording_delay_timer is not None or self._active_recording is not None:
+        # recording is started or stopped, sails straight through
+        # `start_capture` and lands here again. Overwriting the armed
+        # tuple, countdown timer or `_active_recording` in that case would
+        # strand whichever recording was already in flight -- so this
+        # refuses the second request and says why, rather than silently
+        # discarding the first one.
+        if (
+            self._armed_recording is not None
+            or self._countdown_timer is not None
+            or self._active_recording is not None
+        ):
             self._report_shortcut(
                 "Snipux is already recording, or about to start -- finish that "
                 "recording before starting another."
@@ -1345,62 +1475,189 @@ class AppController:
         # backend just needs somewhere to write, and that somewhere is the
         # one dedicated subdirectory `_clean_up_crashed_recording_temp_files`
         # knows to sweep on the next launch if this process dies first.
+        # Reserved at arm time rather than at start so that a recording
+        # which is armed and then cancelled leaves nothing behind but a
+        # file this same sweep would collect anyway.
         tmp = tempfile.NamedTemporaryFile(
             suffix=".mp4", delete=False, dir=str(_recording_temp_dir())
         )
         tmp.close()
-        path = tmp.name
 
-        def _begin() -> None:
-            # The countdown (if any) has now fired, so the pending-request
-            # guard above must stop counting this one -- otherwise every
-            # recording after the first non-"Off" delay would permanently
-            # refuse the next, long after this timer is done firing.
-            self._recording_delay_timer = None
-            try:
-                backend, actual_path = self._recorder_registry.start(rect, path)
-            except RecordingError as exc:
-                # Nothing was ever written to this placeholder path -- an
-                # empty file left behind here isn't a discarded recording
-                # for ticket 9 to clean up, it's a start that never
-                # happened at all.
-                Path(path).unlink(missing_ok=True)
-                self._report_shortcut(str(exc))
-                return
-            if actual_path != path:
-                # The backend wrote somewhere else -- GNOME renames to
-                # match the container it picked -- so the reserved
-                # placeholder is an empty file nothing will ever write to.
-                # Dropping it here rather than leaving it for the next
-                # crash sweep matters because that sweep cannot tell it
-                # apart from a recording genuinely cut short.
-                Path(path).unlink(missing_ok=True)
-            self._active_recording = (backend, actual_path, after)
-            self._start_recording_ui(rect)
+        self._armed_recording = (rect, delay, after, tmp.name)
+        self._show_recording_hud(rect)
+        if self._recording_hud is None:
+            # Nowhere to put a pill: no monitor geometry to place it
+            # against, or a recorded area that covers every candidate spot.
+            # The capture shortcut still starts it, so say so -- an armed
+            # recording with no visible way to start would just look like
+            # nothing happened.
+            self._report_shortcut(
+                "Ready to record -- press the capture shortcut to start."
+            )
 
+    def _show_recording_hud(self, rect: QRectF | None) -> None:
+        """Put the pill up in its armed state, if there is anywhere to put
+        it.
+
+        Placement is computed once, here, and the pill then stays put for
+        the whole of arming, counting down and recording -- a pill that
+        jumped between those states would be harder to track than one that
+        simply changes what it says.
+        """
+        # The same union-of-monitor-geometries source `create_overlays()`
+        # in overlay.py already uses to build its own `virtual_desktop_rect`
+        # for X11.
+        geometries = (
+            self._monitor_geometries
+            if self._monitor_geometries is not None
+            else self._real_monitor_geometries()
+        )
+        placement = _place_recording_hud(rect, geometries, RecordingHud.SIZE)
+        if placement is None:
+            return
+        self._recording_hud = RecordingHud(on_activate=self._on_hud_activated)
+        self._recording_hud.move(placement.topLeft())
+        self._recording_hud.show()
+
+    def _on_hud_activated(self) -> None:
+        """One click target, three meanings -- always the one the pill's
+        label is currently showing.
+
+        Checked most-advanced-state-first so a click that lands during the
+        handover between two states does the later thing rather than
+        restarting the earlier one.
+        """
+        if self._active_recording is not None:
+            self._stop_recording()
+        elif self._countdown_timer is not None:
+            self._cancel_armed_recording()
+        elif self._armed_recording is not None:
+            self._begin_armed_recording()
+
+    def _begin_armed_recording(self) -> None:
+        """Take an armed recording to the countdown, or straight to
+        recording when no delay is set.
+
+        "Off" means no countdown, and that is safe here in a way it would
+        not have been before: `_place_recording_hud` guarantees the pill
+        sits outside the recorded area, so clicking Start does not leave
+        the pointer inside the frame. A delay of 3s/5s/10s is the user
+        asking for preparation time on top of that, and gets a visible
+        count -- the recording equivalent of `DelayCountdown`, shown on the
+        pill itself rather than in a second widget.
+        """
+        if self._armed_recording is None:
+            return
+        # A countdown already running means Start has been pressed once
+        # already: pressing it again must not build a second timer over
+        # the first, which would strand the first one still counting
+        # towards a recording nothing holds a handle to.
+        if self._countdown_timer is not None:
+            return
+        _rect, delay, _after, _path = self._armed_recording
         if delay == "Off":  # design.tokens.DELAYS[0]
-            _begin()
+            self._start_armed_recording()
             return
 
-        seconds = int(delay.rstrip("s"))
+        self._countdown_remaining = int(delay.rstrip("s"))
+        if self._recording_hud is not None:
+            self._recording_hud.set_counting(self._countdown_remaining)
         # No QObject parent -- `AppController` isn't one -- so the strong
         # Python reference this assignment creates is what keeps the timer
         # alive until it fires, the same role a parent would otherwise play.
-        self._recording_delay_timer = QTimer()
-        self._recording_delay_timer.setSingleShot(True)
-        self._recording_delay_timer.timeout.connect(_begin)
-        self._recording_delay_timer.start(seconds * 1000)
+        self._countdown_timer = QTimer()
+        self._countdown_timer.setInterval(1000)
+        self._countdown_timer.timeout.connect(self._tick_recording_countdown)
+        self._countdown_timer.start()
+
+    def _tick_recording_countdown(self) -> None:
+        """One second of the pre-recording countdown."""
+        self._countdown_remaining -= 1
+        if self._countdown_remaining <= 0:
+            self._stop_countdown_timer()
+            self._start_armed_recording()
+            return
+        if self._recording_hud is not None:
+            self._recording_hud.set_counting(self._countdown_remaining)
+
+    def _stop_countdown_timer(self) -> None:
+        """Stop and drop the countdown timer, if one is running.
+
+        Dropping the reference is what actually disposes of it -- see
+        `_begin_armed_recording` on why the reference is the timer's only
+        keeper -- and it doubles as the "is a countdown running" flag every
+        other method here tests.
+        """
+        if self._countdown_timer is not None:
+            self._countdown_timer.stop()
+            self._countdown_timer = None
+        self._countdown_remaining = 0
+
+    def _cancel_armed_recording(self) -> None:
+        """Throw away an armed or counting-down recording without ever
+        starting a backend.
+
+        Nothing has been recorded, so there is nothing to land and nothing
+        to report but the cancellation itself. The reserved temp file is
+        removed here rather than left for the next crash sweep, which
+        cannot tell an abandoned reservation from a recording genuinely
+        cut short.
+        """
+        if self._armed_recording is None:
+            return
+        _rect, _delay, _after, path = self._armed_recording
+        self._armed_recording = None
+        self._stop_countdown_timer()
+        Path(path).unlink(missing_ok=True)
+        self._teardown_recording_ui()
+        self._report_shortcut("Recording cancelled.")
+
+    def _start_armed_recording(self) -> None:
+        """Actually start a backend on the armed rect -- the moment the
+        recording stops being a plan.
+
+        Reached from `_begin_armed_recording()` directly when no delay is
+        set, and from `_tick_recording_countdown()` when one is.
+        """
+        if self._armed_recording is None:
+            return
+        rect, _delay, after, path = self._armed_recording
+        self._armed_recording = None
+        try:
+            backend, actual_path = self._recorder_registry.start(rect, path)
+        except RecordingError as exc:
+            # Nothing was ever written to this placeholder path -- an
+            # empty file left behind here isn't a discarded recording
+            # for ticket 9 to clean up, it's a start that never
+            # happened at all.
+            Path(path).unlink(missing_ok=True)
+            self._teardown_recording_ui()
+            self._report_shortcut(str(exc))
+            return
+        if actual_path != path:
+            # The backend wrote somewhere else -- GNOME renames to
+            # match the container it picked -- so the reserved
+            # placeholder is an empty file nothing will ever write to.
+            # Dropping it here rather than leaving it for the next
+            # crash sweep matters because that sweep cannot tell it
+            # apart from a recording genuinely cut short.
+            Path(path).unlink(missing_ok=True)
+        self._active_recording = (backend, actual_path, after)
+        self._start_recording_ui(rect)
 
     def _start_recording_ui(self, rect: QRectF | None) -> None:
         """Bring up every visible sign that a recording is running (SNX-123
         ticket 8): the elapsed-time timer (which drives the tray tooltip,
-        and the HUD's own label when there's room for one) and the tray
-        icon's recording state.
+        and the pill's own label) and the tray icon's recording state.
 
-        Called from `_on_recording_requested`'s `_begin()`, right after
+        Called from `_start_armed_recording()`, right after
         `self._active_recording` is actually set -- so this never runs for
-        a still-pending delay countdown, only once a backend has genuinely
-        started.
+        a still-armed or still-counting recording, only once a backend has
+        genuinely started.
+
+        The pill itself is not created here: it has been up since the
+        recording was armed, and this only moves it into its recording
+        state.
         """
         self._recording_started_at = time.monotonic()
 
@@ -1410,10 +1667,6 @@ class AppController:
         self._recording_elapsed_timer.setInterval(1000)
         self._recording_elapsed_timer.timeout.connect(self._on_recording_tick)
         self._recording_elapsed_timer.start()
-        # Ticked once immediately, not just on the timer's first firing a
-        # second from now -- a recording stopped inside that first second
-        # should still have shown 0:00 somewhere, not nothing at all.
-        self._on_recording_tick()
 
         # Not gated on `self._tray_available`: every other piece of tray
         # state this class builds (`setContextMenu`, the icon itself) is
@@ -1425,29 +1678,21 @@ class AppController:
         # itself -- see the tray menu's own construction comment.
         self.discard_action.setEnabled(True)
 
-        # The same union-of-monitor-geometries reduction `create_overlays()`
-        # in overlay.py already does to build its own `virtual_desktop_rect`
-        # for X11.
-        geometries = (
-            self._monitor_geometries
-            if self._monitor_geometries is not None
-            else self._real_monitor_geometries()
-        )
-        desktop_bounds = None
-        for geometry in geometries:
-            desktop_bounds = (
-                geometry if desktop_bounds is None else desktop_bounds.united(geometry)
-            )
+        if rect is None and self._recording_hud is not None:
+            # A full-screen recording has no "outside the recorded area"
+            # for the pill to sit in, so from here on it would film
+            # itself. It is shown while armed and counting -- nothing is
+            # being captured then, and a full-screen recording needs a
+            # visible Start as much as any other -- and comes down at the
+            # exact moment that stops being true. The tray tooltip carries
+            # elapsed time from here, as it always did for this case.
+            self._recording_hud.close()
+            self._recording_hud = None
 
-        placement = (
-            _place_recording_hud(rect, desktop_bounds, RecordingHud.SIZE)
-            if desktop_bounds is not None
-            else None
-        )
-        if placement is not None:
-            self._recording_hud = RecordingHud(on_stop=self._stop_recording)
-            self._recording_hud.move(placement.topLeft())
-            self._recording_hud.show()
+        # Ticked once immediately, not just on the timer's first firing a
+        # second from now -- a recording stopped inside that first second
+        # should still have shown 0:00 somewhere, not nothing at all.
+        self._on_recording_tick()
 
     def _teardown_recording_ui(self) -> None:
         """Undo everything `_start_recording_ui` brought up.
@@ -1462,6 +1707,10 @@ class AppController:
         if self._recording_elapsed_timer is not None:
             self._recording_elapsed_timer.stop()
             self._recording_elapsed_timer = None
+        # Belt and braces: a stop arriving while a countdown is somehow
+        # still running must not leave that timer to fire into a
+        # torn-down recording.
+        self._stop_countdown_timer()
         if self._recording_hud is not None:
             self._recording_hud.close()
             self._recording_hud = None
