@@ -615,11 +615,34 @@ def _crop_frame(frame: QVideoFrame, pixel_rect: QRect) -> QVideoFrame:
     any byte-slicing happens -- see `_clamp_rect_to_frame()`.
     """
     pixel_rect = _clamp_rect_to_frame(pixel_rect, frame.width(), frame.height())
-    pixel_format = frame.surfaceFormat().pixelFormat()
+    source_format = frame.surfaceFormat()
+    pixel_format = source_format.pixelFormat()
     bytes_per_pixel = _bytes_per_pixel(pixel_format)
     row_bytes = pixel_rect.width() * bytes_per_pixel
 
-    out_frame = QVideoFrame(QVideoFrameFormat(pixel_rect.size(), pixel_format))
+    # The size/pixel-format constructor copies neither the stream frame rate
+    # nor the colour metadata, and the frame rate is load-bearing: the
+    # encoder builds its output type from the *first* frame pushed, and
+    # Media Foundation's H264 encoder refuses a type whose frame rate is 0
+    # ("could not set output type (80004005)" -> "Could not initialize
+    # encoder"). The recording then lands as a 0-byte file while start()
+    # has already returned successfully. `_apply_measured_frame_rate` does
+    # tell the *recorder* a real rate, but only after
+    # _FRAME_RATE_SAMPLE_FRAMES arrivals -- long after the encoder has
+    # already had to commit -- which is why this failed intermittently
+    # rather than always, depending on which won the race. Carrying the
+    # source's own rate here means the very first frame already describes
+    # itself correctly. The colour fields are copied for the same
+    # "describe the frame honestly" reason; QScreenCapture reports them
+    # Undefined/Unknown today, so they cost nothing and stop this from
+    # silently mattering if it ever reports otherwise.
+    out_format = QVideoFrameFormat(pixel_rect.size(), pixel_format)
+    out_format.setStreamFrameRate(source_format.streamFrameRate())
+    out_format.setColorSpace(source_format.colorSpace())
+    out_format.setColorRange(source_format.colorRange())
+    out_format.setColorTransfer(source_format.colorTransfer())
+
+    out_frame = QVideoFrame(out_format)
     # startTime()/endTime() are metadata accessors, not buffer accessors --
     # copying them here has no interaction with the map/unmap ordering
     # below. This is the fix for SNX-125: a freshly constructed QVideoFrame
@@ -855,6 +878,12 @@ class WindowsRecorderBackend(RecordingBackend):
         self._worker = None
         self._worker_thread = None
 
+        # Failures reported *after* start() returned. Both start paths
+        # check this list once, immediately after record(), which catches
+        # only what Qt reported synchronously -- and the encoder failure
+        # that mattered most did not arrive until later (see stop()).
+        self._errors: list[str] = []
+
     def name(self) -> str:
         return "qt-native"
 
@@ -923,7 +952,8 @@ class WindowsRecorderBackend(RecordingBackend):
         recorder.setMediaFormat(self._media_format())
         recorder.setOutputLocation(QUrl.fromLocalFile(path))
 
-        errors: list[str] = []
+        errors: list[str] = self._errors
+        errors.clear()
         self._wire_errors(screen_capture, recorder, errors)
 
         session.setScreenCapture(screen_capture)
@@ -969,7 +999,8 @@ class WindowsRecorderBackend(RecordingBackend):
         recorder.setMediaFormat(self._media_format())
         recorder.setOutputLocation(QUrl.fromLocalFile(path))
 
-        errors: list[str] = []
+        errors: list[str] = self._errors
+        errors.clear()
         self._wire_errors(screen_capture, recorder, errors)
 
         worker = _RegionCropWorker(frame_input, pixel_rect)
@@ -1027,10 +1058,31 @@ class WindowsRecorderBackend(RecordingBackend):
         self._worker_thread = worker_thread
 
     def stop(self) -> None:
+        """End the recording, and raise if the recorder reported a failure
+        at any point -- not just in the instant after `record()`.
+
+        Both start paths already check for a synchronous failure, but a
+        recorder can fail well after `record()` returns and go on reporting
+        `RecordingState` for a while before dropping to `StoppedState` on
+        its own. That is not hypothetical: a cropped frame carrying a
+        stream frame rate of 0 made Media Foundation's H264 encoder refuse
+        to initialize on the *first* frame, and the whole failure surfaced
+        as `ResourceError: Could not initialize encoder` some milliseconds
+        after a `start()` that had already returned happily. The result was
+        a 0-byte file, an app that showed a HUD counting up over a
+        recording that did not exist, and a toast naming a file nobody had
+        written. Whatever else is wrong, a recording that failed must not
+        end quietly.
+        """
         if self._worker_thread is not None:
             self._stop_region()
         else:
             self._stop_full_screen()
+
+        if self._errors:
+            failure = self._errors[0]
+            self._errors = []
+            raise RuntimeError(f"qt-native: {failure}")
 
     def _stop_full_screen(self) -> None:
         if self._screen_capture is not None:
