@@ -1078,6 +1078,55 @@ class TestCropFrame:
         assert cropped.startTime() == 123_456
         assert cropped.endTime() == 156_789
 
+    def test_carries_the_source_formats_stream_frame_rate(self):
+        # The bug this pins: QVideoFrameFormat(size, pixel_format) leaves
+        # streamFrameRate() at 0, and the encoder builds its output type
+        # from the *first* frame it is handed. Media Foundation's H264
+        # encoder refuses a type whose frame rate is 0 -- measured against
+        # a real desktop as "could not set output type (80004005)", then
+        # "Could not initialize encoder", then a 0-byte file from a start()
+        # that had already returned successfully. Region recording on
+        # Windows produced nothing at all, 3 runs out of 3.
+        #
+        # setVideoFrameRate() on the recorder does not cover this: it is
+        # only called once _RegionCropWorker has 15 arrivals to average,
+        # long after the encoder has had to commit -- which is why the
+        # failure was intermittent rather than total, and why the fix has
+        # to be on the frame itself.
+        source_format = QVideoFrameFormat(
+            QSize(4, 4), QVideoFrameFormat.PixelFormat.Format_BGRA8888
+        )
+        source_format.setStreamFrameRate(30.0)
+        source = QVideoFrame(source_format)
+
+        cropped = _crop_frame(source, QRect(0, 0, 2, 2))
+
+        assert cropped.surfaceFormat().streamFrameRate() == 30.0
+
+    def test_carries_the_source_formats_colour_metadata(self):
+        # Same "describe the frame honestly" reason as the frame rate
+        # above, and copied by the same code. QScreenCapture reports these
+        # Undefined/Unknown today, so this asserts against a source that
+        # sets them rather than one that happens not to -- otherwise it
+        # would pass on a cropped frame that dropped them.
+        source_format = QVideoFrameFormat(
+            QSize(4, 4), QVideoFrameFormat.PixelFormat.Format_BGRA8888
+        )
+        source_format.setColorSpace(QVideoFrameFormat.ColorSpace.ColorSpace_BT709)
+        source_format.setColorRange(QVideoFrameFormat.ColorRange.ColorRange_Full)
+        source = QVideoFrame(source_format)
+
+        cropped = _crop_frame(source, QRect(0, 0, 2, 2))
+
+        assert (
+            cropped.surfaceFormat().colorSpace()
+            == QVideoFrameFormat.ColorSpace.ColorSpace_BT709
+        )
+        assert (
+            cropped.surfaceFormat().colorRange()
+            == QVideoFrameFormat.ColorRange.ColorRange_Full
+        )
+
 
 class TestRegionCropWorker:
     def test_does_nothing_when_no_frame_is_pending(self):
@@ -1529,6 +1578,60 @@ class TestWindowsRecorderBackendStop:
         backend.stop()  # must not raise or hang
 
         assert backend._recorder is None
+
+    def test_stop_raises_when_the_recorder_failed_after_start_returned(self):
+        # A recorder can fail well after record() returns -- both start
+        # paths only check for a synchronous failure, so a late one used to
+        # go nowhere at all. Measured against a real desktop, the encoder
+        # reported "Could not initialize encoder" milliseconds after a
+        # start() that had already returned, and the app went on to show a
+        # HUD counting up and a toast naming a 0-byte file. Whatever else
+        # is wrong, a recording that failed must not end quietly.
+        backend = _windows_backend()
+        backend.start(None, "C:/tmp/out.mp4")
+        recorder = backend._recorder
+        recorder._error = QMediaRecorder.Error.ResourceError
+        recorder._error_string = "Could not initialize encoder"
+        recorder.errorChanged.emit()
+
+        with pytest.raises(RuntimeError, match="Could not initialize encoder"):
+            backend.stop()
+
+    def test_stop_still_tears_everything_down_when_it_raises(self):
+        # The raise must not leave a half-lived recording behind: the
+        # unwind happens first and only then is the failure reported, so a
+        # caller that catches this is not left holding a live capture
+        # session and a running worker thread.
+        backend = _windows_backend()
+        backend.start(QRectF(0, 0, 100, 100), "C:/tmp/out-region.mp4")
+        recorder = backend._recorder
+        recorder._error = QMediaRecorder.Error.ResourceError
+        recorder._error_string = "Could not initialize encoder"
+        recorder.errorChanged.emit()
+
+        with pytest.raises(RuntimeError):
+            backend.stop()
+
+        assert backend._recorder is None
+        assert backend._worker_thread is None
+        assert backend._screen_capture is None
+
+    def test_a_later_recording_does_not_inherit_the_previous_failure(self):
+        # The error list is per-recording, not per-backend: a backend
+        # reused after a failed recording must not raise on the next
+        # stop() for something the previous one reported.
+        backend = _windows_backend()
+        backend.start(None, "C:/tmp/out.mp4")
+        recorder = backend._recorder
+        recorder._error = QMediaRecorder.Error.ResourceError
+        recorder._error_string = "Could not initialize encoder"
+        recorder.errorChanged.emit()
+        with pytest.raises(RuntimeError):
+            backend.stop()
+
+        backend.start(None, "C:/tmp/out-2.mp4")
+
+        backend.stop()  # must not raise
 
 
 class TestBuildWindowsRegistry:
