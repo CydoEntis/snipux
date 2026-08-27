@@ -15,6 +15,11 @@ pattern for backends; `overlay.py` is scoped to widget/painting code).
 `app.py` has no reason to import `overlay.py`'s `OverlayWindow.copy`/`save`,
 so `overlay.py` importing these two functions from here (deferred, to avoid
 a circular import) stays one-directional.
+
+`copy_file_to_clipboard`/`finish_recording` sit next to them for the same
+reason: recording has no bitmap to put on the clipboard, only a file, so
+copying it is a sibling function rather than a branch inside
+`copy_image_to_clipboard`.
 """
 
 from __future__ import annotations
@@ -24,14 +29,16 @@ import datetime
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QBuffer, QIODevice, QRectF
-from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QImage, QPixmap
+from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QRect, QRectF, QSize, Qt, QTimer, QUrl
+from PyQt6.QtGui import QColor, QFont, QGuiApplication, QIcon, QImage, QPainter, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget
 
 from snipux.capture import (
     XwininfoWindowGeometryProvider,
@@ -49,6 +56,7 @@ from snipux.overlay import (
 )
 from snipux import design, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
+from snipux.recording import RecorderRegistry, RecordingError
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
 
@@ -83,6 +91,97 @@ def copy_image_to_clipboard(image: QImage) -> None:
         )
     except (OSError, subprocess.CalledProcessError):
         pass  # Qt clipboard already holds the image; this sink is best-effort
+
+
+def copy_file_to_clipboard(path: Path) -> None:
+    """Place a *reference* to the file at `path` on the clipboard -- the way
+    Windows Snipping Tool does it, and the only way a recording can be
+    copied since there is no bitmap to put there instead.
+
+    A sibling to `copy_image_to_clipboard`, not a branch inside it: the
+    `QMimeData` shape is different (a URL list, not image bytes) and so are
+    the flavours involved. `QMimeData.setUrls` with a `QUrl.fromLocalFile`
+    is the whole of what makes Qt's clipboard backend map this to `CF_HDROP`
+    on Windows and `text/uri-list` on Linux -- there is nothing to branch on
+    `sys.platform` for here.
+
+    This function does not touch the filesystem beyond reading `path` to
+    build the URL -- it does not create, move, or check that the file
+    exists. Copy is save-then-copy: it's the caller's job to have written a
+    real file first.
+    """
+    url = QUrl.fromLocalFile(str(path))
+
+    mime = QMimeData()
+    mime.setUrls([url])
+    # Nautilus (and other GNOME file managers) ignore text/uri-list for
+    # paste and want this flavour instead: an operation word ("copy") then
+    # one URI per line, on the *same* QMimeData. QUrl.toString() is what
+    # gets percent-encoding right for a path with spaces or non-ASCII
+    # characters -- do not hand-format the file:// string.
+    mime.setData("x-special/gnome-copied-files", b"copy\n" + url.toString().encode())
+    QGuiApplication.clipboard().setMimeData(mime)
+
+    if shutil.which("wl-copy") is None:
+        return
+
+    try:
+        subprocess.run(
+            ["wl-copy", "--type", "text/uri-list"],
+            input=(url.toString() + "\n").encode(),
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pass  # Qt clipboard already holds the file reference; best-effort sink
+
+
+def finish_recording(path: Path, after: str) -> None:
+    """Carry out whichever of recording's two destinations `after` names.
+
+    The backends behind `platform.current.build_recording_registry()`
+    already write straight to `path` while recording runs, so by the time
+    this is called the file exists on disk either way -- there is no
+    flatten-then-write step here the way stills has. "Instant" copies the
+    finished file; "Save" is a no-op, because the file is already where it
+    needs to be.
+
+    Written as "only 'instant' acts" rather than "only 'save' is inert" so
+    that a third destination added later stays inert here by default
+    instead of silently being treated as a copy.
+    """
+    if after == "instant":
+        copy_file_to_clipboard(path)
+
+
+def _recording_temp_dir() -> Path:
+    """The one dedicated subdirectory a recording's working file lives
+    under while it is in progress (recording.md ticket 9) -- created on
+    demand, not assumed to exist.
+
+    Not the bare system temp dir a placeholder `NamedTemporaryFile` used to
+    land in directly: a dedicated subdirectory is what makes "delete every
+    file already here at startup" (see `AppController.__init__`) mean
+    "recordings this app itself left behind", rather than every other
+    application's litter in `/tmp`.
+    """
+    directory = Path(tempfile.gettempdir()) / "snipux-recording"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _clean_up_crashed_recording_temp_files() -> None:
+    """Delete every file already present in `_recording_temp_dir()`.
+
+    Called once, at `AppController` construction, before anything else
+    runs -- only one recording is ever active at a time and this process
+    wasn't running a moment ago, so anything already there is necessarily
+    a crash leftover (the process died mid-recording, or between finishing
+    the backend and landing the file), not a live recording something else
+    still needs.
+    """
+    for leftover in _recording_temp_dir().iterdir():
+        if leftover.is_file():
+            leftover.unlink(missing_ok=True)
 
 
 def save_image(image: QImage, directory: Path | str | None = None) -> Path:
@@ -137,6 +236,162 @@ def load_app_icon() -> QIcon:
         pixmap.fill(QColor(60, 110, 200))
         return QIcon(pixmap)
     return icon
+
+
+# The tray renders at one small size regardless of how many resolutions
+# `icon` carries -- unlike the taskbar/window-switcher use `load_app_icon`'s
+# own docstring is about -- so a single fixed size is representative enough
+# to paint the recording dot onto.
+_TRAY_ICON_PIXMAP_SIZE = 64
+
+
+def _build_recording_tray_icon(icon: QIcon) -> QIcon:
+    """Derive the "recording" tray icon from the idle one: the same
+    artwork with a filled dot painted over it, in
+    `design.tokens.Color.DANGER_SOLID` -- the same red `overlay.py`'s own
+    "Clear ink" button already uses for its danger/alert state (there as
+    the translucent `DANGER_BG`; this dot needs it opaque, hence the
+    sibling token -- see `DANGER_SOLID`'s own comment in tokens.py), rather
+    than inventing a new colour.
+
+    Built once, in `AppController.__init__`, and swapped for the idle icon
+    (`self._idle_tray_icon`) whenever a recording starts/stops -- not
+    redrawn per recording.
+    """
+    base = icon.pixmap(_TRAY_ICON_PIXMAP_SIZE, _TRAY_ICON_PIXMAP_SIZE)
+    pixmap = QPixmap(base)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(design.color("DANGER_SOLID"))
+    diameter = round(pixmap.width() * 0.42)
+    painter.drawEllipse(
+        pixmap.width() - diameter, pixmap.height() - diameter, diameter, diameter
+    )
+    # Closed before the QIcon below reads the pixmap -- never leave a
+    # QPainter open across a read of the pixmap it is painting, per
+    # CLAUDE.md.
+    painter.end()
+
+    return QIcon(pixmap)
+
+
+def _place_recording_hud(
+    rect: QRectF | None, desktop_bounds: QRectF, hud_size: QSize, margin: float = 12.0
+) -> QRect | None:
+    """Find a spot for the floating stop/elapsed-time pill outside the
+    recorded area, or `None` if there isn't room for one.
+
+    `rect is None` means a full-screen recording -- the recorded area *is*
+    `desktop_bounds` in that case, so there is never room outside it, by
+    construction. This is what makes "not shown in a full-screen
+    recording" true structurally, rather than by a separate check
+    somewhere else.
+
+    Otherwise, tries candidate placements outside `rect` in a fixed
+    preference order (below, above, right, left), each centred on the
+    relevant edge of `rect` and clamped, perpendicular to that edge, to
+    stay inside `desktop_bounds`. The first candidate whose full geometry
+    still fits inside `desktop_bounds` wins; if none do, there is no room.
+
+    Only checked against the union bounding box of every monitor, not gaps
+    between non-adjacent ones -- the same simplification
+    `WindowsRecorderBackend` already accepts for "primary screen only".
+    """
+    if rect is None:
+        return None
+
+    width, height = hud_size.width(), hud_size.height()
+
+    def clamp_x(x: float) -> float:
+        return min(max(x, desktop_bounds.left()), desktop_bounds.right() - width)
+
+    def clamp_y(y: float) -> float:
+        return min(max(y, desktop_bounds.top()), desktop_bounds.bottom() - height)
+
+    centered_x = clamp_x(rect.center().x() - width / 2)
+    centered_y = clamp_y(rect.center().y() - height / 2)
+
+    candidates = [
+        QRectF(centered_x, rect.bottom() + margin, width, height),  # below
+        QRectF(centered_x, rect.top() - margin - height, width, height),  # above
+        QRectF(rect.right() + margin, centered_y, width, height),  # right
+        QRectF(rect.left() - margin - width, centered_y, width, height),  # left
+    ]
+
+    for candidate in candidates:
+        if desktop_bounds.contains(candidate):
+            return QRect(round(candidate.x()), round(candidate.y()), width, height)
+    return None
+
+
+class RecordingHud(QWidget):
+    """The floating stop/elapsed-time pill shown outside the recorded rect
+    while a recording is in progress (SNX-123 ticket 8).
+
+    Deliberately parentless and frameless/always-on-top, the same shape as
+    `overlay.py`'s `DelayCountdown` -- a HUD standing in for a window
+    rather than living inside one. Lives here, not in `overlay.py`:
+    `overlay.py`'s module docstring already establishes a one-directional
+    dependency (it imports from `app.py`, never the reverse), and this
+    widget has no reason to invert that just to be reused.
+
+    The whole pill is the click target -- there is exactly one action it
+    offers, so a separate button inside it would be redundant chrome.
+    """
+
+    # `_place_recording_hud` is called with this, so the two never drift
+    # out of sync.
+    SIZE = QSize(150, 44)
+
+    def __init__(self, on_stop: Callable[[], None]):
+        # No parent, ever -- see the class docstring.
+        super().__init__(None)
+        self._on_stop = on_stop
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(self.SIZE)
+
+        self._label = QLabel("0:00", self)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setGeometry(0, 0, self.SIZE.width(), self.SIZE.height())
+        # A click must reach this widget's own mousePressEvent, not stop at
+        # the label sitting on top of it.
+        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        font = QFont(design.font_families().mono)
+        font.setPixelSize(16)
+        font.setWeight(QFont.Weight(600))
+        self._label.setFont(font)
+        self._label.setStyleSheet(f"color: {design.color('TEXT_PRIMARY').name()};")
+
+    def set_elapsed(self, text: str) -> None:
+        self._label.setText(text)
+
+    def mousePressEvent(self, event) -> None:
+        self._on_stop()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("BAR_BG"))
+        radius = self.SIZE.height() / 2
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+
+        dot_diameter = 10
+        dot_margin = 14
+        painter.setBrush(design.color("DANGER_SOLID"))
+        painter.drawEllipse(
+            dot_margin,
+            round(self.SIZE.height() / 2 - dot_diameter / 2),
+            dot_diameter,
+            dot_diameter,
+        )
+        painter.end()
 
 
 def build_default_registry() -> BackendRegistry:
@@ -538,7 +793,16 @@ class AppController:
         transport: Transport,
         monitor_geometries: list[QRectF] | None = None,
         geometry_provider: GeometryProvider | None = None,
+        recorder_registry: RecorderRegistry | None = None,
+        disk_usage: Callable[[str], object] = shutil.disk_usage,
     ):
+        # Before anything else -- including the QApplication tweak right
+        # below -- so a previous run of this same process that died
+        # mid-recording never gets a chance to have its leftover temp file
+        # mistaken for a live one by anything constructed after this line
+        # (recording.md ticket 9).
+        _clean_up_crashed_recording_temp_files()
+
         # Must happen before any overlay window is ever shown. Without it,
         # Qt's default behavior quits the whole application the moment the
         # last visible window closes — exactly what happens the first time
@@ -546,6 +810,12 @@ class AppController:
         # resident process on the very first dismissal instead of
         # returning it to idle.
         QApplication.instance().setQuitOnLastWindowClosed(False)
+
+        # Constructor-injectable, defaulting to the real thing -- same
+        # 'factory the test can swap' shape `WindowsRecorderBackend` already
+        # uses for its Qt objects, so a test can fake low free space without
+        # touching a real disk. See `_check_recording_disk_space`.
+        self._disk_usage = disk_usage
 
         self._registry = registry
         self._transport = transport
@@ -563,6 +833,60 @@ class AppController:
             if geometry_provider is not None
             else build_default_geometry_provider()
         )
+
+        # Same None -> "build the real thing" pattern as `geometry_provider`
+        # above, but a platform with nothing behind this seam yet (macOS
+        # today) must not stop `AppController` from constructing at all --
+        # the same "a failure must not stop the rest" rule
+        # `run_first_launch_setup`'s own `UnimplementedPlatformError`
+        # handling already follows for desktop integration, applied here.
+        # `_recorder_registry` stays None in that case and the remembered
+        # message is what `_on_recording_requested` reports later, rather
+        # than raising out of `__init__` the moment a snip is actually
+        # requested.
+        self._recorder_registry: RecorderRegistry | None = None
+        self._recorder_unavailable_message: str | None = None
+        if recorder_registry is not None:
+            self._recorder_registry = recorder_registry
+        else:
+            try:
+                self._recorder_registry = platform.current.build_recording_registry()
+            except platform.UnimplementedPlatformError as exc:
+                self._recorder_unavailable_message = str(exc)
+
+        # Ticket 8 (the recording HUD/stop path) reads this; this ticket
+        # only writes it, as the seam ticket 8 needs.
+        self._active_recording: tuple | None = None
+        # Held on self, not the overlay -- see `_on_recording_requested`'s
+        # own docstring for why: `_commit_selection`'s record branch closes
+        # the overlay right after handing off the rect, and `closeEvent`
+        # drops `AppController`'s own last reference to it (`_overlay =
+        # None`) synchronously, in the same call. A timer that depended on
+        # an `OverlayWindow` about to lose its last reference must not fire
+        # reliably -- `DelayCountdown`'s own docstring flags this exact bug
+        # for a different widget.
+        self._recording_delay_timer: QTimer | None = None
+
+        # True for the whole duration of a `_stop_recording()` call, not
+        # just around `backend.stop()` itself -- `WindowsRecorderBackend
+        # .stop()` pumps `QApplication.processEvents()` while it blocks
+        # (see its own `_wait_for_stopped()` docstring), which can dispatch
+        # a second `WM_HOTKEY` (or a duplicate click on the HUD pill,
+        # delivered by that same pumping) and re-enter either
+        # `start_capture()` or `RecordingHud.mousePressEvent` before the
+        # first stop has finished. `_stop_recording()` itself checks this
+        # before calling `backend.stop()`, so a request that lands mid-stop
+        # through either entry point is a no-op rather than a second stop
+        # or a new snip.
+        self._stopping_recording = False
+        self._recording_started_at: float | None = None
+        # No QObject parent -- same reasoning as `_recording_delay_timer`
+        # above: this attribute's own strong reference is what keeps it
+        # alive.
+        self._recording_elapsed_timer: QTimer | None = None
+        # The pill widget, or None when there was no room for one (or no
+        # recording is active) -- see `_place_recording_hud`.
+        self._recording_hud: RecordingHud | None = None
 
         self._overlay: OverlayWindow | None = None
         # Held for the same reason `_overlay` is: a parentless widget is
@@ -593,6 +917,12 @@ class AppController:
         icon = load_app_icon()
         QApplication.instance().setWindowIcon(icon)
 
+        # Built once, not reconstructed per-recording -- `_start_recording_ui`/
+        # `_teardown_recording_ui` just swap `self._tray_icon`'s icon between
+        # these two (SNX-123 ticket 8).
+        self._idle_tray_icon = icon
+        self._recording_tray_icon = _build_recording_tray_icon(icon)
+
         self._tray_icon = QSystemTrayIcon(icon)
         menu = QMenu()
         # A single Snip item, not one per SelectionMode: OverlayWindow's own
@@ -605,6 +935,16 @@ class AppController:
         self.snip_action.triggered.connect(self.start_capture)
         self.settings_action = menu.addAction("Settings...")
         self.settings_action.triggered.connect(self.open_settings)
+        # Disabled by default and only ever enabled while a recording is
+        # actually active -- RecordingHud's own docstring is deliberate
+        # that its pill is one click target, so a second, distinct way to
+        # end a recording (discard, not stop-and-land) lives here instead
+        # (recording.md ticket 9). Flipped in the same two places
+        # `_start_recording_ui`/`_teardown_recording_ui` already flip the
+        # tray icon.
+        self.discard_action = menu.addAction("Discard recording")
+        self.discard_action.triggered.connect(self._discard_recording)
+        self.discard_action.setEnabled(False)
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         self._tray_icon.setContextMenu(menu)
@@ -778,6 +1118,23 @@ class AppController:
         return [QRectF(screen.geometry()) for screen in QGuiApplication.screens()]
 
     def start_capture(self) -> None:
+        # SNX-123 ticket 8: the capture hotkey (and every other caller of
+        # this single funnel -- the tray's own Snip action, --snip's
+        # transport listener, a forwarded request from a second launch)
+        # doubles as the stop control while a recording is running, ahead
+        # of the overlay-open guard below (which is moot here anyway --
+        # `_active_recording` is only ever set after `_commit_selection`'s
+        # record branch has already closed the overlay). `_active_recording`
+        # stays set for the whole duration of a `_stop_recording()` call
+        # (see its own docstring), so a request that lands while one is
+        # still unwinding sails past this check too -- `_stop_recording()`
+        # itself is what turns that into a no-op rather than a second stop,
+        # so every entry point (this one, and the HUD's own click handler)
+        # gets the guard for free instead of each re-checking it here.
+        if self._active_recording is not None:
+            self._stop_recording()
+            return
+
         # No mode parameter: unlike the old per-monitor Overlay, a single
         # OverlayWindow starts in Region and lets its own capture-mode
         # popover switch to Window/Full screen/Freeform after the fact, so
@@ -873,6 +1230,9 @@ class AppController:
             # Fires only for a real capture, never for a cancelled snip --
             # see `OverlayWindow._report_capture`.
             on_captured=self._on_captured,
+            # SNX-122: fires only for the record side of the chooser -- see
+            # `_on_recording_requested`.
+            on_recording_requested=self._on_recording_requested,
         )
         # Stored on self, not left as a local: a parentless widget is fair
         # game for Python's GC to collect out from under the still-open
@@ -923,6 +1283,388 @@ class AppController:
         """
         if window in self._reviews:
             self._reviews.remove(window)
+
+    def _on_recording_requested(
+        self,
+        rect: QRectF | None,
+        delay: str,
+        after: str = design.tokens.RECORD_AFTER_DEFAULT,
+    ) -> None:
+        """Start recording `rect` (absolute logical virtual-desktop
+        coordinates, or None for the whole desktop), once `delay` has
+        elapsed -- `OverlayWindow._commit_selection`'s record branch calls
+        this and closes itself right after, per SNX-122.
+
+        `after` is `OverlayWindow.outcome` at the moment the selection was
+        committed ("instant" or "save", record's own "then" vocabulary) --
+        held alongside the backend and path in `_active_recording` so
+        `_stop_recording()` knows, once the file is finally real, whether
+        to land-and-copy or just land (recording.md ticket 9's
+        `_land_recording`). Defaulting to `tokens.RECORD_AFTER_DEFAULT`
+        keeps every caller that only ever passed `(rect, delay)` working
+        unchanged.
+
+        The delay is parsed here, not in overlay.py: `design.tokens.DELAYS`
+        values ("Off"/"3s"/"5s"/"10s") already pass through overlay.py
+        unparsed everywhere else (the popover, `_tick_delay`), and this is
+        the only place a recording delay is turned into seconds, so there's
+        nothing to keep in sync by keeping it in one place.
+
+        No visible countdown here -- `DelayCountdown` is overlay.py's own
+        widget for a *frame that hasn't been grabbed yet*, and recording's
+        frozen frame is already behind the closed overlay by the time this
+        runs. The recording HUD itself (ticket 8) only comes up once
+        `_begin()` below has actually started a backend -- see
+        `_start_recording_ui`.
+        """
+        if self._recorder_registry is None:
+            self._report_shortcut(self._recorder_unavailable_message)
+            return
+
+        # `start_capture`'s re-entrancy guard only blocks a second overlay
+        # while the first is genuinely still open -- and the record branch
+        # of `_commit_selection` closes the overlay right after calling
+        # this, which (via `_on_overlay_dismissed`) clears `self._overlay`
+        # in the same call. So a second shortcut press, before this
+        # countdown fires or this recording stops, sails straight through
+        # `start_capture` and lands here again. Overwriting
+        # `_recording_delay_timer`/`_active_recording` in that case would
+        # drop the only Python reference keeping the pending `QTimer` alive
+        # and lose the handle ticket 8 needs to stop the first recording --
+        # so this refuses the second request and says why, rather than
+        # silently discarding the first one.
+        if self._recording_delay_timer is not None or self._active_recording is not None:
+            self._report_shortcut(
+                "Snipux is already recording, or about to start -- finish that "
+                "recording before starting another."
+            )
+            return
+
+        # The real filename/save-folder convention only applies once the
+        # recording lands (`_land_recording`) -- while it's in progress the
+        # backend just needs somewhere to write, and that somewhere is the
+        # one dedicated subdirectory `_clean_up_crashed_recording_temp_files`
+        # knows to sweep on the next launch if this process dies first.
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".mp4", delete=False, dir=str(_recording_temp_dir())
+        )
+        tmp.close()
+        path = tmp.name
+
+        def _begin() -> None:
+            # The countdown (if any) has now fired, so the pending-request
+            # guard above must stop counting this one -- otherwise every
+            # recording after the first non-"Off" delay would permanently
+            # refuse the next, long after this timer is done firing.
+            self._recording_delay_timer = None
+            try:
+                backend = self._recorder_registry.start(rect, path)
+            except RecordingError as exc:
+                # Nothing was ever written to this placeholder path -- an
+                # empty file left behind here isn't a discarded recording
+                # for ticket 9 to clean up, it's a start that never
+                # happened at all.
+                Path(path).unlink(missing_ok=True)
+                self._report_shortcut(str(exc))
+                return
+            self._active_recording = (backend, path, after)
+            self._start_recording_ui(rect)
+
+        if delay == "Off":  # design.tokens.DELAYS[0]
+            _begin()
+            return
+
+        seconds = int(delay.rstrip("s"))
+        # No QObject parent -- `AppController` isn't one -- so the strong
+        # Python reference this assignment creates is what keeps the timer
+        # alive until it fires, the same role a parent would otherwise play.
+        self._recording_delay_timer = QTimer()
+        self._recording_delay_timer.setSingleShot(True)
+        self._recording_delay_timer.timeout.connect(_begin)
+        self._recording_delay_timer.start(seconds * 1000)
+
+    def _start_recording_ui(self, rect: QRectF | None) -> None:
+        """Bring up every visible sign that a recording is running (SNX-123
+        ticket 8): the elapsed-time timer (which drives the tray tooltip,
+        and the HUD's own label when there's room for one) and the tray
+        icon's recording state.
+
+        Called from `_on_recording_requested`'s `_begin()`, right after
+        `self._active_recording` is actually set -- so this never runs for
+        a still-pending delay countdown, only once a backend has genuinely
+        started.
+        """
+        self._recording_started_at = time.monotonic()
+
+        # No QObject parent -- see `_recording_elapsed_timer`'s own
+        # docstring in __init__.
+        self._recording_elapsed_timer = QTimer()
+        self._recording_elapsed_timer.setInterval(1000)
+        self._recording_elapsed_timer.timeout.connect(self._on_recording_tick)
+        self._recording_elapsed_timer.start()
+        # Ticked once immediately, not just on the timer's first firing a
+        # second from now -- a recording stopped inside that first second
+        # should still have shown 0:00 somewhere, not nothing at all.
+        self._on_recording_tick()
+
+        # Not gated on `self._tray_available`: every other piece of tray
+        # state this class builds (`setContextMenu`, the icon itself) is
+        # likewise built unconditionally, only `.show()` is gated -- an
+        # icon/tooltip update on a tray icon nobody sees is harmless the
+        # same way.
+        self._tray_icon.setIcon(self._recording_tray_icon)
+        # Same "flip it wherever the tray icon flips" reasoning as the icon
+        # itself -- see the tray menu's own construction comment.
+        self.discard_action.setEnabled(True)
+
+        # The same union-of-monitor-geometries reduction `create_overlays()`
+        # in overlay.py already does to build its own `virtual_desktop_rect`
+        # for X11.
+        geometries = (
+            self._monitor_geometries
+            if self._monitor_geometries is not None
+            else self._real_monitor_geometries()
+        )
+        desktop_bounds = None
+        for geometry in geometries:
+            desktop_bounds = (
+                geometry if desktop_bounds is None else desktop_bounds.united(geometry)
+            )
+
+        placement = (
+            _place_recording_hud(rect, desktop_bounds, RecordingHud.SIZE)
+            if desktop_bounds is not None
+            else None
+        )
+        if placement is not None:
+            self._recording_hud = RecordingHud(on_stop=self._stop_recording)
+            self._recording_hud.move(placement.topLeft())
+            self._recording_hud.show()
+
+    def _teardown_recording_ui(self) -> None:
+        """Undo everything `_start_recording_ui` brought up.
+
+        Called unconditionally from `_stop_recording()`, regardless of
+        whether `backend.stop()` itself goes on to succeed -- the stop
+        control should feel instant even though the backend call behind it
+        may still be draining for a few seconds on Windows (see
+        `_stopping_recording`'s docstring), so the visible state is torn
+        down before that call is even made.
+        """
+        if self._recording_elapsed_timer is not None:
+            self._recording_elapsed_timer.stop()
+            self._recording_elapsed_timer = None
+        if self._recording_hud is not None:
+            self._recording_hud.close()
+            self._recording_hud = None
+        self._recording_started_at = None
+        self._tray_icon.setIcon(self._idle_tray_icon)
+        self._tray_icon.setToolTip("")
+        self.discard_action.setEnabled(False)
+
+    def _on_recording_tick(self) -> None:
+        """Push the current elapsed time to every surface that shows it:
+        the tray tooltip -- the one surface that survives both a
+        full-screen recording (the HUD structurally can't, by
+        `_place_recording_hud`'s own design) and a machine with no tray at
+        all can still set harmlessly -- and the HUD's own label, when one
+        is showing.
+
+        A region recording on a machine with no tray (`_tray_available` is
+        False, so nobody can see that tooltip) *and* no room for the HUD
+        (`_place_recording_hud` found none) would otherwise show elapsed
+        time nowhere at all -- both surfaces individually optional, but the
+        acceptance criterion isn't. stdout is the same last-resort fallback
+        `_report_shortcut` already uses for "no tray to hang a message on"
+        (SNX-54), applied here so that combination is never silent.
+        """
+        elapsed = int(time.monotonic() - self._recording_started_at)
+        minutes, seconds = divmod(elapsed, 60)
+        text = f"{minutes}:{seconds:02d}"
+        self._tray_icon.setToolTip(text)
+        if self._recording_hud is not None:
+            self._recording_hud.set_elapsed(text)
+        elif not self._tray_available:
+            print(f"Snipux is recording -- {text}")
+
+        self._check_recording_disk_space()
+
+    def _check_recording_disk_space(self) -> None:
+        """Stop the active recording if the filesystem its temp file is
+        actually growing on has dropped below
+        `design.tokens.RECORDING_MIN_FREE_BYTES` free (recording.md ticket
+        9) -- piggybacked on `_on_recording_tick`'s existing once-a-second
+        timer rather than a second one of its own.
+
+        Stats `Path(path).parent` -- `_recording_temp_dir()`, i.e.
+        `tempfile.gettempdir()/snipux-recording` -- not the save folder
+        `_land_recording` eventually moves into. The save folder is where
+        the *finished* file ends up, but the file that's growing while a
+        recording is in progress lives under system temp, which is
+        routinely a separate, smaller filesystem (a tmpfs mount is the
+        common case) -- checking the save folder's free space would miss
+        that partition filling up entirely.
+
+        `self._disk_usage` is the constructor-injected factory (defaulting
+        to `shutil.disk_usage`, set in `__init__`) so a test can report an
+        arbitrarily low `.free` without touching a real disk -- the same
+        'factory the test can swap' shape `WindowsRecorderBackend` already
+        uses for its Qt objects.
+
+        A failure to stat the temp dir here is a silent no-op rather than
+        something this method reports -- `_recording_temp_dir()` creates it
+        on demand and a recording can't be active without it, so a stat
+        failure here would mean something stranger than "not there yet".
+        """
+        if self._active_recording is None:
+            return
+        _backend, path, _after = self._active_recording
+        try:
+            free = self._disk_usage(str(Path(path).parent)).free
+        except OSError:
+            return
+        if free >= design.tokens.RECORDING_MIN_FREE_BYTES:
+            return
+        self._stop_recording(reason="Recording stopped: running low on disk space.")
+
+    def _stop_recording(self, *, reason: str | None = None) -> None:
+        """Stop the in-progress recording, if there is one -- wired as the
+        HUD's own `on_stop` callback and reached via `start_capture()`
+        whenever the capture hotkey fires mid-recording (SNX-123 ticket 8),
+        and by `_check_recording_disk_space()` above when free space runs
+        low.
+
+        `reason`, when given (only `_check_recording_disk_space()` passes
+        one), is folded into the one toast `_land_recording` shows instead
+        of `_land_recording`'s usual "Recording saved to ..." message --
+        without this, a low-disk stop would show two tray notifications
+        back to back for the same event (the landed-file message, then a
+        separate low-disk message), and depending on the OS's notification
+        stacking the first can be clipped before it's read. A failed stop
+        or a failed landing reports its own failure instead and `reason` is
+        dropped on the floor -- there is no "saved to" to fold it into.
+
+        A request to stop with nothing recording is a no-op, not an error
+        -- `_teardown_recording_ui()`/`backend.stop()` are independent
+        steps, and `backend.stop()`'s own failure is reported rather than
+        raised, the same "a failure must not stop the rest" rule CLAUDE.md
+        states for capture backends, applied here. Landing the file
+        (`_land_recording`, recording.md ticket 9) only happens once
+        `backend.stop()` has actually returned without raising -- a backend
+        that failed to stop cleanly gets no promise made about the state
+        of its output file. Landing itself can also fail -- `shutil.move`
+        into the save folder is a real cross-filesystem copy whenever the
+        temp dir and save folder don't share a mount, which needs free
+        space precisely in the low-disk scenario this ticket is about -- so
+        that failure is reported the same way rather than left to escape
+        this Qt slot uncaught.
+
+        The `_stopping_recording` re-entrancy check lives here, at the one
+        place `backend.stop()` is actually called, rather than at each of
+        this method's call sites (`start_capture()`'s hotkey path and the
+        HUD's own `mousePressEvent`) -- a request that lands through either
+        one while a `_stop_recording()` call is already unwinding must be a
+        no-op, not a second `backend.stop()` while the first is still in
+        flight (see the attribute's own docstring in `__init__`), and
+        checking it once here is what makes that true for every caller
+        instead of only the ones that remember to ask first. The same
+        guard is what keeps this from racing `_discard_recording()` over
+        the same in-flight recording.
+
+        `_active_recording` is cleared only in the `finally`, after landing
+        has already run -- the ordering ticket 9 needs so that anything
+        this same call graph could still reach (a second `_stop_recording`,
+        a discard, another low-disk tick) never sees "no recording active"
+        while the file is still mid-move.
+        """
+        if self._stopping_recording or self._active_recording is None:
+            return
+        self._stopping_recording = True
+        self._teardown_recording_ui()
+        backend, path, after = self._active_recording
+        try:
+            backend.stop()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            self._report_shortcut(f"Stopping the recording failed: {exc}")
+        else:
+            try:
+                self._land_recording(path, after, reason=reason)
+            except OSError as exc:
+                self._report_shortcut(f"Saving the recording failed: {exc}")
+        finally:
+            self._active_recording = None
+            self._stopping_recording = False
+
+    def _land_recording(self, path: str, after: str, *, reason: str | None = None) -> None:
+        """Move a just-stopped recording from its temp `path` into
+        `setup_desktop.load_save_folder()`, under a name from
+        `setup_desktop.preview_filename()` (recording.md ticket 9), then
+        carry out `after` through `finish_recording` -- the same two
+        functions stills already use for folder/filename, and the same
+        function an instant still's clipboard destination goes through, so
+        recording's real filename is provably the same computation
+        Settings' own preview label renders.
+
+        `reason` is `_stop_recording()`'s low-disk message, when this call
+        came from `_check_recording_disk_space()` -- folded into the one
+        toast this method shows instead of the plain "Recording saved to
+        ..." wording, so a low-disk stop still says where the file went
+        without a second, separate notification for the same event.
+
+        Called only from `_stop_recording()`, once `backend.stop()` has
+        already returned without raising -- never from `_discard_recording()`,
+        which deletes the temp file outright instead of landing it. Raises
+        `OSError` uncaught -- `shutil.move` into a nearly-full save folder
+        is exactly the failure ticket 9 needs reported, and `_stop_recording`
+        is what catches it and turns it into a toast; this method itself
+        makes no promise about the temp file's fate on that path (the
+        source of a failed cross-filesystem move is left where it is, for
+        the next crash-cleanup sweep to find).
+        """
+        folder = setup_desktop.load_save_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        destination = Path(
+            setup_desktop.preview_filename(
+                folder, setup_desktop.load_filename_pattern(), extension="mp4"
+            )
+        )
+        shutil.move(path, destination)
+        finish_recording(destination, after)
+        if reason is not None:
+            self._report_shortcut(f"{reason} Saved to {destination}")
+        else:
+            self._report_shortcut(f"Recording saved to {destination}")
+
+    def _discard_recording(self) -> None:
+        """Tray action (recording.md ticket 9): stop the in-progress
+        recording and throw its temp file away rather than land it -- no
+        move, no clipboard, and a distinct tray message from the one
+        `_land_recording` reports.
+
+        There is nowhere else to reach this from: `RecordingHud`'s own
+        docstring is deliberate that its one pill is one click target, so
+        a second, distinct way to end a recording lives on the tray's
+        context menu instead (see its construction comment in `__init__`).
+
+        Guarded exactly like `_stop_recording`'s own re-entrancy check --
+        a discard while a stop (or another discard) is already unwinding
+        must be a no-op, not a second `backend.stop()` over the same
+        in-flight recording.
+        """
+        if self._stopping_recording or self._active_recording is None:
+            return
+        self._stopping_recording = True
+        self._teardown_recording_ui()
+        backend, path, _after = self._active_recording
+        try:
+            backend.stop()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            self._report_shortcut(f"Stopping the recording failed: {exc}")
+        finally:
+            Path(path).unlink(missing_ok=True)
+            self._active_recording = None
+            self._stopping_recording = False
+        self._report_shortcut("Recording discarded.")
 
     def _on_overlay_dismissed(self) -> None:
         """Called once, by `OverlayWindow`'s own `on_dismissed` hook, the

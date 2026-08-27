@@ -4851,8 +4851,16 @@ class TestCaptureModeWindowIntegration:
     def _clean_slate(self):
         _close_stray_toplevel_windows()
 
-    WINDOW_RECT = QRectF(30, 30, 50, 50)
-    HIT_POINT = QPoint(50, 50)
+    # y=90, not 30: while `_picking_window` is armed the prior selection is
+    # None, which is also `Chooser`'s own "nothing chosen yet" condition
+    # (`_sync_chooser_visibility`), so its panel -- SNX-120's stills/record
+    # switch widened it -- is up too, spanning the full top ChooserMetric.
+    # HEIGHT (54px) band. A rect/point inside that band never reaches
+    # `OverlayWindow.mouseMoveEvent` at all (Qt delivers a bare hover to
+    # whichever child sits under the cursor instead), silently turning a
+    # hit into a no-op. 90 clears it with margin.
+    WINDOW_RECT = QRectF(30, 90, 50, 50)
+    HIT_POINT = QPoint(50, 110)
     # Outside WINDOW_RECT, and -- as important -- outside the real child
     # widgets `OverlayWindow` shows once it has a selection: `HintHUD`
     # spans the full width for `tokens.Metric.HUD_H` (44px) from the top,
@@ -4943,15 +4951,15 @@ class TestCaptureModeWindowIntegration:
         self._pick_window_mode(overlay)
         QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
         press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
-        target = QPoint(120, 55)
+        target = QPoint(120, 115)
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
         QTest.mouseMove(overlay, target)
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=target)
 
         # left/top/bottom stay anchored at the window-mode rect's own
-        # edges (30, 30, 80); only the dragged right edge moves, to 120.
-        assert overlay._selection == QRect(30, 30, 90, 50)
+        # edges (30, 90, 80); only the dragged right edge moves, to 120.
+        assert overlay._selection == QRect(30, 90, 90, 50)
 
     def test_selection_from_window_mode_can_be_annotated(self):
         overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))
@@ -5145,6 +5153,155 @@ class TestInstantCapture:
         assert copied == [], "the whole point is that it does not also copy"
         assert (tmp_path / "Pictures" / "snipux").exists()
         assert not overlay.isVisible()
+
+
+class TestCommitToRecord:
+    """SNX-122 AC: on the record side of the chooser, `_commit_selection`
+    hands the rect off to `on_recording_requested` (absolute coordinates,
+    None for Full screen) and closes the overlay unconditionally, rather
+    than running any of the stills-only `outcome` handling right below it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self, monkeypatch):
+        _close_stray_toplevel_windows()
+        # `Chooser.kindChanged` is wired straight to `setup_desktop.save_kind`
+        # (SNX-122's own `_chooser.set_kind("record")` below fires it), which
+        # would otherwise write to this machine's real config file the same
+        # way a real session does. `load_kind` is pinned the same way so a
+        # write a previous, unrelated test left behind can't change which
+        # side a fresh `OverlayWindow` opens on here.
+        monkeypatch.setattr(overlay_module.setup_desktop, "save_kind", lambda *a, **k: True)
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_kind", lambda *a, **k: "stills")
+
+    def _overlay(
+        self,
+        on_recording_requested=None,
+        logical_origin=(0, 0),
+        monitor_geometries=None,
+        size=(600, 600),
+    ):
+        frame = make_frame(
+            image_size=size, logical_size=size, logical_origin=logical_origin
+        )
+        overlay = OverlayWindow(
+            frame,
+            monitor_geometries=monitor_geometries,
+            on_recording_requested=on_recording_requested,
+        )
+        overlay._chooser.set_kind("record")
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _drag(self, overlay, start, end):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(overlay, QPoint((start.x() + end.x()) // 2, (start.y() + end.y()) // 2))
+        QTest.mouseMove(overlay, end)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=end)
+
+    def test_a_region_drag_hands_off_the_absolute_rect_and_closes(self):
+        requests = []
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)))
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert len(requests) == 1
+        rect, delay, after = requests[0]
+        assert rect == QRectF(100, 100, 300, 250)
+        assert delay == tokens.DELAYS[0]  # "Off", the default
+        assert after == tokens.RECORD_AFTER_DEFAULT  # "instant", the chooser's own default
+        assert not overlay.isVisible()
+
+    def test_a_region_drag_on_a_monitor_left_of_and_above_the_primary_translates_the_rect(self):
+        # The case a naive `abs()` on `logical_origin` gets wrong: this
+        # monitor's origin is negative on both axes, so the absolute rect
+        # must be a real translate, not a mirror.
+        requests = []
+        overlay = self._overlay(
+            on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)),
+            logical_origin=(-500, -300),
+            monitor_geometries=[
+                QRectF(-500, -300, 600, 600),
+                QRectF(100, -300, 800, 600),
+            ],
+        )
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert len(requests) == 1
+        rect, _delay, _after = requests[0]
+        assert rect == QRectF(-400, -200, 300, 250)
+
+    def test_full_screen_hands_off_none_rather_than_the_monitors_own_rect(self):
+        # The test that actually proves AC3 -- a rect equal to the
+        # monitor's geometry would look right by accident if the `None`
+        # branch were missing.
+        requests = []
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)))
+
+        overlay._chooser.set_mode("Full screen")
+
+        assert len(requests) == 1
+        rect, _delay, _after = requests[0]
+        assert rect is None
+        assert not overlay.isVisible()
+
+    def test_the_armed_delay_reaches_the_callback_unchanged(self):
+        # This ticket doesn't own the timer that counts the delay down --
+        # app.py does -- so the assertion is "the right value reaches the
+        # callback", not "N seconds elapse".
+        requests = []
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)))
+        overlay._on_delay_changed(tokens.DELAYS[1])  # "3s"
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert requests[0][1] == tokens.DELAYS[1]
+
+    @pytest.mark.parametrize("after", ["instant", "save"])
+    def test_the_chosen_after_reaches_the_callback_as_a_third_argument(self, after):
+        # SNX-124 ticket 9: app.py's `_on_recording_requested` needs to know
+        # which of record's "then" vocabulary was picked so it can land or
+        # copy the finished file accordingly -- this is the handoff half of
+        # that, `outcome` (== `self._chooser.after`) passed through, not
+        # dropped on the floor the way it used to be.
+        requests = []
+        overlay = self._overlay(
+            on_recording_requested=lambda rect, delay, after: requests.append(after)
+        )
+        overlay._chooser.set_after(after)
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert requests == [after]
+
+    @pytest.mark.parametrize("after", ["instant", "save"])
+    def test_closes_regardless_of_after(self, after):
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
+        overlay._chooser.set_after(after)
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert not overlay.isVisible()
+
+    def test_stills_kind_never_calls_the_recording_callback(self):
+        # Kind defaults to "stills" -- proving the branch added for
+        # SNX-122 is truly gated on it, not just usually not reached.
+        requests = []
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(
+            frame, on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after))
+        )
+        overlay._chooser.set_after("edit")  # stays open; nothing else to assert on
+        overlay.setGeometry(0, 0, 600, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert requests == []
 
 
 class TestCaptureModeFullScreenIntegration:
