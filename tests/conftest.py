@@ -27,6 +27,53 @@ import sys
 
 import pytest
 
+from snipux import setup_desktop
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path):
+    """Point every test at a throwaway `config.json`, never this machine's
+    real `~/.config/snipux/` (or `%APPDATA%`/`XDG_CONFIG_HOME` equivalent) --
+    SNX-126.
+
+    `setup_desktop.config_path()` is the one seam every `load_*`/`save_*`
+    helper in that module already funnels through, `config_dir=None`
+    meaning "the real location" -- so patching it here, autouse, isolates
+    the whole suite in one place rather than requiring every test that
+    happens to build an `OverlayWindow`/`Chooser`/`AppController` to
+    remember to mock `load_kind`/`save_kind`/etc. itself. Before this, a
+    real `~/.config/snipux/config.json` left over from actually running
+    snipux (e.g. with `"kind": "record"` recorded by a prior session) was
+    read straight into fresh test overlays, so the suite's result depended
+    on how this machine last used the app -- the same class of bug SNX-109
+    fixed for the global hotkey.
+
+    An explicit `config_dir` (test_setup_desktop.py's own `run_setup`/
+    `run_remove` calls, or anything passing `tmp_path` directly) is left
+    alone -- only the "use the real default" case of `config_dir=None` is
+    redirected, to a fresh directory scoped to *this* test's own `tmp_path`
+    so no state leaks between tests either.
+
+    Restored by hand in a `finally`, deliberately not via the `monkeypatch`
+    fixture: pulling `monkeypatch` into an autouse conftest fixture would
+    force it to be instantiated ahead of test-local fixtures that also
+    request it (e.g. test_platform.py's `_restore_the_real_platform`,
+    which relies on `monkeypatch` having already restored `sys.platform`
+    by the time *it* tears down) -- flipping their teardown order relative
+    to it and reintroducing exactly the kind of machine/order-dependent
+    flakiness this ticket exists to remove.
+    """
+    fake_dir = tmp_path / "config"
+    real_config_path = setup_desktop.config_path
+    setup_desktop.config_path = (
+        lambda config_dir=None: real_config_path(fake_dir if config_dir is None else config_dir)
+    )
+    try:
+        yield
+    finally:
+        setup_desktop.config_path = real_config_path
+
+
 # The suite runs under a single shared QApplication per process (each test
 # module's own autouse fixture reuses whatever instance already exists), so
 # window-activation state leaks across files the same way it would in a real
