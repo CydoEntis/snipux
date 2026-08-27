@@ -481,11 +481,25 @@ class TestSettingsWindow:
         window.grab()  # a full paintEvent -- CLAUDE.md's offscreen pattern
 
         assert label.wordWrap() is True
+
+        # Driven with a line deliberately too long for the rail, rather
+        # than with whatever this machine's own version line happens to
+        # be. `version_line()` varies by package version, Qt version and
+        # session type -- "x11" is short enough to fit on one line, so
+        # asserting that the real line overflows made this test pass or
+        # fail by machine state, which is the thing SNX-126 went and
+        # removed everywhere else.
+        label.setText("Snipux 0.1.0 / Qt 6.11.0 · a session with a long name")
+        window.grab()
+
         # Proves wrapping is load-bearing here, not just set and unused:
         # the text is wider than the width the rail actually granted the
         # label, so without word wrap this exact case would still clip.
         single_line_width = label.fontMetrics().horizontalAdvance(label.text())
         assert single_line_width > label.width()
+        # And it genuinely wraps rather than clipping: laid out at the
+        # width it has, it needs more than one line's height.
+        assert label.heightForWidth(label.width()) > label.fontMetrics().height()
 
     def test_the_filename_preview_shows_a_real_path(self, tmp_path):
         window = self._window(tmp_path)
