@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -421,6 +422,47 @@ class SwitchRow(QWidget):
         row.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignTop)
 
 
+class SpinRow(QWidget):
+    """Label, optional note, and a bounded spin box pushed to the right --
+    the numeric-control sibling of `SwitchRow`, for a setting that isn't a
+    plain on/off (ticket 9's frame rate).
+    """
+
+    def __init__(
+        self,
+        label: str,
+        note: str = "",
+        value: int = 0,
+        minimum: int = 1,
+        maximum: int = 120,
+        parent=None,
+    ):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        title = QLabel(label)
+        title.setFont(_ui_font(12.5, 500))
+        title.setStyleSheet(f"color: {tokens.Win.TEXT_BODY};")
+        text.addWidget(title)
+        if note:
+            sub = QLabel(note)
+            sub.setFont(_ui_font(11.5, 400))
+            sub.setWordWrap(True)
+            sub.setStyleSheet(f"color: {tokens.Win.TEXT_NOTE};")
+            text.addWidget(sub)
+        row.addLayout(text, 1)
+
+        self.spin = QSpinBox()
+        self.spin.setRange(minimum, maximum)
+        self.spin.setValue(value)
+        self.spin.setFixedHeight(tokens.WinMetric.CONTROL_H)
+        row.addWidget(self.spin, 0, Qt.AlignmentFlag.AlignTop)
+
+
 class _NavRow(QPushButton):
     def __init__(self, icon_name: str, label: str, parent=None):
         super().__init__(label, parent)
@@ -671,6 +713,22 @@ class SettingsWindow(WinWindow):
         )
         self._native.switch.toggled.connect(lambda _c: self._mark_dirty())
 
+        self._frame_rate = SpinRow(
+            "Recording frame rate",
+            "GNOME recordings ask for this many frames per second. Windows "
+            "measures its own rate instead and ignores this.",
+            setup_desktop.load_recording_frame_rate(self._config_dir),
+        )
+        self._frame_rate.spin.valueChanged.connect(lambda _v: self._mark_dirty())
+
+        self._draw_cursor = SwitchRow(
+            "Show the cursor in recordings",
+            "Composites the mouse pointer into the video. Windows has no "
+            "such toggle, so this only affects GNOME recordings.",
+            setup_desktop.load_recording_draw_cursor(self._config_dir),
+        )
+        self._draw_cursor.switch.toggled.connect(lambda _c: self._mark_dirty())
+
         self._refresh_preview()
         return _pane(
             SectionHeading("Folder"),
@@ -682,6 +740,9 @@ class SettingsWindow(WinWindow):
             chip_row,
             None,
             self._native,
+            SectionHeading("Recording"),
+            self._frame_rate,
+            self._draw_cursor,
         )
 
     def _annotation_pane(self) -> QWidget:
@@ -830,6 +891,12 @@ class SettingsWindow(WinWindow):
         setup_desktop.save_filename_pattern(self._filename.text(), self._config_dir)
         setup_desktop.save_native_resolution(
             self._native.switch.isChecked(), self._config_dir
+        )
+        setup_desktop.save_recording_frame_rate(
+            self._frame_rate.spin.value(), self._config_dir
+        )
+        setup_desktop.save_recording_draw_cursor(
+            self._draw_cursor.switch.isChecked(), self._config_dir
         )
         setup_desktop.save_remember_tool(
             self._remember_tool.switch.isChecked(), self._config_dir

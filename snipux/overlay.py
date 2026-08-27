@@ -3129,11 +3129,19 @@ class OverlayWindow(QWidget):
         registry: BackendRegistry | None = None,
         on_dismissed: Callable[[], None] | None = None,
         on_captured: "Callable[[QImage, Path | None], None] | None" = None,
+        on_recording_requested: "Callable[[QRectF | None, str], None] | None" = None,
     ):
         super().__init__(parent)
         self._frame = frame
         # Fired by `copy()`/`save()` only -- see `_report_capture`.
         self._on_captured = on_captured
+        # SNX-122: fired by `_commit_selection`'s record branch, with an
+        # absolute-coordinate rect (None for the whole desktop) and the
+        # armed delay string -- app.py owns starting/stopping the actual
+        # recorder, per CLAUDE.md's split between this file (widget/
+        # painting) and app.py (subprocess/filesystem/stateful side
+        # effects).
+        self._on_recording_requested = on_recording_requested
         # SNX-58: called once, from closeEvent, when this window is the
         # Wayland-primary of a multi-monitor `open_overlay` group -- the
         # hook that closes the non-interactive `_MonitorVeil` companions
@@ -3425,6 +3433,12 @@ class OverlayWindow(QWidget):
         self._chooser.fireImmediately.connect(self._on_chooser_immediate)
         self._chooser.cancelled.connect(self._cancel)
         self._chooser.set_after(setup_desktop.load_after_capture())
+        # `kind` (the stills/record switch) has no Settings surface the way
+        # `after` does -- the chooser itself is the only place it is ever
+        # set, so it is loaded the same way but persisted on every change
+        # rather than only read here. See `setup_desktop.load_kind`.
+        self._chooser.set_kind(setup_desktop.load_kind())
+        self._chooser.kindChanged.connect(setup_desktop.save_kind)
         self._chooser.hide_all()
         self._blur_tray.blurModeChanged.connect(self._on_blur_mode_changed)
         self._blur_tray.strengthChanged.connect(self._on_blur_strength_changed)
@@ -3878,6 +3892,25 @@ class OverlayWindow(QWidget):
         silently" destination the old three-way menu had lost.
         """
         self.set_selection(rect, path=path)
+        if self._chooser.kind == "record":
+            # Recording has no annotate-in-place and no bar to press Copy
+            # or Save on (docs/design/recording.md: "There is no
+            # annotate-in-place for a video"), so this closes unconditionally
+            # -- unlike `instant` below, `outcome`/`after` play no part in
+            # whether the window closes here, only in what app.py does once
+            # it has the rect.
+            if self._capture_mode == "Full screen":  # tokens.CAPTURE_MODES[2][0]
+                record_rect = None
+            else:
+                record_rect = self._to_absolute_rect(rect)
+            if self._on_recording_requested is not None:
+                # `self.outcome` (== `self._chooser.after`) is "instant" or
+                # "save" here -- ticket 9's `_land_recording` is what
+                # actually acts on it, once the file is real; this branch
+                # only ever hands the choice along.
+                self._on_recording_requested(record_rect, self._delay, self.outcome)
+            self.close()
+            return
         if self.outcome == "instant":
             if setup_desktop.load_instant_saves():
                 self._on_bar_save()
@@ -4024,6 +4057,17 @@ class OverlayWindow(QWidget):
         `_monitor_geometries` results both arrive in absolute coordinates.
         """
         return QRectF(absolute_rect.topLeft() - self._frame.logical_origin, absolute_rect.size())
+
+    def _to_absolute_rect(self, rect: QRectF) -> QRectF:
+        """This widget's own window-local logical rect -> absolute logical
+        virtual-desktop rect -- the inverse of `_to_local_rect`, and the
+        one call site is `_commit_selection`'s record branch: the recorder
+        (SNX-122) needs the same absolute space `RecorderRegistry.start`
+        expects, and `logical_origin` can be negative (a monitor left of or
+        above the primary), so this must be a real translate rather than an
+        `abs()`.
+        """
+        return QRectF(rect).translated(self._frame.logical_origin)
 
     def _chrome_bounds(self) -> QRectF:
         """The rect every piece of floating chrome -- bar, popovers, trays
@@ -5957,6 +6001,7 @@ def open_overlay(
     registry: BackendRegistry | None = None,
     on_dismissed: Callable[[], None] | None = None,
     on_captured: "Callable[[QImage, Path | None], None] | None" = None,
+    on_recording_requested: "Callable[[QRectF | None, str], None] | None" = None,
 ) -> OverlayWindow:
     """Build and show the overlay for one snip, positioned for the
     caller's already-detected session type (`wayland`) rather than assumed
@@ -6022,6 +6067,7 @@ def open_overlay(
         registry=registry,
         on_dismissed=_on_overlay_dismissed if needs_dismissal_hook else None,
         on_captured=on_captured,
+        on_recording_requested=on_recording_requested,
     )
 
     if not wayland:

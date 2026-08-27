@@ -444,6 +444,26 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
     return save_after_capture("review" if enabled else tokens.AFTER_DEFAULT, config_dir)
 
 
+def load_kind(config_dir: Path | None = None) -> str:
+    """`stills` or `record` -- which side of the chooser's switch
+    (docs/design/recording.md ticket 5) a fresh session opens on.
+
+    A new `OverlayWindow`/`Chooser` pair is built for every snip, so without
+    this the switch would silently reset to `stills` the moment one session
+    ended, even though the acceptance criteria for the switch is that it
+    remembers which side was last used. Unlike `after_capture`, there is no
+    Settings toggle for this -- the chooser itself is the only place it is
+    ever set, so `Chooser.set_kind` writes it back out immediately rather
+    than waiting for a dedicated settings surface that doesn't exist.
+    """
+    stored = _read_config(config_dir).get("kind")
+    return stored if stored in ("stills", "record") else tokens.KIND_DEFAULT
+
+
+def save_kind(value: str, config_dir: Path | None = None) -> bool:
+    return _write_config("kind", value, config_dir)
+
+
 def load_instant_saves(config_dir: Path | None = None) -> bool:
     """Whether `instant` (`tokens.AFTER_CAPTURE`) writes the file instead
     of copying to the clipboard -- the one thing `overlay.py`'s
@@ -512,6 +532,43 @@ def load_native_resolution(config_dir: Path | None = None) -> bool:
 
 def save_native_resolution(enabled: bool, config_dir: Path | None = None) -> bool:
     return _write_config("native_resolution", bool(enabled), config_dir)
+
+
+def load_recording_frame_rate(config_dir: Path | None = None) -> int:
+    """The frame rate a recording asks its backend for -- ticket 9's
+    Settings row, consumed today by `GnomeScreencastBackend`'s `framerate`
+    D-Bus option. `WindowsRecorderBackend` deliberately never calls this
+    (see its own docstring): its frame rate is measured from real
+    inter-arrival timing (SNX-125), not a nominal request.
+
+    Falls back to `tokens.RECORDING_FRAME_RATE_DEFAULT`, the same
+    "nothing stored yet" shape as `load_filename_pattern`.
+    """
+    stored = _read_config(config_dir).get("recording_frame_rate")
+    return stored if isinstance(stored, int) else tokens.RECORDING_FRAME_RATE_DEFAULT
+
+
+def save_recording_frame_rate(frame_rate: int, config_dir: Path | None = None) -> bool:
+    return _write_config("recording_frame_rate", int(frame_rate), config_dir)
+
+
+def load_recording_draw_cursor(config_dir: Path | None = None) -> bool:
+    """Whether a recording composites the cursor into the video -- ticket
+    9's other new Settings row, consumed by `GnomeScreencastBackend`'s
+    `draw-cursor` D-Bus option. `WindowsRecorderBackend` never reads this:
+    `QScreenCapture` exposes no such toggle to wire it to.
+
+    Defaults to True, unlike `load_native_resolution`'s plain
+    `is True` -- an upgrading user who never opens Settings should keep
+    seeing the cursor in their recordings exactly as before this setting
+    existed, not have it silently vanish.
+    """
+    stored = _read_config(config_dir).get("recording_draw_cursor")
+    return True if stored is None else bool(stored)
+
+
+def save_recording_draw_cursor(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("recording_draw_cursor", bool(enabled), config_dir)
 
 
 def load_remember_tool(config_dir: Path | None = None) -> bool:
