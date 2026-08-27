@@ -79,6 +79,7 @@ class FakeBackend(RecordingBackend):
         self.start_calls.append((rect, path))
         if self._start_error is not None:
             raise self._start_error
+        return path
 
     def stop(self):
         self.stop_calls += 1
@@ -139,9 +140,10 @@ class TestRecorderRegistryStart:
         succeeding = FakeBackend("succeeding", True)
         registry = RecorderRegistry([succeeding])
 
-        result = registry.start(self.RECT, self.PATH)
+        backend, actual_path = registry.start(self.RECT, self.PATH)
 
-        assert result is succeeding
+        assert backend is succeeding
+        assert actual_path == self.PATH
         assert succeeding.start_calls == [(self.RECT, self.PATH)]
 
     def test_does_not_call_start_on_backends_after_the_first_success(self):
@@ -158,9 +160,9 @@ class TestRecorderRegistryStart:
         succeeding = FakeBackend("succeeding", True)
         registry = RecorderRegistry([failing, succeeding])
 
-        result = registry.start(self.RECT, self.PATH)
+        backend, _actual_path = registry.start(self.RECT, self.PATH)
 
-        assert result is succeeding
+        assert backend is succeeding
         assert failing.start_calls == [(self.RECT, self.PATH)]
         assert succeeding.start_calls == [(self.RECT, self.PATH)]
 
@@ -281,6 +283,18 @@ class TestRecordingErrorWhenNoBackendIsAvailable:
         assert excinfo.value.unavailable == [("qt-native", "not implemented yet")]
 
 
+def _error_reply(message):
+    """A jeepney error reply.
+
+    The blocking API *returns* these rather than raising, and the body is a
+    bare `(message,)` -- the same arity a `Properties.Get` variant reply
+    has, which is exactly why one used to get unpacked as the other.
+    """
+    reply = Mock(body=(message,))
+    reply.header.message_type = recording.MessageType.error
+    return reply
+
+
 def _fake_connection(reply=None, reply_error=None):
     """A `Mock` standing in for jeepney's blocking connection, mirroring
     `test_capture.py`'s style of monkeypatching `open_dbus_connection`
@@ -350,6 +364,90 @@ class TestGnomeScreencastBackendIsAvailable:
         assert unsupported_reason != error_reason
 
 
+class TestGnomeScreencastBackendAddressing:
+    """SNX: GNOME 41 split Screencast out of the main shell object into a
+    service of its own. Shell 46 answers only at the new address and
+    returns a plain "No such interface" D-Bus error at the old one -- which
+    this backend used to treat as a malformed reply, so the only Wayland
+    recording route reported itself unavailable on every modern GNOME.
+    """
+
+    def test_prefers_the_split_screencast_service_address(self, monkeypatch):
+        connection = _fake_connection(reply=Mock(body=(("b", True),)))
+        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+
+        assert GnomeScreencastBackend().is_available() is True
+
+        message = connection.send_and_get_reply.call_args[0][0]
+        assert message.header.fields[HeaderFields.path] == "/org/gnome/Shell/Screencast"
+        assert (
+            message.header.fields[HeaderFields.destination]
+            == "org.gnome.Shell.Screencast"
+        )
+
+    def test_falls_back_to_the_legacy_address_when_the_split_one_is_absent(
+        self, monkeypatch
+    ):
+        connection = Mock()
+        connection.send_and_get_reply = Mock(
+            side_effect=[
+                _error_reply('No such interface "org.gnome.Shell.Screencast"'),
+                Mock(body=(("b", True),)),
+            ]
+        )
+        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+
+        assert GnomeScreencastBackend().is_available() is True
+
+        message = connection.send_and_get_reply.call_args[0][0]
+        assert message.header.fields[HeaderFields.path] == "/org/gnome/Shell"
+
+    def test_start_addresses_whichever_object_the_probe_settled_on(self, monkeypatch):
+        # Both halves of one recording must talk to the same object; Shell
+        # tracks the recording there.
+        connection = Mock()
+        connection.send_and_get_reply = Mock(
+            side_effect=[
+                _error_reply("No such interface"),
+                Mock(body=(("b", True),)),
+                Mock(body=(True, "/tmp/out.webm")),
+            ]
+        )
+        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+
+        backend = GnomeScreencastBackend()
+        assert backend.is_available() is True
+        backend.start(QRectF(0, 0, 10, 10), "/tmp/out.webm")
+
+        message = connection.send_and_get_reply.call_args[0][0]
+        assert message.header.fields[HeaderFields.member] == "ScreencastArea"
+        assert message.header.fields[HeaderFields.path] == "/org/gnome/Shell"
+
+    def test_the_unavailable_reason_carries_the_real_dbus_error_text(self, monkeypatch):
+        connection = _fake_connection(
+            reply=_error_reply('No such interface "org.gnome.Shell.Screencast"')
+        )
+        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+
+        reason = GnomeScreencastBackend().unavailable_reason()
+
+        assert "No such interface" in reason
+        # The regression this guards: an error body is a 1-tuple of a
+        # string, the same shape as a Properties.Get variant, so unpacking
+        # one as the other turned every such failure into the useless
+        # "too many values to unpack (expected 2)".
+        assert "unpack" not in reason
+
+    def test_start_raises_with_the_dbus_error_text(self, monkeypatch):
+        connection = _fake_connection(reply=_error_reply("Access denied"))
+        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            GnomeScreencastBackend().start(QRectF(0, 0, 10, 10), "/tmp/out.webm")
+
+        assert "Access denied" in str(excinfo.value)
+
+
 class TestGnomeScreencastBackendStart:
     RECT = QRectF(10.4, 20.6, 99.5, 49.2)
     PATH = "/tmp/snipux-recording.webm"
@@ -398,11 +496,26 @@ class TestGnomeScreencastBackendStart:
         options = message.body[-1]
         assert options == {"draw-cursor": ("b", False), "framerate": ("i", 15)}
 
-    def test_closes_the_connection_after_a_successful_call(self, monkeypatch):
+    def test_holds_the_connection_open_after_a_successful_start(self, monkeypatch):
+        # Shell keys the live recording to the connection that started it,
+        # so closing it here is what truncated the file (measured on Shell
+        # 46: frozen at 4029 bytes, duration=N/A). This test asserted the
+        # opposite until a real session disproved it.
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
         GnomeScreencastBackend().start(self.RECT, self.PATH)
+
+        assert not connection.close.called
+
+    def test_closes_the_connection_when_starting_fails(self, monkeypatch):
+        # Nothing is recording, so there is no lifeline worth keeping --
+        # holding it would leak a socket per failed start.
+        connection = _fake_connection(reply=Mock(body=(False, self.PATH)))
+        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+
+        with pytest.raises(RuntimeError):
+            GnomeScreencastBackend().start(self.RECT, self.PATH)
 
         assert connection.close.called
 
@@ -413,19 +526,31 @@ class TestGnomeScreencastBackendStart:
         with pytest.raises(RuntimeError):
             GnomeScreencastBackend().start(self.RECT, self.PATH)
 
-    def test_raises_naming_both_paths_when_gnome_resolves_to_a_different_filename(
+    def test_returns_the_filename_gnome_reports_rather_than_the_one_requested(
         self, monkeypatch
     ):
+        # Shell picks the container and appends .webm to any path not
+        # already named that way, so the app's .mp4 temp file comes back as
+        # .mp4.webm. Rejecting that mismatch -- which this test used to
+        # assert -- failed every real GNOME recording *after* Shell had
+        # already started one, orphaning the recording and the file.
         actual_path = "/home/user/Videos/Screencasts/from-2026.webm"
         connection = _fake_connection(reply=Mock(body=(True, actual_path)))
+        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+
+        assert GnomeScreencastBackend().start(self.RECT, self.PATH) == actual_path
+
+    def test_raises_when_gnome_reports_a_relative_path(self, monkeypatch):
+        # Older Shell versions resolve a non-absolute filename against
+        # their own videos directory; nothing downstream could then find
+        # the file to stat, move or reference on the clipboard.
+        connection = _fake_connection(reply=Mock(body=(True, "from-2026.webm")))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
         with pytest.raises(RuntimeError) as excinfo:
             GnomeScreencastBackend().start(self.RECT, self.PATH)
 
-        message = str(excinfo.value)
-        assert self.PATH in message
-        assert actual_path in message
+        assert "from-2026.webm" in str(excinfo.value)
 
 
 class TestGnomeScreencastBackendStartWholeScreen:
@@ -457,13 +582,15 @@ class TestGnomeScreencastBackendStartWholeScreen:
         options = {"draw-cursor": ("b", True), "framerate": ("i", 30)}
         assert message.body == (self.PATH, options)
 
-    def test_closes_the_connection_after_a_successful_call(self, monkeypatch):
+    def test_holds_the_connection_open_after_a_successful_start(self, monkeypatch):
+        # Same lifeline rule as a region recording -- see the region
+        # class's version of this test.
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
         GnomeScreencastBackend().start(None, self.PATH)
 
-        assert connection.close.called
+        assert not connection.close.called
 
     def test_raises_when_screencast_reports_failure(self, monkeypatch):
         connection = _fake_connection(reply=Mock(body=(False, self.PATH)))
@@ -472,63 +599,77 @@ class TestGnomeScreencastBackendStartWholeScreen:
         with pytest.raises(RuntimeError):
             GnomeScreencastBackend().start(None, self.PATH)
 
-    def test_raises_naming_both_paths_when_gnome_resolves_to_a_different_filename(
+    def test_returns_the_filename_gnome_reports_rather_than_the_one_requested(
         self, monkeypatch
     ):
+        # Same renaming rule as a region recording.
         actual_path = "/home/user/Videos/Screencasts/from-2026.webm"
         connection = _fake_connection(reply=Mock(body=(True, actual_path)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
-        with pytest.raises(RuntimeError) as excinfo:
-            GnomeScreencastBackend().start(None, self.PATH)
-
-        message = str(excinfo.value)
-        assert self.PATH in message
-        assert actual_path in message
+        assert GnomeScreencastBackend().start(None, self.PATH) == actual_path
 
 
 class TestGnomeScreencastBackendStop:
-    def test_calls_stop_screencast_and_returns_cleanly_on_success(self, monkeypatch):
-        connection = _fake_connection(reply=Mock(body=(True,)))
+    @staticmethod
+    def _started(monkeypatch, stop_reply):
+        """A backend that has genuinely been through `start()`, so it holds
+        the connection `stop()` has to reuse.
+        """
+        connection = _fake_connection(reply=Mock(body=(True, "/tmp/out.webm")))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+        backend = GnomeScreencastBackend()
+        backend.start(QRectF(0, 0, 10, 10), "/tmp/out.webm")
+        connection.send_and_get_reply = Mock(return_value=stop_reply)
+        return backend, connection
 
-        GnomeScreencastBackend().stop()  # must not raise
+    def test_calls_stop_screencast_and_returns_cleanly_on_success(self, monkeypatch):
+        backend, connection = self._started(monkeypatch, Mock(body=(True,)))
+
+        backend.stop()  # must not raise
 
         message = connection.send_and_get_reply.call_args[0][0]
         assert message.header.fields[HeaderFields.member] == "StopScreencast"
         assert connection.close.called
 
     def test_raises_when_stop_screencast_reports_failure(self, monkeypatch):
-        connection = _fake_connection(reply=Mock(body=(False,)))
-        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+        backend, _connection = self._started(monkeypatch, Mock(body=(False,)))
 
         with pytest.raises(RuntimeError):
-            GnomeScreencastBackend().stop()
+            backend.stop()
 
-    def test_opens_a_fresh_connection_rather_than_reusing_starts(self, monkeypatch):
-        # GNOME Shell tracks the in-progress recording server-side, keyed
-        # to the caller's D-Bus unique name -- there's nothing for this
-        # process to hold between start() and stop(), so each should open
-        # and close its own connection independently.
-        connections = []
-
-        def make_connection(bus):
-            connection = _fake_connection(reply=Mock(body=(True, "/tmp/out.webm")))
-            connections.append(connection)
-            return connection
-
-        monkeypatch.setattr(recording, "open_dbus_connection", make_connection)
-
+    def test_reuses_the_connection_start_opened_rather_than_a_fresh_one(self, monkeypatch):
+        # The inverse of what this file asserted before a live GNOME Shell
+        # 46 session was available: Shell keys the in-progress recording to
+        # the connection that started it, so StopScreencast() on any other
+        # connection answers False and leaves the recording running.
+        started = _fake_connection(reply=Mock(body=(True, "/tmp/out.webm")))
+        monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: started)
         backend = GnomeScreencastBackend()
         backend.start(QRectF(0, 0, 10, 10), "/tmp/out.webm")
 
-        connections.clear()
-        monkeypatch.setattr(
-            recording,
-            "open_dbus_connection",
-            lambda bus: _fake_connection(reply=Mock(body=(True,))),
-        )
-        backend.stop()  # must not raise, and must not touch start()'s connection
+        opened_later = []
+
+        def make_connection(bus):
+            connection = _fake_connection(reply=Mock(body=(True,)))
+            opened_later.append(connection)
+            return connection
+
+        monkeypatch.setattr(recording, "open_dbus_connection", make_connection)
+        started.send_and_get_reply = Mock(return_value=Mock(body=(True,)))
+
+        backend.stop()
+
+        assert opened_later == []
+        assert started.send_and_get_reply.called
+        assert started.close.called
+
+    def test_raises_when_there_is_no_recording_to_stop(self):
+        # Better than quietly opening a connection and asking Shell to stop
+        # a recording this backend never started -- which is what the old
+        # fresh-connection shape did, and always got False for.
+        with pytest.raises(RuntimeError):
+            GnomeScreencastBackend().stop()
 
 
 class TestBuildLinuxRegistry:
