@@ -23,7 +23,26 @@ doesn't exist in this handoff) -- rather than assuming a whole OS one way or
 the other.
 """
 
+import os
 import sys
+
+# CLAUDE.md requires this suite to pass headless -- a build machine has no
+# display, and neither does a Hopper worktree -- so the QPA platform is
+# defaulted here rather than left to every caller to prefix.
+#
+# It is here, and not in the command, because the prefix form is POSIX-only:
+# `QT_QPA_PLATFORM=offscreen python -m pytest -q` under cmd.exe fails with
+# "'QT_QPA_PLATFORM' is not recognized as an internal or external command",
+# 13ms in, having run no tests at all. Moving the assignment into a
+# `python -c` one-liner instead only traded that for the shell eating the
+# quotes ("SyntaxError: unterminated string literal"). A command with no
+# shell syntax in it cannot be got wrong by whichever shell runs it.
+#
+# `setdefault`, not assignment: an explicitly exported QT_QPA_PLATFORM still
+# wins, so a developer can still run the suite against a real display, and
+# the documented `QT_QPA_PLATFORM=offscreen python -m pytest -q` keeps
+# meaning exactly what it says.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
