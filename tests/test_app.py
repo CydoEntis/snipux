@@ -1961,6 +1961,67 @@ class TestReviewWindowIntegration:
         assert controller._reviews == []
 
 
+class TestChooserKindIntegration:
+    """SNX-120: the stills/record switch has to remember which side was
+    last used *across snips*, not just across a `reopen()` on one live
+    `Chooser` -- `start_capture` builds a whole new `OverlayWindow` (and so
+    a whole new `Chooser`) each time, so nothing survives a session ending
+    unless it is read from and written to disk, the same as `after_capture`
+    already is.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    def test_a_fresh_snip_opens_on_the_stored_side(self, make_controller, monkeypatch):
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_kind", lambda cd=None: "record")
+        controller = self._controller(make_controller)
+
+        controller.start_capture()
+
+        assert controller._overlay._chooser.kind == "record"
+
+    def test_flipping_the_switch_saves_the_new_side(self, make_controller, monkeypatch):
+        saved = []
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_kind", lambda cd=None: "stills")
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "save_kind",
+            lambda value, cd=None: saved.append(value),
+        )
+        controller = self._controller(make_controller)
+        controller.start_capture()
+
+        controller._overlay._chooser.set_kind("record")
+
+        assert saved == ["record"]
+
+    def test_the_next_snip_picks_up_what_the_last_one_left(self, make_controller, monkeypatch):
+        # No mock destinations here: round-trips through the real
+        # load_kind/save_kind, backed by a stand-in for the module-level
+        # dict a bare monkeypatch would otherwise need to fake persistence.
+        store = {}
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_kind",
+            lambda cd=None: store.get("kind", "stills"),
+        )
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "save_kind",
+            lambda value, cd=None: store.__setitem__("kind", value),
+        )
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        controller._overlay._chooser.set_kind("record")
+        controller._overlay.close()
+
+        controller.start_capture()
+
+        assert controller._overlay._chooser.kind == "record"
+
+
 class TestQApplicationLifetime:
     """The QApplication must exist -- and stay alive -- before a transport
     claims its socket.
