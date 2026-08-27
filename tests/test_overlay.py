@@ -4851,8 +4851,16 @@ class TestCaptureModeWindowIntegration:
     def _clean_slate(self):
         _close_stray_toplevel_windows()
 
-    WINDOW_RECT = QRectF(30, 30, 50, 50)
-    HIT_POINT = QPoint(50, 50)
+    # y=90, not 30: while `_picking_window` is armed the prior selection is
+    # None, which is also `Chooser`'s own "nothing chosen yet" condition
+    # (`_sync_chooser_visibility`), so its panel -- SNX-120's stills/record
+    # switch widened it -- is up too, spanning the full top ChooserMetric.
+    # HEIGHT (54px) band. A rect/point inside that band never reaches
+    # `OverlayWindow.mouseMoveEvent` at all (Qt delivers a bare hover to
+    # whichever child sits under the cursor instead), silently turning a
+    # hit into a no-op. 90 clears it with margin.
+    WINDOW_RECT = QRectF(30, 90, 50, 50)
+    HIT_POINT = QPoint(50, 110)
     # Outside WINDOW_RECT, and -- as important -- outside the real child
     # widgets `OverlayWindow` shows once it has a selection: `HintHUD`
     # spans the full width for `tokens.Metric.HUD_H` (44px) from the top,
@@ -4943,15 +4951,15 @@ class TestCaptureModeWindowIntegration:
         self._pick_window_mode(overlay)
         QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
         press = overlay._edge_handle_rect(Handle.RIGHT).center().toPoint()
-        target = QPoint(120, 55)
+        target = QPoint(120, 115)
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
         QTest.mouseMove(overlay, target)
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=target)
 
         # left/top/bottom stay anchored at the window-mode rect's own
-        # edges (30, 30, 80); only the dragged right edge moves, to 120.
-        assert overlay._selection == QRect(30, 30, 90, 50)
+        # edges (30, 90, 80); only the dragged right edge moves, to 120.
+        assert overlay._selection == QRect(30, 90, 90, 50)
 
     def test_selection_from_window_mode_can_be_annotated(self):
         overlay = self._overlay(_FakeWindowProvider(self.WINDOW_RECT))

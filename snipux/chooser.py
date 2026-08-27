@@ -10,6 +10,11 @@ captured -- what to capture, and what should happen to it -- plus the delay,
 which used to live in the floating bar's mode popover. That popover is gone;
 this replaces it.
 
+A stills/record switch sits alongside those (docs/design/recording.md
+ticket 5): both the mode list and the "then" list change meaning when it
+flips, which is why it is a fourth axis rather than another mode. UI and
+state only -- nothing here is wired to a recorder.
+
 It exists because capture mode used to live on the floating bar, and that
 bar only appears once a selection does. Choosing "window" therefore meant
 dragging out a region you did not want, clicking a chip, picking the mode
@@ -146,7 +151,7 @@ class _MenuRow(_Surface):
 
     clicked = pyqtSignal(str)
 
-    def __init__(self, value, icon_name, label, note="", shortcut="", parent=None):
+    def __init__(self, value, icon_name, label, note="", shortcut="", parent=None, disabled=False):
         super().__init__(parent)
         metric = tokens.ChooserMetric
         self._value = value
@@ -156,8 +161,10 @@ class _MenuRow(_Surface):
         self._shortcut = shortcut
         self._selected = False
         self._hovered = False
+        self._disabled = disabled
         self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if not disabled:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         pad_v, _pad_h = metric.MENU_ROW_PAD
         self.setFixedHeight(pad_v * 2 + (34 if note else 18))
 
@@ -169,8 +176,9 @@ class _MenuRow(_Surface):
         self.update()
 
     def enterEvent(self, event) -> None:
-        self._hovered = True
-        self.update()
+        if not self._disabled:
+            self._hovered = True
+            self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
@@ -179,6 +187,10 @@ class _MenuRow(_Surface):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        # Inert, not just greyed: a disabled row swallows the press (via
+        # `_Surface`, so SNX-108 does not reopen) but never emits `clicked`.
+        if self._disabled:
+            return
         if self._released_inside(event):
             self.clicked.emit(self._value)
 
@@ -188,7 +200,9 @@ class _MenuRow(_Surface):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect())
 
-        if self._selected:
+        if self._disabled:
+            fill = None
+        elif self._selected:
             fill = design.chooser_color("ROW_SELECTED_BG")
         elif self._hovered:
             fill = design.chooser_color("ROW_HOVER_BG")
@@ -201,10 +215,14 @@ class _MenuRow(_Surface):
 
         pad_v, pad_h = metric.MENU_ROW_PAD
         x = pad_h
+        label_fg = QColor(
+            colour.ROW_DISABLED_FG
+            if self._disabled
+            else (colour.ROW_SELECTED_FG if self._selected else colour.ROW_IDLE_FG)
+        )
         if self._icon_name:
             size = metric.MENU_ROW_ICON
-            glyph = QColor(colour.ROW_SELECTED_FG if self._selected else colour.ROW_IDLE_FG)
-            pixmap = design.icon(self._icon_name, glyph).pixmap(size, size)
+            pixmap = design.icon(self._icon_name, label_fg).pixmap(size, size)
             painter.drawPixmap(x, (self.height() - size) // 2, pixmap)
             x += size + 9
 
@@ -213,7 +231,7 @@ class _MenuRow(_Surface):
         text_w = self.width() - x - pad_h - (metric.MENU_TICK + 8)
 
         painter.setFont(_font(12.5, 500))
-        painter.setPen(QColor(colour.ROW_SELECTED_FG if self._selected else colour.ROW_IDLE_FG))
+        painter.setPen(label_fg)
         if self._note:
             label = QFontMetricsF(painter.font()).elidedText(
                 self._label, Qt.TextElideMode.ElideRight, text_w
@@ -236,14 +254,18 @@ class _MenuRow(_Surface):
             )
 
         right = self.width() - pad_h
-        if self._selected:
+        if self._selected and not self._disabled:
             size = metric.MENU_TICK
             pixmap = design.icon("check", tokens.Color.ACCENT).pixmap(size, size)
             painter.drawPixmap(right - size, (self.height() - size) // 2, pixmap)
             right -= size + 8
         if self._shortcut:
             painter.setFont(_font(10.5, 400, mono=True))
-            painter.setPen(QColor(colour.SHORTCUT_FG))
+            # A disabled row's shortcut letter is dimmed the same as its
+            # label/icon (`label_fg`, above) -- at full brightness it reads
+            # as if the key still does something, when `handle_key` now
+            # silently no-ops for it.
+            painter.setPen(QColor(colour.ROW_DISABLED_FG if self._disabled else colour.SHORTCUT_FG))
             painter.drawText(
                 QRectF(right - 20, 0, 20, self.height()),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
@@ -276,8 +298,8 @@ class _Menu(QWidget):
         )
         column.setSpacing(1)
         self._rows: dict[str, _MenuRow] = {}
-        for value, icon_name, label, note, shortcut in rows:
-            row = _MenuRow(value, icon_name, label, note, shortcut, self)
+        for value, icon_name, label, note, shortcut, disabled in rows:
+            row = _MenuRow(value, icon_name, label, note, shortcut, self, disabled=disabled)
             row.set_selected(value == selected)
             row.clicked.connect(self.picked)
             self._rows[value] = row
@@ -407,6 +429,89 @@ class _Trigger(_Surface):
             (self.height() - chevron) // 2,
             pixmap,
         )
+        painter.end()
+
+
+class _KindSwitch(_Surface):
+    """The stills/record axis: docs/design/recording.md ticket 5.
+
+    The two sides are not symmetric -- the mode list and the "then" list
+    both change meaning when this flips -- which is why it is its own
+    control rather than another `_Trigger`/`_Menu` pair. It carries no
+    chevron and opens no menu: there are only two states, so any click
+    flips between them, the same as `Chooser.set_kind` documents.
+
+    A two-segment pill with a sliding highlight, not a boolean track+knob:
+    an empty knob says on/off, not on/off *what*. Purely UI/state -- this
+    ticket wires nothing to a recorder.
+    """
+
+    toggled = pyqtSignal()
+
+    SEGMENTS = (("stills", "Stills"), ("record", "Record"))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        metric = tokens.ChooserMetric
+        self._kind = "stills"
+        self._seg_widths = [0, 0]
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(metric.SWITCH_H)
+        self._resize_to_fit()
+
+    def set_kind(self, kind: str) -> None:
+        self._kind = kind
+        self.update()
+
+    def _resize_to_fit(self) -> None:
+        metric = tokens.ChooserMetric
+        fm = QFontMetricsF(_font(12.5, 500))
+        self._seg_widths = [
+            round(fm.horizontalAdvance(label) + metric.SWITCH_SEG_PAD_H * 2)
+            for _value, label in self.SEGMENTS
+        ]
+        self.setFixedWidth(metric.SWITCH_PAD * 2 + sum(self._seg_widths))
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._released_inside(event):
+            self.toggled.emit()
+
+    def paintEvent(self, event) -> None:
+        metric, colour = tokens.ChooserMetric, tokens.ChooserColor
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = rect.height() / 2
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.chooser_color("SWITCH_TRACK"))
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.chooser_color("TRIGGER_BORDER"))
+        painter.drawRoundedRect(rect, radius, radius)
+
+        active = 0 if self._kind == "stills" else 1
+        seg_x = [metric.SWITCH_PAD]
+        for width in self._seg_widths[:-1]:
+            seg_x.append(seg_x[-1] + width)
+
+        highlight = QRectF(
+            seg_x[active], metric.SWITCH_PAD,
+            self._seg_widths[active], self.height() - metric.SWITCH_PAD * 2,
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.chooser_color("SWITCH_HIGHLIGHT"))
+        painter.drawRoundedRect(highlight, highlight.height() / 2, highlight.height() / 2)
+
+        painter.setFont(_font(12.5, 500))
+        for index, (_value, label) in enumerate(self.SEGMENTS):
+            painter.setPen(QColor(colour.MODE_ACCENT if index == active else colour.ROW_IDLE_FG))
+            painter.drawText(
+                QRectF(seg_x[index], 0, self._seg_widths[index], self.height()),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
         painter.end()
 
 
@@ -645,6 +750,9 @@ class ChooserPanel(_Surface):
         row.setContentsMargins(metric.PAD, metric.PAD, metric.PAD, metric.PAD)
         row.setSpacing(metric.GAP)
 
+        self.kind_switch = _KindSwitch(self)
+        row.addWidget(self.kind_switch)
+
         self.mode_trigger = _Trigger(
             "crop", "Region", 16, colour.MODE_ACCENT, self
         )
@@ -699,6 +807,7 @@ class Chooser(QWidget):
     modeChosen = pyqtSignal(str)
     fireImmediately = pyqtSignal(str)
     cancelled = pyqtSignal()
+    kindChanged = pyqtSignal(str)
 
     def __init__(self, parent=None, *, screen_rect: QRectF | None = None, origin=None):
         super().__init__(parent)
@@ -708,12 +817,14 @@ class Chooser(QWidget):
         self._mode = tokens.CAPTURE_MODES[0][0]
         self._after = tokens.AFTER_DEFAULT
         self._delay = tokens.DELAY_DEFAULT
+        self._kind = "stills"
         self._phase = "choosing"
         self._menu: _Menu | None = None
         self._menu_kind: str | None = None
 
         self.panel = ChooserPanel(parent)
         self.panel.triggerClicked.connect(self._toggle_menu)
+        self.panel.kind_switch.toggled.connect(self._toggle_kind)
         self.hint = _Pill(parent)
         self.tab = _Tab(parent)
         self.tab.clicked.connect(self.reopen)
@@ -747,6 +858,10 @@ class Chooser(QWidget):
     def phase(self) -> str:
         return self._phase
 
+    @property
+    def kind(self) -> str:
+        return self._kind
+
     def set_mode(self, mode: str, *, arm: bool = True) -> None:
         """Adopt `mode`, and by default arm it.
 
@@ -757,12 +872,21 @@ class Chooser(QWidget):
         """
         if mode not in dict((m[0], m) for m in tokens.CAPTURE_MODES):
             return
+        if self._kind == "record" and mode in tokens.RECORD_DISABLED_MODES:
+            # Window and Freeform aren't offered on the record side -- a
+            # click on their disabled row is inert (`_MenuRow` already
+            # swallows it), and a stray shortcut key must leave the current
+            # mode alone the same way.
+            return
         self._mode = mode
         self._refresh_triggers()
         if not arm:
             return
-        if mode in tokens.IMMEDIATE_MODES:
-            # Nothing left to aim at, so choosing it *is* the capture.
+        if mode in tokens.IMMEDIATE_MODES and self._kind == "stills":
+            # Nothing left to aim at, so choosing it *is* the capture -- but
+            # only on the stills side. Nothing downstream knows how to
+            # record yet, so on the record side Full screen arms and waits
+            # like Region does, rather than silently taking a screenshot.
             self.fireImmediately.emit(mode)
             return
         self._phase = "armed"
@@ -776,6 +900,36 @@ class Chooser(QWidget):
     def set_delay(self, delay: str) -> None:
         self._delay = delay
         self._refresh_triggers()
+
+    def _toggle_kind(self) -> None:
+        self.set_kind("record" if self._kind == "stills" else "stills")
+
+    def set_kind(self, kind: str) -> None:
+        """Flip stills/record. UI and state only -- nothing here starts a
+        capture or a recording, per docs/design/recording.md ticket 5.
+
+        Only `kind` changes, unless the current mode or destination has no
+        meaning on the new side, in which case it snaps to one that does --
+        assigned directly rather than through `set_mode`/`set_after`, so the
+        snap itself never fires `modeChosen`/`fireImmediately`. Switching
+        back to stills needs no such snap: its mode and after lists are the
+        original, unrestricted ones.
+
+        Emits `kindChanged` on every real flip -- unlike `after`/`delay`,
+        there is no Settings surface for this axis, so the chooser itself is
+        where "remembers which side was last used" has to be wired from;
+        see `setup_desktop.save_kind`.
+        """
+        if kind not in ("stills", "record") or kind == self._kind:
+            return
+        self._kind = kind
+        if kind == "record":
+            if self._mode in tokens.RECORD_DISABLED_MODES:
+                self._mode = tokens.CAPTURE_MODES[0][0]
+            if self._after not in dict.fromkeys(value for value, *_ in _RECORD_AFTER_ROWS):
+                self._after = tokens.RECORD_AFTER_DEFAULT
+        self._refresh_triggers()
+        self.kindChanged.emit(kind)
 
     def reopen(self) -> None:
         """Back to choosing, with every selection intact."""
@@ -810,17 +964,21 @@ class Chooser(QWidget):
     def _rows_for(self, kind: str):
         if kind == "mode":
             keys = {mode: key for key, mode in tokens.MODE_KEYS.items()}
-            return [
-                (label, icon, label, "", keys.get(label, ""))
-                for label, icon, _hint in tokens.CAPTURE_MODES
-            ], self._mode, tokens.ChooserMetric.MENU_MODE_W
+            recording = self._kind == "record"
+            rows = []
+            for label, icon, _hint in tokens.CAPTURE_MODES:
+                disabled = recording and label in tokens.RECORD_DISABLED_MODES
+                note = tokens.RECORD_DISABLED_MODES.get(label, "") if disabled else ""
+                rows.append((label, icon, label, note, keys.get(label, ""), disabled))
+            return rows, self._mode, tokens.ChooserMetric.MENU_MODE_W
         if kind == "after":
+            after_rows = _RECORD_AFTER_ROWS if self._kind == "record" else _AFTER_ROWS
             return [
-                (identifier, icon, label, note, "")
-                for identifier, icon, label, note in _AFTER_ROWS
+                (identifier, icon, label, note, "", False)
+                for identifier, icon, label, note in after_rows
             ], self._after, tokens.ChooserMetric.MENU_AFTER_W
         return [
-            (value, "", _delay_label(value), "", "") for value in tokens.DELAYS
+            (value, "", _delay_label(value), "", "", False) for value in tokens.DELAYS
         ], _delay_value(self._delay), tokens.ChooserMetric.MENU_DELAY_W
 
     def _toggle_menu(self, kind: str) -> None:
@@ -867,10 +1025,11 @@ class Chooser(QWidget):
 
     def _refresh_triggers(self) -> None:
         colour = tokens.ChooserColor
+        self.panel.kind_switch.set_kind(self._kind)
         icon = dict((m[0], m[1]) for m in tokens.CAPTURE_MODES)[self._mode]
         self.panel.mode_trigger.set_content(icon, self._mode, colour.MODE_ACCENT)
 
-        after_icon, after_label = _after_display(self._after)
+        after_icon, after_label = _after_display(self._after, self._kind)
         self.panel.after_trigger.set_content(after_icon, after_label, colour.ROW_IDLE_FG)
 
         # A delay that is about to surprise you should be visible before it
@@ -955,12 +1114,22 @@ _AFTER_ROWS = [
     ("review", "eye", "Review", tokens.CHOOSER_AFTER_NOTE["review"]),
 ]
 
+# The record side's own "then" vocabulary -- Instant and Save, never Edit,
+# Review or Trim. Kept out of `AFTER_CAPTURE`/`_AFTER_ROWS`, which are
+# stills-only; "save" is not a destination stills can pick.
+_RECORD_AFTER_ROWS = [
+    ("instant", "copy", "Instant", tokens.CHOOSER_RECORD_AFTER_NOTE["instant"]),
+    ("save", "save", "Save", tokens.CHOOSER_RECORD_AFTER_NOTE["save"]),
+]
 
-def _after_display(identifier: str) -> tuple[str, str]:
-    for value, icon, label, _note in _AFTER_ROWS:
+
+def _after_display(identifier: str, kind: str = "stills") -> tuple[str, str]:
+    rows = _RECORD_AFTER_ROWS if kind == "record" else _AFTER_ROWS
+    for value, icon, label, _note in rows:
         if value == identifier:
             return icon, label
-    return _after_display(tokens.AFTER_DEFAULT)
+    default = tokens.RECORD_AFTER_DEFAULT if kind == "record" else tokens.AFTER_DEFAULT
+    return _after_display(default, kind)
 
 
 def _delay_label(value: str) -> str:

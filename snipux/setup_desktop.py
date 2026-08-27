@@ -444,6 +444,26 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
     return save_after_capture("review" if enabled else tokens.AFTER_DEFAULT, config_dir)
 
 
+def load_kind(config_dir: Path | None = None) -> str:
+    """`stills` or `record` -- which side of the chooser's switch
+    (docs/design/recording.md ticket 5) a fresh session opens on.
+
+    A new `OverlayWindow`/`Chooser` pair is built for every snip, so without
+    this the switch would silently reset to `stills` the moment one session
+    ended, even though the acceptance criteria for the switch is that it
+    remembers which side was last used. Unlike `after_capture`, there is no
+    Settings toggle for this -- the chooser itself is the only place it is
+    ever set, so `Chooser.set_kind` writes it back out immediately rather
+    than waiting for a dedicated settings surface that doesn't exist.
+    """
+    stored = _read_config(config_dir).get("kind")
+    return stored if stored in ("stills", "record") else tokens.KIND_DEFAULT
+
+
+def save_kind(value: str, config_dir: Path | None = None) -> bool:
+    return _write_config("kind", value, config_dir)
+
+
 def load_instant_saves(config_dir: Path | None = None) -> bool:
     """Whether `instant` (`tokens.AFTER_CAPTURE`) writes the file instead
     of copying to the clipboard -- the one thing `overlay.py`'s

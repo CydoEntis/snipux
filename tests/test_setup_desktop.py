@@ -1148,3 +1148,34 @@ class TestInstantSaves:
         setup_desktop.config_path(tmp_path).write_text('{"always_copy": true}')
 
         assert setup_desktop.load_instant_saves(tmp_path) is False
+
+
+class TestKindPersistence:
+    """SNX-120: the chooser's stills/record switch has to remember which
+    side was last used across separate snips, not just across a `reopen()`
+    on one live `Chooser` -- a fresh `OverlayWindow`/`Chooser` pair is built
+    for every snip (see `app.py:start_capture`), so nothing survives here
+    unless it is actually written to disk.
+    """
+
+    def test_nothing_stored_means_stills(self, tmp_path):
+        # An upgrading user who has never touched the switch must not open
+        # on the record side.
+        assert setup_desktop.load_kind(tmp_path) == "stills"
+
+    def test_round_trips_through_save_and_load(self, tmp_path):
+        setup_desktop.save_kind("record", tmp_path)
+
+        assert setup_desktop.load_kind(tmp_path) == "record"
+
+    def test_switching_back_to_stills_is_not_stuck_on_record(self, tmp_path):
+        setup_desktop.save_kind("record", tmp_path)
+        setup_desktop.save_kind("stills", tmp_path)
+
+        assert setup_desktop.load_kind(tmp_path) == "stills"
+
+    def test_an_unknown_value_falls_back_rather_than_being_trusted(self, tmp_path):
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text('{"kind": "nonsense"}')
+
+        assert setup_desktop.load_kind(tmp_path) == tokens.KIND_DEFAULT

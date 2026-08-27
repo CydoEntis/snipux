@@ -489,6 +489,15 @@ class ChooserMetric:
     LEGEND_BOTTOM    = 26
     LEGEND_H         = 30
 
+    # Stills/record switch: a two-segment pill with a sliding highlight
+    # behind whichever side is active, rather than a boolean track+knob --
+    # a switch that only shows an empty knob says on/off, not on/off *what*.
+    # `Win.SWITCH_W/H/KNOB/PAD` (tokens.py, Settings' opaque toggle) is the
+    # naming precedent for the shape, adapted to a content-sized highlight.
+    SWITCH_H         = TRIGGER_H
+    SWITCH_PAD       = 3           # inset between the track edge and the highlight
+    SWITCH_SEG_PAD_H = 12           # horizontal padding inside each segment
+
 
 class ChooserColor:
     """Only what differs from Color. Everything else comes from the overlay
@@ -530,6 +539,16 @@ class ChooserColor:
     PANEL_BG_ALPHA       = 0.93        # the panel's own fill
     LEGEND_KEY_FG        = "#d7dacb"
 
+    # Stills/record switch. The active segment's label reuses MODE_ACCENT
+    # and the idle one reuses ROW_IDLE_FG -- the same two colours the menu
+    # rows already use for selected vs idle -- so only the pill graphic
+    # itself needs new tokens.
+    SWITCH_TRACK         = "#ffffff"   # at 6% alpha -- the pill's resting fill
+    SWITCH_TRACK_ALPHA   = 0.06
+    SWITCH_HIGHLIGHT     = "#ffffff"   # at 10% alpha -- behind the active side
+    SWITCH_HIGHLIGHT_ALPHA = 0.10
+    ROW_DISABLED_FG      = "#5c6156"   # a disabled mode row's label + icon
+
 # Delay: label shown on the trigger. "No delay" is the stored value; the
 # chooser prints it in full at this width. (The narrower icon-only variant
 # abbreviates to "Off" — not used in the shipped design.)
@@ -563,8 +582,40 @@ MODE_KEYS = {"R": "Region", "W": "Window", "F": "Full screen", "L": "Freeform"}
 
 # Full screen is the only mode with nothing left to aim at, so choosing it
 # fires the grab immediately (after any delay). The other three arm and wait.
+# On the record side nothing fires immediately -- see RECORD_DISABLED_MODES.
 IMMEDIATE_MODES = ["Full screen"]
 
+# The stills/record switch, docs/design/recording.md ticket 5. UI and state
+# only here -- nothing behind either side is wired to a recorder yet.
+#
+# `stills`, never the first entry of some list -- there is no list, just the
+# two literal sides -- so the default is its own constant, the same way
+# AFTER_DEFAULT/RECORD_AFTER_DEFAULT are rather than "whatever happens to be
+# first".
+KIND_DEFAULT = "stills"
+
+# Window recording wasn't asked for, and Freeform is close to meaningless
+# since video is rectangular -- both stay in the mode list, greyed out, with
+# the value naming why rather than being hidden (handoff for this ticket).
+# Full screen has nothing left to aim at on the stills side, but on the
+# record side there is equally nothing *downstream* wired up yet, so it must
+# not fire immediately there -- it arms and waits like Region does.
+RECORD_DISABLED_MODES = {
+    "Window": "Not offered for recording yet",
+    "Freeform": "Video is rectangular, so freeform doesn't apply",
+}
+
+# The record side's "then" vocabulary: Instant and Save only, never Edit,
+# Review or Trim -- there is no annotate-in-place for a video, and Trim is
+# where a third destination lands once editing exists (recording.md ticket
+# 6+, not this one). "save" is a destination id that exists only here, not
+# in `AFTER_CAPTURE` (stills-only) -- Save's actual behaviour is ticket 6's,
+# this ticket is UI/state only.
+CHOOSER_RECORD_AFTER_NOTE = {
+    "instant": "Straight to the clipboard, no overlay.",
+    "save": "Save the recording to a file.",
+}
+RECORD_AFTER_DEFAULT = "instant"
 
 TOOL_HINTS = {
     "pen":         "Drag to draw freehand",
