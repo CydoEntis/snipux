@@ -417,9 +417,10 @@ class TestCopyFileToClipboard:
         self, monkeypatch, tmp_path
     ):
         monkeypatch.setattr(app.shutil, "which", lambda binary: None)
-        # A space in the directory name forces QUrl to percent-encode --
-        # a path that happened to look the same hand-formatted wouldn't
-        # actually exercise that.
+        # A space in the directory name is what forces percent-encoding,
+        # and it is not a corner case: the default filename pattern
+        # ("Screenshot from %Y-%m-%d %H-%M-%S") always contains spaces, so
+        # every recording copied to the clipboard goes through this.
         directory = tmp_path / "a b"
         directory.mkdir()
         path = directory / "clip.mp4"
@@ -428,8 +429,19 @@ class TestCopyFileToClipboard:
         copy_file_to_clipboard(path)
 
         mime = QGuiApplication.clipboard().mimeData()
-        expected = b"copy\n" + QUrl.fromLocalFile(str(path)).toString().encode()
-        assert bytes(mime.data("x-special/gnome-copied-files").data()) == expected
+        payload = bytes(mime.data("x-special/gnome-copied-files").data())
+        operation, _, uri = payload.partition(b"\n")
+
+        assert operation == b"copy"
+        # Spelled out rather than recomputed through the same QUrl call the
+        # implementation makes. Asserting `toString()` against `toString()`
+        # is exactly what let the unescaped form ship: the test agreed with
+        # the bug. A URI with a raw space in it is not a URI.
+        assert b" " not in uri
+        assert uri.endswith(b"/a%20b/clip.mp4")
+        # Both flavours ride on one QMimeData and must name the same file
+        # the same way.
+        assert uri == bytes(mime.urls()[0].toEncoded())
 
     def test_pipes_the_uri_list_to_wl_copy_when_present_on_path(
         self, monkeypatch, tmp_path
@@ -441,7 +453,9 @@ class TestCopyFileToClipboard:
             calls.append((argv, input))
 
         monkeypatch.setattr(app.subprocess, "run", fake_run)
-        path = tmp_path / "clip.mp4"
+        directory = tmp_path / "a b"
+        directory.mkdir()
+        path = directory / "clip.mp4"
         path.write_bytes(b"fake video bytes")
 
         copy_file_to_clipboard(path)
@@ -449,8 +463,10 @@ class TestCopyFileToClipboard:
         assert len(calls) == 1
         argv, piped_bytes = calls[0]
         assert argv == ["wl-copy", "--type", "text/uri-list"]
-        expected_uri = QUrl.fromLocalFile(str(path)).toString()
-        assert piped_bytes.decode() == expected_uri + "\n"
+        # Same rule as the GNOME flavour, and spelled out for the same
+        # reason -- text/uri-list carries URIs, so this one is escaped too.
+        assert b" " not in piped_bytes
+        assert piped_bytes.endswith(b"/a%20b/clip.mp4\n")
 
     def test_does_not_raise_when_wl_copy_binary_vanishes_before_running(
         self, monkeypatch, tmp_path
