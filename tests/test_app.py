@@ -134,6 +134,48 @@ def test_list_backends_reports_name_availability_and_reason(capsys):
     assert "not on Wayland" in out
 
 
+def test_list_backends_reports_recording_backends_too(capsys):
+    # --list-backends used to answer only for capture, so there was no way
+    # to ask the tool whether it could record at all on this machine --
+    # the one question worth asking on a platform where exactly one
+    # recording backend exists and it is the whole feature.
+    registry = BackendRegistry([FakeBackend("win32-gdi", True)])
+    recorder_registry = RecorderRegistry(
+        [
+            FakeBackend("qt-native", True),
+            FakeBackend("gnome-screencast", False, reason="not on GNOME"),
+        ]
+    )
+
+    exit_code = main(
+        ["--list-backends"], registry=registry, recorder_registry=recorder_registry
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "capture backends:" in out
+    assert "win32-gdi" in out
+    assert "recording backends:" in out
+    assert "gnome-screencast" in out
+    assert "not on GNOME" in out
+
+
+def test_list_backends_says_so_when_nothing_can_record(capsys):
+    # The empty-recording-registry case is the one a user on non-GNOME
+    # Linux actually hits, and it must not print a bare heading with
+    # nothing under it.
+    exit_code = main(
+        ["--list-backends"],
+        registry=BackendRegistry([FakeBackend("grim", True)]),
+        recorder_registry=RecorderRegistry(),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "recording backends:" in out
+    assert "no backends registered" in out
+
+
 def test_list_backends_on_empty_registry_reports_none_registered(capsys):
     registry = BackendRegistry()
 
