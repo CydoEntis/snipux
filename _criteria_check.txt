@@ -1,6 +1,0 @@
-nothing outside snipux/platform/ branches on sys.platform to pick a recorder registry
-grep confirms no module outside snipux/platform/ imports recording.build_linux_registry or recording.build_windows_registry
-TestLinuxPlatform gains a test asserting LinuxPlatform().build_recording_registry() returns a sentinel monkeypatched onto snipux.recording.build_linux_registry
-the new Linux delegation test mirrors the existing test_default_save_folder_delegates_to_setup_desktop pattern
-tests/test_platform.py's TestStubPlatforms.DARWIN_OPERATIONS tuple gains 'build_recording_registry'
-the existing test_every_darwin_operation_raises_naming_the_platform_and_the_operation loop then covers build_recording_registry with no new test method needed

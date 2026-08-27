@@ -3904,7 +3904,11 @@ class OverlayWindow(QWidget):
             else:
                 record_rect = self._to_absolute_rect(rect)
             if self._on_recording_requested is not None:
-                self._on_recording_requested(record_rect, self._delay)
+                # `self.outcome` (== `self._chooser.after`) is "instant" or
+                # "save" here -- ticket 9's `_land_recording` is what
+                # actually acts on it, once the file is real; this branch
+                # only ever hands the choice along.
+                self._on_recording_requested(record_rect, self._delay, self.outcome)
             self.close()
             return
         if self.outcome == "instant":
