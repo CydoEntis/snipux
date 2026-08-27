@@ -1,12 +1,79 @@
-# Next: get the recording branch onto Windows and Wayland
+# Next: Wayland, and a real paste
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
 
-Everything through **SNX-127** is merged. The recording work below is on
-`fix/recording-flow`, five commits, **not yet merged**. The suite is green
-on Linux for the first time: 1,464 passed, 0 failed, at both
-`QT_SCALE_FACTOR=1` and `1.5`.
+Everything through **SNX-127** is merged, and so is `fix/recording-flow`
+(merge `97f129b`). The suite is green on Linux -- 1,464 passed, 0 failed,
+at both `QT_SCALE_FACTOR=1` and `1.5` -- and green on Windows too:
+1,457 passed, 14 skipped.
+
+## Windows has now been watched, and region recording was broken
+
+Run for real on Windows 11 on 2026-08-27, against the merged main.
+
+**Region recording produced a 0-byte, unplayable file -- 0 runs out of 3
+-- while full screen managed 3 of 3.** `_crop_frame()` built its output
+format with `QVideoFrameFormat(size, pixel_format)`, which leaves
+`streamFrameRate()` at 0. The encoder builds its output type from the
+*first* frame it is handed, and Media Foundation's H264 encoder refuses a
+type whose frame rate is 0: "could not set output type (80004005)" ->
+"Could not initialize encoder" -> a recorder that dropped itself from
+`RecordingState` to `StoppedState`. The source format's rate is carried
+onto the crop now, and region measures 5.866s of video for 6.001s of wall
+clock (0.977x -- no SNX-125 regression).
+
+`setVideoFrameRate()` on the recorder did **not** cover this: it is only
+called once `_RegionCropWorker` has 15 arrivals to average, long after the
+encoder has had to commit. That race is why the failure was intermittent,
+and it produced the most misleading evidence of the week -- a size sweep
+"proved" 640x360 broken and 1280x720 fine, then proved the exact opposite
+when the same sweep ran in reverse order. Nothing about the sizes
+mattered; only what ran first did. **A sweep that varies one thing still
+has to be run in more than one order.**
+
+`stop()` now raises on a failure reported after `start()` returned. Both
+start paths only ever checked for a *synchronous* failure, so this entire
+fault went unreported: `start()` returned happily, the HUD counted up over
+a recording that did not exist, and the toast named a file nobody had
+written. `_stop_recording()` in app.py already catches and reports a
+raising `stop()`, and already declines to land a file when one raises, so
+this needed no app-side change.
+
+Two smaller Windows faults, both fixed:
+
+- `--list-backends` reported capture backends only -- no way to ask
+  whether the machine could record at all, which on Windows is a
+  single-backend yes/no question.
+- `build.ps1` printed "Built ..." after a **failed** build.
+  `$ErrorActionPreference` does not apply to a native executable's exit
+  code, and python and pyinstaller are both native. Observed for real:
+  PyInstaller died with "Access is denied" on `dist\snipux.exe` (a running
+  snipux was holding its own image open), the script reported success, and
+  left the stale exe in place.
+
+And one that was Windows-only by accident: 11 `GnomeScreencastBackend`
+tests failed here while passing on Linux, because `os.path.isabs()` is
+`ntpath.isabs()` on a Windows dev box and since Python 3.13 that calls a
+drive-less `/tmp/out.webm` **not** absolute. The check asks `posixpath`
+now -- the answer comes from GNOME Shell and is a POSIX path whoever reads
+it. Same family as SNX-126: a test that passes or fails by what the
+machine running it happens to be.
+
+**Still open on Windows:** the recording pill's placement was reported as
+"doesn't stay stuck to the top". `_place_recording_hud` was run against a
+real three-monitor layout (one of them at y=-1440) and every case lands
+correctly top-centre of the right monitor, *except* the documented
+fallback: a region covering the top-centre strip pushes the pill below the
+recorded area, which on a 1440p screen is several hundred px down. That is
+by design -- it keeps the pill out of the recording -- but it is what a
+user reads as broken, and it is unresolved whether the report was that
+case or a genuine bug. Worth knowing when picking this up: on Windows the
+recorder only ever captures the **primary** screen, so on a multi-monitor
+desktop any non-primary monitor is a guaranteed-unfilmed home for the
+pill. Also note `_screen_for()` treats `geometries[0]` as the primary
+screen for a full-screen recording, which `QGuiApplication.screens()` does
+not actually guarantee.
 
 ## The recording flow was fixed, and so was the recorder underneath it
 
@@ -53,12 +120,12 @@ Shell finalises before `StopScreencast()` returns.
 
 ## Still unwatched
 
-**Windows.** None of the flow work has run there. The arming pill, the
-top-centre placement and the countdown are all ordinary Qt, but
-`WindowsRecorderBackend.start()` now returns the path it wrote (it returns
-its input unchanged, since `QMediaRecorder` honours it) and that contract
-change has only been exercised by tests. A fresh `dist\snipux.exe` needs
-building from this branch.
+**Windows.** Done -- see the section above. `start()`'s returned-path
+contract is verified for real (`QMediaRecorder` honours the path it is
+given), both recording paths land a playable file at the right speed, and
+`dist\snipux.exe` is rebuilt from main. What remains unwatched here is the
+pill placement question above and the overlay/annotation flow end to end;
+only recording was driven.
 
 **Wayland at all.** Still true, and not checkable from the machine this was
 done on -- it has no Wayland socket. What *is* now known is that the GNOME
