@@ -125,10 +125,17 @@ def copy_file_to_clipboard(path: Path) -> None:
     mime.setUrls([url])
     # Nautilus (and other GNOME file managers) ignore text/uri-list for
     # paste and want this flavour instead: an operation word ("copy") then
-    # one URI per line, on the *same* QMimeData. QUrl.toString() is what
-    # gets percent-encoding right for a path with spaces or non-ASCII
-    # characters -- do not hand-format the file:// string.
-    mime.setData("x-special/gnome-copied-files", b"copy\n" + url.toString().encode())
+    # one URI per line, on the *same* QMimeData.
+    #
+    # `toEncoded()`, not `toString()`. `toString()` returns QUrl's *pretty*
+    # form, which leaves spaces and non-ASCII characters exactly as they
+    # are -- so this flavour used to carry `file:///.../Screen recording
+    # .webm`, which is not a URI, while `setUrls` above put the properly
+    # escaped one in text/uri-list. Two flavours on one QMimeData naming
+    # the same file two different ways, and this is not a corner case: the
+    # default filename pattern ("Screenshot from %Y-%m-%d %H-%M-%S")
+    # always contains spaces, so every recording copied hit it.
+    mime.setData("x-special/gnome-copied-files", b"copy\n" + bytes(url.toEncoded()))
     QGuiApplication.clipboard().setMimeData(mime)
 
     if shutil.which("wl-copy") is None:
@@ -137,7 +144,10 @@ def copy_file_to_clipboard(path: Path) -> None:
     try:
         subprocess.run(
             ["wl-copy", "--type", "text/uri-list"],
-            input=(url.toString() + "\n").encode(),
+            # Percent-encoded, for the same reason the GNOME flavour
+            # above is: text/uri-list carries URIs, and a raw space is
+            # not one.
+            input=bytes(url.toEncoded()) + b"\n",
             check=True,
         )
     except (OSError, subprocess.CalledProcessError):
