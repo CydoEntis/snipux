@@ -30,14 +30,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QRectF, QTimer, QUrl
-from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QImage, QPixmap
+from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QRect, QRectF, QSize, Qt, QTimer, QUrl
+from PyQt6.QtGui import QColor, QFont, QGuiApplication, QIcon, QImage, QPainter, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget
 
 from snipux.capture import (
     XwininfoWindowGeometryProvider,
@@ -204,6 +205,162 @@ def load_app_icon() -> QIcon:
         pixmap.fill(QColor(60, 110, 200))
         return QIcon(pixmap)
     return icon
+
+
+# The tray renders at one small size regardless of how many resolutions
+# `icon` carries -- unlike the taskbar/window-switcher use `load_app_icon`'s
+# own docstring is about -- so a single fixed size is representative enough
+# to paint the recording dot onto.
+_TRAY_ICON_PIXMAP_SIZE = 64
+
+
+def _build_recording_tray_icon(icon: QIcon) -> QIcon:
+    """Derive the "recording" tray icon from the idle one: the same
+    artwork with a filled dot painted over it, in
+    `design.tokens.Color.DANGER_SOLID` -- the same red `overlay.py`'s own
+    "Clear ink" button already uses for its danger/alert state (there as
+    the translucent `DANGER_BG`; this dot needs it opaque, hence the
+    sibling token -- see `DANGER_SOLID`'s own comment in tokens.py), rather
+    than inventing a new colour.
+
+    Built once, in `AppController.__init__`, and swapped for the idle icon
+    (`self._idle_tray_icon`) whenever a recording starts/stops -- not
+    redrawn per recording.
+    """
+    base = icon.pixmap(_TRAY_ICON_PIXMAP_SIZE, _TRAY_ICON_PIXMAP_SIZE)
+    pixmap = QPixmap(base)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(design.color("DANGER_SOLID"))
+    diameter = round(pixmap.width() * 0.42)
+    painter.drawEllipse(
+        pixmap.width() - diameter, pixmap.height() - diameter, diameter, diameter
+    )
+    # Closed before the QIcon below reads the pixmap -- never leave a
+    # QPainter open across a read of the pixmap it is painting, per
+    # CLAUDE.md.
+    painter.end()
+
+    return QIcon(pixmap)
+
+
+def _place_recording_hud(
+    rect: QRectF | None, desktop_bounds: QRectF, hud_size: QSize, margin: float = 12.0
+) -> QRect | None:
+    """Find a spot for the floating stop/elapsed-time pill outside the
+    recorded area, or `None` if there isn't room for one.
+
+    `rect is None` means a full-screen recording -- the recorded area *is*
+    `desktop_bounds` in that case, so there is never room outside it, by
+    construction. This is what makes "not shown in a full-screen
+    recording" true structurally, rather than by a separate check
+    somewhere else.
+
+    Otherwise, tries candidate placements outside `rect` in a fixed
+    preference order (below, above, right, left), each centred on the
+    relevant edge of `rect` and clamped, perpendicular to that edge, to
+    stay inside `desktop_bounds`. The first candidate whose full geometry
+    still fits inside `desktop_bounds` wins; if none do, there is no room.
+
+    Only checked against the union bounding box of every monitor, not gaps
+    between non-adjacent ones -- the same simplification
+    `WindowsRecorderBackend` already accepts for "primary screen only".
+    """
+    if rect is None:
+        return None
+
+    width, height = hud_size.width(), hud_size.height()
+
+    def clamp_x(x: float) -> float:
+        return min(max(x, desktop_bounds.left()), desktop_bounds.right() - width)
+
+    def clamp_y(y: float) -> float:
+        return min(max(y, desktop_bounds.top()), desktop_bounds.bottom() - height)
+
+    centered_x = clamp_x(rect.center().x() - width / 2)
+    centered_y = clamp_y(rect.center().y() - height / 2)
+
+    candidates = [
+        QRectF(centered_x, rect.bottom() + margin, width, height),  # below
+        QRectF(centered_x, rect.top() - margin - height, width, height),  # above
+        QRectF(rect.right() + margin, centered_y, width, height),  # right
+        QRectF(rect.left() - margin - width, centered_y, width, height),  # left
+    ]
+
+    for candidate in candidates:
+        if desktop_bounds.contains(candidate):
+            return QRect(round(candidate.x()), round(candidate.y()), width, height)
+    return None
+
+
+class RecordingHud(QWidget):
+    """The floating stop/elapsed-time pill shown outside the recorded rect
+    while a recording is in progress (SNX-123 ticket 8).
+
+    Deliberately parentless and frameless/always-on-top, the same shape as
+    `overlay.py`'s `DelayCountdown` -- a HUD standing in for a window
+    rather than living inside one. Lives here, not in `overlay.py`:
+    `overlay.py`'s module docstring already establishes a one-directional
+    dependency (it imports from `app.py`, never the reverse), and this
+    widget has no reason to invert that just to be reused.
+
+    The whole pill is the click target -- there is exactly one action it
+    offers, so a separate button inside it would be redundant chrome.
+    """
+
+    # `_place_recording_hud` is called with this, so the two never drift
+    # out of sync.
+    SIZE = QSize(150, 44)
+
+    def __init__(self, on_stop: Callable[[], None]):
+        # No parent, ever -- see the class docstring.
+        super().__init__(None)
+        self._on_stop = on_stop
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(self.SIZE)
+
+        self._label = QLabel("0:00", self)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setGeometry(0, 0, self.SIZE.width(), self.SIZE.height())
+        # A click must reach this widget's own mousePressEvent, not stop at
+        # the label sitting on top of it.
+        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        font = QFont(design.font_families().mono)
+        font.setPixelSize(16)
+        font.setWeight(QFont.Weight(600))
+        self._label.setFont(font)
+        self._label.setStyleSheet(f"color: {design.color('TEXT_PRIMARY').name()};")
+
+    def set_elapsed(self, text: str) -> None:
+        self._label.setText(text)
+
+    def mousePressEvent(self, event) -> None:
+        self._on_stop()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("BAR_BG"))
+        radius = self.SIZE.height() / 2
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+
+        dot_diameter = 10
+        dot_margin = 14
+        painter.setBrush(design.color("DANGER_SOLID"))
+        painter.drawEllipse(
+            dot_margin,
+            round(self.SIZE.height() / 2 - dot_diameter / 2),
+            dot_diameter,
+            dot_diameter,
+        )
+        painter.end()
 
 
 def build_default_registry() -> BackendRegistry:
@@ -665,6 +822,27 @@ class AppController:
         # for a different widget.
         self._recording_delay_timer: QTimer | None = None
 
+        # True for the whole duration of a `_stop_recording()` call, not
+        # just around `backend.stop()` itself -- `WindowsRecorderBackend
+        # .stop()` pumps `QApplication.processEvents()` while it blocks
+        # (see its own `_wait_for_stopped()` docstring), which can dispatch
+        # a second `WM_HOTKEY` (or a duplicate click on the HUD pill,
+        # delivered by that same pumping) and re-enter either
+        # `start_capture()` or `RecordingHud.mousePressEvent` before the
+        # first stop has finished. `_stop_recording()` itself checks this
+        # before calling `backend.stop()`, so a request that lands mid-stop
+        # through either entry point is a no-op rather than a second stop
+        # or a new snip.
+        self._stopping_recording = False
+        self._recording_started_at: float | None = None
+        # No QObject parent -- same reasoning as `_recording_delay_timer`
+        # above: this attribute's own strong reference is what keeps it
+        # alive.
+        self._recording_elapsed_timer: QTimer | None = None
+        # The pill widget, or None when there was no room for one (or no
+        # recording is active) -- see `_place_recording_hud`.
+        self._recording_hud: RecordingHud | None = None
+
         self._overlay: OverlayWindow | None = None
         # Held for the same reason `_overlay` is: a parentless widget is
         # fair game for the GC while its window is still on screen.
@@ -693,6 +871,12 @@ class AppController:
         # all.
         icon = load_app_icon()
         QApplication.instance().setWindowIcon(icon)
+
+        # Built once, not reconstructed per-recording -- `_start_recording_ui`/
+        # `_teardown_recording_ui` just swap `self._tray_icon`'s icon between
+        # these two (SNX-123 ticket 8).
+        self._idle_tray_icon = icon
+        self._recording_tray_icon = _build_recording_tray_icon(icon)
 
         self._tray_icon = QSystemTrayIcon(icon)
         menu = QMenu()
@@ -879,6 +1063,23 @@ class AppController:
         return [QRectF(screen.geometry()) for screen in QGuiApplication.screens()]
 
     def start_capture(self) -> None:
+        # SNX-123 ticket 8: the capture hotkey (and every other caller of
+        # this single funnel -- the tray's own Snip action, --snip's
+        # transport listener, a forwarded request from a second launch)
+        # doubles as the stop control while a recording is running, ahead
+        # of the overlay-open guard below (which is moot here anyway --
+        # `_active_recording` is only ever set after `_commit_selection`'s
+        # record branch has already closed the overlay). `_active_recording`
+        # stays set for the whole duration of a `_stop_recording()` call
+        # (see its own docstring), so a request that lands while one is
+        # still unwinding sails past this check too -- `_stop_recording()`
+        # itself is what turns that into a no-op rather than a second stop,
+        # so every entry point (this one, and the HUD's own click handler)
+        # gets the guard for free instead of each re-checking it here.
+        if self._active_recording is not None:
+            self._stop_recording()
+            return
+
         # No mode parameter: unlike the old per-monitor Overlay, a single
         # OverlayWindow starts in Region and lets its own capture-mode
         # popover switch to Window/Full screen/Freeform after the fact, so
@@ -1043,7 +1244,9 @@ class AppController:
         No visible countdown here -- `DelayCountdown` is overlay.py's own
         widget for a *frame that hasn't been grabbed yet*, and recording's
         frozen frame is already behind the closed overlay by the time this
-        runs; a recording HUD is ticket 8's, not this one's.
+        runs. The recording HUD itself (ticket 8) only comes up once
+        `_begin()` below has actually started a backend -- see
+        `_start_recording_ui`.
         """
         if self._recorder_registry is None:
             self._report_shortcut(self._recorder_unavailable_message)
@@ -1092,6 +1295,7 @@ class AppController:
                 self._report_shortcut(str(exc))
                 return
             self._active_recording = (backend, path)
+            self._start_recording_ui(rect)
 
         if delay == "Off":  # design.tokens.DELAYS[0]
             _begin()
@@ -1105,6 +1309,140 @@ class AppController:
         self._recording_delay_timer.setSingleShot(True)
         self._recording_delay_timer.timeout.connect(_begin)
         self._recording_delay_timer.start(seconds * 1000)
+
+    def _start_recording_ui(self, rect: QRectF | None) -> None:
+        """Bring up every visible sign that a recording is running (SNX-123
+        ticket 8): the elapsed-time timer (which drives the tray tooltip,
+        and the HUD's own label when there's room for one) and the tray
+        icon's recording state.
+
+        Called from `_on_recording_requested`'s `_begin()`, right after
+        `self._active_recording` is actually set -- so this never runs for
+        a still-pending delay countdown, only once a backend has genuinely
+        started.
+        """
+        self._recording_started_at = time.monotonic()
+
+        # No QObject parent -- see `_recording_elapsed_timer`'s own
+        # docstring in __init__.
+        self._recording_elapsed_timer = QTimer()
+        self._recording_elapsed_timer.setInterval(1000)
+        self._recording_elapsed_timer.timeout.connect(self._on_recording_tick)
+        self._recording_elapsed_timer.start()
+        # Ticked once immediately, not just on the timer's first firing a
+        # second from now -- a recording stopped inside that first second
+        # should still have shown 0:00 somewhere, not nothing at all.
+        self._on_recording_tick()
+
+        # Not gated on `self._tray_available`: every other piece of tray
+        # state this class builds (`setContextMenu`, the icon itself) is
+        # likewise built unconditionally, only `.show()` is gated -- an
+        # icon/tooltip update on a tray icon nobody sees is harmless the
+        # same way.
+        self._tray_icon.setIcon(self._recording_tray_icon)
+
+        # The same union-of-monitor-geometries reduction `create_overlays()`
+        # in overlay.py already does to build its own `virtual_desktop_rect`
+        # for X11.
+        geometries = (
+            self._monitor_geometries
+            if self._monitor_geometries is not None
+            else self._real_monitor_geometries()
+        )
+        desktop_bounds = None
+        for geometry in geometries:
+            desktop_bounds = (
+                geometry if desktop_bounds is None else desktop_bounds.united(geometry)
+            )
+
+        placement = (
+            _place_recording_hud(rect, desktop_bounds, RecordingHud.SIZE)
+            if desktop_bounds is not None
+            else None
+        )
+        if placement is not None:
+            self._recording_hud = RecordingHud(on_stop=self._stop_recording)
+            self._recording_hud.move(placement.topLeft())
+            self._recording_hud.show()
+
+    def _teardown_recording_ui(self) -> None:
+        """Undo everything `_start_recording_ui` brought up.
+
+        Called unconditionally from `_stop_recording()`, regardless of
+        whether `backend.stop()` itself goes on to succeed -- the stop
+        control should feel instant even though the backend call behind it
+        may still be draining for a few seconds on Windows (see
+        `_stopping_recording`'s docstring), so the visible state is torn
+        down before that call is even made.
+        """
+        if self._recording_elapsed_timer is not None:
+            self._recording_elapsed_timer.stop()
+            self._recording_elapsed_timer = None
+        if self._recording_hud is not None:
+            self._recording_hud.close()
+            self._recording_hud = None
+        self._recording_started_at = None
+        self._tray_icon.setIcon(self._idle_tray_icon)
+        self._tray_icon.setToolTip("")
+
+    def _on_recording_tick(self) -> None:
+        """Push the current elapsed time to every surface that shows it:
+        the tray tooltip -- the one surface that survives both a
+        full-screen recording (the HUD structurally can't, by
+        `_place_recording_hud`'s own design) and a machine with no tray at
+        all can still set harmlessly -- and the HUD's own label, when one
+        is showing.
+
+        A region recording on a machine with no tray (`_tray_available` is
+        False, so nobody can see that tooltip) *and* no room for the HUD
+        (`_place_recording_hud` found none) would otherwise show elapsed
+        time nowhere at all -- both surfaces individually optional, but the
+        acceptance criterion isn't. stdout is the same last-resort fallback
+        `_report_shortcut` already uses for "no tray to hang a message on"
+        (SNX-54), applied here so that combination is never silent.
+        """
+        elapsed = int(time.monotonic() - self._recording_started_at)
+        minutes, seconds = divmod(elapsed, 60)
+        text = f"{minutes}:{seconds:02d}"
+        self._tray_icon.setToolTip(text)
+        if self._recording_hud is not None:
+            self._recording_hud.set_elapsed(text)
+        elif not self._tray_available:
+            print(f"Snipux is recording -- {text}")
+
+    def _stop_recording(self) -> None:
+        """Stop the in-progress recording, if there is one -- wired as the
+        HUD's own `on_stop` callback and reached via `start_capture()`
+        whenever the capture hotkey fires mid-recording (SNX-123 ticket 8).
+
+        A request to stop with nothing recording is a no-op, not an error
+        -- `_teardown_recording_ui()`/`backend.stop()` are independent
+        steps, and `backend.stop()`'s own failure is reported rather than
+        raised, the same "a failure must not stop the rest" rule CLAUDE.md
+        states for capture backends, applied here.
+
+        The `_stopping_recording` re-entrancy check lives here, at the one
+        place `backend.stop()` is actually called, rather than at each of
+        this method's call sites (`start_capture()`'s hotkey path and the
+        HUD's own `mousePressEvent`) -- a request that lands through either
+        one while a `_stop_recording()` call is already unwinding must be a
+        no-op, not a second `backend.stop()` while the first is still in
+        flight (see the attribute's own docstring in `__init__`), and
+        checking it once here is what makes that true for every caller
+        instead of only the ones that remember to ask first.
+        """
+        if self._stopping_recording or self._active_recording is None:
+            return
+        self._stopping_recording = True
+        self._teardown_recording_ui()
+        backend, path = self._active_recording
+        try:
+            backend.stop()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            self._report_shortcut(f"Stopping the recording failed: {exc}")
+        finally:
+            self._active_recording = None
+            self._stopping_recording = False
 
     def _on_overlay_dismissed(self) -> None:
         """Called once, by `OverlayWindow`'s own `on_dismissed` hook, the

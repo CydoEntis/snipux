@@ -27,6 +27,12 @@ class Color:
     DANGER_BG       = "#c85050"   # at 22% alpha, clear-ink hover
     DANGER_BG_ALPHA = 0.22
     DANGER_FG       = "#f5a3a3"
+    # Same red as DANGER_BG, opaque -- the recording-state dot (tray icon
+    # overlay + HUD pill), which needs a solid fill rather than a hover
+    # tint. A separate token rather than DANGER_BG at alpha 1.0 so
+    # `design.color()`'s "colour and alpha resolve together" rule (see its
+    # own docstring) still holds for callers that don't want the hover tint.
+    DANGER_SOLID    = "#c85050"
 
     # Text on chrome
     TEXT_PRIMARY    = "#f1f3e8"
