@@ -3129,15 +3129,16 @@ class OverlayWindow(QWidget):
         registry: BackendRegistry | None = None,
         on_dismissed: Callable[[], None] | None = None,
         on_captured: "Callable[[QImage, Path | None], None] | None" = None,
-        on_recording_requested: "Callable[[QRectF | None, str], None] | None" = None,
+        on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
     ):
         super().__init__(parent)
         self._frame = frame
         # Fired by `copy()`/`save()` only -- see `_report_capture`.
         self._on_captured = on_captured
         # SNX-122: fired by `_commit_selection`'s record branch, with an
-        # absolute-coordinate rect (None for the whole desktop) and the
-        # armed delay string -- app.py owns starting/stopping the actual
+        # absolute-coordinate rect (None for the whole desktop), the armed
+        # delay string, and the chooser's after-capture destination
+        # ("instant" or "save") -- app.py owns starting/stopping the actual
         # recorder, per CLAUDE.md's split between this file (widget/
         # painting) and app.py (subprocess/filesystem/stateful side
         # effects).
@@ -6001,7 +6002,10 @@ def open_overlay(
     registry: BackendRegistry | None = None,
     on_dismissed: Callable[[], None] | None = None,
     on_captured: "Callable[[QImage, Path | None], None] | None" = None,
-    on_recording_requested: "Callable[[QRectF | None, str], None] | None" = None,
+    # rect, delay, and the chooser's after-capture destination ("instant" or
+    # "save") -- see `OverlayWindow.__init__`'s own comment on the same
+    # parameter.
+    on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
 ) -> OverlayWindow:
     """Build and show the overlay for one snip, positioned for the
     caller's already-detected session type (`wayland`) rather than assumed
