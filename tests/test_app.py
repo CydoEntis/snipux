@@ -4281,3 +4281,120 @@ class TestWindowsShapedMultiMonitorSelection:
         rendered = overlay.rendered_image()
         assert rendered.width() == 600
         assert rendered.height() == 400
+
+
+class TestTheOutlineIsUpBeforeTheRecorderStarts:
+    """Reported as "a weird pause flash from when u drag a recording region
+    to actually seeing the recording happening".
+
+    Starting a GNOME screencast is a blocking D-Bus round trip -- measured
+    at 340-540ms on a real session -- and the outline used to go up *after*
+    it returned. So the overlay came down, the UI thread wedged, and for a
+    third of a second the screen carried neither the frozen frame nor any
+    sign of a recording. Then everything arrived at once.
+
+    The fix is an ordering, which is what these protect: everything the
+    user can see goes up first, and only the clock waits for the backend.
+    """
+
+    @staticmethod
+    def _controller(make_controller, backend):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+        )
+
+    def test_the_chrome_is_shown_before_the_backend_is_started(
+        self, make_controller, monkeypatch
+    ):
+        order = []
+
+        backend = FakeRecordingBackend()
+        original_start = backend.start
+        def start(rect, path):
+            order.append("backend")
+            return original_start(rect, path)
+        backend.start = start
+
+        controller = self._controller(make_controller, backend)
+        original_chrome = controller._show_recording_chrome
+        def chrome(rect):
+            order.append("chrome")
+            return original_chrome(rect)
+        controller._show_recording_chrome = chrome
+
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert order == ["chrome", "backend"]
+
+    def test_the_clock_starts_after_the_backend_not_before(
+        self, make_controller
+    ):
+        # The other half of the same ordering: moving the *visible* work
+        # earlier must not drag the elapsed time with it, or every
+        # recording would report the backend's start-up as footage.
+        seen = {}
+
+        backend = FakeRecordingBackend()
+        controller = self._controller(make_controller, backend)
+        original = backend.start
+        def start(rect, path):
+            seen["clock_at_start"] = controller._recording_started_at
+            return original(rect, path)
+        backend.start = start
+
+        controller._recording_started_at = None
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert seen["clock_at_start"] is None
+        assert controller._recording_started_at is not None
+
+    def test_a_failed_start_leaves_no_outline_behind(
+        self, make_controller
+    ):
+        # The chrome is up before we know the recording will happen, so the
+        # failure path has to take it down again -- otherwise a backend
+        # that refuses leaves a red rectangle on screen around nothing.
+        # A plain exception, which is what a backend actually raises -- the
+        # registry catches `Exception` and wraps the lot.
+        backend = FakeRecordingBackend(start_error=RuntimeError("no recorder here"))
+        controller = self._controller(make_controller, backend)
+
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert controller._active_recording is None
+        assert controller._region_frame.is_exposed() is False
+
+
+class TestRegionFrameExposure:
+    def test_an_empty_frame_is_not_exposed(self):
+        # Nothing shown is not everything shown -- an `all()` over an empty
+        # list is True, which would have reported a frame that had never
+        # been shown as being on screen.
+        from snipux.flowbars import RegionFrame
+
+        assert RegionFrame().is_exposed() is False
+
+
+class TestRecordingErrorAcceptsAPlainMessage:
+    def test_a_string_is_treated_as_the_message_not_as_failures(self):
+        # `RecordingError("the display is locked")` is what a backend author
+        # will write. Iterating that string as (name, exception) pairs made
+        # the exception constructor itself raise ValueError.
+        from snipux.recording import RecordingError
+
+        error = RecordingError("the display is locked")
+
+        assert str(error) == "the display is locked"
+        assert error.failures == []
+        assert error.unavailable == []
+
+    def test_the_pair_form_still_summarises_every_backend(self):
+        from snipux.recording import RecordingError
+
+        error = RecordingError([("gnome", RuntimeError("bus is gone")),
+                                ("x11", RuntimeError("no display"))])
+
+        assert "gnome: bus is gone" in str(error)
+        assert "x11: no display" in str(error)

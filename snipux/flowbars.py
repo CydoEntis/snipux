@@ -1063,6 +1063,23 @@ class RegionFrame:
         self._thickness = thickness
         self._strips: list[QWidget] = []
 
+    def is_exposed(self) -> bool:
+        """Whether every strip is genuinely on screen, not merely shown.
+
+        `show()` maps a window; the compositor puts it on screen a frame or
+        so later. The caller starts a recording immediately afterwards and
+        blocks the UI thread doing it, so "shown" is not the question worth
+        asking -- "would the user see this yet" is.
+
+        False for an empty frame: nothing shown is not everything shown.
+        """
+        if not self._strips:
+            return False
+        return all(
+            strip.windowHandle() is not None and strip.windowHandle().isExposed()
+            for strip in self._strips
+        )
+
     def _strip(self, colour: str | None = None, alpha: float | None = None) -> QWidget:
         """One edge of the outline, or one panel of the scrim."""
         paint = design.flow_color(colour or "REC")
