@@ -896,3 +896,31 @@ class FlowColor:
     WINDOW_HOVER_ALPHA   = 0.85        # the 2px border
     WINDOW_HOVER_FILL    = "#e3ff4f"
     WINDOW_HOVER_FILL_ALPHA = 0.07
+
+
+# Audio sources for the recording bar's dropdown. `AUDIO_DEFAULT` is the one
+# every platform can honour: `org.gnome.Shell.Screencast` has no audio option
+# at all, so on Linux the other two are offered disabled with the reason
+# rather than hidden -- see docs/design/flow/divergences.md 2. A control that
+# opens a menu it cannot act on is the failure the handoff names elsewhere,
+# and silently dropping the options is the same lie told quietly.
+AUDIO_SOURCES = [
+    ("system", "speaker", "System", "Desktop output -- what you hear"),
+    ("mic",    "mic",     "Mic",    "Default input device"),
+    ("off",    "mute",    "Muted",  "No audio track at all"),
+]
+AUDIO_DEFAULT = "off"
+
+# Stage -> (label, the hint line under the bar). The label names the state
+# machine's own phase; the hint is what the user does next. Two of these are
+# placeholders in the handoff ("<mode hint from CAPTURE_MODES>") because the
+# text belongs to whatever is armed, so those read from MODE_NEXT_STEP and
+# TOOL_HINTS instead and are absent here rather than duplicated wrongly.
+STAGES = {
+    "choose":   ("Choose", "pick a mode, then drag a region"),
+    "recArmed": ("Ready to record",
+                 "Reframe now -- you cannot resize once it is rolling"),
+    "count":    ("Counting down", "Recording starts -- Esc to stop"),
+    "live":     ("Recording", "This bar sits outside the recorded frame"),
+    "done":     ("Finished", "Trim and export in the player"),
+}
