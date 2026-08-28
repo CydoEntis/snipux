@@ -2057,6 +2057,18 @@ class AppController:
         `_pending_start_request` -- because the honest answer to "stop"
         during start-up is to stop, not to ignore it.
         """
+        # Only when every backend that could run says it is safe. The
+        # Windows recorder builds a QScreenCapture, a QMediaCaptureSession
+        # and a QMediaRecorder in start(); created on a worker thread, they
+        # refuse everything stop() later asks of them from the UI thread.
+        # It also has no measured need for this -- the delay being fixed is
+        # GNOME's D-Bus round trip, which Qt's local objects do not pay.
+        if not all(
+            backend.starts_off_thread
+            for backend in self._recorder_registry.available()
+        ):
+            return self._recorder_registry.start(rect, path)
+
         starter = _RecorderStarter(self._recorder_registry, rect, path)
         loop = QEventLoop()
         starter.done.connect(loop.quit)
