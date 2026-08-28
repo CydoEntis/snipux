@@ -213,7 +213,41 @@ remove. Do not pass one without connecting it.
 
 ---
 
-## 6 · Eleven tools in the stills bar, not eight
+## 6 · The stills bar keeps its mode chip
+
+**The handoff says** (rule 2): *"There is also no `Region ˅` chip on the
+post-selection bars: mode cannot change once a selection exists, and a
+control that opens a menu it can't act on is a lie."*
+
+**We keep it.** The rest of rule 3 is built as written -- the action group
+leads the bar, before a divider, and Save is the only accent-filled control
+in it.
+
+### Why
+
+The premise is not true here. In the prototype the chip is decorative, so
+the rule follows. In this build it opens the capture-mode popover
+(`_toggle_capture_popover`), which re-arms the mode and genuinely changes
+what the next capture takes: Region to Window to Full screen, after a
+selection already exists. It is not a control that cannot act; it is one
+that acts.
+
+Removing it would delete working behaviour on the strength of a sentence
+about a different implementation. The lie the rule is protecting against is
+a *dead* control, and the fix for a live one is to make sure it stays live.
+
+### What did change
+
+The chip used to be the accent-filled control, which put the brightest
+thing on the bar on a mode switch rather than on the control that finishes
+the snip -- and Save, the actual primary action, trailed the whole bar so
+it moved every time the tool group changed width. The accent moved to Save
+and Save moved to the front; the chip is neutral now and sits with the
+tools it belongs to.
+
+---
+
+## 7 · Eleven tools in the stills bar, not eight
 
 **The handoff says** (§3a): *"split action button → divider → 8 tools →
 divider → undo, clear ink"*, and `ANNOTATION_TOOLS` lists exactly eight.
@@ -245,7 +279,7 @@ hint are already `MODE_KEYS` and `MODE_NEXT_STEP`, the latter word for word.
 
 ---
 
-## 7 · No IBM Plex
+## 8 · No IBM Plex
 
 **The handoff says** the chrome is IBM Plex Sans and every numeral, dimension,
 clock, size and shortcut is IBM Plex Mono, both shipped with the app, and that

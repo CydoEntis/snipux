@@ -998,6 +998,20 @@ class FloatingBar(_Chrome):
         self._last_selection: QRect | None = None
         self._last_bounds: QRectF | None = None
 
+        # Rule 3 of the capture-flow handoff: the primary action sits at
+        # the LEFT end, before a divider, and picking a tool never changes
+        # anything to its left. It used to trail the bar, so the one control
+        # that finishes the snip was the last thing read and moved every
+        # time the tool group changed width.
+        self._copy_button = _IconButton("copy", "Copy", idle_color=design.color("ICON_NEUTRAL"))
+        self._copy_button.clicked.connect(self.copyRequested)
+        layout.addWidget(self._copy_button)
+
+        self._save_button = self._build_save_button()
+        self._save_button.clicked.connect(self.saveRequested)
+        layout.addWidget(self._save_button)
+        self._add_divider(layout)
+
         self._chip = self._build_capture_chip()
         if not capture_chip:
             self._chip.hide()
@@ -1046,15 +1060,6 @@ class FloatingBar(_Chrome):
         )
         self._clear_button.clicked.connect(self.clearRequested)
         layout.addWidget(self._clear_button)
-        self._add_divider(layout)
-
-        self._copy_button = _IconButton("copy", "Copy", idle_color=design.color("ICON_NEUTRAL"))
-        self._copy_button.clicked.connect(self.copyRequested)
-        layout.addWidget(self._copy_button)
-
-        self._save_button = self._build_save_button()
-        self._save_button.clicked.connect(self.saveRequested)
-        layout.addWidget(self._save_button)
 
     # -- construction helpers ------------------------------------------------
 
@@ -1071,8 +1076,13 @@ class FloatingBar(_Chrome):
             "chevron",
             label,
             icon_size=14,
-            text_color=design.color("ACCENT_FG"),
-            bg_color=design.color("ACCENT"),
+            # Neutral, not accent. Rule 3 of the capture-flow handoff is
+            # that the primary action is the *only* accent-filled control
+            # in the bar -- with the mode chip wearing it too, the brightest
+            # thing on the bar was a mode switch rather than the control
+            # that finishes the snip.
+            text_color=design.color("TEXT_PRIMARY"),
+            bg_color=design.color("BAR_BORDER"),
             icon_after=True,
             pad_left=metric.CHIP_PAD_L,
             pad_right=metric.CHIP_PAD_R,
@@ -1080,8 +1090,14 @@ class FloatingBar(_Chrome):
         )
 
     def _build_save_button(self) -> _PillButton:
-        """The bar's trailing action: `Save` in the overlay, `Done` in the
+        """The bar's primary action: `Save` in the overlay, `Done` in the
         review window, whose footer already owns the exports.
+
+        It leads the bar rather than trailing it (capture-flow handoff,
+        rule 3), and carries the accent -- the one control in the bar that
+        may. The mode chip used to wear it, which made the brightest thing
+        on the bar a mode switch rather than the control that finishes the
+        snip.
         """
         metric = design.tokens.Metric
         done = self._trailing == "done"
@@ -1089,12 +1105,8 @@ class FloatingBar(_Chrome):
             "check" if done else "save",
             "Done" if done else "Save",
             icon_size=metric.ICON,
-            text_color=design.color("TEXT_PRIMARY"),
-            # No token names this fill on its own; it is the same
-            # #ffffff/10% pair tokens.Color.BAR_BORDER already defines, so
-            # that's reused here rather than re-typed, per CLAUDE.md's
-            # "import from tokens rather than re-typing literals."
-            bg_color=design.color("BAR_BORDER"),
+            text_color=design.color("ACCENT_FG"),
+            bg_color=design.color("ACCENT"),
             icon_after=False,
             pad_left=13,
             pad_right=13,
