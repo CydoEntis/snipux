@@ -4239,11 +4239,13 @@ class OverlayWindow(QWidget):
         itself was ever shown, so visibility has to be gated here rather
         than unconditionally following `_selection`.
         """
-        # Armed for a recording: the selection is real and resizable, but
-        # the annotation bar belongs to stills. The recording bar is
-        # app.py's, sits outside this window, and is the only chrome the
-        # ready stage has.
-        if self._armed_for_recording:
+        # The annotation bar belongs to stills. Gated on the *kind* rather
+        # than on `_armed_for_recording`, because the bar follows the
+        # selection and a selection exists from the first pixel of a drag
+        # -- so gating on "armed" showed the whole screenshot toolbar for
+        # the length of every recording drag and only hid it on release.
+        # Reported twice as "i shouldnt see the whole screenshooting tools".
+        if self._armed_for_recording or self._chooser.kind == "record":
             self._bar.hide()
             self._tray.hide()
             self._blur_tray.hide()

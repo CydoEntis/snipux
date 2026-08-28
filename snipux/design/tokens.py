@@ -655,14 +655,21 @@ DESTINATION_WORDING = {
 # first".
 KIND_DEFAULT = "stills"
 
-# Window recording wasn't asked for, and Freeform is close to meaningless
-# since video is rectangular -- both stay in the mode list, greyed out, with
-# the value naming why rather than being hidden (handoff for this ticket).
+# Freeform is close to meaningless for a recording, since video is
+# rectangular -- it stays in the mode list, greyed out, with the value
+# naming why rather than being hidden (handoff for this ticket).
+#
+# Window used to sit here too, reading "Not offered for recording yet",
+# which was the honest reason: nobody had asked for it, not that anything
+# stopped it. Window mode already resolves to a rect
+# (`_confirm_window_pick`), and a rect is exactly what the recorder takes,
+# so it needed no new machinery -- only asking for. Note the recorder films
+# a fixed rectangle, so a window moved or resized mid-recording keeps
+# filming the rectangle it started in.
 # Full screen has nothing left to aim at on the stills side, but on the
 # record side there is equally nothing *downstream* wired up yet, so it must
 # not fire immediately there -- it arms and waits like Region does.
 RECORD_DISABLED_MODES = {
-    "Window": "Not offered for recording yet",
     "Freeform": "Video is rectangular, so freeform doesn't apply",
 }
 

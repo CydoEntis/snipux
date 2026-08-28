@@ -1922,7 +1922,17 @@ class AppController:
         # screen, and a red border around the whole display would be both
         # useless and, on the edges, in the recording.
         if rect is not None:
-            self._region_frame.show_around(rect)
+            # The screen the recording is on, so everything else on it can
+            # be dimmed -- what is *not* being filmed, which an outline
+            # alone only implies. Other monitors are left alone: the bar is
+            # deliberately on one of them, and so is whatever the user is
+            # still working with.
+            geometries = (
+                self._monitor_geometries
+                if self._monitor_geometries is not None
+                else self._real_monitor_geometries()
+            )
+            self._region_frame.show_around(rect, within=_screen_for(rect, geometries))
 
         if rect is None and self._recording_hud is not None:
             # A full-screen recording has no "outside the recorded area"

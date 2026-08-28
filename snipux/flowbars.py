@@ -845,6 +845,37 @@ class CountdownNumeral(QWidget):
         painter.end()
 
 
+class _Panel(QWidget):
+    """One flat rectangle of colour, painted rather than styled.
+
+    A stylesheet background is not reliable here: a plain `QWidget` does not
+    paint one without `WA_StyledBackground`, and combined with
+    `WA_TranslucentBackground` the widget is simply cleared to nothing --
+    which is exactly how four correctly-sized, correctly-coloured, visible
+    scrim panels managed to render as no scrim at all. Painting it is one
+    line and cannot be undone by an attribute.
+    """
+
+    def __init__(self, colour: QColor):
+        super().__init__(None)
+        self._colour = colour
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        if colour.alphaF() < 1.0:
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._colour)
+        painter.end()
+
+
 class RegionFrame:
     """A red outline around the region being recorded.
 
@@ -870,25 +901,26 @@ class RegionFrame:
         self._thickness = thickness
         self._strips: list[QWidget] = []
 
-    def _strip(self) -> QWidget:
-        strip = QWidget(None)
-        strip.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.WindowTransparentForInput
-        )
-        strip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        # A tool window that never takes focus: clicking near the frame must
-        # reach whatever is being recorded, not this.
-        strip.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        strip.setStyleSheet(
-            f"background: {design.flow_color('REC').name()};"
-        )
-        return strip
+    def _strip(self, colour: str | None = None, alpha: float | None = None) -> QWidget:
+        """One edge of the outline, or one panel of the scrim."""
+        paint = design.flow_color(colour or "REC")
+        if alpha is not None:
+            paint.setAlphaF(alpha)
+        return _Panel(paint)
 
-    def show_around(self, rect) -> None:
-        """Outline `rect` (absolute logical coordinates), drawn outside it."""
+    def show_around(self, rect, within=None) -> None:
+        """Outline `rect` (absolute logical coordinates), drawn outside it.
+
+        `within` is the screen the recording is on. Given one, the rest of
+        that screen is dimmed to `SCRIM_LIVE_ALPHA` -- the handoff's live
+        scrim, which the overlay used to carry before it had to come down
+        (divergences.md 4). It says what is *not* being filmed, which the
+        outline alone only implies.
+
+        Only that screen. Dimming the whole virtual desktop would grey out
+        the monitor the bar was deliberately placed on, and every other
+        window the user still has to work with while recording.
+        """
         self.close()
         t = self._thickness
         left, top = round(rect.left()), round(rect.top())
@@ -899,6 +931,25 @@ class RegionFrame:
             (left - t, top, t, height),                      # left
             (left + width, top, t, height),                  # right
         ]
+        if within is not None:
+            # Four panels covering `within` minus `rect`, so the recorded
+            # area is the one part of that screen at full brightness.
+            sl, st = round(within.left()), round(within.top())
+            sr, sb = round(within.right()), round(within.bottom())
+            for dim in (
+                (sl, st, sr - sl, top - st),                      # above
+                (sl, top + height, sr - sl, sb - (top + height)),  # below
+                (sl, top, left - sl, height),                     # left
+                (left + width, top, sr - (left + width), height),  # right
+            ):
+                x, y, w, h = dim
+                if w <= 0 or h <= 0:
+                    continue
+                panel = self._strip("SCRIM", tokens.FlowColor.SCRIM_LIVE_ALPHA)
+                panel.setGeometry(x, y, w, h)
+                panel.show()
+                self._strips.append(panel)
+
         for x, y, w, h in edges:
             strip = self._strip()
             strip.setGeometry(x, y, w, h)
