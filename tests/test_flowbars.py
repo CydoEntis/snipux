@@ -80,6 +80,17 @@ class TestTheFourStates:
         bar.set_done("00:27", destination="Save")
         assert bar._action._label == "Save"
 
+    def test_the_glyph_follows_the_action_not_just_the_label(self, bar):
+        # A filled circle beside the word "Stop" reads as record whatever
+        # the label says -- the exact shape of mistake this redesign exists
+        # to stop making, so the glyph changes with the action.
+        bar.set_ready()
+        assert bar._action._glyph == "circle"
+        bar.set_live("0:12")
+        assert bar._action._glyph == "square"
+        bar.set_done("00:27")
+        assert bar._action._glyph is None
+
     def test_counting_says_how_long_is_left_without_offering_an_action(self, bar):
         bar.set_counting(2)
 

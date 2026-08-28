@@ -179,6 +179,38 @@ class Platform(ABC):
         """
         return max(0, screen.availableGeometry().top() - screen.geometry().top())
 
+    def records_audio(self) -> bool:
+        """Whether this platform's recorder can capture an audio track.
+
+        Chrome only, like `reserved_top`: it decides whether the recording
+        bar's audio control is offered live or inert, never what the
+        recorder actually does. The recorder's own backend is still the
+        thing that would carry audio if there were any.
+
+        Defaults to True because a recorder that cannot do audio is the
+        exception rather than the rule -- `QMediaRecorder` on Windows takes
+        a source and records one. Linux overrides it: the whole Wayland
+        route is `org.gnome.Shell.Screencast`, which has no audio option to
+        pass, so there is nothing a control could be wired to.
+
+        Answered here rather than by a `sys.platform` test at the bar,
+        because this is the one place that question is allowed to be asked
+        (CLAUDE.md), and because "can this machine record audio" is exactly
+        the shape of thing that will differ again on macOS.
+        """
+        return True
+
+    def audio_unavailable_reason(self) -> str:
+        """Why `records_audio()` is False, for the control to carry.
+
+        The handoff's rule is that an option which cannot work is shown
+        with its reason rather than hidden -- hiding it is the same lie
+        told quietly, and a user who cannot see why has no way to tell a
+        missing feature from a broken one. Empty when audio *is* available,
+        since there is nothing to explain.
+        """
+        return ""
+
 
 class UnimplementedPlatformError(NotImplementedError):
     """Raised by a stub platform implementation (`windows.py`/`darwin.py`

@@ -49,6 +49,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget
 
+from snipux.flowbars import CountdownNumeral, RecordingBar
 from snipux.capture import (
     XwininfoWindowGeometryProvider,
     BackendRegistry,
@@ -377,131 +378,6 @@ def _place_recording_hud(
             continue
         return QRect(round(candidate.x()), round(candidate.y()), width, height)
     return None
-
-
-class RecordingHud(QWidget):
-    """The floating pill a recording is driven from, from armed to stopped
-    (SNX-123 ticket 8, reshaped by the recording-flow fixes).
-
-    One widget with three states rather than three widgets, because all
-    three answer the same question -- "what happens if I click this?" --
-    at different moments, and one pill that changes is less to follow than
-    three that appear and vanish.
-
-    **The label always names the action a click performs**: "Start
-    recording", "Cancel", "Stop". This is the whole point of the shape.
-    The pill used to be a bare elapsed-time readout whose entire surface
-    silently stopped the recording -- the click target was everything and
-    nothing said so, and a user who had not been told could not have
-    guessed. Do not shorten these back to a bare time.
-
-    The glyph reinforces the word rather than replacing it: a filled dot
-    for armed (record), a hollow ring while counting (pending), a filled
-    square for recording (the universal stop).
-
-    Deliberately parentless and frameless/always-on-top, the same shape as
-    `overlay.py`'s `DelayCountdown` -- a HUD standing in for a window
-    rather than living inside one. Lives here, not in `overlay.py`, so the
-    dependency between those two modules stays one-directional.
-    """
-
-    ARMED = "armed"
-    COUNTING = "counting"
-    RECORDING = "recording"
-
-    # Wide enough for "Start recording" in the label's own font with the
-    # glyph and both margins clear of it. `_place_recording_hud` is called
-    # with this, so the two never drift out of sync.
-    SIZE = QSize(220, 44)
-
-    _GLYPH_SIZE = 10
-    _GLYPH_MARGIN = 14
-
-    def __init__(self, on_activate: Callable[[], None]):
-        # No parent, ever -- see the class docstring.
-        super().__init__(None)
-        # One callback, not one per state: the pill reports that it was
-        # clicked and `AppController` decides what that means now, so the
-        # widget never has to hold the controller's state machine too.
-        self._on_activate = on_activate
-        self._state = self.ARMED
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(self.SIZE)
-
-        self._label = QLabel(self)
-        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setGeometry(0, 0, self.SIZE.width(), self.SIZE.height())
-        # A click must reach this widget's own mousePressEvent, not stop at
-        # the label sitting on top of it.
-        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        font = QFont(design.font_families().mono)
-        font.setPixelSize(16)
-        font.setWeight(QFont.Weight(600))
-        self._label.setFont(font)
-        self._label.setStyleSheet(f"color: {design.color('TEXT_PRIMARY').name()};")
-
-        self.set_armed()
-
-    def state(self) -> str:
-        return self._state
-
-    def set_armed(self) -> None:
-        self._state = self.ARMED
-        self._label.setText("Start recording")
-        self.update()
-
-    def set_counting(self, seconds: int) -> None:
-        self._state = self.COUNTING
-        # The count is what changed, but the word is what makes the click
-        # target legible, so both stay on the pill.
-        self._label.setText(f"Cancel  ·  {seconds}")
-        self.update()
-
-    def set_elapsed(self, text: str) -> None:
-        self._state = self.RECORDING
-        self._label.setText(f"Stop  ·  {text}")
-        self.update()
-
-    def mousePressEvent(self, event) -> None:
-        self._on_activate()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.color("BAR_BG"))
-        radius = self.SIZE.height() / 2
-        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
-        self._paint_glyph(painter)
-        painter.end()
-
-    def _paint_glyph(self, painter) -> None:
-        size = self._GLYPH_SIZE
-        left = self._GLYPH_MARGIN
-        top = round(self.SIZE.height() / 2 - size / 2)
-        accent = design.color("DANGER_SOLID")
-
-        if self._state == self.COUNTING:
-            # Hollow: nothing is being captured yet. An outline needs a pen
-            # rather than the brush the other two states fill with, so both
-            # are set explicitly here instead of inheriting paintEvent's.
-            pen = QPen(accent)
-            pen.setWidth(2)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(left, top, size, size)
-            painter.setPen(Qt.PenStyle.NoPen)
-            return
-
-        painter.setBrush(accent)
-        if self._state == self.RECORDING:
-            painter.drawRect(left, top, size, size)
-        else:
-            painter.drawEllipse(left, top, size, size)
 
 
 def build_default_registry() -> BackendRegistry:
@@ -1015,7 +891,7 @@ class AppController:
         # (see its own `_wait_for_stopped()` docstring), which can dispatch
         # a second `WM_HOTKEY` (or a duplicate click on the HUD pill,
         # delivered by that same pumping) and re-enter either
-        # `start_capture()` or `RecordingHud.mousePressEvent` before the
+        # `start_capture()` or the recording bar's Stop control before the
         # first stop has finished. `_stop_recording()` itself checks this
         # before calling `backend.stop()`, so a request that lands mid-stop
         # through either entry point is a no-op rather than a second stop
@@ -1028,7 +904,13 @@ class AppController:
         self._recording_elapsed_timer: QTimer | None = None
         # The pill widget, or None when there was no room for one (or no
         # recording is active) -- see `_place_recording_hud`.
-        self._recording_hud: RecordingHud | None = None
+        self._recording_hud: RecordingBar | None = None
+        # The countdown numeral goes *inside* the recorded region rather
+        # than on the bar -- see `CountdownNumeral`. Held separately
+        # because it is torn down a stage earlier than the bar is.
+        self._countdown_numeral: CountdownNumeral | None = None
+        # Where the bar's centre stays while its width changes with state.
+        self._recording_bar_anchor = None
 
         self._overlay: OverlayWindow | None = None
         # Held for the same reason `_overlay` is: a parentless widget is
@@ -1078,7 +960,7 @@ class AppController:
         self.settings_action = menu.addAction("Settings...")
         self.settings_action.triggered.connect(self.open_settings)
         # Disabled by default and only ever enabled while a recording is
-        # actually active -- RecordingHud's own docstring is deliberate
+        # actually active -- `RecordingBar`'s own docstring is deliberate
         # that its pill is one click target, so a second, distinct way to
         # end a recording (discard, not stop-and-land) lives here instead
         # (recording.md ticket 9). Flipped in the same two places
@@ -1540,27 +1422,91 @@ class AppController:
             if self._monitor_geometries is not None
             else self._real_monitor_geometries()
         )
-        placement = _place_recording_hud(rect, geometries, RecordingHud.SIZE)
+        bar = RecordingBar()
+        bar.set_ready()
+        # Audio is the platform's answer, not the bar's: GNOME's screencast
+        # has no audio option at all, so the control is offered inert with
+        # the reason on it rather than hidden (divergences.md 2).
+        bar.set_audio(design.tokens.AUDIO_DEFAULT)
+        bar.set_audio_enabled(platform.current.records_audio())
+        if not platform.current.records_audio():
+            bar.audio_control().setToolTip(platform.current.audio_unavailable_reason())
+        # Hidden until it has a menu to open. The handoff puts a delay
+        # dropdown in this bar precisely because a visibly-enabled control
+        # doing nothing is the bug it was fixing; shipping one here would
+        # reintroduce it under a new name.
+        bar.set_delay_available(False)
+
+        placement = _place_recording_hud(rect, geometries, bar.sizeHint())
         if placement is None:
+            bar.deleteLater()
             return
-        self._recording_hud = RecordingHud(on_activate=self._on_hud_activated)
-        self._recording_hud.move(placement.topLeft())
-        self._recording_hud.show()
 
-    def _on_hud_activated(self) -> None:
-        """One click target, three meanings -- always the one the pill's
-        label is currently showing.
+        bar.startClicked.connect(self._begin_armed_recording)
+        bar.cancelClicked.connect(self._cancel_armed_recording)
+        bar.stopClicked.connect(self._stop_recording)
+        bar.discardClicked.connect(self._discard_recording)
 
-        Checked most-advanced-state-first so a click that lands during the
-        handover between two states does the later thing rather than
-        restarting the earlier one.
+        self._recording_hud = bar
+        # The anchor is the centre of the spot found for the bar, not its
+        # top-left: the bar's width changes with its state, and rule 1 says
+        # the centre is what must stay put -- both edges move symmetrically
+        # or the bar appears to slide.
+        self._recording_bar_anchor = placement.center()
+        self._reposition_recording_bar()
+        bar.show()
+
+    def _show_countdown(self, seconds: int, rect) -> None:
+        """Put the count on the bar and, more importantly, inside the region.
+
+        Inside is where the user is already looking: they are watching the
+        thing about to be filmed, not the chrome beside it. The pill this
+        replaces carried the count on itself, and the opening seconds of a
+        recording were still of somebody glancing away from the frame.
+
+        `rect` is only passed on the first tick, when the numeral is
+        created; later ticks leave it where it was rather than recomputing
+        a position that cannot have changed.
         """
-        if self._active_recording is not None:
-            self._stop_recording()
-        elif self._countdown_timer is not None:
-            self._cancel_armed_recording()
-        elif self._armed_recording is not None:
-            self._begin_armed_recording()
+        if self._recording_hud is not None:
+            self._recording_hud.set_counting(seconds)
+            self._reposition_recording_bar()
+
+        if rect is None:
+            if self._countdown_numeral is not None:
+                self._countdown_numeral.set_seconds(seconds)
+            return
+
+        # A full-screen recording has no region to sit inside that is not
+        # also the whole screen, and a numeral centred on the desktop would
+        # be filmed. The bar's own count carries it in that case.
+        if self._countdown_numeral is None:
+            self._countdown_numeral = CountdownNumeral()
+        self._countdown_numeral.set_seconds(seconds)
+        self._countdown_numeral.show_centered_on(rect)
+
+    def _hide_countdown(self) -> None:
+        if self._countdown_numeral is not None:
+            self._countdown_numeral.close()
+            self._countdown_numeral = None
+
+    def _reposition_recording_bar(self) -> None:
+        """Keep the bar centred on its anchor as its width changes.
+
+        Every state shows a different set of controls, so the bar is a
+        different width in each. Rule 1 of the handoff is that a bar must
+        not shift sideways between stages, and for a centred bar that means
+        holding the *centre* while both edges move -- moving the top-left
+        instead is what makes it look like it slid.
+        """
+        bar = self._recording_hud
+        if bar is None or self._recording_bar_anchor is None:
+            return
+        bar.adjustSize()
+        bar.move(
+            round(self._recording_bar_anchor.x() - bar.width() / 2),
+            round(self._recording_bar_anchor.y() - bar.height() / 2),
+        )
 
     def _begin_armed_recording(self) -> None:
         """Take an armed recording to the countdown, or straight to
@@ -1583,14 +1529,13 @@ class AppController:
         # towards a recording nothing holds a handle to.
         if self._countdown_timer is not None:
             return
-        _rect, delay, _after, _path = self._armed_recording
+        rect, delay, _after, _path = self._armed_recording
         if delay == design.tokens.DELAYS[0]:
             self._start_armed_recording()
             return
 
         self._countdown_remaining = int(delay.rstrip("s"))
-        if self._recording_hud is not None:
-            self._recording_hud.set_counting(self._countdown_remaining)
+        self._show_countdown(self._countdown_remaining, rect)
         # No QObject parent -- `AppController` isn't one -- so the strong
         # Python reference this assignment creates is what keeps the timer
         # alive until it fires, the same role a parent would otherwise play.
@@ -1606,8 +1551,7 @@ class AppController:
             self._stop_countdown_timer()
             self._start_armed_recording()
             return
-        if self._recording_hud is not None:
-            self._recording_hud.set_counting(self._countdown_remaining)
+        self._show_countdown(self._countdown_remaining, None)
 
     def _stop_countdown_timer(self) -> None:
         """Stop and drop the countdown timer, if one is running.
@@ -1743,6 +1687,8 @@ class AppController:
         if self._recording_hud is not None:
             self._recording_hud.close()
             self._recording_hud = None
+        self._recording_bar_anchor = None
+        self._hide_countdown()
         self._recording_started_at = None
         self._tray_icon.setIcon(self._idle_tray_icon)
         self._tray_icon.setToolTip("")
@@ -1769,7 +1715,8 @@ class AppController:
         text = f"{minutes}:{seconds:02d}"
         self._tray_icon.setToolTip(text)
         if self._recording_hud is not None:
-            self._recording_hud.set_elapsed(text)
+            self._recording_hud.set_live(text)
+            self._reposition_recording_bar()
         elif not self._tray_available:
             print(f"Snipux is recording -- {text}")
 
@@ -1967,7 +1914,7 @@ class AppController:
         move, no clipboard, and a distinct tray message from the one
         `_land_recording` reports.
 
-        There is nowhere else to reach this from: `RecordingHud`'s own
+        There is nowhere else to reach this from: `RecordingBar`'s own
         docstring is deliberate that its one pill is one click target, so
         a second, distinct way to end a recording lives on the tray's
         context menu instead (see its construction comment in `__init__`).
