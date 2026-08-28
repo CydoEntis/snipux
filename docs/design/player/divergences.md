@@ -6,44 +6,59 @@ bug, not a decision.
 
 ---
 
-## 1. "MP4 (H.264)" is labelled "MP4", and does not promise browsers
+## 1. Export uses the system `ffmpeg` when there is one
 
-**Handoff:** `MP4 (H.264)` — *"Plays anywhere. Slack, Teams, browsers."*
-**Built:** `MP4` — *"Re-encoded for the trim. Plays in desktop players."*
+**Handoff:** four formats, MP4 (H.264) the default.
+**Built:** exactly that -- *if* `ffmpeg` is on PATH and can encode
+`libx264`, `libvpx-vp9` and `gif`. Otherwise MP4 falls back to MPEG-4
+Part 2, and GIF and trimmed WebM become disabled rows.
 
-The bundled FFmpeg cannot encode H.264 in software. `libavcodec.so.61` as shipped
-with PyQt6 6.11 contains exactly two H.264 encoders, `h264_nvenc` and
-`h264_vaapi`, and no `libx264` — it is an LGPL build, and x264 is GPL. So H.264
-depends entirely on a working hardware encoder.
+snipux does not depend on ffmpeg, does not install it and does not require
+it. `system_ffmpeg()` looks for one, asks the binary what it can encode
+and caches the answer; everything works without it, one codec down.
 
-On the development box — an RTX 4060 with driver 580.173.02 and
-`libnvidia-encode.so.1` present — Qt's NVENC path still fails at probe time with
-`10 bit encode not supported` / `No capable devices found`, and VAAPI fails the
-same way. When it fails, Qt does **not** fall back: `QMediaRecorder` reports
-"Could not initialize encoder" and leaves a zero-length file.
+The reason it is worth reaching for: **the bundled FFmpeg cannot encode
+H.264 in software.** `libavcodec.so.61` as shipped with PyQt6 6.11 has
+exactly `h264_nvenc` and `h264_vaapi` and no `libx264` -- an LGPL build,
+and x264 is GPL. And Qt cannot reach the hardware either: on this box
+(RTX 4060, driver 580.173.02) Qt's NVENC path fails at probe with `10 bit
+encode not supported` / `No capable devices found`, and VAAPI fails the
+same way, while **the same machine's system ffmpeg encodes H.264 through
+`h264_nvenc` without complaint**. The hardware is fine; Qt's use of it is
+not. When it fails Qt does not fall back -- `QMediaRecorder` reports
+"Could not initialize encoder" and leaves a zero-length file, which is why
+`snipux/__init__.py` disables hardware encoding for the Qt path.
 
-`snipux/__init__.py` therefore disables hardware encoding by default, which
-trades H.264 for MPEG-4 Part 2 and, crucially, for an export that always
-produces a playable file. The label follows the file we actually write. A
-`QT_FFMPEG_ENCODING_HW_DEVICE_TYPES` set by the user is left alone, so anyone
-with a working encoder keeps H.264 — the variable has to be read before Qt
-Multimedia builds its encoder list, which is why the decision lives in the
-package's `__init__` and cannot be revisited once an encode has failed.
+The menu row says which one will run: "MP4 (H.264) -- plays anywhere" with
+ffmpeg, "MP4 (MPEG-4) -- no H.264 encoder here, desktop players only"
+without. A row must not promise a browser a file that will not play in
+one.
 
-**Open:** making "plays anywhere" true again needs either a Qt build with a
-working hardware encoder or the system `ffmpeg` binary, and adding an external
-binary is the kind of dependency CLAUDE.md says to raise rather than decide.
+Two things the real files taught us, both now covered by tests:
 
-## 2. GIF and trimmed WebM are disabled rows, not missing ones
+- **A snip is whatever rectangle was dragged, and half of them are odd.**
+  The first real export attempted here was 983x680 and libx264 refused it
+  outright -- H.264 in yuv420p cannot encode an odd dimension. Every MP4
+  is scaled with `trunc(iw/2)*2`, losing at most one row rather than
+  inventing one.
+- **GNOME writes `r_frame_rate=1000/1`**, a millisecond timebase rather
+  than a thousand frames a second, with no average rate at all. Copied
+  through, ffmpeg duplicated ~31 real frames into 1,455 and stamped the
+  output 1000fps -- 370KB where 61KB was correct. The output is forced to
+  constant rate, and any "rate" outside 1-120 is treated as the timebase
+  it actually is.
 
-Same root cause. `QImageWriter` has no GIF plugin and the bundled FFmpeg has no
-VP8/VP9 encoder, so neither can be produced. Both stay in the menu, greyed, with
-the reason in place of the size estimate — the handoff's own rule that an option
-which cannot work says why, because a user who cannot see the reason has no way
-to tell a missing feature from a broken one.
+## 2. GIF and trimmed WebM are disabled rows when there is no ffmpeg
 
-WebM is only disabled *when trimmed*: untrimmed it is a byte-for-byte copy of
-what was recorded, which always works and needs no encoder at all.
+Not missing ones. `QImageWriter` has no GIF plugin and the bundled FFmpeg
+no VP8/VP9 encoder, so without a system ffmpeg neither can be produced.
+Both stay in the menu, greyed, with the reason in place of the size
+estimate -- the handoff's own rule that an option which cannot work says
+why, because a user who cannot see the reason has no way to tell a missing
+feature from a broken one.
+
+WebM is only ever disabled *when trimmed*: untrimmed it is a byte-for-byte
+copy of what was recorded, which always works and needs no encoder at all.
 
 ## 3. Both menus are `flowbars.FlowMenu`
 

@@ -14,8 +14,9 @@ and `docs/design/player/` (the recording player / trim editor). What was
 built differently, and why, is in each directory's `divergences.md` --
 read those before "fixing" anything back to a handoff.
 
-**The one thing that needs a decision from you, not more work from me:**
-see "H.264, and what Export MP4 actually writes" below.
+The export/H.264 question is **settled** -- see "Export: decided" below.
+What is still open is the *stills* destination model, which is a product
+question rather than a build one.
 
 ## Windows has now been watched, and region recording was broken
 
@@ -121,35 +122,29 @@ Verified against a real GNOME recording, not just the suite: the window
 opens on a poster frame, all 16 filmstrip cells decode, and a 1.0s-2.5s
 trim exported to 1.527s / 43 frames / 900x400, measured with `ffprobe`.
 
-### H.264, and what Export MP4 actually writes -- **needs a decision**
+### Export: decided, and the H.264 problem is solved
 
-The bundled FFmpeg **cannot encode H.264 in software**. `libavcodec.so.61`
-as shipped with PyQt6 6.11 has exactly `h264_nvenc` and `h264_vaapi` and
-no `libx264` -- an LGPL build, and x264 is GPL. On this box (RTX 4060,
-driver 580.173.02, `libnvidia-encode.so.1` present) Qt's NVENC path still
-fails at probe with `10 bit encode not supported` / `No capable devices
-found`, and VAAPI fails the same way. Qt does not fall back: the recorder
-reports "Could not initialize encoder" and leaves a zero-length file.
+**Decision taken: use the system `ffmpeg` when there is one, keep the Qt
+pipeline as the fallback.** It is not a dependency -- nothing imports it,
+nothing installs it, and every export works without it one codec down --
+so it does not spend the "fourth dependency" CLAUDE.md guards.
 
-So `snipux/__init__.py` disables hardware encoding, which always produces
-a playable file -- MPEG-4 Part 2 -- and the menu label was changed from
-"MP4 (H.264) -- plays anywhere. Slack, Teams, browsers." to plain "MP4 --
-plays in desktop players", because the old line would have been a lie.
-MPEG-4 Part 2 does not play in browsers or Slack.
+What settled it: **the same machine's system ffmpeg encodes H.264 through
+`h264_nvenc` without complaint**, while Qt's NVENC probe fails on that
+identical hardware. The bundled FFmpeg has no software x264 at all (LGPL
+build; x264 is GPL). So the capability was there the whole time and only
+Qt could not reach it. With ffmpeg present all four formats work; without
+it, MP4 degrades to MPEG-4 Part 2 and the row says so, and GIF and trimmed
+WebM grey out with their reason.
 
-Three ways to make "plays anywhere" true again, in increasing cost:
+Measured end to end on a real GNOME recording, 1.0s-2.5s: **h264 High,
+yuv420p, 982x680, 30fps, 45 frames, exactly 1.500s, 61KB**. Two real bugs
+found by measuring rather than trusting the exit code, both now tested:
+libx264 refuses an odd width (a dragged region is odd about half the
+time), and GNOME's `r_frame_rate=1000/1` is a timebase, not a frame rate --
+believed, it turned 31 frames into 1,455 and the file into 370KB.
 
-1. **Ship nothing, accept the limit.** Trimmed clips are for desktop
-   players; untrimmed sharing uses the WebM copy, which is what was
-   recorded and plays in every browser.
-2. **Use the system `ffmpeg` when present**, fall back to Qt otherwise.
-   It is already on this machine and in every distro's repos. This is the
-   "fourth dependency" CLAUDE.md says to raise rather than decide -- and
-   it is an external binary, not a Python package, so it degrades rather
-   than breaks.
-3. **Find a PyQt6 wheel whose FFmpeg carries x264.** Out of our hands.
-
-Nothing else in the player depends on which is chosen.
+Full reasoning in `docs/design/player/divergences.md`.
 
 ### The stills destination model -- still open, still a product question
 

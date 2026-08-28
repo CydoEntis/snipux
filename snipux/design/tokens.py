@@ -1102,7 +1102,7 @@ SPEEDS = ["0.5", "1", "1.5", "2"]
 # `frame` has no per-second figure because it is a single still.
 EXPORT_FORMATS = [
     ("webm",  "save",   "WebM",                 "What was recorded -- no re-encode when untrimmed.", 0.42),
-    ("mp4",   "save",   "MP4",                  "Re-encoded for the trim. Plays in desktop players.", 0.55),
+    ("mp4",   "save",   "MP4 (H.264)",          "Plays anywhere. Slack, Teams, browsers.",           0.55),
     ("gif",   "image",  "GIF",                  "Silent, loops. Big above ~10 seconds.",             1.90),
     ("frame", "camera", "Current frame as PNG", "Just the frame under the playhead.",                None),
 ]
