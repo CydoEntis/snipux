@@ -123,9 +123,21 @@ class RecordingError(Exception):
 
     def __init__(
         self,
-        failures: list[tuple[str, Exception]],
+        failures: "list[tuple[str, Exception]] | str",
         unavailable: list[tuple[str, str | None]] | None = None,
     ):
+        if isinstance(failures, str):
+            # `RecordingError("the display is locked")` is the obvious thing
+            # to write, and a backend author will write it -- the Windows
+            # and macOS recorders are the next ones to exist. Without this
+            # the string is iterated as a list of (name, exception) pairs
+            # and the *exception constructor* raises ValueError, burying
+            # whatever actually went wrong.
+            self.failures = []
+            self.unavailable = unavailable or []
+            super().__init__(failures)
+            return
+
         self.failures = failures
         self.unavailable = unavailable or []
         if not failures:

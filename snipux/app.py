@@ -35,7 +35,19 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QRect, QRectF, QSize, Qt, QTimer, QUrl
+from PyQt6.QtCore import (
+    QBuffer,
+    QElapsedTimer,
+    QEventLoop,
+    QIODevice,
+    QMimeData,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+)
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -175,6 +187,12 @@ def finish_recording(path: Path, after: str) -> None:
     """
     if after == "instant":
         copy_file_to_clipboard(path)
+
+
+# How long to let the recording outline reach the screen before starting
+# the backend anyway. It normally needs a frame or two; this only has to
+# be long enough that a slow compositor is not mistaken for a stuck one.
+_CHROME_PAINT_BUDGET_MS = 150
 
 
 def _recording_temp_dir() -> Path:
@@ -1911,6 +1929,23 @@ class AppController:
             # Down before the backend starts: from here the frozen frame it
             # paints would be what gets filmed.
             self._overlay.close()
+
+        # The chrome goes up BEFORE the backend, not after. Starting a GNOME
+        # screencast is a blocking D-Bus round trip -- measured at ~340ms on
+        # this session -- and putting the outline up afterwards left the
+        # screen carrying neither the overlay nor the recording frame for a
+        # third of a second, with the UI thread wedged so nothing repainted.
+        # That reads exactly as reported: a stall, then a flash as
+        # everything arrives at once.
+        #
+        # Safe because none of it is inside the recorded area: `show_around`
+        # draws its edges from `left - thickness` outwards and dims the
+        # screen *minus* the rect, and `_place_recording_hud` put the pill
+        # outside the frame to begin with. The one thing that would be
+        # filmed -- the pill during a full-screen recording -- is closed
+        # here too, which is a frame earlier than it used to be rather than
+        # later.
+        self._show_recording_chrome(rect)
         try:
             backend, actual_path = self._recorder_registry.start(rect, path)
         except RecordingError as exc:
@@ -1931,41 +1966,17 @@ class AppController:
             # apart from a recording genuinely cut short.
             Path(path).unlink(missing_ok=True)
         self._active_recording = (backend, actual_path, after)
-        self._start_recording_ui(rect)
+        self._start_recording_ui()
 
-    def _start_recording_ui(self, rect: QRectF | None) -> None:
-        """Bring up every visible sign that a recording is running (SNX-123
-        ticket 8): the elapsed-time timer (which drives the tray tooltip,
-        and the pill's own label) and the tray icon's recording state.
+    def _show_recording_chrome(self, rect: QRectF | None) -> None:
+        """Everything the user should *see* the moment a recording starts.
 
-        Called from `_start_armed_recording()`, right after
-        `self._active_recording` is actually set -- so this never runs for
-        a still-armed or still-counting recording, only once a backend has
-        genuinely started.
-
-        The pill itself is not created here: it has been up since the
-        recording was armed, and this only moves it into its recording
-        state.
+        Split out of `_start_recording_ui` so it can run before the
+        backend's blocking start rather than after it -- see the call site
+        for the third of a second that cost. Nothing here touches the
+        clock: the elapsed time must be measured from when the recording
+        genuinely began, not from when its outline appeared.
         """
-        self._recording_started_at = time.monotonic()
-
-        # No QObject parent -- see `_recording_elapsed_timer`'s own
-        # docstring in __init__.
-        self._recording_elapsed_timer = QTimer()
-        self._recording_elapsed_timer.setInterval(1000)
-        self._recording_elapsed_timer.timeout.connect(self._on_recording_tick)
-        self._recording_elapsed_timer.start()
-
-        # Not gated on `self._tray_available`: every other piece of tray
-        # state this class builds (`setContextMenu`, the icon itself) is
-        # likewise built unconditionally, only `.show()` is gated -- an
-        # icon/tooltip update on a tray icon nobody sees is harmless the
-        # same way.
-        self._tray_icon.setIcon(self._recording_tray_icon)
-        # Same "flip it wherever the tray icon flips" reasoning as the icon
-        # itself -- see the tray menu's own construction comment.
-        self.discard_action.setEnabled(True)
-
         # A full-screen recording needs no outline: the region is the
         # screen, and a red border around the whole display would be both
         # useless and, on the edges, in the recording.
@@ -1981,6 +1992,13 @@ class AppController:
                 else self._real_monitor_geometries()
             )
             self._region_frame.show_around(rect, within=_screen_for(rect, geometries))
+            if self._recording_hud is not None:
+                # Straight to the live face rather than leaving "Start" on
+                # screen through the backend's start-up: the button has
+                # been pressed, and a control still offering to do the
+                # thing it is already doing invites a second press.
+                self._recording_hud.set_live("0:00", size="")
+                self._reposition_recording_bar()
 
         if rect is None and self._recording_hud is not None:
             # A full-screen recording has no "outside the recorded area"
@@ -2008,6 +2026,64 @@ class AppController:
                 f"Recording. Press {setup_desktop.load_shortcut()} to stop "
                 "-- the bar is hidden because it would be in the recording."
             )
+
+        # Showing a window maps it; it does not paint it. Both happen when
+        # the event loop next runs, and the very next thing the caller does
+        # is block it for a third of a second -- so without this the chrome
+        # would arrive at the same moment it always did and moving it
+        # earlier would have bought nothing.
+        #
+        # Pumped until the strips are genuinely exposed rather than once:
+        # a single pass leaves seven separate always-on-top windows mapped
+        # but not yet on screen. Bounded, because a compositor that never
+        # exposes them must not stop the recording from starting -- and
+        # cheap either way against a backend start an order of magnitude
+        # longer.
+        #
+        # User input excluded deliberately: this is a repaint, not an
+        # opportunity to press Stop on a recording that has not started.
+        # `QElapsedTimer`, not `time.monotonic()`: this budget has nothing
+        # to do with how long the recording has run, and reading the same
+        # clock the elapsed time is measured from entangles the two -- it
+        # consumed the scripted clock the tests hand `_elapsed_text`.
+        budget = QElapsedTimer()
+        budget.start()
+        while True:
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+            )
+            if rect is None or self._region_frame.is_exposed():
+                break
+            if budget.elapsed() >= _CHROME_PAINT_BUDGET_MS:
+                break
+
+    def _start_recording_ui(self) -> None:
+        """Start the clock and flip the tray, once a backend really has
+        started (SNX-123 ticket 8).
+
+        Called from `_start_armed_recording()`, right after
+        `self._active_recording` is actually set -- so this never runs for
+        a still-armed or still-counting recording. What the user *sees* went
+        up earlier, in `_show_recording_chrome`.
+        """
+        self._recording_started_at = time.monotonic()
+
+        # No QObject parent -- see `_recording_elapsed_timer`'s own
+        # docstring in __init__.
+        self._recording_elapsed_timer = QTimer()
+        self._recording_elapsed_timer.setInterval(1000)
+        self._recording_elapsed_timer.timeout.connect(self._on_recording_tick)
+        self._recording_elapsed_timer.start()
+
+        # Not gated on `self._tray_available`: every other piece of tray
+        # state this class builds (`setContextMenu`, the icon itself) is
+        # likewise built unconditionally, only `.show()` is gated -- an
+        # icon/tooltip update on a tray icon nobody sees is harmless the
+        # same way.
+        self._tray_icon.setIcon(self._recording_tray_icon)
+        # Same "flip it wherever the tray icon flips" reasoning as the icon
+        # itself -- see the tray menu's own construction comment.
+        self.discard_action.setEnabled(True)
 
         # Ticked once immediately, not just on the timer's first firing a
         # second from now -- a recording stopped inside that first second
