@@ -1,4 +1,4 @@
-# Next: Windows (three jobs, written up below), then Wayland
+# Next: the destination migration, then Windows, then Wayland
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
@@ -80,6 +80,54 @@ desktop any non-primary monitor is a guaranteed-unfilmed home for the
 pill. Also note `_screen_for()` treats `geometries[0]` as the primary
 screen for a full-screen recording, which `QGuiApplication.screens()` does
 not actually guarantee.
+
+## The capture flow: what is built, and the one thing left
+
+The recording side of `docs/design/flow/` is built and driven end to end
+on real GNOME. The stills side has rule 3 and nothing else from this
+handoff.
+
+**Built:** the recording bar (`flowbars.py`) with its four states, its
+delay and audio dropdowns, the countdown numeral inside the region, the
+red outline and live scrim around what is being filmed, cross-monitor
+placement so a full-monitor recording still has a visible Stop, Window
+recording, and the stills bar's action group leading the bar and carrying
+the accent.
+
+**Verified live**, not just in the suite -- which caught nothing that
+mattered here. Twelve faults were found by using the app, every one of
+them invisible to 1,500-odd passing tests: a bar shown behind a fullscreen
+overlay for want of `Qt.WindowType.Tool`, a scrim whose panels were
+present, sized, coloured and painting nothing, Enter copying a screenshot
+of a region about to be recorded, Full screen filming all three monitors,
+and the capture hotkey starting a recording rather than opening a snip.
+**Photograph the screen before believing a UI change works.**
+
+A full run, end to end: arm on a region, reframe it to 1100x560 with the
+handles, record, stop. The file is 1100x560 -- the reframed size, not the
+dragged one -- 2.96s, landed where the toast said, with the finished bar
+carrying "0:02 - 0.2 MB - webm".
+
+**Left: the destination migration.** `AFTER_CAPTURE`
+(`instant`/`edit`/`review`) has to become the handoff's `DESTINATIONS`
+(`Copy`/`Save`/`Open`). It is agreed, and it is deliberately not done in
+the same pass as everything above, because it is the only remaining change
+that:
+
+- rewrites values already persisted in the user's config, so it needs a
+  rename map like `_AFTER_CAPTURE_RENAMES` already is for `clip`/`file`;
+- touches the Settings pane's radio cards, the chooser's rows and
+  `_commit_selection`'s outcome branch at once;
+- **drops a path that exists today.** `instant` finishes the snip with no
+  overlay at all, and the handoff has no equivalent: every capture lands
+  on the stills bar and fires its destination from there. `edit` likewise
+  stops being a destination and becomes the thing that always happens.
+  Whether the no-overlay path is worth keeping as a fourth option is a
+  product question, not a merge conflict.
+
+`DESTINATION_WORDING` in tokens.py already carries the per-kind Copy/Save
+strings the record side uses, so the vocabulary exists; what is missing is
+the model change behind it.
 
 ## Windows: three jobs, in this order
 
