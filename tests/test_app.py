@@ -2505,6 +2505,51 @@ class TestTheBarStaysUpAfterARecordingLands:
         assert controller._region_frame.is_showing() is False
         assert controller._recording_hud is not None
 
+    def test_a_full_screen_recording_says_how_to_stop_it(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # It films every monitor, so there is nowhere to put a bar that
+        # would not be in the file -- which removes the only visible Stop.
+        # The tray icon and the shell's own dot are enough to notice and
+        # not enough to act on, so the shortcut is said out loud.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([FakeRecordingBackend()]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        messages = []
+        monkeypatch.setattr(controller, "_report_shortcut", messages.append)
+
+        _record(controller, None, "No delay", "save")
+
+        assert any("stop" in m.lower() for m in messages), messages
+        assert any(setup_desktop.load_shortcut() in m for m in messages), messages
+
+    def test_a_region_recording_says_no_such_thing(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # A region has both an outline and a Stop button on screen, so the
+        # same sentence there would be noise on every single recording.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([FakeRecordingBackend()]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        messages = []
+        monkeypatch.setattr(controller, "_report_shortcut", messages.append)
+
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "save")
+
+        assert not any("whole screen" in m for m in messages), messages
+
     def test_a_full_screen_recording_gets_no_outline(
         self, make_controller, monkeypatch, tmp_path
     ):
