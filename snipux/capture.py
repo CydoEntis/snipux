@@ -227,6 +227,11 @@ def _virtual_desktop_geometry() -> QRectF:
     return union if union is not None else QRectF()
 
 
+def _monitor_geometries() -> list[QRectF]:
+    """Every screen's logical geometry, in absolute logical coordinates."""
+    return [QRectF(screen.geometry()) for screen in QGuiApplication.screens()]
+
+
 def _x11_shell_backend_available(binary: str) -> tuple[bool, str | None]:
     """Shared "am I usable" check for every shell-out X11 backend.
 
@@ -441,6 +446,9 @@ class XwininfoWindowGeometryProvider:
     def __init__(self):
         self._cache: list[tuple[str, QRectF]] | None = None
         self._cache_time: float | None = None
+        # id -> is-it-furniture. A window's type never changes, so this is
+        # answered once per window rather than once per pointer move.
+        self._furniture_cache: dict[str, bool] = {}
 
     def is_available(self) -> bool:
         return detect_session_type() == "x11" and shutil.which("xwininfo") is not None
@@ -458,6 +466,83 @@ class XwininfoWindowGeometryProvider:
         self._cache_time = now
         return windows
 
+    # EWMH window types that are furniture rather than something anyone
+    # meant to capture. The desktop is the one that matters here: GNOME's
+    # is a real managed window, one per monitor, covering its whole monitor
+    # *including* the shell bar -- so hovering empty desktop offered "the
+    # entire monitor, top bar included" as a window to record.
+    _FURNITURE_TYPES = ("_NET_WM_WINDOW_TYPE_DESKTOP", "_NET_WM_WINDOW_TYPE_DOCK")
+
+    def _is_furniture(self, win_id: str) -> bool:
+        """Whether `win_id` is a desktop or a dock, per `_NET_WM_WINDOW_TYPE`.
+
+        Cached per window id for the life of this provider rather than
+        re-asked on every refresh: a window's *type* does not change, and
+        `list_windows()` is called on every pointer move in Window mode, so
+        an uncached `xprop` per window would be a dozen subprocesses a
+        frame.
+
+        Not gated on the window's size, which is what the first attempt at
+        this did -- "only ask about windows big enough to be a desktop"
+        compares against `QGuiApplication.screens()`, and under
+        `QT_QPA_PLATFORM=offscreen` that is a single fake 800x800 screen.
+        The guard silently never matched, so the filter it guarded never
+        ran, and the check that proved it worked was run offscreen too.
+        """
+        cached = self._furniture_cache.get(win_id)
+        if cached is not None:
+            return cached
+        answer = self._query_is_furniture(win_id)
+        self._furniture_cache[win_id] = answer
+        return answer
+
+    @classmethod
+    def _query_is_furniture(cls, win_id: str) -> bool:
+        if shutil.which("xprop") is None:
+            return False
+        try:
+            result = subprocess.run(
+                ["xprop", "-id", win_id, "_NET_WM_WINDOW_TYPE"],
+                check=True, capture_output=True, text=True, timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return any(kind in result.stdout for kind in cls._FURNITURE_TYPES)
+
+    @staticmethod
+    def _managed_window_ids() -> set[str] | None:
+        """Window ids the window manager considers *applications*, from
+        EWMH's `_NET_CLIENT_LIST`, or None if it cannot be read.
+
+        `xwininfo -root -children` lists every direct child of the root,
+        which is a far wider net than "windows a user might capture": on a
+        stock GNOME desktop it returns the three `Desktop Icons` windows
+        (one per monitor, each covering its whole monitor -- so hovering
+        empty desktop offered the desktop itself, top bar included), 200x200
+        helper windows named after their app, and windows that are not
+        currently on screen at all. Reported as "why is it showing this
+        region as a window? its not a window".
+
+        None, not an empty set, when the property is missing: a window
+        manager that does not publish it is not one where every window is
+        unmanaged, so the caller keeps its own weaker filtering rather than
+        concluding there is nothing to pick.
+        """
+        if shutil.which("xprop") is None:
+            return None
+        try:
+            result = subprocess.run(
+                ["xprop", "-root", "_NET_CLIENT_LIST"],
+                check=True, capture_output=True, text=True, timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        ids = set(re.findall(r"0x[0-9a-f]+", result.stdout))
+        # Normalised: xprop pads to 0x0240011e where xwininfo prints
+        # 0x240011e, and comparing the two spellings finds nothing at all.
+        found = {f"0x{int(value, 16):x}" for value in ids}
+        return found or None
+
     def _list_windows_uncached(self) -> list[tuple[str, QRectF]]:
         if shutil.which("xwininfo") is None:
             return []
@@ -470,12 +555,17 @@ class XwininfoWindowGeometryProvider:
             return []
 
         desktop = _virtual_desktop_geometry()
+        managed = self._managed_window_ids()
         windows: list[tuple[str, QRectF]] = []
         for line in result.stdout.splitlines():
             match = self._LINE_RE.match(line)
             if match is None:
                 continue
-            _win_id, title, width, height, _x, _y, abs_x, abs_y = match.groups()
+            win_id, title, width, height, _x, _y, abs_x, abs_y = match.groups()
+            if managed is not None:
+                normalised = f"0x{int(win_id, 16):x}"
+                if normalised not in managed:
+                    continue
             try:
                 rect = QRectF(float(abs_x), float(abs_y), float(width), float(height))
             except ValueError:
@@ -489,6 +579,8 @@ class XwininfoWindowGeometryProvider:
             # capture -- and offered as a pick it would swallow every real
             # window behind it, since it is on top of all of them.
             if rect.contains(desktop) or rect == desktop:
+                continue
+            if self._is_furniture(win_id):
                 continue
             windows.append((title or "", rect))
         # Reversed: xwininfo lists children bottom-of-stack first, and

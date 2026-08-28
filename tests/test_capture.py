@@ -1291,6 +1291,126 @@ class TestXwininfoWindowGeometryProvider:
 
         assert "tiny" not in dict(provider.list_windows())
 
+    # -- what counts as a window ----------------------------------------
+    #
+    # `xwininfo -root -children` is every direct child of the root, which is
+    # a far wider net than "windows a user might capture". On a stock GNOME
+    # desktop it returns three `Desktop Icons` windows -- one per monitor,
+    # each covering its whole monitor *including* the shell bar -- so
+    # hovering empty desktop offered the entire monitor as a window to
+    # record. Reported as "why is it showing this region as a window? its
+    # not a window".
+
+    CLIENTS = "_NET_CLIENT_LIST(WINDOW): window id # 0x3400011, 0x2200005\n"
+
+    def _routed(self, monkeypatch, *, children, clients=CLIENTS, types=None):
+        """A `subprocess.run` that answers per command, so a test can tell
+        the window list apart from the two `xprop` queries -- the existing
+        fixture answers every call with the same stdout, which would let
+        either filter pass without doing anything.
+        """
+        types = types or {}
+
+        def run(argv, *a, **k):
+            if argv[0] == "xwininfo":
+                return SimpleNamespace(stdout=children, returncode=0)
+            if argv[:2] == ["xprop", "-root"]:
+                return SimpleNamespace(stdout=clients, returncode=0)
+            if argv[:2] == ["xprop", "-id"]:
+                kind = types.get(argv[2], "_NET_WM_WINDOW_TYPE_NORMAL")
+                return SimpleNamespace(
+                    stdout=f"_NET_WM_WINDOW_TYPE(ATOM) = {kind}\n", returncode=0
+                )
+            raise AssertionError(f"unexpected command {argv!r}")
+
+        monkeypatch.setattr(capture.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(capture.subprocess, "run", run)
+        return capture.XwininfoWindowGeometryProvider()
+
+    def test_a_window_the_manager_does_not_list_is_not_offered(self, monkeypatch):
+        # 200x200 helpers named after their app are real X children and are
+        # not applications.
+        children = self.SAMPLE + (
+            '  0x9900001 "brave": ("brave" "Brave")  200x200+0+0  +0+0\n'
+        )
+        provider = self._routed(monkeypatch, children=children)
+
+        assert "brave" not in dict(provider.list_windows())
+        assert "Terminal" in dict(provider.list_windows())
+
+    def test_the_desktop_is_not_a_window_even_though_it_is_managed(self, monkeypatch):
+        # GNOME's desktop is a genuine managed window, so the client list
+        # alone does not exclude it -- `_NET_WM_WINDOW_TYPE` does.
+        children = self.SAMPLE + (
+            '  0x2600003 "Desktop Icons 1": ("gjs" "Gjs")  1920x1080+0+0  +0+201\n'
+        )
+        provider = self._routed(
+            monkeypatch,
+            children=children,
+            clients="_NET_CLIENT_LIST(WINDOW): window id # 0x3400011, 0x2600003\n",
+            types={"0x2600003": "_NET_WM_WINDOW_TYPE_DESKTOP"},
+        )
+
+        assert "Desktop Icons 1" not in dict(provider.list_windows())
+
+    def test_a_windows_type_is_asked_once_not_once_per_hover(self, monkeypatch):
+        # `list_windows()` runs on every pointer move in Window mode, and a
+        # window's type never changes.
+        asked = []
+
+        def run(argv, *a, **k):
+            if argv[0] == "xwininfo":
+                return SimpleNamespace(stdout=self.SAMPLE, returncode=0)
+            if argv[:2] == ["xprop", "-root"]:
+                return SimpleNamespace(stdout=self.CLIENTS, returncode=0)
+            asked.append(argv[2])
+            return SimpleNamespace(
+                stdout="_NET_WM_WINDOW_TYPE(ATOM) = _NET_WM_WINDOW_TYPE_NORMAL\n",
+                returncode=0,
+            )
+
+        monkeypatch.setattr(capture.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(capture.subprocess, "run", run)
+        provider = capture.XwininfoWindowGeometryProvider()
+
+        provider.list_windows()
+        first = len(asked)
+        provider._cache = None
+        provider.list_windows()
+
+        assert first > 0
+        assert len(asked) == first
+
+    def test_ids_are_compared_on_value_not_spelling(self, monkeypatch):
+        # xprop pads to 0x03400011 where xwininfo prints 0x3400011, and
+        # comparing the two spellings finds nothing at all.
+        provider = self._routed(
+            monkeypatch,
+            children=self.SAMPLE,
+            clients="_NET_CLIENT_LIST(WINDOW): window id # 0x03400011\n",
+        )
+
+        assert "Terminal" in dict(provider.list_windows())
+
+    def test_without_xprop_the_old_weaker_filtering_still_applies(self, monkeypatch):
+        # A window manager that publishes no client list is not one where
+        # every window is unmanaged -- offering nothing would be worse than
+        # offering too much.
+        monkeypatch.setattr(
+            capture.shutil, "which",
+            lambda name: None if name == "xprop" else f"/usr/bin/{name}",
+        )
+        monkeypatch.setattr(
+            capture.subprocess, "run",
+            lambda *a, **k: SimpleNamespace(stdout=self.SAMPLE, returncode=0),
+        )
+        provider = capture.XwininfoWindowGeometryProvider()
+
+        windows = dict(provider.list_windows())
+
+        assert "Terminal" in windows
+        assert "tiny" not in windows  # the size floor still runs
+
     def test_the_topmost_window_wins_a_hover(self, monkeypatch):
         # xwininfo lists children bottom-of-stack first, so the list has to
         # be reversed or a hover resolves to whatever is underneath.
