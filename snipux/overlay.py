@@ -1162,12 +1162,20 @@ class FloatingBar(_Chrome):
             layout.addWidget(self._action)
         self._add_divider(layout)
 
+        # The chip is built but not placed on the overlay's bar: the
+        # handoff's post-selection bars carry no mode control, and the way
+        # back to one is Space, which reopens the chooser with the mode
+        # still on it. Keeping it here made the bar the second place to
+        # change mode and the widest thing between the action and the
+        # tools. The review window still shows it -- it has no chooser
+        # behind it to go back to.
         self._chip = self._build_capture_chip()
-        if not capture_chip:
-            self._chip.hide()
         self._chip.clicked.connect(self.captureChipClicked)
-        layout.addWidget(self._chip)
-        self._add_divider(layout)
+        if capture_chip and self._trailing == "done":
+            layout.addWidget(self._chip)
+            self._add_divider(layout)
+        else:
+            self._chip.hide()
 
         for tool in design.tokens.TOOLS:
             key = _TOOL_SHORTCUT_KEYS[tool]
@@ -1197,10 +1205,17 @@ class FloatingBar(_Chrome):
         self._undo_button.setEnabled(False)
         layout.addWidget(self._undo_button)
 
+        # Undo and clear only, per the handoff's bar. Redo keeps its
+        # keyboard shortcut and its place in the review window; on the
+        # overlay it was a button pressed far less often than the tools it
+        # was widening the bar for.
         self._redo_button = _IconButton("redo", f"Redo — {self.REDO_SHORTCUT}")
         self._redo_button.clicked.connect(self.redoRequested)
         self._redo_button.setEnabled(False)
-        layout.addWidget(self._redo_button)
+        if self._trailing == "done":
+            layout.addWidget(self._redo_button)
+        else:
+            self._redo_button.hide()
 
         self._clear_button = _IconButton(
             "trash",
@@ -5148,6 +5163,20 @@ class OverlayWindow(QWidget):
         """
         if self._marks:
             self.discard()
+        elif self._selection is not None and not self._armed_for_recording:
+            # Back a stage, not out. The handoff's post-selection bars carry
+            # no mode control -- its legend reads "Esc back" -- so once the
+            # chip left this bar, Esc became the only way to reach the mode
+            # again. Cancelling the whole snip instead would mean a
+            # mis-picked mode cost the selection too.
+            #
+            # A recording that is already armed is excluded: `app.py` holds
+            # state for it, and its own Esc path cancels that properly
+            # rather than leaving a bar attached to a region this window
+            # just dropped.
+            self.set_selection(None)
+            self._chooser.reopen()
+            self._sync_chooser_visibility()
         else:
             self.close()
 

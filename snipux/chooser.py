@@ -461,14 +461,25 @@ class _KindSwitch(_Surface):
     chevron and opens no menu: there are only two states, so any click
     flips between them, the same as `Chooser.set_kind` documents.
 
-    A two-segment pill with a sliding highlight, not a boolean track+knob:
+A two-segment pill with a sliding highlight, not a boolean track+knob:
     an empty knob says on/off, not on/off *what*. Purely UI/state -- this
     ticket wires nothing to a recorder.
+
+    The segments are glyphs, not words: the capture-flow handoff draws a
+    camera and a filled dot, and "Record is a filled 10px circle, not a
+    glyph" -- a red-adjacent dot is what every recorder in the world uses
+    and needs no label. Spelling both out made the leading control the
+    widest thing in the row, ahead of the mode it is only qualifying.
     """
 
     toggled = pyqtSignal()
 
-    SEGMENTS = (("stills", "Stills"), ("record", "Record"))
+    # (value, icon) -- `None` means the filled circle, which is drawn
+    # rather than loaded: every icon set's "record" glyph is a circle
+    # anyway, and a stroked one reads as a radio button.
+    SEGMENTS = (("stills", "camera"), ("record", None))
+    SEG_W = 30
+    DOT = 10
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -486,11 +497,7 @@ class _KindSwitch(_Surface):
 
     def _resize_to_fit(self) -> None:
         metric = tokens.ChooserMetric
-        fm = QFontMetricsF(_font(12.5, 500))
-        self._seg_widths = [
-            round(fm.horizontalAdvance(label) + metric.SWITCH_SEG_PAD_H * 2)
-            for _value, label in self.SEGMENTS
-        ]
+        self._seg_widths = [self.SEG_W for _ in self.SEGMENTS]
         self.setFixedWidth(metric.SWITCH_PAD * 2 + sum(self._seg_widths))
 
     def mouseReleaseEvent(self, event) -> None:
@@ -524,13 +531,20 @@ class _KindSwitch(_Surface):
         painter.setBrush(design.chooser_color("SWITCH_HIGHLIGHT"))
         painter.drawRoundedRect(highlight, highlight.height() / 2, highlight.height() / 2)
 
-        painter.setFont(_font(12.5, 500))
-        for index, (_value, label) in enumerate(self.SEGMENTS):
-            painter.setPen(QColor(colour.MODE_ACCENT if index == active else colour.ROW_IDLE_FG))
-            painter.drawText(
-                QRectF(seg_x[index], 0, self._seg_widths[index], self.height()),
-                Qt.AlignmentFlag.AlignCenter,
-                label,
+        for index, (_value, icon_name) in enumerate(self.SEGMENTS):
+            tint = QColor(colour.MODE_ACCENT if index == active else colour.ROW_IDLE_FG)
+            centre = QRectF(
+                seg_x[index], 0, self._seg_widths[index], self.height()
+            ).center()
+            if icon_name is None:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(tint)
+                painter.drawEllipse(centre, self.DOT / 2, self.DOT / 2)
+                continue
+            size = 16
+            pixmap = design.icon(icon_name, tint).pixmap(size, size)
+            painter.drawPixmap(
+                round(centre.x() - size / 2), round(centre.y() - size / 2), pixmap
             )
         painter.end()
 

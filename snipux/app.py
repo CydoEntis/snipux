@@ -1712,8 +1712,8 @@ class AppController:
         self._flow_menu = menu
 
     def _live_readout(self) -> str:
-        """The trailing readout on a live recording: audio source, then how
-        big the file has got.
+        """The trailing readout on a live recording: how big the file has
+        got.
 
         The size is read from the file as it grows rather than estimated --
         the one number that answers "is this actually recording anything",
@@ -1721,18 +1721,17 @@ class AppController:
         the same question `_check_recording_disk_space` is already asking
         of the same file every tick.
         """
-        label = dict(
-            (identifier, name)
-            for identifier, _icon, name, _note in design.tokens.AUDIO_SOURCES
-        ).get(self._recording_audio, "")
+        # The size alone: the audio control beside it is labelled with its
+        # own source, and naming it twice on one bar reads as two different
+        # facts rather than one.
         if self._active_recording is None:
-            return label
+            return ""
         _backend, path, _after = self._active_recording
         try:
             megabytes = Path(path).stat().st_size / (1024 * 1024)
         except OSError:
-            return label
-        return f"{label} · {megabytes:.1f} MB" if label else f"{megabytes:.1f} MB"
+            return ""
+        return f"{megabytes:.1f} MB"
 
     def _show_countdown(self, seconds: int, rect) -> None:
         """Put the count on the bar and, more importantly, inside the region.

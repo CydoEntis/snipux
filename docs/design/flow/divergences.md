@@ -213,7 +213,7 @@ remove. Do not pass one without connecting it.
 
 ---
 
-## 6 · The stills bar keeps its mode chip
+## 6 · The stills bar keeps its mode chip -- WITHDRAWN
 
 **The handoff says** (rule 2): *"There is also no `Region ˅` chip on the
 post-selection bars: mode cannot change once a selection exists, and a
@@ -223,18 +223,32 @@ control that opens a menu it can't act on is a lie."*
 leads the bar, before a divider, and Save is the only accent-filled control
 in it.
 
-### Why
+**This divergence was wrong and has been withdrawn.** The chip is gone
+from the overlay's bar, as the handoff says.
 
-The premise is not true here. In the prototype the chip is decorative, so
-the rule follows. In this build it opens the capture-mode popover
-(`_toggle_capture_popover`), which re-arms the mode and genuinely changes
-what the next capture takes: Region to Window to Full screen, after a
-selection already exists. It is not a control that cannot act; it is one
-that acts.
+### Why it was claimed
 
-Removing it would delete working behaviour on the strength of a sentence
-about a different implementation. The lie the rule is protecting against is
-a *dead* control, and the fix for a live one is to make sure it stays live.
+The premise looked untrue here: in the prototype the chip is decorative,
+but in this build it opened the capture-mode popover, which genuinely
+re-arms the mode after a selection exists. Deleting a live control on the
+strength of a sentence about a dead one seemed like following the letter
+past the point.
+
+### Why that was wrong
+
+Because the rule was never only about the chip. Looking at the rendered
+prototype rather than the prose, the post-selection bar has no mode
+control *and* Esc steps back a stage -- those are one design, and taking
+half of it is what makes the other half look unreasonable. Keeping the
+chip meant the bar carried the second place to change mode and was wider
+than the design for it.
+
+So the chip went, and Esc gained its third stage: ink, then the selection
+(back to choosing, with the mode still set), then out. Nothing was lost;
+the way back moved to where the handoff puts it.
+
+The review window's bar keeps the chip. It has no chooser behind it to
+step back to.
 
 ### What did change
 

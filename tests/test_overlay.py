@@ -2671,12 +2671,16 @@ class TestFloatingBarComposition:
 
         buttons = bar.findChildren(QPushButton)
 
-        # 1 capture chip + 8 tools + undo/redo/clear == 12. The two
-        # destination buttons became one split action, which is a QWidget
-        # and not a QPushButton -- it has two hit areas, so it cannot be
-        # one button -- and so is asserted separately.
-        assert len(buttons) == 12
+        # 8 tools + undo + clear == 10 on the overlay's bar. The
+        # destinations are one split action, which is a QWidget rather than
+        # a QPushButton (two hit areas cannot be one button); the mode chip
+        # and redo are built but not placed, since the handoff's
+        # post-selection bar carries neither.
+        visible = [button for button in buttons if not button.isHidden()]
+        assert len(visible) == 10
         assert bar._action is not None
+        assert bar._chip.isHidden()
+        assert bar._redo_button.isHidden()
 
     def test_the_review_windows_bar_keeps_its_destination_pair(self):
         # Its footer already owns the exports, so a split button on the bar
@@ -2692,10 +2696,13 @@ class TestFloatingBarComposition:
 
         assert list(bar._tool_buttons.keys()) == tokens.TOOLS
 
-    def test_three_dividers_separate_the_four_groups(self):
+    def test_two_dividers_separate_the_overlay_bars_three_groups(self):
+        # Action | tools | undo+clear. The review window keeps a third,
+        # since it still carries the mode chip.
         bar = FloatingBar()
 
-        assert len(bar.findChildren(_Divider)) == 3
+        assert len(bar.findChildren(_Divider)) == 2
+        assert len(FloatingBar(trailing="done").findChildren(_Divider)) == 3
 
     def test_undo_redo_clear_and_the_action_are_all_present(self):
         bar = FloatingBar()
@@ -2821,7 +2828,10 @@ class TestPillButtonLabelWidth:
         # "Full screen" is the longest of tokens.CAPTURE_MODES -- widening
         # the chip must push every widget after it right, with no overlap,
         # rather than clipping the label to keep the bar's old width.
-        bar = FloatingBar()
+        # The review window's bar: the overlay's carries no mode chip,
+        # since the handoff's post-selection bars have no mode control and
+        # Space reopens the chooser instead.
+        bar = FloatingBar(trailing="done")
         bar.resize(bar.sizeHint())
         bar.grab()
         narrow_chip_right = bar._chip.geometry().right()
@@ -2872,7 +2882,7 @@ class TestCaptureChipResizesOnModeChange:
             assert bar._chip._text_label.text() == label
 
     def test_set_capture_mode_grows_the_bar_for_a_longer_label(self):
-        bar = FloatingBar()
+        bar = FloatingBar(trailing="done")
         bar.resize(bar.sizeHint())
         bar.grab()
         narrow_width = bar.width()
@@ -4399,14 +4409,18 @@ class TestCaptureModePopoverOverlayIntegration:
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        # The popover is opened directly rather than through the bar: the
+        # overlay's bar carries no mode chip any more (the handoff's
+        # post-selection bars have no mode control), so there is nothing on
+        # it to click. What this test is actually about -- that picking a
+        # mode leaves the bar centred on the selection -- is unchanged.
+        overlay._toggle_capture_popover()
         full_screen_label = tokens.CAPTURE_MODES[2][0]
         QTest.mouseClick(overlay._popover._rows[full_screen_label], Qt.MouseButton.LeftButton)
-        wide_width = overlay._bar.width()
         expected_center = round(overlay._selection.center().x())
         assert abs(overlay._bar.geometry().center().x() - expected_center) <= 1
 
-        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+        overlay._toggle_capture_popover()
         region_label = tokens.CAPTURE_MODES[0][0]
         QTest.mouseClick(overlay._popover._rows[region_label], Qt.MouseButton.LeftButton)
 
@@ -4414,7 +4428,6 @@ class TestCaptureModePopoverOverlayIntegration:
         # -- and therefore where the bar ought to be centred -- is
         # unchanged from the Full screen pick above.
         assert round(overlay._selection.center().x()) == expected_center
-        assert overlay._bar.width() < wide_width
         assert abs(overlay._bar.geometry().center().x() - expected_center) <= 1
 
     def test_cycling_the_delay_row_updates_the_overlays_delay(self):
@@ -6722,14 +6735,25 @@ class TestKeyboardEscapeTwoStage:
             Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
         )
 
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # first stage: discards the mark
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # second stage: nothing left, closes
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # ink
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # the selection, back to choosing
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # nothing left, closes
 
         assert not overlay.isVisible()
         assert calls == []  # never captured
 
-    def test_escape_with_no_ink_at_all_closes_on_the_first_press(self):
+    def test_escape_steps_back_to_choosing_before_it_closes(self):
+        # Three stages now, not two: ink, then the selection, then out.
+        # The post-selection bar carries no mode control -- the handoff's
+        # legend reads "Esc back" -- so Esc is the way back to the mode,
+        # and cancelling outright would make a mis-picked mode cost the
+        # selection too.
         overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay.isVisible()
+        assert overlay._selection is None
 
         QTest.keyClick(overlay, Qt.Key.Key_Escape)
 
@@ -6928,10 +6952,14 @@ class TestEscapeAndUndoRedoBypassSuppression:
         QTest.qWaitForWindowExposed(overlay)
         return overlay
 
-    def test_escape_closes_the_overlay_while_the_stroke_slider_has_focus(self):
+    def test_escape_reaches_the_overlay_while_the_stroke_slider_has_focus(self):
+        # The point of this test is that a focused slider does not swallow
+        # Escape, not which stage Escape is at -- so it presses through to
+        # the close rather than asserting on the first press.
         overlay = self._overlay()
         overlay._tray._slider.setFocus()
 
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
         QTest.keyClick(overlay, Qt.Key.Key_Escape)
 
         assert not overlay.isVisible()
@@ -6950,7 +6978,8 @@ class TestEscapeAndUndoRedoBypassSuppression:
         assert overlay.marks == ()  # abandoned, not committed as a Text mark
         assert overlay.isVisible()
 
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # second stage: nothing left, closes
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # the selection
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # nothing left, closes
 
         assert not overlay.isVisible()
 
@@ -6961,7 +6990,10 @@ class TestEscapeAndUndoRedoBypassSuppression:
         overlay = self._overlay()
         overlay._tray._slider.setFocus()
 
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+        # Pressed until it is out: the claim is that a focused child never
+        # swallows Escape, not how many stages Escape has.
+        for _ in range(3):
+            QTest.keyClick(overlay, Qt.Key.Key_Escape)
 
         assert not overlay.isVisible()
 
@@ -6969,8 +7001,8 @@ class TestEscapeAndUndoRedoBypassSuppression:
         label = QLineEdit(overlay)
         label.setFocus()
 
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # abandons the (bare-stand-in) label
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # nothing left to discard, closes
+        for _ in range(3):
+            QTest.keyClick(overlay, Qt.Key.Key_Escape)
 
         assert not overlay.isVisible()
 

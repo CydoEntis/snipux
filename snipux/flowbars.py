@@ -29,7 +29,7 @@ of three.
 from __future__ import annotations
 
 from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from snipux import design
@@ -174,6 +174,100 @@ class _IconButton(QWidget):
         size = metric.ICON
         offset = (metric.BTN - size) / 2
         icon.paint(painter, round(offset), round(offset), size, size)
+        painter.end()
+
+
+class _LabelledIcon(_IconButton):
+    """An icon button that also says what it is set to, with a chevron.
+
+    Used where the answer matters more than the control: "which audio
+    source" has three answers and a speaker glyph gives none of them, so
+    the spec draws the name beside it.
+    """
+
+    def __init__(self, icon_name: str, label: str, parent: QWidget | None = None):
+        self._label = label
+        super().__init__(icon_name, parent)
+        self._relayout()
+
+    def set_content(self, icon_name: str, label: str) -> None:
+        self._icon_name = icon_name
+        self._label = label
+        self._relayout()
+
+    def _relayout(self) -> None:
+        metric = tokens.FlowMetric
+        width = QFontMetricsF(_font(12, 500)).horizontalAdvance(self._label)
+        self.setFixedWidth(
+            round(metric.PAD + metric.ICON + 6 + width + 5 + metric.CHEVRON + metric.PAD)
+        )
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = tokens.FlowMetric
+        if self._hovered and self._enabled:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(design.flow_color("ROW_HOVER_BG"))
+            painter.drawRoundedRect(
+                QRectF(self.rect()), metric.BTN_RADIUS, metric.BTN_RADIUS
+            )
+
+        tint = design.flow_color(
+            "TOOL_DISABLED_FG" if not self._enabled else "TOOL_IDLE_FG"
+        )
+        x = float(metric.PAD)
+        icon = design.icon(self._icon_name, tint)
+        size = metric.ICON
+        icon.paint(painter, round(x), (self.height() - size) // 2, size, size)
+        x += size + 6
+
+        painter.setFont(_font(12, 500))
+        painter.setPen(tint)
+        painter.drawText(
+            QRectF(x, 0, self.width() - x - metric.CHEVRON - metric.PAD, self.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self._label,
+        )
+
+        chevron = design.icon("chevron", tint)
+        chevron.paint(
+            painter,
+            self.width() - metric.PAD - metric.CHEVRON,
+            (self.height() - metric.CHEVRON) // 2,
+            metric.CHEVRON,
+            metric.CHEVRON,
+        )
+        painter.end()
+
+
+class _TextButton(_IconButton):
+    """A bare word. Cancel, where a cross would read as "close the bar"
+    rather than "do not record this".
+    """
+
+    def __init__(self, label: str, parent: QWidget | None = None):
+        self._label = label
+        super().__init__("close", parent)
+        width = QFontMetricsF(_font(12, 500)).horizontalAdvance(label)
+        self.setFixedWidth(round(width + tokens.FlowMetric.PAD * 2 + 8))
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = tokens.FlowMetric
+        if self._hovered and self._enabled:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(design.flow_color("ROW_HOVER_BG"))
+            painter.drawRoundedRect(
+                QRectF(self.rect()), metric.BTN_RADIUS, metric.BTN_RADIUS
+            )
+        painter.setFont(_font(12, 500))
+        painter.setPen(design.flow_color("TOOL_IDLE_FG"))
+        painter.drawText(
+            self.rect(), int(Qt.AlignmentFlag.AlignCenter), self._label
+        )
         painter.end()
 
 
@@ -596,7 +690,11 @@ class RecordingBar(QWidget):
         layout.addWidget(self._action_divider)
         layout.addSpacing(metric.GROUP_GAP - metric.GAP)
 
-        self._audio = _IconButton("mute", self)
+        # Labelled, because "which audio source" is a question with three
+        # answers and a speaker glyph answers none of them -- the spec
+        # draws "System" beside it. `_LabelledIcon` keeps the chevron, so
+        # it still reads as something that opens.
+        self._audio = _LabelledIcon("mute", "Muted", self)
         self._audio.clicked.connect(self.audioClicked)
         layout.addWidget(self._audio)
 
@@ -612,7 +710,10 @@ class RecordingBar(QWidget):
         layout.addWidget(self._tail_divider)
         layout.addSpacing(metric.GROUP_GAP - metric.GAP)
 
-        self._cancel = _IconButton("close", self)
+        # A word, not a cross. The spec spells Cancel out, and at this
+        # stage nothing has happened yet -- an X beside a Record button
+        # reads as "close the bar", which is not what it does.
+        self._cancel = _TextButton("Cancel", self)
         self._cancel.clicked.connect(self.cancelClicked)
         layout.addWidget(self._cancel)
 
@@ -694,10 +795,11 @@ class RecordingBar(QWidget):
         """Reflect the chosen source. The bar renders it; whether a source is
         even offerable is the platform's business, not this widget's.
         """
-        glyph = dict(
-            (identifier, icon) for identifier, icon, _label, _note in tokens.AUDIO_SOURCES
-        ).get(source, "mute")
-        self._audio.set_icon(glyph)
+        chosen = {
+            identifier: (icon, label)
+            for identifier, icon, label, _note in tokens.AUDIO_SOURCES
+        }.get(source, ("mute", "Muted"))
+        self._audio.set_content(*chosen)
 
     def set_audio_enabled(self, enabled: bool) -> None:
         self._audio.set_enabled(enabled)
