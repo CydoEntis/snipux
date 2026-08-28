@@ -5281,10 +5281,14 @@ class TestCommitToRecord:
         rect, _delay, _after = requests[0]
         assert rect == QRectF(-400, -200, 300, 250)
 
-    def test_full_screen_hands_off_none_rather_than_the_monitors_own_rect(self):
-        # The test that actually proves AC3 -- a rect equal to the
-        # monitor's geometry would look right by accident if the `None`
-        # branch were missing.
+    def test_full_screen_hands_off_the_monitor_rather_than_every_monitor(self):
+        # This asserted the opposite until it was run on a real
+        # three-monitor desktop. Handing over None makes the backend record
+        # the whole *virtual* desktop -- one 6400x1440 file of all three --
+        # while the identical row on the stills side captures one display,
+        # and the chooser promises "Grabs this monitor the moment you
+        # choose it". `_select_full_screen` has already picked the display
+        # under the cursor, so Full screen is a region like any other here.
         requests = []
         overlay = self._overlay(on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)))
 
@@ -5292,19 +5296,20 @@ class TestCommitToRecord:
 
         assert len(requests) == 1
         rect, _delay, _after = requests[0]
-        assert rect is None
-        assert not overlay.isVisible()
+        assert rect is not None
+        assert rect == overlay.absolute_selection()
 
-    def test_full_screen_still_closes_because_there_is_nothing_to_reframe(self):
-        # A region stays up so its handles can be dragged. Full screen has
-        # no handle, and a frozen shot of the whole desktop sitting there
-        # while the user decides reads as a hung machine.
+    def test_full_screen_arms_like_any_other_region(self):
+        # It is a monitor-sized selection now, not a special case, so it
+        # gets the same handles as a dragged one -- which is what makes
+        # "full screen, but a bit narrower" reachable without starting the
+        # snip again.
         overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
 
         overlay._chooser.set_mode("Full screen")
 
-        assert not overlay.isVisible()
-        assert overlay._armed_for_recording is False
+        assert overlay.isVisible()
+        assert overlay._armed_for_recording is True
 
     def test_the_armed_region_can_still_be_reframed(self):
         # The whole reason the window stays up. `absolute_selection()` is
