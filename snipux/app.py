@@ -49,7 +49,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget
 
-from snipux.flowbars import CountdownNumeral, RecordingBar
+from snipux.flowbars import CountdownNumeral, FlowMenu, RecordingBar
 from snipux.capture import (
     XwininfoWindowGeometryProvider,
     BackendRegistry,
@@ -911,6 +911,13 @@ class AppController:
         self._countdown_numeral: CountdownNumeral | None = None
         # Where the bar's centre stays while its width changes with state.
         self._recording_bar_anchor = None
+        # The open dropdown, held so Python does not collect a parentless
+        # popup out from under the user mid-choice.
+        self._flow_menu: FlowMenu | None = None
+        # Per-session, like mode and destination: a snip's own override must
+        # not write back to the stored preferences (the handoff's state
+        # model says so in as many words).
+        self._recording_audio = design.tokens.AUDIO_DEFAULT
 
         self._overlay: OverlayWindow | None = None
         # Held for the same reason `_overlay` is: a parentless widget is
@@ -1431,11 +1438,7 @@ class AppController:
         bar.set_audio_enabled(platform.current.records_audio())
         if not platform.current.records_audio():
             bar.audio_control().setToolTip(platform.current.audio_unavailable_reason())
-        # Hidden until it has a menu to open. The handoff puts a delay
-        # dropdown in this bar precisely because a visibly-enabled control
-        # doing nothing is the bug it was fixing; shipping one here would
-        # reintroduce it under a new name.
-        bar.set_delay_available(False)
+        bar.set_delay_available(True)
 
         placement = _place_recording_hud(rect, geometries, bar.sizeHint())
         if placement is None:
@@ -1443,6 +1446,8 @@ class AppController:
             return
 
         bar.startClicked.connect(self._begin_armed_recording)
+        bar.delayClicked.connect(self._open_delay_menu)
+        bar.audioClicked.connect(self._open_audio_menu)
         bar.cancelClicked.connect(self._cancel_armed_recording)
         bar.stopClicked.connect(self._stop_recording)
         bar.discardClicked.connect(self._discard_recording)
@@ -1455,6 +1460,67 @@ class AppController:
         self._recording_bar_anchor = placement.center()
         self._reposition_recording_bar()
         bar.show()
+
+    def _open_delay_menu(self) -> None:
+        """The delay dropdown for an armed recording.
+
+        Editable here, not just in the chooser, because this is the stage
+        where a countdown actually matters -- the handoff gives this bar a
+        delay control of its own for exactly that reason. Changing it
+        rewrites the armed tuple rather than any stored preference: a
+        per-snip override must not quietly become the user's setting.
+        """
+        bar = self._recording_hud
+        if bar is None or self._armed_recording is None:
+            return
+        rect, current, after, path = self._armed_recording
+        rows = [(value, value, "", "", "") for value in design.tokens.DELAYS]
+        menu = FlowMenu(rows, current, design.tokens.FlowMetric.MENU_W_DELAY)
+
+        def choose(value: str) -> None:
+            if self._armed_recording is None:
+                return
+            self._armed_recording = (rect, value, after, path)
+
+        menu.chosen.connect(choose)
+        control = bar.delay_control()
+        menu.open_below(QRect(control.mapToGlobal(control.rect().topLeft()),
+                              control.size()))
+        self._flow_menu = menu
+
+    def _open_audio_menu(self) -> None:
+        """The audio dropdown, opening *upward* so it never covers the
+        region being recorded -- the one thing on screen the user is trying
+        to look at.
+
+        Every source is listed whatever the platform can do; the ones it
+        cannot carry its reason and refuse to be chosen. Leaving them out
+        would be the same lie the handoff forbids, told by omission.
+        """
+        bar = self._recording_hud
+        if bar is None:
+            return
+        reason = "" if platform.current.records_audio() else (
+            platform.current.audio_unavailable_reason()
+        )
+        rows = [
+            (identifier, label, note, "",
+             "" if identifier == design.tokens.AUDIO_DEFAULT else reason)
+            for identifier, _icon, label, note in design.tokens.AUDIO_SOURCES
+        ]
+        menu = FlowMenu(rows, self._recording_audio,
+                        design.tokens.FlowMetric.MENU_W_AUDIO)
+
+        def choose(value: str) -> None:
+            self._recording_audio = value
+            if self._recording_hud is not None:
+                self._recording_hud.set_audio(value)
+
+        menu.chosen.connect(choose)
+        control = bar.audio_control()
+        menu.open_above(QRect(control.mapToGlobal(control.rect().topLeft()),
+                              control.size()))
+        self._flow_menu = menu
 
     def _show_countdown(self, seconds: int, rect) -> None:
         """Put the count on the bar and, more importantly, inside the region.

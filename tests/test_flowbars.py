@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import QApplication
 
 from snipux import design
 from snipux.design import tokens
-from snipux.flowbars import CountdownNumeral, RecordingBar
+from snipux.flowbars import CountdownNumeral, FlowMenu, RecordingBar
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -272,3 +272,91 @@ class TestCountdownNumeral:
             assert three != one
         finally:
             numeral.close()
+
+
+class TestFlowMenu:
+    """The dropdowns. A top-level popup rather than a child of the bar,
+    because an open menu has to paint above the hint pill *below* the bar
+    and an effect-bearing parent traps it in its own stacking context --
+    the HTML reference hit exactly this with `backdrop-filter`.
+    """
+
+    def _rows(self, disabled_reason=""):
+        return [
+            ("system", "System", "Desktop output", "", disabled_reason),
+            ("mic", "Mic", "Default input", "", disabled_reason),
+            ("off", "Muted", "No audio track at all", "", ""),
+        ]
+
+    def test_it_is_a_popup_not_a_child(self):
+        menu = FlowMenu(self._rows(), "off", 250)
+        try:
+            assert menu.parent() is None
+            assert bool(menu.windowFlags() & Qt.WindowType.Popup)
+        finally:
+            menu.close()
+
+    def test_choosing_a_row_reports_its_value_and_closes(self):
+        menu = FlowMenu(self._rows(), "off", 250)
+        try:
+            chosen = []
+            menu.chosen.connect(chosen.append)
+
+            row_h = menu._row_height()
+            y = tokens.FlowMetric.MENU_PAD + row_h + row_h / 2  # the second row
+            QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=QPoint(40, int(y)))
+
+            assert chosen == ["mic"]
+        finally:
+            menu.close()
+
+    def test_a_disabled_row_refuses_to_be_chosen(self):
+        # The handoff's rule is that an option which cannot work says why
+        # rather than vanishing -- but saying why and then accepting the
+        # click would be worse than either.
+        menu = FlowMenu(self._rows("Not available on Linux"), "off", 250)
+        try:
+            chosen = []
+            menu.chosen.connect(chosen.append)
+
+            row_h = menu._row_height()
+            y = tokens.FlowMetric.MENU_PAD + row_h / 2  # the first, disabled row
+            QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=QPoint(40, int(y)))
+
+            assert chosen == []
+        finally:
+            menu.close()
+
+    def test_a_click_outside_any_row_chooses_nothing(self):
+        menu = FlowMenu(self._rows(), "off", 250)
+        try:
+            chosen = []
+            menu.chosen.connect(chosen.append)
+
+            QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=QPoint(40, 1))
+
+            assert chosen == []
+        finally:
+            menu.close()
+
+    def test_opening_upward_puts_it_clear_of_the_anchor(self):
+        # Audio opens upward so it never covers the region being recorded,
+        # which is the one thing on screen the user is trying to look at.
+        menu = FlowMenu(self._rows(), "off", 250)
+        try:
+            anchor = QRect(500, 700, 28, 28)
+            menu.open_above(anchor)
+
+            assert menu.y() + menu.height() <= anchor.top()
+        finally:
+            menu.close()
+
+    def test_opening_downward_puts_it_clear_the_other_way(self):
+        menu = FlowMenu(self._rows(), "off", 250)
+        try:
+            anchor = QRect(500, 100, 28, 28)
+            menu.open_below(anchor)
+
+            assert menu.y() >= anchor.bottom()
+        finally:
+            menu.close()
