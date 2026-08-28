@@ -1938,7 +1938,7 @@ class TestAppControllerArmingARecording:
         # carries elapsed time from here, as it always did for this case.
         assert len(backend.start_calls) == 1
         assert controller._recording_hud is None
-        assert controller._tray_icon.toolTip() == "0:00"
+        assert controller._tray_icon.toolTip() == "00:00"
 
 
 class TestAppControllerRecordingHud:
@@ -2096,17 +2096,17 @@ class TestAppControllerRecordingHud:
 
         _record(controller, QRectF(50, 50, 200, 150), "No delay")
 
-        assert controller._tray_icon.toolTip() == "0:00"
+        assert controller._tray_icon.toolTip() == "00:00"
         assert controller._recording_hud is not None
         # The pill names the action, not just the time -- clicking it
         # stops the recording, and nothing used to say so.
-        assert controller._recording_hud._clock.text() == "0:00"
+        assert controller._recording_hud._clock.text() == "00:00"
         assert controller._recording_hud.state() == RecordingBar.LIVE
 
         controller._on_recording_tick()
 
-        assert controller._tray_icon.toolTip() == "1:05"
-        assert controller._recording_hud._clock.text() == "1:05"
+        assert controller._tray_icon.toolTip() == "01:05"
+        assert controller._recording_hud._clock.text() == "01:05"
 
     def test_no_hud_for_a_full_screen_recording(self, make_controller, monkeypatch):
         controller, _backend = self._start_a_recording(
@@ -2658,7 +2658,7 @@ class TestTheBarStaysUpAfterARecordingLands:
         summary = controller._recording_hud._summary.text()
         # Duration, size and container -- the three things you would
         # otherwise open a file manager to find out.
-        assert "0:00" in summary
+        assert "00:00" in summary
         assert "2.1 MB" in summary
         assert "mp4" in summary or "webm" in summary
 
