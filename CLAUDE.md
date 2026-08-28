@@ -61,6 +61,11 @@ snipux/
   overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
                 (its pre-snip chooser diverges from the handoff -- see
                  docs/design/pre-snip-chooser.md)
+  chooser.py    the docked pre-snip chooser row: what to capture, and what
+                happens to it afterwards
+  flowbars.py   the post-selection bars from the locked capture-flow handoff
+                (docs/design/flow/, and its divergences.md). Views only --
+                they report clicks and app.py decides what they mean.
   shapes.py     annotation data model and the flattening renderer
   settings.py   the Settings window (Qt in front of setup_desktop.py)
   review.py     the optional post-capture review window; Annotate reuses the bar
