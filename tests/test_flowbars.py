@@ -88,7 +88,9 @@ class TestTheFourStates:
         assert bar._action._glyph == "circle"
         bar.set_live("0:12")
         assert bar._action._glyph == "square"
-        bar.set_done("00:27")
+        # `done` hides the action entirely unless a destination is given,
+        # so the glyph is only asked about when there is a button wearing it.
+        bar.set_done("00:27", destination="Copy")
         assert bar._action._glyph is None
 
     def test_counting_says_how_long_is_left_without_offering_an_action(self, bar):
@@ -139,6 +141,16 @@ class TestWhatEachStateShows:
         assert bar._summary.text() == "00:27 - 11.3 MB - webm"
         assert bar._discard.isHidden() is False
         assert bar._cancel.isHidden() is True
+
+    def test_done_shows_no_action_unless_a_destination_is_given(self, bar):
+        # The file has already landed by then, so an accent button reading
+        # "Copy" would be a control with nothing to do -- the exact thing
+        # this design removes everywhere else.
+        bar.set_done("00:27 - 11.3 MB - webm")
+        assert bar._action.isHidden() is True
+
+        bar.set_done("00:27 - 11.3 MB - webm", destination="Copy")
+        assert bar._action.isHidden() is False
 
     def test_a_divider_only_appears_when_it_separates_something(self, bar):
         # Two dividers with nothing between them is how a bar looks broken

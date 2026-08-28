@@ -815,6 +815,13 @@ class FlowMetric:
     HANDLE_LONG      = 30
     HANDLE_SHORT     = 8
 
+    # How long the finished bar stays up after a recording lands. Long
+    # enough to read a summary and reach for Discard, short enough not to
+    # sit there. Not from the handoff: the handoff's stage 6 waits for the
+    # user to confirm a destination, and this build lands the file first --
+    # see docs/design/flow/divergences.md.
+    DONE_LINGER_MS   = 6000
+
     # Countdown, centred IN the region -- where the user is already looking.
     COUNT_D          = 118
     COUNT_FONT       = 54

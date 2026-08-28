@@ -652,19 +652,28 @@ class RecordingBar(QWidget):
         self._show(action=True, clock=True, audio=True, delay=False,
                    summary=bool(size), cancel=False, discard=False)
 
-    def set_done(self, summary: str, *, destination: str = "Copy") -> None:
-        """Stage 6. The destination becomes the action; the summary says what
-        was produced, and discard is the way to decide it was not worth
+    def set_done(self, summary: str, *, destination: str | None = None) -> None:
+        """Stage 6: what was produced, and a way to decide it was not worth
         keeping.
+
+        `destination is None` -- the shipped shape -- shows the summary and
+        Discard alone, because the file has already landed and there is
+        nothing left to confirm. Passing one puts it back as an accent
+        action, which is the handoff's own stage 6; do not pass one without
+        wiring `destinationClicked`, or the bar grows exactly the
+        visibly-enabled control doing nothing that this design exists to
+        remove.
         """
         self._state = self.DONE
-        # No glyph: the destination is a word, and a record dot beside
-        # "Copy" would say the recording is still running.
-        self._action.set_label(destination, shortcut="↵", glyph=None)
-        self._action.set_tone("accent")
+        if destination is not None:
+            # No glyph: the destination is a word, and a record dot beside
+            # "Copy" would say the recording is still running.
+            self._action.set_label(destination, shortcut="↵", glyph=None)
+            self._action.set_tone("accent")
         self._summary.setText(summary)
-        self._show(action=True, clock=False, audio=False, delay=False,
-                   summary=True, cancel=False, discard=True)
+        self._clock.set_wash(None)
+        self._show(action=destination is not None, clock=False, audio=False,
+                   delay=False, summary=True, cancel=False, discard=True)
 
     # -- audio ---------------------------------------------------------
     def set_audio(self, source: str) -> None:
