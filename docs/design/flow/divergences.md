@@ -113,6 +113,15 @@ and the selection frame switching to solid red around it.
 stage 3b (ready), where the resize handles are live and the frame and scrim
 are exactly as designed; it closes as the countdown ends.
 
+A region only. Full screen has nothing to reframe, so it closes on commit
+as it always did -- a frozen shot of the whole desktop sitting there while
+the user decides reads as a hung machine rather than a stage.
+
+Because the region *can* change during that stage, `app.py` reads
+`OverlayWindow.absolute_selection()` when the backend starts rather than
+trusting the rect handed over at commit. Filming the rectangle first
+dragged would make the ready stage's handles a lie.
+
 ### Why
 
 The overlay paints a **frozen** capture across its whole surface --

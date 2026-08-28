@@ -5194,8 +5194,14 @@ class TestInstantCapture:
 class TestCommitToRecord:
     """SNX-122 AC: on the record side of the chooser, `_commit_selection`
     hands the rect off to `on_recording_requested` (absolute coordinates,
-    None for Full screen) and closes the overlay unconditionally, rather
-    than running any of the stills-only `outcome` handling right below it.
+    None for Full screen) rather than running any of the stills-only
+    `outcome` handling right below it.
+
+    It used to close the overlay here too. It no longer does: the
+    handoff's ready stage is the one place a recording can still be
+    reframed, and the handles that reframe it are this window's, so the
+    window stays up with the stills bar suppressed until `app.py` starts
+    the backend. See `_commit_selection`'s record branch.
     """
 
     @pytest.fixture(autouse=True)
@@ -5237,7 +5243,7 @@ class TestCommitToRecord:
         QTest.mouseMove(overlay, end)
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=end)
 
-    def test_a_region_drag_hands_off_the_absolute_rect_and_closes(self):
+    def test_a_region_drag_hands_off_the_absolute_rect_and_stays_up(self):
         requests = []
         overlay = self._overlay(on_recording_requested=lambda rect, delay, after: requests.append((rect, delay, after)))
 
@@ -5248,7 +5254,12 @@ class TestCommitToRecord:
         assert rect == QRectF(100, 100, 300, 250)
         assert delay == tokens.DELAYS[0]  # "No delay", the default
         assert after == tokens.RECORD_AFTER_DEFAULT  # "instant", the chooser's own default
-        assert not overlay.isVisible()
+        # Still up, and armed: the region has to stay reframeable until
+        # recording actually starts, and the stills bar has no business
+        # being on a recording.
+        assert overlay.isVisible()
+        assert overlay._armed_for_recording is True
+        assert overlay._bar.isHidden() is True
 
     def test_a_region_drag_on_a_monitor_left_of_and_above_the_primary_translates_the_rect(self):
         # The case a naive `abs()` on `logical_origin` gets wrong: this
@@ -5284,6 +5295,30 @@ class TestCommitToRecord:
         assert rect is None
         assert not overlay.isVisible()
 
+    def test_full_screen_still_closes_because_there_is_nothing_to_reframe(self):
+        # A region stays up so its handles can be dragged. Full screen has
+        # no handle, and a frozen shot of the whole desktop sitting there
+        # while the user decides reads as a hung machine.
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
+
+        overlay._chooser.set_mode("Full screen")
+
+        assert not overlay.isVisible()
+        assert overlay._armed_for_recording is False
+
+    def test_the_armed_region_can_still_be_reframed(self):
+        # The whole reason the window stays up. `absolute_selection()` is
+        # what app.py reads when recording actually starts, so a rect
+        # changed here is the rect that gets filmed -- otherwise the ready
+        # stage's handles would be a lie.
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+        assert overlay.absolute_selection() == QRectF(100, 100, 300, 250)
+
+        overlay.set_selection(QRectF(120, 130, 200, 180))
+
+        assert overlay.absolute_selection() == QRectF(120, 130, 200, 180)
+
     def test_the_armed_delay_reaches_the_callback_unchanged(self):
         # This ticket doesn't own the timer that counts the delay down --
         # app.py does -- so the assertion is "the right value reaches the
@@ -5314,13 +5349,17 @@ class TestCommitToRecord:
         assert requests == [after]
 
     @pytest.mark.parametrize("after", ["instant", "save"])
-    def test_closes_regardless_of_after(self, after):
+    def test_arms_regardless_of_after(self, after):
+        # `outcome`/`after` decide what app.py does with the file once it
+        # is real; they play no part in what this window does, which is
+        # stay up and reframeable either way.
         overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
         overlay._chooser.set_after(after)
 
         self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
 
-        assert not overlay.isVisible()
+        assert overlay.isVisible()
+        assert overlay._armed_for_recording is True
 
     def test_stills_kind_never_calls_the_recording_callback(self):
         # Kind defaults to "stills" -- proving the branch added for

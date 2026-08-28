@@ -1751,6 +1751,8 @@ class AppController:
             return
         _rect, _delay, _after, path = self._armed_recording
         self._armed_recording = None
+        if self._overlay is not None:
+            self._overlay.close()
         self._stop_countdown_timer()
         Path(path).unlink(missing_ok=True)
         self._teardown_recording_ui()
@@ -1767,6 +1769,19 @@ class AppController:
             return
         rect, _delay, after, path = self._armed_recording
         self._armed_recording = None
+        # The overlay has been up since the selection was committed so the
+        # region could still be reframed, so *it* holds the rect that
+        # matters -- not the one handed over at commit. Reading the one
+        # from commit would film the rectangle first dragged and make the
+        # ready stage's handles a lie.
+        if self._overlay is not None:
+            if rect is not None:
+                reframed = self._overlay.absolute_selection()
+                if reframed is not None:
+                    rect = reframed
+            # Down before the backend starts: from here the frozen frame it
+            # paints would be what gets filmed.
+            self._overlay.close()
         try:
             backend, actual_path = self._recorder_registry.start(rect, path)
         except RecordingError as exc:
