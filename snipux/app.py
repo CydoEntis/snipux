@@ -41,12 +41,15 @@ from PyQt6.QtCore import (
     QEventLoop,
     QIODevice,
     QMimeData,
+    QObject,
     QRect,
     QRectF,
     QSize,
     Qt,
+    QThreadPool,
     QTimer,
     QUrl,
+    pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor,
@@ -197,6 +200,48 @@ _STARTING_LABEL = "Starting"
 # the backend anyway. It normally needs a frame or two; this only has to
 # be long enough that a slow compositor is not mistaken for a stuck one.
 _CHROME_PAINT_BUDGET_MS = 150
+
+
+class _RecorderStarter(QObject):
+    """Runs a recorder's blocking `start()` off the UI thread.
+
+    `org.gnome.Shell.Screencast.ScreencastArea` takes ~500ms to answer --
+    measured, and reproduced with `gdbus`, so it is Shell building its
+    capture pipeline rather than anything snipux does. Called from the UI
+    thread that whole time, the window stops painting and every control
+    stops responding: reported as the app feeling stuck between pressing
+    Record and recording.
+
+    This does not make the recording start any sooner. Nothing can: the
+    first frame lands when Shell says it does. It only stops the interface
+    dying while that happens.
+
+    The connection the backend opens therefore belongs to the worker thread
+    and is used from the UI thread afterwards, by `stop()`. That is safe
+    because it is a plain socket used strictly one thread at a time -- the
+    signal below is what orders the two -- and not because jeepney promises
+    anything about concurrent use, which it does not.
+    """
+
+    done = pyqtSignal()
+
+    def __init__(self, registry, rect, path):
+        super().__init__()
+        self._registry = registry
+        self._rect = rect
+        self._path = path
+        self.result: tuple | None = None
+        self.error: Exception | None = None
+
+    def run(self) -> None:
+        """Worker thread. Never touches a widget."""
+        try:
+            self.result = self._registry.start(self._rect, self._path)
+        except Exception as exc:  # noqa: BLE001 - handed back, not swallowed
+            self.error = exc
+        # Queued, because this object lives on the UI thread: the receiver
+        # runs there, which is what makes the result safe to read.
+        self.done.emit()
 
 
 def _recording_temp_dir() -> Path:
@@ -997,6 +1042,14 @@ class AppController:
         # through either entry point is a no-op rather than a second stop
         # or a new snip.
         self._stopping_recording = False
+        # True only while a backend's blocking start() is in flight on a
+        # worker thread. The UI is live during that -- which is the whole
+        # point -- so anything reachable in half a second has to know
+        # there is a recording that has been asked for but does not yet
+        # exist, and `_pending_start_request` carries what the user asked
+        # for meanwhile. See `_start_recorder_responsively`.
+        self._starting_recording = False
+        self._pending_start_request: str | None = None
         self._recording_started_at: float | None = None
         # No QObject parent -- same reasoning as `_recording_delay_timer`
         # above: this attribute's own strong reference is what keeps it
@@ -1273,6 +1326,14 @@ class AppController:
         # gets the guard for free instead of each re-checking it here.
         if self._active_recording is not None:
             self._stop_recording()
+            return
+
+        # A recording that has been asked for but has not started yet. The
+        # shortcut means "stop" for a running recording, and it means the
+        # same here -- the alternative is opening a fresh overlay over a
+        # recording that is about to begin filming it.
+        if self._starting_recording:
+            self._pending_start_request = "stop"
             return
 
         # An armed or counting-down recording is abandoned, and a fresh
@@ -1951,7 +2012,7 @@ class AppController:
         # later.
         self._show_recording_chrome(rect)
         try:
-            backend, actual_path = self._recorder_registry.start(rect, path)
+            backend, actual_path = self._start_recorder_responsively(rect, path)
         except RecordingError as exc:
             # Nothing was ever written to this placeholder path -- an
             # empty file left behind here isn't a discarded recording
@@ -1971,6 +2032,46 @@ class AppController:
             Path(path).unlink(missing_ok=True)
         self._active_recording = (backend, actual_path, after)
         self._start_recording_ui()
+        pending, self._pending_start_request = self._pending_start_request, None
+        if pending == "discard":
+            self._discard_recording()
+        elif pending == "stop":
+            # Asked for while the backend was still starting. Honoured now
+            # rather than leaving a recording running that the user has
+            # already said they do not want.
+            self._stop_recording()
+
+    def _start_recorder_responsively(self, rect: QRectF | None, path: str) -> tuple:
+        """`registry.start()`, with the interface still alive while it runs.
+
+        A nested event loop rather than restructuring the whole flow around
+        a callback: every caller of `_start_armed_recording` -- the Start
+        press, the countdown's last tick -- still gets a recording that is
+        running by the time it returns, and so do the tests.
+
+        The price of a nested loop is re-entrancy, so `_starting_recording`
+        is set for its duration and the two things a user can reach in half
+        a second both check it: `start_capture` (the global shortcut, the
+        tray's Snip) and `_stop_recording` (the pill's Stop). A Stop
+        pressed here is remembered rather than dropped -- see
+        `_pending_start_request` -- because the honest answer to "stop"
+        during start-up is to stop, not to ignore it.
+        """
+        starter = _RecorderStarter(self._recorder_registry, rect, path)
+        loop = QEventLoop()
+        starter.done.connect(loop.quit)
+
+        self._starting_recording = True
+        self._pending_start_request = None
+        try:
+            QThreadPool.globalInstance().start(starter.run)
+            loop.exec()
+        finally:
+            self._starting_recording = False
+
+        if starter.error is not None:
+            raise starter.error
+        return starter.result
 
     def _show_recording_chrome(self, rect: QRectF | None) -> None:
         """Everything the user should *see* the moment a recording starts.
@@ -2243,6 +2344,14 @@ class AppController:
         a discard, another low-disk tick) never sees "no recording active"
         while the file is still mid-move.
         """
+        if self._starting_recording:
+            # Pressed during the backend's start-up. There is nothing to
+            # stop yet, so this is remembered and acted on the moment
+            # there is -- dropping it would make Stop do nothing at the
+            # one time a user is most likely to press it, having just
+            # watched half a second go by.
+            self._pending_start_request = "stop"
+            return
         if self._stopping_recording or self._active_recording is None:
             return
         self._stopping_recording = True
@@ -2379,6 +2488,11 @@ class AppController:
         must be a no-op, not a second `backend.stop()` over the same
         in-flight recording.
         """
+        if self._starting_recording:
+            # Nothing exists to discard yet; remembered and honoured the
+            # moment it does.
+            self._pending_start_request = "discard"
+            return
         if self._stopping_recording or self._active_recording is None:
             return
         self._stopping_recording = True
