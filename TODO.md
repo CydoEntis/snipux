@@ -290,11 +290,29 @@ never been tried.
 
 ## Decisions -- deliberate, do not revert
 
-**No ffmpeg, and no editing in v1.** PyQt6 already ships FFmpeg inside the
-wheel, which is why recording and playback need no external tool. Trimming
-and format conversion would; they are deferred, and their research is kept
-in `docs/design/recording.md` under a heading saying so. Bundling a real
-`ffmpeg.exe` measured 121MB and was **blocked outright by Smart App Control**.
+**No ffmpeg *binary*, and that does not block editing.** *(Corrected
+2026-08-28 -- the earlier form of this decision said trimming and format
+conversion were deferred because they needed an external ffmpeg. They do
+not, and the correction was the owner's: "i thought we could do it cause
+pyqt bundles ffmpeg itself".)*
+
+Bundling a real `ffmpeg.exe` measured 121MB and was **blocked outright by
+Smart App Control**, so it stays unbundled. But the wheel ships
+`libavcodec`/`libavformat`/`libavutil` and the FFmpeg media plugin, and Qt
+exposes the *encoder* through its own API -- so trimming needs no binary.
+
+Measured, not assumed: `QMediaPlayer` -> `QVideoSink` decodes, and
+`QVideoFrameInput` -> `QMediaCaptureSession` -> `QMediaRecorder` encodes,
+which is the identical pipeline `WindowsRecorderBackend._start_region`
+already uses for a cropped screen recording. Trimming 1.0s-2.5s out of a
+3.54s WebM produced a 1.521s H.264 MP4 at 900x400, `Error.NoError`. It
+needs nothing bundled, so Smart App Control has nothing to object to on
+Windows either.
+
+`QMediaFormat` will encode to MPEG4/Matroska/QuickTime/AVI with
+H264/H265/MPEG4/MotionJPEG here. **GIF is not in that list**, so the
+player handoff's GIF export is the one row that still needs something
+else; the other three do not.
 
 **No Windows installer**, same reason -- SAC refuses unsigned installers. The
 portable exe is not blocked and installs itself on first run.
