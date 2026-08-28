@@ -273,6 +273,49 @@ class TestRecordSideModeSelectionIsInert:
         assert chooser.mode == "Window"
 
 
+class TestOnlyModeIsLabelled:
+    """The capture-flow handoff makes mode the only labelled trigger:
+    destination is "icon only ... secondary decision, so no label on the
+    trigger", and delay's "label appears only when set". Labelling all
+    three gave the row three equal-weight controls when only one of them
+    is the question being asked.
+    """
+
+    def test_mode_keeps_its_label(self):
+        chooser = Chooser(parent=None)
+
+        assert chooser.panel.mode_trigger._label == "Region"
+
+    def test_the_destination_trigger_carries_no_label(self):
+        chooser = Chooser(parent=None)
+
+        chooser.set_after("review")
+
+        assert chooser.panel.after_trigger._label == ""
+        # The label still exists where there is room for it.
+        assert chooser.after == "review"
+
+    def test_delay_is_bare_until_one_is_set(self):
+        chooser = Chooser(parent=None)
+        assert chooser.panel.delay_trigger._label == ""
+
+        chooser.set_delay("5s")
+        assert chooser.panel.delay_trigger._label == "5s"
+
+        chooser.set_delay(tokens.DELAY_DEFAULT)
+        assert chooser.panel.delay_trigger._label == ""
+
+    def test_an_unlabelled_trigger_is_narrower_than_a_labelled_one(self):
+        # The point of the change: the row was wide enough to read as a
+        # toolbar rather than a sentence.
+        chooser = Chooser(parent=None)
+        bare = chooser.panel.delay_trigger.width()
+
+        chooser.set_delay("10s")
+
+        assert chooser.panel.delay_trigger.width() > bare
+
+
 class TestEveryModeRowSaysWhatItCaptures:
     """Window and Full screen read as the same thing until you have used
     both -- "if you're capturing a window, you're capturing a full screen?"

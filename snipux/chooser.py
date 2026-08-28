@@ -326,7 +326,16 @@ class _Menu(QWidget):
 
 
 class _Trigger(_Surface):
-    """One of the row's three dropdown triggers: icon, label, chevron."""
+    """One of the row's three dropdown triggers: icon, label, chevron.
+
+    An empty label makes it icon-only, which is what the capture-flow
+    handoff asks of two of the three: *"Mode -- the only labelled
+    control"*, destination *"icon only ... secondary decision, so no label
+    on the trigger"*, delay *"label appears only when set"*. Labelling all
+    three gave the row three equal-weight controls when only one of them
+    is the question being asked, and made it wide enough to read as a
+    toolbar rather than a sentence.
+    """
 
     clicked = pyqtSignal()
 
@@ -362,6 +371,16 @@ class _Trigger(_Surface):
         from PyQt6.QtGui import QFontMetricsF
 
         metric = tokens.ChooserMetric
+        if not self._label:
+            # Icon and chevron only, padded evenly: a labelled trigger's
+            # left padding would look like a gap with nothing in it.
+            self.setFixedWidth(
+                round(
+                    metric.TRIGGER_PAD_R + self._icon_size + 4
+                    + metric.CHEVRON + metric.TRIGGER_PAD_R
+                )
+            )
+            return
         text = QFontMetricsF(_font(12.5, 500)).horizontalAdvance(self._label)
         self.setFixedWidth(
             round(
@@ -408,19 +427,20 @@ class _Trigger(_Surface):
         )
         painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
 
-        x = metric.TRIGGER_PAD_L
         size = self._icon_size
+        x = metric.TRIGGER_PAD_R if not self._label else metric.TRIGGER_PAD_L
         pixmap = design.icon(self._icon_name, QColor(self._icon_colour)).pixmap(size, size)
         painter.drawPixmap(x, (self.height() - size) // 2, pixmap)
-        x += size + 8
 
-        painter.setFont(_font(12.5, 500))
-        painter.setPen(QColor(self._label_colour))
-        painter.drawText(
-            QRectF(x, 0, self.width() - x, self.height()),
-            Qt.AlignmentFlag.AlignVCenter,
-            self._label,
-        )
+        if self._label:
+            x += size + 8
+            painter.setFont(_font(12.5, 500))
+            painter.setPen(QColor(self._label_colour))
+            painter.drawText(
+                QRectF(x, 0, self.width() - x, self.height()),
+                Qt.AlignmentFlag.AlignVCenter,
+                self._label,
+            )
 
         chevron = metric.CHEVRON
         pixmap = design.icon("chevron", QColor(colour.HINT_FG)).pixmap(chevron, chevron)
@@ -759,21 +779,16 @@ class ChooserPanel(_Surface):
         self.mode_trigger.clicked.connect(lambda: self.triggerClicked.emit("mode"))
         row.addWidget(self.mode_trigger)
 
-        # A literal text node, not decoration: it is what makes the row parse
-        # as one sentence rather than three unrelated widgets.
-        then = QLabel("then", self)
-        then.setFont(_font(12, 400))
-        then.setStyleSheet(f"color: {colour.HINT_FG}; background: transparent;")
-        then.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        row.addWidget(then)
-
-        self.after_trigger = _Trigger("eye", "Review", 15, colour.ROW_IDLE_FG, self)
+        # No "then" text node, and no label on this trigger. The
+        # capture-flow handoff makes mode the only labelled control and
+        # calls the destination a "secondary decision, so no label on the
+        # trigger" -- and "then Review" reads as the sentence's main clause
+        # when it is the part most users set once and never touch.
+        self.after_trigger = _Trigger("eye", "", 15, colour.ROW_IDLE_FG, self)
         self.after_trigger.clicked.connect(lambda: self.triggerClicked.emit("after"))
         row.addWidget(self.after_trigger)
 
-        self.delay_trigger = _Trigger(
-            "timer", tokens.DELAY_DEFAULT, 15, colour.ROW_IDLE_FG, self
-        )
+        self.delay_trigger = _Trigger("timer", "", 15, colour.ROW_IDLE_FG, self)
         self.delay_trigger.clicked.connect(lambda: self.triggerClicked.emit("delay"))
         row.addWidget(self.delay_trigger)
 
@@ -1057,14 +1072,19 @@ class Chooser(QWidget):
         self.panel.mode_trigger.set_content(icon, self._mode, colour.MODE_ACCENT)
 
         after_icon, after_label = _after_display(self._after, self._kind)
-        self.panel.after_trigger.set_content(after_icon, after_label, colour.ROW_IDLE_FG)
+        # Icon only. The label still exists for the tab and the menu, which
+        # have room for it and need it to be readable.
+        self.panel.after_trigger.set_content(after_icon, "", colour.ROW_IDLE_FG)
 
         # A delay that is about to surprise you should be visible before it
         # does, so the label goes accent the moment one is set.
         armed_delay = self._delay != tokens.DELAY_DEFAULT
+        # "Label appears only when set", per the handoff -- a countdown is
+        # the one thing here that can surprise you, so it earns width
+        # exactly when it is armed and none when it is not.
         self.panel.delay_trigger.set_content(
             "timer",
-            self._delay,
+            self._delay if armed_delay else "",
             colour.MODE_ACCENT if armed_delay else colour.ROW_IDLE_FG,
             colour.MODE_ACCENT if armed_delay else tokens.Color.TEXT_PRIMARY,
         )
