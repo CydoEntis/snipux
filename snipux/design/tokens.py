@@ -700,11 +700,12 @@ RECORD_DISABLED_MODES = {
     "Freeform": "Video is rectangular",
 }
 
-# The record side's "then" vocabulary: Instant and Save only, never Edit,
-# Review or Trim -- there is no annotate-in-place for a video, and Trim is
-# where a third destination lands once editing exists (recording.md ticket
-# 6+, not this one). "save" is a destination id that exists only here, not
-# in `AFTER_CAPTURE` (stills-only).
+# The record side's "then" vocabulary: Copy, Save and Open -- never Edit or
+# Review, because there is no annotate-in-place for a video. "open" is the
+# third destination this file long said would land "once editing exists":
+# it exists now, as `player.PlayerWindow`, and it is where a recording goes
+# to be trimmed and exported. "save" and "open" are destination ids that
+# exist only here, not in `AFTER_CAPTURE` (stills-only).
 #
 # These two are genuine alternatives, and the wording says which is which.
 # They were not always: landing a recording used to move the file into the
@@ -716,6 +717,7 @@ RECORD_DISABLED_MODES = {
 CHOOSER_RECORD_AFTER_NOTE = {
     "instant": "Copy to the clipboard. No file is kept.",
     "save": "Save to your recordings folder.",
+    "open": "Save, then open it to trim and export.",
 }
 RECORD_AFTER_DEFAULT = "instant"
 
@@ -731,6 +733,9 @@ RECORDING_AFTER = [
     ("save", "Save to a folder",
      "The finished video is moved into your recordings folder, under the "
      "filename pattern below."),
+    ("open", "Open in the player",
+     "Saved as above, then opened in the trim editor -- play it back, cut "
+     "the dead air off either end and export."),
 ]
 
 # Recordings get their own default name, not the stills one. Sharing
@@ -970,4 +975,155 @@ STAGES = {
     "count":    ("Counting down", "Recording starts -- Esc to stop"),
     "live":     ("Recording", "This bar sits outside the recorded frame"),
     "done":     ("Finished", "Trim and export in the player"),
+}
+
+
+# --------------------------------------------------------------------------
+# Recording player / trim editor (docs/design/player, LOCKED 2026-08-27)
+#
+# The player wears the REVIEW window's chrome, not the overlay's glass, so
+# `Win` / `WinMetric` above cover the shell, title bar and footer. What
+# follows is only what the player adds: the floating transport and the
+# timeline rail. `Gradient.WORKSPACE` is already the radial the handoff
+# specifies for the canvas, so it is reused rather than restated.
+# --------------------------------------------------------------------------
+
+class PlayerMetric:
+    """Player geometry. Logical pixels."""
+    WINDOW_MIN       = (980, 640)
+
+    # Floating transport, over the canvas bottom -- the annotate bar's shell
+    BAR_H            = 42          # 6 pad + 28 control + 6 pad + borders
+    BAR_PAD          = 6
+    BAR_GAP          = 3
+    BAR_RADIUS       = 12
+    BAR_BOTTOM       = 18          # from the canvas floor
+    BTN              = 28
+    BTN_RADIUS       = 8
+    ICON             = 16
+
+    # Video frame on the workspace
+    FRAME_BORDER     = 1
+    FRAME_RING       = 7           # rgba(255,255,255,.02)
+    BADGE_INSET      = (16, 14)
+    ZOOM_STEPS       = (60, 160, 20)
+    PLAY_OVERLAY_D   = 74          # centre play badge while paused
+
+    # Timeline panel
+    PANEL_PAD        = (12, 16, 14)
+    PANEL_GAP        = 9
+    RAIL_H           = 96
+    RAIL_RADIUS      = 9
+    RULER_H          = 16
+    FILMSTRIP_H      = 44
+    WAVE_H           = 36          # rail minus ruler minus filmstrip
+    FILMSTRIP_CELLS  = 16
+    WAVE_BARS        = 120
+    TICK_EVERY_S     = 5
+
+    HANDLE_HIT_W     = 14          # invisible grab area
+    HANDLE_W         = 8           # visible bar
+    HANDLE_H         = 34
+    HANDLE_RADIUS    = 3
+    PLAYHEAD_W       = 2
+    RANGE_EDGE_W     = 2
+    MIN_RANGE_S      = 0.5
+
+    ROW_BTN_H        = 26          # Start here / End here / Reset
+    ACTION_BTN_H     = 36          # footer buttons
+    ACTION_RADIUS    = 9
+    SPLIT_CARET_W    = 24
+
+
+class PlayerColor:
+    RAIL_BG          = "#14161a"
+    RAIL_BORDER      = "#262a31"
+    RULER_RULE       = "#1f2229"
+    TICK             = "#2f333b"
+    TICK_FG          = "#5f6674"
+
+    FILM_CELL        = "#26271f"        # the recorded content's own tone
+    FILM_SEAM        = "#000000"        # at 35%
+    OUTSIDE_OPACITY  = 0.38             # filmstrip cells outside the range
+    OUTSIDE_VEIL     = "#0a0b0d"        # at 72%, over ruler-to-bottom
+
+    WAVE_IN          = "#c8d96a"        # inside the range, audio kept
+    WAVE_OUT         = "#4a4f45"        # outside the range
+    WAVE_MUTED_IN    = "#3a3f47"        # muted: the whole waveform greys
+    WAVE_MUTED_OUT   = "#23262d"
+
+    TRIM             = "#e3ff4f"        # range edges + both handles
+    TRIM_INNER       = "#e3ff4f"        # at 18%, inset ring
+    HANDLE_GRIP      = "#15170e"        # at 50%, the 2x14 line in the handle
+    PLAYHEAD         = "#ff5a52"        # red = "now", matching the recording bar
+    PLAYHEAD_FG      = "#2a0d0b"        # text in the playhead's time flag
+
+    KEPT_FG          = "#c8d96a"        # "keeping 00:20"
+    CUT_FG           = "#c8a54a"        # "-00:07 cut"
+    MUTED_FG         = "#f5a3a3"
+    MUTED_BG         = "#c85050"        # at 20%
+
+    SAVED_FG         = "#9ec46a"
+    DIRTY_FG         = "#c8a54a"
+
+    # Transport shell + controls, over the canvas
+    BAR_BG           = "#1a1c18"        # at 94%
+    BAR_BORDER       = "#ffffff"        # at 10%
+    BAR_SEP          = "#ffffff"        # at 12%
+    BTN_IDLE_FG      = "#a8afa0"
+    BTN_ON_BG        = "#ffffff"        # at 12%, the pre-lit play button
+    BTN_HOVER_BG     = "#ffffff"        # at 9%
+    BTN_ON_FG        = "#f1f3e8"
+    TIME_FG          = "#f1f3e8"
+    TIME_TOTAL_FG    = "#6f766a"
+    ACCENT_ON_BG     = "#e3ff4f"        # at 15%, loop/speed when engaged
+    ACCENT_ON_FG     = "#eaff7a"
+    MENU_BG          = "#1a1c18"        # at 98%
+
+    PAUSE_SCRIM      = "#0c0d0a"        # at 28%, over the frame while paused
+    PAUSE_BADGE_BG   = "#141612"        # at 82%
+    PAUSE_BADGE_EDGE = "#ffffff"        # at 16%
+    PAUSE_BADGE_FG   = "#f1f3e8"
+
+    BADGE_BG         = "#121418"        # at 88%, canvas corner badges
+    BADGE_BORDER     = "#262a31"
+    BADGE_FG         = "#9aa2b1"
+    BADGE_SEP        = "#4e545f"
+    ZOOM_FG          = "#aeb5c2"
+    ZOOM_BTN_FG      = "#8a92a1"
+    ZOOM_BTN_HOVER   = "#282c34"
+
+
+# Playback speeds. 1x is the only one that renders without the accent tint --
+# an altered speed must be visible without reading the number.
+SPEEDS = ["0.5", "1", "1.5", "2"]
+
+# Export formats: id, icon, label, the one-line consequence, MB/s estimate.
+# `frame` has no per-second figure because it is a single still.
+EXPORT_FORMATS = [
+    ("webm",  "save",   "WebM",                 "What was recorded -- no re-encode when untrimmed.", 0.42),
+    ("mp4",   "save",   "MP4",                  "Re-encoded for the trim. Plays in desktop players.", 0.55),
+    ("gif",   "image",  "GIF",                  "Silent, loops. Big above ~10 seconds.",             1.90),
+    ("frame", "camera", "Current frame as PNG", "Just the frame under the playhead.",                None),
+]
+EXPORT_DEFAULT = "mp4"
+EXPORT_FRAME_MB = 0.9
+
+# The footer's primary is EXPORT, not Copy: trimming re-encodes, so a file must
+# be written and a clipboard-only result would be a lie. Copy stays secondary
+# and copies a file REFERENCE, the same rule as the capture flow.
+EXPORT_FOOTNOTE = ("Trimming re-encodes. The untrimmed original stays at its "
+                   "own path until you overwrite it.")
+
+PLAYER_FPS = 30
+
+PLAYER_SHORTCUTS = {
+    "Space": "play / pause",
+    "I": "set the start at the playhead",
+    "O": "set the end at the playhead",
+    "Left": "previous frame",
+    "Right": "next frame",
+    "M": "mute (drops the audio track on export)",
+    "L": "loop the trimmed range",
+    "Esc": "close an open menu",
 }

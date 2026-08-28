@@ -1178,12 +1178,13 @@ _AFTER_ROWS = [
     ("review", "eye", "Review", tokens.CHOOSER_AFTER_NOTE["review"]),
 ]
 
-# The record side's own "then" vocabulary -- Instant and Save, never Edit,
-# Review or Trim. Kept out of `AFTER_CAPTURE`/`_AFTER_ROWS`, which are
-# stills-only; "save" is not a destination stills can pick.
+# The record side's own "then" vocabulary -- Copy, Save and Open, never
+# Edit or Review. Kept out of `AFTER_CAPTURE`/`_AFTER_ROWS`, which are
+# stills-only; neither "save" nor "open" is a destination stills can pick.
 _RECORD_AFTER_ROWS = [
-    ("instant", "copy", "Instant", tokens.CHOOSER_RECORD_AFTER_NOTE["instant"]),
+    ("instant", "copy", "Copy", tokens.CHOOSER_RECORD_AFTER_NOTE["instant"]),
     ("save", "save", "Save", tokens.CHOOSER_RECORD_AFTER_NOTE["save"]),
+    ("open", "pen", "Open", tokens.CHOOSER_RECORD_AFTER_NOTE["open"]),
 ]
 
 
