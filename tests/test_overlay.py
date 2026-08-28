@@ -5299,6 +5299,28 @@ class TestCommitToRecord:
         assert rect is not None
         assert rect == overlay.absolute_selection()
 
+    def test_the_dimension_chip_drops_the_mark_count_for_a_recording(self):
+        # "793 x 458 - 0 marks" over a region about to be filmed counts a
+        # feature that does not apply to it: there is no annotate-in-place
+        # for a video.
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
+        overlay.set_selection(QRectF(10, 10, 793, 458))
+
+        size, marks = overlay._dimension_chip_texts()
+
+        assert size == "793 × 458"
+        assert marks == ""
+
+    def test_the_stills_side_still_counts_its_marks(self):
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 600, 600)
+        overlay.set_selection(QRectF(10, 10, 793, 458))
+
+        _size, marks = overlay._dimension_chip_texts()
+
+        assert marks == "0 marks"
+
     def test_full_screen_arms_like_any_other_region(self):
         # It is a monitor-sized selection now, not a special case, so it
         # gets the same handles as a dragged one -- which is what makes

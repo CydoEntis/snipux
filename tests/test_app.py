@@ -1822,18 +1822,22 @@ class TestAppControllerArmingARecording:
         assert controller._recording_hud.state() == RecordingBar.LIVE
         assert "Stop" in controller._recording_hud._action._label
 
-    def test_the_capture_hotkey_starts_an_armed_recording(
+    def test_the_capture_hotkey_abandons_an_armed_recording_for_a_new_snip(
         self, make_controller, monkeypatch
     ):
-        # The pill and the hotkey always do the same thing, so a machine
-        # with nowhere to put a pill still has a way in.
+        # It used to start the recording, on the reasoning that the hotkey
+        # and the bar should agree. Wrong about which thing they agree on:
+        # this shortcut means "give me a new snip" everywhere else, and a
+        # user who drew the wrong region reaches for it to draw another.
         controller, backend = self._controller(make_controller, monkeypatch)
         controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
 
         controller.start_capture()
 
-        assert len(backend.start_calls) == 1
-        assert controller._overlay is None
+        assert backend.start_calls == []
+        assert controller._armed_recording is None
+        # And it does what it always means: a fresh snip is open.
+        assert controller._overlay is not None
 
     def test_the_countdown_pill_counts_down_and_names_the_action(
         self, make_controller, monkeypatch
@@ -1870,7 +1874,9 @@ class TestAppControllerArmingARecording:
         # was genuinely cut short.
         assert not Path(path).exists()
 
-    def test_the_hotkey_cancels_during_the_countdown(self, make_controller, monkeypatch):
+    def test_the_hotkey_abandons_a_countdown_for_a_new_snip_too(
+        self, make_controller, monkeypatch
+    ):
         controller, backend = self._controller(make_controller, monkeypatch)
         controller._on_recording_requested(QRectF(50, 50, 200, 150), "3s")
         controller._begin_armed_recording()
@@ -1879,7 +1885,25 @@ class TestAppControllerArmingARecording:
 
         assert backend.start_calls == []
         assert controller._armed_recording is None
-        assert controller._overlay is None
+        assert controller._countdown_timer is None
+        assert controller._overlay is not None
+
+    def test_dismissing_the_overlay_abandons_the_armed_recording(
+        self, make_controller, monkeypatch
+    ):
+        # The overlay holds the region a recording is being set up around,
+        # so Esc is the user saying they do not want this one. Leaving it
+        # armed left a bar offering to Record a region no longer on screen,
+        # and a Record button that would have filmed it anyway.
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+        assert controller._recording_hud is not None
+
+        controller._on_overlay_dismissed()
+
+        assert controller._armed_recording is None
+        assert controller._recording_hud is None
+        assert backend.start_calls == []
 
     def test_a_second_start_press_does_not_stack_a_second_countdown(
         self, make_controller, monkeypatch

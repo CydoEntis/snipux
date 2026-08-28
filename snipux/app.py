@@ -1221,18 +1221,20 @@ class AppController:
             self._stop_recording()
             return
 
-        # The same hotkey drives the armed and counting states, so it
-        # always does whatever the pill currently says it does -- the two
-        # controls never disagree, and a machine with nowhere to put a
-        # pill still has a way to start and cancel a recording. Ordered
-        # most-advanced-state-first for the same reason
-        # `_on_hud_activated` is.
-        if self._countdown_timer is not None:
+        # An armed or counting-down recording is abandoned, and a fresh
+        # snip opens -- this does not fall through to a `return`.
+        #
+        # It used to *start* the recording, on the reasoning that the
+        # hotkey and the bar should always do the same thing. That was
+        # wrong about which thing. This shortcut means "give me a new
+        # snip" everywhere else in the app, and a user who has drawn the
+        # wrong region reaches for it precisely to draw another one:
+        # "i tried to cancel and redraw where i wanted to record and i went
+        # to reopen the snipux so i can draw a new region and it just
+        # started recording". Starting is the Record button's job, and
+        # Enter's.
+        if self._countdown_timer is not None or self._armed_recording is not None:
             self._cancel_armed_recording()
-            return
-        if self._armed_recording is not None:
-            self._begin_armed_recording()
-            return
 
         # No mode parameter: unlike the old per-monitor Overlay, a single
         # OverlayWindow starts in Region and lets its own capture-mode
@@ -1332,6 +1334,10 @@ class AppController:
             # SNX-122: fires only for the record side of the chooser -- see
             # `_on_recording_requested`.
             on_recording_requested=self._on_recording_requested,
+            # Enter fires the stage's primary action, and while a recording
+            # is armed that is Record. Without it Enter fell through to the
+            # stills path and copied a *screenshot* of the region.
+            on_recording_start=self._begin_armed_recording,
         )
         # Stored on self, not left as a local: a parentless widget is fair
         # game for Python's GC to collect out from under the still-open
@@ -2221,8 +2227,17 @@ class AppController:
         `isVisible()`, is what makes a stale overlay unable to wedge this
         guard shut for the rest of the session: whatever ends the overlay,
         this is the one path that lets the next Snip request through.
+
+        An armed recording goes with it. The overlay is what holds the
+        region while a recording is being set up, so dismissing it -- Esc,
+        most often -- is the user saying they do not want this one. Leaving
+        `_armed_recording` set left a bar offering to Record a region that
+        was no longer on screen, and a Record button that would have filmed
+        it anyway.
         """
         self._overlay = None
+        if self._armed_recording is not None or self._countdown_timer is not None:
+            self._cancel_armed_recording()
 
 
 # The process's QApplication, kept alive here for as long as the process
