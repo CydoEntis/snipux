@@ -734,3 +734,165 @@ TOOL_HINTS = {
     "line":        "Drag for a straight line",
     "crop":        "Drag to box off a dashed crop mark",
 }
+
+
+# ---------------------------------------------------------------------------
+# The capture flow's bars (docs/design/flow, LOCKED 2026-08-27)
+# ---------------------------------------------------------------------------
+# Overlay furniture on the same warm glass as the chooser, never the opaque
+# Win palette. The handoff is emphatic that this is one palette with
+# tokens.py rather than a fork -- everything not restated here (Color,
+# Metric, Shadow, Font) still comes from above.
+#
+# Three rules the handoff says are load-bearing, each arrived at by building
+# the alternative and rejecting it. Metrics here only make sense with them:
+#
+#   1. Every bar is centred -- the chooser on the monitor, every
+#      post-selection bar on the selection. Never edge-anchored: a centred
+#      bar that changes width moves both edges, which is also why
+#   2. nothing collapses. Tools stay visible.
+#   3. The primary action is at the LEFT end, before a divider, and is the
+#      only accent-filled control in the bar.
+
+# ---------------------------------------------------------------- geometry
+class FlowMetric:
+    """Shared by the chooser row, the stills bar and the recording bar."""
+
+    ROW_H            = 42          # 6 pad + 28 control + 6 pad + 2x1px border
+    PAD              = 6
+    GAP              = 3           # between icon buttons
+    GROUP_GAP        = 7           # either side of the action divider
+    RADIUS           = 12          # free-floating bars
+    RADIUS_DOCKED    = (0, 0, 12, 12)   # chooser: flush to the monitor's top edge
+
+    BTN              = 28          # every control in every bar
+    BTN_RADIUS       = 8
+    ICON             = 16          # glyph in a 28px button; 15 in a labelled chip
+    ICON_STROKE      = 1.55
+    CHEVRON          = 12
+    DIVIDER_H        = 20
+
+    # Split action button
+    SPLIT_PAD_H      = 11
+    SPLIT_CARET_W    = 22
+
+    # Placement, relative to the SELECTION -- not the screen. Rule 1.
+    BAR_OFFSET_Y     = 16          # gap below the selection's bottom edge
+    BAR_EDGE_MARGIN  = 12          # min gap from a monitor edge after clamping
+    BAR_BOTTOM_ROOM  = 108         # bar top is clamped to monitor_h - this
+
+    # Hint line under every bar
+    HINT_GAP         = 7
+    HINT_PAD         = (4, 10)
+    HINT_RADIUS      = 7
+    HINT_ICON        = 12
+
+    # Dropdown popovers
+    MENU_PAD         = 4
+    MENU_RADIUS      = 11
+    MENU_OFFSET      = 6           # from the trigger edge
+    MENU_ROW_PAD     = (7, 8)
+    MENU_ROW_RADIUS  = 7
+    MENU_W_MODE      = 228
+    MENU_W_DEST      = 284
+    MENU_W_AUDIO     = 250
+    MENU_W_DELAY     = 146
+
+    # Chips above the selection
+    CHIP_OFFSET_Y    = 34
+    CHIP_RADIUS      = 7
+    CHIP_PAD         = (5, 10)
+
+    # Selection frame. FRAME_INSET is negative because the frame is drawn
+    # OUTSIDE the captured pixels -- a border on the boundary would land in
+    # the file.
+    FRAME_W          = 2
+    FRAME_INSET      = -3
+    ANTS_DASH        = (7, 7)
+    ANTS_PERIOD_MS   = 700
+    CORNER_LEN       = 24
+    CORNER_W         = 4
+    HANDLE_LONG      = 30
+    HANDLE_SHORT     = 8
+
+    # Countdown, centred IN the region -- where the user is already looking.
+    COUNT_D          = 118
+    COUNT_FONT       = 54
+
+    # A drag smaller than this is discarded rather than captured. Note this
+    # is the handoff's figure; TODO.md records a 16x16 minimum as an earlier
+    # deliberate deviation, so whichever ends up enforced, only one of these
+    # two numbers may be live at a time.
+    MIN_SEL_W        = 60
+    MIN_SEL_H        = 40
+
+
+class FlowColor:
+    """Only what differs from Color / ChooserColor.
+
+    Alphas ride as `<TOKEN>_ALPHA` siblings so `design.flow_color()` can hand
+    back one fully-specified QColor, the same pairing rule the other three
+    palettes follow -- a caller must never re-type a percentage into an
+    rgba() string that then drifts from the token.
+    """
+
+    BAR_BG               = "#1a1c18"
+    BAR_BG_ALPHA         = 0.93
+    BAR_BORDER           = "#ffffff"
+    BAR_BORDER_ALPHA     = 0.10
+    BAR_BORDER_LIVE      = "#ff5a52"
+    BAR_BORDER_LIVE_ALPHA = 0.34
+
+    MENU_BG              = "#1a1c18"
+    MENU_BG_ALPHA        = 0.98
+    MENU_BORDER          = "#ffffff"
+    MENU_BORDER_ALPHA    = 0.12
+    ROW_SELECTED_BG      = "#ffffff"
+    ROW_SELECTED_BG_ALPHA = 0.08
+    ROW_SELECTED_FG      = "#f8faf0"
+    ROW_IDLE_FG          = "#a8afa0"
+    ROW_HOVER_BG         = "#ffffff"
+    ROW_HOVER_BG_ALPHA   = 0.09
+    ROW_NOTE_FG          = "#8f9689"
+    SECTION_FG           = "#616a5c"
+    SHORTCUT_FG          = "#6f766a"
+
+    TOOL_ACTIVE_BG       = "#ffffff"
+    TOOL_ACTIVE_BG_ALPHA = 0.16
+    TOOL_ACTIVE_FG       = "#f8faf0"
+    TOOL_IDLE_FG         = "#a8afa0"
+    TOOL_DISABLED_FG     = "#5d6157"
+    DANGER_BG            = "#c85050"
+    DANGER_BG_ALPHA      = 0.22
+    DANGER_FG            = "#f5a3a3"
+
+    ACCENT               = "#e3ff4f"
+    ACCENT_FG            = "#15170e"
+    ACCENT_SOFT          = "#eaff7a"   # accent as TEXT or a small glyph
+    # The handoff gives this as "14-18% for an armed segment"; the prototype
+    # spends the range on two different things, so it is two tokens here
+    # rather than one that has to be right twice. .18 is the armed kind
+    # segment; PAUSE_WASH is the paused button in the live bar.
+    ACCENT_WASH          = "#e3ff4f"
+    ACCENT_WASH_ALPHA    = 0.18
+    PAUSE_WASH           = "#e3ff4f"
+    PAUSE_WASH_ALPHA     = 0.14
+
+    # Recording. The only place red appears in the product, which is what
+    # lets it mean "live" without a label -- do not spend it anywhere else.
+    REC                  = "#ff5a52"
+    REC_FG               = "#2a0d0b"   # text on the Stop button
+    REC_CLOCK            = "#ffd9d6"
+    REC_WASH             = "#ff5a52"
+    REC_WASH_ALPHA       = 0.14
+
+    SCRIM                = "#0c0d0a"
+    SCRIM_ALPHA          = 0.62
+    SCRIM_LIVE_ALPHA     = 0.28        # drops so you can see what you are filming
+
+    # Window-mode hover preview: two alphas on one colour, so they are two
+    # tokens.
+    WINDOW_HOVER         = "#e3ff4f"
+    WINDOW_HOVER_ALPHA   = 0.85        # the 2px border
+    WINDOW_HOVER_FILL    = "#e3ff4f"
+    WINDOW_HOVER_FILL_ALPHA = 0.07
