@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#0d0e11; font-family:'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color:#c8d96a; text-decoration:none; } a:hover { color:#e3ff4f; }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:.2; } }
+</style>
+</helmet>
+
+<div style="position:relative; width:100vw; height:100vh; display:flex; flex-direction:column; background:#14161a; overflow:hidden; user-select:none">
+
+  <div style="height:42px; flex:none; display:flex; align-items:center; gap:10px; padding:0 10px 0 14px; background:#191c21; border-bottom:1px solid #23262d">
+    <div style="width:18px; height:18px; flex:none; border-radius:5px; background:#e3ff4f; display:grid; place-items:center; color:#15170e">
+      <dc-import name="Icon" glyph="play" size="10" stroke="2.2" hint-size="10px,10px"></dc-import>
+    </div>
+    <span style="font:500 12.5px/1 'IBM Plex Sans'; color:#d6dae2; white-space:nowrap">Screen recording from 2026-08-27 16-22-04.webm</span>
+    <span style="font:400 11px/1 'IBM Plex Mono'; color:#6d7484; white-space:nowrap">1017 × 562 · 30 fps · {{ durLabel }}</span>
+    <span style="display:flex; align-items:center; gap:5px; font:400 11px/1 'IBM Plex Sans'; color:{{ dirtyFg }}; white-space:nowrap"><span style="width:5px; height:5px; border-radius:50%; background:currentColor"></span>{{ dirtyText }}</span>
+    <div style="flex:1"></div>
+    <div style="display:flex; gap:2px; color:#7c8494">
+      <button style="width:26px; height:26px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:6px; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="minimize" size="14" hint-size="14px,14px"></dc-import></button>
+      <button style="width:26px; height:26px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:6px; cursor:pointer" style-hover="background:#23262d"><dc-import name="Icon" glyph="expand" size="14" hint-size="14px,14px"></dc-import></button>
+      <button style="width:26px; height:26px; display:grid; place-items:center; border:0; background:transparent; color:inherit; border-radius:6px; cursor:pointer" style-hover="background:#c0392b; color:#fff"><dc-import name="Icon" glyph="close" size="14" hint-size="14px,14px"></dc-import></button>
+    </div>
+  </div>
+
+  <div style="flex:1; min-height:0; position:relative; display:grid; place-items:center; background:radial-gradient(85% 75% at 50% 30%, #171a1f 0%, #0c0d10 100%); overflow:hidden">
+
+    <div style="position:absolute; left:16px; top:14px; z-index:5; display:flex; align-items:center; gap:8px; padding:5px 10px; border-radius:7px; background:rgba(18,20,24,.88); border:1px solid #262a31; font:500 11px/1 'IBM Plex Mono'; color:#9aa2b1; white-space:nowrap">
+      <dc-import name="Icon" glyph="image" size="13" hint-size="13px,13px"></dc-import>1017 × 562
+      <span style="color:#4e545f">·</span><span style="color:{{ trimFg }}">{{ trimLabel }}</span>
+    </div>
+    <div style="position:absolute; right:16px; top:14px; z-index:5; display:flex; align-items:center; gap:4px; padding:4px; border-radius:8px; background:rgba(18,20,24,.88); border:1px solid #262a31">
+      <button onClick="{{ zoomOut }}" title="Zoom out" style="width:22px; height:22px; display:grid; place-items:center; border:0; padding:0; border-radius:6px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#282c34"><dc-import name="Icon" glyph="minus" size="13" hint-size="13px,13px"></dc-import></button>
+      <span style="min-width:40px; text-align:center; font:500 11px/1 'IBM Plex Mono'; color:#aeb5c2">{{ zoom }}%</span>
+      <button onClick="{{ zoomIn }}" title="Zoom in" style="width:22px; height:22px; display:grid; place-items:center; border:0; padding:0; border-radius:6px; background:transparent; color:#8a92a1; cursor:pointer" style-hover="background:#282c34"><dc-import name="Icon" glyph="plus" size="13" hint-size="13px,13px"></dc-import></button>
+    </div>
+
+    <div style="transform:scale({{ zs }}); transition:transform .18s ease">
+      <div onClick="{{ togglePlay }}" style="position:relative; width:760px; height:420px; border-radius:4px; border:1px solid #454b56; box-shadow:0 34px 74px -18px rgba(0,0,0,.9), 0 0 0 7px rgba(255,255,255,.02); overflow:hidden; cursor:pointer">
+        <div style="position:absolute; inset:0; display:flex; font:400 11px/22px 'IBM Plex Mono'; color:#d6d8c8; background:#26271f">
+          <div style="width:132px; flex:none; background:#212219; border-right:1px solid #34362b; padding:14px 0">
+            <div style="padding:0 13px 9px; font:500 9.5px/1 'IBM Plex Sans'; letter-spacing:.12em; text-transform:uppercase; color:#8d907c">spaces</div>
+            <div style="padding:0 13px; font-size:10.5px; line-height:21px; color:#b6b9a6">
+              <div>The COMMANDER</div>
+              <div>aevox-web</div>
+              <div style="color:#e3ff4f">snipux</div>
+              <div>punchcard</div>
+            </div>
+          </div>
+          <div style="flex:1; min-width:0; padding:14px 16px; overflow:hidden">
+            <div>Region recording produces empty, unplayable files while full screen works.</div>
+            <div style="height:22px"></div>
+            <div>no error — the pill counts up like it's working, then nothing lands.</div>
+            <div>unning again. Right now it's also the only mode that works.</div>
+            <div style="height:22px"></div>
+            <div style="color:#9ea08d">~/.config/snipux/profiles/default.toml</div>
+            <div style="height:22px"></div>
+            <div>r's frame construction is the prime suspect.</div>
+            <div style="height:22px"></div>
+            <div><span style="color:#8ce99a">ubuntu@ubuntu</span>:~/snipux$ <span style="display:inline-block; width:6px; height:11px; background:#d6d8c8; vertical-align:-1px; animation:blink 1s steps(2) infinite"></span></div>
+          </div>
+        </div>
+        <div style="position:absolute; left:{{ cursorX }}%; top:{{ cursorY }}%; width:14px; height:14px; margin:-2px 0 0 -2px; pointer-events:none; transition:left .12s linear, top .12s linear">
+          <dc-import name="Icon" glyph="select" size="14" stroke="1.2" hint-size="14px,14px"></dc-import>
+        </div>
+        <sc-if value="{{ paused }}" hint-placeholder-val="{{ true }}">
+          <div style="position:absolute; inset:0; display:grid; place-items:center; background:rgba(12,13,10,.28)">
+            <div style="width:74px; height:74px; border-radius:50%; background:rgba(20,22,18,.82); border:1px solid rgba(255,255,255,.16); display:grid; place-items:center; color:#f1f3e8; padding-left:5px">
+              <dc-import name="Icon" glyph="play" size="30" hint-size="30px,30px"></dc-import>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+
+    <div style="position:absolute; left:50%; bottom:18px; transform:translateX(-50%); z-index:6; display:flex; align-items:center; gap:3px; padding:6px; border-radius:12px; background:rgba(26,28,24,.94); border:1px solid rgba(255,255,255,.1); box-shadow:0 20px 44px -14px rgba(0,0,0,.9)">
+      <button onClick="{{ togglePlay }}" title="{{ playTitle }}" style="width:28px; height:28px; display:grid; place-items:center; border:0; padding:0; border-radius:8px; cursor:pointer; background:rgba(255,255,255,.12); color:#f1f3e8" style-hover="background:rgba(255,255,255,.2)">
+        <dc-import name="Icon" glyph="{{ playGlyph }}" size="16" hint-size="16px,16px"></dc-import>
+      </button>
+      <button onClick="{{ stepBack }}" title="Previous frame — ←" style="width:28px; height:28px; display:grid; place-items:center; border:0; padding:0; border-radius:8px; cursor:pointer; background:transparent; color:#a8afa0" style-hover="background:rgba(255,255,255,.09)">
+        <span style="display:flex; transform:rotate(90deg)"><dc-import name="Icon" glyph="chevron" size="16" hint-size="16px,16px"></dc-import></span>
+      </button>
+      <button onClick="{{ stepFwd }}" title="Next frame — →" style="width:28px; height:28px; display:grid; place-items:center; border:0; padding:0; border-radius:8px; cursor:pointer; background:transparent; color:#a8afa0" style-hover="background:rgba(255,255,255,.09)">
+        <span style="display:flex; transform:rotate(-90deg)"><dc-import name="Icon" glyph="chevron" size="16" hint-size="16px,16px"></dc-import></span>
+      </button>
+      <div style="width:1px; height:20px; background:rgba(255,255,255,.12); margin:0 5px"></div>
+      <span style="display:flex; align-items:center; gap:6px; font:500 12px/1 'IBM Plex Mono'; color:#f1f3e8; white-space:nowrap; padding:0 3px">
+        {{ nowLabel }}<span style="color:#6f766a">/ {{ trimDurLabel }}</span>
+      </span>
+      <div style="width:1px; height:20px; background:rgba(255,255,255,.12); margin:0 5px"></div>
+      <button onClick="{{ toggleMute }}" title="{{ muteTitle }}" style="width:28px; height:28px; display:grid; place-items:center; border:0; padding:0; border-radius:8px; cursor:pointer; background:{{ muteBg }}; color:{{ muteFg }}" style-hover="background:rgba(255,255,255,.09)">
+        <dc-import name="Icon" glyph="{{ muteGlyph }}" size="16" hint-size="16px,16px"></dc-import>
+      </button>
+      <button onClick="{{ toggleLoop }}" title="Loop the trimmed range — L" style="display:flex; align-items:center; gap:5px; height:28px; padding:0 9px; border:0; border-radius:8px; cursor:pointer; background:{{ loopBg }}; color:{{ loopFg }}; font:500 11.5px 'IBM Plex Sans'" style-hover="background:rgba(255,255,255,.09)">
+        <dc-import name="Icon" glyph="redo" size="15" hint-size="15px,15px"></dc-import>Loop
+      </button>
+      <div style="position:relative">
+        <button onClick="{{ openSpeed }}" title="Playback speed" style="display:flex; align-items:center; gap:5px; height:28px; padding:0 7px 0 9px; border:0; border-radius:8px; cursor:pointer; background:{{ speedBg }}; color:{{ speedFg }}; font:500 11.5px 'IBM Plex Mono'" style-hover="background:rgba(255,255,255,.09)">
+          {{ speed }}×<span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="12" hint-size="12px,12px"></dc-import></span>
+        </button>
+        <sc-if value="{{ speedOpen }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; right:0; bottom:34px; z-index:30; width:110px; padding:4px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 -22px 48px -12px rgba(0,0,0,.92)">
+            <sc-for list="{{ speeds }}" as="s" hint-placeholder-count="5">
+              <button onClick="{{ s.pick }}" style="width:100%; display:flex; align-items:center; gap:8px; padding:7px 8px; border:0; border-radius:7px; cursor:pointer; text-align:left; background:{{ s.bg }}; color:{{ s.fg }}; font:500 12px 'IBM Plex Mono'" style-hover="background:rgba(255,255,255,.09)">
+                <span style="flex:1">{{ s.label }}×</span>
+                <span style="opacity:{{ s.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="13" stroke="2" hint-size="13px,13px"></dc-import></span>
+              </button>
+            </sc-for>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+  </div>
+
+  <div style="flex:none; background:#191c21; border-top:1px solid #23262d; padding:12px 16px 14px; display:flex; flex-direction:column; gap:9px">
+
+    <div style="display:flex; align-items:center; gap:10px">
+      <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876; white-space:nowrap">Trim</span>
+      <div style="display:flex; gap:6px">
+        <button onClick="{{ markIn }}" title="Set the start at the playhead — I" style="display:flex; align-items:center; gap:6px; height:26px; padding:0 10px; border:1px solid #2f333b; border-radius:7px; cursor:pointer; background:#1c1f25; color:#d3d8e1; font:500 11.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:#252931">
+          <span style="width:2px; height:11px; background:#e3ff4f"></span>Start here
+          <span style="font:400 10px 'IBM Plex Mono'; color:#6d7484">I</span>
+        </button>
+        <button onClick="{{ markOut }}" title="Set the end at the playhead — O" style="display:flex; align-items:center; gap:6px; height:26px; padding:0 10px; border:1px solid #2f333b; border-radius:7px; cursor:pointer; background:#1c1f25; color:#d3d8e1; font:500 11.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:#252931">
+          End here<span style="width:2px; height:11px; background:#e3ff4f"></span>
+          <span style="font:400 10px 'IBM Plex Mono'; color:#6d7484">O</span>
+        </button>
+        <button onClick="{{ resetTrim }}" title="Use the whole recording" style="height:26px; padding:0 10px; border:1px solid #2b2f36; border-radius:7px; cursor:pointer; background:transparent; color:{{ resetFg }}; font:500 11.5px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:#22262d; color:#dfe4ec">Reset</button>
+      </div>
+      <div style="flex:1"></div>
+      <span style="display:flex; align-items:center; gap:9px; font:400 11.5px/1 'IBM Plex Mono'; color:#8a92a1; white-space:nowrap">
+        <span>in <span style="color:#dfe4ec">{{ inLabel }}</span></span>
+        <span style="color:#3f444d">·</span>
+        <span>out <span style="color:#dfe4ec">{{ outLabel }}</span></span>
+        <span style="color:#3f444d">·</span>
+        <span>keeping <span style="color:#c8d96a">{{ trimDurLabel }}</span> of {{ durLabel }}</span>
+        <sc-if value="{{ trimmed }}" hint-placeholder-val="{{ false }}">
+          <span style="color:#3f444d">·</span>
+          <span style="color:#c8a54a">−{{ cutLabel }} cut</span>
+        </sc-if>
+      </span>
+    </div>
+
+    <div ref="{{ railRef }}" onPointerDown="{{ onDown }}" onPointerMove="{{ onMove }}" onPointerUp="{{ onUp }}" style="position:relative; height:96px; border-radius:9px; background:#14161a; border:1px solid #262a31; overflow:hidden; touch-action:none; cursor:pointer">
+
+      <div style="position:absolute; left:0; right:0; top:0; height:16px; display:flex; align-items:flex-end; padding:0 2px; border-bottom:1px solid #1f2229">
+        <sc-for list="{{ ticks }}" as="k" hint-placeholder-count="6">
+          <span style="position:absolute; left:{{ k.pct }}%; bottom:0; display:flex; flex-direction:column; align-items:flex-start; gap:2px">
+            <span style="font:400 9px/1 'IBM Plex Mono'; color:#5f6674; padding-left:3px">{{ k.label }}</span>
+            <span style="width:1px; height:5px; background:#2f333b"></span>
+          </span>
+        </sc-for>
+      </div>
+
+      <div style="position:absolute; left:0; right:0; top:16px; height:44px; display:flex; overflow:hidden">
+        <sc-for list="{{ frames }}" as="f" hint-placeholder-count="16">
+          <div style="flex:1; min-width:0; border-right:1px solid rgba(0,0,0,.35); background:{{ f.bg }}; opacity:{{ f.op }}; position:relative">
+            <div style="position:absolute; left:0; top:0; bottom:0; width:22%; background:rgba(33,34,25,.9)"></div>
+            <div style="position:absolute; left:28%; top:26%; width:52%; height:3px; background:rgba(214,216,200,.28)"></div>
+            <div style="position:absolute; left:28%; top:44%; width:36%; height:3px; background:rgba(214,216,200,.2)"></div>
+            <div style="position:absolute; left:28%; top:62%; width:44%; height:3px; background:{{ f.accent }}"></div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="position:absolute; left:0; right:0; top:60px; bottom:0; display:flex; align-items:center; gap:1px; padding:0 1px">
+        <sc-for list="{{ wave }}" as="w" hint-placeholder-count="120">
+          <span style="flex:1; height:{{ w.h }}%; border-radius:1px; background:{{ w.bg }}"></span>
+        </sc-for>
+      </div>
+
+      <div style="position:absolute; left:0; top:16px; bottom:0; width:{{ inPct }}%; background:rgba(10,11,13,.72); pointer-events:none"></div>
+      <div style="position:absolute; right:0; top:16px; bottom:0; width:{{ outRestPct }}%; background:rgba(10,11,13,.72); pointer-events:none"></div>
+
+      <div style="position:absolute; left:{{ inPct }}%; top:16px; bottom:0; width:{{ rangePct }}%; border-left:2px solid #e3ff4f; border-right:2px solid #e3ff4f; box-shadow:inset 0 0 0 1px rgba(227,255,79,.18); pointer-events:none"></div>
+
+      <div onPointerDown="{{ grabIn }}" title="Drag the start" style="position:absolute; left:{{ inPct }}%; top:16px; bottom:0; width:14px; margin-left:-7px; cursor:ew-resize; display:flex; align-items:center; justify-content:center">
+        <span style="width:8px; height:34px; border-radius:3px; background:#e3ff4f; display:grid; place-items:center">
+          <span style="width:2px; height:14px; background:rgba(21,23,14,.5)"></span>
+        </span>
+      </div>
+      <div onPointerDown="{{ grabOut }}" title="Drag the end" style="position:absolute; left:{{ outPct }}%; top:16px; bottom:0; width:14px; margin-left:-7px; cursor:ew-resize; display:flex; align-items:center; justify-content:center">
+        <span style="width:8px; height:34px; border-radius:3px; background:#e3ff4f; display:grid; place-items:center">
+          <span style="width:2px; height:14px; background:rgba(21,23,14,.5)"></span>
+        </span>
+      </div>
+
+      <div style="position:absolute; left:{{ nowPct }}%; top:0; bottom:0; width:2px; margin-left:-1px; background:#ff5a52; pointer-events:none">
+        <span style="position:absolute; left:50%; top:0; transform:translateX(-50%); padding:2px 5px; border-radius:0 0 4px 4px; background:#ff5a52; color:#2a0d0b; font:600 9.5px/1 'IBM Plex Mono'; white-space:nowrap">{{ nowLabel }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="flex:none; padding:13px 16px; background:#191c21; border-top:1px solid #23262d; display:flex; align-items:center; gap:14px">
+    <div style="min-width:0; display:flex; flex-direction:column; gap:5px">
+      <div style="display:flex; align-items:center; gap:7px">
+        <span style="flex:none; color:{{ stateFg }}; display:flex"><dc-import name="Icon" glyph="{{ stateGlyph }}" size="14" stroke="2" hint-size="14px,14px"></dc-import></span>
+        <span style="font:500 12px/1 'IBM Plex Sans'; color:{{ stateFg }}; white-space:nowrap">{{ stateText }}</span>
+      </div>
+      <span style="font:400 11.5px/1 'IBM Plex Mono'; color:#8a92a1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis">{{ path }}</span>
+    </div>
+    <div style="flex:1"></div>
+    <button title="Copies a file reference — pastes into a chat or folder, not an image editor" style="height:36px; padding:0 14px; display:flex; align-items:center; gap:7px; border:1px solid #2f333b; border-radius:9px; background:#1c1f25; color:#d3d8e1; font:500 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="background:#252931"><dc-import name="Icon" glyph="copy" size="15" hint-size="15px,15px"></dc-import>Copy file</button>
+    <button style="height:36px; padding:0 14px; display:flex; align-items:center; gap:7px; border:1px solid #2f333b; border-radius:9px; background:#1c1f25; color:#d3d8e1; font:500 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="background:#252931"><dc-import name="Icon" glyph="window" size="15" hint-size="15px,15px"></dc-import>Show in Folder</button>
+    <div style="position:relative; display:flex; align-items:stretch">
+      <button onClick="{{ runExport }}" title="{{ exportTitle }}" style="height:36px; padding:0 15px; display:flex; align-items:center; gap:7px; border:0; border-radius:9px 0 0 9px; background:#e3ff4f; color:#15170e; font:600 12.5px 'IBM Plex Sans'; cursor:pointer; white-space:nowrap" style-hover="filter:brightness(1.06)">
+        <dc-import name="Icon" glyph="save" size="15" stroke="1.95" hint-size="15px,15px"></dc-import>{{ exportFace }}
+      </button>
+      <span style="width:1px; background:rgba(21,23,14,.22)"></span>
+      <button onClick="{{ openExport }}" title="Other formats" style="width:24px; display:grid; place-items:center; border:0; padding:0; border-radius:0 9px 9px 0; background:#e3ff4f; color:#15170e; cursor:pointer" style-hover="filter:brightness(1.06)">
+        <dc-import name="Icon" glyph="chevron" size="13" stroke="2.1" hint-size="13px,13px"></dc-import>
+      </button>
+      <sc-if value="{{ exportOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; right:0; bottom:42px; z-index:30; width:298px; padding:5px; border-radius:11px; background:#1c1f25; border:1px solid #2f333b; box-shadow:0 -22px 48px -12px rgba(0,0,0,.85)">
+          <sc-for list="{{ formats }}" as="f" hint-placeholder-count="4">
+            <button onClick="{{ f.pick }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:{{ f.bg }}; color:{{ f.fg }}" style-hover="background:#252931">
+              <dc-import name="Icon" glyph="{{ f.glyph }}" size="16" hint-size="16px,16px"></dc-import>
+              <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+                <span style="font:500 12px/1 'IBM Plex Sans'">{{ f.label }}</span>
+                <span style="font:400 10.5px/1.4 'IBM Plex Sans'; color:#79808f">{{ f.note }}</span>
+              </span>
+              <span style="font:400 10.5px/1 'IBM Plex Mono'; color:#6d7484; white-space:nowrap">{{ f.size }}</span>
+            </button>
+          </sc-for>
+          <div style="height:1px; background:#2b2f36; margin:5px 4px"></div>
+          <p style="margin:0; padding:4px 8px 7px; font:400 11px/1.5 'IBM Plex Sans'; color:#6d7484; text-wrap:pretty">Trimming re-encodes. The untrimmed original stays at its own path until you overwrite it.</p>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1180,&quot;height&quot;:760},&quot;loop&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Playback&quot;},&quot;fmt&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;mp4&quot;,&quot;options&quot;:[&quot;webm&quot;,&quot;mp4&quot;,&quot;gif&quot;,&quot;frame&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Export&quot;}}">
+const DUR = 27.4;
+const FPS = 30;
+const SPEEDS = ['0.5', '1', '1.5', '2'];
+const FORMATS = [
+  ['webm', 'save', 'WebM', 'What was recorded — no re-encode when untrimmed.'],
+  ['mp4', 'save', 'MP4 (H.264)', 'Plays anywhere. Slack, Teams, browsers.'],
+  ['gif', 'image', 'GIF', 'Silent, loops. Big above ~10 seconds.'],
+  ['frame', 'camera', 'Current frame as PNG', 'Just the frame under the playhead.']
+];
+
+class Component extends DCLogic {
+  state = {
+    playing: false, t: 4.2, inP: 2.6, outP: 22.8,
+    muted: false, loop: true, speed: '1', zoom: 100,
+    fmt: 'mp4', menu: null, saved: true
+  };
+
+  componentDidMount() {
+    this.timer = setInterval(() => {
+      const s = this.state;
+      if (!s.playing) return;
+      const step = 0.1 * parseFloat(s.speed);
+      let t = s.t + step;
+      if (t >= s.outP) {
+        if (s.loop) t = s.inP;
+        else { this.setState({ t: s.outP, playing: false }); return; }
+      }
+      this.setState({ t });
+    }, 100);
+    this.onKey = e => {
+      const s = this.state, k = e.key.toLowerCase();
+      if (k === ' ') { e.preventDefault(); this.setState({ playing: !s.playing, menu: null }); return; }
+      if (k === 'i') { e.preventDefault(); this.markIn(); return; }
+      if (k === 'o') { e.preventDefault(); this.markOut(); return; }
+      if (k === 'm') { e.preventDefault(); this.setState({ muted: !s.muted }); return; }
+      if (k === 'l') { e.preventDefault(); this.setState({ loop: !s.loop }); return; }
+      if (k === 'arrowleft') { e.preventDefault(); this.step(-1); return; }
+      if (k === 'arrowright') { e.preventDefault(); this.step(1); return; }
+      if (k === 'escape') { e.preventDefault(); this.setState({ menu: null }); }
+    };
+    window.addEventListener('keydown', this.onKey);
+  }
+
+  componentWillUnmount() {
+    clearInterval(this.timer);
+    window.removeEventListener('keydown', this.onKey);
+  }
+
+  clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  fmtTime(t) {
+    const m = Math.floor(t / 60), s = Math.floor(t % 60), f = Math.round((t % 1) * FPS);
+    return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + '.' + String(Math.min(f, FPS - 1)).padStart(2, '0');
+  }
+
+  step(dir) {
+    const s = this.state;
+    this.setState({ t: this.clamp(s.t + dir / FPS, 0, DUR), playing: false });
+  }
+
+  markIn = () => {
+    const s = this.state;
+    this.setState({ inP: Math.min(s.t, s.outP - 0.5), saved: false, menu: null });
+  };
+
+  markOut = () => {
+    const s = this.state;
+    this.setState({ outP: Math.max(s.t, s.inP + 0.5), saved: false, menu: null });
+  };
+
+  frac(e) {
+    const el = this.rail;
+    if (!el) return 0;
+    const r = el.getBoundingClientRect();
+    return this.clamp((e.clientX - r.left) / r.width, 0, 1);
+  }
+
+  onDown = e => {
+    if (this.state.menu) { this.setState({ menu: null }); return; }
+    if (!this.drag) this.drag = 'now';
+    const t = this.frac(e) * DUR;
+    if (this.drag === 'now') this.setState({ t, playing: false });
+    else if (this.drag === 'in') this.setState({ inP: Math.min(t, this.state.outP - 0.5), saved: false });
+    else this.setState({ outP: Math.max(t, this.state.inP + 0.5), saved: false });
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+  };
+
+  onMove = e => {
+    if (!this.drag) return;
+    const t = this.frac(e) * DUR;
+    const s = this.state;
+    if (this.drag === 'in') this.setState({ inP: this.clamp(Math.min(t, s.outP - 0.5), 0, DUR), t: Math.min(t, s.outP - 0.5), saved: false });
+    else if (this.drag === 'out') this.setState({ outP: this.clamp(Math.max(t, s.inP + 0.5), 0, DUR), t: Math.max(t, s.inP + 0.5), saved: false });
+    else this.setState({ t });
+  };
+
+  onUp = () => { this.drag = null; };
+
+  grabIn = e => { e.stopPropagation(); this.drag = 'in'; };
+  grabOut = e => { e.stopPropagation(); this.drag = 'out'; };
+
+  renderVals() {
+    const s = this.state;
+    const range = s.outP - s.inP;
+    const inPct = s.inP / DUR * 100, outPct = s.outP / DUR * 100;
+    const bytesPerSec = { webm: 0.42, mp4: 0.55, gif: 1.9, frame: 0.0009 };
+    const sizeOf = k => k === 'frame' ? '0.9 MB' : (Math.round(range * bytesPerSec[k] * 10) / 10) + ' MB';
+    const fmt = FORMATS.find(f => f[0] === s.fmt) || FORMATS[1];
+    const wave = [];
+    for (let i = 0; i < 120; i++) {
+      const t = i / 120 * DUR;
+      const a = Math.abs(Math.sin(i * 0.7) * 0.5 + Math.sin(i * 0.23) * 0.35 + Math.sin(i * 1.9) * 0.15);
+      const inside = t >= s.inP && t <= s.outP;
+      wave.push({ key: i, h: Math.max(6, Math.round(a * 88)),
+        bg: s.muted ? (inside ? '#3a3f47' : '#23262d') : (inside ? '#c8d96a' : '#4a4f45') });
+    }
+    const frames = [];
+    for (let i = 0; i < 16; i++) {
+      const t = (i + 0.5) / 16 * DUR;
+      const inside = t >= s.inP && t <= s.outP;
+      frames.push({ key: i, bg: '#26271f', op: inside ? 1 : 0.38,
+        accent: i % 4 === 1 ? 'rgba(227,255,79,.5)' : 'rgba(214,216,200,.16)' });
+    }
+    const ticks = [];
+    for (let sec = 0; sec <= DUR; sec += 5) ticks.push({ key: sec, pct: sec / DUR * 100, label: this.fmtTime(sec).slice(0, 5) });
+    const openMenu = k => () => this.setState({ menu: s.menu === k ? null : k });
+    const prog = range > 0 ? (s.t - s.inP) / range : 0;
+    return {
+      durLabel: this.fmtTime(DUR).slice(0, 5),
+      nowLabel: this.fmtTime(s.t), inLabel: this.fmtTime(s.inP), outLabel: this.fmtTime(s.outP),
+      trimDurLabel: this.fmtTime(range).slice(0, 5),
+      cutLabel: this.fmtTime(DUR - range).slice(0, 5),
+      trimmed: range < DUR - 0.05,
+      trimLabel: range < DUR - 0.05 ? 'trimmed to ' + this.fmtTime(range).slice(0, 5) : 'full length',
+      trimFg: range < DUR - 0.05 ? '#c8d96a' : '#9aa2b1',
+      nowPct: s.t / DUR * 100, inPct, outPct,
+      rangePct: Math.max(0.4, outPct - inPct), outRestPct: Math.max(0, 100 - outPct),
+      playing: s.playing, paused: !s.playing,
+      playGlyph: s.playing ? 'pause' : 'play',
+      playTitle: (s.playing ? 'Pause' : 'Play') + ' — Space',
+      togglePlay: () => this.setState({ playing: !s.playing, menu: null }),
+      stepBack: () => this.step(-1), stepFwd: () => this.step(1),
+      cursorX: 22 + Math.sin(prog * 5.2) * 16 + prog * 42,
+      cursorY: 34 + Math.cos(prog * 4.1) * 18 + prog * 22,
+      muted: s.muted, muteGlyph: s.muted ? 'mute' : 'speaker',
+      muteTitle: (s.muted ? 'Unmute — the export keeps audio' : 'Mute — the export drops the audio track') + ' (M)',
+      muteBg: s.muted ? 'rgba(200,80,80,.2)' : 'transparent',
+      muteFg: s.muted ? '#f5a3a3' : '#a8afa0',
+      toggleMute: () => this.setState({ muted: !s.muted, saved: false }),
+      loop: s.loop,
+      loopBg: s.loop ? 'rgba(227,255,79,.15)' : 'transparent',
+      loopFg: s.loop ? '#eaff7a' : '#a8afa0',
+      toggleLoop: () => this.setState({ loop: !s.loop }),
+      speed: s.speed, speedOpen: s.menu === 'speed',
+      speedBg: s.speed === '1' ? 'transparent' : 'rgba(227,255,79,.15)',
+      speedFg: s.speed === '1' ? '#a8afa0' : '#eaff7a',
+      openSpeed: openMenu('speed'),
+      speeds: SPEEDS.map(v => ({ key: v, label: v, tick: s.speed === v ? 1 : 0,
+        bg: s.speed === v ? 'rgba(255,255,255,.08)' : 'transparent',
+        fg: s.speed === v ? '#f8faf0' : '#a8afa0',
+        pick: () => this.setState({ speed: v, menu: null }) })),
+      zoom: s.zoom, zs: s.zoom / 100,
+      zoomIn: () => this.setState({ zoom: Math.min(160, s.zoom + 20) }),
+      zoomOut: () => this.setState({ zoom: Math.max(60, s.zoom - 20) }),
+      markIn: this.markIn, markOut: this.markOut,
+      resetTrim: () => this.setState({ inP: 0, outP: DUR, saved: false }),
+      resetFg: range < DUR - 0.05 ? '#c3c9d4' : '#5f6674',
+      ticks, frames, wave,
+      exportFace: 'Export ' + fmt[2].split(' ')[0],
+      exportTitle: 'Export the trimmed range as ' + fmt[2],
+      exportOpen: s.menu === 'export',
+      openExport: openMenu('export'),
+      runExport: () => this.setState({ menu: null, saved: true }),
+      formats: FORMATS.map(([id, glyph, label, note]) => ({
+        key: id, glyph, label, note, size: sizeOf(id),
+        bg: s.fmt === id ? '#252931' : 'transparent',
+        fg: s.fmt === id ? '#f1f3e8' : '#c3c9d4',
+        pick: () => this.setState({ fmt: id, menu: null, saved: false })
+      })),
+      saved: s.saved,
+      stateGlyph: s.saved ? 'check' : 'pen',
+      stateFg: s.saved ? '#9ec46a' : '#c8a54a',
+      stateText: s.saved ? 'Saved' : 'Edited — not exported',
+      dirtyText: s.saved ? 'No pending edits' : 'Unsaved trim',
+      dirtyFg: s.saved ? '#6d7484' : '#c8a54a',
+      path: '~/Videos/snipux/Screen recording from 2026-08-27 16-22-04.webm',
+      railRef: el => { if (el) this.rail = el; },
+      onDown: this.onDown, onMove: this.onMove, onUp: this.onUp,
+      grabIn: this.grabIn, grabOut: this.grabOut
+    };
+  }
+}
+</script>
+</body>
+</html>

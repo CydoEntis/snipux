@@ -28,8 +28,16 @@ of three.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
+from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QFontMetricsF,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from snipux import design
@@ -459,7 +467,14 @@ class FlowMenu(QWidget):
 
     chosen = pyqtSignal(str)
 
-    def __init__(self, rows, current: str, width: int, parent: QWidget | None = None):
+    def __init__(
+        self,
+        rows,
+        current: str,
+        width: int,
+        parent: QWidget | None = None,
+        footnote: str = "",
+    ):
         super().__init__(parent)
         self.setWindowFlags(
             Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
@@ -467,12 +482,36 @@ class FlowMenu(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._rows = list(rows)
         self._current = current
+        self._footnote = footnote
         self._hovered = -1
         self.setMouseTracking(True)
 
         metric = tokens.FlowMetric
         row_h = self._row_height()
-        self.setFixedSize(width, metric.MENU_PAD * 2 + row_h * len(self._rows))
+        height = metric.MENU_PAD * 2 + row_h * len(self._rows)
+        self.setFixedSize(width, height + self._footnote_height(width))
+
+    def _footnote_height(self, width: int) -> int:
+        """Room for the standing note under the rows, separator included.
+
+        Zero when there is no footnote, so every menu that does not want one
+        is the size it always was.
+        """
+        if not self._footnote:
+            return 0
+        return 11 + round(self._footnote_rect(width).height())
+
+    def _footnote_rect(self, width: int) -> QRectF:
+        metric = tokens.FlowMetric
+        _pad_v, pad_h = metric.MENU_ROW_PAD
+        available = width - (metric.MENU_PAD + pad_h) * 2
+        metrics = QFontMetrics(_font(11, 400))
+        bounds = metrics.boundingRect(
+            QRect(0, 0, available, 0),
+            int(Qt.TextFlag.TextWordWrap),
+            self._footnote,
+        )
+        return QRectF(0, 0, available, bounds.height() + 6)
 
     @staticmethod
     def _row_height() -> int:
@@ -593,6 +632,27 @@ class FlowMenu(QWidget):
                     int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
                     shortcut,
                 )
+
+        if self._footnote:
+            # Permanently at the foot of the menu, not attached to any row:
+            # it is true of every export, and repeating it per row would
+            # read as four different warnings.
+            top = metric.MENU_PAD + row_h * len(self._rows)
+            painter.setPen(design.flow_color("MENU_BORDER"))
+            painter.drawLine(
+                QPointF(metric.MENU_PAD + 4, top + 5),
+                QPointF(self.width() - metric.MENU_PAD - 4, top + 5),
+            )
+            note = self._footnote_rect(self.width())
+            note.moveTo(metric.MENU_PAD + pad_h, top + 11)
+            painter.setPen(design.flow_color("ROW_NOTE_FG"))
+            painter.setFont(_font(11, 400))
+            painter.drawText(
+                note,
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                    | Qt.TextFlag.TextWordWrap),
+                self._footnote,
+            )
         painter.end()
 
 

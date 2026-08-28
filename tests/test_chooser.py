@@ -409,21 +409,23 @@ class TestTheAfterMenuSwapsVocabularyOnTheRecordSide:
         assert [row[0] for row in rows] == ["instant", "edit", "review"]
         assert all(row[5] is False for row in rows)
 
-    def test_record_offers_exactly_instant_and_save(self):
+    def test_record_offers_copy_save_and_open(self):
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
 
         rows, _selected, _width = chooser._rows_for("after")
 
-        assert [row[0] for row in rows] == ["instant", "save"]
+        assert [row[0] for row in rows] == ["instant", "save", "open"]
         assert all(row[5] is False for row in rows)
 
-    def test_edit_review_and_trim_never_appear_on_the_record_side(self):
+    def test_edit_and_review_never_appear_on_the_record_side(self):
+        # "open" is the record side's third destination and means the trim
+        # editor, not the stills review window -- the two are different
+        # windows and the ids stay separate.
         record_ids = {value for value, *_rest in _RECORD_AFTER_ROWS}
 
         assert "edit" not in record_ids
         assert "review" not in record_ids
-        assert "trim" not in record_ids
 
     def test_save_does_not_exist_on_the_stills_side(self):
         # `AFTER_CAPTURE`/`_AFTER_ROWS` are stills-only -- "save" is not a

@@ -67,6 +67,7 @@ from snipux.overlay import (
 from snipux import design, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
 from snipux.recording import RecorderRegistry, RecordingError
+from snipux.player import PlayerWindow
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
 
@@ -167,7 +168,10 @@ def finish_recording(path: Path, after: str) -> None:
 
     Written as "only 'instant' acts" rather than "only 'save' is inert" so
     that a third destination added later stays inert here by default
-    instead of silently being treated as a copy.
+    instead of silently being treated as a copy. "open" is inert for
+    exactly that reason: it lands the file the way "save" does and the
+    window is opened by the controller, which is the only thing that can
+    own a window.
     """
     if after == "instant":
         copy_file_to_clipboard(path)
@@ -1006,6 +1010,7 @@ class AppController:
         # fair game for the GC while its window is still on screen.
         self._settings: SettingsDialog | None = None
         self._reviews: list[ReviewWindow] = []
+        self._players: list[PlayerWindow] = []
         # Set by install_hotkey_listener(), not here -- see its own
         # docstring for why registering the real Windows hotkey is kept out
         # of __init__.
@@ -1408,6 +1413,24 @@ class AppController:
         review.show()
         review.raise_()
         review.activateWindow()
+
+    def _open_player(self, path: Path) -> None:
+        """Open a landed recording in the trim editor.
+
+        Held in a list for the same reason review windows are: a parentless
+        widget is fair game for the GC while it is on screen, and taking
+        several recordings in a row should leave several windows open.
+        """
+        player = PlayerWindow(path)
+        self._players.append(player)
+        player.closed.connect(lambda w=player: self._forget_player(w))
+        player.show()
+        player.raise_()
+        player.activateWindow()
+
+    def _forget_player(self, window) -> None:
+        if window in self._players:
+            self._players.remove(window)
 
     def _forget_review(self, window) -> None:
         """Drop a closed review window, so a long session doesn't
@@ -2248,6 +2271,8 @@ class AppController:
         )
         shutil.move(path, destination)
         finish_recording(destination, after)
+        if after == "open":
+            self._open_player(destination)
         landed = destination
         if reason is not None:
             self._report_shortcut(f"{reason} Saved to {destination}")
