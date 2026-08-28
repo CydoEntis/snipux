@@ -2005,10 +2005,12 @@ class PlayerWindow(WinWindow):
     def _destination_for(self, format_id: str) -> Path:
         suffix = {"frame": ".png", "mp4": ".mp4", "webm": ".webm"}.get(format_id, ".mp4")
         stem = self.path.stem
-        if self.state.trimmed:
+        if self.state.trimmed and format_id != "frame":
             # A trimmed export is a different clip from the recording, so it
             # gets a different name -- PRESERVE_ORIGINAL means never writing
-            # over what was recorded.
+            # over what was recorded. A still is exempt: one frame is not
+            # "trimmed", and a PNG called "(trimmed)" describes something
+            # the file is not.
             stem = f"{stem} (trimmed)"
         candidate = self.path.with_name(stem + suffix)
         index = 2
