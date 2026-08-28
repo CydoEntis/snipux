@@ -238,7 +238,7 @@ CAPTURE_MODES = [
     ("Freeform",    "pen",     "Lasso an odd shape"),
 ]
 
-DELAYS = ["Off", "3s", "5s", "10s"]
+DELAYS = ["No delay", "3s", "5s", "10s"]
 
 # ---------------------------------------------------------------------------
 # Settings and review window chrome (design_handoff_snipux)
@@ -555,10 +555,14 @@ class ChooserColor:
     SWITCH_HIGHLIGHT_ALPHA = 0.10
     ROW_DISABLED_FG      = "#5c6156"   # a disabled mode row's label + icon
 
-# Delay: label shown on the trigger. "No delay" is the stored value; the
-# chooser prints it in full at this width. (The narrower icon-only variant
-# abbreviates to "Off" — not used in the shipped design.)
-DELAY_DEFAULT = "No delay"
+# Delay: the trigger's label when nothing is set, which is also the stored
+# value. It was "No delay" on the trigger and "Off" in `DELAYS`, so the
+# chooser carried a pair of functions whose only job was translating between
+# the two; adopting the handoff's wording as the value made both of them
+# identities and they are gone. Kept as a name of its own because the
+# chooser asks "is a delay armed?" often enough that `!= DELAYS[0]` would
+# read as an index trick rather than a question.
+DELAY_DEFAULT = DELAYS[0]
 
 # The destination menu's notes. `AFTER_CAPTURE` carries the same three
 # identifiers with the Settings pane's prose, which is written for a radio
@@ -594,11 +598,30 @@ IMMEDIATE_MODES = ["Full screen"]
 # Destinations, from the locked capture-flow handoff (docs/design/flow/).
 # Merged one structure at a time as each gains a consumer rather than all at
 # once: FlowMetric/FlowColor/STAGES/AUDIO_SOURCES land with the bars that
-# read them, and CAPTURE_MODES/DELAYS/SHORTCUTS need their existing
-# consumers changed first (the handoff's CAPTURE_MODES carries a shortcut
-# letter this one does not, its DELAYS says "No delay" where this says
-# "Off", and its SHORTCUTS is the stage-level map rather than this file's
-# tool letters).
+# read them.
+#
+# Three of the handoff's structures need no merge at all, because this file
+# already carries everything in them -- split across several named
+# structures rather than packed into one tuple, which is why they did not
+# look merged:
+#
+#   * `CAPTURE_MODES` is a 4-tuple there, adding a shortcut letter and a
+#     next-step hint. Both already live here, in `MODE_KEYS` and
+#     `MODE_NEXT_STEP`, and `MODE_NEXT_STEP` carries the handoff's wording
+#     verbatim. Folding them back into the tuple would give each of those
+#     two facts a second home to drift from.
+#   * `ANNOTATION_TOOLS` is (tool, letter, hint) for eight tools. Here that
+#     is `TOOLS` + `SHORTCUTS` + `TOOL_HINTS`, for *eleven* -- see the note
+#     on `TOOLS` for why the extra three outrank the handoff's own
+#     "eight tools" rule. Adopting the handoff's list would drop them.
+#   * `SHORTCUTS` is the stage-level key map there and the tool letters
+#     here. Both are wanted; the stage map arrives with the bars that read
+#     it, under a name that does not collide.
+#
+# `DELAYS` did need merging and has been: it said "Off" here and "No delay"
+# on the trigger, so the chooser carried a translation pair whose only job
+# was to bridge the two. The handoff's wording is the stored value now and
+# that pair is gone.
 #
 # What this slice is for: **Copy is not the same operation for a
 # recording.** A still goes on the clipboard as image data and pastes

@@ -1001,8 +1001,8 @@ class Chooser(QWidget):
                 for identifier, icon, label, note in after_rows
             ], self._after, tokens.ChooserMetric.MENU_AFTER_W
         return [
-            (value, "", _delay_label(value), "", "", False) for value in tokens.DELAYS
-        ], _delay_value(self._delay), tokens.ChooserMetric.MENU_DELAY_W
+            (value, "", value, "", "", False) for value in tokens.DELAYS
+        ], self._delay, tokens.ChooserMetric.MENU_DELAY_W
 
     def _toggle_menu(self, kind: str) -> None:
         # One at a time: opening one closes the others.
@@ -1027,7 +1027,7 @@ class Chooser(QWidget):
         elif kind == "after":
             self.set_after(value)
         else:
-            self.set_delay(_delay_label(value))
+            self.set_delay(value)
 
     def _close_menu(self) -> bool:
         if self._menu is None:
@@ -1155,10 +1155,4 @@ def _after_display(identifier: str, kind: str = "stills") -> tuple[str, str]:
     return _after_display(default, kind)
 
 
-def _delay_label(value: str) -> str:
-    """`tokens.DELAYS` stores "Off"; the chooser prints it in full."""
-    return tokens.DELAY_DEFAULT if value == "Off" else value
 
-
-def _delay_value(label: str) -> str:
-    return "Off" if label == tokens.DELAY_DEFAULT else label

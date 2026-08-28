@@ -1469,7 +1469,7 @@ class AppController:
 
         `delay` is carried unparsed and only turned into seconds in
         `_begin_armed_recording()`, which is the one place that needs a
-        number -- `design.tokens.DELAYS` values ("Off"/"3s"/"5s"/"10s")
+        number -- `design.tokens.DELAYS` values ("No delay"/"3s"/"5s"/"10s")
         pass through overlay.py unparsed everywhere else.
         """
         if self._recorder_registry is None:
@@ -1566,7 +1566,8 @@ class AppController:
         """Take an armed recording to the countdown, or straight to
         recording when no delay is set.
 
-        "Off" means no countdown, and that is safe here in a way it would
+        "No delay" means exactly that, and starting at once is safe here in a
+        way it would
         not have been before: `_place_recording_hud` guarantees the pill
         sits outside the recorded area, so clicking Start does not leave
         the pointer inside the frame. A delay of 3s/5s/10s is the user
@@ -1583,7 +1584,7 @@ class AppController:
         if self._countdown_timer is not None:
             return
         _rect, delay, _after, _path = self._armed_recording
-        if delay == "Off":  # design.tokens.DELAYS[0]
+        if delay == design.tokens.DELAYS[0]:
             self._start_armed_recording()
             return
 

@@ -1516,7 +1516,7 @@ class FakeRecordingBackend(RecordingBackend):
             raise self._stop_error
 
 
-def _record(controller, rect, delay="Off", after=None):
+def _record(controller, rect, delay="No delay", after=None):
     """Arm a recording and press Start, the way a user does.
 
     Committing a selection only *arms* a recording (the pill's "Start
@@ -1552,7 +1552,7 @@ class TestAppControllerRecording:
         )
         rect = QRectF(10, 20, 300, 200)
 
-        controller._on_recording_requested(rect, "Off")
+        controller._on_recording_requested(rect, "No delay")
 
         # Committing a selection only arms: nothing is recording yet, and
         # the pill is offering to start. This gap is the whole point --
@@ -1629,7 +1629,7 @@ class TestAppControllerRecording:
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
         )
 
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
 
         assert len(calls) == 1
         assert "boom" in calls[0][1]
@@ -1649,7 +1649,7 @@ class TestAppControllerRecording:
             recorder_registry=registry,
         )
 
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
 
         assert "boom" in capsys.readouterr().out
 
@@ -1662,7 +1662,7 @@ class TestAppControllerRecording:
             recorder_registry=registry,
         )
 
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
 
         # The path handed to `backend.start` is the placeholder tempfile
         # `_on_recording_requested` creates before calling it -- a start
@@ -1693,7 +1693,7 @@ class TestAppControllerRecording:
         controller._on_recording_requested(QRectF(0, 0, 100, 100), "3s")
         controller._begin_armed_recording()
         first_timer = controller._countdown_timer
-        _record(controller, QRectF(0, 0, 50, 50), "Off")
+        _record(controller, QRectF(0, 0, 50, 50), "No delay")
 
         # The second request must not have clobbered the first countdown,
         # nor started a recording of its own.
@@ -1727,9 +1727,9 @@ class TestAppControllerRecording:
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
         )
 
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
         active = controller._active_recording
-        _record(controller, QRectF(0, 0, 50, 50), "Off")
+        _record(controller, QRectF(0, 0, 50, 50), "No delay")
 
         assert len(backend.start_calls) == 1
         assert controller._active_recording is active
@@ -1761,7 +1761,7 @@ class TestAppControllerArmingARecording:
     ):
         controller, backend = self._controller(make_controller, monkeypatch)
 
-        controller._on_recording_requested(QRectF(50, 50, 200, 150), "Off")
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
 
         assert backend.start_calls == []
         assert controller._recording_hud is not None
@@ -1773,7 +1773,7 @@ class TestAppControllerArmingARecording:
         self, make_controller, monkeypatch
     ):
         controller, backend = self._controller(make_controller, monkeypatch)
-        controller._on_recording_requested(QRectF(50, 50, 200, 150), "Off")
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
 
         controller._on_hud_activated()
 
@@ -1787,7 +1787,7 @@ class TestAppControllerArmingARecording:
         # The pill and the hotkey always do the same thing, so a machine
         # with nowhere to put a pill still has a way in.
         controller, backend = self._controller(make_controller, monkeypatch)
-        controller._on_recording_requested(QRectF(50, 50, 200, 150), "Off")
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
 
         controller.start_capture()
 
@@ -1859,7 +1859,7 @@ class TestAppControllerArmingARecording:
     ):
         controller, backend = self._controller(make_controller, monkeypatch)
 
-        controller._on_recording_requested(None, "Off")
+        controller._on_recording_requested(None, "No delay")
 
         # Nothing is being captured yet, so a Start control is safe here --
         # and without one there would be no way to begin a full-screen
@@ -1896,7 +1896,7 @@ class TestAppControllerRecordingHud:
             recorder_registry=registry,
             monitor_geometries=monitor_geometries,
         )
-        _record(controller, rect, "Off")
+        _record(controller, rect, "No delay")
         return controller, backend
 
     def test_capture_hotkey_stops_an_active_recording_instead_of_starting_a_second_one(
@@ -1971,7 +1971,7 @@ class TestAppControllerRecordingHud:
             recorder_registry=registry,
             monitor_geometries=[QRectF(0, 0, 800, 600)],
         )
-        _record(controller, QRectF(50, 50, 200, 150), "Off")
+        _record(controller, QRectF(50, 50, 200, 150), "No delay")
 
         controller.start_capture()
 
@@ -2023,7 +2023,7 @@ class TestAppControllerRecordingHud:
         clock = iter([100.0, 100.0, 165.0])
         monkeypatch.setattr(app.time, "monotonic", lambda: next(clock))
 
-        _record(controller, QRectF(50, 50, 200, 150), "Off")
+        _record(controller, QRectF(50, 50, 200, 150), "No delay")
 
         assert controller._tray_icon.toolTip() == "0:00"
         assert controller._recording_hud is not None
@@ -2082,7 +2082,7 @@ class TestAppControllerRecordingHud:
         clock = iter([100.0, 100.0])
         monkeypatch.setattr(app.time, "monotonic", lambda: next(clock))
 
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
 
         assert controller._recording_hud is None
         assert "0:00" in capsys.readouterr().out
@@ -2137,7 +2137,7 @@ class TestAppControllerRecordingHud:
             recorder_registry=registry,
             monitor_geometries=[QRectF(0, 0, 800, 600)],
         )
-        _record(controller, QRectF(50, 50, 200, 150), "Off")
+        _record(controller, QRectF(50, 50, 200, 150), "No delay")
         calls = []
         monkeypatch.setattr(
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
@@ -2205,7 +2205,7 @@ class TestAppControllerRecorderUnavailable:
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
         )
         try:
-            _record(controller, QRectF(0, 0, 100, 100), "Off")
+            _record(controller, QRectF(0, 0, 100, 100), "No delay")
 
             assert len(calls) == 1
             assert "macOS" in calls[0][1]
@@ -2244,7 +2244,7 @@ class TestAppControllerLandingRecording:
             recorder_registry=registry,
             monitor_geometries=[QRectF(0, 0, 800, 600)],
         )
-        _record(controller, QRectF(0, 0, 100, 100), "Off", after)
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", after)
         return controller, backend
 
     def test_stopping_moves_the_temp_file_into_the_save_folder(
@@ -2408,7 +2408,7 @@ class TestAppControllerDiscardRecording:
             recorder_registry=registry,
             monitor_geometries=[QRectF(0, 0, 800, 600)],
         )
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
         return controller, backend
 
     def test_discard_action_is_enabled_while_recording_and_disabled_after(
@@ -2503,7 +2503,7 @@ class TestAppControllerRecordingTempFileCleanup:
             recorder_registry=registry,
         )
 
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
 
         _rect, path = backend.start_calls[0]
         assert Path(path).parent == app._recording_temp_dir()
@@ -2543,7 +2543,7 @@ class TestAppControllerRecordingDiskSpace:
         # still shows 0:00 somewhere) -- the low-disk check piggybacks on
         # that same tick, so low free space is caught on this very first
         # one, with no separate explicit tick needed.
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
 
         assert backend.stop_calls == [True]
         assert controller._active_recording is None
@@ -2579,7 +2579,7 @@ class TestAppControllerRecordingDiskSpace:
             controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
         )
 
-        _record(controller, QRectF(0, 0, 100, 100), "Off", "save")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "save")
 
         assert len(calls) == 1
         landed = next(tmp_path.iterdir())
@@ -2614,7 +2614,7 @@ class TestAppControllerRecordingDiskSpace:
             disk_usage=_disk_usage,
         )
 
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
 
         _rect, path = backend.start_calls[0]
         assert queried == [str(Path(path).parent)]
@@ -2635,7 +2635,7 @@ class TestAppControllerRecordingDiskSpace:
             monitor_geometries=[QRectF(0, 0, 800, 600)],
             disk_usage=self._disk_usage_reporting(10 * 1024 * 1024 * 1024),
         )
-        _record(controller, QRectF(0, 0, 100, 100), "Off")
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
 
         controller._on_recording_tick()
 

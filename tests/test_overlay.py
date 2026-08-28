@@ -5246,7 +5246,7 @@ class TestCommitToRecord:
         assert len(requests) == 1
         rect, delay, after = requests[0]
         assert rect == QRectF(100, 100, 300, 250)
-        assert delay == tokens.DELAYS[0]  # "Off", the default
+        assert delay == tokens.DELAYS[0]  # "No delay", the default
         assert after == tokens.RECORD_AFTER_DEFAULT  # "instant", the chooser's own default
         assert not overlay.isVisible()
 
@@ -5727,7 +5727,7 @@ class TestCaptureModeDelayIntegration:
 
     def test_delay_off_captures_immediately_with_no_hide_or_countdown(self):
         overlay = self._overlay()
-        assert overlay._delay == tokens.DELAYS[0]  # "Off", the default
+        assert overlay._delay == tokens.DELAYS[0]  # "No delay", the default
 
         QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
         self._confirm_mode(overlay, self.FREEFORM_LABEL)
