@@ -273,6 +273,58 @@ class TestRecordSideModeSelectionIsInert:
         assert chooser.mode == "Window"
 
 
+class TestEveryModeRowSaysWhatItCaptures:
+    """Window and Full screen read as the same thing until you have used
+    both -- "if you're capturing a window, you're capturing a full screen?"
+    One is an application's window, the other a whole monitor, and the note
+    is the only thing that distinguishes them at the moment of choosing.
+    The menu used to show a note only for *disabled* rows, so every mode a
+    user could actually pick explained nothing.
+    """
+
+    def _notes(self, kind):
+        chooser = Chooser(parent=None)
+        chooser.set_kind(kind)
+        rows, _selected, _width = chooser._rows_for("mode")
+        return {row[0]: row[3] for row in rows}
+
+    def test_every_enabled_mode_carries_a_note(self):
+        for kind in ("stills", "record"):
+            for mode, note in self._notes(kind).items():
+                assert note, f"{mode} on the {kind} side has no note"
+
+    def test_window_and_full_screen_do_not_describe_the_same_thing(self):
+        notes = self._notes("stills")
+
+        assert "window" in notes["Window"].lower()
+        assert "monitor" in notes["Full screen"].lower()
+        assert notes["Window"] != notes["Full screen"]
+
+    def test_the_record_side_says_a_window_is_filmed_where_it_is(self):
+        # The recorder is handed a rectangle once and does not follow the
+        # window afterwards, which is the surprise worth naming up front.
+        assert "now" in self._notes("record")["Window"].lower()
+
+    def test_a_disabled_rows_reason_outranks_its_description(self):
+        notes = self._notes("record")
+
+        assert notes["Freeform"] == tokens.RECORD_DISABLED_MODES["Freeform"]
+
+    def test_no_note_is_long_enough_to_be_elided(self):
+        # A note cut off mid-sentence is worse than none at all, and the
+        # menu is a fixed width -- so this is measured, not eyeballed.
+        from PyQt6.QtGui import QFontMetricsF
+        from snipux.chooser import _font
+
+        budget = tokens.ChooserMetric.MENU_MODE_W - 84  # icon, padding, shortcut
+        metrics = QFontMetricsF(_font(11, 400))
+        for kind in ("stills", "record"):
+            for mode, note in self._notes(kind).items():
+                assert metrics.horizontalAdvance(note) <= budget, (
+                    f"{mode} on the {kind} side would elide: {note!r}"
+                )
+
+
 class TestTheModeMenuNarrowsOnTheRecordSide:
     def test_stills_offers_all_four_modes_none_disabled(self):
         chooser = Chooser(parent=None)
