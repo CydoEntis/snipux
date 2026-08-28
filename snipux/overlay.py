@@ -3130,6 +3130,7 @@ class OverlayWindow(QWidget):
         on_dismissed: Callable[[], None] | None = None,
         on_captured: "Callable[[QImage, Path | None], None] | None" = None,
         on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
+        on_recording_start: "Callable[[], None] | None" = None,
     ):
         super().__init__(parent)
         self._frame = frame
@@ -3143,6 +3144,7 @@ class OverlayWindow(QWidget):
         # painting) and app.py (subprocess/filesystem/stateful side
         # effects).
         self._on_recording_requested = on_recording_requested
+        self._on_recording_start = on_recording_start
         # SNX-58: called once, from closeEvent, when this window is the
         # Wayland-primary of a multi-monitor `open_overlay` group -- the
         # hook that closes the non-interactive `_MonitorVeil` companions
@@ -4981,6 +4983,15 @@ class OverlayWindow(QWidget):
             return
 
         if key in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+            # Enter fires the stage's primary action, and on a recording
+            # that is Record -- not Copy. Without this branch it took a
+            # *screenshot* of the region a recording was being set up
+            # around and put that on the clipboard, which is the wrong
+            # capture, the wrong destination and the wrong kind entirely.
+            if self._armed_for_recording:
+                if self._on_recording_start is not None:
+                    self._on_recording_start()
+                return
             # Mirrors Overlay's own Enter handling above: nothing to copy
             # (and dismiss) without a selection yet.
             if self._selection is not None:
@@ -5824,6 +5835,14 @@ class OverlayWindow(QWidget):
         """
         width = round(self._selection.width())
         height = round(self._selection.height())
+        # A recording has no marks and never will -- there is no
+        # annotate-in-place for a video (docs/design/recording.md) -- so
+        # counting them says "0 marks" over a region the user is about to
+        # film, in the vocabulary of a feature that does not apply to it.
+        # The handoff's own live chip appends the frame rate here instead;
+        # until that exists, the size alone is the honest half.
+        if self._chooser.kind == "record":
+            return f"{width} × {height}", ""
         count = len(self._marks)
         unit = "mark" if count == 1 else "marks"
         return f"{width} × {height}", f"{count} {unit}"
@@ -6057,6 +6076,11 @@ def open_overlay(
     # "save") -- see `OverlayWindow.__init__`'s own comment on the same
     # parameter.
     on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
+    # Enter, while a recording is armed. Fires the stage's primary action,
+    # which on the record side is Record -- see `OverlayWindow`'s own
+    # keyPressEvent, where the alternative was copying a screenshot of the
+    # region a recording was being set up around.
+    on_recording_start: "Callable[[], None] | None" = None,
 ) -> OverlayWindow:
     """Build and show the overlay for one snip, positioned for the
     caller's already-detected session type (`wayland`) rather than assumed
@@ -6123,6 +6147,7 @@ def open_overlay(
         on_dismissed=_on_overlay_dismissed if needs_dismissal_hook else None,
         on_captured=on_captured,
         on_recording_requested=on_recording_requested,
+        on_recording_start=on_recording_start,
     )
 
     if not wayland:
