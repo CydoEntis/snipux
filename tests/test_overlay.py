@@ -2968,7 +2968,12 @@ class TestFloatingBarFill:
             for y in range(rect.top(), rect.bottom())
         ]
 
-        assert max(alphas) == 255
+        # Not exactly 255: at fractional display scaling the glyph is
+        # rendered large and resampled, which costs the peak a unit or
+        # two. The bug this guards against is a glyph that INHERITED the
+        # panel's translucency, and that lands far below this -- the fill
+        # it sits on is itself well under 250.
+        assert max(alphas) >= 250
 
 
 class TestFloatingBarPositioning:

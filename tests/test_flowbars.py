@@ -57,7 +57,12 @@ class TestTheFourStates:
             lambda: bar.set_done("00:27 - 11.3 MB - webm"),
         ):
             setup()
-            assert bar.grab().height() == tokens.FlowMetric.ROW_H, bar.state()
+            # `deviceIndependentSize()`, not `height()`: grab() hands back
+            # PHYSICAL pixels, so at 1.5x scaling a correct 42px bar
+            # measures 63 and the token comparison fails on a machine whose
+            # display is scaled rather than on a bug.
+            height = bar.grab().deviceIndependentSize().height()
+            assert round(height) == tokens.FlowMetric.ROW_H, bar.state()
 
     def test_each_state_reports_itself(self, bar):
         bar.set_ready()
@@ -247,8 +252,11 @@ class TestCountdownNumeral:
     def test_it_is_the_token_diameter(self):
         numeral = CountdownNumeral()
         try:
-            assert numeral.grab().width() == tokens.FlowMetric.COUNT_D
-            assert numeral.grab().height() == tokens.FlowMetric.COUNT_D
+            # Logical pixels -- see the note in
+            # TestTheFourStates.test_every_state_is_exactly_one_row_tall.
+            size = numeral.grab().deviceIndependentSize()
+            assert round(size.width()) == tokens.FlowMetric.COUNT_D
+            assert round(size.height()) == tokens.FlowMetric.COUNT_D
         finally:
             numeral.close()
 
