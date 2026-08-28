@@ -989,9 +989,13 @@ class Chooser(QWidget):
             keys = {mode: key for key, mode in tokens.MODE_KEYS.items()}
             recording = self._kind == "record"
             rows = []
-            for label, icon, _hint in tokens.CAPTURE_MODES:
+            for label, icon, note in tokens.CAPTURE_MODES:
                 disabled = recording and label in tokens.RECORD_DISABLED_MODES
-                note = tokens.RECORD_DISABLED_MODES.get(label, "") if disabled else ""
+                if disabled:
+                    # Why it cannot be picked outranks what it would do.
+                    note = tokens.RECORD_DISABLED_MODES[label]
+                elif recording:
+                    note = tokens.RECORD_MODE_NOTE.get(label, note)
                 rows.append((label, icon, label, note, keys.get(label, ""), disabled))
             return rows, self._mode, tokens.ChooserMetric.MENU_MODE_W
         if kind == "after":
@@ -1065,7 +1069,10 @@ class Chooser(QWidget):
             colour.MODE_ACCENT if armed_delay else tokens.Color.TEXT_PRIMARY,
         )
 
-        self.hint.set_content(icon, tokens.MODE_NEXT_STEP.get(self._mode, ""))
+        next_step = tokens.MODE_NEXT_STEP.get(self._mode, "")
+        if self._kind == "record":
+            next_step = tokens.RECORD_MODE_NEXT_STEP.get(self._mode, next_step)
+        self.hint.set_content(icon, next_step)
         self.tab.set_content(
             icon, self._mode, f"then {after_label}",
             "" if not armed_delay else self._delay,

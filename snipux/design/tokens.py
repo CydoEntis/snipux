@@ -231,12 +231,32 @@ SHORTCUTS = {
     "S": "step", "T": "text", "B": "blur", "E": "eraser",
 }
 
+# The third field is the note under each row in the mode menu. It says
+# *what gets captured*, because Window and Full screen are the two that
+# read as the same thing until you have used both -- "if you're capturing a
+# window, you're capturing a full screen?" One is an application's window,
+# the other is a whole monitor, and only the note distinguishes them at the
+# moment of choosing.
 CAPTURE_MODES = [
-    ("Region",      "crop",    "Drag any rectangle"),
-    ("Window",      "window",  "Snap to a window"),
-    ("Full screen", "monitor", "Whole display"),
-    ("Freeform",    "pen",     "Lasso an odd shape"),
+    ("Region",      "crop",    "Any rectangle you drag"),
+    ("Window",      "window",  "One application's window"),
+    ("Full screen", "monitor", "The whole monitor you are on"),
+    ("Freeform",    "pen",     "A shape you draw by hand"),
 ]
+
+# Notes that replace the above on the record side only, where a mode means
+# something narrower than it does for a screenshot.
+RECORD_MODE_NOTE = {
+    # The recorder is handed a rectangle, once. Window mode picks that
+    # rectangle *from* a window; it does not then follow it, so a window
+    # moved mid-recording leaves the recording filming where it used to be.
+    # There is no window-following in the API to build it on.
+    # Short because the row elides, and a note cut off mid-sentence is
+    # worse than none. The rest of the story -- that a window moved
+    # mid-recording leaves the recording filming where it used to be -- is
+    # in `RECORD_MODE_NEXT_STEP`, which has a whole pill to itself.
+    "Window": "Films where it is right now",
+}
 
 DELAYS = ["No delay", "3s", "5s", "10s"]
 
@@ -588,6 +608,13 @@ MODE_NEXT_STEP = {
 }
 
 # Mode shortcuts. Live whenever the chooser is on screen, armed or not.
+# The next-step hint, where the record side needs a different one. The pill
+# has room the menu row does not, so the caveat the note only gestures at
+# gets said properly here.
+RECORD_MODE_NEXT_STEP = {
+    "Window": "Click a window to frame it -- moving it later will not follow",
+}
+
 MODE_KEYS = {"R": "Region", "W": "Window", "F": "Full screen", "L": "Freeform"}
 
 # Full screen is the only mode with nothing left to aim at, so choosing it
@@ -670,7 +697,7 @@ KIND_DEFAULT = "stills"
 # record side there is equally nothing *downstream* wired up yet, so it must
 # not fire immediately there -- it arms and waits like Region does.
 RECORD_DISABLED_MODES = {
-    "Freeform": "Video is rectangular, so freeform doesn't apply",
+    "Freeform": "Video is rectangular",
 }
 
 # The record side's "then" vocabulary: Instant and Save only, never Edit,
