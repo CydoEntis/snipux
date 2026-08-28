@@ -364,3 +364,49 @@ class TestTheReadoutIsNeverClippedShortOfItsLastFigure:
 
         assert tokens.PlayerColor.KEPT_FG in label.text()
         assert tokens.PlayerColor.CUT_FG in label.text()
+
+
+class TestExportNamesNeverCollideWithTheSource:
+    """`PRESERVE_ORIGINAL` -- the untrimmed original stays at its own path
+    until the user explicitly overwrites it, which the export menu promises
+    in so many words."""
+
+    @staticmethod
+    def _window(tmp_path, monkeypatch, *, trimmed):
+        from snipux import player
+
+        source = tmp_path / "Recording from 2026-08-28 11-40-21.webm"
+        source.write_bytes(b"stand-in")
+
+        # The naming is pure path arithmetic on `self.path` and
+        # `self.state`; building the whole window would need a decodable
+        # file and an event loop to say the same thing.
+        class Stub:
+            path = source
+            state = TrimState(
+                duration=27.4, start=2.6 if trimmed else 0.0, end=22.8 if trimmed else 27.4
+            )
+            _destination_for = player.PlayerWindow._destination_for
+
+        return Stub()
+
+    def test_a_trimmed_video_is_marked_as_a_different_clip(self, tmp_path, monkeypatch):
+        window = self._window(tmp_path, monkeypatch, trimmed=True)
+        assert window._destination_for("mp4").name.endswith("(trimmed).mp4")
+
+    def test_a_still_is_never_called_trimmed(self, tmp_path, monkeypatch):
+        # One frame is not a trimmed clip, whatever the range says.
+        window = self._window(tmp_path, monkeypatch, trimmed=True)
+        assert "(trimmed)" not in window._destination_for("frame").name
+        assert window._destination_for("frame").suffix == ".png"
+
+    def test_an_untrimmed_export_keeps_the_plain_name(self, tmp_path, monkeypatch):
+        window = self._window(tmp_path, monkeypatch, trimmed=False)
+        assert window._destination_for("mp4").name.endswith("11-40-21.mp4")
+
+    def test_a_second_export_does_not_overwrite_the_first(self, tmp_path, monkeypatch):
+        window = self._window(tmp_path, monkeypatch, trimmed=True)
+        first = window._destination_for("mp4")
+        first.write_bytes(b"already here")
+
+        assert window._destination_for("mp4") != first
