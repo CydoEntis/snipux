@@ -594,6 +594,15 @@ class XwininfoWindowGeometryProvider:
                 return rect
         return None
 
+    def window_named_at(self, point: QPointF):
+        """`(title, rect)` for the window under `point` -- the hover
+        preview names what it is about to take.
+        """
+        for title, rect in self.list_windows():
+            if rect.contains(point):
+                return title, rect
+        return None
+
 
 class X11WindowGeometryProvider:
     """Real per-window geometry source for X11's window-selection mode.
@@ -678,6 +687,15 @@ class X11WindowGeometryProvider:
         for _title, rect in self.list_windows():
             if rect.contains(point):
                 return rect
+        return None
+
+    def window_named_at(self, point: QPointF):
+        """`(title, rect)` for the window under `point` -- the hover
+        preview names what it is about to take.
+        """
+        for title, rect in self.list_windows():
+            if rect.contains(point):
+                return title, rect
         return None
 
 
