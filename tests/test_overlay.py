@@ -2671,9 +2671,21 @@ class TestFloatingBarComposition:
 
         buttons = bar.findChildren(QPushButton)
 
-        # 1 capture chip + 8 tools + undo/redo/clear + copy/save == 14, per
-        # the table's numbered rows 1, 3-10, 12-14, 16-17.
-        assert len(buttons) == 14
+        # 1 capture chip + 8 tools + undo/redo/clear == 12. The two
+        # destination buttons became one split action, which is a QWidget
+        # and not a QPushButton -- it has two hit areas, so it cannot be
+        # one button -- and so is asserted separately.
+        assert len(buttons) == 12
+        assert bar._action is not None
+
+    def test_the_review_windows_bar_keeps_its_destination_pair(self):
+        # Its footer already owns the exports, so a split button on the bar
+        # above them would be two answers to one question.
+        bar = FloatingBar(trailing="done")
+
+        assert bar._action is None
+        assert bar._copy_button is not None
+        assert bar._save_button is not None
 
     def test_tool_buttons_cover_every_tokens_tool_in_order(self):
         bar = FloatingBar()
@@ -2685,14 +2697,23 @@ class TestFloatingBarComposition:
 
         assert len(bar.findChildren(_Divider)) == 3
 
-    def test_undo_redo_clear_copy_save_are_all_present(self):
+    def test_undo_redo_clear_and_the_action_are_all_present(self):
         bar = FloatingBar()
 
         assert bar._undo_button is not None
         assert bar._redo_button is not None
         assert bar._clear_button is not None
-        assert bar._copy_button is not None
-        assert bar._save_button is not None
+        # The overlay's destinations live on one split button now; the
+        # review window's bar keeps the pair, since its footer owns the
+        # exports and a second control would be two answers to one
+        # question.
+        assert bar._action is not None
+        assert bar._copy_button is None
+
+        review_bar = FloatingBar(trailing="done")
+        assert review_bar._action is None
+        assert review_bar._copy_button is not None
+        assert review_bar._save_button is not None
 
     def test_bar_is_not_painted_inside_overlaywindows_paintevent(self):
         # The acceptance criterion's other half: OverlayWindow's own paint
@@ -2741,13 +2762,15 @@ class TestPillButtonLabelWidth:
             assert bar._chip._text_label.text() == label
 
     def test_save_button_shows_the_full_word_alongside_its_icon(self):
-        bar = FloatingBar()
+        # The review window's bar, which still has one. The overlay's
+        # destination is a split button and measured separately.
+        bar = FloatingBar(trailing="done")
         bar.resize(bar.sizeHint())
         bar.grab()
 
         granted, hint = self._granted_vs_hint(bar._save_button._text_label)
 
-        assert bar._save_button._text_label.text() == "Save"
+        assert bar._save_button._text_label.text() == "Done"
         assert granted >= hint
 
     def test_a_clipped_label_would_fail_this_measurement(self):
@@ -3228,7 +3251,7 @@ class TestFloatingBarIntegration:
         overlay = self._overlay(size=(200, 200))
         overlay.set_selection(QRect(0, 0, 200, 200))
 
-        QTest.mouseClick(overlay._bar._copy_button, Qt.MouseButton.LeftButton)
+        overlay._bar._action.activated.emit("Copy")
 
         assert len(calls) == 1
 
@@ -3237,7 +3260,7 @@ class TestFloatingBarIntegration:
         overlay = self._overlay(size=(50, 50))
         overlay.set_selection(QRect(0, 0, 50, 50))
 
-        QTest.mouseClick(overlay._bar._save_button, Qt.MouseButton.LeftButton)
+        overlay._bar._action.activated.emit("Save")
 
         assert (tmp_path / "Pictures" / "snipux").exists()
 
@@ -3254,7 +3277,7 @@ class TestFloatingBarIntegration:
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(0, 0, 200, 200))
 
-        QTest.mouseClick(overlay._bar._copy_button, Qt.MouseButton.LeftButton)
+        overlay._bar._action.activated.emit("Copy")
 
         assert not overlay.isVisible()
 
@@ -3267,7 +3290,7 @@ class TestFloatingBarIntegration:
         QTest.qWaitForWindowExposed(overlay)
         overlay.set_selection(QRect(0, 0, 50, 50))
 
-        QTest.mouseClick(overlay._bar._save_button, Qt.MouseButton.LeftButton)
+        overlay._bar._action.activated.emit("Save")
 
         assert not overlay.isVisible()
 
