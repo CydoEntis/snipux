@@ -103,7 +103,39 @@ things the handoff itself leaves unresolved.
 
 ---
 
-## 4 · No IBM Plex
+## 4 · Eleven tools in the stills bar, not eight
+
+**The handoff says** (§3a): *"split action button → divider → 8 tools →
+divider → undo, clear ink"*, and `ANNOTATION_TOOLS` lists exactly eight.
+
+**We ship eleven.** Ellipse, Line and Crop stay.
+
+### Why
+
+This one is older than this handoff and already recorded against the
+previous one -- see the note on `TOOLS` in `design/tokens.py`. `shapes.py`
+has always fully implemented all three; the redesigned chrome simply stopped
+naming them, so the bar offered eight of the eleven the owner had asked --
+before any redesign started -- to keep, having tried them and found they
+worked. That instruction outranks a handoff's tool count, the same way the
+16x16 minimum selection does.
+
+They are not three more bar buttons: the handoff's own guidance for a tool
+that does not fit the eight is a submenu off an existing button, and that is
+where they live -- behind the rect button's popover (`ShapeToolPopover`).
+So the bar still reads as eight, which is what the rule was protecting.
+
+### What this means for the token merge
+
+`ANNOTATION_TOOLS` is not merged. Everything in it already exists here as
+`TOOLS` + `SHORTCUTS` + `TOOL_HINTS`, covering eleven tools instead of
+eight; adopting the handoff's list would delete three of them. Same for
+`CAPTURE_MODES`, for a different reason: its shortcut letter and next-step
+hint are already `MODE_KEYS` and `MODE_NEXT_STEP`, the latter word for word.
+
+---
+
+## 5 · No IBM Plex
 
 **The handoff says** the chrome is IBM Plex Sans and every numeral, dimension,
 clock, size and shortcut is IBM Plex Mono, both shipped with the app, and that

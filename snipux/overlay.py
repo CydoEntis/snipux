@@ -3691,7 +3691,7 @@ class OverlayWindow(QWidget):
         # exactly one of them originating each change.
         self._chooser.set_mode(mode, arm=False)
 
-        if self._delay != "Off":  # design.tokens.DELAYS[0]
+        if self._delay != design.tokens.DELAYS[0]:
             self._start_delayed_capture(mode)
             return
 
