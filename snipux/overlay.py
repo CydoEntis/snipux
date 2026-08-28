@@ -3453,6 +3453,10 @@ class OverlayWindow(QWidget):
         # what read them back, and the chip's own label is kept in sync by
         # `_on_capture_mode_selected`.
         self._capture_mode: str = design.tokens.CAPTURE_MODES[0][0]
+        # True between committing a record selection and app.py starting
+        # the backend: the window stays up so the region can still be
+        # reframed, with the stills bar suppressed. See `_commit_selection`.
+        self._armed_for_recording = False
         self._delay: str = design.tokens.DELAYS[0]
         self._popover = CaptureModePopover(self)
         self._popover.hide()
@@ -3897,27 +3901,62 @@ class OverlayWindow(QWidget):
         if self._chooser.kind == "record":
             # Recording has no annotate-in-place and no bar to press Copy
             # or Save on (docs/design/recording.md: "There is no
-            # annotate-in-place for a video"), so this closes unconditionally
-            # -- unlike `instant` below, `outcome`/`after` play no part in
-            # whether the window closes here, only in what app.py does once
-            # it has the rect.
+            # annotate-in-place for a video"), so the stills bar stays
+            # hidden -- but the window itself stays *up*, unlike every
+            # other branch here.
+            #
+            # It has to. The handoff's ready stage is the one place a
+            # recording can still be reframed ("Reframe now -- you cannot
+            # resize once it is rolling"), and the handles that do the
+            # reframing are this window's. Closing here left the user with
+            # a Record button, no visible region and nothing to drag:
+            # "i dragged a region and it says i can record but i dont know
+            # where its recording? I cant resize or make adjustments?"
+            #
+            # Nothing is being filmed yet, so a frozen frame is the right
+            # thing to be looking at. `app.py` closes this window at the
+            # moment recording actually starts, which is the moment a
+            # frozen frame would start being filmed instead -- see
+            # docs/design/flow/divergences.md 4.
             if self._capture_mode == "Full screen":  # tokens.CAPTURE_MODES[2][0]
                 record_rect = None
             else:
                 record_rect = self._to_absolute_rect(rect)
+
+            # Only a region has anything to reframe. Full screen keeps the
+            # old behaviour and closes: there is no handle to drag, and a
+            # frozen shot of the whole desktop sitting there while the user
+            # decides reads as a hung machine rather than a stage.
+            if record_rect is not None:
+                self._armed_for_recording = True
+                self._sync_bar_visibility()
             if self._on_recording_requested is not None:
                 # `self.outcome` (== `self._chooser.after`) is "instant" or
                 # "save" here -- ticket 9's `_land_recording` is what
                 # actually acts on it, once the file is real; this branch
                 # only ever hands the choice along.
                 self._on_recording_requested(record_rect, self._delay, self.outcome)
-            self.close()
+            if record_rect is None:
+                self.close()
             return
         if self.outcome == "instant":
             if setup_desktop.load_instant_saves():
                 self._on_bar_save()
             else:
                 self._on_bar_copy()
+
+    def absolute_selection(self) -> QRectF | None:
+        """The current selection in absolute virtual-desktop coordinates,
+        or None if there isn't one.
+
+        Read by `app.py` when a recording actually starts, rather than the
+        rect handed over at commit time: the ready stage exists so the
+        region can be reframed, and a recording that filmed the rectangle
+        the user *first* dragged would make those handles a lie.
+        """
+        if self._selection is None:
+            return None
+        return self._to_absolute_rect(self._selection)
 
     def _confirm_window_pick(self, pos: QPointF) -> None:
         """Snap `_selection` to the window under `pos` (this widget's own
@@ -4197,7 +4236,17 @@ class OverlayWindow(QWidget):
         itself was ever shown, so visibility has to be gated here rather
         than unconditionally following `_selection`.
         """
-        if self._selection is not None and self.isVisible():
+        # Armed for a recording: the selection is real and resizable, but
+        # the annotation bar belongs to stills. The recording bar is
+        # app.py's, sits outside this window, and is the only chrome the
+        # ready stage has.
+        if self._armed_for_recording:
+            self._bar.hide()
+            self._tray.hide()
+            self._blur_tray.hide()
+            self._popover.hide()
+            self._shape_popover.hide()
+        elif self._selection is not None and self.isVisible():
             self._bar.reposition(self._selection, self._chrome_bounds())
             self._bar.show()
             self._sync_tray_visibility()
