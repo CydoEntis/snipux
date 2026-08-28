@@ -1,18 +1,21 @@
-# Next: the destination migration, then Windows, then Wayland
+# Next: the destination model, then Windows, then Wayland
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
 
-Everything through **SNX-127** is merged, and so is `fix/recording-flow`
-(merge `97f129b`). The suite is green on Linux -- 1,542 passed, 0 failed.
-It was last green on Windows at 1,457 passed / 14 skipped, which is
-*before* the capture-flow work below; that number is stale.
+Everything through **SNX-127** is merged, and so is `fix/recording-flow`.
+The suite is green on Linux -- **1,595 passed at both 1.0 and 1.5 display
+scaling**. It was last green on Windows at 1,457 passed / 14 skipped,
+which is *before* the capture-flow and player work below; that number is
+stale.
 
-The locked capture-flow handoff (`docs/design/flow/`) is part-built: the
-recording bar and its stages are done, the chooser and the stills bar are
-not. What was built differently, and why, is in that directory's
-`divergences.md` -- read it before "fixing" anything back to the
-handoff.
+Two locked handoffs are now built: `docs/design/flow/` (the capture flow)
+and `docs/design/player/` (the recording player / trim editor). What was
+built differently, and why, is in each directory's `divergences.md` --
+read those before "fixing" anything back to a handoff.
+
+**The one thing that needs a decision from you, not more work from me:**
+see "H.264, and what Export MP4 actually writes" below.
 
 ## Windows has now been watched, and region recording was broken
 
@@ -108,11 +111,52 @@ handles, record, stop. The file is 1100x560 -- the reframed size, not the
 dragged one -- 2.96s, landed where the toast said, with the finished bar
 carrying "0:02 - 0.2 MB - webm".
 
-**Left: the destination migration.** `AFTER_CAPTURE`
-(`instant`/`edit`/`review`) has to become the handoff's `DESTINATIONS`
-(`Copy`/`Save`/`Open`). It is agreed, and it is deliberately not done in
-the same pass as everything above, because it is the only remaining change
-that:
+**The player is built.** `snipux/player.py` is the window a recording
+opens into: playback, a 96px rail with a decoded filmstrip and a real
+waveform, in/out handles with a plain-language readout, mute-as-a-track
+-decision, and export. Record mode's third destination, `open`, now
+exists and is wired from the chooser through `_land_recording`.
+
+Verified against a real GNOME recording, not just the suite: the window
+opens on a poster frame, all 16 filmstrip cells decode, and a 1.0s-2.5s
+trim exported to 1.527s / 43 frames / 900x400, measured with `ffprobe`.
+
+### H.264, and what Export MP4 actually writes -- **needs a decision**
+
+The bundled FFmpeg **cannot encode H.264 in software**. `libavcodec.so.61`
+as shipped with PyQt6 6.11 has exactly `h264_nvenc` and `h264_vaapi` and
+no `libx264` -- an LGPL build, and x264 is GPL. On this box (RTX 4060,
+driver 580.173.02, `libnvidia-encode.so.1` present) Qt's NVENC path still
+fails at probe with `10 bit encode not supported` / `No capable devices
+found`, and VAAPI fails the same way. Qt does not fall back: the recorder
+reports "Could not initialize encoder" and leaves a zero-length file.
+
+So `snipux/__init__.py` disables hardware encoding, which always produces
+a playable file -- MPEG-4 Part 2 -- and the menu label was changed from
+"MP4 (H.264) -- plays anywhere. Slack, Teams, browsers." to plain "MP4 --
+plays in desktop players", because the old line would have been a lie.
+MPEG-4 Part 2 does not play in browsers or Slack.
+
+Three ways to make "plays anywhere" true again, in increasing cost:
+
+1. **Ship nothing, accept the limit.** Trimmed clips are for desktop
+   players; untrimmed sharing uses the WebM copy, which is what was
+   recorded and plays in every browser.
+2. **Use the system `ffmpeg` when present**, fall back to Qt otherwise.
+   It is already on this machine and in every distro's repos. This is the
+   "fourth dependency" CLAUDE.md says to raise rather than decide -- and
+   it is an external binary, not a Python package, so it degrades rather
+   than breaks.
+3. **Find a PyQt6 wheel whose FFmpeg carries x264.** Out of our hands.
+
+Nothing else in the player depends on which is chosen.
+
+### The stills destination model -- still open, still a product question
+
+`AFTER_CAPTURE` (`instant`/`edit`/`review`) still has to become the
+handoff's `Copy`/`Save`/`Open`. The *record* side made this move in this
+pass and now offers all three. The stills side did not, because it is the
+side where the change:
 
 - rewrites values already persisted in the user's config, so it needs a
   rename map like `_AFTER_CAPTURE_RENAMES` already is for `clip`/`file`;
@@ -122,12 +166,12 @@ that:
   overlay at all, and the handoff has no equivalent: every capture lands
   on the stills bar and fires its destination from there. `edit` likewise
   stops being a destination and becomes the thing that always happens.
-  Whether the no-overlay path is worth keeping as a fourth option is a
-  product question, not a merge conflict.
+  Whether the no-overlay path survives as a separate toggle -- "finish
+  without showing the toolbar" -- or is dropped is a product question.
 
-`DESTINATION_WORDING` in tokens.py already carries the per-kind Copy/Save
-strings the record side uses, so the vocabulary exists; what is missing is
-the model change behind it.
+What was fixed meanwhile: `_sync_bar_destination` mapped `edit` to the
+Copy face through a `.get` default, so the most common setting reached its
+face by accident. It is now spelled out with the reason.
 
 ## Windows: three jobs, in this order
 
