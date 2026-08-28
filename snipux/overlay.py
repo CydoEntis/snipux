@@ -3918,26 +3918,27 @@ class OverlayWindow(QWidget):
             # moment recording actually starts, which is the moment a
             # frozen frame would start being filmed instead -- see
             # docs/design/flow/divergences.md 4.
-            if self._capture_mode == "Full screen":  # tokens.CAPTURE_MODES[2][0]
-                record_rect = None
-            else:
-                record_rect = self._to_absolute_rect(rect)
+            # Full screen means *this monitor*, the same thing it means on
+            # the stills side and the same thing the chooser promises
+            # ("Grabs this monitor the moment you choose it"). It used to
+            # hand over None, which the backend reads as the whole virtual
+            # desktop -- so choosing it on a three-monitor machine produced
+            # one 6400x1440 video of all three, while the identical row on
+            # the stills side captured one display. `_select_full_screen`
+            # has already set `rect` to the display under the cursor, so
+            # this needs no special case at all: it is a region like any
+            # other, and the backend's None is left for a caller that
+            # genuinely wants every monitor at once.
+            record_rect = self._to_absolute_rect(rect)
 
-            # Only a region has anything to reframe. Full screen keeps the
-            # old behaviour and closes: there is no handle to drag, and a
-            # frozen shot of the whole desktop sitting there while the user
-            # decides reads as a hung machine rather than a stage.
-            if record_rect is not None:
-                self._armed_for_recording = True
-                self._sync_bar_visibility()
+            self._armed_for_recording = True
+            self._sync_bar_visibility()
             if self._on_recording_requested is not None:
                 # `self.outcome` (== `self._chooser.after`) is "instant" or
                 # "save" here -- ticket 9's `_land_recording` is what
                 # actually acts on it, once the file is real; this branch
                 # only ever hands the choice along.
                 self._on_recording_requested(record_rect, self._delay, self.outcome)
-            if record_rect is None:
-                self.close()
             return
         if self.outcome == "instant":
             if setup_desktop.load_instant_saves():
