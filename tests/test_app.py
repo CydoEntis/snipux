@@ -1,11 +1,22 @@
 import ctypes
 import re
 import shutil
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PyQt6.QtCore import QMimeData, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QUrl
+from PyQt6.QtCore import (
+    QMimeData,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    QSizeF,
+    Qt,
+    QTimer,
+    QUrl,
+)
 from PyQt6.QtGui import QGuiApplication, QImage, qRgb
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtTest import QTest
@@ -4421,3 +4432,129 @@ class TestRecordingErrorAcceptsAPlainMessage:
 
         assert "gnome: bus is gone" in str(error)
         assert "x11: no display" in str(error)
+
+
+class TestTheInterfaceStaysAliveWhileTheRecorderStarts:
+    """`ScreencastArea` takes ~500ms to answer -- measured, and reproduced
+    with `gdbus`, so it is GNOME building its capture pipeline rather than
+    anything snipux does. Called on the UI thread it froze the window for
+    that whole time, reported as the app feeling stuck between pressing
+    Record and recording.
+
+    It does not start any sooner now. Nothing can. These cover the part
+    that was fixable: the interface not dying while it happens, and the
+    controls that became reachable as a result behaving.
+    """
+
+    @staticmethod
+    def _slow_backend(delay=0.25):
+        backend = FakeRecordingBackend()
+        original = backend.start
+        def start(rect, path):
+            time.sleep(delay)
+            return original(rect, path)
+        backend.start = start
+        return backend
+
+    def _controller(self, make_controller, backend):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+        )
+
+    def test_the_event_loop_keeps_running_during_the_start(self, make_controller):
+        # The whole point. A frozen loop fires no timers at all.
+        controller = self._controller(make_controller, self._slow_backend())
+        ticks = []
+        heartbeat = QTimer()
+        heartbeat.setInterval(10)
+        heartbeat.timeout.connect(lambda: ticks.append(1))
+        heartbeat.start()
+
+        _record(controller, QRectF(50, 50, 200, 150))
+        heartbeat.stop()
+
+        assert ticks, "the UI thread was blocked for the whole start"
+
+    def test_the_recording_is_running_by_the_time_the_call_returns(
+        self, make_controller
+    ):
+        # The nested loop exists so callers -- and every existing test --
+        # keep seeing a synchronous start.
+        controller = self._controller(make_controller, self._slow_backend())
+
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert controller._active_recording is not None
+        assert controller._starting_recording is False
+
+    def test_stop_during_start_up_is_recorded_rather_than_ignored(
+        self, make_controller
+    ):
+        # Deterministic half: with a start in flight there is nothing to
+        # stop yet, so the press must be remembered instead of hitting the
+        # "no active recording" guard and vanishing.
+        backend = FakeRecordingBackend()
+        controller = self._controller(make_controller, backend)
+        controller._starting_recording = True
+
+        controller._stop_recording()
+
+        assert controller._pending_start_request == "stop"
+        assert not backend.stop_calls
+
+    def test_discard_during_start_up_is_recorded_as_a_discard(
+        self, make_controller
+    ):
+        # The two mean different things once the file exists, so the
+        # request has to remember which was asked for.
+        controller = self._controller(make_controller, FakeRecordingBackend())
+        controller._starting_recording = True
+
+        controller._discard_recording()
+
+        assert controller._pending_start_request == "discard"
+
+    def test_the_shortcut_during_start_up_means_stop_not_a_new_snip(
+        self, make_controller
+    ):
+        # `start_capture` means "stop" while a recording runs; a recording
+        # a few hundred milliseconds from running is the same answer, not
+        # an invitation to overlay it.
+        controller = self._controller(make_controller, FakeRecordingBackend())
+        controller._starting_recording = True
+
+        controller.start_capture()
+
+        assert controller._overlay is None
+        assert controller._pending_start_request == "stop"
+
+    def test_a_stop_asked_for_mid_start_really_stops_the_recording(
+        self, make_controller
+    ):
+        # End to end through the nested loop: pressed 150ms into a 400ms
+        # start, comfortably clear of the repaint pump that runs before it.
+        backend = self._slow_backend(delay=0.4)
+        controller = self._controller(make_controller, backend)
+        QTimer.singleShot(150, controller._stop_recording)
+
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert controller._active_recording is None
+        assert backend.stop_calls, "the backend was never stopped"
+        assert controller._pending_start_request is None
+
+    def test_a_failed_start_still_raises_through_the_nested_loop(
+        self, make_controller
+    ):
+        # The worker catches the exception and hands it back; it must be
+        # re-raised on the UI thread rather than swallowed into a silent
+        # non-recording.
+        backend = FakeRecordingBackend(start_error=RuntimeError("no recorder"))
+        controller = self._controller(make_controller, backend)
+
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert controller._active_recording is None
+        assert controller._starting_recording is False
