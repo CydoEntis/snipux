@@ -70,6 +70,19 @@ class RecordingBackend(ABC):
         """
         return None
 
+    # Whether `start()` may be called from a worker thread. Off by default,
+    # and deliberately opt-in: a backend built out of QObjects cannot, since
+    # a QMediaRecorder created on one thread refuses everything from
+    # another -- "Operation not permitted", the same wall the player's
+    # exporter hit. Only a backend whose start() touches nothing but a
+    # socket may say True.
+    #
+    # `app.AppController` runs the start off the UI thread when every
+    # available backend allows it, because GNOME's ScreencastArea blocks
+    # for ~500ms and froze the window for all of it. That is a measured fix
+    # for one backend, not a property to assume of the next one.
+    starts_off_thread: bool = False
+
     @abstractmethod
     def start(self, rect: QRectF | None, path: str) -> str:
         """Begin recording to `path`: `rect` (absolute logical coordinates)
@@ -265,6 +278,12 @@ class GnomeScreencastBackend(RecordingBackend):
         # again -- and so both halves of one recording are guaranteed to
         # talk to the same one.
         self._address = None
+
+    # Nothing here is a QObject: jeepney's connection is a plain socket,
+    # opened by start() and used by stop() strictly one thread at a time,
+    # ordered by the completion signal. This is the backend the off-thread
+    # start was measured for.
+    starts_off_thread = True
 
     def name(self) -> str:
         return "gnome-screencast"

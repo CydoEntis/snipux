@@ -1,6 +1,7 @@
 import ctypes
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -4449,6 +4450,10 @@ class TestTheInterfaceStaysAliveWhileTheRecorderStarts:
     @staticmethod
     def _slow_backend(delay=0.25):
         backend = FakeRecordingBackend()
+        # Opted in, as GnomeScreencastBackend is: these tests are about the
+        # off-thread path, and a backend that has not said it is safe there
+        # correctly does not take it.
+        backend.starts_off_thread = True
         original = backend.start
         def start(rect, path):
             time.sleep(delay)
@@ -4544,6 +4549,47 @@ class TestTheInterfaceStaysAliveWhileTheRecorderStarts:
         assert controller._active_recording is None
         assert backend.stop_calls, "the backend was never stopped"
         assert controller._pending_start_request is None
+
+    def test_a_backend_that_has_not_opted_in_starts_on_the_ui_thread(
+        self, make_controller
+    ):
+        # The Windows recorder builds a QScreenCapture, a
+        # QMediaCaptureSession and a QMediaRecorder in start(). Created on
+        # a worker thread they refuse everything stop() later asks of them,
+        # and it has no measured need for this anyway -- the delay being
+        # fixed is GNOME's D-Bus round trip.
+        threads = []
+
+        backend = FakeRecordingBackend()
+        assert backend.starts_off_thread is False, "the default must be off"
+        original = backend.start
+        def start(rect, path):
+            threads.append(threading.current_thread())
+            return original(rect, path)
+        backend.start = start
+
+        controller = self._controller(make_controller, backend)
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert threads == [threading.main_thread()]
+
+    def test_an_opted_in_backend_really_does_start_off_the_ui_thread(
+        self, make_controller
+    ):
+        threads = []
+
+        backend = FakeRecordingBackend()
+        backend.starts_off_thread = True
+        original = backend.start
+        def start(rect, path):
+            threads.append(threading.current_thread())
+            return original(rect, path)
+        backend.start = start
+
+        controller = self._controller(make_controller, backend)
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert threads and threads[0] is not threading.main_thread()
 
     def test_a_failed_start_still_raises_through_the_nested_loop(
         self, make_controller

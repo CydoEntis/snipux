@@ -1,4 +1,4 @@
-# Next: the destination model, then Windows, then Wayland
+# Next: Windows, then the destination model, then Wayland
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
@@ -14,9 +14,12 @@ and `docs/design/player/` (the recording player / trim editor). What was
 built differently, and why, is in each directory's `divergences.md` --
 read those before "fixing" anything back to a handoff.
 
-The export/H.264 question is **settled** -- see "Export: decided" below.
-What is still open is the *stills* destination model, which is a product
-question rather than a build one.
+Nothing here is blocked on a decision from you. The export/H.264 question
+is **settled** -- see "Export: decided" below. The *stills* destination
+model is still open, but it is a product question rather than a build one
+and nothing waits on it.
+
+**Everything is on `main`, pushed. There is no `dev` branch on this repo.**
 
 ## Windows has now been watched, and region recording was broken
 
@@ -168,10 +171,14 @@ What was fixed meanwhile: `_sync_bar_destination` mapped `edit` to the
 Copy face through a `.get` default, so the most common setting reached its
 face by accident. It is now spelled out with the reason.
 
-## Windows: three jobs, in this order
+## Windows: four jobs, in this order
 
 Written up from the Linux side on 2026-08-28. None of it can be checked
 from here; all of it is reachable with the machine in front of you.
+
+**Read job 4 first if you are short of time** -- it is the one that is
+new since the rest of this list was written, and it is a check rather
+than a build.
 
 ### 1 · The recorder always records the primary screen (a real bug)
 
@@ -241,6 +248,44 @@ post-selection flow changed and none of it has run there:
   and nothing has ever verified that choosing one changes what is
   recorded;
 - stopping leaves the bar up for six seconds with a summary and Discard.
+
+### 4 · Check what the Linux work assumed about every platform
+
+Three things landed for Linux reasons and apply everywhere. None is known
+to be wrong on Windows; none has been run there.
+
+**`snipux/__init__.py` disables hardware video encoding, globally.** It
+sets `QT_FFMPEG_ENCODING_HW_DEVICE_TYPES=""` because Qt's bundled FFmpeg
+has no software x264 and its NVENC/VAAPI paths fail *here* -- when they
+fail Qt does not fall back, it writes a zero-length file. On Windows the
+same Qt may reach a working hardware H.264 encoder, in which case this
+line is throwing away the good path for a Linux problem. **Check whether
+an MP4 export produces `h264` on Windows with the line and without it**
+(`ffprobe -show_entries stream=codec_name`), and if hardware works there,
+make the variable conditional on the platform seam rather than global.
+
+**The player prefers a system `ffmpeg` and Windows will not have one.**
+`player.system_ffmpeg()` looks on PATH, verifies `libx264`/`libvpx-vp9`/
+`gif`, and caches. With none found, MP4 falls back to Qt (see above), and
+GIF and trimmed WebM show as disabled rows with their reason -- correct
+behaviour, but it means the *default* Windows experience is the degraded
+one. Worth knowing before it reads as a bug.
+
+**The off-thread recorder start is opt-in, and Windows is opted out.**
+`RecordingBackend.starts_off_thread` defaults to False;
+`GnomeScreencastBackend` sets it True. `WindowsRecorderBackend` must stay
+False: it builds a `QScreenCapture`, a `QMediaCaptureSession` and a
+`QMediaRecorder` in `start()`, and a QMediaRecorder created on a worker
+thread refuses everything from another -- "Operation not permitted", the
+same wall the player's exporter hit. It also has no need for it: the
+delay that change fixes is GNOME's ~500ms D-Bus round trip, which Qt's
+local objects do not pay. **Do not flip that flag without measuring that
+Windows is slow, and confirming stop() still works from the UI thread.**
+
+Also unrun on Windows, and cheap to eyeball while you are there: the
+frameless windows' new resize borders (`WinWindow` asks
+`startSystemResize` first, which Windows supports) and the whole player
+window.
 
 ## The recording flow was fixed, and so was the recorder underneath it
 
