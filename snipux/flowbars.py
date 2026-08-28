@@ -823,3 +823,72 @@ class CountdownNumeral(QWidget):
             self.rect(), int(Qt.AlignmentFlag.AlignCenter), str(self._seconds)
         )
         painter.end()
+
+
+class RegionFrame:
+    """A red outline around the region being recorded.
+
+    Not a widget: **four** thin always-on-top strips, one per edge, sitting
+    entirely *outside* the recorded rectangle. One window covering the
+    region with a transparent middle would be simpler and is the obvious
+    thing to reach for -- and it puts a window over the very pixels being
+    filmed, which is a question about compositing this project cannot yet
+    answer on Wayland. Four strips make it a non-question: nothing this
+    draws is ever inside the frame.
+
+    It exists because taking the overlay down at the moment recording
+    starts (docs/design/flow/divergences.md 4) took the scrim, the frame
+    and the dimension chip with it, leaving nothing on screen that says
+    what is being recorded. The report was exactly that: "i dragged to a
+    region and now idk where its recording".
+
+    Red, and the same red as the bar's border, because red means live here
+    and appears nowhere else in the product.
+    """
+
+    def __init__(self, thickness: int = 3):
+        self._thickness = thickness
+        self._strips: list[QWidget] = []
+
+    def _strip(self) -> QWidget:
+        strip = QWidget(None)
+        strip.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput
+        )
+        strip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        # A tool window that never takes focus: clicking near the frame must
+        # reach whatever is being recorded, not this.
+        strip.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        strip.setStyleSheet(
+            f"background: {design.flow_color('REC').name()};"
+        )
+        return strip
+
+    def show_around(self, rect) -> None:
+        """Outline `rect` (absolute logical coordinates), drawn outside it."""
+        self.close()
+        t = self._thickness
+        left, top = round(rect.left()), round(rect.top())
+        width, height = round(rect.width()), round(rect.height())
+        edges = [
+            (left - t, top - t, width + 2 * t, t),           # above
+            (left - t, top + height, width + 2 * t, t),      # below
+            (left - t, top, t, height),                      # left
+            (left + width, top, t, height),                  # right
+        ]
+        for x, y, w, h in edges:
+            strip = self._strip()
+            strip.setGeometry(x, y, w, h)
+            strip.show()
+            self._strips.append(strip)
+
+    def close(self) -> None:
+        for strip in self._strips:
+            strip.close()
+        self._strips = []
+
+    def is_showing(self) -> bool:
+        return bool(self._strips)

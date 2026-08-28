@@ -2106,7 +2106,7 @@ class TestAppControllerRecordingHud:
         hud_rect = QRectF(controller._recording_hud.geometry())
         assert not hud_rect.intersects(rect)
 
-    def test_stop_recording_closes_the_hud_and_stops_the_elapsed_timer(
+    def test_stop_recording_ends_the_live_chrome_but_leaves_the_bar(
         self, make_controller, monkeypatch
     ):
         controller, backend = self._start_a_recording(
@@ -2122,11 +2122,19 @@ class TestAppControllerRecordingHud:
 
         controller._stop_recording()
 
-        assert controller._recording_hud is None
+        # Everything that says "recording" stops: the clock, the tray
+        # tooltip, the red outline round the region.
         assert controller._recording_elapsed_timer is None
-        assert not hud.isVisible()
         assert not timer.isActive()
         assert controller._tray_icon.toolTip() == ""
+        assert controller._region_frame.is_showing() is False
+
+        # The bar itself stays, saying what was produced and offering to
+        # bin it -- see `_show_finished_bar`. It used to vanish here, which
+        # left nothing on screen between "stop" and a toast that had
+        # already gone.
+        assert controller._recording_hud is hud
+        assert hud.state() == RecordingBar.DONE
         assert backend.stop_calls == [True]
 
     def test_stopping_recording_reports_a_backend_failure_without_raising(
@@ -2435,6 +2443,85 @@ class TestTheBarStaysUpAfterARecordingLands:
         landed = list(tmp_path.glob("*.mp4")) + list(tmp_path.glob("*.webm"))
         assert landed, f"nothing landed in {tmp_path}"
         assert controller._landed_recording is not None
+
+    def test_the_bar_appears_for_copy_too_not_just_save(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Copy is the *default* destination, and it used to return nothing
+        # from landing -- so the finished bar never appeared for the
+        # destination most recordings actually use, which is how it came to
+        # be reported as not working at all.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None)
+        backend = FakeRecordingBackend()
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "instant")
+        _b, path, _a = controller._active_recording
+        Path(path).write_bytes(b"x" * 1_048_576)
+
+        controller._stop_recording()
+
+        assert controller._recording_hud is not None
+        assert controller._recording_hud.state() == RecordingBar.DONE
+        summary = controller._recording_hud._summary.text()
+        # "copied", not a container: the file is in the temp dir and the
+        # clipboard holds a reference, so naming a folder the user could go
+        # and look in would be a lie.
+        assert "copied" in summary
+        assert "1.0 MB" in summary
+
+    def test_the_region_is_outlined_while_recording_and_not_after(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Taking the overlay down at the moment recording starts took the
+        # frame with it, leaving nothing on screen saying what was live.
+        # The report was exactly that: "i dragged to a region and now idk
+        # where its recording".
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "save")
+
+        assert controller._region_frame.is_showing() is True
+
+        controller._stop_recording()
+
+        # Gone even though the bar stays: an outline round nothing until
+        # the bar times out is worse than none at all.
+        assert controller._region_frame.is_showing() is False
+        assert controller._recording_hud is not None
+
+    def test_a_full_screen_recording_gets_no_outline(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # The region is the screen, so a border round it would be useless
+        # and, on the edges, in the recording.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([FakeRecordingBackend()]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, None, "No delay", "save")
+
+        assert controller._region_frame.is_showing() is False
 
     def test_the_bar_stays_up_saying_what_was_produced(
         self, make_controller, monkeypatch, tmp_path

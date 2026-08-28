@@ -49,7 +49,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget
 
-from snipux.flowbars import CountdownNumeral, FlowMenu, RecordingBar
+from snipux.flowbars import CountdownNumeral, FlowMenu, RecordingBar, RegionFrame
 from snipux.capture import (
     XwininfoWindowGeometryProvider,
     BackendRegistry,
@@ -929,6 +929,10 @@ class AppController:
         # something to remove once there is no recording left to stop.
         self._landed_recording: Path | None = None
         self._done_timer: QTimer | None = None
+        # The red outline around what is being recorded. The overlay is
+        # gone by then and took the frame with it, so without this there is
+        # nothing on screen saying which region is live.
+        self._region_frame = RegionFrame()
 
         self._overlay: OverlayWindow | None = None
         # Held for the same reason `_overlay` is: a parentless widget is
@@ -1483,7 +1487,9 @@ class AppController:
         minutes, seconds = divmod(elapsed, 60)
         return f"{minutes}:{seconds:02d}"
 
-    def _show_finished_bar(self, landed: Path, elapsed: str) -> None:
+    def _show_finished_bar(
+        self, landed: Path, elapsed: str, *, copied: bool = False
+    ) -> None:
         """Leave the bar up for a moment saying what was produced, with a
         way to bin it.
 
@@ -1510,9 +1516,15 @@ class AppController:
             # size that would be a guess.
             size = "size unknown"
         container = landed.suffix.lstrip(".") or "video"
-
+        # Copy leaves the file in the temp dir and puts a *reference* on
+        # the clipboard, so the summary says "copied" rather than naming a
+        # container the user cannot go and find. Discard still works, and
+        # still means what it says: the clipboard entry it leaves behind
+        # pastes nothing, which is the correct outcome for a take the user
+        # has just said they do not want.
+        tail = "copied" if copied else container
         self._landed_recording = landed
-        bar.set_done(f"{elapsed} · {size} · {container}")
+        bar.set_done(f"{elapsed} · {size} · {tail}")
         self._reposition_recording_bar()
 
         self._done_timer = QTimer()
@@ -1810,6 +1822,12 @@ class AppController:
         # itself -- see the tray menu's own construction comment.
         self.discard_action.setEnabled(True)
 
+        # A full-screen recording needs no outline: the region is the
+        # screen, and a red border around the whole display would be both
+        # useless and, on the edges, in the recording.
+        if rect is not None:
+            self._region_frame.show_around(rect)
+
         if rect is None and self._recording_hud is not None:
             # A full-screen recording has no "outside the recorded area"
             # for the pill to sit in, so from here on it would film
@@ -1843,6 +1861,11 @@ class AppController:
         # still running must not leave that timer to fire into a
         # torn-down recording.
         self._stop_countdown_timer()
+        # The outline goes whatever happens to the bar. It describes a
+        # recording that is over, and `keep_bar=True` deliberately leaves
+        # the bar standing afterwards -- hanging the outline off that would
+        # leave a red rectangle around nothing until the bar timed out.
+        self._region_frame.close()
         if not keep_bar and self._recording_hud is not None:
             self._recording_hud.close()
             self._recording_hud = None
@@ -1995,7 +2018,7 @@ class AppController:
         if landed is None:
             self._close_recording_bar()
         else:
-            self._show_finished_bar(landed, elapsed)
+            self._show_finished_bar(landed, elapsed, copied=after == "instant")
 
     def _land_recording(
         self, path: str, after: str, *, reason: str | None = None
@@ -2056,7 +2079,13 @@ class AppController:
                 self._report_shortcut(f"{reason} {copied}.")
             else:
                 self._report_shortcut(f"{copied}.")
-            return
+            # The temp file, which is what the clipboard reference points
+            # at. Handed back for the same reason a saved one is: the
+            # finished bar has to be able to say how big it was and offer
+            # to bin it, and Copy is the *default* destination -- returning
+            # nothing here is why that bar never appeared for the
+            # destination most recordings actually use.
+            return Path(path)
 
         folder = setup_desktop.load_recording_folder()
         folder.mkdir(parents=True, exist_ok=True)
