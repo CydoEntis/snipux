@@ -163,7 +163,10 @@ class TestKindChangedSignal:
 
 
 class TestSwitchingToRecordSnapsAnUnavailableMode:
-    @pytest.mark.parametrize("mode", ["Window", "Freeform"])
+    # Window came off this list once recording gained it -- it was only
+    # ever disabled because nobody had asked, and it resolves to a rect
+    # like any region. Freeform stays: video is rectangular.
+    @pytest.mark.parametrize("mode", ["Freeform"])
     def test_it_snaps_to_region(self, mode):
         chooser = Chooser(parent=None)
         chooser.set_mode(mode, arm=False)
@@ -184,7 +187,7 @@ class TestSwitchingToRecordSnapsAnUnavailableMode:
         # The stills side's mode/after lists are the original, unrestricted
         # ones, so nothing there can ever be invalid.
         chooser = Chooser(parent=None)
-        chooser.set_mode("Window", arm=False)
+        chooser.set_mode("Freeform", arm=False)
         chooser.set_kind("record")
         assert chooser.mode == "Region"
 
@@ -239,7 +242,7 @@ class TestFullScreenBehavesDifferentlyPerKind:
 
 
 class TestRecordSideModeSelectionIsInert:
-    @pytest.mark.parametrize("mode", ["Window", "Freeform"])
+    @pytest.mark.parametrize("mode", ["Freeform"])
     def test_picking_a_disabled_mode_leaves_it_unchanged(self, mode):
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
@@ -249,7 +252,7 @@ class TestRecordSideModeSelectionIsInert:
         assert chooser.mode == "Region"
         assert chooser.phase == "choosing"
 
-    @pytest.mark.parametrize("key,mode", [("W", "Window"), ("L", "Freeform")])
+    @pytest.mark.parametrize("key,mode", [("L", "Freeform")])
     def test_the_shortcut_key_is_inert_too(self, key, mode):
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
@@ -257,6 +260,17 @@ class TestRecordSideModeSelectionIsInert:
         chooser.handle_key(ord(key), key)
 
         assert chooser.mode == "Region"
+
+    def test_window_is_live_on_the_record_side_now(self):
+        # It was disabled for one reason -- nobody had asked -- and it
+        # resolves to a rect exactly like a dragged region does, which is
+        # all the recorder ever wanted.
+        chooser = Chooser(parent=None)
+        chooser.set_kind("record")
+
+        chooser.set_mode("Window")
+
+        assert chooser.mode == "Window"
 
 
 class TestTheModeMenuNarrowsOnTheRecordSide:
