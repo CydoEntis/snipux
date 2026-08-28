@@ -347,6 +347,161 @@ class _Readout(QLabel):
         self.setStyleSheet(" ".join(rules))
 
 
+class FlowMenu(QWidget):
+    """A dropdown for one of the bars.
+
+    A **top-level popup**, never a child of the bar that opened it. The
+    handoff is explicit about this and gives the reason: an open menu has to
+    paint above the hint pill that sits *below* the bar, and a parent
+    carrying an effect traps it in that parent's stacking context. The HTML
+    reference hit exactly this with `backdrop-filter`.
+
+    Rows are `(value, label, note, shortcut, disabled_reason)`. A row with a
+    reason is drawn dimmed and refuses to be chosen, rather than being left
+    out: the handoff's rule is that an option which cannot work says why,
+    because a user who cannot see the reason has no way to tell a missing
+    feature from a broken one.
+    """
+
+    chosen = pyqtSignal(str)
+
+    def __init__(self, rows, current: str, width: int, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._rows = list(rows)
+        self._current = current
+        self._hovered = -1
+        self.setMouseTracking(True)
+
+        metric = tokens.FlowMetric
+        row_h = self._row_height()
+        self.setFixedSize(width, metric.MENU_PAD * 2 + row_h * len(self._rows))
+
+    @staticmethod
+    def _row_height() -> int:
+        metric = tokens.FlowMetric
+        pad_v, _pad_h = metric.MENU_ROW_PAD
+        return pad_v * 2 + 30
+
+    def _row_at(self, y: float) -> int:
+        metric = tokens.FlowMetric
+        index = int((y - metric.MENU_PAD) // self._row_height())
+        return index if 0 <= index < len(self._rows) else -1
+
+    def open_above(self, anchor_rect) -> None:
+        """Open with the menu's bottom edge above `anchor_rect`'s top.
+
+        The audio menu opens upward so it never covers the region being
+        recorded -- the one thing on screen the user is trying to look at.
+        """
+        metric = tokens.FlowMetric
+        x = anchor_rect.center().x() - self.width() / 2
+        self.move(round(x), round(anchor_rect.top() - metric.MENU_OFFSET - self.height()))
+        self.show()
+
+    def open_below(self, anchor_rect) -> None:
+        metric = tokens.FlowMetric
+        x = anchor_rect.center().x() - self.width() / 2
+        self.move(round(x), round(anchor_rect.bottom() + metric.MENU_OFFSET))
+        self.show()
+
+    def mouseMoveEvent(self, event) -> None:
+        index = self._row_at(event.position().y())
+        if index != self._hovered:
+            self._hovered = index
+            self.update()
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = -1
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        index = self._row_at(event.position().y())
+        if index < 0:
+            return
+        value, _label, _note, _shortcut, disabled = self._rows[index]
+        if disabled:
+            return
+        self.chosen.emit(value)
+        self.close()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = tokens.FlowMetric
+
+        surface = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(surface, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.flow_color("MENU_BG"))
+        painter.drawPath(path)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.flow_color("MENU_BORDER"))
+        painter.drawPath(path)
+
+        row_h = self._row_height()
+        pad_v, pad_h = metric.MENU_ROW_PAD
+        for index, (value, label, note, shortcut, disabled) in enumerate(self._rows):
+            top = metric.MENU_PAD + index * row_h
+            row = QRectF(metric.MENU_PAD, top, self.width() - metric.MENU_PAD * 2, row_h)
+            selected = value == self._current
+
+            if selected or (index == self._hovered and not disabled):
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(
+                    design.flow_color(
+                        "ROW_SELECTED_BG" if selected else "ROW_HOVER_BG"
+                    )
+                )
+                painter.drawRoundedRect(
+                    row, metric.MENU_ROW_RADIUS, metric.MENU_ROW_RADIUS
+                )
+
+            if disabled:
+                fg = design.flow_color("TOOL_DISABLED_FG")
+            elif selected:
+                fg = design.flow_color("ROW_SELECTED_FG")
+            else:
+                fg = design.flow_color("ROW_IDLE_FG")
+
+            text_rect = row.adjusted(pad_h, 0, -pad_h, 0)
+            painter.setPen(fg)
+            painter.setFont(_font(12.5, 600 if selected else 500))
+            if note or disabled:
+                painter.drawText(
+                    text_rect.adjusted(0, pad_v - 2, 0, 0),
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+                    label,
+                )
+                painter.setPen(design.flow_color("ROW_NOTE_FG"))
+                painter.setFont(_font(11, 400))
+                painter.drawText(
+                    text_rect.adjusted(0, 0, 0, -pad_v + 2),
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom),
+                    disabled or note,
+                )
+            else:
+                painter.drawText(
+                    text_rect,
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    label,
+                )
+
+            if shortcut and not disabled:
+                painter.setPen(design.flow_color("SHORTCUT_FG"))
+                painter.setFont(_font(11, 500, mono=True))
+                painter.drawText(
+                    text_rect,
+                    int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                    shortcut,
+                )
+        painter.end()
+
+
 class RecordingBar(QWidget):
     """The recording side of the flow, stages 3b through 6.
 
@@ -523,6 +678,10 @@ class RecordingBar(QWidget):
 
     def set_audio_enabled(self, enabled: bool) -> None:
         self._audio.set_enabled(enabled)
+
+    def delay_control(self) -> QWidget:
+        """The delay button, for a menu to anchor itself against."""
+        return self._delay
 
     def audio_control(self) -> QWidget:
         """The audio button itself, so a caller can hang the platform's own
