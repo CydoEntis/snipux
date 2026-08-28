@@ -1843,6 +1843,23 @@ class AppController:
         if rect is not None:
             self._region_frame.show_around(rect)
 
+        if rect is None:
+            # A full-screen recording films every monitor -- measured on
+            # this three-monitor desktop, GNOME's bare `Screencast` returns
+            # 6400x1440, the whole virtual desktop -- so there is nowhere on
+            # screen to put chrome that would not end up in the file. The
+            # bar goes, and with it the only visible Stop.
+            #
+            # What is left is a tray icon, a tooltip, and (on GNOME) the
+            # shell's own recording dot: enough to notice, not enough to
+            # act on. So the one thing the user cannot work out by looking
+            # -- how to stop it -- is said out loud, once, as it starts.
+            self._report_shortcut(
+                "Recording the whole screen. Press "
+                f"{setup_desktop.load_shortcut()} to stop -- the bar is "
+                "hidden because it would be in the recording."
+            )
+
         if rect is None and self._recording_hud is not None:
             # A full-screen recording has no "outside the recorded area"
             # for the pill to sit in, so from here on it would film
