@@ -135,6 +135,20 @@ def chooser_color(token_name: str) -> QColor:
     return qcolour
 
 
+def flow_color(token_name: str) -> QColor:
+    """`tokens.FlowColor.<token_name>` -> QColor, alpha included.
+
+    The capture flow's bars, on the same pairing rule as `color()`,
+    `win_color()` and `chooser_color()`: the `<TOKEN>_ALPHA` sibling is
+    resolved here so a colour and its alpha are never applied separately.
+    """
+    if not hasattr(tokens.FlowColor, token_name):
+        raise ValueError(f"no such flow colour: {token_name!r}")
+    qcolour = QColor(getattr(tokens.FlowColor, token_name))
+    qcolour.setAlphaF(getattr(tokens.FlowColor, f"{token_name}_ALPHA", 1.0))
+    return qcolour
+
+
 def color(token_name: str) -> QColor:
     """Resolve `tokens.Color.<token_name>` to a QColor, alpha included.
 

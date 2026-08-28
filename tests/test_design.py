@@ -116,6 +116,42 @@ class TestColor:
             design.color("NOT_A_REAL_TOKEN")
 
 
+class TestFlowColor:
+    """The capture flow's palette (docs/design/flow). Same pairing rule as
+    `TestColor` above -- a fourth palette resolved by a fourth helper, which
+    is exactly the shape that lets one of them quietly skip the rule.
+    """
+
+    def test_resolves_hex_and_alpha_together(self):
+        result = design.flow_color("BAR_BG")
+
+        assert result.name() == tokens.FlowColor.BAR_BG
+        assert result.alphaF() == pytest.approx(tokens.FlowColor.BAR_BG_ALPHA, abs=1e-3)
+
+    def test_a_token_with_no_alpha_sibling_resolves_fully_opaque(self):
+        assert not hasattr(tokens.FlowColor, "ACCENT_ALPHA")
+
+        result = design.flow_color("ACCENT")
+
+        assert result.name() == tokens.FlowColor.ACCENT
+        assert result.alphaF() == pytest.approx(1.0)
+
+    def test_one_colour_carrying_two_alphas_is_two_tokens(self):
+        # The window-mode hover preview is one colour at two strengths --
+        # an 85% border around a 7% fill. A single token cannot be right
+        # for both, and the handoff's own "14-18%" range is the same shape
+        # of problem, so each strength gets its own name.
+        border = design.flow_color("WINDOW_HOVER")
+        fill = design.flow_color("WINDOW_HOVER_FILL")
+
+        assert border.name() == fill.name()
+        assert border.alphaF() > fill.alphaF()
+
+    def test_unknown_token_name_raises(self):
+        with pytest.raises(ValueError):
+            design.flow_color("NOT_A_REAL_TOKEN")
+
+
 class TestTokenAlphaComments:
     """SNX-60: a token whose comment names an alpha percentage but has no
     matching `_ALPHA` constant is silently opaque -- `design.color()` has no
@@ -131,14 +167,18 @@ class TestTokenAlphaComments:
         matches = _ALPHA_COMMENT_RE.findall(source)
         assert matches, "expected to find at least one alpha-in-comment colour token"
 
-        # The rule applies to both palettes: Color for the overlay, Win for
-        # the Settings/review chrome, each resolved by its own helper.
+        # The rule applies to every palette, each resolved by its own
+        # helper: Color for the overlay, Win for the Settings/review chrome,
+        # ChooserColor for the docked row, FlowColor for the capture-flow
+        # bars. A palette left out here is one that can reintroduce the
+        # silently-opaque bug this test exists for.
         missing = [
             name
             for name, _ in matches
             if not hasattr(tokens.Color, f"{name}_ALPHA")
             and not hasattr(tokens.Win, f"{name}_ALPHA")
             and not hasattr(tokens.ChooserColor, f"{name}_ALPHA")
+            and not hasattr(tokens.FlowColor, f"{name}_ALPHA")
         ]
         assert not missing, (
             f"{missing} name an alpha in a comment but have no matching "
@@ -154,7 +194,8 @@ class TestTokenAlphaComments:
             actual = (
                 getattr(tokens.Color, f"{name}_ALPHA", None)
                 or getattr(tokens.Win, f"{name}_ALPHA", None)
-                or getattr(tokens.ChooserColor, f"{name}_ALPHA")
+                or getattr(tokens.ChooserColor, f"{name}_ALPHA", None)
+                or getattr(tokens.FlowColor, f"{name}_ALPHA")
             )
             assert actual == pytest.approx(expected), (
                 f"{name}_ALPHA is {actual}, but its comment names {percent}%"
