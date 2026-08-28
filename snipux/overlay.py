@@ -108,6 +108,20 @@ class GeometryProvider(ABC):
     def window_at(self, point: QPointF) -> QRectF | None:
         """Absolute logical rect of the window under `point`, or None."""
 
+    def window_named_at(self, point: QPointF) -> "tuple[str, QRectF] | None":
+        """The window under `point` as `(title, rect)`, or None.
+
+        The hover preview names what it is about to take -- "snipux --
+        notes -- 1433 x 892" in the handoff -- and a rect alone cannot say
+        which of two same-sized windows is under the pointer.
+
+        Defaulted rather than abstract so a provider that only knows
+        geometry keeps working: it answers with an empty title, and the
+        chip degrades to the size it does know.
+        """
+        rect = self.window_at(point)
+        return None if rect is None else ("", rect)
+
 
 class UnsupportedGeometryProvider(GeometryProvider):
     """Default provider: reports no windows anywhere.
@@ -3459,6 +3473,9 @@ class OverlayWindow(QWidget):
         # nothing else runs" shape `_active_handle`/`_eraser_active`
         # already use for their own presses.
         self._picking_window = False
+        # (title, absolute rect) of the window under the pointer while
+        # Window mode is armed, so the preview can name what it would take.
+        self._hovered_window: "tuple[str, QRectF] | None" = None
 
         # SNX-49: armed the same way `_picking_window` is, from the moment
         # Freeform mode is chosen (`_enter_freeform_mode`) until a full
@@ -4178,6 +4195,7 @@ class OverlayWindow(QWidget):
         if rect is None:
             return
         self._picking_window = False
+        self._hovered_window = None
         self._commit_selection(self._to_local_rect(rect).toRect())
 
     def _select_full_screen(self) -> None:
@@ -5516,7 +5534,11 @@ class OverlayWindow(QWidget):
             # "a miss actively clears any previously-shown preview instead
             # of leaving it stuck." None of the resize/stroke/cursor logic
             # below applies while picking, so this returns unconditionally.
-            rect = self._geometry_provider.window_at(self._to_absolute(event.position()))
+            found = self._geometry_provider.window_named_at(
+                self._to_absolute(event.position())
+            )
+            self._hovered_window = found
+            rect = None if found is None else found[1]
             self.set_selection(self._to_local_rect(rect).toRect() if rect is not None else None)
             self.setCursor(Qt.CursorShape.CrossCursor)
             super().mouseMoveEvent(event)
@@ -5734,7 +5756,50 @@ class OverlayWindow(QWidget):
             # save/copy.
             self._paint_dimension_chip(painter)
             self._paint_frozen_pill(painter)
+        if self._picking_window and self._hovered_window is not None:
+            self._paint_window_hover(painter)
         painter.end()
+
+    def _paint_window_hover(self, painter: QPainter) -> None:
+        """The Window-mode preview: an accent outline over the window under
+        the pointer, with a chip naming it and its size.
+
+        Accent rather than the selection's white, because nothing has been
+        chosen yet -- this is what a click *would* take. The name is the
+        half a rectangle cannot say: two same-sized windows look identical
+        outlined, and picking the wrong one only shows up afterwards.
+        """
+        title, absolute = self._hovered_window
+        rect = QRectF(self._to_local_rect(absolute))
+
+        painter.setBrush(design.flow_color("WINDOW_HOVER_FILL"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(rect)
+
+        pen = QPen(design.flow_color("WINDOW_HOVER"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
+
+        size = f"{round(absolute.width())} × {round(absolute.height())}"
+        label = f"{title} — {size}" if title else size
+        font = QFont(design.font_families().ui)
+        font.setPixelSize(12)
+        font.setWeight(QFont.Weight(600))
+        metrics = QFontMetricsF(font)
+        chip = QRectF(
+            rect.left(),
+            rect.top() - design.tokens.Metric.CHIP_OFFSET_Y,
+            metrics.horizontalAdvance(label) + 20,
+            22,
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.flow_color("ACCENT"))
+        painter.drawRoundedRect(chip, 6, 6)
+        painter.setFont(font)
+        painter.setPen(design.flow_color("ACCENT_FG"))
+        painter.drawText(chip, int(Qt.AlignmentFlag.AlignCenter), label)
 
     def _window_to_frame_scale(self) -> tuple[float, float]:
         """Ratio of `self._frame.image`'s own pixel size to this widget's
