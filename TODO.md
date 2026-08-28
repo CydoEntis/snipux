@@ -1,12 +1,18 @@
-# Next: Wayland, and a real paste
+# Next: Windows (three jobs, written up below), then Wayland
 
 Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
 
 Everything through **SNX-127** is merged, and so is `fix/recording-flow`
-(merge `97f129b`). The suite is green on Linux -- 1,464 passed, 0 failed,
-at both `QT_SCALE_FACTOR=1` and `1.5` -- and green on Windows too:
-1,457 passed, 14 skipped.
+(merge `97f129b`). The suite is green on Linux -- 1,542 passed, 0 failed.
+It was last green on Windows at 1,457 passed / 14 skipped, which is
+*before* the capture-flow work below; that number is stale.
+
+The locked capture-flow handoff (`docs/design/flow/`) is part-built: the
+recording bar and its stages are done, the chooser and the stills bar are
+not. What was built differently, and why, is in that directory's
+`divergences.md` -- read it before "fixing" anything back to the
+handoff.
 
 ## Windows has now been watched, and region recording was broken
 
@@ -74,6 +80,80 @@ desktop any non-primary monitor is a guaranteed-unfilmed home for the
 pill. Also note `_screen_for()` treats `geometries[0]` as the primary
 screen for a full-screen recording, which `QGuiApplication.screens()` does
 not actually guarantee.
+
+## Windows: three jobs, in this order
+
+Written up from the Linux side on 2026-08-28. None of it can be checked
+from here; all of it is reachable with the machine in front of you.
+
+### 1 · The recorder always records the primary screen (a real bug)
+
+`WindowsRecorderBackend._start_region` opens with
+`screen = QGuiApplication.primaryScreen()` (`recording.py`, ~987) and maps
+the requested rect against *that* screen's geometry and DPR.
+`_start_full_screen` does the same. So on a multi-monitor desktop:
+
+- a region dragged on a non-primary monitor is cropped out of the primary
+  one -- wrong pixels, or an out-of-bounds crop, depending where it is;
+- **Full screen on a non-primary monitor records the primary monitor.**
+
+The second is newly visible rather than newly broken: Full screen used to
+hand the backend `None`, which took the same primary-only path. It is now
+an ordinary rect (see "Full screen means the monitor you are on"), so the
+fix is the same one either way.
+
+**The fix:** pick the screen the rect is actually on --
+`QGuiApplication.screenAt(rect.center().toPoint())`, falling back to
+`primaryScreen()` when it answers None (a rect whose centre is in the gap
+between two staggered monitors). Then `QScreenCapture.setScreen()` that
+one, and map through *its* geometry and DPR.
+
+**How to know it worked:** record a region on your second monitor and look
+at the file. Today it will contain the primary monitor's pixels. Note that
+`_place_recording_hud` deliberately puts the bar on a *different* monitor
+from the one being recorded, so on Windows the bar itself is a convenient
+marker for which screen the recorder should not have chosen.
+
+### 2 · Let the bar sit anywhere: WDA_EXCLUDEFROMCAPTURE
+
+Asked directly, and the answer is yes on Windows and no on Linux.
+
+`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` (user32, Windows
+10 2004+) makes a window invisible to screen capture while still visible
+on screen. Applied to `RecordingBar` (and `RegionFrame`), it removes the
+whole reason placement has to work around the recorded area: the bar could
+sit wherever it reads best, including over the region, and still be absent
+from the file.
+
+`WDA_EXCLUDEFROMCAPTURE` is `0x00000011`. The older `WDA_MONITOR` (`0x1`)
+blanks the window to *black* in the capture rather than removing it, which
+is worse than the current behaviour -- check the constant.
+
+The hwnd is `int(widget.winId())`; call it after the widget is shown, and
+re-apply if the window is ever recreated. Failure is a returned zero, not
+an exception, so check it rather than assuming.
+
+**Keep the geometry fallback.** Linux has no equivalent -- introspected:
+`org.gnome.Shell.Screencast`'s `ScreencastArea` takes `draw-cursor` and
+`framerate` and nothing else, and it captures the composited output. So
+placement must stay correct without this; the affinity call is an
+improvement on top, per platform, not a replacement for it.
+
+### 3 · Watch the flow end to end
+
+Only recording has been driven on Windows. Since then the whole
+post-selection flow changed and none of it has run there:
+
+- the overlay now **stays up** after a record selection is committed, so
+  the region can be reframed, and closes when the backend starts;
+- the bar has four states, dropdowns for delay and audio, and a countdown
+  that goes *inside* the region;
+- audio is a live control on Windows (`records_audio()` returns True
+  there) and its menu has never been opened on a machine that can act on
+  it -- this is the only platform where all three sources are selectable,
+  and nothing has ever verified that choosing one changes what is
+  recorded;
+- stopping leaves the bar up for six seconds with a summary and Discard.
 
 ## The recording flow was fixed, and so was the recorder underneath it
 
