@@ -69,6 +69,9 @@ snipux/
   shapes.py     annotation data model and the flattening renderer
   settings.py   the Settings window (Qt in front of setup_desktop.py)
   review.py     the optional post-capture review window; Annotate reuses the bar
+  player.py     the recording player/trim editor -- the `Open` destination for
+                a recording (docs/design/player/, and its divergences.md for
+                what this Qt build cannot encode)
   marks.py      the ink layer + undo/redo, shared by the overlay and review
   winchrome.py  frameless title bar/footer/controls for the two ordinary windows
   setup_desktop.py  Linux desktop/autostart entries, icons, the GNOME

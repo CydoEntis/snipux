@@ -4441,10 +4441,20 @@ class OverlayWindow(QWidget):
         before the snip is already under the cursor when the bar appears,
         and the caret is only for changing your mind. `instant` means the
         clipboard, `review` the review window, and `save` writes a file.
+
+        `edit` is the odd one and is mapped deliberately rather than left
+        to fall through a default. It is not a destination at all -- it is
+        "put the toolbar up and let me decide" -- so the face has to show
+        *something*, and Copy is both the most-used ending and the one the
+        caret is cheapest to change away from. Left as a `.get` default
+        this looked like an oversight; it is a choice.
         """
-        face = {"instant": "Copy", "review": "Open", "save": "Save"}.get(
-            self._chooser.after, "Copy"
-        )
+        face = {
+            "instant": "Copy",
+            "edit": "Copy",
+            "save": "Save",
+            "review": "Open",
+        }.get(self._chooser.after, "Copy")
         self._bar.set_destination(face)
 
     def _on_chooser_mode(self, mode: str) -> None:
