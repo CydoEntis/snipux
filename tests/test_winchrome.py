@@ -169,3 +169,167 @@ class TestWinWindowTitleBarMark:
         grabbed = window.grab()
 
         assert not grabbed.isNull()
+
+
+class TestFramelessWindowsCanStillBeResized:
+    """`FramelessWindowHint` takes the window manager's resize borders away
+    with everything else it removes, and nothing replaced them: Settings,
+    the review window and the player all opened at a fixed size and stayed
+    there. These cover the borders `WinWindow` grows for itself.
+
+    They drive `_handle_edge_event` directly and exercise the manual
+    fallback, because `startSystemResize` needs a real compositor and the
+    suite runs headless -- which is also the reason that fallback exists.
+    """
+
+    @staticmethod
+    def _window(width=900, height=600):
+        window = winchrome.WinWindow("Test", size=(width, height))
+        window.show()
+        window.setGeometry(100, 100, width, height)
+        return window
+
+    @staticmethod
+    def _event(window, kind, global_x, global_y):
+        from PyQt6.QtCore import QPoint, QPointF
+        from PyQt6.QtGui import QMouseEvent
+        from PyQt6.QtCore import Qt
+
+        return QMouseEvent(
+            kind,
+            QPointF(window.mapFromGlobal(QPoint(global_x, global_y))),
+            QPointF(global_x, global_y),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+    def _drag(self, window, from_xy, to_xy):
+        from PyQt6.QtCore import QEvent
+
+        window._handle_edge_event(
+            QEvent.Type.MouseButtonPress,
+            self._event(window, QEvent.Type.MouseButtonPress, *from_xy),
+        )
+        window._handle_edge_event(
+            QEvent.Type.MouseMove, self._event(window, QEvent.Type.MouseMove, *to_xy)
+        )
+        window._handle_edge_event(
+            QEvent.Type.MouseButtonRelease,
+            self._event(window, QEvent.Type.MouseButtonRelease, *to_xy),
+        )
+
+    def test_the_bottom_right_corner_grows_the_window(self):
+        window = self._window()
+        rect = window.geometry()
+
+        self._drag(window, (rect.right() - 2, rect.bottom() - 2),
+                   (rect.right() + 198, rect.bottom() + 148))
+
+        assert window.geometry().width() == 1100
+        assert window.geometry().height() == 750
+
+    def test_the_left_edge_moves_rather_than_stretching_the_other_side(self):
+        window = self._window()
+        rect = window.geometry()
+
+        self._drag(window, (rect.left() + 2, rect.center().y()),
+                   (rect.left() + 102, rect.center().y()))
+
+        assert window.geometry().left() == rect.left() + 100
+        assert window.geometry().right() == rect.right()
+
+    def test_a_window_cannot_be_collapsed_past_its_minimum(self):
+        # Otherwise it is dragged down to a sliver it can never be got back
+        # out of, because the grips go with it.
+        window = self._window()
+        rect = window.geometry()
+
+        self._drag(window, (rect.right() - 2, rect.bottom() - 2),
+                   (rect.left(), rect.top()))
+
+        assert window.geometry().width() == window.minimumSize().width()
+        assert window.geometry().height() == window.minimumSize().height()
+
+    def test_the_middle_of_the_window_is_not_an_edge(self):
+        from PyQt6.QtCore import QPoint
+
+        window = self._window()
+
+        assert not window._edges_at(QPoint(450, 300))
+        assert window._edges_at(QPoint(1, 1))
+        assert window._edges_at(QPoint(899, 599))
+
+    def test_each_edge_gets_the_cursor_that_describes_it(self):
+        from PyQt6.QtCore import QPoint, Qt
+
+        window = self._window()
+        shape = lambda x, y: window._cursor_for(window._edges_at(QPoint(x, y)))
+
+        assert shape(2, 300) == Qt.CursorShape.SizeHorCursor
+        assert shape(450, 2) == Qt.CursorShape.SizeVerCursor
+        assert shape(2, 2) == Qt.CursorShape.SizeFDiagCursor
+        assert shape(898, 2) == Qt.CursorShape.SizeBDiagCursor
+
+    def test_the_title_bar_still_drags_the_window(self):
+        # The resize border runs along the top of the title bar, so the
+        # check that added it could easily have eaten the move gesture.
+        from PyQt6.QtCore import QEvent
+
+        window = self._window()
+        window.mousePressEvent(self._event(window, QEvent.Type.MouseButtonPress, 400, 120))
+
+        assert window._drag_origin is not None
+
+    def test_the_title_bars_own_corner_resizes_rather_than_moves(self):
+        from PyQt6.QtCore import QEvent
+
+        window = self._window()
+        rect = window.geometry()
+        window.mousePressEvent(
+            self._event(window, QEvent.Type.MouseButtonPress, rect.left() + 1, rect.top() + 1)
+        )
+
+        assert window._drag_origin is None
+
+    def test_an_ordinary_click_inside_the_window_is_left_alone(self):
+        # The filter runs on every descendant, so swallowing a non-resize
+        # event here would break every button in the window.
+        from PyQt6.QtCore import QEvent
+
+        window = self._window()
+        handled = window._handle_edge_event(
+            QEvent.Type.MouseButtonPress,
+            self._event(window, QEvent.Type.MouseButtonPress, 500, 400),
+        )
+
+        assert handled is False
+
+    def test_a_maximised_window_has_no_resize_edges(self):
+        from PyQt6.QtCore import QEvent
+
+        window = self._window()
+        window.showMaximized()
+        rect = window.geometry()
+        handled = window._handle_edge_event(
+            QEvent.Type.MouseButtonPress,
+            self._event(window, QEvent.Type.MouseButtonPress,
+                        rect.right() - 2, rect.bottom() - 2),
+        )
+
+        assert handled is False
+
+    def test_widgets_added_after_construction_are_watched_too(self):
+        # Subclasses fill `body` well after __init__, so registering only
+        # what exists at construction would leave the sides uncovered.
+        from PyQt6.QtWidgets import QLabel
+
+        window = self._window()
+        late = QLabel("added later", window.body)
+
+        # An installed event filter is not introspectable, but the mouse
+        # tracking set alongside it is -- and without that a hover over the
+        # edge never reaches the filter in the first place, so it is the
+        # half worth asserting.
+        assert late.hasMouseTracking()
+        assert QLabel("deeper still", late).hasMouseTracking()

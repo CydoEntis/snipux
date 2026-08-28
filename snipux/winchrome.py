@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QPoint, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -43,6 +43,19 @@ from .design import tokens
 # from these three; reaching for the 48px+ files (still a downscale of the
 # master) once the title bar wants more resolution would silently reintroduce
 # the blur this ticket exists to remove.
+# How far in from an edge still counts as grabbing that edge. Matched to
+# what a window manager gives its own borders -- much less and the window
+# is not resizable in practice, much more and clicks near the edge of the
+# content start missing what they were aimed at.
+_RESIZE_MARGIN = 7
+
+_RESIZE_CURSORS = {
+    Qt.CursorShape.SizeHorCursor,
+    Qt.CursorShape.SizeVerCursor,
+    Qt.CursorShape.SizeFDiagCursor,
+    Qt.CursorShape.SizeBDiagCursor,
+}
+
 _LOGO_DIR = design.PACKAGE_DIR / "design" / "logo"
 _SMALL_MARK_SIZES = (16, 24, 32)
 _TITLEBAR_MARK_SIZE = 16  # logical px
@@ -230,7 +243,22 @@ class WinWindow(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(*size)
+        # A floor, so a window cannot be dragged down to a sliver it can
+        # never be got back out of. Subclasses with a real minimum (the
+        # player's 980x640) set their own over the top of this.
+        self.setMinimumSize(420, 300)
         self._drag_origin: QPoint | None = None
+
+        # Frameless means the window manager gives us no resize borders, so
+        # we grow our own. The edges are covered by child widgets -- the
+        # title bar owns the top, the footer the bottom, the body the sides
+        # -- so this window never sees a mouse event there on its own. An
+        # event filter on every descendant is what puts the edges back
+        # within reach.
+        self._resize_edges = Qt.Edge(0)
+        self._resize_from: tuple[QRect, QPoint] | None = None
+        self.setMouseTracking(True)
+        self._watch_for_edges(self)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -316,6 +344,140 @@ class WinWindow(QWidget):
         row.addLayout(self.footer_right)
         return footer
 
+    # -- resizing --------------------------------------------------------
+
+    def _watch_for_edges(self, widget: QWidget) -> None:
+        """Filter `widget` and everything under it, now and later.
+
+        `ChildAdded` is filtered too, so a widget built after construction
+        -- which is most of them, since subclasses fill `body` afterwards --
+        is picked up without anyone having to remember to register it.
+        """
+        widget.installEventFilter(self)
+        widget.setMouseTracking(True)
+        for child in widget.findChildren(QWidget):
+            child.installEventFilter(self)
+            child.setMouseTracking(True)
+
+    def _edges_at(self, point: QPoint) -> Qt.Edge:
+        """Which window edges `point` (in this window's coordinates) grabs."""
+        edges = Qt.Edge(0)
+        if point.x() <= _RESIZE_MARGIN:
+            edges |= Qt.Edge.LeftEdge
+        elif point.x() >= self.width() - _RESIZE_MARGIN:
+            edges |= Qt.Edge.RightEdge
+        if point.y() <= _RESIZE_MARGIN:
+            edges |= Qt.Edge.TopEdge
+        elif point.y() >= self.height() - _RESIZE_MARGIN:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    @staticmethod
+    def _cursor_for(edges: Qt.Edge) -> Qt.CursorShape:
+        left = bool(edges & Qt.Edge.LeftEdge)
+        right = bool(edges & Qt.Edge.RightEdge)
+        top = bool(edges & Qt.Edge.TopEdge)
+        bottom = bool(edges & Qt.Edge.BottomEdge)
+        if (left and top) or (right and bottom):
+            return Qt.CursorShape.SizeFDiagCursor
+        if (right and top) or (left and bottom):
+            return Qt.CursorShape.SizeBDiagCursor
+        if left or right:
+            return Qt.CursorShape.SizeHorCursor
+        return Qt.CursorShape.SizeVerCursor
+
+    def eventFilter(self, watched, event) -> bool:
+        kind = event.type()
+        if kind == QEvent.Type.ChildAdded:
+            child = event.child()
+            if isinstance(child, QWidget):
+                self._watch_for_edges(child)
+        elif kind in (
+            QEvent.Type.MouseMove,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+        ):
+            if self._handle_edge_event(kind, event):
+                return True
+        return super().eventFilter(watched, event)
+
+    def _handle_edge_event(self, kind, event) -> bool:
+        """True when the event was a resize gesture and must go no further.
+
+        Returning False for everything else matters as much as returning
+        True here: these events are filtered on *every* descendant, so
+        swallowing one that was not a resize would break every button in
+        the window.
+        """
+        if self.isMaximized() or self.isFullScreen():
+            return False
+        try:
+            global_point = event.globalPosition().toPoint()
+        except AttributeError:
+            return False
+        local = self.mapFromGlobal(global_point)
+
+        if kind == QEvent.Type.MouseButtonRelease:
+            if self._resize_from is None:
+                return False
+            self._resize_from = None
+            self.unsetCursor()
+            return True
+
+        if kind == QEvent.Type.MouseMove:
+            if self._resize_from is not None:
+                self._resize_to(global_point)
+                return True
+            edges = self._edges_at(local)
+            if edges:
+                self.setCursor(self._cursor_for(edges))
+                return True
+            # Only ours to unset: a child that set its own cursor (the
+            # rail's pointing hand, a text field's I-beam) must keep it.
+            if self.cursor().shape() in _RESIZE_CURSORS:
+                self.unsetCursor()
+            return False
+
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        edges = self._edges_at(local)
+        if not edges:
+            return False
+
+        # Ask the compositor first. It knows about snapping, about screen
+        # edges, and it is the only thing that can resize a window under
+        # Wayland at all; the manual path below is the fallback, and the
+        # one the offscreen platform in the tests uses.
+        handle = self.windowHandle()
+        if handle is not None and handle.startSystemResize(edges):
+            return True
+        self._resize_edges = edges
+        self._resize_from = (self.geometry(), global_point)
+        return True
+
+    def _resize_to(self, global_point: QPoint) -> None:
+        """The manual fallback: work out the new geometry ourselves."""
+        if self._resize_from is None:
+            return
+        start_geometry, start_point = self._resize_from
+        delta = global_point - start_point
+        rect = QRect(start_geometry)
+        minimum = self.minimumSize()
+
+        # `right`/`bottom` are the last pixel INSIDE the rect, so a width of
+        # `w` spans left..left + w - 1. Without the -1 the window clamps to
+        # one pixel over its own minimum, which is the kind of thing nobody
+        # sees and every geometry test does.
+        if self._resize_edges & Qt.Edge.LeftEdge:
+            rect.setLeft(min(rect.left() + delta.x(), rect.right() - minimum.width() + 1))
+        elif self._resize_edges & Qt.Edge.RightEdge:
+            rect.setRight(max(rect.right() + delta.x(), rect.left() + minimum.width() - 1))
+        if self._resize_edges & Qt.Edge.TopEdge:
+            rect.setTop(min(rect.top() + delta.y(), rect.bottom() - minimum.height() + 1))
+        elif self._resize_edges & Qt.Edge.BottomEdge:
+            rect.setBottom(max(rect.bottom() + delta.y(), rect.top() + minimum.height() - 1))
+        self.setGeometry(rect)
+
     def _toggle_maximised(self) -> None:
         if self.isMaximized():
             self.showNormal()
@@ -331,6 +493,10 @@ class WinWindow(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if (
             event.button() == Qt.MouseButton.LeftButton
+            # The outer few pixels of the title bar are a resize edge, not
+            # a drag handle -- checked first, or the top corners could only
+            # ever move the window and never resize it.
+            and not self._edges_at(event.position().toPoint())
             and event.position().y() <= tokens.WinMetric.TITLEBAR_H
         ):
             self._drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
