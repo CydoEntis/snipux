@@ -5311,6 +5311,14 @@ class TestCommitToRecord:
         assert size == "793 × 458"
         assert marks == ""
 
+        # And the chip shrinks to fit: reserving the middot's width would
+        # pad the chip out around a separator with nothing on the far side
+        # of it, which reads as a truncated label.
+        record_width = overlay._dimension_chip_rect().width()
+        overlay._chooser.set_kind("stills")
+        stills_width = overlay._dimension_chip_rect().width()
+        assert record_width < stills_width
+
     def test_the_stills_side_still_counts_its_marks(self):
         frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
         overlay = OverlayWindow(frame)

@@ -5862,13 +5862,17 @@ class OverlayWindow(QWidget):
         size_fm = QFontMetricsF(self._chip_font(design.tokens.Font.DIM_CHIP, mono))
         mute_fm = QFontMetricsF(self._chip_font(design.tokens.Font.DIM_CHIP_MUTE, mono))
 
-        content_width = (
-            size_fm.horizontalAdvance(size_text)
-            + self._CHIP_INNER_GAP
-            + mute_fm.horizontalAdvance(self._CHIP_DOT)
-            + self._CHIP_INNER_GAP
-            + mute_fm.horizontalAdvance(mark_text)
-        )
+        content_width = size_fm.horizontalAdvance(size_text)
+        # The middot and the count are one unit: with no count there is
+        # nothing to separate, and reserving their width would leave the
+        # chip padded out around empty space.
+        if mark_text:
+            content_width += (
+                self._CHIP_INNER_GAP
+                + mute_fm.horizontalAdvance(self._CHIP_DOT)
+                + self._CHIP_INNER_GAP
+                + mute_fm.horizontalAdvance(mark_text)
+            )
         content_height = max(size_fm.height(), mute_fm.height())
         width = content_width + 2 * self._CHIP_PAD_H
         height = content_height + 2 * self._CHIP_PAD_V
@@ -5924,6 +5928,12 @@ class OverlayWindow(QWidget):
         painter.setPen(design.color("CHIP_LIGHT_FG"))
         painter.drawText(QPointF(x, baseline), size_text)
         x += size_fm.horizontalAdvance(size_text) + self._CHIP_INNER_GAP
+
+        # The middot separates two things. With no mark count to separate
+        # it from -- a recording, which has no marks -- it is a dangling
+        # "747 x 473 ·" that reads as a truncated label.
+        if not mark_text:
+            return
 
         painter.setFont(mute_font)
         painter.setPen(design.color("CHIP_DOT"))

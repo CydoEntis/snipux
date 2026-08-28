@@ -544,9 +544,23 @@ class RecordingBar(QWidget):
         # the pill this replaces used.
         super().__init__(parent)
         metric = tokens.FlowMetric
+        # `Tool`, not a plain top-level. Without it the window manager
+        # treats this as an ordinary window and will not stage it above the
+        # overlay's fullscreen one -- the bar is created, placed and shown,
+        # and never seen. Measured: two bare windows with these flags do
+        # stack correctly and two without the Tool flag do not, which is
+        # why `RegionFrame`'s strips were visible all along and this was
+        # not. It also keeps the bar out of the task switcher, which is
+        # right for a HUD.
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
         )
+        # Shown without stealing focus: the overlay underneath owns the
+        # keyboard while a recording is armed (Enter starts it, Esc
+        # cancels), and a bar that took focus would break both.
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._state = self.READY
         # Both are read by `set_ready()` below, so they exist before it runs.
@@ -785,9 +799,15 @@ class CountdownNumeral(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         diameter = tokens.FlowMetric.COUNT_D
+        # `Tool` for the same stacking reason as `RecordingBar` -- and this
+        # one has to clear the overlay, since it is shown over the region
+        # while the overlay is still up.
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
         )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setFixedSize(diameter, diameter)

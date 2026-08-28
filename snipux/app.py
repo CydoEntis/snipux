@@ -374,7 +374,14 @@ def _place_recording_hud(
     x = screen.center().x() - width / 2
     x = min(max(x, screen.left()), screen.right() - width)
 
-    candidates = [QRectF(x, screen.top() + margin, width, height)]
+    # The desktop's own chrome owns the top of the screen and paints over
+    # an always-on-top window regardless of what that window thinks it
+    # covers -- the same thing `OverlayWindow._reserved_top` insets the
+    # chooser and close button for. Without it the bar sits at y=12 on a
+    # GNOME primary monitor, which is underneath a 32px shell bar: created,
+    # positioned, shown, and invisible.
+    top = screen.top() + _reserved_top_for(screen) + margin
+    candidates = [QRectF(x, top, width, height)]
     if rect is not None:
         candidates.append(QRectF(x, rect.bottom() + margin, width, height))
 
@@ -397,12 +404,32 @@ def _place_recording_hud(
     for other in _other_screens_nearest_first(screen, geometries, rect):
         x = min(max(other.center().x() - width / 2, other.left()),
                 other.right() - width)
-        candidate = QRectF(x, other.top() + margin, width, height)
+        candidate = QRectF(
+            x, other.top() + _reserved_top_for(other) + margin, width, height
+        )
         if other.contains(candidate) and not (
             rect is not None and candidate.intersects(rect)
         ):
             return QRect(round(candidate.x()), round(candidate.y()), width, height)
     return None
+
+
+def _reserved_top_for(screen: QRectF) -> int:
+    """Logical pixels of `screen`'s top edge the desktop's own chrome owns.
+
+    Resolved through `QGuiApplication.screenAt` so the platform seam can
+    answer for the right monitor -- and zero whenever it cannot be
+    identified, which is the same safe direction `OverlayWindow` takes: the
+    cost of being wrong is a bar a few pixels high, never one drawn into a
+    recording.
+    """
+    found = QGuiApplication.screenAt(screen.center().toPoint())
+    if found is None:
+        return 0
+    try:
+        return platform.current.reserved_top(found)
+    except Exception:  # noqa: BLE001 - chrome placement, never worth raising for
+        return 0
 
 
 def _other_screens_nearest_first(
@@ -1521,6 +1548,14 @@ class AppController:
         self._recording_bar_anchor = placement.center()
         self._reposition_recording_bar()
         bar.show()
+        # Above the overlay, which is now still up so the region can be
+        # reframed -- and which is itself a full-virtual-desktop
+        # always-on-top window. Two always-on-top windows are ordered by
+        # who was raised last, and the overlay was shown first, so without
+        # this the bar is created, positioned and shown *behind* it: armed
+        # correctly, invisible entirely. Reported as "still dont see the
+        # recording option when i drag to record a region".
+        bar.raise_()
 
     def _elapsed_text(self) -> str:
         """The running time as the clock shows it, or "0:00" if nothing is
