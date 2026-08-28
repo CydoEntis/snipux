@@ -1441,6 +1441,47 @@ class TestPlaceRecordingHud:
             assert result is not None, rect
             assert not QRectF(result).intersects(rect), rect
 
+    def test_a_whole_monitor_recording_puts_the_bar_on_another_monitor(self):
+        # The bar is the only visible Stop. Recording a whole monitor
+        # leaves no room for it on that monitor -- top-centre is inside the
+        # recorded area and "below" falls off the bottom -- and a second
+        # monitor is guaranteed unfilmed, because only one is recorded.
+        # Without this a full-monitor recording had no Stop at all.
+        second = QRectF(1000, 0, 1000, 800)
+        recorded = self.SCREEN
+
+        result = _place_recording_hud(recorded, [self.SCREEN, second], self.HUD_SIZE)
+
+        assert result is not None
+        assert not QRectF(result).intersects(recorded)
+        assert second.contains(QRectF(result))
+
+    def test_it_prefers_the_nearest_unrecorded_monitor(self):
+        # Nearest, so the Stop button turns up beside the recording rather
+        # than three displays away where nobody looks.
+        near = QRectF(1000, 0, 1000, 800)
+        far = QRectF(9000, 0, 1000, 800)
+
+        result = _place_recording_hud(
+            self.SCREEN, [self.SCREEN, far, near], self.HUD_SIZE
+        )
+
+        assert result is not None
+        assert near.contains(QRectF(result))
+
+    def test_a_monitor_the_recording_reaches_into_is_not_a_home_for_the_bar(self):
+        # A recording spanning two displays makes the second one filmed
+        # too, so it is no safer than the first.
+        second = QRectF(1000, 0, 1000, 800)
+        spanning = QRectF(500, 0, 1200, 800)
+
+        result = _place_recording_hud(
+            spanning, [self.SCREEN, second], self.HUD_SIZE
+        )
+
+        if result is not None:
+            assert not QRectF(result).intersects(spanning)
+
     def test_none_when_the_region_leaves_nowhere_to_put_it(self):
         rect = QRectF(0, 0, 1000, 800)
 
@@ -2279,17 +2320,30 @@ class TestAppControllerLandingRecording:
     ):
         # AC: the real filename is the same computation Settings' own
         # preview label renders, not a second, independent guess at it.
+        #
+        # Asserted by watching the call rather than by recomputing it after
+        # the fact. `preview_filename` renders `datetime.now()` through a
+        # pattern with seconds in it, so a second recomputation is a second
+        # clock reading: this test used to fail whenever the clock ticked
+        # between landing the file and checking it -- rarely, and only in a
+        # full-suite run. Same family as SNX-126: a test that passes or
+        # fails by something other than the code under it.
+        produced = []
+        real_preview_filename = setup_desktop.preview_filename
+
+        def spy(folder, pattern, extension="png"):
+            answer = real_preview_filename(folder, pattern, extension=extension)
+            produced.append(answer)
+            return answer
+
+        monkeypatch.setattr(app.setup_desktop, "preview_filename", spy)
         controller, backend = self._start_a_recording(make_controller, monkeypatch)
 
         controller._stop_recording()
 
         landed = next(tmp_path.iterdir())
-        expected = setup_desktop.preview_filename(
-            tmp_path,
-            setup_desktop.load_recording_filename_pattern(),
-            extension="mp4",
-        )
-        assert landed == Path(expected)
+        assert produced, "landing never asked preview_filename for a name"
+        assert landed == Path(produced[-1])
 
     def test_instant_copies_the_temp_file_and_lands_nothing(
         self, make_controller, monkeypatch, tmp_path
