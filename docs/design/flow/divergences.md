@@ -103,7 +103,70 @@ things the handoff itself leaves unresolved.
 
 ---
 
-## 4 · Eleven tools in the stills bar, not eight
+## 4 · The overlay cannot stay up while recording
+
+**The handoff says** (§5): the live stage keeps the same surface, with the
+scrim dropping *"from 62% to 28% so the user can see what they're filming"*,
+and the selection frame switching to solid red around it.
+
+**We take the overlay down the moment recording starts.** It stays up for
+stage 3b (ready), where the resize handles are live and the frame and scrim
+are exactly as designed; it closes as the countdown ends.
+
+### Why
+
+The overlay paints a **frozen** capture across its whole surface --
+`drawImage(rect, self._base_layer_image())` in `overlay.py` -- including
+inside the selection. That is the project's one architectural rule working
+as intended: grab the entire virtual desktop once, then run everything
+downstream against that still frame.
+
+So there is nothing to see through. Dropping the scrim to 28% over a frozen
+frame does not reveal what is being filmed; it reveals a dimmer photograph
+of the moment the snip started. Worse, `org.gnome.Shell.Screencast` records
+the *composited screen*, so an overlay left up would put that photograph
+into the file -- the recording would be a still image of the desktop with a
+scrim over it.
+
+The prototype does not hit this because its desktop is a static mock: a
+frozen frame and a live one look identical there, which is exactly the class
+of thing a running prototype cannot tell you.
+
+### What it would take
+
+A real hole -- `CompositionMode_Clear` over the selection on a translucent
+window, plus an input mask so clicks still reach the desktop underneath.
+That is feasible on a compositing desktop and unverified on Wayland, which
+this project has never run on at all (TODO.md). It is a piece of work in its
+own right, not a detail of this redesign, and it trades against the one rule
+CLAUDE.md says is not negotiable.
+
+### What this costs
+
+The scrim drop, the red frame and the live dimension chip are all stage-5
+chrome on a surface that no longer exists by stage 5. The bar carries the
+whole live state instead: red border, red clock, and Stop.
+
+It also takes rule 1's other half with it. The handoff centres every
+post-selection bar **on the selection, 16px below** -- which reads as
+attached to the region only while the region is still drawn, scrimmed and
+framed around it. Once the overlay goes, a bar below a mid-screen region is
+a lone pill floating in the middle of the screen with nothing to belong to,
+which is a real complaint this project already had and already fixed:
+
+> The HUD floats in the middle of the screen. It should sit at the top, the
+> way the chooser and floating bar do.
+
+So the bar is **top-centre of the monitor being recorded**, moved below the
+region only when the region itself covers that strip. That keeps it
+predictable (always the same place, whatever was selected), keeps it out of
+the frame, and keeps it in one place across every stage -- which is what
+rule 1 was protecting. The rule survives; the coordinate it was measured
+from does not.
+
+---
+
+## 5 · Eleven tools in the stills bar, not eight
 
 **The handoff says** (§3a): *"split action button → divider → 8 tools →
 divider → undo, clear ink"*, and `ANNOTATION_TOOLS` lists exactly eight.
@@ -135,7 +198,7 @@ hint are already `MODE_KEYS` and `MODE_NEXT_STEP`, the latter word for word.
 
 ---
 
-## 5 · No IBM Plex
+## 6 · No IBM Plex
 
 **The handoff says** the chrome is IBM Plex Sans and every numeral, dimension,
 clock, size and shortcut is IBM Plex Mono, both shipped with the app, and that

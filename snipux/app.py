@@ -336,7 +336,14 @@ def _place_recording_hud(
     the recording happens to be.
 
     Top-centre because that is where the chooser and the floating bar
-    already sit, so the pill turns up where the user is already looking.
+    already sit, so the bar turns up where the user is already looking --
+    and because the handoff's own rule ("centred on the selection, 16px
+    below") assumes the overlay is still drawn around that selection, which
+    it is not by the time a recording is live. See
+    docs/design/flow/divergences.md 4: the overlay paints a frozen frame,
+    so it cannot stay up over a recording, and a bar measured from a
+    selection nobody can see any more is the "floats in the middle of the
+    screen" complaint again.
     The rule this replaces took the first of below/above/right/left of the
     recorded rect that fit, each centred on that edge -- which put the pill
     in the middle of the screen for any region in the middle of the screen,
