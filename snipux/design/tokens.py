@@ -810,6 +810,7 @@ class FlowMetric:
     SPLIT_PAD_H      = 11
     SPLIT_CARET_W    = 22
 
+
     # Placement, relative to the SELECTION -- not the screen. Rule 1.
     BAR_OFFSET_Y     = 16          # gap below the selection's bottom edge
     BAR_EDGE_MARGIN  = 12          # min gap from a monitor edge after clamping
@@ -909,6 +910,11 @@ class FlowColor:
 
     ACCENT               = "#e3ff4f"
     ACCENT_FG            = "#15170e"
+    # The 1px line between a split button's face and its caret. Which half
+    # a click lands in has to be visible before the click, or a split
+    # button is just a button that sometimes does something else.
+    SPLIT_SEAM           = "#15170e"
+    SPLIT_SEAM_ALPHA     = 0.22
     ACCENT_SOFT          = "#eaff7a"   # accent as TEXT or a small glyph
     # The handoff gives this as "14-18% for an armed segment"; the prototype
     # spends the range on two different things, so it is two tokens here

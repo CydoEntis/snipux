@@ -3003,7 +3003,9 @@ class TestAppControllerOverlayDismissal:
         monkeypatch.setattr(app, "copy_image_to_clipboard", lambda image: None)
         controller, first_overlay = self._start_capture_with_selection(make_controller)
 
-        QTest.mouseClick(first_overlay._bar._copy_button, Qt.MouseButton.LeftButton)
+        # The overlay's bar leads with a split action now, not a pair of
+        # icon buttons; its face fires whichever destination it shows.
+        first_overlay._bar._action.activated.emit("Copy")
 
         # The bug: this used to still be `first_overlay`, still isVisible(),
         # forever -- so the request below was silently swallowed.
@@ -3020,7 +3022,7 @@ class TestAppControllerOverlayDismissal:
         monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
         controller, first_overlay = self._start_capture_with_selection(make_controller)
 
-        QTest.mouseClick(first_overlay._bar._save_button, Qt.MouseButton.LeftButton)
+        first_overlay._bar._action.activated.emit("Save")
 
         assert controller._overlay is None
 

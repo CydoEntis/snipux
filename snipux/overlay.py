@@ -52,6 +52,7 @@ from PyQt6.QtWidgets import (
 from snipux import design, platform, setup_desktop
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
+from snipux.flowbars import FlowMenu
 from snipux.marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
 from snipux.shapes import (
     Arrow,
@@ -917,6 +918,135 @@ class _Chrome(QWidget):
         event.accept()
 
 
+def _bar_font() -> QFont:
+    """The bar's own label font -- the same `Font.CHIP_LABEL` pair the
+    pill buttons use, so a split button's label sits on the same line as
+    the chip beside it rather than nearly on it.
+    """
+    font = QFont(design.font_families().ui)
+    size, weight = design.tokens.Font.CHIP_LABEL
+    font.setPixelSize(round(size))
+    font.setWeight(QFont.Weight(weight))
+    return font
+
+
+class _SplitAction(QWidget):
+    """The bar's primary action: a destination on the face, and a caret
+    that offers the other two.
+
+    The capture-flow handoff's stills bar leads with one of these rather
+    than a row of equal icon buttons -- "the chooser sets the split
+    button's face; the chevron always offers the other two", so the
+    destination picked before the snip is the one already under the
+    cursor, and changing your mind costs a menu rather than a hunt.
+
+    Two hit areas, one control: pressing the face fires the destination,
+    pressing the caret opens the menu. The seam between them is drawn, so
+    which half a click will land in is visible before the click.
+    """
+
+    activated = pyqtSignal(str)
+    menuRequested = pyqtSignal()
+
+    _CARET_W = 22
+    _PAD_H = 11
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._destination = "Copy"
+        self._icon_name = "copy"
+        self._hovered_half = None
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(design.tokens.Metric.CHIP_H)
+        self._relayout()
+
+    def destination(self) -> str:
+        return self._destination
+
+    def set_destination(self, destination: str, icon_name: str) -> None:
+        self._destination = destination
+        self._icon_name = icon_name
+        self._relayout()
+
+    def _relayout(self) -> None:
+        metric = design.tokens.Metric
+        text = QFontMetricsF(_bar_font()).horizontalAdvance(self._destination)
+        self._face_w = round(self._PAD_H + metric.ICON + 7 + text + self._PAD_H)
+        self.setFixedWidth(self._face_w + self._CARET_W)
+        self.updateGeometry()
+        self.update()
+
+    def _half_at(self, x: float) -> str:
+        return "face" if x < self._face_w else "caret"
+
+    def mouseMoveEvent(self, event) -> None:
+        half = self._half_at(event.position().x())
+        if half != self._hovered_half:
+            self._hovered_half = half
+            self.update()
+
+    def leaveEvent(self, event) -> None:
+        self._hovered_half = None
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if not self.rect().contains(event.position().toPoint()):
+            return
+        if self._half_at(event.position().x()) == "caret":
+            self.menuRequested.emit()
+        else:
+            self.activated.emit(self._destination)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.Metric
+        radius = self.height() / 2
+
+        fill = design.color("ACCENT")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill.lighter(106) if self._hovered_half else fill)
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+
+        text_colour = design.color("ACCENT_FG")
+        x = float(self._PAD_H)
+        size = metric.ICON
+        pixmap = design.icon(self._icon_name, text_colour).pixmap(size, size)
+        painter.drawPixmap(round(x), (self.height() - size) // 2, pixmap)
+        x += size + 7
+
+        painter.setFont(_bar_font())
+        painter.setPen(text_colour)
+        painter.drawText(
+            QRectF(x, 0, self._face_w - x, self.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self._destination,
+        )
+
+        # The seam: which half a click lands in has to be visible before
+        # the click, or a split button is just a button that sometimes does
+        # something else.
+        painter.setPen(design.flow_color("SPLIT_SEAM"))
+        painter.drawLine(
+            QPointF(self._face_w, 6), QPointF(self._face_w, self.height() - 6)
+        )
+
+        caret = 12
+        pixmap = design.icon("chevron", text_colour).pixmap(caret, caret)
+        painter.drawPixmap(
+            round(self._face_w + (self._CARET_W - caret) / 2),
+            (self.height() - caret) // 2,
+            pixmap,
+        )
+        painter.end()
+
+
 class FloatingBar(_Chrome):
     """The overlay redesign's floating bar: capture chip, eight tool
     buttons, undo/redo/clear, copy and save, per
@@ -939,6 +1069,8 @@ class FloatingBar(_Chrome):
     clearRequested = pyqtSignal()
     copyRequested = pyqtSignal()
     saveRequested = pyqtSignal()
+    openRequested = pyqtSignal()
+    destinationMenuRequested = pyqtSignal()
     captureChipClicked = pyqtSignal()
     # SNX-64: rect's own button is the group's entry point for
     # Ellipse/Line/Crop -- emitted instead of `toolSelected` when its
@@ -1003,13 +1135,31 @@ class FloatingBar(_Chrome):
         # anything to its left. It used to trail the bar, so the one control
         # that finishes the snip was the last thing read and moved every
         # time the tool group changed width.
-        self._copy_button = _IconButton("copy", "Copy", idle_color=design.color("ICON_NEUTRAL"))
-        self._copy_button.clicked.connect(self.copyRequested)
-        layout.addWidget(self._copy_button)
+        #
+        # The overlay leads with a split button -- "the chooser sets the
+        # split button's face; the chevron always offers the other two" --
+        # so the destination chosen before the snip is already under the
+        # cursor. The review window keeps its pair: its footer already owns
+        # the exports, and a second destination control on the bar above
+        # them would be two answers to one question.
+        self._action: _SplitAction | None = None
+        self._copy_button: _IconButton | None = None
+        self._save_button: _PillButton | None = None
+        if self._trailing == "done":
+            self._copy_button = _IconButton(
+                "copy", "Copy", idle_color=design.color("ICON_NEUTRAL")
+            )
+            self._copy_button.clicked.connect(self.copyRequested)
+            layout.addWidget(self._copy_button)
 
-        self._save_button = self._build_save_button()
-        self._save_button.clicked.connect(self.saveRequested)
-        layout.addWidget(self._save_button)
+            self._save_button = self._build_save_button()
+            self._save_button.clicked.connect(self.saveRequested)
+            layout.addWidget(self._save_button)
+        else:
+            self._action = _SplitAction(self)
+            self._action.activated.connect(self._on_destination_activated)
+            self._action.menuRequested.connect(self.destinationMenuRequested)
+            layout.addWidget(self._action)
         self._add_divider(layout)
 
         self._chip = self._build_capture_chip()
@@ -1060,6 +1210,27 @@ class FloatingBar(_Chrome):
         )
         self._clear_button.clicked.connect(self.clearRequested)
         layout.addWidget(self._clear_button)
+
+    def set_destination(self, destination: str) -> None:
+        """Put `destination` on the split button's face.
+
+        A no-op on the review window's bar, which has no split button --
+        its footer owns the exports.
+        """
+        if self._action is None:
+            return
+        icon = {"Copy": "copy", "Save": "save", "Open": "eye"}.get(destination, "copy")
+        self._action.set_destination(destination, icon)
+
+    def destination(self) -> str:
+        return self._action.destination() if self._action is not None else "Copy"
+
+    def _on_destination_activated(self, destination: str) -> None:
+        {
+            "Copy": self.copyRequested,
+            "Save": self.saveRequested,
+            "Open": self.openRequested,
+        }.get(destination, self.copyRequested).emit()
 
     # -- construction helpers ------------------------------------------------
 
@@ -3404,6 +3575,8 @@ class OverlayWindow(QWidget):
         self._bar.clearRequested.connect(self.clear)
         self._bar.copyRequested.connect(self._on_bar_copy)
         self._bar.saveRequested.connect(self._on_bar_save)
+        self._bar.openRequested.connect(self._on_bar_open)
+        self._bar.destinationMenuRequested.connect(self._open_destination_menu)
         self._bar.toolSelected.connect(self._on_tool_selected)
 
         # The settings tray (SNX-41): shown only while the bar's active
@@ -4228,6 +4401,19 @@ class OverlayWindow(QWidget):
             return QRectF(screen.geometry())
         return self._chrome_bounds().translated(self.geometry().topLeft())
 
+    def _sync_bar_destination(self) -> None:
+        """Put the chooser's destination on the split button's face.
+
+        "The chooser sets the split button's face" -- so the choice made
+        before the snip is already under the cursor when the bar appears,
+        and the caret is only for changing your mind. `instant` means the
+        clipboard, `review` the review window, and `save` writes a file.
+        """
+        face = {"instant": "Copy", "review": "Open", "save": "Save"}.get(
+            self._chooser.after, "Copy"
+        )
+        self._bar.set_destination(face)
+
     def _on_chooser_mode(self, mode: str) -> None:
         """A mode armed from the chooser. One piece of state, two surfaces:
         the bar's own chip is seeded from the same value.
@@ -4264,6 +4450,7 @@ class OverlayWindow(QWidget):
             self._popover.hide()
             self._shape_popover.hide()
         elif self._selection is not None and self.isVisible():
+            self._sync_bar_destination()
             self._bar.reposition(self._selection, self._chrome_bounds())
             self._bar.show()
             self._sync_tray_visibility()
@@ -4731,6 +4918,54 @@ class OverlayWindow(QWidget):
         """The floating bar's Save button: save, then dismiss."""
         self.save()
         self.close()
+
+    def _on_bar_open(self) -> None:
+        """Open: save the snip, then hand it to the review window.
+
+        `app.py`'s `_on_captured` is what actually opens that window, and
+        it asks this overlay's `outcome` -- so choosing Open here is the
+        same thing as having chosen Review in the chooser, decided one
+        stage later. Saving first rather than copying is deliberate: the
+        review window edits a file, and the handoff's own note for this
+        destination is "Review window -- annotate, crop, export".
+        """
+        self._chooser.set_after("review")
+        self.save()
+        self.close()
+
+    def _open_destination_menu(self) -> None:
+        """The split action's caret: the two destinations its face is not.
+
+        A top-level popup, for the reason `FlowMenu`'s own docstring gives
+        -- it has to paint above the hint pill below the bar, and a parent
+        carrying an effect would trap it.
+        """
+        current = self._bar.destination()
+        rows = [
+            (name, name, note, key, "")
+            for name, note, key in (
+                ("Copy", "Image on the clipboard, paste anywhere.", "C"),
+                ("Save", "Straight to your snips folder.", "S"),
+                ("Open", "Review window -- annotate, crop, export.", "O"),
+            )
+        ]
+        menu = FlowMenu(rows, current, design.tokens.FlowMetric.MENU_W_DEST, None)
+        menu.chosen.connect(self._on_destination_chosen)
+        anchor = self._bar._action
+        top_left = anchor.mapToGlobal(anchor.rect().topLeft())
+        menu.open_below(QRect(top_left, anchor.size()))
+        self._destination_menu = menu
+
+    def _on_destination_chosen(self, destination: str) -> None:
+        """Set the split button's face and fire it.
+
+        Firing immediately rather than only re-facing: the caret was opened
+        to finish the snip a different way, and leaving the user to press
+        the face afterwards would make choosing a destination cost two
+        clicks where the face alone costs one.
+        """
+        self._bar.set_destination(destination)
+        self._bar._on_destination_activated(destination)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
