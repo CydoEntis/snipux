@@ -20,8 +20,8 @@ rather than merely changing it:
    it.
 
 These are views, not controllers. A bar reports that a control was clicked
-and `AppController` decides what that means, the same split `RecordingHud`
-already used -- which is what lets the audio menu, the destination menu and
+and `AppController` decides what that means, the same split the pill this
+replaces already used -- which is what lets the audio menu, the destination menu and
 the platform's own opinion about what is possible live in one place instead
 of three.
 """
@@ -206,10 +206,14 @@ class _ActionButton(QWidget):
         self.setFixedHeight(tokens.FlowMetric.BTN)
         self._relayout()
 
-    def set_label(self, label: str, *, shortcut: str | None = None) -> None:
+    def set_label(
+        self, label: str, *, shortcut: str | None = None, glyph: str | None = "keep"
+    ) -> None:
         self._label = label
         if shortcut is not None:
             self._shortcut = shortcut
+        if glyph != "keep":
+            self._glyph = glyph
         self._relayout()
 
     def set_tone(self, tone: str) -> None:
@@ -272,14 +276,19 @@ class _ActionButton(QWidget):
 
         x = float(metric.SPLIT_PAD_H)
         if self._glyph:
-            # Record is a filled circle, not a glyph -- the handoff is
-            # specific about this, because every icon set's "record" is a
-            # circle anyway and a stroked one reads as a radio button.
+            # Record is a filled circle rather than an icon -- the handoff is
+            # specific about it, because every icon set's "record" is a
+            # circle anyway and a stroked one reads as a radio button. Stop
+            # is the matching square: a circle beside the word "Stop" reads
+            # as record whatever the label says, which is the shape of
+            # mistake this whole redesign exists to stop making.
             diameter = 10
+            top = (self.height() - diameter) / 2
             painter.setBrush(text)
-            painter.drawEllipse(
-                QRectF(x, (self.height() - diameter) / 2, diameter, diameter)
-            )
+            if self._glyph == "square":
+                painter.drawRect(QRectF(x, top, diameter, diameter))
+            else:
+                painter.drawEllipse(QRectF(x, top, diameter, diameter))
             x += metric.ICON + 6
 
         painter.setPen(text)
@@ -306,6 +315,7 @@ class _Readout(QLabel):
     def __init__(self, parent: QWidget | None = None, *, token: str = "ROW_IDLE_FG"):
         super().__init__(parent)
         self._token = token
+        self._wash: str | None = None
         self.setFont(_font(12.5, 600, mono=True))
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._apply()
@@ -314,8 +324,27 @@ class _Readout(QLabel):
         self._token = token
         self._apply()
 
+    def set_wash(self, token: str | None) -> None:
+        """A tinted plate behind the text, or None for bare text.
+
+        The live clock reads on a red wash because red is what says "live"
+        in this design; the same readout with no wash is the finished
+        recording's summary, which is over and should not.
+        """
+        self._wash = token
+        self._apply()
+
     def _apply(self) -> None:
-        self.setStyleSheet(f"color: {design.flow_color(self._token).name()};")
+        rules = [f"color: {design.flow_color(self._token).name()};"]
+        if self._wash:
+            wash = design.flow_color(self._wash)
+            rules.append(
+                f"background: rgba({wash.red()}, {wash.green()}, "
+                f"{wash.blue()}, {wash.alphaF():.2f});"
+            )
+            rules.append(f"border-radius: {tokens.FlowMetric.BTN_RADIUS}px;")
+            rules.append("padding: 0px 8px;")
+        self.setStyleSheet(" ".join(rules))
 
 
 class RecordingBar(QWidget):
@@ -357,7 +386,7 @@ class RecordingBar(QWidget):
     def __init__(self, parent: QWidget | None = None):
         # Parentless and always-on-top by default: this is a HUD standing in
         # for a window, the same shape `DelayCountdown` and the old
-        # `RecordingHud` use.
+        # the pill this replaces used.
         super().__init__(parent)
         metric = tokens.FlowMetric
         self.setWindowFlags(
@@ -365,6 +394,9 @@ class RecordingBar(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._state = self.READY
+        # Both are read by `set_ready()` below, so they exist before it runs.
+        self._delay_available = True
+        self._last_shown: dict[str, bool] = {}
 
         # ROW_H is "6 pad + 28 control + 6 pad + 2x1px border", so the
         # vertical margin carries the border's pixel as well as the pad --
@@ -378,12 +410,17 @@ class RecordingBar(QWidget):
         layout.setSpacing(metric.GAP)
         self.setFixedHeight(metric.ROW_H)
 
+        # The clock is added first and so sits to the LEFT of the action,
+        # which is the handoff's own layout for the live stage ("clock ->
+        # Stop") and the one place the bar departs from rule 3. It is safe
+        # because the clock is mono: 0:09 -> 0:10 is the same width, so
+        # Stop does not shuffle every second. It moves once, at 9:59.
+        self._clock = _Readout(self, token="REC_CLOCK")
+        layout.addWidget(self._clock)
+
         self._action = _ActionButton("Record", glyph="record", shortcut="↵", parent=self)
         self._action.clicked.connect(self._on_action)
         layout.addWidget(self._action)
-
-        self._clock = _Readout(self, token="REC_CLOCK")
-        layout.addWidget(self._clock)
 
         self._action_divider = _Divider(self)
         layout.addSpacing(metric.GROUP_GAP - metric.GAP)
@@ -425,9 +462,10 @@ class RecordingBar(QWidget):
         which is why the hint says so and why Record is the only accent.
         """
         self._state = self.READY
-        self._action.set_label("Record", shortcut="↵")
+        self._action.set_label("Record", shortcut="↵", glyph="circle")
         self._action.set_tone("accent")
-        self._show(action=True, clock=False, audio=True, delay=True,
+        self._show(action=True, clock=False, audio=True,
+                   delay=self._delay_available,
                    summary=False, cancel=True, discard=False)
 
     def set_counting(self, seconds: int) -> None:
@@ -436,7 +474,7 @@ class RecordingBar(QWidget):
         out, and nothing here restates the count.
         """
         self._state = self.COUNTING
-        self._action.set_label(f"Starting in {seconds}", shortcut="")
+        self._action.set_label(f"Starting in {seconds}", shortcut="", glyph="circle")
         self._action.set_tone("accent")
         self._show(action=True, clock=False, audio=False, delay=False,
                    summary=False, cancel=True, discard=False)
@@ -444,17 +482,17 @@ class RecordingBar(QWidget):
     def set_live(self, elapsed: str, *, size: str = "") -> None:
         """Stage 5. The clock leads, then Stop.
 
-        The clock sits *before* the action rather than after it, which is the
-        one place this bar departs from "action at the left end": while
-        recording, elapsed time is the thing being watched, and rule 3 is
-        about the primary action never moving when something to its right
-        changes -- a clock that pushed Stop sideways every second would break
-        the rule it was obeying.
+        The clock leads, which is the handoff's own layout here and the one
+        place the bar departs from rule 3's "action at the left end". The
+        departure costs nothing because the clock is mono -- 0:09 and 0:10
+        are the same width, so Stop does not shuffle sideways every second;
+        it moves once, when the recording passes ten minutes.
         """
         self._state = self.LIVE
         self._clock.setText(elapsed)
+        self._clock.set_wash("REC_WASH")
         self._summary.setText(size)
-        self._action.set_label("Stop", shortcut="")
+        self._action.set_label("Stop", shortcut="", glyph="square")
         self._action.set_tone("rec")
         self._show(action=True, clock=True, audio=True, delay=False,
                    summary=bool(size), cancel=False, discard=False)
@@ -465,7 +503,9 @@ class RecordingBar(QWidget):
         keeping.
         """
         self._state = self.DONE
-        self._action.set_label(destination, shortcut="↵")
+        # No glyph: the destination is a word, and a record dot beside
+        # "Copy" would say the recording is still running.
+        self._action.set_label(destination, shortcut="↵", glyph=None)
         self._action.set_tone("accent")
         self._summary.setText(summary)
         self._show(action=True, clock=False, audio=False, delay=False,
@@ -484,6 +524,25 @@ class RecordingBar(QWidget):
     def set_audio_enabled(self, enabled: bool) -> None:
         self._audio.set_enabled(enabled)
 
+    def audio_control(self) -> QWidget:
+        """The audio button itself, so a caller can hang the platform's own
+        reason on it as a tooltip. Handed out rather than taking the string
+        here because *why* a platform cannot record audio is the platform's
+        sentence to write, not this widget's.
+        """
+        return self._audio
+
+    def set_delay_available(self, available: bool) -> None:
+        """Show or hide the delay control.
+
+        Hidden while it has no menu to open. The handoff puts a delay
+        dropdown in this bar precisely because the stage without one had "a
+        visibly-enabled control doing nothing", so shipping an inert one
+        here would reintroduce that bug under a new name.
+        """
+        self._delay_available = available
+        self._refresh_visibility()
+
     # -- internals -----------------------------------------------------
     def _on_action(self) -> None:
         if self._state == self.READY:
@@ -496,7 +555,18 @@ class RecordingBar(QWidget):
         # the only thing to do during a countdown is cancel, and Cancel is
         # its own control rather than a second meaning for this one.
 
+    def _refresh_visibility(self) -> None:
+        """Re-apply the current state's visibility, so a change in what is
+        *available* takes effect without the caller re-entering the state.
+        """
+        if self._last_shown:
+            shown = dict(self._last_shown)
+            if self._state == self.READY:
+                shown["delay"] = self._delay_available
+            self._show(**shown)
+
     def _show(self, **visible: bool) -> None:
+        self._last_shown = dict(visible)
         widgets = {
             "action": self._action,
             "clock": self._clock,

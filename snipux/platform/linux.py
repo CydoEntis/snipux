@@ -106,6 +106,24 @@ class LinuxPlatform(Platform):
             return portable
         return _x11_reserved_top(screen)
 
+    def records_audio(self) -> bool:
+        """False. `org.gnome.Shell.Screencast` takes `draw-cursor` and
+        `framerate` and nothing else -- there is no audio option in the
+        interface, so there is nothing to wire a control to.
+
+        Capturing from PipeWire ourselves and muxing it is a different
+        piece of work from this one, and would pull in a dependency the
+        project has so far refused (CLAUDE.md: a fourth is a decision worth
+        raising in the ticket). See docs/design/flow/divergences.md 2.
+        """
+        return False
+
+    def audio_unavailable_reason(self) -> str:
+        return (
+            "GNOME's screen recorder has no audio track. Recording audio on "
+            "Linux needs a capture route Snipux does not have yet."
+        )
+
 
 def _x11_reserved_top(screen) -> int:
     """`_NET_WORKAREA`'s top offset, as it applies to `screen`.

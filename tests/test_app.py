@@ -18,7 +18,6 @@ from snipux import setup_desktop
 from snipux.app import (
     AppController,
     QLocalSocketTransport,
-    RecordingHud,
     Transport,
     _place_recording_hud,
     build_default_geometry_provider,
@@ -41,6 +40,7 @@ from snipux.capture import (
 )
 from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
 from snipux.platform import windows as windows_platform
+from snipux.flowbars import RecordingBar
 from snipux.recording import RecorderRegistry, RecordingBackend, RecordingError
 from snipux.settings import SettingsDialog
 
@@ -1560,7 +1560,7 @@ class TestAppControllerRecording:
         # every recording opened with the user getting ready.
         assert backend.start_calls == []
         assert controller._armed_recording is not None
-        assert controller._recording_hud.state() == app.RecordingHud.ARMED
+        assert controller._recording_hud.state() == RecordingBar.READY
 
         controller._begin_armed_recording()
 
@@ -1599,7 +1599,7 @@ class TestAppControllerRecording:
 
         assert backend.start_calls == []
         assert controller._countdown_timer is not None
-        assert controller._recording_hud.state() == app.RecordingHud.COUNTING
+        assert controller._recording_hud.state() == RecordingBar.COUNTING
 
         # Mirrors test_overlay.py's own `overlay._delay_timer.timeout.emit()`
         # convention for SNX-50's delayed capture -- firing the signal
@@ -1609,7 +1609,7 @@ class TestAppControllerRecording:
             timer.timeout.emit()
 
         assert len(backend.start_calls) == 1
-        assert controller._recording_hud.state() == app.RecordingHud.RECORDING
+        assert controller._recording_hud.state() == RecordingBar.LIVE
 
     def test_a_recording_error_is_reported_through_the_tray(
         self, make_controller, monkeypatch
@@ -1765,9 +1765,9 @@ class TestAppControllerArmingARecording:
 
         assert backend.start_calls == []
         assert controller._recording_hud is not None
-        assert controller._recording_hud.state() == app.RecordingHud.ARMED
+        assert controller._recording_hud.state() == RecordingBar.READY
         # Legible without being told: the label says what a click does.
-        assert "Start" in controller._recording_hud._label.text()
+        assert "Record" in controller._recording_hud._action._label
 
     def test_clicking_the_pill_starts_an_armed_recording(
         self, make_controller, monkeypatch
@@ -1775,11 +1775,11 @@ class TestAppControllerArmingARecording:
         controller, backend = self._controller(make_controller, monkeypatch)
         controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
 
-        controller._on_hud_activated()
+        controller._recording_hud.startClicked.emit()
 
         assert len(backend.start_calls) == 1
-        assert controller._recording_hud.state() == app.RecordingHud.RECORDING
-        assert "Stop" in controller._recording_hud._label.text()
+        assert controller._recording_hud.state() == RecordingBar.LIVE
+        assert "Stop" in controller._recording_hud._action._label
 
     def test_the_capture_hotkey_starts_an_armed_recording(
         self, make_controller, monkeypatch
@@ -1802,13 +1802,13 @@ class TestAppControllerArmingARecording:
 
         controller._begin_armed_recording()
 
-        assert controller._recording_hud.state() == app.RecordingHud.COUNTING
-        assert "3" in controller._recording_hud._label.text()
-        assert "Cancel" in controller._recording_hud._label.text()
+        assert controller._recording_hud.state() == RecordingBar.COUNTING
+        assert "3" in controller._recording_hud._action._label
+        assert controller._countdown_numeral is not None
 
         controller._countdown_timer.timeout.emit()
 
-        assert "2" in controller._recording_hud._label.text()
+        assert "2" in controller._recording_hud._action._label
 
     def test_clicking_during_the_countdown_cancels_without_recording(
         self, make_controller, monkeypatch
@@ -1818,7 +1818,7 @@ class TestAppControllerArmingARecording:
         controller._begin_armed_recording()
         _rect, _delay, _after, path = controller._armed_recording
 
-        controller._on_hud_activated()
+        controller._recording_hud.cancelClicked.emit()
 
         assert backend.start_calls == []
         assert controller._armed_recording is None
@@ -1865,7 +1865,7 @@ class TestAppControllerArmingARecording:
         # and without one there would be no way to begin a full-screen
         # recording at all.
         assert controller._recording_hud is not None
-        assert controller._recording_hud.state() == app.RecordingHud.ARMED
+        assert controller._recording_hud.state() == RecordingBar.READY
 
         controller._begin_armed_recording()
 
@@ -1946,14 +1946,20 @@ class TestAppControllerRecordingHud:
             monitor_geometries=[QRectF(0, 0, 800, 600)],
         )
         # The same re-entrant shape `test_a_second_hotkey_press_mid_stop_is_a_noop`
-        # covers for the hotkey path, but reached through
-        # `RecordingHud.mousePressEvent`'s own direct call to `_stop_recording`
-        # rather than through `start_capture()` -- the guard has to hold at
-        # both entry points, not just the one `start_capture()` checks.
+        # covers for the hotkey path, but reached through the bar's own Stop
+        # control rather than through `start_capture()` -- the guard has to
+        # hold at both entry points, not just the one `start_capture()`
+        # checks.
+        #
+        # Emitting the signal rather than synthesising a press: the control
+        # is what turns a click into `stopClicked`, and the old version of
+        # this test called `mousePressEvent(None)`, which the pill got away
+        # with only because it ignored its event argument. A real QWidget
+        # dereferences it.
         assert controller._recording_hud is not None
         controller._stopping_recording = True
 
-        controller._recording_hud.mousePressEvent(None)
+        controller._recording_hud.stopClicked.emit()
 
         assert backend.stop_calls == []
 
@@ -2029,13 +2035,13 @@ class TestAppControllerRecordingHud:
         assert controller._recording_hud is not None
         # The pill names the action, not just the time -- clicking it
         # stops the recording, and nothing used to say so.
-        assert controller._recording_hud._label.text() == "Stop  ·  0:00"
-        assert controller._recording_hud.state() == app.RecordingHud.RECORDING
+        assert controller._recording_hud._clock.text() == "0:00"
+        assert controller._recording_hud.state() == RecordingBar.LIVE
 
         controller._on_recording_tick()
 
         assert controller._tray_icon.toolTip() == "1:05"
-        assert controller._recording_hud._label.text() == "Stop  ·  1:05"
+        assert controller._recording_hud._clock.text() == "1:05"
 
     def test_no_hud_for_a_full_screen_recording(self, make_controller, monkeypatch):
         controller, _backend = self._start_a_recording(
