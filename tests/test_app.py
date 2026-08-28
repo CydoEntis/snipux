@@ -4328,6 +4328,29 @@ class TestTheOutlineIsUpBeforeTheRecorderStarts:
 
         assert order == ["chrome", "backend"]
 
+    def test_the_pill_says_starting_rather_than_claiming_a_clock(
+        self, make_controller
+    ):
+        # GNOME takes ~460ms to build its capture pipeline. A pill reading
+        # "0:00" through that claims the recording has begun, so anyone who
+        # starts performing on it loses the opening half second.
+        seen = {}
+
+        backend = FakeRecordingBackend()
+        controller = self._controller(make_controller, backend)
+        original = backend.start
+        def start(rect, path):
+            hud = controller._recording_hud
+            seen["label"] = hud.clock_text() if hud is not None else None
+            return original(rect, path)
+        backend.start = start
+
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert seen["label"] == app._STARTING_LABEL
+        # And once it really is recording, the clock is a clock again.
+        assert controller._recording_hud.clock_text() != app._STARTING_LABEL
+
     def test_the_clock_starts_after_the_backend_not_before(
         self, make_controller
     ):

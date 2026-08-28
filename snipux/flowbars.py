@@ -809,6 +809,15 @@ class RecordingBar(QWidget):
         self._show(action=True, clock=False, audio=False, delay=False,
                    summary=False, cancel=True, discard=False)
 
+    def clock_text(self) -> str:
+        """What the clock slot currently reads.
+
+        It does not always hold a clock -- it carries "Starting" between the
+        Start press and the recorder actually running -- so the accessor is
+        named for the slot rather than for the number usually in it.
+        """
+        return self._clock.text()
+
     def set_live(self, elapsed: str, *, size: str = "") -> None:
         """Stage 5. The clock leads, then Stop.
 

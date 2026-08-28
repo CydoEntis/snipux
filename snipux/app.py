@@ -189,6 +189,10 @@ def finish_recording(path: Path, after: str) -> None:
         copy_file_to_clipboard(path)
 
 
+# What the pill reads between the Start press and the recorder actually
+# running. Not a clock: see `_show_recording_chrome`.
+_STARTING_LABEL = "Starting"
+
 # How long to let the recording outline reach the screen before starting
 # the backend anyway. It normally needs a frame or two; this only has to
 # be long enough that a slow compositor is not mistaken for a stuck one.
@@ -1993,11 +1997,14 @@ class AppController:
             )
             self._region_frame.show_around(rect, within=_screen_for(rect, geometries))
             if self._recording_hud is not None:
-                # Straight to the live face rather than leaving "Start" on
-                # screen through the backend's start-up: the button has
-                # been pressed, and a control still offering to do the
-                # thing it is already doing invites a second press.
-                self._recording_hud.set_live("0:00", size="")
+                # "Starting", not "0:00". The button has been pressed and a
+                # control still offering to do the thing it is doing invites
+                # a second press -- but GNOME takes ~460ms to build its
+                # capture pipeline, and a clock reading 0:00 through that is
+                # a claim the recording has begun. It has not, so someone
+                # who starts performing on it loses the opening half second.
+                # The word says which of the two is true.
+                self._recording_hud.set_live(_STARTING_LABEL, size="")
                 self._reposition_recording_bar()
 
         if rect is None and self._recording_hud is not None:
