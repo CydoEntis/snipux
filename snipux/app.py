@@ -925,6 +925,10 @@ class AppController:
         # not write back to the stored preferences (the handoff's state
         # model says so in as many words).
         self._recording_audio = design.tokens.AUDIO_DEFAULT
+        # The file the finished bar is currently describing, so Discard has
+        # something to remove once there is no recording left to stop.
+        self._landed_recording: Path | None = None
+        self._done_timer: QTimer | None = None
 
         self._overlay: OverlayWindow | None = None
         # Held for the same reason `_overlay` is: a parentless widget is
@@ -1457,7 +1461,7 @@ class AppController:
         bar.audioClicked.connect(self._open_audio_menu)
         bar.cancelClicked.connect(self._cancel_armed_recording)
         bar.stopClicked.connect(self._stop_recording)
-        bar.discardClicked.connect(self._discard_recording)
+        bar.discardClicked.connect(self._on_discard_clicked)
 
         self._recording_hud = bar
         # The anchor is the centre of the spot found for the bar, not its
@@ -1467,6 +1471,88 @@ class AppController:
         self._recording_bar_anchor = placement.center()
         self._reposition_recording_bar()
         bar.show()
+
+    def _elapsed_text(self) -> str:
+        """The running time as the clock shows it, or "0:00" if nothing is
+        running. One formatting rule, so the summary cannot disagree with
+        the clock the user was just watching.
+        """
+        if self._recording_started_at is None:
+            return "0:00"
+        elapsed = int(time.monotonic() - self._recording_started_at)
+        minutes, seconds = divmod(elapsed, 60)
+        return f"{minutes}:{seconds:02d}"
+
+    def _show_finished_bar(self, landed: Path, elapsed: str) -> None:
+        """Leave the bar up for a moment saying what was produced, with a
+        way to bin it.
+
+        The handoff's stage 6 asks the user to confirm a destination here.
+        This does not: the destination was chosen in the chooser before
+        recording started, and asking again after is asking the same
+        question twice -- which the handoff itself objects to elsewhere.
+        The common case is record, stop, paste, and a click in the middle
+        of that is friction on the path most used.
+
+        What is worth keeping from stage 6 is the other half: seeing what
+        you got, and being able to throw away a bad take without going to
+        find the file. So the file lands as it always did, and the bar
+        stays for `DONE_LINGER_MS` carrying the summary and Discard.
+        """
+        bar = self._recording_hud
+        if bar is None:
+            return
+        try:
+            megabytes = landed.stat().st_size / (1024 * 1024)
+            size = f"{megabytes:.1f} MB"
+        except OSError:
+            # The file landed and then went; say so rather than showing a
+            # size that would be a guess.
+            size = "size unknown"
+        container = landed.suffix.lstrip(".") or "video"
+
+        self._landed_recording = landed
+        bar.set_done(f"{elapsed} · {size} · {container}")
+        self._reposition_recording_bar()
+
+        self._done_timer = QTimer()
+        self._done_timer.setSingleShot(True)
+        self._done_timer.timeout.connect(self._close_recording_bar)
+        self._done_timer.start(design.tokens.FlowMetric.DONE_LINGER_MS)
+
+    def _close_recording_bar(self) -> None:
+        """Take the bar down and forget what it was describing."""
+        if self._done_timer is not None:
+            self._done_timer.stop()
+            self._done_timer = None
+        if self._recording_hud is not None:
+            self._recording_hud.close()
+            self._recording_hud = None
+        self._recording_bar_anchor = None
+        self._landed_recording = None
+
+    def _on_discard_clicked(self) -> None:
+        """Discard means two different things depending on when it is
+        pressed, and the bar is the same widget for both.
+
+        While recording, it stops and throws the temp file away. Once the
+        file has landed, there is no recording left to stop and the thing
+        to remove is the file itself -- deleting it here is the whole point
+        of leaving the bar up, since the alternative is going to find it.
+        """
+        if self._active_recording is not None:
+            self._discard_recording()
+            return
+        landed = self._landed_recording
+        if landed is None:
+            return
+        try:
+            landed.unlink(missing_ok=True)
+        except OSError as exc:  # noqa: BLE001 - reported, not swallowed
+            self._report_shortcut(f"Could not discard the recording: {exc}")
+        else:
+            self._report_shortcut(f"Recording discarded: {landed.name}")
+        self._close_recording_bar()
 
     def _open_delay_menu(self) -> None:
         """The delay dropdown for an armed recording.
@@ -1740,7 +1826,7 @@ class AppController:
         # should still have shown 0:00 somewhere, not nothing at all.
         self._on_recording_tick()
 
-    def _teardown_recording_ui(self) -> None:
+    def _teardown_recording_ui(self, *, keep_bar: bool = False) -> None:
         """Undo everything `_start_recording_ui` brought up.
 
         Called unconditionally from `_stop_recording()`, regardless of
@@ -1757,10 +1843,10 @@ class AppController:
         # still running must not leave that timer to fire into a
         # torn-down recording.
         self._stop_countdown_timer()
-        if self._recording_hud is not None:
+        if not keep_bar and self._recording_hud is not None:
             self._recording_hud.close()
             self._recording_hud = None
-        self._recording_bar_anchor = None
+            self._recording_bar_anchor = None
         self._hide_countdown()
         self._recording_started_at = None
         self._tray_icon.setIcon(self._idle_tray_icon)
@@ -1886,22 +1972,34 @@ class AppController:
         if self._stopping_recording or self._active_recording is None:
             return
         self._stopping_recording = True
-        self._teardown_recording_ui()
+        # Read before the teardown clears it -- the summary needs to say how
+        # long the recording ran, and by the time the file has landed there
+        # is nothing left that knows.
+        elapsed = self._elapsed_text()
+        self._teardown_recording_ui(keep_bar=True)
         backend, path, after = self._active_recording
+        landed = None
         try:
             backend.stop()
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             self._report_shortcut(f"Stopping the recording failed: {exc}")
         else:
             try:
-                self._land_recording(path, after, reason=reason)
+                landed = self._land_recording(path, after, reason=reason)
             except OSError as exc:
                 self._report_shortcut(f"Saving the recording failed: {exc}")
         finally:
             self._active_recording = None
             self._stopping_recording = False
 
-    def _land_recording(self, path: str, after: str, *, reason: str | None = None) -> None:
+        if landed is None:
+            self._close_recording_bar()
+        else:
+            self._show_finished_bar(landed, elapsed)
+
+    def _land_recording(
+        self, path: str, after: str, *, reason: str | None = None
+    ) -> Path:
         """Carry out whichever destination `after` names for a just-stopped
         recording sitting at its temp `path`.
 
@@ -1976,10 +2074,12 @@ class AppController:
         )
         shutil.move(path, destination)
         finish_recording(destination, after)
+        landed = destination
         if reason is not None:
             self._report_shortcut(f"{reason} Saved to {destination}")
         else:
             self._report_shortcut(f"Recording saved to {destination}")
+        return landed
 
     def _discard_recording(self) -> None:
         """Tray action (recording.md ticket 9): stop the in-progress

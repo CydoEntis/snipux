@@ -2396,6 +2396,118 @@ class TestAppControllerLandingRecording:
         assert controller._stopping_recording is False
 
 
+class TestTheBarStaysUpAfterARecordingLands:
+    """What replaces the handoff's stage 6.
+
+    The handoff asks the user to confirm a destination after stopping.
+    This does not: the destination was chosen in the chooser before
+    recording started, and asking again is asking twice -- the common case
+    is record, stop, paste, and a click in the middle of that is friction
+    on the path most used. What is kept is the other half of stage 6:
+    seeing what you got, and being able to bin a bad take without going to
+    find the file.
+    """
+
+    def _stopped_recording(self, make_controller, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "save")
+        _backend, path, _after = controller._active_recording
+        Path(path).write_bytes(b"x" * 2_200_000)  # so the summary has a size
+        controller._stop_recording()
+        return controller, backend
+
+    def test_the_file_still_lands_without_a_second_click(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._stopped_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+
+        landed = list(tmp_path.glob("*.mp4")) + list(tmp_path.glob("*.webm"))
+        assert landed, f"nothing landed in {tmp_path}"
+        assert controller._landed_recording is not None
+
+    def test_the_bar_stays_up_saying_what_was_produced(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._stopped_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+
+        assert controller._recording_hud is not None
+        assert controller._recording_hud.state() == RecordingBar.DONE
+        summary = controller._recording_hud._summary.text()
+        # Duration, size and container -- the three things you would
+        # otherwise open a file manager to find out.
+        assert "0:00" in summary
+        assert "2.1 MB" in summary
+        assert "mp4" in summary or "webm" in summary
+
+    def test_discard_after_landing_removes_the_file_it_named(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, backend = self._stopped_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+        landed = controller._landed_recording
+        assert landed.exists()
+
+        controller._recording_hud.discardClicked.emit()
+
+        assert not landed.exists()
+        assert controller._recording_hud is None
+        # Nothing to stop by then, so Discard must not reach for the
+        # backend a second time.
+        assert backend.stop_calls == [True]
+
+    def test_the_bar_goes_by_itself_if_nothing_is_pressed(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._stopped_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+        landed = controller._landed_recording
+        assert controller._done_timer is not None
+
+        controller._done_timer.timeout.emit()
+
+        assert controller._recording_hud is None
+        # Left alone means kept: the timer is a dismissal, not a discard.
+        assert landed.exists()
+
+    def test_a_failed_stop_leaves_no_bar_claiming_success(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend(stop_error=RuntimeError("no"))
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "save")
+
+        controller._stop_recording()
+
+        # Nothing landed, so there is nothing to summarise -- a bar reading
+        # "0:00 - 0.0 MB - webm" over a recording that failed would be the
+        # toast naming a file nobody wrote, one screen further on.
+        assert controller._recording_hud is None
+        assert controller._landed_recording is None
+
+
 class TestAppControllerDiscardRecording:
     """SNX-124 (recording.md ticket 9): the tray's own 'Discard recording'
     action -- stop the backend and throw the temp file away, no move, no

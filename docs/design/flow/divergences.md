@@ -166,7 +166,45 @@ from does not.
 
 ---
 
-## 5 · Eleven tools in the stills bar, not eight
+## 5 · Stopping lands the file; the bar says so and offers to bin it
+
+**The handoff says** (§6): stopping shows *"split action → divider →
+summary chip (`00:27 · 11.3 MB · webm`) → discard"*, and then *"the same
+destination logic as stills"* -- so the file lands when the user picks a
+destination, after the recording has stopped.
+
+**We land it on Stop**, and leave the bar up for six seconds carrying the
+summary and Discard, with no destination button at all.
+
+### Why
+
+The destination was already chosen, in the chooser, before recording
+started. Asking again afterwards is asking the same question twice, which
+this handoff objects to elsewhere in its own words -- and the common case is
+record, stop, paste. A click between "stop" and "the file exists" is
+friction on the path that gets used most, every time, forever.
+
+The half of stage 6 that earns its place is the other half: **seeing what
+you got, and being able to throw a bad take away without going to find the
+file.** That needs no confirmation step -- only for the bar not to vanish
+the instant it stops.
+
+So: `00:27 · 11.3 MB · webm` and a Discard button, for
+`FlowMetric.DONE_LINGER_MS`. Left alone it dismisses itself and the file
+stays; that timer is a dismissal, not a discard.
+
+### If the confirm step is wanted back
+
+`RecordingBar.set_done()` still takes a `destination`, and passing one puts
+the accent action back exactly as the handoff draws it. It is opt-in rather
+than the default because wiring is what makes it honest: a bar showing
+"Copy" whose `destinationClicked` nobody connected is a visibly-enabled
+control doing nothing, which is the failure this whole redesign exists to
+remove. Do not pass one without connecting it.
+
+---
+
+## 6 · Eleven tools in the stills bar, not eight
 
 **The handoff says** (§3a): *"split action button → divider → 8 tools →
 divider → undo, clear ink"*, and `ANNOTATION_TOOLS` lists exactly eight.
@@ -198,7 +236,7 @@ hint are already `MODE_KEYS` and `MODE_NEXT_STEP`, the latter word for word.
 
 ---
 
-## 6 · No IBM Plex
+## 7 · No IBM Plex
 
 **The handoff says** the chrome is IBM Plex Sans and every numeral, dimension,
 clock, size and shortcut is IBM Plex Mono, both shipped with the app, and that
