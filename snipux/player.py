@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import shutil
 import struct
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -319,8 +320,19 @@ class TrimState:
     def trimmed(self) -> bool:
         # A hair of slack: dragging a handle to the very end lands within a
         # rounding error of the duration, and calling that "trimmed" would
-        # put a "-00:00 cut" clause on screen for a recording nobody cut.
+        # claim a cut nobody made.
         return self.kept < self.duration - 0.05
+
+    @property
+    def cut_is_reportable(self) -> bool:
+        """Whether the cut figure is worth printing.
+
+        `cut` is shown as mm:ss, so anything under a second renders as
+        "−00:00 cut" -- a clause that says a cut happened and then reports
+        nothing, which reads as a bug. Below a second the trim is real but
+        not sayable at this precision, so the clause is left off.
+        """
+        return self.trimmed and self.cut >= 1.0
 
 
 class _RailHandle(QWidget):
@@ -1059,7 +1071,56 @@ class VideoCanvas(QWidget):
 # Export
 # --------------------------------------------------------------------------
 
-# What this Qt build can actually write, measured rather than assumed:
+# snipux does not depend on ffmpeg and never requires it. It *uses* one if
+# the system already has it, because the difference is large and visible:
+# with it, "Export MP4" is real H.264 that plays in a browser, and GIF and
+# trimmed WebM become possible at all. Without it everything still works,
+# one codec down. Detected at runtime, verified by asking the binary what
+# it can encode, and cached -- never assumed from its presence on PATH,
+# since a minimal build may carry none of the encoders that matter.
+_FFMPEG_NEEDS = ("libx264", "libvpx-vp9", "gif")
+_ffmpeg_cache: "str | None | object" = None
+_UNPROBED = object()
+_ffmpeg_cache = _UNPROBED
+
+
+def system_ffmpeg() -> str | None:
+    """Path to a system ffmpeg that can encode what the menu offers, or None.
+
+    Probed once per process. `-encoders` is a ~100ms subprocess and the
+    answer cannot change while snipux runs, so paying for it lazily on the
+    first export or menu open costs nothing at startup.
+    """
+    global _ffmpeg_cache
+    if _ffmpeg_cache is not _UNPROBED:
+        return _ffmpeg_cache
+
+    _ffmpeg_cache = None
+    binary = shutil.which("ffmpeg")
+    if binary is None:
+        return None
+    try:
+        listing = subprocess.run(
+            [binary, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        # A binary that will not answer is a binary we will not rely on.
+        return None
+    if all(f" {name} " in listing for name in _FFMPEG_NEEDS):
+        _ffmpeg_cache = binary
+    return _ffmpeg_cache
+
+
+def reset_ffmpeg_probe() -> None:
+    """Forget the cached probe. For tests, which need both worlds."""
+    global _ffmpeg_cache
+    _ffmpeg_cache = _UNPROBED
+
+
+# What Qt ALONE can write, measured rather than assumed:
 # QMediaFormat *reports* H264/H265/MPEG4 encoders for the MPEG4 container,
 # but the bundled FFmpeg (7.1.5, LGPL) carries only the hardware H.264
 # encoders -- `h264_nvenc` and `h264_vaapi`, no software x264 -- and none at
@@ -1074,19 +1135,180 @@ EXPORT_UNAVAILABLE = {
 }
 
 
-def export_availability(trimmed: bool) -> dict[str, str]:
+def export_availability(trimmed: bool, *, ffmpeg: bool | None = None) -> dict[str, str]:
     """Format id -> why it is unavailable. Absent means available.
 
-    WebM is the interesting one: untrimmed it is a straight copy of what
-    was recorded, which always works, and trimmed it would need an encoder
-    this build does not carry. So its availability depends on the trim,
-    which is exactly what the handoff's own note ("no re-encode when
-    untrimmed") is describing.
+    With a system ffmpeg every format the design offers is reachable, so
+    the answer is "nothing is unavailable" and the menu is the one the
+    handoff drew.
+
+    Without one, WebM is the interesting case: untrimmed it is a straight
+    copy of what was recorded, which always works and needs no encoder at
+    all, and trimmed it would need one Qt does not carry. So its
+    availability depends on the trim, which is exactly what the handoff's
+    own note ("no re-encode when untrimmed") is describing.
+
+    `ffmpeg=None` asks the system; the tests pass it explicitly so both
+    worlds are covered on any machine.
     """
+    if ffmpeg is None:
+        ffmpeg = system_ffmpeg() is not None
+    if ffmpeg:
+        return {}
     unavailable = {"gif": EXPORT_UNAVAILABLE["gif"]}
     if trimmed:
         unavailable["webm"] = EXPORT_UNAVAILABLE["webm"]
     return unavailable
+
+
+class FfmpegExporter(QObject):
+    """Writes the trimmed range with the system ffmpeg. Never touches the source.
+
+    Preferred over `Exporter` whenever `system_ffmpeg()` finds one, because
+    it is the difference between an MP4 that plays in a browser and one
+    that does not, and because GIF and a re-encoded WebM are not reachable
+    any other way. `Exporter` remains the fallback and is not going away:
+    ffmpeg is an optional convenience, never a requirement.
+
+    Runs as a `QProcess` rather than a blocking `subprocess`, so the window
+    keeps painting and the footer can report progress -- ffmpeg's own
+    `-progress pipe:1` reports `out_time_us` against the range being
+    written, which is exactly the fraction wanted.
+    """
+
+    progressed = pyqtSignal(float)
+    finished = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        source: Path,
+        destination: Path,
+        state: TrimState,
+        format_id: str,
+        *,
+        muted: bool,
+        binary: str,
+        fps: float = tokens.PLAYER_FPS,
+        parent: QObject | None = None,
+    ):
+        super().__init__(parent)
+        self._source = source
+        self._destination = destination
+        self._start = state.start
+        self._duration = max(0.05, state.kept)
+        self._format = format_id
+        self._muted = muted
+        self._binary = binary
+        # A GNOME screencast declares `r_frame_rate=1000/1` -- a millisecond
+        # timebase, not a thousand frames a second -- with no average rate
+        # at all. Copied through, that made ffmpeg duplicate ~31 real frames
+        # into 1,455 and stamp the output as 1000fps: a file every player
+        # has to work around. Anything outside a plausible range is not a
+        # frame rate, it is a timebase, and gets replaced.
+        self._fps = fps if 1 <= fps <= 120 else float(tokens.PLAYER_FPS)
+        self._process = None
+        self._tail: list[str] = []
+        self._diagnosis = ""
+
+    def _arguments(self) -> list[str]:
+        # `-ss` before `-i` seeks by keyframe, which is fast; the re-encode
+        # that follows is what makes the cut land on the exact frame, so
+        # there is no accuracy to trade away here.
+        args = ["-hide_banner", "-nostdin", "-y",
+                "-ss", f"{self._start:.3f}", "-i", str(self._source),
+                "-t", f"{self._duration:.3f}"]
+
+        if self._format == "mp4":
+            args += [
+                # H.264 in yuv420p cannot encode an odd width or height, and
+                # a snip is whatever rectangle was dragged -- the first real
+                # recording tried here was 983x680 and libx264 refused it
+                # outright. Rounding DOWN to even loses at most one row or
+                # column of pixels; rounding up would invent one.
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                # yuv420p rather than whatever the source was: it is the
+                # only chroma layout every browser and phone decodes.
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            ]
+            args += ["-an"] if self._muted else ["-c:a", "aac", "-b:a", "128k"]
+        elif self._format == "webm":
+            args += ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0",
+                     # VP9 is slow by default; `good`/4 is the usual
+                     # sane-quality-in-finite-time pairing for a short clip.
+                     "-row-mt", "1", "-deadline", "good", "-cpu-used", "4"]
+            args += ["-an"] if self._muted else ["-c:a", "libopus", "-b:a", "128k"]
+        elif self._format == "gif":
+            # Two passes in one command: a palette generated from this clip
+            # beats the fixed 216-colour web palette by a wide margin, and a
+            # screen recording is mostly flat colour where the difference is
+            # most visible. 15fps and 640px wide because the menu's own note
+            # says GIF is big above ten seconds and this is where that is
+            # kept honest.
+            args += ["-vf", ("fps=15,scale=640:-1:flags=lanczos,split[a][b];"
+                             "[a]palettegen=stats_mode=diff[p];"
+                             "[b][p]paletteuse=dither=bayer:bayer_scale=5"),
+                     "-loop", "0", "-an"]
+        else:
+            raise ValueError(f"ffmpeg does not handle {self._format!r} here")
+
+        if self._format != "gif":
+            # GIF sets its own rate inside the filter graph.
+            args += ["-fps_mode", "cfr", "-r", f"{self._fps:g}"]
+        return args + ["-progress", "pipe:1", "-nostats", str(self._destination)]
+
+    def start(self) -> None:
+        from PyQt6.QtCore import QProcess
+
+        self._process = QProcess(self)
+        self._process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        self._process.readyReadStandardOutput.connect(self._read_progress)
+        self._process.readyReadStandardError.connect(self._read_errors)
+        self._process.finished.connect(self._on_finished)
+        self._process.errorOccurred.connect(
+            lambda *_: self.failed.emit("ffmpeg could not be started")
+        )
+        self._process.start(self._binary, self._arguments())
+
+    def _read_progress(self) -> None:
+        text = bytes(self._process.readAllStandardOutput()).decode("utf-8", "replace")
+        for line in text.splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() != "out_time_us":
+                continue
+            try:
+                written = int(value) / 1_000_000
+            except ValueError:
+                continue
+            self.progressed.emit(max(0.0, min(1.0, written / self._duration)))
+
+    def _read_errors(self) -> None:
+        text = bytes(self._process.readAllStandardError()).decode("utf-8", "replace")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # The diagnosis and the epitaph are different lines, and ffmpeg
+            # prints the diagnosis first: "width not divisible by 2" comes
+            # several lines before "Conversion failed!". Keeping only the
+            # tail reported the epitaph, which tells the user nothing.
+            if any(word in line.lower() for word in ("not divisible", "invalid",
+                                                     "no such", "unable",
+                                                     "could not", "unsupported")):
+                self._diagnosis = self._diagnosis or line
+            self._tail = (self._tail + [line])[-6:]
+
+    def _on_finished(self, code: int, _status) -> None:
+        if code == 0 and self._destination.exists() and self._destination.stat().st_size:
+            self.progressed.emit(1.0)
+            self.finished.emit(str(self._destination))
+            return
+        reason = self._diagnosis or next(
+            (line for line in reversed(self._tail) if line.strip()),
+            f"ffmpeg exited with {code}",
+        )
+        self.failed.emit(reason.strip()[:160])
 
 
 class Exporter(QObject):
@@ -1493,7 +1715,8 @@ class PlayerWindow(WinWindow):
         self._format = tokens.EXPORT_DEFAULT
         self._saved = True
         self._menu: FlowMenu | None = None
-        self._exporter: Exporter | None = None
+        self._exporter = None
+        self._source_fps: float = float(tokens.PLAYER_FPS)
 
         self._build_title_extras()
         self._build_body()
@@ -1658,6 +1881,10 @@ class PlayerWindow(WinWindow):
             self.canvas.set_source_size(size)
             self._sync_chrome()
             self._sync_readout()
+
+        rate = self.player.metaData().value(QMediaMetaData.Key.VideoFrameRate)
+        if isinstance(rate, (int, float)) and 1 <= rate <= 120:
+            self._source_fps = float(rate)
 
     # -- media callbacks -------------------------------------------------
 
@@ -1946,10 +2173,21 @@ class PlayerWindow(WinWindow):
     def _open_export_menu(self) -> None:
         self._close_menu()
         unavailable = export_availability(self.state.trimmed)
+        real_h264 = system_ffmpeg() is not None
         rows = []
         for fid, _glyph, label, note, _rate in tokens.EXPORT_FORMATS:
             reason = unavailable.get(fid, "")
             size = "" if reason else f"{estimate_size_mb(fid, self.state.kept)} MB"
+            if fid == "mp4":
+                # The row promises what will actually be written. With a
+                # system ffmpeg that is H.264, which is the handoff's own
+                # wording; without one it is MPEG-4 Part 2, which does not
+                # play in a browser and must not claim to.
+                label, note = (
+                    ("MP4 (H.264)", note)
+                    if real_h264
+                    else ("MP4 (MPEG-4)", "No H.264 encoder here. Desktop players only.")
+                )
             rows.append((fid, label, note, size, reason))
         self._menu = FlowMenu(
             rows, self._format, 298, footnote=tokens.EXPORT_FOOTNOTE
@@ -2036,15 +2274,31 @@ class PlayerWindow(WinWindow):
             self._finish_export(written, mark_saved=False)
             return
 
-        if self._format == "webm":
+        if self._format == "webm" and not self.state.trimmed:
+            # Nothing to change: re-encoding an untrimmed recording would
+            # cost time and a generation of quality to produce the same
+            # clip. True with or without ffmpeg.
             written = export_copy(self.path, destination)
             self._finish_export(written)
             return
 
-        self._report(f"Exporting… 0%", ok=True, busy=True)
-        self._exporter = Exporter(
-            self.path, destination, self.state, muted=self._muted, parent=self
-        )
+        self._report("Exporting… 0%", ok=True, busy=True)
+        binary = system_ffmpeg()
+        if binary is not None:
+            self._exporter = FfmpegExporter(
+                self.path,
+                destination,
+                self.state,
+                self._format,
+                muted=self._muted,
+                binary=binary,
+                fps=self._source_fps,
+                parent=self,
+            )
+        else:
+            self._exporter = Exporter(
+                self.path, destination, self.state, muted=self._muted, parent=self
+            )
         self._exporter.progressed.connect(
             lambda fraction: self._report(
                 f"Exporting… {int(fraction * 100)}%", ok=True, busy=True
@@ -2245,9 +2499,9 @@ class _TrimReadout(QLabel):
             f"out {format_timecode(state.end)}",
             f"keeping {format_clock(state.kept)} of {format_clock(state.duration)}",
         ]
-        if state.trimmed:
-            # Only when something was actually cut: a "-00:00 cut" clause on
-            # an untrimmed recording is noise that reads as a warning.
+        if state.cut_is_reportable:
+            # Only when there is a figure to report -- see
+            # `TrimState.cut_is_reportable`.
             rich.append(
                 f"<span style='color:{_C.CUT_FG}'>−{format_clock(state.cut)} cut</span>"
             )

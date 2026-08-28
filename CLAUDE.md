@@ -103,7 +103,11 @@ pass headless too, the same way `tests/test_platform.py` already runs against
 - **Python 3.10+, PyQt6.** Qt6 enums are fully scoped: `Qt.PenStyle.DashLine`,
   never `Qt.DashLine`.
 - **Dependencies are PyQt6, jeepney and pytest.** Adding a fourth is a decision
-  worth raising in the ticket, not a detail. Notably: no numpy, no Pillow, no
+  worth raising in the ticket, not a detail. `ffmpeg` is the one *optional*
+  exception and is not a dependency: `player.system_ffmpeg()` uses one if the
+  system already has it, because Qt's bundled FFmpeg cannot encode H.264 in
+  software, and every export works without it one codec down. Never import it,
+  never require it, never install it. Notably: no numpy, no Pillow, no
   OpenCV — Qt already does image work, and a screenshot tool that drags in a
   numerical stack has made a bad trade.
 - **Comments say why, not what.** A comment restating the line above it is

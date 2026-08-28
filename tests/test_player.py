@@ -15,6 +15,7 @@ suite uses, and the reason these pass with no display.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QPoint, QPointF, QSize, Qt
@@ -254,23 +255,94 @@ class TestTheCanvas:
 
 
 class TestExportAvailabilityExplainsItself:
-    def test_gif_is_never_available_and_says_why(self):
-        # No GIF encoder in this build, and a missing row reads as a bug
-        # while a greyed row with a reason reads as a limit.
-        assert "gif" in export_availability(trimmed=False)
-        assert "gif" in export_availability(trimmed=True)
+    """`ffmpeg` is passed explicitly throughout, never probed, so both
+    worlds are covered whichever machine runs the suite -- the developer
+    box has ffmpeg and a build machine may not, and a test that quietly
+    exercises only one of them proves nothing about the other."""
+
+    def test_a_system_ffmpeg_makes_every_format_reachable(self):
+        assert export_availability(trimmed=False, ffmpeg=True) == {}
+        assert export_availability(trimmed=True, ffmpeg=True) == {}
+
+    def test_without_ffmpeg_gif_is_unavailable_and_says_why(self):
+        # Qt has no GIF encoder, and a missing row reads as a bug while a
+        # greyed row with a reason reads as a limit.
+        assert "gif" in export_availability(trimmed=False, ffmpeg=False)
+        assert "gif" in export_availability(trimmed=True, ffmpeg=False)
         assert EXPORT_UNAVAILABLE["gif"]
 
-    def test_webm_is_available_untrimmed_and_not_trimmed(self):
+    def test_without_ffmpeg_webm_survives_untrimmed_only(self):
         # Untrimmed it is a byte-for-byte copy and needs no encoder at all;
-        # trimmed it would need the VP9 encoder this build does not carry.
-        assert "webm" not in export_availability(trimmed=False)
-        assert "webm" in export_availability(trimmed=True)
+        # trimmed it would need the VP9 encoder Qt does not carry.
+        assert "webm" not in export_availability(trimmed=False, ffmpeg=False)
+        assert "webm" in export_availability(trimmed=True, ffmpeg=False)
 
-    def test_mp4_and_a_still_frame_are_always_available(self):
-        for trimmed in (False, True):
-            assert "mp4" not in export_availability(trimmed)
-            assert "frame" not in export_availability(trimmed)
+    def test_mp4_and_a_still_frame_are_available_either_way(self):
+        for ffmpeg in (True, False):
+            for trimmed in (False, True):
+                assert "mp4" not in export_availability(trimmed, ffmpeg=ffmpeg)
+                assert "frame" not in export_availability(trimmed, ffmpeg=ffmpeg)
+
+
+class TestTheFfmpegCommandsSayWhatTheyMean:
+    """Built as argument lists and asserted as argument lists -- never as a
+    joined string, which is how a quoting bug hides."""
+
+    @staticmethod
+    def _args(format_id, *, muted=False, start=2.6, end=22.8):
+        from snipux.player import FfmpegExporter
+
+        exporter = FfmpegExporter(
+            Path("/in.webm"),
+            Path("/out.x"),
+            TrimState(duration=27.4, start=start, end=end),
+            format_id,
+            muted=muted,
+            binary="/usr/bin/ffmpeg",
+        )
+        return exporter._arguments()
+
+    def test_the_range_is_the_trim_not_the_whole_source(self):
+        args = self._args("mp4")
+        assert args[args.index("-ss") + 1] == "2.600"
+        assert args[args.index("-t") + 1] == "20.200"
+
+    def test_the_source_is_only_ever_an_input(self):
+        # PRESERVE_ORIGINAL: the source appears after -i and nowhere else,
+        # so no command can be one typo away from overwriting a recording.
+        args = self._args("mp4")
+        assert args[args.index("-i") + 1] == "/in.webm"
+        assert args.count("/in.webm") == 1
+        assert args[-1] == "/out.x"
+
+    def test_mp4_is_h264_in_a_layout_browsers_decode(self):
+        args = self._args("mp4")
+        assert "libx264" in args
+        assert args[args.index("-pix_fmt") + 1] == "yuv420p"
+
+    def test_muting_drops_the_track_rather_than_silencing_it(self):
+        assert "-an" in self._args("mp4", muted=True)
+        assert "-an" not in self._args("mp4", muted=False)
+        assert "aac" in self._args("mp4", muted=False)
+
+    def test_a_trimmed_webm_is_really_re_encoded(self):
+        assert "libvpx-vp9" in self._args("webm")
+
+    def test_gif_builds_its_own_palette(self):
+        # A palette from this clip beats the fixed web palette by a wide
+        # margin on the flat colour a screen recording is mostly made of.
+        filters = self._args("gif")[self._args("gif").index("-vf") + 1]
+        assert "palettegen" in filters and "paletteuse" in filters
+        assert "-an" in self._args("gif")
+
+    def test_a_format_ffmpeg_is_not_asked_to_handle_is_refused(self):
+        # "frame" is a Qt path -- the pixels are already in memory.
+        with pytest.raises(ValueError):
+            self._args("frame")
+
+    def test_progress_is_requested_in_a_parseable_form(self):
+        args = self._args("mp4")
+        assert args[args.index("-progress") + 1] == "pipe:1"
 
 
 class TestSizeEstimatesFollowTheTrim:
@@ -410,3 +482,70 @@ class TestExportNamesNeverCollideWithTheSource:
         first.write_bytes(b"already here")
 
         assert window._destination_for("mp4") != first
+
+
+class TestTheFfmpegOutputIsAFileOtherPlayersUnderstand:
+    @staticmethod
+    def _args(fps=None, format_id="mp4"):
+        from snipux.player import FfmpegExporter
+
+        kwargs = {} if fps is None else {"fps": fps}
+        return FfmpegExporter(
+            Path("/in.webm"),
+            Path("/out.mp4"),
+            TrimState(duration=27.4, start=2.6, end=22.8),
+            format_id,
+            muted=True,
+            binary="/usr/bin/ffmpeg",
+            **kwargs,
+        )._arguments()
+
+    def test_odd_dimensions_are_rounded_down_to_even(self):
+        # A snip is whatever rectangle was dragged, and H.264 in yuv420p
+        # cannot encode an odd width -- the first real recording tried here
+        # was 983x680 and libx264 refused it outright.
+        filters = self._args()[self._args().index("-vf") + 1]
+        assert "trunc(iw/2)*2" in filters and "trunc(ih/2)*2" in filters
+
+    def test_a_timebase_masquerading_as_a_frame_rate_is_replaced(self):
+        # GNOME writes `r_frame_rate=1000/1`, which is a millisecond
+        # timebase. Believed, it made ffmpeg duplicate 31 real frames into
+        # 1,455 and stamp the file 1000fps.
+        args = self._args(fps=1000)
+        assert args[args.index("-r") + 1] == str(tokens.PLAYER_FPS)
+
+    def test_a_plausible_source_rate_is_kept(self):
+        args = self._args(fps=60)
+        assert args[args.index("-r") + 1] == "60"
+
+    def test_the_output_is_constant_rate(self):
+        args = self._args()
+        assert args[args.index("-fps_mode") + 1] == "cfr"
+
+    def test_gif_sets_its_rate_in_the_filter_instead(self):
+        args = self._args(format_id="gif")
+        assert "-fps_mode" not in args
+        assert "fps=15" in args[args.index("-vf") + 1]
+
+
+class TestTheCutClauseOnlyAppearsWhenItHasAFigure:
+    def test_a_sub_second_cut_is_not_reported(self):
+        # It renders as "−00:00 cut": a clause that announces a cut and then
+        # reports nothing, which reads as a bug.
+        state = TrimState(duration=2.4, start=0.11, end=2.05)
+        assert state.trimmed is True
+        assert state.cut_is_reportable is False
+
+    def test_a_cut_of_a_second_or_more_is_reported(self):
+        state = TrimState(duration=27.4, start=2.6, end=22.8)
+        assert state.cut_is_reportable is True
+
+    def test_an_untrimmed_range_reports_nothing(self):
+        assert TrimState(duration=27.4, start=0.0, end=27.4).cut_is_reportable is False
+
+    def test_the_readout_follows(self):
+        from snipux.player import _TrimReadout
+
+        label = _TrimReadout()
+        label.set_state(TrimState(duration=2.4, start=0.11, end=2.05))
+        assert "cut" not in label.text()
