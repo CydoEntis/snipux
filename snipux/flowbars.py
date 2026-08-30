@@ -1144,6 +1144,16 @@ class RegionFrame:
             strip.show()
             self._strips.append(strip)
 
+    def widgets(self) -> list[QWidget]:
+        """The strips currently on screen.
+
+        Exposed because a caller may need their native window handles --
+        `platform.current.exclude_from_capture()` marks each one so the
+        outline cannot film itself. This class stays a view: it hands over
+        its widgets and does not know what is done with them.
+        """
+        return list(self._strips)
+
     def close(self) -> None:
         for strip in self._strips:
             strip.close()

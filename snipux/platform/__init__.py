@@ -179,6 +179,28 @@ class Platform(ABC):
         """
         return max(0, screen.availableGeometry().top() - screen.geometry().top())
 
+    def exclude_from_capture(self, widget) -> bool:
+        """Ask the OS to leave `widget` out of screen captures while
+        leaving it visible on screen. True if it took.
+
+        Chrome only, like `reserved_top` and `records_audio`: it decides
+        whether the recording bar and the region outline can be *trusted*
+        not to film themselves, never what the recorder captures.
+
+        Defaults to False -- "this platform cannot" -- because most cannot.
+        Linux has no equivalent and this was introspected, not assumed:
+        `org.gnome.Shell.Screencast`'s `ScreencastArea` takes `draw-cursor`
+        and `framerate` and nothing else, and it captures the composited
+        output, so a window on screen is a window in the file.
+
+        **Callers must keep working when this returns False.** It is an
+        improvement on top of correct placement, never a replacement for
+        it: the bar still has to be positioned clear of the recorded area,
+        because on every platform but one that is the only thing keeping it
+        out of the recording.
+        """
+        return False
+
     def records_audio(self) -> bool:
         """Whether this platform's recorder can capture an audio track.
 

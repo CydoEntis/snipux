@@ -114,6 +114,14 @@ _MOD_WIN = 0x0008
 # Vista+: one WM_HOTKEY per press, not one per OS key-repeat tick while held.
 _MOD_NOREPEAT = 0x4000
 
+# SetWindowDisplayAffinity (winuser.h, Windows 10 2004+): remove the window
+# from screen captures entirely while leaving it visible on screen. NOT
+# WDA_MONITOR (0x1), the older constant sitting one bit away -- that blanks
+# the window to *black* in the capture instead of removing it, which is worse
+# than leaving it visible.
+_WDA_NONE = 0x00000000
+_WDA_EXCLUDEFROMCAPTURE = 0x00000011
+
 _WM_HOTKEY = 0x0312
 _ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 
@@ -983,3 +991,36 @@ class WindowsPlatform(Platform):
 
     def build_recording_registry(self) -> RecorderRegistry:
         return recording.build_windows_registry()
+
+    def exclude_from_capture(self, widget) -> bool:
+        """`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` -- the
+        one platform that can genuinely keep its own chrome out of a
+        recording rather than dodging around it.
+
+        The widget must already be shown: `winId()` realises the native
+        window, and an affinity set on one that is later recreated is lost
+        with it, so this is called at show time and again after any
+        reshow rather than once at construction.
+
+        Failure is a returned zero, not an exception -- an unsupported
+        build, or a window the compositor will not accept it for -- so the
+        result is returned rather than assumed. `False` here is not an
+        error the caller has to handle: placement still keeps the bar clear
+        of the recorded area on its own, exactly as it must on Linux.
+        """
+        try:
+            hwnd = int(widget.winId())
+        except (AttributeError, TypeError, RuntimeError):
+            # No native handle: never shown, or already destroyed. Nothing
+            # to mark, and nothing on screen to contaminate a recording.
+            return False
+        if not hwnd:
+            return False
+        # `c_void_p` for the HWND, the same way capture.py hands window
+        # handles to user32: an HWND is pointer-sized, and ctypes' default
+        # `c_int` conversion would truncate one on 64-bit Windows.
+        return bool(
+            ctypes.windll.user32.SetWindowDisplayAffinity(
+                ctypes.c_void_p(hwnd), ctypes.c_uint(_WDA_EXCLUDEFROMCAPTURE)
+            )
+        )

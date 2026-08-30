@@ -1445,3 +1445,116 @@ class TestHotkeyEventFilter:
         filter_.nativeEventFilter(b"some_other_event_type", address)
 
         assert calls == []
+
+
+class _FakeUser32Affinity:
+    """Stand-in for `ctypes.windll.user32`, covering only
+    `SetWindowDisplayAffinity` -- the one call
+    `WindowsPlatform.exclude_from_capture` makes.
+
+    `result` is what the real function returns: non-zero for success, zero
+    for a refusal. It does not raise on failure, which is the whole reason
+    the production code checks the return value.
+    """
+
+    def __init__(self, result=1):
+        self._result = result
+        self.calls: list[tuple[int, int]] = []
+
+    def SetWindowDisplayAffinity(self, hwnd, affinity):
+        self.calls.append((hwnd.value, affinity.value))
+        return self._result
+
+
+class _FakeNativeWidget:
+    """A widget stand-in exposing only `winId()`.
+
+    A real `QWidget` has no native handle under the offscreen QPA platform,
+    so the hwnd it would hand over is not a thing this suite can produce --
+    and the value itself is opaque anyway; what matters is that it reaches
+    user32 unchanged.
+    """
+
+    def __init__(self, hwnd):
+        self._hwnd = hwnd
+
+    def winId(self):
+        if isinstance(self._hwnd, Exception):
+            raise self._hwnd
+        return self._hwnd
+
+
+class TestWindowsKeepsItsOwnChromeOutOfARecording:
+    """`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` -- Windows
+    is the one platform that can leave the recording bar visible on screen
+    and absent from the file, so placement no longer has to be the only
+    thing keeping it out.
+    """
+
+    def test_a_shown_window_is_marked_and_the_handle_reaches_user32(self, monkeypatch):
+        user32 = _FakeUser32Affinity()
+        monkeypatch.setattr(
+            windows.ctypes, "windll", SimpleNamespace(user32=user32), raising=False
+        )
+
+        assert windows.WindowsPlatform().exclude_from_capture(
+            _FakeNativeWidget(0x7FFF_1234_5678)
+        )
+        [(hwnd, _affinity)] = user32.calls
+        # Pointer-sized, not truncated to a C int -- an hwnd on 64-bit
+        # Windows does not fit in one.
+        assert hwnd == 0x7FFF_1234_5678
+
+    def test_it_asks_to_be_removed_from_the_capture_not_blanked_in_it(self, monkeypatch):
+        # WDA_MONITOR (0x1) sits one bit away from WDA_EXCLUDEFROMCAPTURE
+        # (0x11) and blanks the window to *black* in the capture instead of
+        # removing it -- worse than leaving it visible, and a silent
+        # substitution if the constant is ever "corrected".
+        user32 = _FakeUser32Affinity()
+        monkeypatch.setattr(
+            windows.ctypes, "windll", SimpleNamespace(user32=user32), raising=False
+        )
+
+        windows.WindowsPlatform().exclude_from_capture(_FakeNativeWidget(42))
+        [(_hwnd, affinity)] = user32.calls
+        assert affinity == 0x00000011
+
+    def test_a_refusal_is_reported_rather_than_assumed(self, monkeypatch):
+        # Failure is a returned zero, not an exception. A caller that
+        # believed this had worked would place the bar over the region.
+        user32 = _FakeUser32Affinity(result=0)
+        monkeypatch.setattr(
+            windows.ctypes, "windll", SimpleNamespace(user32=user32), raising=False
+        )
+
+        assert windows.WindowsPlatform().exclude_from_capture(_FakeNativeWidget(42)) is False
+
+    def test_a_window_with_no_native_handle_is_left_alone(self, monkeypatch):
+        # Never shown, or already destroyed: nothing to mark, and nothing on
+        # screen to contaminate a recording either.
+        user32 = _FakeUser32Affinity()
+        monkeypatch.setattr(
+            windows.ctypes, "windll", SimpleNamespace(user32=user32), raising=False
+        )
+
+        widget = _FakeNativeWidget(RuntimeError("wrapped C/C++ object has been deleted"))
+        assert windows.WindowsPlatform().exclude_from_capture(widget) is False
+        assert user32.calls == []
+
+    def test_a_zero_handle_is_not_passed_on(self, monkeypatch):
+        user32 = _FakeUser32Affinity()
+        monkeypatch.setattr(
+            windows.ctypes, "windll", SimpleNamespace(user32=user32), raising=False
+        )
+
+        assert windows.WindowsPlatform().exclude_from_capture(_FakeNativeWidget(0)) is False
+        assert user32.calls == []
+
+    def test_every_other_platform_says_plainly_that_it_cannot(self):
+        # Linux has no equivalent -- introspected, not assumed:
+        # org.gnome.Shell.Screencast's ScreencastArea takes draw-cursor and
+        # framerate and nothing else, and it captures the composited output.
+        # Callers must keep placing chrome correctly on the strength of this
+        # answer.
+        assert linux.LinuxPlatform().exclude_from_capture(_FakeNativeWidget(42)) is False
+        assert darwin.DarwinPlatform().exclude_from_capture(_FakeNativeWidget(42)) is False
