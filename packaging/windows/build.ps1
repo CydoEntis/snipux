@@ -70,8 +70,17 @@ try {
                "with: Stop-Process -Name snipux")
     }
 
+    # `python -m PyInstaller`, never the `pyinstaller.exe` console-script
+    # shim pip drops in Scripts\. That shim is a freshly written, unsigned
+    # executable, which is precisely what Smart App Control refuses to run
+    # -- "An Application Control policy has blocked this file", the same
+    # wall SNX-104 hit with the Inno Setup installer. `python.exe` is
+    # already trusted, so reaching PyInstaller through it as a module
+    # sidesteps the block entirely: the identical reasoning the README
+    # gives for preferring pipx over the standalone exe on a Smart App
+    # Control machine, applied to the build step itself.
     Invoke-Checked "pyinstaller" {
-        pyinstaller packaging/windows/snipux.spec --noconfirm
+        python -m PyInstaller packaging/windows/snipux.spec --noconfirm
     }
 
     Write-Host "Built $ExePath"
