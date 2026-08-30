@@ -471,11 +471,23 @@ def _darkest_pixel(pixmap, x0, x1, y0, y1):
     # any foreground colour this row ever paints. Against that background,
     # the shortcut glyph's own ink is what pulls a pixel's R+G+B *down* --
     # the most-inked pixel is therefore the darkest one, not the brightest.
+    #
+    # The window is given in LOGICAL pixels -- the space `_MenuRow.paintEvent`
+    # draws in and the space its 9px/20px shortcut slot is expressed in -- but
+    # `grab()` hands back PHYSICAL ones, so on a 1.5x display this row's 250
+    # logical px are 375 in the image. Scaling the window here rather than at
+    # the call sites keeps every caller in the one space the layout constants
+    # are written in. Unscaled, the sample lands mid-row on a scaled machine
+    # and reads the same ink for both rows -- see 2e0838f, the same mistake in
+    # a different costume.
     image = pixmap.toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    px0, px1 = round(x0 * ratio), round(x1 * ratio)
+    py0, py1 = round(y0 * ratio), round(y1 * ratio)
     return min(
         image.pixelColor(x, y).red() + image.pixelColor(x, y).green() + image.pixelColor(x, y).blue()
-        for x in range(x0, x1)
-        for y in range(y0, y1)
+        for x in range(px0, px1)
+        for y in range(py0, py1)
     )
 
 
