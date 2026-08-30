@@ -1662,6 +1662,11 @@ class AppController:
         # correctly, invisible entirely. Reported as "still dont see the
         # recording option when i drag to record a region".
         bar.raise_()
+        # Windows can keep the bar out of the recording outright
+        # (SetWindowDisplayAffinity); everywhere else this answers False and
+        # the placement above is what does the job. Called here, after
+        # show(), because it needs a realised native window.
+        platform.current.exclude_from_capture(bar)
 
     def _elapsed_text(self) -> str:
         """The running time as the clock shows it, or "0:00" if nothing is
@@ -2109,6 +2114,13 @@ class AppController:
                 else self._real_monitor_geometries()
             )
             self._region_frame.show_around(rect, within=_screen_for(rect, geometries))
+            # Same as the bar: on Windows the outline and the live scrim
+            # are marked out of the capture. They already sit outside the
+            # recorded rect, so this changes nothing today -- it is what
+            # stops a later change that moves either of them inside it from
+            # being a silent regression on the one platform that can say so.
+            for strip in self._region_frame.widgets():
+                platform.current.exclude_from_capture(strip)
             if self._recording_hud is not None:
                 # "Starting", not "0:00". The button has been pressed and a
                 # control still offering to do the thing it is doing invites
