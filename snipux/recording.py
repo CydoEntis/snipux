@@ -593,6 +593,27 @@ def _rect_to_screen_pixels(rect: QRectF, screen_geometry: QRectF, ratio: float) 
     return QRect(left, top, right - left, bottom - top)
 
 
+def _screen_for_rect(rect: QRectF):
+    """The `QScreen` `rect` actually lies on, for a rect in absolute logical
+    virtual-desktop coordinates (the space `RecordingBackend.start()` is
+    documented to take).
+
+    `QScreenCapture` captures one whole `QScreen`, so *which* screen it is
+    pointed at decides both the pixels recorded and the geometry/DPR the
+    crop rect must be mapped through. Those two must agree: reading the
+    primary screen's geometry while capturing a different one produces a
+    crop taken at the right offsets out of the wrong monitor.
+
+    Falls back to the primary screen when `screenAt()` answers None, which
+    it does for a centre landing in the dead space between two staggered
+    monitors. That fallback restores the old primary-only behaviour rather
+    than crashing -- wrong pixels beat no recording, and the caller has
+    already committed to recording something by this point.
+    """
+    screen = QGuiApplication.screenAt(rect.center().toPoint())
+    return screen if screen is not None else QGuiApplication.primaryScreen()
+
+
 def _bytes_per_pixel(pixel_format: "QVideoFrameFormat.PixelFormat") -> int:
     """Bytes per pixel for a `QVideoFrame` pixel format, via the `QImage`
     format Qt itself considers equivalent -- there is no direct
@@ -842,14 +863,18 @@ class WindowsRecorderBackend(RecordingBackend):
       session (encoding only, never touches the raw screen), with
       `_RegionCropWorker` on its own `QThread` between them.
 
-    Records the primary screen -- `QScreenCapture` has no region support of
-    its own (confirmed by the spike: no rect/crop/area method, it captures
-    a whole `QScreen`), and there is no ticket yet for choosing which
-    monitor a region on a multi-monitor desktop belongs to, so, like
-    `QtNativeX11Backend.capture()` in capture.py, one session-wide screen
-    and device-pixel ratio is what's used. A region that doesn't lie on the
-    primary screen will record the wrong pixels; that is a real gap, not
-    an oversight, and belongs to whichever ticket adds monitor selection.
+    `QScreenCapture` has no region support of its own (confirmed by the
+    spike: no rect/crop/area method, it captures a whole `QScreen`), so the
+    region path picks the screen the rect lies on -- `_screen_for_rect()`
+    -- points the capture at it, and crops out of that screen's own
+    geometry and device-pixel ratio. It used to assume the primary screen
+    for both, which recorded the wrong monitor's pixels for any region not
+    on it.
+
+    `_start_full_screen` (`rect is None`) still leaves `QScreenCapture` on
+    its default screen: with no rect there is nothing to locate, and the
+    UI no longer reaches this path at all -- "Full screen" resolves to the
+    monitor under the cursor and comes through as an ordinary rect.
 
     Deliberately does not read either of ticket 9's Settings rows the way
     `GnomeScreencastBackend` does. Frame rate: SNX-125 measures the real
@@ -1015,7 +1040,15 @@ class WindowsRecorderBackend(RecordingBackend):
         no visible delay, and the declared rate updates in place once the
         measurement is ready, a few frames in.
         """
-        screen = QGuiApplication.primaryScreen()
+        # The screen the region is on, not the primary one. These two
+        # calls are a pair: `setScreen()` below decides which monitor's
+        # pixels arrive, and this geometry/DPR decides where in them to
+        # crop. Point them at different screens and the crop is taken at
+        # the right offsets out of the wrong monitor -- which is what this
+        # did, so a region dragged on a second display recorded the
+        # primary one, and (since full screen became an ordinary rect)
+        # so did "Full screen" on any non-primary monitor.
+        screen = _screen_for_rect(rect)
         pixel_rect = _rect_to_screen_pixels(
             rect, QRectF(screen.geometry()), screen.devicePixelRatio()
         )
@@ -1071,6 +1104,10 @@ class WindowsRecorderBackend(RecordingBackend):
         encode_session.setVideoFrameInput(frame_input)
         encode_session.setRecorder(recorder)
 
+        # Before setActive: an active capture is already delivering frames
+        # from whichever screen it defaulted to, so setting it afterwards
+        # would leak a few frames of the wrong monitor into the file.
+        screen_capture.setScreen(screen)
         screen_capture.setActive(True)
         recorder.record()
 

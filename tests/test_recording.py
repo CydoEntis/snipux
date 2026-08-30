@@ -734,6 +734,13 @@ class FakeScreenCapture:
         self.errorOccurred = _FakeSignal()
         self._fail_message = fail_message
         self.active_calls = []
+        # Recorded in order against `active_calls` so a test can assert the
+        # screen was chosen *before* the capture went live -- an active
+        # capture is already delivering the default screen's frames.
+        self.screen_calls = []
+
+    def setScreen(self, screen):
+        self.screen_calls.append(screen)
 
     def setActive(self, active):
         self.active_calls.append(active)
@@ -1493,6 +1500,97 @@ class TestWindowsRecorderBackendRegionStart:
         assert backend._recorder.set_video_frame_rate_calls == pytest.approx(
             [15.0], rel=0.01
         )
+
+
+class _FakeScreen:
+    """A `QScreen` stand-in exposing only what the region path reads.
+
+    Offscreen QPA gives exactly one screen, so a real multi-monitor desktop
+    -- the whole point of this fix -- cannot be assembled from live Qt
+    objects here. `geometry()` in logical virtual-desktop coordinates and
+    `devicePixelRatio()` are the two calls `_start_region` makes, and they
+    are what the crop is mapped through.
+    """
+
+    def __init__(self, geometry: QRect, ratio: float = 1.0):
+        self._geometry = geometry
+        self._ratio = ratio
+
+    def geometry(self):
+        return self._geometry
+
+    def devicePixelRatio(self):
+        return self._ratio
+
+
+class TestTheRecordedScreenIsTheOneTheRegionIsOn:
+    """The region path assumed `primaryScreen()` for both the capture and
+    the crop arithmetic. On a multi-monitor desktop that recorded the wrong
+    monitor for any region not on the primary one -- and once "Full screen"
+    became an ordinary rect rather than None, full screen on a second
+    monitor recorded the primary one too.
+    """
+
+    PATH = "/tmp/out.mp4"
+
+    def test_the_screen_under_the_rect_is_the_one_picked(self, monkeypatch):
+        chosen = _FakeScreen(QRect(2560, 0, 2560, 1440))
+        monkeypatch.setattr(
+            recording.QGuiApplication, "screenAt", staticmethod(lambda _p: chosen)
+        )
+        assert recording._screen_for_rect(QRectF(3000, 100, 400, 300)) is chosen
+
+    def test_a_rect_between_monitors_falls_back_to_the_primary_screen(self, monkeypatch):
+        # screenAt() answers None for a centre in the dead space between two
+        # staggered monitors. Wrong pixels beat refusing to record at all.
+        primary = _FakeScreen(QRect(0, 0, 2560, 1440))
+        monkeypatch.setattr(
+            recording.QGuiApplication, "screenAt", staticmethod(lambda _p: None)
+        )
+        monkeypatch.setattr(
+            recording.QGuiApplication, "primaryScreen", staticmethod(lambda: primary)
+        )
+        assert recording._screen_for_rect(QRectF(0, 0, 10, 10)) is primary
+
+    def test_the_capture_is_aimed_at_that_screen_before_it_goes_live(self, monkeypatch):
+        # Order matters: an already-active capture is delivering the default
+        # screen's frames, so aiming it afterwards leaks them into the file.
+        calls = []
+
+        class OrderedScreenCapture(FakeScreenCapture):
+            def setScreen(self, screen):
+                calls.append("setScreen")
+                super().setScreen(screen)
+
+            def setActive(self, active):
+                calls.append("setActive")
+                super().setActive(active)
+
+        second = _FakeScreen(QRect(2560, 0, 2560, 1440))
+        monkeypatch.setattr(recording, "_screen_for_rect", lambda _rect: second)
+
+        backend = _windows_backend(screen_capture_factory=OrderedScreenCapture)
+        backend.start(QRectF(2600, 100, 400, 300), self.PATH)
+
+        assert backend._screen_capture.screen_calls == [second]
+        assert calls == ["setScreen", "setActive"]
+
+    def test_the_crop_is_taken_out_of_that_screen_not_the_virtual_desktop(
+        self, monkeypatch
+    ):
+        # The bug in one assertion. A 400x300 region at virtual-desktop
+        # x=2600 sits 40px into a second monitor that starts at x=2560. Read
+        # against the primary screen's geometry the crop would be offset
+        # 2600px -- past the right edge of a 2560-wide frame, and out of the
+        # wrong monitor's pixels either way.
+        second = _FakeScreen(QRect(2560, 0, 2560, 1440), ratio=2.0)
+        monkeypatch.setattr(recording, "_screen_for_rect", lambda _rect: second)
+
+        backend = _windows_backend()
+        backend.start(QRectF(2600, 100, 400, 300), self.PATH)
+
+        # Screen-local logical (40, 100, 400, 300), doubled by the DPR.
+        assert backend._worker._pixel_rect == QRect(80, 200, 800, 600)
 
 
 class TestWindowsRecorderBackendStop:
