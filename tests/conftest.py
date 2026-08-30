@@ -44,6 +44,27 @@ import sys
 # meaning exactly what it says.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# The offscreen plugin has no windowing system to ask for fonts, so it builds
+# its font database from a directory instead. On Linux it finds one through
+# fontconfig and the suite measures real glyphs; on Windows there is no
+# fontconfig, nothing tells it where to look, and `QFontDatabase.families()`
+# comes back *empty*. That does not fail loudly -- QFont resolves to a null
+# family, `drawText` paints nothing at all, and `QFontMetrics` reports one
+# advance of exactly the pixel size for every character. Assertions about
+# text fitting a box then measure a fiction: a 22-character note "advances"
+# 242px, and two different countdown numerals grab as byte-identical images
+# because neither of them drew a glyph.
+#
+# Pointing the plugin at the system font directory makes those measurements
+# mean on Windows what they already mean on Linux. Guarded by platform
+# because on Linux this would *narrow* a working fontconfig database to a
+# single directory, which is a regression, not a fix.
+#
+# setdefault again, so a developer aiming the suite at a vendored font
+# directory still wins.
+if sys.platform == "win32":
+    os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
+
 import pytest
 
 from snipux import setup_desktop
