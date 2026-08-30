@@ -288,13 +288,22 @@ class TestTheFfmpegCommandsSayWhatTheyMean:
     """Built as argument lists and asserted as argument lists -- never as a
     joined string, which is how a quoting bug hides."""
 
+    # Named, and asserted against `str(...)` rather than a "/in.webm"
+    # literal, because a Path renders with the running platform's separator:
+    # the same object is "/in.webm" on Linux and "\in.webm" on Windows. What
+    # this class is checking is *which argument slot the source lands in*, not
+    # how a path is spelled, so hard-coding one platform's spelling only
+    # bought a red run on the other.
+    SOURCE = Path("/in.webm")
+    DEST = Path("/out.x")
+
     @staticmethod
     def _args(format_id, *, muted=False, start=2.6, end=22.8):
         from snipux.player import FfmpegExporter
 
         exporter = FfmpegExporter(
-            Path("/in.webm"),
-            Path("/out.x"),
+            TestTheFfmpegCommandsSayWhatTheyMean.SOURCE,
+            TestTheFfmpegCommandsSayWhatTheyMean.DEST,
             TrimState(duration=27.4, start=start, end=end),
             format_id,
             muted=muted,
@@ -311,9 +320,9 @@ class TestTheFfmpegCommandsSayWhatTheyMean:
         # PRESERVE_ORIGINAL: the source appears after -i and nowhere else,
         # so no command can be one typo away from overwriting a recording.
         args = self._args("mp4")
-        assert args[args.index("-i") + 1] == "/in.webm"
-        assert args.count("/in.webm") == 1
-        assert args[-1] == "/out.x"
+        assert args[args.index("-i") + 1] == str(self.SOURCE)
+        assert args.count(str(self.SOURCE)) == 1
+        assert args[-1] == str(self.DEST)
 
     def test_mp4_is_h264_in_a_layout_browsers_decode(self):
         args = self._args("mp4")
