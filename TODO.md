@@ -5,9 +5,20 @@ shape of the plan, the decisions already made, and how to pick it up.
 
 Everything through **SNX-127** is merged, and so is `fix/recording-flow`.
 The suite is green on Linux -- **1,595 passed at both 1.0 and 1.5 display
-scaling**. It was last green on Windows at 1,457 passed / 14 skipped,
-which is *before* the capture-flow and player work below; that number is
-stale.
+scaling** -- and green on Windows too, at **1,640 passed / 13 skipped**,
+also at both scalings, with the capture-flow and player work in.
+
+Three of those Windows failures were the suite lying rather than the app
+breaking, and the cause is worth knowing before the next red run there:
+**the offscreen QPA plugin enumerates zero fonts on Windows.** Linux finds
+them through fontconfig; Windows has no fontconfig and nothing tells the
+plugin where to look, so `QFontDatabase.families()` comes back empty. That
+fails quietly -- `QFont` resolves to a null family, `drawText` paints
+nothing at all, and `QFontMetrics` reports one advance of exactly the pixel
+size for every character. Any assertion about text fitting a box is then
+measuring a fiction. `tests/conftest.py` defaults `QT_QPA_FONTDIR` to
+`C:\Windows\Fonts` on win32 to fix it (and only on win32: on Linux it
+would narrow a working fontconfig database to one directory).
 
 Two locked handoffs are now built: `docs/design/flow/` (the capture flow)
 and `docs/design/player/` (the recording player / trim editor). What was
@@ -81,10 +92,21 @@ fallback: a region covering the top-centre strip pushes the pill below the
 recorded area, which on a 1440p screen is several hundred px down. That is
 by design -- it keeps the pill out of the recording -- but it is what a
 user reads as broken, and it is unresolved whether the report was that
-case or a genuine bug. Worth knowing when picking this up: on Windows the
-recorder only ever captures the **primary** screen, so on a multi-monitor
-desktop any non-primary monitor is a guaranteed-unfilmed home for the
-pill. Also note `_screen_for()` treats `geometries[0]` as the primary
+case or a genuine bug.
+
+Two things have changed under this since it was written. The recorder no
+longer always captures the primary screen (job 1 below is done), so "any
+non-primary monitor is a guaranteed-unfilmed home for the pill" is no
+longer true -- the recorded screen is now whichever one the region is on.
+And job 2 is built: on Windows the bar is marked
+`WDA_EXCLUDEFROMCAPTURE`, which if it holds against Qt's capture means the
+fallback this complaint is about **is not needed on Windows at all** --
+the pill could stay top-centre, over the region, and still be absent from
+the file. Do not make that change until someone has watched a recording
+and confirmed the affinity actually works: if it does not, a pill placed
+over the region is filmed, which is worse than a pill in an odd place.
+
+Also still true: `_screen_for()` treats `geometries[0]` as the primary
 screen for a full-screen recording, which `QGuiApplication.screens()` does
 not actually guarantee.
 
@@ -171,69 +193,73 @@ What was fixed meanwhile: `_sync_bar_destination` mapped `edit` to the
 Copy face through a `.get` default, so the most common setting reached its
 face by accident. It is now spelled out with the reason.
 
-## Windows: four jobs, in this order
+## Windows: four jobs -- 1, 2 and 4 are done; 3 needs a human
 
-Written up from the Linux side on 2026-08-28. None of it can be checked
-from here; all of it is reachable with the machine in front of you.
+Written up from the Linux side on 2026-08-28 and worked on the Windows box
+the same day. Jobs 1, 2 and 4 are built and measured. **Job 3 cannot be
+done from a terminal at all** -- it is watching the flow with your eyes,
+and it is the only one left.
 
-**Read job 4 first if you are short of time** -- it is the one that is
-new since the rest of this list was written, and it is a check rather
-than a build.
+### 1 · The recorder always records the primary screen -- FIXED
 
-### 1 · The recorder always records the primary screen (a real bug)
+`WindowsRecorderBackend._start_region` opened with
+`screen = QGuiApplication.primaryScreen()` and mapped the requested rect
+against *that* screen's geometry and DPR, so a region dragged on a
+non-primary monitor was cropped out of the primary one -- and, once "Full
+screen" became an ordinary rect rather than None, full screen on a
+non-primary monitor recorded the primary monitor.
 
-`WindowsRecorderBackend._start_region` opens with
-`screen = QGuiApplication.primaryScreen()` (`recording.py`, ~987) and maps
-the requested rect against *that* screen's geometry and DPR.
-`_start_full_screen` does the same. So on a multi-monitor desktop:
+`_screen_for_rect()` now answers `QGuiApplication.screenAt(rect.center())`,
+falling back to `primaryScreen()` when that is None (a centre in the dead
+space between two staggered monitors). `QScreenCapture.setScreen()` is
+pointed at it *before* `setActive(True)` -- an already-active capture is
+delivering the default screen's frames, so aiming it afterwards leaks a
+few of the wrong monitor into the file -- and the crop is mapped through
+that same screen's geometry and DPR. Those two must agree; pointing them
+at different screens is exactly what the bug was.
 
-- a region dragged on a non-primary monitor is cropped out of the primary
-  one -- wrong pixels, or an out-of-bounds crop, depending where it is;
-- **Full screen on a non-primary monitor records the primary monitor.**
+`_start_full_screen` (`rect is None`) still leaves `QScreenCapture` on its
+default screen. There is nothing to locate without a rect, and no UI path
+reaches it any more.
 
-The second is newly visible rather than newly broken: Full screen used to
-hand the backend `None`, which took the same primary-only path. It is now
-an ordinary rect (see "Full screen means the monitor you are on"), so the
-fix is the same one either way.
+**Still worth doing with your eyes:** record a region on your second
+monitor and look at the file. Four tests cover the arithmetic, including
+the crop being taken out of the recorded screen rather than the virtual
+desktop, but none of them can see a real second monitor -- offscreen QPA
+gives exactly one screen, so the multi-monitor case is assembled from
+stand-ins.
 
-**The fix:** pick the screen the rect is actually on --
-`QGuiApplication.screenAt(rect.center().toPoint())`, falling back to
-`primaryScreen()` when it answers None (a rect whose centre is in the gap
-between two staggered monitors). Then `QScreenCapture.setScreen()` that
-one, and map through *its* geometry and DPR.
+### 2 · Let the bar sit anywhere: WDA_EXCLUDEFROMCAPTURE -- BUILT, UNVERIFIED
 
-**How to know it worked:** record a region on your second monitor and look
-at the file. Today it will contain the primary monitor's pixels. Note that
-`_place_recording_hud` deliberately puts the bar on a *different* monitor
-from the one being recorded, so on Windows the bar itself is a convenient
-marker for which screen the recorder should not have chosen.
-
-### 2 · Let the bar sit anywhere: WDA_EXCLUDEFROMCAPTURE
-
-Asked directly, and the answer is yes on Windows and no on Linux.
-
-`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` (user32, Windows
-10 2004+) makes a window invisible to screen capture while still visible
-on screen. Applied to `RecordingBar` (and `RegionFrame`), it removes the
-whole reason placement has to work around the recorded area: the bar could
-sit wherever it reads best, including over the region, and still be absent
-from the file.
-
-`WDA_EXCLUDEFROMCAPTURE` is `0x00000011`. The older `WDA_MONITOR` (`0x1`)
-blanks the window to *black* in the capture rather than removing it, which
-is worse than the current behaviour -- check the constant.
-
-The hwnd is `int(widget.winId())`; call it after the widget is shown, and
-re-apply if the window is ever recreated. Failure is a returned zero, not
-an exception, so check it rather than assuming.
-
-**Keep the geometry fallback.** Linux has no equivalent -- introspected:
+`Platform.exclude_from_capture(widget)` is a new operation on the seam. It
+defaults to False -- "this platform cannot" -- and Linux keeps that
+default, introspected rather than assumed:
 `org.gnome.Shell.Screencast`'s `ScreencastArea` takes `draw-cursor` and
-`framerate` and nothing else, and it captures the composited output. So
-placement must stay correct without this; the affinity call is an
-improvement on top, per platform, not a replacement for it.
+`framerate` and nothing else, and it captures the composited output.
 
-### 3 · Watch the flow end to end
+`WindowsPlatform` implements it as
+`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` -- `0x00000011`,
+*not* the older `WDA_MONITOR` (`0x1`) one bit away, which blanks the
+window to black in the capture instead of removing it. There is a test
+asserting the constant for exactly that reason. Failure is a returned
+zero rather than an exception, so the result is returned rather than
+assumed, and a widget with no native handle is left alone.
+
+`app.py` calls it on the recording bar after `show()` (it needs a realised
+native window) and on each of `RegionFrame`'s strips. **Callers still
+place chrome as if this did not exist**, which is the rule: it is an
+improvement on top of correct placement, never a replacement, because on
+every other platform it answers False.
+
+**What is not known:** whether Qt's `QScreenCapture` on Windows actually
+honours the affinity. `SetWindowDisplayAffinity` is a DWM-level request
+and the capture path here is Qt's own; nothing in this repo can answer
+that without a real desktop. Record a region with the bar deliberately
+overlapping it and look at the file. If it holds, the placement fallback
+in `_place_recording_hud` can go on Windows and the pill can stay
+top-centre -- see the pill-placement note above.
+
+### 3 · Watch the flow end to end -- THE ONE THING LEFT
 
 Only recording has been driven on Windows. Since then the whole
 post-selection flow changed and none of it has run there:
@@ -249,27 +275,30 @@ post-selection flow changed and none of it has run there:
   recorded;
 - stopping leaves the bar up for six seconds with a summary and Discard.
 
-### 4 · Check what the Linux work assumed about every platform
+Cheap to eyeball while you are there: the frameless windows' new resize
+borders (`WinWindow` asks `startSystemResize` first, which Windows
+supports) and the whole player window.
 
-Three things landed for Linux reasons and apply everywhere. None is known
-to be wrong on Windows; none has been run there.
+### 4 · What the Linux work assumed about every platform -- CHECKED
 
-**`snipux/__init__.py` disables hardware video encoding, globally.** It
-sets `QT_FFMPEG_ENCODING_HW_DEVICE_TYPES=""` because Qt's bundled FFmpeg
-has no software x264 and its NVENC/VAAPI paths fail *here* -- when they
-fail Qt does not fall back, it writes a zero-length file. On Windows the
-same Qt may reach a working hardware H.264 encoder, in which case this
-line is throwing away the good path for a Linux problem. **Check whether
-an MP4 export produces `h264` on Windows with the line and without it**
-(`ffprobe -show_entries stream=codec_name`), and if hardware works there,
-make the variable conditional on the platform seam rather than global.
+**`snipux/__init__.py` disables hardware video encoding, globally --
+and on Windows this changes nothing. Measured, not reasoned.** Driving 45
+synthetic frames through the same `QVideoFrameInput` -> `QMediaRecorder`
+path the region recorder uses produced **byte-identical files, same md5**,
+with `QT_FFMPEG_ENCODING_HW_DEVICE_TYPES=""` and with it unset: h264,
+Constrained Baseline, yuv420p, avc1, 45 frames, 63,451 bytes each time.
+Qt reaches `h264_mf` -- Media Foundation's H.264 encoder -- which is not a
+hwaccel *device* encoder and so is not in the list that variable names.
+So there is no good Windows path being thrown away, and nothing for a
+per-platform override to buy. The line stays global; the reasoning is now
+in its own comment.
 
-**The player prefers a system `ffmpeg` and Windows will not have one.**
-`player.system_ffmpeg()` looks on PATH, verifies `libx264`/`libvpx-vp9`/
-`gif`, and caches. With none found, MP4 falls back to Qt (see above), and
-GIF and trimmed WebM show as disabled rows with their reason -- correct
-behaviour, but it means the *default* Windows experience is the degraded
-one. Worth knowing before it reads as a bug.
+**The player prefers a system `ffmpeg`, and this box has one** --
+ffmpeg 9.0.1 (winget, Gyan.FFmpeg), found on PATH by
+`player.system_ffmpeg()`. So the "degraded default Windows experience"
+this list warned about is not what is happening here, and any export
+problem seen on this machine is *not* the missing-binary case. It remains
+true for a Windows user who has not installed one.
 
 **The off-thread recorder start is opt-in, and Windows is opted out.**
 `RecordingBackend.starts_off_thread` defaults to False;
@@ -281,11 +310,6 @@ same wall the player's exporter hit. It also has no need for it: the
 delay that change fixes is GNOME's ~500ms D-Bus round trip, which Qt's
 local objects do not pay. **Do not flip that flag without measuring that
 Windows is slow, and confirming stop() still works from the UI thread.**
-
-Also unrun on Windows, and cheap to eyeball while you are there: the
-frameless windows' new resize borders (`WinWindow` asks
-`startSystemResize` first, which Windows supports) and the whole player
-window.
 
 ## The recording flow was fixed, and so was the recorder underneath it
 

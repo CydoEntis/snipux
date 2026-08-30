@@ -1,4 +1,4 @@
-"""snipux — a Windows Snipping Tool workalike for Linux."""
+"""snipux — a Windows Snipping Tool workalike, on Linux, Windows and macOS."""
 
 import os as _os
 
@@ -19,6 +19,16 @@ import os as _os
 # default: a file in a slightly older codec beats no file at all. Anyone
 # with a working encoder can set this variable themselves and get H.264 --
 # which is why an existing value is left alone.
+#
+# Global rather than behind the platform seam, and measured rather than
+# assumed: on Windows 11 this variable changes nothing. Qt reaches
+# `h264_mf`, Media Foundation's H.264 encoder, which is not a hwaccel
+# *device* encoder and so is not in the list this names. Driving 45 frames
+# through the same QVideoFrameInput -> QMediaRecorder path the region
+# recorder uses produced h264 (Constrained Baseline, yuv420p, avc1) both
+# with the variable set to "" and with it unset -- byte-identical files,
+# same md5. So there is no good Windows path being thrown away here, and
+# nothing for a per-platform override to buy.
 _os.environ.setdefault("QT_FFMPEG_ENCODING_HW_DEVICE_TYPES", "")
 
 __version__ = "0.1.0"
