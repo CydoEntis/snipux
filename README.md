@@ -8,7 +8,9 @@ out the parts that shouldn't be shared, and copy or save it. Or record the same
 region to a video file and trim it down. The workflow Windows gives you for
 free, on Linux too — and a slightly better one back on Windows.
 
-MIT licensed. Install it with one command; see [Install](#install).
+MIT licensed, and installed from this repository with pipx — see
+[Install](#install). There is no PyPI package and no Windows installer;
+both are deliberate, and both are explained where they'd be missed.
 
 ## Platform support
 
@@ -98,8 +100,42 @@ cd snipux
 
 ### Windows
 
-Windows ships as a single standalone `snipux.exe` — no Python, no terminal, and
-no installer to run first:
+> **No release is published yet, so there is no `snipux.exe` to download
+> today.** The Releases page is empty. Until one is cut, use the pipx route
+> below — it works now. The download instructions further down are correct,
+> but only once a release exists.
+
+**With Python — the route that works today.** Install
+[Python 3.10+](https://www.python.org/downloads/) if you don't have it
+(tick "Add python.exe to PATH" in the installer), then:
+
+```powershell
+py -m pip install --user pipx
+py -m pipx ensurepath
+```
+
+Close and reopen the terminal so `PATH` picks that up, then:
+
+```powershell
+pipx install git+https://github.com/CydoEntis/snipux.git
+snipux --setup
+snipux
+```
+
+`--setup` writes a Start Menu shortcut, a Startup entry and the Ctrl+Alt+S
+registration, in place of the `.desktop`/GNOME pieces it writes on Linux. The
+third line matters for the same reason it does on Linux — see below.
+
+**Snipux has to actually be running for the hotkey to do anything.** Unlike
+GNOME's shortcut on Linux, which the desktop itself owns, Windows' hotkey is a
+registration the Snipux process holds only while it's alive. That's what
+autostart is for: the Startup entry means Snipux is already running by the time
+you'd want to press the shortcut, from the next login onward. The first time,
+start it yourself.
+
+**Without Python — the standalone exe.** *(Not available until a release is
+published — see the note above.)* Windows is meant to ship as a single
+`snipux.exe`: no Python, no terminal, and no installer to run first.
 
 1. Download `snipux.exe` from the
    [Releases page](https://github.com/CydoEntis/snipux/releases) (newest
@@ -130,22 +166,8 @@ App Control, and since it installs itself on first run it delivers what the
 installer was for without the thing that broke it. Full reasoning in
 [docs/releasing.md](docs/releasing.md#why-theres-no-installer).
 
-**Or install with pipx**, if you already have Python — the same two commands as
-Linux work unchanged, and `--setup` writes the Start Menu shortcut, the Startup
-entry and the hotkey registration in place of the `.desktop`/GNOME pieces:
-
-```powershell
-pipx install git+https://github.com/CydoEntis/snipux.git
-snipux --setup
-snipux
-```
-
-Same as Linux, including the last line: the hotkey is a registration the
-running process holds, so something has to be running before Ctrl+Alt+S does
-anything.
-
-This is also the fallback if Smart App Control ever blocks the exe itself:
-`pipx` runs Snipux through the already-trusted `python.exe` rather than a new
+If Smart App Control ever blocks the exe itself, pipx above is the fallback:
+it runs Snipux through the already-trusted `python.exe` rather than a new
 unsigned executable.
 
 **Snipux has to actually be running for the hotkey to do anything.** Unlike
