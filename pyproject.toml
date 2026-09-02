@@ -5,30 +5,45 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "snipux"
 version = "0.1.0"
-description = "A Windows Snipping Tool workalike for Linux."
+description = "Snip, annotate and record your screen -- a Snipping Tool workalike for Linux and Windows."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
     { name = "Cody", email = "cydoentis@gmail.com" },
 ]
-keywords = ["screenshot", "snipping-tool", "wayland", "gnome", "linux", "annotation"]
-# Trove classifiers PyPI renders on the project page. The OS classifier is
-# load-bearing, not decorative -- capture.py's one architectural rule only
-# holds on Linux (X11/Wayland via the compositor's own portal/APIs), so
-# "Operating System :: POSIX :: Linux" tells pip/pipx not to even offer this
-# on Windows or macOS rather than installing something that cannot capture.
+keywords = [
+    "screenshot",
+    "snipping-tool",
+    "screen-recorder",
+    "wayland",
+    "gnome",
+    "linux",
+    "windows",
+    "annotation",
+]
+# Trove classifiers PyPI renders on the project page. The OS list is
+# load-bearing, not decorative: it is the list of platforms whose seam in
+# snipux/platform/ is actually implemented, so an installer is never
+# offered something that cannot capture. Linux and Windows both are;
+# macOS is absent on purpose, because darwin.py is still a stub that
+# raises UnimplementedPlatformError for every operation. Add
+# "Operating System :: MacOS :: MacOS X" when that stops being true, and
+# not before.
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: X11 Applications :: Qt",
+    "Environment :: Win32 (MS Windows)",
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Graphics :: Capture :: Screen Capture",
+    "Topic :: Multimedia :: Video :: Capture",
     "Topic :: Utilities",
 ]
 # Matches requirements.txt's two runtime packages. pytest stays a
@@ -37,6 +52,13 @@ dependencies = [
     # >=6.8: QVideoFrameInput (SNX-118's Windows region-recording path) is
     # a Qt 6.8 addition -- see requirements.txt for the same floor.
     "PyQt6>=6.8",
+    # Unconditional, deliberately, even though jeepney only *does* anything
+    # on Linux (it is the D-Bus client behind the portal and GNOME Shell
+    # backends). capture.py imports it at module top level and app.py
+    # imports capture.py on every platform, so a
+    # `sys_platform == "linux"` marker here would make the Windows install
+    # fail at startup with ModuleNotFoundError. Gate the import before
+    # gating the dependency.
     "jeepney>=0.8",
 ]
 
