@@ -47,27 +47,36 @@ you are dragging.
 
 ### Linux
 
-Install with [pipx](https://pipx.pypa.io/), straight from the repository:
+First, the two things Ubuntu doesn't already have — [pipx](https://pipx.pypa.io/)
+itself, and one library Qt needs that nothing else on a stock desktop pulls in:
+
+```sh
+sudo apt install pipx libxcb-cursor0
+pipx ensurepath      # only needed once, and only if pipx was just installed
+```
+
+`libxcb-cursor0` is not optional: without it Snipux installs cleanly and then
+crashes on launch, behind four lines of Qt plugin text that name the library
+but not the package. Then:
 
 ```sh
 pipx install git+https://github.com/CydoEntis/snipux.git
 snipux --setup
+snipux &
 ```
 
-That is the whole install. `pipx` gives Snipux and its dependencies their own
-isolated environment and puts a `snipux` launcher on `PATH`; `--setup` writes
-the pieces `pipx` can't — the `.desktop` entry, the autostart entry, and the
-GNOME shortcut. It's safe to re-run.
+`pipx` gives Snipux and its dependencies their own isolated environment and
+puts a `snipux` launcher on `PATH`. `--setup` writes the pieces `pipx` can't —
+the `.desktop` entry, the autostart entry, and the GNOME shortcut — and is safe
+to re-run.
 
-You'll also need one system library Qt needs and Ubuntu doesn't otherwise pull
-in:
+**The third line is not optional the first time.** The shortcut runs
+`snipux --snip`, which needs a resident Snipux to talk to, and `--setup` only
+*writes* the autostart entry — it doesn't start anything. Without it the key
+you just bound does nothing until your next login. (`packaging/install.sh`
+does this step for you, which is why it isn't mentioned there.)
 
-```sh
-sudo apt install libxcb-cursor0
-```
-
-Without it Snipux installs cleanly and then crashes on launch. See
-[Requirements](#requirements).
+That's it — press **Ctrl+Alt+S**.
 
 Prefer SSH, or contributing rather than just using it?
 
@@ -125,10 +134,15 @@ installer was for without the thing that broke it. Full reasoning in
 Linux work unchanged, and `--setup` writes the Start Menu shortcut, the Startup
 entry and the hotkey registration in place of the `.desktop`/GNOME pieces:
 
-```sh
+```powershell
 pipx install git+https://github.com/CydoEntis/snipux.git
 snipux --setup
+snipux
 ```
+
+Same as Linux, including the last line: the hotkey is a registration the
+running process holds, so something has to be running before Ctrl+Alt+S does
+anything.
 
 This is also the fallback if Smart App Control ever blocks the exe itself:
 `pipx` runs Snipux through the already-trusted `python.exe` rather than a new
