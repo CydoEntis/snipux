@@ -1,6 +1,33 @@
-# Screen recording — the plan
+# Screen recording — the original plan
 
-Not built. This is the shape of it, sliced into tickets, with the research
+> **Superseded. Kept for its research, not as a description of what exists.**
+>
+> Recording is **built** and has been driven end to end on real GNOME and on
+> Windows 11. What actually shipped is specified by two locked handoffs, and
+> those are the authority now:
+>
+> - `docs/design/flow/` — the capture flow and the recording bar
+>   (and its `divergences.md`)
+> - `docs/design/player/` — the player / trim editor
+>   (and its `divergences.md`)
+>
+> Two decisions below were **reversed** after this page was written, and the
+> reasoning for both is in TODO.md:
+>
+> - *"No ffmpeg, and therefore no editing in v1"* — trimming and format
+>   conversion need no ffmpeg binary. PyQt6's own wheel ships the FFmpeg
+>   libraries and Qt exposes the encoder, so the player trims and exports
+>   today. A *system* ffmpeg is used when one is already on `PATH`, purely
+>   to reach H.264 in software, and is never a dependency.
+> - *"No audio in v1"* — Windows records audio. Linux still does not, because
+>   `org.gnome.Shell.Screencast` has no audio option to pass, and the UI says
+>   so rather than leaving people to discover it.
+>
+> Everything below this line is the original plan as written, unedited.
+
+---
+
+This is the shape of it, sliced into tickets, with the research
 already done so the tickets can be written without redoing it.
 
 **What it does in v1:** a switch between screenshotting and recording;
