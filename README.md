@@ -49,11 +49,12 @@ you are dragging.
 
 ### Linux
 
-First, the two things Ubuntu doesn't already have — [pipx](https://pipx.pypa.io/)
-itself, and one library Qt needs that nothing else on a stock desktop pulls in:
+First, the things Ubuntu may not already have — [pipx](https://pipx.pypa.io/),
+`git` (which pipx shells out to for the install below), and one library Qt needs
+that nothing else on a stock desktop pulls in:
 
 ```sh
-sudo apt install pipx libxcb-cursor0
+sudo apt install pipx git libxcb-cursor0
 pipx ensurepath      # only needed once, and only if pipx was just installed
 ```
 
@@ -105,9 +106,16 @@ cd snipux
 > below — it works now. The download instructions further down are correct,
 > but only once a release exists.
 
-**With Python — the route that works today.** Install
-[Python 3.10+](https://www.python.org/downloads/) if you don't have it
-(tick "Add python.exe to PATH" in the installer), then:
+**With Python — the route that works today.** Two prerequisites Windows does
+not ship, both needed before the commands below will work:
+
+- **[Python 3.10+](https://www.python.org/downloads/)** — tick *"Add python.exe
+  to PATH"* in the installer.
+- **[Git for Windows](https://git-scm.com/download/win)** — `pipx install
+  git+https://…` shells out to `git`, so without it the install fails with
+  `Cannot find command 'git'`. Accept the defaults.
+
+Then, in PowerShell:
 
 ```powershell
 py -m pip install --user pipx
