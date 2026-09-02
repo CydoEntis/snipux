@@ -401,12 +401,12 @@ class TestTheModeMenuNarrowsOnTheRecordSide:
 
 
 class TestTheAfterMenuSwapsVocabularyOnTheRecordSide:
-    def test_stills_is_unchanged_instant_edit_review(self):
+    def test_stills_offers_instant_edit_save_and_review(self):
         chooser = Chooser(parent=None)
 
         rows, _selected, _width = chooser._rows_for("after")
 
-        assert [row[0] for row in rows] == ["instant", "edit", "review"]
+        assert [row[0] for row in rows] == ["instant", "edit", "save", "review"]
         assert all(row[5] is False for row in rows)
 
     def test_record_offers_copy_save_and_open(self):
@@ -427,13 +427,36 @@ class TestTheAfterMenuSwapsVocabularyOnTheRecordSide:
         assert "edit" not in record_ids
         assert "review" not in record_ids
 
-    def test_save_does_not_exist_on_the_stills_side(self):
-        # `AFTER_CAPTURE`/`_AFTER_ROWS` are stills-only -- "save" is not a
-        # destination stills can pick, and must not leak into that list.
+    def test_save_is_a_stills_destination_too_now(self):
+        # It did not used to be, and the split action was the thing that
+        # made that untenable: its caret has always offered Copy/Save/Open
+        # and `_sync_bar_destination` has always mapped `save` to a Save
+        # face, so with no stills id to record it in, picking Save from the
+        # caret was the one choice that could not be remembered.
         stills_ids = {value for value, *_rest in _AFTER_ROWS}
 
-        assert "save" not in stills_ids
-        assert "save" not in {v for v, *_r in tokens.AFTER_CAPTURE}
+        assert "save" in stills_ids
+        assert "save" in {v for v, *_r in tokens.AFTER_CAPTURE}
+
+    def test_the_two_lists_agree_on_what_the_shared_ids_mean(self):
+        # `instant` and `save` appear on both sides and mean the same
+        # thing by both; a divergence here would make `set_kind`'s snap
+        # (which keeps `_after` when the new side also has it) silently
+        # change what the user asked for.
+        stills = {value for value, *_rest in _AFTER_ROWS}
+        record = {value for value, *_rest in _RECORD_AFTER_ROWS}
+
+        assert stills & record == {"instant", "save"}
+
+    def test_stills_ids_still_round_trip_through_storage(self):
+        # `load_after_capture` validates against `tokens.AFTER_CAPTURE`, so
+        # a row the menu offers but storage rejects would silently fall
+        # back to the default the moment it was read back.
+        from snipux import setup_desktop
+
+        for identifier, *_rest in _AFTER_ROWS:
+            setup_desktop.save_after_capture(identifier)
+            assert setup_desktop.load_after_capture() == identifier
 
 
 class TestADisabledModeRowIsInertNotJustGreyed:
@@ -521,3 +544,115 @@ class TestADisabledModeRowDimsItsShortcutToo:
         disabled_ink = _darkest_pixel(disabled.grab(), x0, x1, 0, disabled.height())
 
         assert disabled_ink < enabled_ink
+
+
+class TestTheReuseLastRegionToggle:
+    """The row's one on/off control. It is on the row rather than in
+    Settings because a preference nobody finds is a preference nobody has:
+    this one shipped in Settings first and went unnoticed.
+    """
+
+    def test_it_is_off_by_default(self):
+        assert Chooser(parent=None).reuse_last_region is False
+
+    def test_seeding_it_does_not_emit(self):
+        # Adopting stored config and the user clicking are different
+        # events, and only the second is worth writing back -- the same
+        # rule `set_after` follows.
+        chooser = Chooser(parent=None)
+        fired = []
+        chooser.reuseLastRegionChanged.connect(fired.append)
+
+        chooser.set_reuse_last_region(True)
+
+        assert chooser.reuse_last_region is True
+        assert fired == []
+
+    def test_clicking_it_flips_and_announces(self):
+        chooser = Chooser(parent=None)
+        fired = []
+        chooser.reuseLastRegionChanged.connect(fired.append)
+
+        QTest.mouseClick(chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton)
+
+        assert fired == [True]
+        assert chooser.reuse_last_region is True
+
+    def test_clicking_it_again_turns_it_back_off(self):
+        chooser = Chooser(parent=None)
+        chooser.set_reuse_last_region(True)
+        fired = []
+        chooser.reuseLastRegionChanged.connect(fired.append)
+
+        QTest.mouseClick(chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton)
+
+        assert fired == [False]
+        assert chooser.reuse_last_region is False
+
+    def test_it_sits_next_to_the_mode_it_modifies(self):
+        # Before the destination and delay triggers, which answer a
+        # different question entirely.
+        chooser = Chooser(parent=None)
+        panel = chooser.panel
+        order = [panel.layout().itemAt(i).widget() for i in range(panel.layout().count())]
+
+        assert order.index(panel.reuse_toggle) == order.index(panel.mode_trigger) + 1
+        assert order.index(panel.reuse_toggle) < order.index(panel.after_trigger)
+
+    def test_it_is_hidden_on_the_record_side(self):
+        # Recording never pre-selects -- committing there arms a recording
+        # -- so offering the control would promise something that side
+        # does not do.
+        chooser = Chooser(parent=None)
+        chooser.panel.show()
+
+        chooser.set_kind("record")
+
+        assert chooser.panel.reuse_toggle.isVisibleTo(chooser.panel) is False
+
+    def test_it_comes_back_on_the_stills_side(self):
+        chooser = Chooser(parent=None)
+        chooser.panel.show()
+        chooser.set_kind("record")
+
+        chooser.set_kind("stills")
+
+        assert chooser.panel.reuse_toggle.isVisibleTo(chooser.panel) is True
+
+    def test_hovering_it_explains_what_it_does(self):
+        # Qt tooltips are a coin toss on an always-on-top frameless window,
+        # so the row's own hint pill is what carries the explanation.
+        chooser = Chooser(parent=None)
+
+        chooser._on_reuse_hovered(True)
+
+        assert chooser.hint._text == tokens.REUSE_HINT[False]
+
+    def test_the_hint_says_how_to_turn_it_off_once_it_is_on(self):
+        chooser = Chooser(parent=None)
+        chooser.set_reuse_last_region(True)
+
+        chooser._on_reuse_hovered(True)
+
+        assert chooser.hint._text == tokens.REUSE_HINT[True]
+
+    def test_leaving_it_restores_the_modes_own_hint(self):
+        chooser = Chooser(parent=None)
+        chooser._on_reuse_hovered(True)
+
+        chooser._on_reuse_hovered(False)
+
+        assert chooser.hint._text == tokens.MODE_NEXT_STEP["Region"]
+
+    def test_both_hints_fit_the_pill_without_eliding(self):
+        # The pill sizes itself to its text, and the row is centred on one
+        # monitor -- a hint wider than the narrowest sane screen would hang
+        # off it.
+        from PyQt6.QtGui import QFontMetricsF
+
+        from snipux.chooser import _font
+
+        metrics = QFontMetricsF(_font(11.5, 400))
+        for state, text in tokens.REUSE_HINT.items():
+            width = metrics.horizontalAdvance(text)
+            assert width <= 420, f"reuse hint for {state} is {width:.0f}px: {text!r}"

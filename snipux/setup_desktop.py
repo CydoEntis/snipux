@@ -639,6 +639,73 @@ def save_remember_tool(enabled: bool, config_dir: Path | None = None) -> bool:
     return _write_config("remember_tool", bool(enabled), config_dir)
 
 
+def load_last_region(config_dir: Path | None = None) -> tuple[int, int, int, int] | None:
+    """The rectangle the last snip was actually taken from -- absolute
+    logical virtual-desktop coordinates, `(x, y, width, height)` -- or None
+    if there is not one to offer yet.
+
+    Absolute, and it has to be: "the region I grabbed" is meaningless
+    without knowing which monitor it was on, and this file is read by a
+    process that may since have had a display unplugged. The reader
+    (`OverlayWindow._select_last_region`) is what clips it back to the
+    screens that exist now.
+
+    Persisted rather than kept in memory because autostart means the
+    process a user reaches for in the morning is a fresh one -- an
+    in-memory-only rectangle would be empty at exactly the moment they
+    would most like yesterday's region back.
+
+    Anything the document cannot be trusted to mean is None rather than an
+    exception, the same direction every other loader here takes: a
+    hand-edited or truncated entry must leave the mode simply unavailable,
+    never break the chooser that reads it. A zero or negative extent is
+    part of that -- it is not a rectangle anything can be captured from --
+    and `bool` is excluded explicitly because it is an `int` subclass, so
+    `[true, true, true, true]` would otherwise pass for a rectangle.
+    """
+    stored = _read_config(config_dir).get("last_region")
+    if not isinstance(stored, list) or len(stored) != 4:
+        return None
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in stored):
+        return None
+    x, y, width, height = (int(value) for value in stored)
+    if width <= 0 or height <= 0:
+        return None
+    return x, y, width, height
+
+
+def save_last_region(
+    rect: tuple[int, int, int, int], config_dir: Path | None = None
+) -> bool:
+    """Remember `rect` (absolute logical virtual-desktop coordinates) as
+    what the chooser's `Last region` mode recaptures.
+    """
+    x, y, width, height = (int(round(value)) for value in rect)
+    return _write_config("last_region", [x, y, width, height], config_dir)
+
+
+def load_reuse_last_region(config_dir: Path | None = None) -> bool:
+    """Whether Region mode opens with the last rectangle already selected
+    instead of an empty overlay waiting for a drag.
+
+    Off unless explicitly turned on: pre-selecting an area the user has not
+    asked for this time changes what the very first frame of a snip means,
+    which is not a default to inherit by accident.
+
+    This is the whole of the `Last region` feature's surface. It began as a
+    fifth entry in the chooser's mode menu, which was wrong: choosing it
+    from a dropdown every single time is the same number of interactions as
+    dragging the box again, so the mode cost what it was meant to save.
+    A preference that simply *is* on says "repeat captures are what I do",
+    and then costs nothing per snip.
+    """
+    return _read_config(config_dir).get("reuse_last_region") is True
+
+
+def save_reuse_last_region(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("reuse_last_region", bool(enabled), config_dir)
+
+
 def load_hints_enabled(config_dir: Path | None = None) -> bool:
     """Whether the overlay's top hint HUD (SNX-46) is shown from the start
     of a session.

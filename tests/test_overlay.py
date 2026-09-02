@@ -30,6 +30,7 @@ import snipux.app as app_module
 import snipux.overlay as overlay_module
 from conftest import skip_on_windows
 from snipux import capture as capture_module
+from snipux import setup_desktop
 from snipux.capture import (
     BackendRegistry,
     CaptureBackend,
@@ -7042,12 +7043,21 @@ class TestEscapeAndUndoRedoBypassSuppression:
         # Guards against a fix that stops suppressing everything rather than
         # carving out just Escape and undo/redo -- the AC is explicit that
         # tool letters must stay suppressed.
+        #
+        # Asserts the tool does not *change*, rather than that none is
+        # armed: the toolbar now opens with the pen already armed, so
+        # "nothing is active" stopped being a usable proxy for "the key was
+        # swallowed" -- pressing P would leave `active_tool == "pen"`
+        # whether it was suppressed or not. Highlighter is a letter the
+        # default is not.
         overlay = self._overlay()
+        before = overlay._bar.active_tool
         overlay._tray._slider.setFocus()
 
-        QTest.keyClick(overlay, Qt.Key.Key_P)
+        QTest.keyClick(overlay, Qt.Key.Key_H)
 
-        assert overlay._bar.active_tool is None
+        assert overlay._bar.active_tool == before
+        assert overlay._bar.active_tool != "highlighter"
 
     def test_arrow_key_still_reaches_the_slider_after_the_escape_fix(self):
         overlay = self._overlay()
@@ -7260,6 +7270,339 @@ STAGGERED_CENTRE = QRectF(1920, 0, 2560, 1440)   # full height, the primary
 STAGGERED_RIGHT = QRectF(4480, 188, 1920, 1080)  # bottom edge y=1268
 STAGGERED = [STAGGERED_CENTRE, STAGGERED_LEFT, STAGGERED_RIGHT]
 STAGGERED_UNION = QRectF(0, 0, 6400, 1440)
+
+
+class TestReuseLastRegionPreselectsIt:
+    """The `reuse last region` preference: Region mode opens on the
+    rectangle the last snip came from instead of an empty overlay.
+
+    A preference, not a fifth mode. Picking a mode from a dropdown every
+    time costs the same interaction the drag did, so a mode would have
+    spent exactly what it was meant to save.
+
+    Coordinates are the sharp edge here, per CLAUDE.md -- the rectangle is
+    stored absolute and used window-local, and these frames deliberately
+    have a non-zero origin so a missing translate cannot pass.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    # Two 1920x1080 monitors with the second mounted to the *left* of the
+    # primary, so absolute x runs from -1920. A local-for-absolute mix-up
+    # is a whole monitor's error.
+    LEFT = QRectF(-1920, 0, 1920, 1080)
+    PRIMARY = QRectF(0, 0, 1920, 1080)
+    MONITORS = [PRIMARY, LEFT]
+    ORIGIN = (-1920, 0)
+
+    def _overlay(self, monitors=None, origin=None, size=(3840, 1080)) -> OverlayWindow:
+        origin = self.ORIGIN if origin is None else origin
+        frame = make_frame(image_size=size, logical_size=size, logical_origin=origin)
+        overlay = OverlayWindow(
+            frame, monitor_geometries=list(self.MONITORS if monitors is None else monitors)
+        )
+        overlay.setGeometry(round(origin[0]), round(origin[1]), *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    # -- remembering -----------------------------------------------------
+
+    def test_a_finished_snip_is_what_gets_remembered(self):
+        overlay = self._overlay()
+        # Window-local (200, 300) is absolute (-1720, 300), on the left monitor.
+        overlay.set_selection(QRect(200, 300, 640, 480))
+
+        overlay.copy()
+
+        assert setup_desktop.load_last_region() == (-1720, 300, 640, 480)
+
+    def test_an_abandoned_selection_is_not_remembered(self):
+        # Why this is recorded at `_report_capture` and not at
+        # `_commit_selection`: a rectangle dragged, reconsidered and
+        # cancelled is not what anyone means by "the last region".
+        overlay = self._overlay()
+        overlay.set_selection(QRect(200, 300, 640, 480))
+
+        overlay.close()
+
+        assert setup_desktop.load_last_region() is None
+
+    def test_a_lasso_does_not_overwrite_the_remembered_rectangle(self):
+        # A freeform selection's bounding box is not what was captured --
+        # everything outside the traced path came out transparent -- so
+        # offering that box back as a plain rectangle would recapture an
+        # area the user never selected.
+        overlay = self._overlay()
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        path = QPainterPath()
+        path.addEllipse(QRectF(900, 200, 300, 300))
+        overlay.set_selection(QRect(900, 200, 300, 300), path=path)
+
+        overlay.copy()
+
+        assert setup_desktop.load_last_region() == (-1720, 300, 640, 480)
+
+    # -- the preference --------------------------------------------------
+
+    def test_the_row_toggle_is_seeded_from_storage(self):
+        # The control has to show the state it is actually in, or the user
+        # turns on a preference that was already on.
+        setup_desktop.save_reuse_last_region(True)
+
+        assert self._overlay()._chooser.reuse_last_region is True
+
+    def test_clicking_the_row_toggle_persists_it(self):
+        # The gap this closes: the toggle was on the row, emitting its
+        # signal, with nothing on the other end -- so it looked like a
+        # working control and changed nothing at all.
+        overlay = self._overlay()
+
+        QTest.mouseClick(
+            overlay._chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton
+        )
+
+        assert setup_desktop.load_reuse_last_region() is True
+
+    def test_clicking_it_off_again_persists_that_too(self):
+        setup_desktop.save_reuse_last_region(True)
+        overlay = self._overlay()
+
+        QTest.mouseClick(
+            overlay._chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton
+        )
+
+        assert setup_desktop.load_reuse_last_region() is False
+
+    def test_turning_it_on_does_not_pre_select_underneath_the_pointer(self):
+        # Pre-selecting stands the chooser down, so acting immediately
+        # would take the row -- and the toggle just clicked -- off screen.
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        overlay = self._overlay()
+
+        QTest.mouseClick(
+            overlay._chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton
+        )
+
+        assert overlay._selection is None
+
+    def test_it_takes_effect_on_the_next_overlay(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        first = self._overlay()
+        QTest.mouseClick(
+            first._chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton
+        )
+
+        assert self._overlay()._selection == QRect(200, 300, 640, 480)
+
+    def test_the_preference_is_off_unless_asked_for(self):
+        # Pre-selecting an area the user did not ask for this time changes
+        # what the first frame of a snip means, so it is never a default.
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+
+        assert self._overlay()._selection is None
+
+    def test_with_it_on_the_overlay_opens_on_the_last_rectangle(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay()
+
+        # Absolute (-1720, 300) is window-local (200, 300) here.
+        assert overlay._selection == QRect(200, 300, 640, 480)
+
+    def test_it_needs_no_trip_through_the_mode_menu(self):
+        # The whole point of the redesign: nothing is picked, nothing is
+        # clicked, and the mode is still the plain Region it always was.
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay()
+
+        assert overlay._chooser.mode == "Region"
+        assert [m[0] for m in tokens.CAPTURE_MODES] == [
+            "Region", "Window", "Full screen", "Freeform"
+        ]
+
+    def test_the_toolbar_is_up_on_the_rectangles_own_monitor(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay()
+
+        assert overlay._bar.isVisible()
+        bar = QRectF(overlay._bar.geometry()).translated(QPointF(*self.ORIGIN))
+        assert self.LEFT.contains(bar), f"bar at {bar}"
+
+    def test_nothing_is_captured_merely_by_opening(self):
+        # A pre-selection is not a commit. `instant` finishes the snip the
+        # moment a selection is *committed*, and an overlay that opened
+        # must not have finished anything.
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+        reported = []
+        frame = make_frame(
+            image_size=(3840, 1080), logical_size=(3840, 1080), logical_origin=self.ORIGIN
+        )
+        overlay = OverlayWindow(
+            frame,
+            monitor_geometries=list(self.MONITORS),
+            on_captured=lambda image, path: reported.append(path),
+        )
+        overlay._chooser.set_after("instant")
+        overlay.setGeometry(-1920, 0, 3840, 1080)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        assert reported == []
+        assert overlay.isVisible()
+
+    def test_dragging_a_new_box_replaces_the_recalled_one(self):
+        # "Still draggable" is the half that keeps the preference from
+        # becoming a mode you have to remember to turn off: a press
+        # outside the selection starts a fresh one, exactly as it does for
+        # any other selection.
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+        overlay = self._overlay()
+
+        start_at, end_at = QPoint(2400, 100), QPoint(2900, 500)
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start_at
+        )
+        QTest.mouseMove(overlay, end_at)
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end_at
+        )
+
+        assert overlay._selection == QRect(2400, 100, 500, 400)
+
+    def test_the_record_side_is_left_alone(self):
+        # Committing is what arms a recording, and arming one as a side
+        # effect of opening the overlay is not something anyone asked for.
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+        setup_desktop.save_kind("record")
+
+        overlay = self._overlay()
+
+        assert overlay._selection is None
+        assert overlay._armed_for_recording is False
+
+    # -- recalling onto a desktop that has changed -----------------------
+
+    def test_nothing_remembered_yet_leaves_an_ordinary_empty_overlay(self):
+        setup_desktop.save_reuse_last_region(True)
+
+        assert self._overlay()._selection is None
+
+    def test_a_rectangle_reaching_past_a_shrunken_desktop_is_clipped(self):
+        # Remembered on the two-monitor desk, recalled with the left
+        # monitor unplugged. The frame is the only source of pixels there
+        # is, so the part that no longer exists is cut off rather than
+        # cropped from nothing.
+        setup_desktop.save_last_region((-200, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay(
+            monitors=[QRectF(self.PRIMARY)], origin=(0, 0), size=(1920, 1080)
+        )
+
+        assert overlay._selection == QRect(0, 300, 440, 480)
+
+    def test_a_rectangle_on_a_monitor_that_is_gone_is_discarded(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay(
+            monitors=[QRectF(self.PRIMARY)], origin=(0, 0), size=(1920, 1080)
+        )
+
+        assert overlay._selection is None
+
+    def test_a_rectangle_surviving_only_in_a_gap_is_discarded(self):
+        # The frame's span is the *union* of the monitors, and a staggered
+        # desk leaves gaps inside that union which no display shows. A
+        # rectangle surviving only there would crop black pixels.
+        setup_desktop.save_last_region((300, 20, 200, 100))
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay(
+            monitors=list(STAGGERED), origin=(0, 0), size=(6400, 1440)
+        )
+
+        assert overlay._selection is None
+
+
+class TestTheDestinationIsRemembered:
+    """Last used wins. The handoff made the chooser and the split action's
+    caret one-snip overrides that never wrote back, and that read as the
+    control being ignored -- pick Copy, take the snip, and the next one is
+    back on Open.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self) -> OverlayWindow:
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_choosing_a_destination_stores_it(self):
+        overlay = self._overlay()
+
+        overlay._chooser.set_after("save")
+
+        assert setup_desktop.load_after_capture() == "save"
+
+    def test_the_next_overlay_opens_on_it(self):
+        first = self._overlay()
+        first._chooser.set_after("save")
+
+        assert self._overlay().outcome == "save"
+
+    def test_the_carets_choice_is_stored_too(self, monkeypatch):
+        # The control actually reached for in the report.
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        overlay = self._overlay()
+        overlay._chooser.set_after("review")
+        overlay.set_selection(QRect(100, 100, 300, 250))
+
+        overlay._on_destination_chosen("Copy")
+
+        assert setup_desktop.load_after_capture() == "edit"
+
+    def test_seeding_from_settings_is_not_mistaken_for_a_choice(self):
+        # Adopting what is already stored must not write it straight back,
+        # or every overlay opened would look like a fresh decision.
+        written = []
+        original = setup_desktop.save_after_capture
+        try:
+            setup_desktop.save_after_capture = lambda *a, **k: written.append(a)
+            self._overlay()
+        finally:
+            setup_desktop.save_after_capture = original
+
+        assert written == []
+
+    def test_the_record_side_keeps_its_own_answer(self):
+        # `after` on the record side is a different vocabulary with its own
+        # stored key -- writing one into the other would seed the stills
+        # chooser from a value its own menu cannot show.
+        overlay = self._overlay()
+        overlay._chooser.set_kind("record")
+
+        overlay._chooser.set_after("open")
+
+        assert setup_desktop.load_recording_after() == "open"
+        assert setup_desktop.load_after_capture() == tokens.AFTER_DEFAULT
 
 
 class TestChromeStaysOnTheSelectionsMonitor:
@@ -8196,6 +8539,116 @@ class TestTheChooserTakesItsOwnClicks:
 
         assert overlay._selection is None
         assert overlay._chooser.panel.isVisibleTo(overlay)
+
+
+class TestTheDestinationMenuChangesTheDestination:
+    """Picking a destination from the split action's caret has to change
+    what actually happens to the snip, not just what the button says.
+
+    `app.py._on_captured` reads `OverlayWindow.outcome` -- the *chooser's*
+    destination -- to decide whether the review window opens. So a caret
+    that re-faced the button without telling the chooser left the old
+    destination in force, and the menu looked broken while behaving
+    exactly as written.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self, monkeypatch, tmp_path, after: str) -> OverlayWindow:
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        # The chooser said "open the review window" before the snip, which
+        # is what puts `Open` on the split button's face.
+        overlay._chooser.set_after(after)
+        overlay.set_selection(QRect(100, 100, 300, 250))
+        return overlay
+
+    def test_the_face_starts_as_the_chooser_left_it(self, monkeypatch, tmp_path):
+        overlay = self._overlay(monkeypatch, tmp_path, "review")
+
+        assert overlay._bar.destination() == "Open"
+
+    def test_choosing_copy_stops_the_review_window_opening(self, monkeypatch, tmp_path):
+        # The reported bug: "cant seem to change the option here? it just
+        # always open it in the editor." Copy went to the clipboard *and*
+        # the review window opened anyway, because `outcome` still said
+        # review.
+        overlay = self._overlay(monkeypatch, tmp_path, "review")
+        seen = []
+        overlay._on_captured = lambda image, path: seen.append(overlay.outcome)
+
+        overlay._on_destination_chosen("Copy")
+
+        assert seen == ["edit"], "the snip finished still claiming review"
+
+    def test_choosing_save_stops_the_review_window_opening(self, monkeypatch, tmp_path):
+        overlay = self._overlay(monkeypatch, tmp_path, "review")
+        seen = []
+        overlay._on_captured = lambda image, path: seen.append(overlay.outcome)
+
+        overlay._on_destination_chosen("Save")
+
+        assert seen == ["save"]
+
+    def test_choosing_open_still_asks_for_the_review_window(self, monkeypatch, tmp_path):
+        # The other direction, from a chooser that did *not* ask for it.
+        overlay = self._overlay(monkeypatch, tmp_path, "instant")
+        seen = []
+        overlay._on_captured = lambda image, path: seen.append(overlay.outcome)
+
+        overlay._on_destination_chosen("Open")
+
+        assert seen == ["review"]
+
+    def test_the_face_follows_the_choice(self, monkeypatch, tmp_path):
+        overlay = self._overlay(monkeypatch, tmp_path, "review")
+
+        overlay._on_destination_chosen("Save")
+
+        assert overlay._bar.destination() == "Save"
+
+    def test_the_caret_opens_the_menu(self, monkeypatch, tmp_path):
+        # The other half of "cannot change the option": if the caret never
+        # opened a menu there would be nothing to pick from in the first
+        # place.
+        overlay = self._overlay(monkeypatch, tmp_path, "review")
+        action = overlay._bar._action
+
+        QTest.mouseClick(
+            action,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(action.width() - 8, action.height() // 2),
+        )
+
+        menu = getattr(overlay, "_destination_menu", None)
+        assert menu is not None and menu.isVisible()
+        menu.close()
+
+    def test_pressing_the_face_is_not_the_caret(self, monkeypatch, tmp_path):
+        # The seam has to actually separate the two halves, or every
+        # attempt to open the menu fires the destination instead -- which
+        # would read as "it just always opens it in the editor" too.
+        overlay = self._overlay(monkeypatch, tmp_path, "review")
+        action = overlay._bar._action
+        fired = []
+        overlay._bar.openRequested.connect(lambda: fired.append("open"))
+
+        QTest.mouseClick(
+            action,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(8, action.height() // 2),
+        )
+
+        assert fired == ["open"]
 
 
 class TestTheDestinationMenuFitsItsWidth:

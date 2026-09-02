@@ -1150,6 +1150,104 @@ class TestInstantSaves:
         assert setup_desktop.load_instant_saves(tmp_path) is False
 
 
+class TestReuseLastRegionPreference:
+    """The whole user-facing surface of the Last region feature: one
+    checkbox in Settings, off by default.
+    """
+
+    def test_off_unless_asked_for(self, tmp_path):
+        # Pre-selecting an area the user did not ask for this time changes
+        # what the first frame of a snip means -- never a default.
+        assert setup_desktop.load_reuse_last_region(tmp_path) is False
+
+    def test_round_trips_through_save_and_load(self, tmp_path):
+        setup_desktop.save_reuse_last_region(True, tmp_path)
+
+        assert setup_desktop.load_reuse_last_region(tmp_path) is True
+
+    def test_turning_it_off_again_is_not_stuck_on(self, tmp_path):
+        setup_desktop.save_reuse_last_region(True, tmp_path)
+        setup_desktop.save_reuse_last_region(False, tmp_path)
+
+        assert setup_desktop.load_reuse_last_region(tmp_path) is False
+
+    def test_a_junk_value_reads_as_off(self, tmp_path):
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text('{"reuse_last_region": "yes"}')
+
+        assert setup_desktop.load_reuse_last_region(tmp_path) is False
+
+    def test_it_is_independent_of_the_remembered_rectangle(self, tmp_path):
+        # Two separate keys: the preference survives a rectangle being
+        # replaced, and a rectangle survives the preference being toggled.
+        setup_desktop.save_reuse_last_region(True, tmp_path)
+
+        setup_desktop.save_last_region((1, 2, 3, 4), tmp_path)
+
+        assert setup_desktop.load_reuse_last_region(tmp_path) is True
+        assert setup_desktop.load_last_region(tmp_path) == (1, 2, 3, 4)
+
+
+class TestLastRegionPersistence:
+    """The rectangle the chooser's `Last region` mode recaptures. Persisted
+    because autostart means the process a user reaches for in the morning is
+    a fresh one -- an in-memory-only rectangle would be empty at exactly the
+    moment they would most like yesterday's region back.
+    """
+
+    def test_nothing_stored_means_the_mode_has_nothing_to_offer(self, tmp_path):
+        assert setup_desktop.load_last_region(tmp_path) is None
+
+    def test_round_trips_through_save_and_load(self, tmp_path):
+        setup_desktop.save_last_region((-1720, 300, 640, 480), tmp_path)
+
+        assert setup_desktop.load_last_region(tmp_path) == (-1720, 300, 640, 480)
+
+    def test_a_negative_origin_survives(self, tmp_path):
+        # A monitor mounted left of or above the primary gives the virtual
+        # desktop a negative origin, so this is an ordinary rectangle, not
+        # an edge case -- and an `abs()` anywhere in the round trip would
+        # move it a whole monitor.
+        setup_desktop.save_last_region((-3000, -1440, 800, 600), tmp_path)
+
+        assert setup_desktop.load_last_region(tmp_path) == (-3000, -1440, 800, 600)
+
+    def test_the_newest_region_replaces_the_last_one(self, tmp_path):
+        setup_desktop.save_last_region((0, 0, 100, 100), tmp_path)
+        setup_desktop.save_last_region((50, 60, 700, 800), tmp_path)
+
+        assert setup_desktop.load_last_region(tmp_path) == (50, 60, 700, 800)
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            '{"last_region": [1, 2, 3]}',           # too few values
+            '{"last_region": [1, 2, 3, 4, 5]}',     # too many
+            '{"last_region": "600x400"}',           # not a list at all
+            '{"last_region": [1, 2, "wide", 4]}',   # a value that is not a number
+            '{"last_region": [1, 2, 0, 400]}',      # nothing can be captured from it
+            '{"last_region": [1, 2, 640, -480]}',   # nor from a negative extent
+            '{"last_region": [true, true, true, true]}',  # bool is an int subclass
+        ],
+    )
+    def test_an_entry_that_is_not_a_rectangle_leaves_the_mode_unavailable(
+        self, tmp_path, stored
+    ):
+        # A hand-edited or truncated config must leave the mode simply
+        # unavailable, never raise into the chooser that reads it.
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text(stored)
+
+        assert setup_desktop.load_last_region(tmp_path) is None
+
+    def test_saving_a_region_leaves_other_settings_alone(self, tmp_path):
+        setup_desktop.save_shortcut("<Super>x", tmp_path)
+
+        setup_desktop.save_last_region((10, 20, 30, 40), tmp_path)
+
+        assert setup_desktop.load_shortcut(tmp_path) == "<Super>x"
+
+
 class TestKindPersistence:
     """SNX-120: the chooser's stills/record switch has to remember which
     side was last used across separate snips, not just across a `reopen()`

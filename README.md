@@ -84,6 +84,46 @@ login onward.
 
 Already have Python? `pipx` works identically on Windows — see below.
 
+### Sending it to someone else
+
+The repository is private, so `pipx install git+https://…` only works for
+people who have access to it. To put Snipux on someone else's Windows
+machine without adding them as a collaborator — and without handing them an
+executable that Smart App Control may refuse to run — send them a **wheel**:
+
+```powershell
+python -m pip install --upgrade build
+python -m build --wheel
+```
+
+That writes `dist/snipux-<version>-py3-none-any.whl`. Send them that one
+file. On their machine, with Python 3.10+ installed:
+
+```powershell
+python -m pip install --user pipx
+python -m pipx ensurepath
+pipx install C:\path\to\snipux-<version>-py3-none-any.whl
+snipux --setup
+```
+
+`--setup` writes the Start Menu shortcut, the Startup entry and the
+Ctrl+Alt+S binding, exactly as it does for a git install.
+
+**Smart App Control does not block this route**, which is the whole reason
+it exists alongside `snipux.exe`. The `snipux` launcher `pipx` puts on PATH
+is generated on their machine by pip, from the `python.exe` they already
+trust — nothing unsigned is ever downloaded and run, so there is no
+unrecognised binary for Smart App Control or SmartScreen to object to. The
+wheel is a zip of Python source and PNG/SVG assets; neither feature
+inspects it.
+
+The one thing they do need is Python, which the standalone `snipux.exe`
+does not require. If they have it (or will install it from python.org or
+the Microsoft Store), this is the smoothest path. If they don't and won't,
+`snipux.exe` is the alternative — and if Smart App Control blocks *that*,
+this section is the fallback.
+
+
 ### Linux
 
 Snipux isn't published to PyPI — publishing there isn't planned. This is a
@@ -169,15 +209,30 @@ paying startup cost on every snip.
    between **Region** (drag any rectangle, the default), **Window** (hover
    highlights the window under the cursor, click accepts it), **Full
    screen** (the whole display), and **Freeform** (lasso an odd shape).
+
+   If you often re-shoot the same area, click the **↻ toggle** right next
+   to the mode control on that row. Region then opens with your previous
+   snip's rectangle already framed, so a repeat capture needs no second
+   drag — take it as-is, nudge an edge, or drag anywhere outside it to
+   frame something else. It takes effect from the next snip, the rectangle
+   is remembered between sessions, and it is trimmed or dropped if the
+   monitor it came from is no longer there. Hover the toggle and the hint
+   line under the row says which way it is set; to turn it off once a
+   region is already framed, press `Esc` to bring the row back.
 3. **Annotate in place**, directly on the frozen desktop — there's no
-   separate editor window. Pick a tool from the floating bar or its
-   keyboard shortcut (below) and draw. You can keep reframing as you go:
+   separate editor window. The **pen is already armed** when the toolbar
+   appears, so you can draw straight away; pick a different tool from the
+   bar or its keyboard shortcut (below) at any point. You can keep reframing as you go:
    drag any edge or corner of the selection and the ink you've already
    drawn stays exactly where it was drawn, over the same pixels, instead of
    moving with the selection or getting clipped away.
 4. **Copy or save.** `Enter` (or the bar's Copy button) copies the
    annotated snip to the clipboard and closes the overlay. The bar's Save
-   button writes it to disk and closes the overlay too.
+   button writes it to disk and closes the overlay too. The bar's leading
+   button is a split action: its face is whichever destination you chose
+   before the snip, and its chevron offers the other two. Whatever you pick
+   there sticks — the next snip opens on it, so the Settings default is a
+   starting point rather than something you have to keep overriding.
 
 ### The review window
 

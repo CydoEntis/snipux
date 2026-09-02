@@ -13,11 +13,20 @@ authors = [
     { name = "Cody", email = "cydoentis@gmail.com" },
 ]
 keywords = ["screenshot", "snipping-tool", "wayland", "gnome", "linux", "annotation"]
-# Trove classifiers PyPI renders on the project page. The OS classifier is
-# load-bearing, not decorative -- capture.py's one architectural rule only
-# holds on Linux (X11/Wayland via the compositor's own portal/APIs), so
-# "Operating System :: POSIX :: Linux" tells pip/pipx not to even offer this
-# on Windows or macOS rather than installing something that cannot capture.
+# Trove classifiers PyPI renders on the project page. They are metadata and
+# nothing else -- documentation for a human reading the project page.
+#
+# An earlier version of this comment claimed the OS classifier was
+# "load-bearing": that it stopped pip/pipx offering this on Windows. It does
+# not, and never did. pip does not read classifiers when deciding what to
+# install; only `requires-python` and wheel tags gate anything, and this is a
+# pure-Python `py3-none-any` wheel. Measured: the wheel installs cleanly into
+# a Windows venv and puts a `snipux` launcher on PATH, classifier and all.
+# That is now the wanted behaviour anyway -- Windows is a target platform
+# (SNX-85/86), and shipping someone the wheel is the install route that
+# Smart App Control cannot block, because pip generates the launcher locally
+# from an already-trusted python.exe rather than the user downloading a new
+# unsigned executable. See the README's "Sending it to someone else".
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: X11 Applications :: Qt",

@@ -3654,6 +3654,18 @@ class OverlayWindow(QWidget):
         self._chooser.cancelled.connect(self._cancel)
         self._chooser.set_after(setup_desktop.load_after_capture())
         self._chooser.set_record_after_default(setup_desktop.load_recording_after())
+        # Connected *after* the two seeds above, not before: seeding is this
+        # window adopting what is already stored, and a connection made
+        # first would answer it by writing the same value straight back.
+        # Only a real change from here on is the user choosing something.
+        self._chooser.afterChanged.connect(self._remember_destination)
+        # The reuse toggle lives on the row, not in Settings -- see
+        # `chooser._ReuseToggle`. Seeded here (which never emits) and
+        # persisted on every real click, the same shape `kind` uses below.
+        self._chooser.set_reuse_last_region(setup_desktop.load_reuse_last_region())
+        self._chooser.reuseLastRegionChanged.connect(
+            setup_desktop.save_reuse_last_region
+        )
         # `kind` (the stills/record switch) has no Settings surface the way
         # `after` does -- the chooser itself is the only place it is ever
         # set, so it is loaded the same way but persisted on every change
@@ -3676,6 +3688,9 @@ class OverlayWindow(QWidget):
         # the backend: the window stays up so the region can still be
         # reframed, with the stills bar suppressed. See `_commit_selection`.
         self._armed_for_recording = False
+        # Latch for `_arm_default_tool`: the pen is armed once, the first
+        # time this snip's toolbar appears, and never again -- see there.
+        self._armed_default_tool = False
         self._delay: str = design.tokens.DELAYS[0]
         self._popover = CaptureModePopover(self)
         self._popover.hide()
@@ -3758,6 +3773,44 @@ class OverlayWindow(QWidget):
         self._close_button.clicked.connect(self._cancel)
         self._close_button.hide()
         self._reposition_close_button()
+
+        # Last, once every piece of chrome above exists to react to it: the
+        # overlay opens on the previous snip's rectangle when the
+        # preference asks for it. Region is the mode a fresh overlay starts
+        # in (`tokens.CAPTURE_MODES[0]`), so this is that mode's opening
+        # state rather than a separate step -- and it is a no-op for
+        # everyone who has left the preference off.
+        #
+        # `_sync_bar_visibility` is gated on `self.isVisible()`, which is
+        # still false here, so the bar catches up in `showEvent` -- which
+        # already handles exactly this case for the same reason.
+        self._preselect_last_region()
+
+    def _remember_destination(self, after: str) -> None:
+        """Persist the destination the user just picked, so the next snip
+        opens on it.
+
+        The handoff's rule was that the per-snip control never writes back
+        -- Settings held the destination, and the chooser and the split
+        button's caret were both one-snip overrides. In practice that read
+        as the control being broken: picking Copy, taking the snip, and
+        finding the next one back on Open again looks like the choice was
+        ignored, and it is the second-most-changed setting in the app after
+        the mode itself. Reported as "how come this isnt saving my last
+        selected option, like i picked copy?". Last-used-wins is the rule
+        now, and the Settings radio is a starting point rather than a
+        fixed default -- it will show whatever was last chosen here.
+
+        The two sides keep their own answer. `after` on the record side is
+        drawn from a different vocabulary (`tokens.RECORD_AFTER_ROWS`:
+        Copy/Save/Open) and has its own stored key, so writing a recording
+        destination into the stills one would leave the stills chooser
+        seeded from a value its own menu cannot show.
+        """
+        if self._chooser.kind == "record":
+            setup_desktop.save_recording_after(after)
+        else:
+            setup_desktop.save_after_capture(after)
 
     def set_selection(self, rect: QRect | None, path: QPainterPath | None = None) -> None:
         """Set the current selection (window coordinates) and repaint.
@@ -3933,6 +3986,8 @@ class OverlayWindow(QWidget):
             self._select_full_screen()
         elif mode == "Freeform":  # design.tokens.CAPTURE_MODES[3][0]
             self._enter_freeform_mode()
+        elif mode == "Region":  # design.tokens.CAPTURE_MODES[0][0]
+            self._preselect_last_region()
         # handoff-chooser.md, Armed: "The cursor becomes a crosshair." The
         # Window and Freeform branches above repaint it on every move, but
         # Region has nothing to preview and would otherwise sit under a
@@ -4221,6 +4276,81 @@ class OverlayWindow(QWidget):
         rect = self._monitor_at(self._to_absolute(cursor))
         self._commit_selection(self._to_local_rect(rect).toRect())
 
+    def _preselect_last_region(self) -> None:
+        """Open Region mode on the rectangle the last snip was taken from,
+        when `setup_desktop.load_reuse_last_region()` asks for it.
+
+        A *pre*-selection, deliberately: `set_selection`, never
+        `_commit_selection`. Committing is what "the user has chosen
+        something" means -- it is the moment `instant` finishes the snip and
+        the moment a recording arms -- and neither should happen because an
+        overlay opened. What the user gets is the rectangle already framed
+        with the toolbar on it: press Copy or Save to take it, drag a new
+        box anywhere outside it to frame something else instead (which
+        `mousePressEvent` already supports), or nudge an edge to adjust it.
+        Nothing is captured until they say so.
+
+        Stills only. On the record side the equivalent would have to commit
+        -- that is what puts the record bar up and arms the region -- and
+        arming a recording as a side effect of opening the overlay is not
+        something anyone asked for.
+
+        The stored rectangle is absolute, and the desktop it was stored
+        against may not be the desktop it is being recalled onto -- a
+        monitor unplugged, a laptop undocked, screens rearranged. So it is
+        clipped to the frame's own span before use: the frame is the only
+        source of pixels there is, and a selection reaching past it would
+        crop from nothing and hand back black. It must also still touch a
+        real monitor, because the frame's span is the *union* of the
+        monitors and a staggered desk leaves gaps inside that union which
+        no display shows. A rectangle that survives neither test leaves the
+        overlay exactly as it would have been with the preference off --
+        an ordinary empty Region drag, which is the right thing to fall
+        back to and needs no explaining to the user.
+
+        On Wayland with more than one monitor this reaches only the
+        interactive one. A client there cannot span two outputs with a
+        single surface, so `open_overlay` hands this window a frame cropped
+        to that monitor and that monitor alone as `_monitor_geometries`; a
+        rectangle remembered on any other output then fails the
+        touches-a-real-monitor test above and is dropped, leaving an
+        ordinary empty drag. That is the correct outcome rather than a gap
+        to close -- the other monitor's pixels are not in this frame to
+        crop from. X11 and Windows both span the whole virtual desktop in
+        one window and have no such limit.
+
+        Called when the overlay opens and when Region is re-dispatched,
+        never straight off the toggle: flipping the switch on would
+        otherwise pre-select immediately, and pre-selecting stands the
+        chooser down -- so the row would vanish from under the pointer that
+        just clicked it. The preference takes effect on the next overlay,
+        which is also the only place the word "opens" can mean anything.
+        """
+        if self._chooser.kind == "record":
+            return
+        # Read off the toggle, not straight from config: the two agree at
+        # construction (it is seeded from the same value), and within a
+        # session the control the user can actually see is the authority.
+        if not self._chooser.reuse_last_region:
+            return
+        stored = setup_desktop.load_last_region()
+        if stored is None:
+            return
+        absolute = QRectF(*stored)
+        usable = absolute.intersected(
+            QRectF(self._frame.logical_origin, self._frame.logical_size)
+        )
+        if usable.isEmpty():
+            return
+        if not any(usable.intersects(geometry) for geometry in self._monitor_geometries):
+            return
+        # No drag, so no anchor -- the recalled rectangle's own monitor is
+        # what `_chrome_bounds` should resolve against, exactly as for
+        # Window and Full screen above.
+        self._selection_anchor = None
+        # `usable` is absolute; `_selection` is window-local.
+        self.set_selection(self._to_local_rect(usable).toRect())
+
     # -- Freeform capture mode (SNX-49) --------------------------------------
     # docs/design/overlay-redesign.md's "Capture modes" entry for Freeform is
     # the authority: "lasso; the selection becomes a path, the dim scrim
@@ -4494,6 +4624,7 @@ class OverlayWindow(QWidget):
             self._shape_popover.hide()
         elif self._selection is not None and self.isVisible():
             self._sync_bar_destination()
+            self._arm_default_tool()
             self._bar.reposition(self._selection, self._chrome_bounds())
             self._bar.show()
             self._sync_tray_visibility()
@@ -4516,6 +4647,40 @@ class OverlayWindow(QWidget):
         self._tool_hint.show()
         self._tool_hint.raise_()
         self._reposition_tray(self._tool_hint)
+
+    def _arm_default_tool(self) -> None:
+        """Arm the pen the first time the toolbar comes up for a snip.
+
+        The bar is the annotate-in-place surface, and it used to appear
+        with nothing armed at all -- so the first stroke of every
+        annotation cost a trip to the bar to pick the tool that was going
+        to be picked anyway. Pen is the one that is: it is
+        `tokens.TOOLS`' own first entry and the swatch tray's default
+        colour is chosen for it.
+
+        Once only, and only while nothing is armed. `_sync_bar_visibility`
+        runs on every mouse-move of a live drag, so re-arming here
+        unconditionally would drag whatever tool the user had actually
+        chosen back to pen underneath them. Anything the user has already
+        selected therefore wins over this.
+
+        The eraser is checked separately because it is the one tool that
+        is *not* an `active_tool`: `set_eraser_active` arms it through its
+        own flag, leaving `active_tool` at None. Reading only `active_tool`
+        would see "nothing armed", arm the pen over an eraser the caller
+        had just switched on, and take the pointer cursor with it.
+
+        The trade this makes, deliberately: a press inside the selection
+        now draws where it used to do nothing. That is what "the pen is
+        armed" has always meant for a tool picked by hand, and the
+        selection can still be reframed by its handles or replaced by a
+        drag outside it.
+        """
+        if self._armed_default_tool:
+            return
+        self._armed_default_tool = True
+        if self._bar.active_tool is None and not self._eraser_active:
+            self._bar.select_tool(design.tokens.TOOLS[0])
 
     def _sync_tray_visibility(self) -> None:
         """Show/hide and reposition whichever settings tray -- draw or
@@ -4937,8 +5102,34 @@ class OverlayWindow(QWidget):
         ends -- Esc included. A cancelled snip is not a capture, and must
         not open a review window.
         """
+        self._remember_last_region()
         if self._on_captured is not None:
             self._on_captured(image, path)
+
+    def _remember_last_region(self) -> None:
+        """Write down the rectangle this snip came from, so the chooser's
+        `Last region` mode can offer it back.
+
+        Recorded here -- the one moment a capture is known to have really
+        happened -- rather than when a selection is committed. A rectangle
+        dragged, reconsidered and abandoned with Esc is not what anyone
+        means by "the last region", and all five modes funnel through
+        `_report_capture` on their way out, so this needs no per-mode
+        wiring.
+
+        A lasso is deliberately skipped. Its bounding box is not what was
+        captured -- everything outside the traced path came out transparent
+        -- so offering that box back as a plain rectangle would recapture
+        an area the user never selected.
+        """
+        if self._selection is None or self._selection_path is not None:
+            return
+        absolute = self._to_absolute_rect(QRectF(self._selection)).toRect()
+        if absolute.width() <= 0 or absolute.height() <= 0:
+            return
+        setup_desktop.save_last_region(
+            (absolute.x(), absolute.y(), absolute.width(), absolute.height())
+        )
 
     # SNX-62: the bar's Copy/Save buttons, unlike `copy()`/`save()`
     # themselves, must also end the snip -- taking a snip should end the
@@ -4999,15 +5190,53 @@ class OverlayWindow(QWidget):
         menu.open_below(QRect(top_left, anchor.size()))
         self._destination_menu = menu
 
+    # The caret's three destinations, as `tokens.AFTER_CAPTURE` values --
+    # the inverse of the mapping `_sync_bar_destination` uses to put a face
+    # on the button in the first place.
+    #
+    # Copy maps to `edit`, not `instant`. `instant` means "finish the snip
+    # the moment a selection is committed", a stage this snip is already
+    # past by the time a bar exists to press; `edit` is the value whose
+    # face is Copy and whose meaning is "the bar decides", which is exactly
+    # what just happened.
+    _DESTINATION_OUTCOMES = {"Copy": "edit", "Save": "save", "Open": "review"}
+
     def _on_destination_chosen(self, destination: str) -> None:
-        """Set the split button's face and fire it.
+        """Adopt `destination` as this snip's destination, then fire it.
 
         Firing immediately rather than only re-facing: the caret was opened
         to finish the snip a different way, and leaving the user to press
         the face afterwards would make choosing a destination cost two
         clicks where the face alone costs one.
+
+        The *chooser* is updated too, not just the button's face, and that
+        is the half this used to miss. `outcome` -- which `app.py`'s
+        `_on_captured` reads to decide whether the review window opens --
+        is the chooser's value, not the bar's. So a caret that re-faced the
+        button alone left the destination picked before the snip still in
+        force: under a face reading `Open`, choosing Copy put the image on
+        the clipboard and then opened the review window anyway, and
+        choosing Save wrote the file and opened it too. The menu looked
+        broken while doing exactly what it said. Reported as "cant seem to
+        change the option here? it just always open it in the editor".
+
+        Set before the action fires, not after: `_on_bar_copy`/`_on_bar_save`
+        run the whole capture synchronously, `_report_capture` included, so
+        an update afterwards would land after the window it was meant to
+        suppress had already opened.
+
+        `_on_bar_open` performs the same sync for its own face-click path
+        (`set_after("review")`) and is left alone -- the two routes agree,
+        and the face click is the one that was never wrong.
         """
         self._bar.set_destination(destination)
+        after = self._DESTINATION_OUTCOMES.get(destination)
+        if after is not None:
+            # A per-snip override, exactly like the chooser's own: this
+            # deliberately does not write back to Settings, per the
+            # handoff's rule that the per-snip control may differ from the
+            # stored preference without changing it.
+            self._chooser.set_after(after)
         self._bar._on_destination_activated(destination)
 
     def showEvent(self, event) -> None:
