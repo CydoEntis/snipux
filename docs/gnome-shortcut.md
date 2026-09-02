@@ -1,4 +1,4 @@
-# Binding Super+Shift+S to Snipux on GNOME
+# Binding the Snipux shortcut on GNOME
 
 Binding a key is the desktop's job, not the application's — Snipux never
 grabs keys globally (see `docs/SPEC.md`, "Resident process and hotkey"). This
@@ -19,7 +19,7 @@ the package into its venv, and that command runs exactly the mechanism below
 itself: it appends a `custom-keybindings` slot named `snipux`, sets its
 `command` to the installed console script's *absolute* path plus `--snip`
 (not the bare `snipux` name — `~/.local/bin` is not reliably on `PATH` in a
-graphical GNOME session), and sets its `binding` to `<Super><Shift>s`. It
+graphical GNOME session), and sets its `binding` to `<Control><Alt>s`. It
 reads the existing `custom-keybindings` list first and appends to it, so any
 shortcuts you already had configured are kept. Running `snipux --setup`
 again (via a re-run of `install.sh`, or directly once Snipux is installed)
@@ -63,14 +63,23 @@ gsettings reset org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/
 The rest of this page describes the same mechanism by hand, for other
 desktops or if you'd rather not have install.sh touch GNOME settings at all.
 
-## Why Super+Shift+S
+## Why Control+Alt+S, and not Super+Shift+S
 
-Snipux exists to restore the Windows Snipping Tool workflow, and that
-workflow's muscle memory is Windows key + Shift + S. On Linux the key
-labelled with the Windows logo is called **Super**, so the GNOME binding
-string for that combination is `<Super><Shift>s`. It also does not collide
-with anything: GNOME itself binds Print for its own screenshot UI, so
-Super+Shift+S stays out of its way entirely.
+The obvious choice is the one Snipux is imitating: the Windows Snipping
+Tool's Win+Shift+S, which on Linux would be `<Super><Shift>s`. Snipux used
+that default, and no longer does.
+
+**Windows will not give that combination to another application.** Win+Shift+S
+belongs to the Windows Snipping Tool, and `RegisterHotKey` refuses it outright
+rather than sharing it. So on Windows the shortcut had to be something else
+regardless, and keeping Super+Shift+S on Linux would have meant Snipux
+answering a different key on each platform — two things to document, two
+things to remember, for no gain.
+
+`Control+Alt+S` is what both platforms use instead: free on GNOME (which binds
+Print for its own screenshot UI, not this) and accepted by `RegisterHotKey` on
+Windows. It is the default, not a requirement — see "Using a different
+shortcut" in the README, or the recorder in Settings, to change it.
 
 ## 1. Install first
 
@@ -114,18 +123,18 @@ gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/or
 
 gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ command 'snipux --snip'
 
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ binding '<Super><Shift>s'
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ binding '<Control><Alt>s'
 ```
 
 `command` must be exactly `snipux --snip` — that is the flag `snipux/app.py`
 parses to forward a capture request to the resident instance. `binding` is
-`<Super><Shift>s`, GNOME's keysym string for Super (the key labelled with the
-Windows logo) plus Shift plus S — the same combination Windows Snipping Tool
-uses.
+`<Control><Alt>s`, GNOME's keysym string for Control plus Alt plus S — see
+"Why Control+Alt+S" above for why this and not the Snipping Tool's own
+combination.
 
 ## 4. Try it
 
-Press Super+Shift+S. The screen freezes into the selection overlay, whether
+Press Control+Alt+S. The screen freezes into the selection overlay, whether
 or not Snipux happened to be running already. If instead nothing happens,
 check that `snipux --snip` succeeds when run by hand from a terminal.
 
@@ -133,7 +142,7 @@ check that `snipux --snip` succeeds when run by hand from a terminal.
 
 If you'd rather bind Print Screen — note GNOME also uses it for its own
 screenshot UI, so binding it here means overriding that — set `binding` to
-`'Print'` in step 3 instead of `'<Super><Shift>s'`. Everything else in this
+`'Print'` in step 3 instead of `'<Control><Alt>s'`. Everything else in this
 page is unchanged.
 
 ## Note
