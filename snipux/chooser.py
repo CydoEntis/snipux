@@ -763,6 +763,101 @@ class _Tab(_Surface):
         painter.end()
 
 
+class _ReuseToggle(_Surface):
+    """The row's one on/off control: whether Region opens on the rectangle
+    the last snip came from.
+
+    Icon-only and the width of a trigger without its chevron, because it
+    opens no menu -- a chevron would promise one. It sits immediately after
+    the mode trigger since that is the mode it modifies, and nowhere near
+    the destination and delay triggers, which answer a different question.
+
+    On the row rather than in Settings because a preference nobody finds is
+    a preference nobody has: this one was in Settings first and went
+    unnoticed until it was pointed out. It stays reachable once it is on,
+    even though the chooser stands down the moment a region is
+    pre-selected -- Esc clears the selection and brings the row back, which
+    is already the design's documented way back to the mode.
+
+    `redo` for the glyph: the vendored set has no clock or history icon,
+    and "do that again" is exactly what the control means.
+    """
+
+    toggled = pyqtSignal(bool)
+    hovered = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        metric = tokens.ChooserMetric
+        self._on = False
+        self._hovered = False
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(metric.TRIGGER_H)
+        self.setFixedWidth(round(metric.TRIGGER_PAD_R * 2 + 16))
+
+    def is_on(self) -> bool:
+        return self._on
+
+    def set_on(self, on: bool) -> None:
+        """State only -- never emits. Seeding this from stored config and
+        the user clicking it are different events, and only the second is
+        worth writing back.
+        """
+        self._on = bool(on)
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.hovered.emit(True)
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.hovered.emit(False)
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._released_inside(event):
+            self._on = not self._on
+            self.update()
+            self.toggled.emit(self._on)
+
+    def paintEvent(self, event) -> None:
+        metric, colour = tokens.ChooserMetric, tokens.ChooserColor
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        # On reads as filled, the same way an open trigger does -- an
+        # outline-only difference between on and off is exactly the
+        # distinction that disappears at a glance on a busy desktop.
+        if self._on:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_alpha(colour.MODE_ACCENT, 0.16))
+            painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
+        elif self._hovered:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_alpha(colour.TRIGGER_BG_OPEN, 0.05))
+            painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(
+            QColor(colour.MODE_ACCENT) if self._on
+            else design.chooser_color("TRIGGER_BORDER")
+        )
+        painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
+
+        glyph = colour.MODE_ACCENT if self._on else colour.ROW_IDLE_FG
+        pixmap = design.icon("redo", QColor(glyph)).pixmap(16, 16)
+        painter.drawPixmap(
+            (self.width() - 16) // 2, (self.height() - 16) // 2, pixmap
+        )
+        painter.end()
+
+
 class ChooserPanel(_Surface):
     """The 54px row itself: mode, "then", destination, delay.
 
@@ -792,6 +887,11 @@ class ChooserPanel(_Surface):
         )
         self.mode_trigger.clicked.connect(lambda: self.triggerClicked.emit("mode"))
         row.addWidget(self.mode_trigger)
+
+        # Immediately after the mode it modifies, before the destination
+        # and delay triggers, which answer a different question entirely.
+        self.reuse_toggle = _ReuseToggle(self)
+        row.addWidget(self.reuse_toggle)
 
         # No "then" text node, and no label on this trigger. The
         # capture-flow handoff makes mode the only labelled control and
@@ -837,6 +937,8 @@ class Chooser(QWidget):
     fireImmediately = pyqtSignal(str)
     cancelled = pyqtSignal()
     kindChanged = pyqtSignal(str)
+    afterChanged = pyqtSignal(str)
+    reuseLastRegionChanged = pyqtSignal(bool)
 
     def __init__(self, parent=None, *, screen_rect: QRectF | None = None, origin=None):
         super().__init__(parent)
@@ -863,6 +965,8 @@ class Chooser(QWidget):
         self.panel.triggerClicked.connect(self._toggle_menu)
         self.panel.kind_switch.toggled.connect(self._toggle_kind)
         self.hint = _Pill(parent)
+        self.panel.reuse_toggle.toggled.connect(self.reuseLastRegionChanged)
+        self.panel.reuse_toggle.hovered.connect(self._on_reuse_hovered)
         self.tab = _Tab(parent)
         self.tab.clicked.connect(self.reopen)
         self.legend = _Legend(parent)
@@ -930,6 +1034,34 @@ class Chooser(QWidget):
         self.modeChosen.emit(mode)
         self._layout()
 
+    @property
+    def reuse_last_region(self) -> bool:
+        return self.panel.reuse_toggle.is_on()
+
+    def set_reuse_last_region(self, on: bool) -> None:
+        """Seed the toggle from stored config. Never emits -- see
+        `_ReuseToggle.set_on`.
+        """
+        self.panel.reuse_toggle.set_on(on)
+
+    def _on_reuse_hovered(self, hovered: bool) -> None:
+        """Borrow the hint pill to say what the toggle does.
+
+        The pill is the row's one line of prose and is otherwise showing
+        the armed mode's next step, which is not urgent while the pointer
+        is somewhere else entirely. Qt's own tooltips are not an option
+        here: on an always-on-top frameless window they are a coin toss,
+        which is why `FloatingBar` grew `toolHovered` rather than using
+        them.
+        """
+        if hovered:
+            self.hint.set_content(
+                "redo", tokens.REUSE_HINT[self.panel.reuse_toggle.is_on()]
+            )
+            self._layout()
+        else:
+            self._refresh_triggers()
+
     def set_record_after_default(self, after: str) -> None:
         """Seed what the record side opens on, from Settings.
 
@@ -946,8 +1078,24 @@ class Chooser(QWidget):
             self._refresh_triggers()
 
     def set_after(self, after: str) -> None:
+        """Adopt `after` as this snip's destination.
+
+        Emits `afterChanged` on a real change only, which is what
+        `OverlayWindow` persists from -- see its `_remember_destination`.
+        Guarding on "actually different" is what keeps this widget's own
+        seeding (`set_after(load_after_capture())`, run once per overlay)
+        from being mistaken for the user choosing something.
+
+        `set_kind`'s snap assigns `_after` directly rather than calling
+        this, deliberately: flipping to the record side because the current
+        destination has no meaning there is the widget tidying up after
+        itself, not a choice worth remembering.
+        """
+        if after == self._after:
+            return
         self._after = after
         self._refresh_triggers()
+        self.afterChanged.emit(after)
 
     def set_delay(self, delay: str) -> None:
         self._delay = delay
@@ -1111,6 +1259,10 @@ class Chooser(QWidget):
             icon, self._mode, f"then {after_label}",
             "" if not armed_delay else self._delay,
         )
+        # Stills-only: `_preselect_last_region` refuses on the record side
+        # (committing there arms a recording), so offering the control
+        # would promise something that side does not do.
+        self.panel.reuse_toggle.setVisible(self._kind != "record")
         self.panel.adjustSize()
         self._layout()
 
@@ -1175,12 +1327,16 @@ class Chooser(QWidget):
 _AFTER_ROWS = [
     ("instant", "copy", "Instant", tokens.CHOOSER_AFTER_NOTE["instant"]),
     ("edit", "pen", "Edit", tokens.CHOOSER_AFTER_NOTE["edit"]),
+    ("save", "save", "Save", tokens.CHOOSER_AFTER_NOTE["save"]),
     ("review", "eye", "Review", tokens.CHOOSER_AFTER_NOTE["review"]),
 ]
 
 # The record side's own "then" vocabulary -- Copy, Save and Open, never
 # Edit or Review. Kept out of `AFTER_CAPTURE`/`_AFTER_ROWS`, which are
-# stills-only; neither "save" nor "open" is a destination stills can pick.
+# stills-only. The two lists overlap on `instant` and `save` and mean the
+# same thing by both; `open` stays record-only (a recording opens in the
+# player, not the review window), and `edit`/`review` stay stills-only
+# because there is no annotate-in-place for a video.
 _RECORD_AFTER_ROWS = [
     ("instant", "copy", "Copy", tokens.CHOOSER_RECORD_AFTER_NOTE["instant"]),
     ("save", "save", "Save", tokens.CHOOSER_RECORD_AFTER_NOTE["save"]),

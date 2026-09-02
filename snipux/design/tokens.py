@@ -40,7 +40,17 @@ class Color:
     TEXT_READOUT    = "#c6cab8"   # monospace numerals
 
     # Primary accent — the capture-mode chip and the default ink
-    ACCENT          = "#e3ff4f"
+    # Sampled from the app icon's selection marquee, so the accent and
+    # the mark are the same green. The previous #e3ff4f was a full-
+    # saturation yellow-green that read as neon against the dark chrome --
+    # "not so vibrant" was the report, and on a switch or a Save pill it
+    # pulled the eye harder than the thing it was labelling.
+    #
+    # INK_SWATCHES' "Acid" below deliberately keeps the old value: that
+    # one is a *drawing* colour, not chrome, and changing it would repaint
+    # what the pen puts on the image rather than what the interface looks
+    # like.
+    ACCENT          = "#b7fa4d"
     ACCENT_FG       = "#15170e"   # text on accent
 
     # Selection frame
@@ -406,9 +416,22 @@ AFTER_CAPTURE = [
     ("edit", "Capture and annotate",
      "The frozen frame stays up with the tools on it. Copy or save when "
      "you are done."),
+    ("save", "Capture and save",
+     "The same frozen frame and tools as above, with Save as the button "
+     "already under the cursor instead of Copy."),
     ("review", "Capture and review",
      "Opens the review window afterwards, which annotates too."),
 ]
+
+# `save` is the odd one, and it is here because the split action assumed it
+# all along: `OverlayWindow._sync_bar_destination` has always mapped it to a
+# `Save` face, and `FloatingBar`'s caret has always offered Save as one of
+# its three. Until now there was no stills value to record that choice in --
+# the vocabulary ran instant/edit/review, `save` was record-only, and
+# picking Save from the caret therefore could not be remembered the way
+# Copy and Open could. It differs from `edit` in exactly one respect, the
+# face, which is the whole of what "the chooser sets the split button's
+# face" means.
 
 # The one an upgrading user gets, and what `Chooser` starts on before
 # Settings seeds it. Not `AFTER_CAPTURE[0]`: the list is ordered for the
@@ -552,15 +575,15 @@ class ChooserColor:
     ROW_HOVER_BG         = "#ffffff"   # at 9% alpha
     ROW_HOVER_BG_ALPHA   = 0.09
     SHORTCUT_FG          = "#6f766a"   # the R/W/F/L glyphs in the mode menu
-    MODE_ACCENT          = "#eaff7a"   # active mode's icon + the tab's mode label
+    MODE_ACCENT          = "#c8fb77"   # active mode's icon + the tab's mode label
     HINT_BG              = "#101210"   # at 72% alpha
     HINT_BG_ALPHA        = 0.72
     HINT_BORDER          = "#ffffff"   # at 7% alpha
     HINT_BORDER_ALPHA    = 0.07
     HINT_FG              = "#8f9689"
-    WINDOW_PREVIEW       = "#e3ff4f"   # at 85% alpha
+    WINDOW_PREVIEW       = "#b7fa4d"   # at 85% alpha
     WINDOW_PREVIEW_ALPHA = 0.85
-    WINDOW_PREVIEW_FILL  = "#e3ff4f"   # at 7% alpha
+    WINDOW_PREVIEW_FILL  = "#b7fa4d"   # at 7% alpha
     WINDOW_PREVIEW_FILL_ALPHA = 0.07
     PANEL_BG_ALPHA       = 0.93        # the panel's own fill
     LEGEND_KEY_FG        = "#d7dacb"
@@ -592,6 +615,7 @@ DELAY_DEFAULT = DELAYS[0]
 CHOOSER_AFTER_NOTE = {
     "instant": "Straight to the clipboard, no overlay.",
     "edit": "Annotate in place, then copy or save.",
+    "save": "Annotate in place, then save the file.",
     "review": "Opens the review window to edit.",
 }
 
@@ -600,6 +624,14 @@ CHOOSER_AFTER_NOTE = {
 # hint under the panel AND the armed hint under the tab. It replaces the
 # primary button that used to sit at the end of the row: picking the mode IS
 # the commit, so nothing should promise an action it cannot perform.
+# The reuse toggle's own hint line, shown while it is hovered in place of
+# the armed mode's next step. Two of them, because the control's whole job
+# is to say which state it is in and a toggle with one caption cannot.
+REUSE_HINT = {
+    True: "Region opens on your last one -- click to turn off",
+    False: "Reuse your last region instead of dragging",
+}
+
 MODE_NEXT_STEP = {
     "Region":      "Drag anywhere to frame a region",
     "Window":      "Hover a window, click to take it",
@@ -913,21 +945,21 @@ class FlowColor:
     DANGER_BG_ALPHA      = 0.22
     DANGER_FG            = "#f5a3a3"
 
-    ACCENT               = "#e3ff4f"
+    ACCENT               = "#b7fa4d"
     ACCENT_FG            = "#15170e"
     # The 1px line between a split button's face and its caret. Which half
     # a click lands in has to be visible before the click, or a split
     # button is just a button that sometimes does something else.
     SPLIT_SEAM           = "#15170e"
     SPLIT_SEAM_ALPHA     = 0.22
-    ACCENT_SOFT          = "#eaff7a"   # accent as TEXT or a small glyph
+    ACCENT_SOFT          = "#c8fb77"   # accent as TEXT or a small glyph
     # The handoff gives this as "14-18% for an armed segment"; the prototype
     # spends the range on two different things, so it is two tokens here
     # rather than one that has to be right twice. .18 is the armed kind
     # segment; PAUSE_WASH is the paused button in the live bar.
-    ACCENT_WASH          = "#e3ff4f"
+    ACCENT_WASH          = "#b7fa4d"
     ACCENT_WASH_ALPHA    = 0.18
-    PAUSE_WASH           = "#e3ff4f"
+    PAUSE_WASH           = "#b7fa4d"
     PAUSE_WASH_ALPHA     = 0.14
 
     # Recording. The only place red appears in the product, which is what
@@ -944,9 +976,9 @@ class FlowColor:
 
     # Window-mode hover preview: two alphas on one colour, so they are two
     # tokens.
-    WINDOW_HOVER         = "#e3ff4f"
+    WINDOW_HOVER         = "#b7fa4d"
     WINDOW_HOVER_ALPHA   = 0.85        # the 2px border
-    WINDOW_HOVER_FILL    = "#e3ff4f"
+    WINDOW_HOVER_FILL    = "#b7fa4d"
     WINDOW_HOVER_FILL_ALPHA = 0.07
 
 
@@ -1052,8 +1084,8 @@ class PlayerColor:
     WAVE_MUTED_IN    = "#3a3f47"        # muted: the whole waveform greys
     WAVE_MUTED_OUT   = "#23262d"
 
-    TRIM             = "#e3ff4f"        # range edges + both handles
-    TRIM_INNER       = "#e3ff4f"        # at 18%, inset ring
+    TRIM             = "#b7fa4d"        # range edges + both handles
+    TRIM_INNER       = "#b7fa4d"        # at 18%, inset ring
     HANDLE_GRIP      = "#15170e"        # at 50%, the 2x14 line in the handle
     PLAYHEAD         = "#ff5a52"        # red = "now", matching the recording bar
     PLAYHEAD_FG      = "#2a0d0b"        # text in the playhead's time flag
@@ -1076,8 +1108,8 @@ class PlayerColor:
     BTN_ON_FG        = "#f1f3e8"
     TIME_FG          = "#f1f3e8"
     TIME_TOTAL_FG    = "#6f766a"
-    ACCENT_ON_BG     = "#e3ff4f"        # at 15%, loop/speed when engaged
-    ACCENT_ON_FG     = "#eaff7a"
+    ACCENT_ON_BG     = "#b7fa4d"        # at 15%, loop/speed when engaged
+    ACCENT_ON_FG     = "#c8fb77"
     MENU_BG          = "#1a1c18"        # at 98%
 
     PAUSE_SCRIM      = "#0c0d0a"        # at 28%, over the frame while paused

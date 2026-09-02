@@ -654,6 +654,12 @@ class SettingsWindow(WinWindow):
         )
         self._instant_saves.switch.toggled.connect(lambda _c: self._mark_dirty())
 
+        # "Start on the last region" deliberately has no row here. It lived
+        # in this pane first and went unnoticed until it was pointed out --
+        # a preference nobody finds is a preference nobody has -- so it is a
+        # toggle on the chooser row itself now, next to the mode it
+        # modifies. See `chooser._ReuseToggle`.
+
         return _pane(
             SectionHeading("Shortcut"),
             self._recorder,
