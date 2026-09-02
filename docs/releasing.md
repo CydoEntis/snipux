@@ -1,12 +1,86 @@
-# Releasing Snipux to PyPI
+# Releasing Snipux
 
-Publishing needs a PyPI account with ownership of the `snipux` project name
-and an API token for it — only the account owner has that token, and it must
-never be committed anywhere in this repository. This page assumes both
-already exist; it records the two commands that turn a checkout into a
-published release, nothing else.
+Snipux is MIT-licensed and distributed from its own GitHub repository. There
+are two channels today, and neither is PyPI:
 
-## 1. Build clean artifacts
+1. **The git install.** `pipx install git+https://github.com/CydoEntis/snipux.git`
+   builds from whatever `main` is at that moment. Nothing has to be published
+   for this to work -- `main` *is* the release, which is why it must stay
+   green.
+2. **The Windows `snipux.exe`**, attached to a
+   [GitHub Release](https://github.com/CydoEntis/snipux/releases). This is the
+   only artifact that gets uploaded anywhere, and the only one that needs the
+   procedure below.
+
+PyPI is set up for but deliberately not used -- see
+"[Publishing to PyPI](#publishing-to-pypi-not-done-today)" at the bottom for
+what it would take and why it is not done.
+
+## Cutting a release
+
+### 1. Bump the version, in both places
+
+```sh
+# pyproject.toml     -> version = "0.2.0"
+# snipux/__init__.py -> __version__ = "0.2.0"
+```
+
+`__version__` is **not** read from `pyproject.toml`. Changing one and not the
+other produces a build whose metadata and whose own reported version disagree,
+which is the kind of thing nobody notices until a bug report quotes the wrong
+number.
+
+### 2. Confirm the suite is green, at both scalings
+
+```sh
+QT_QPA_PLATFORM=offscreen python -m pytest -q
+QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=1.5 python -m pytest -q
+```
+
+Both, not one. 1.5 catches a whole class of coordinate-space bug that 1.0
+cannot -- see TODO.md, "Fractional display scaling".
+
+A green suite is necessary and **not sufficient** here. Read TODO.md's "The
+trap, restated" before treating it as a release gate: 1,444 tests once passed
+while the primary Linux recording path could not have worked even once. Drive
+whatever changed, on a real screen, before tagging.
+
+### 3. Tag it
+
+```sh
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
+```
+
+The tag is what a user pins to:
+`pipx install git+https://github.com/CydoEntis/snipux.git@v0.2.0`.
+
+### 4. Build the Windows exe
+
+On a Windows machine or VM -- see
+[Building the Windows exe](#building-the-windows-exe) below. Then create the
+GitHub Release against the tag and attach `dist\snipux.exe`:
+
+```sh
+gh release create v0.2.0 dist/snipux.exe \
+  --title "v0.2.0" --notes "..."
+```
+
+Linux needs no artifact: the git install above covers it.
+
+## Publishing to PyPI (not done today)
+
+`snipux` is unclaimed on PyPI and the packaging metadata is already valid for
+it, so this is available whenever it is wanted. It is not done because the git
+install already gives a one-command install on both platforms, and publishing
+adds a namespace to own and a release cadence to keep up with in exchange for
+`pip install snipux` and discoverability.
+
+If that trade changes, this is the whole procedure. It needs a PyPI account
+with ownership of the `snipux` project name and an API token for it -- the
+token must never be committed anywhere in this repository.
+
+### Build clean artifacts
 
 ```sh
 rm -rf dist build *.egg-info
@@ -24,12 +98,12 @@ Before uploading, sanity-check what got built:
 twine check dist/*
 ```
 
-`twine check` catches the two things PyPI itself rejects at upload time — a
+`twine check` catches the two things PyPI itself rejects at upload time -- a
 `long_description` that fails to render, and metadata missing fields PyPI
 requires. Fix and rebuild rather than uploading and finding out from a failed
 upload.
 
-## 2. Upload
+### Upload
 
 ```sh
 twine upload dist/*
@@ -38,17 +112,18 @@ twine upload dist/*
 `twine` prompts for credentials; use `__token__` as the username and the
 PyPI API token as the password. To skip the prompt, export
 `TWINE_USERNAME=__token__` and `TWINE_PASSWORD=<token>` in the shell before
-running the command — never write the token itself into a file in this
+running the command -- never write the token itself into a file in this
 repository.
 
-## Before either command
+PyPI refuses to accept a second upload of a version number that has already
+been published, even if the previous upload was later deleted. So the version
+bump in step 1 above is not optional here, it is load-bearing.
 
-Bump `version` in `pyproject.toml` (and `__version__` in
-`snipux/__init__.py`, which is not read from it). PyPI refuses to accept a
-second upload of a version number that has already been published, even if
-the previous upload was later deleted.
+**If this is ever done, update the README's Install section** -- it currently
+documents the git install as the only route, on purpose, so that nothing tells
+a user to run a command that 404s.
 
-# Releasing the Windows exe
+## Building the Windows exe
 
 SNX-96 produces a standalone `snipux.exe` that runs with no Python
 installed — the sole Windows release artifact (SNX-104: the Inno Setup
@@ -63,7 +138,9 @@ powershell -File packaging\windows\build.ps1
 This builds `dist\snipux.exe` with PyInstaller
 (`packaging\windows\snipux.spec`) and nothing else — there is no
 Add/Remove Programs entry to stamp a version into the way the installer
-used to, so unlike the PyPI half above there is no version to bump first.
+used to, so the build itself carries no version. The version bump belongs to
+[Cutting a release](#cutting-a-release) above, which is also what produces the
+tag this exe gets attached to.
 
 What running `snipux.exe` actually does on first launch: relocates itself
 to a stable location under the user's own `%LocalAppData%\snipux` (so a
@@ -111,7 +188,7 @@ section for what that looks like from the user's side. If Snipux's user
 base or distribution model changes enough that the warning itself becomes
 the blocker, that's the trigger to revisit this, not a fixed schedule.
 
-# Regenerating the app icon
+## Regenerating the app icon
 
 `snipux/design/logo/` vendors the same `snipux-<size>.png` files onto both
 platforms: `setup_desktop.install_icons()` copies them into the Linux

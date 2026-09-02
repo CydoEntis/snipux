@@ -4,10 +4,10 @@ Status lives in Linear, not here. This file holds what Linear cannot: the
 shape of the plan, the decisions already made, and how to pick it up.
 
 Everything through **SNX-127** is merged, and so is `fix/recording-flow`.
-The suite is green on Linux -- **1,595 passed at both 1.0 and 1.5 display
-scaling**. It was last green on Windows at 1,457 passed / 14 skipped,
-which is *before* the capture-flow and player work below; that number is
-stale.
+The suite is green on Linux -- **1,643 passed at both 1.0 and 1.5 display
+scaling**, re-measured 2026-09-02. It was last green on Windows at 1,457
+passed / 14 skipped, which is *before* the capture-flow and player work
+below; that number is stale.
 
 Two locked handoffs are now built: `docs/design/flow/` (the capture flow)
 and `docs/design/player/` (the recording player / trim editor). What was
@@ -20,6 +20,37 @@ model is still open, but it is a product question rather than a build one
 and nothing waits on it.
 
 **Everything is on `main`, pushed. There is no `dev` branch on this repo.**
+
+## The repository is public, MIT, and installed with one command
+
+Done 2026-09-02. The repo was private with no `LICENSE` file at all, while
+`pyproject.toml` and the README both claimed MIT -- so nothing actually
+granted anyone rights. `LICENSE` exists now and the repo is public.
+
+The install story is **the git install**, not PyPI:
+`pipx install git+https://github.com/CydoEntis/snipux.git`, then
+`snipux --setup`. `main` is the release, which is another reason it has to
+stay green. `snipux` is unclaimed on PyPI and the metadata is valid for it,
+but publishing is deliberately not done -- it buys `pip install snipux` and
+discoverability in exchange for a namespace to own and a cadence to keep.
+`docs/releasing.md` carries the whole procedure for when that trade changes,
+and says to update the README's Install section if it ever is.
+
+Windows still ships `snipux.exe` on the Releases page. No installer, unsigned,
+both for reasons already recorded in `docs/releasing.md` -- Smart App Control
+blocks unsigned installers outright, and a trusted certificate is a few
+hundred a year plus a hardware token.
+
+**A drift found while doing this, worth knowing:** the default shortcut has
+been `Control+Alt+S` on *both* platforms since the Settings handoff landed
+(`tokens.SHORTCUT_DEFAULT`, 23cc27e, 2026-08-25), but every document, several
+`--help` strings and the messages `unbind_gnome_shortcut()` prints still said
+Super+Shift+S. A user who removed Snipux was told "Removed the Super+Shift+S
+shortcut" about a binding that was never set. All of it now says what the code
+does, and `docs/super-shift-s-gnome.md` became `docs/gnome-shortcut.md` since
+the filename was the most misleading part. The rationale is recorded there:
+Windows' `RegisterHotKey` refuses Win+Shift+S outright, so one combination on
+both platforms beats two.
 
 ## Windows has now been watched, and region recording was broken
 

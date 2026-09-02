@@ -1,5 +1,17 @@
 # snipux — specification, milestone 1
 
+> **Historical.** This is the milestone-1 specification, written when Snipux
+> was Linux-only and did stills only. It is kept because it is still the
+> clearest statement of *why* the tool is shaped the way it is -- the
+> architectural constraint below has not moved and will not.
+>
+> What has changed since: **Windows is supported**, recording and the trim
+> player exist, and the default shortcut is **Ctrl+Alt+S** on both platforms,
+> not the Super+Shift+S this page names (see
+> [docs/gnome-shortcut.md](gnome-shortcut.md#why-controlalts-and-not-supershifts)).
+> For what the tool does today, read the [README](../README.md); for what is
+> next, TODO.md.
+
 ## What this is
 
 A Windows Snipping Tool workalike for Linux, written in Python with PyQt6.
