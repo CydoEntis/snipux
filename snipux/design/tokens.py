@@ -624,6 +624,14 @@ CHOOSER_AFTER_NOTE = {
 # hint under the panel AND the armed hint under the tab. It replaces the
 # primary button that used to sit at the end of the row: picking the mode IS
 # the commit, so nothing should promise an action it cannot perform.
+# The reuse toggle's label. It carries one because the glyph alone did not
+# survive contact: "the icon makes no sense, i had to hover to tell what is
+# was doing". The handoff's "mode is the only labelled control" is a rule
+# about keeping the row from reading as a toolbar of equal-weight buttons --
+# it is not worth a control nobody can identify without hovering it, which
+# is the one thing a toggle must never be.
+REUSE_LABEL = "Last region"
+
 # The reuse toggle's own hint line, shown while it is hovered in place of
 # the armed mode's next step. Two of them, because the control's whole job
 # is to say which state it is in and a toggle with one caption cannot.
