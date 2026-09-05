@@ -3455,6 +3455,10 @@ class OverlayWindow(QWidget):
         # drag) -- see that method's own docstring.
         self._selection_path: QPainterPath | None = None
 
+        # The monitor `_sync_chooser_visibility` last placed the chooser row
+        # against, so `_follow_pointer_to_its_monitor` can tell a real
+        # crossing from an ordinary move. None until first placed.
+        self._chooser_monitor: QRectF | None = None
         # SNX-48: last-known pointer position over the frozen desktop
         # itself (window-local logical coords, the same space `_selection`
         # lives in) -- tracked from ordinary mouse-move events the same
@@ -4574,13 +4578,55 @@ class OverlayWindow(QWidget):
         The handoff is emphatic that everything here positions against a
         monitor and never the virtual desktop: on a staggered multi-monitor
         setup the desktop's centre is a gap between screens. `screenAt` is
-        the cursor's own monitor -- the one being looked at -- with the
+        the pointer's own monitor -- the one being looked at -- with the
         primary as the fallback the handoff names.
+
+        `_cursor_pos` (tracked from real move events) is preferred over
+        `QCursor.pos()`, per this file's standing rule against reaching for
+        global cursor state: it is what lets the row follow the pointer
+        across a bezel (`_follow_pointer_to_its_monitor`) without a test
+        having to drive a system-wide cursor. The global position remains
+        the fallback for the one moment nothing has been tracked yet --
+        the overlay opening, before any move has happened.
         """
+        if self._cursor_pos is not None:
+            return self._monitor_at(self._to_absolute(self._cursor_pos))
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         if screen is not None:
             return QRectF(screen.geometry())
         return self._chrome_bounds().translated(self.geometry().topLeft())
+
+    def _follow_pointer_to_its_monitor(self) -> None:
+        """Move the chooser row to the monitor the pointer is now on.
+
+        The row is placed against one monitor, and which one was decided
+        when the overlay opened -- so pressing the shortcut while working
+        on one screen and then crossing to another to frame something left
+        every control back where you started. On a three-monitor desk that
+        is a round trip per snip, and it reads as the controls appearing on
+        the wrong screen: reported as "the controls pop up on the monitor
+        im focused on, not the monitor i started capturing on".
+
+        Only while the row is actually up. Once something is selected the
+        chooser has stood down and the floating bar takes over, and that
+        one is anchored to where the drag *started* on purpose
+        (`_chrome_bounds`) -- chrome that chased the pointer mid-drag would
+        be worse than chrome that stayed put.
+
+        Guarded on the monitor actually changing, because this runs from
+        `mouseMoveEvent`: re-laying the row out on every pixel of every
+        move would repaint it across the frozen frame for no visible
+        change.
+        """
+        if self._cursor_pos is None or self._selection is not None:
+            return
+        if not self.isVisible():
+            return
+        monitor = self._monitor_at(self._to_absolute(self._cursor_pos))
+        if monitor == self._chooser_monitor:
+            return
+        self._chooser_monitor = monitor
+        self._sync_chooser_visibility()
 
     def _sync_bar_destination(self) -> None:
         """Put the chooser's destination on the split button's face.
@@ -5805,6 +5851,10 @@ class OverlayWindow(QWidget):
         # "which display is the cursor on" from -- see its own docstring
         # for why this beats `QCursor.pos()`.
         self._cursor_pos = event.position()
+        # Before anything is selected the chooser row belongs on whichever
+        # monitor is being looked at, which changes as the pointer crosses
+        # a bezel -- see `_follow_pointer_to_its_monitor`.
+        self._follow_pointer_to_its_monitor()
 
         if self._picking_window:
             # Live preview while armed: a hit sets `_selection` to that

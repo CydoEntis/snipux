@@ -7693,6 +7693,108 @@ class TestTheDestinationIsRemembered:
         assert setup_desktop.load_after_capture() == tokens.AFTER_DEFAULT
 
 
+class TestTheChooserRowFollowsThePointer:
+    """The row is placed against one monitor, and which one used to be
+    settled when the overlay opened -- so pressing the shortcut while
+    working on one screen and then crossing to another to frame something
+    left every control back where you started.
+
+    `_cursor_pos` is set directly rather than through `QTest.mouseMove`:
+    synthesising a *hover* onto a window that is not the OS-active one does
+    not reliably deliver on Windows (conftest documents the same gap for
+    the cursor-shape tests), and this behaviour is not about event
+    plumbing.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self) -> OverlayWindow:
+        frame = make_frame(image_size=(6400, 1440), logical_size=(6400, 1440))
+        overlay = OverlayWindow(frame, monitor_geometries=list(STAGGERED))
+        overlay.setGeometry(0, 0, 6400, 1440)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    @staticmethod
+    def _row(overlay: OverlayWindow) -> QRectF:
+        return QRectF(overlay._chooser.panel.geometry())
+
+    def _point_at(self, overlay: OverlayWindow, monitor: QRectF) -> None:
+        overlay._cursor_pos = QPointF(monitor.center())
+        overlay._follow_pointer_to_its_monitor()
+
+    @pytest.mark.parametrize(
+        "monitor", [STAGGERED_LEFT, STAGGERED_CENTRE, STAGGERED_RIGHT]
+    )
+    def test_the_row_moves_to_the_monitor_under_the_pointer(self, monitor):
+        overlay = self._overlay()
+
+        self._point_at(overlay, monitor)
+
+        assert monitor.contains(self._row(overlay)), (
+            f"row at {self._row(overlay)} is not on {monitor}"
+        )
+
+    def test_it_follows_across_several_monitors_in_turn(self):
+        overlay = self._overlay()
+
+        for monitor in (STAGGERED_RIGHT, STAGGERED_LEFT, STAGGERED_CENTRE):
+            self._point_at(overlay, monitor)
+            assert monitor.contains(self._row(overlay))
+
+    def test_a_move_within_one_monitor_does_not_relayout(self):
+        # This runs from every mouse-move event, so it has to be cheap: a
+        # row re-laid out on every pixel would repaint across the frozen
+        # frame for no visible change.
+        overlay = self._overlay()
+        self._point_at(overlay, STAGGERED_CENTRE)
+        before = self._row(overlay)
+        calls = []
+        overlay._sync_chooser_visibility = lambda: calls.append(1)
+
+        overlay._cursor_pos = QPointF(STAGGERED_CENTRE.center()) + QPointF(40, 30)
+        overlay._follow_pointer_to_its_monitor()
+
+        assert calls == []
+        assert self._row(overlay) == before
+
+    def test_the_row_stands_still_once_something_is_selected(self):
+        # From here the floating bar is the chrome, and it is anchored to
+        # where the drag started on purpose -- chrome that chased the
+        # pointer mid-drag would be worse than chrome that stayed put.
+        overlay = self._overlay()
+        self._point_at(overlay, STAGGERED_LEFT)
+        overlay.set_selection(QRect(300, 600, 400, 300))
+        calls = []
+        overlay._sync_chooser_visibility = lambda: calls.append(1)
+
+        self._point_at(overlay, STAGGERED_RIGHT)
+
+        assert calls == []
+
+    def test_nothing_happens_before_the_pointer_has_ever_moved(self):
+        # `_cursor_pos` is None until the first real move, and the opening
+        # placement is `_active_screen_rect`'s own job.
+        overlay = self._overlay()
+        calls = []
+        overlay._sync_chooser_visibility = lambda: calls.append(1)
+
+        overlay._follow_pointer_to_its_monitor()
+
+        assert calls == []
+
+    def test_the_active_screen_prefers_the_tracked_pointer(self):
+        # Not `QCursor.pos()`: this file refuses global cursor state so a
+        # test never has to drive a system-wide pointer.
+        overlay = self._overlay()
+        overlay._cursor_pos = QPointF(STAGGERED_RIGHT.center())
+
+        assert overlay._active_screen_rect() == STAGGERED_RIGHT
+
+
 class TestChromeStaysOnTheSelectionsMonitor:
     """Every piece of floating chrome is clamped to the monitor the
     selection is on, never to the union of every monitor.
