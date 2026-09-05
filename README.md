@@ -37,16 +37,21 @@ tick **Add python.exe to PATH** if asked). Then, given the
 
 ```powershell
 py -m pip install snipux-0.2.0-py3-none-any.whl
-py -m snipux --setup
+py -m snipux
 ```
 
-That is the whole install. The first command takes a few minutes the first
-time, because it pulls down Qt.
+That is the whole install. The first line takes a few minutes the first
+time, because it pulls down Qt. The second just starts Snipux — and the
+first launch installs itself: the Start Menu shortcut, the Startup entry,
+and the **Ctrl+Alt+S** hotkey. After that it starts with Windows and the
+shortcut is the only way in anyone needs.
 
-`--setup` writes the Start Menu shortcut, the Startup entry, and the
-**Ctrl+Alt+S** hotkey. Only ever needed once, not on later updates.
+`snipux --setup` exists and does the same thing explicitly, but is not a
+step to hand anyone: it is for redoing the integration after a move, and
+`AppController._install_desktop_integration_once` already runs it the
+first time the app is ever the resident instance.
 
-Both commands use `py -m ...` deliberately rather than a bare `snipux`.
+`py -m ...` deliberately, rather than a bare `snipux`.
 `py` is the Python launcher Windows installs with Python itself, and `-m`
 runs the package directly — so neither command depends on any folder
 having been added to `PATH`, which is the step that most often silently
@@ -68,7 +73,7 @@ One command. Same as installing, with the newer file:
 py -m pip install snipux-0.3.0-py3-none-any.whl
 ```
 
-No `--setup` again: the shortcut and hotkey point at a location that does
+Nothing else to run: the shortcut and hotkey point at a location that does
 not change between versions. No need to quit Snipux first either — the
 files being replaced are plain Python source, which Windows does not lock.
 Restart Snipux to actually run the new version.
