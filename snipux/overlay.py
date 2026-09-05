@@ -1483,14 +1483,38 @@ class FloatingBar(_Chrome):
         max_center = max(bounds.right() - metric.BAR_MIN_EDGE, center)
         center_x = max(min_center, min(desired_center_x, max_center))
 
-        desired_top = sel.bottom() + metric.BAR_OFFSET_Y
-        # Clamped at both ends, not just the bottom: a monitor mounted
-        # below the virtual desktop's origin has a non-zero top, and a
-        # selection near its upper edge would otherwise push the bar above
-        # that monitor into the same never-displayed gap the bottom clamp
-        # exists to avoid.
-        highest_top = min(bounds.top(), bounds.bottom() - self._TOP_MAX_FROM_BOTTOM)
-        top = max(highest_top, min(desired_top, bounds.bottom() - self._TOP_MAX_FROM_BOTTOM))
+        # Below the selection is the spec's placement. Above it is the
+        # fallback, and it is the one this used to lack: a selection with
+        # less than a bar's height beneath it left no room below, and the
+        # clamp then pulled the bar *up over the selection* -- covering the
+        # very pixels the user had just framed in order to annotate them.
+        # Reported as "when u select a small region the controls are in the
+        # region so u cant edit anything", on a 1123x74 strip.
+        #
+        # A short selection is the common way to hit this, but height is
+        # not what decides it -- distance from the monitor's bottom edge
+        # is. A tall selection ending at the same place has exactly the
+        # same problem, and gets the same answer.
+        below_top = sel.bottom() + metric.BAR_OFFSET_Y
+        above_top = sel.top() - metric.BAR_OFFSET_Y - size.height()
+        if below_top + size.height() <= bounds.bottom():
+            top = below_top
+        elif above_top >= bounds.top():
+            top = above_top
+        else:
+            # Neither side has room, so the selection is within a bar's
+            # height of both edges -- it is essentially the whole monitor,
+            # and some overlap is unavoidable. Clamped at both ends, not
+            # just the bottom: a monitor mounted below the virtual
+            # desktop's origin has a non-zero top, and a selection near its
+            # upper edge would otherwise push the bar off that monitor into
+            # the same never-displayed gap the bottom clamp exists to
+            # avoid.
+            highest_top = min(bounds.top(), bounds.bottom() - self._TOP_MAX_FROM_BOTTOM)
+            top = max(
+                highest_top,
+                min(below_top, bounds.bottom() - self._TOP_MAX_FROM_BOTTOM),
+            )
 
         self.setGeometry(
             round(center_x - size.width() / 2), round(top), size.width(), size.height()
