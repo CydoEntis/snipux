@@ -2999,17 +2999,68 @@ class TestFloatingBarPositioning:
         expected_top = QRectF(selection).bottom() + tokens.Metric.BAR_OFFSET_Y
         assert bar.geometry().top() == expected_top
 
-    def test_top_clamps_so_the_bar_cannot_leave_a_short_window(self):
+    def test_no_room_below_flips_the_bar_above_the_selection(self):
+        # The natural position (bottom + BAR_OFFSET_Y) would land past the
+        # window's own bottom edge. This used to clamp the bar upward,
+        # which put it *on top of the selection* -- covering the pixels the
+        # user framed in order to annotate them. Reported as "when u select
+        # a small region the controls are in the region so u cant edit
+        # anything".
         bounds = QRectF(0, 0, 1600, 400)
-        # Natural position (bottom + BAR_OFFSET_Y) would land past the
-        # window's own bottom edge.
         selection = QRect(400, 350, 200, 40)
         bar = FloatingBar()
 
         bar.reposition(selection, bounds)
 
-        assert bar.geometry().top() == bounds.bottom() - FloatingBar._TOP_MAX_FROM_BOTTOM
-        assert bar.geometry().bottom() <= bounds.bottom()
+        assert bar.geometry().bottom() <= QRectF(selection).top()
+        assert bounds.contains(QRectF(bar.geometry()))
+
+    def test_the_reported_strip_is_not_covered(self):
+        # The exact shape from the report: a wide, 74px-tall strip sitting
+        # near the bottom of a 1440-tall monitor.
+        bounds = QRectF(0, 0, 2560, 1440)
+        selection = QRect(700, 1330, 1123, 74)
+        bar = FloatingBar()
+
+        bar.reposition(selection, bounds)
+
+        assert not QRectF(bar.geometry()).intersects(QRectF(selection))
+        assert bounds.contains(QRectF(bar.geometry()))
+
+    def test_a_tall_selection_ending_low_gets_the_same_answer(self):
+        # Height is not what decides this -- distance from the monitor's
+        # bottom edge is. A tall selection ending in the same place has the
+        # same problem and must get the same treatment.
+        bounds = QRectF(0, 0, 2560, 1440)
+        selection = QRect(700, 300, 1123, 1104)  # bottom at 1404
+        bar = FloatingBar()
+
+        bar.reposition(selection, bounds)
+
+        assert not QRectF(bar.geometry()).intersects(QRectF(selection))
+
+    def test_a_selection_filling_the_monitor_still_lands_on_it(self):
+        # Neither side has room, so overlap is unavoidable -- but the bar
+        # must still be somewhere the user can see and press it.
+        bounds = QRectF(0, 0, 1600, 400)
+        selection = QRect(0, 0, 1600, 400)
+        bar = FloatingBar()
+
+        bar.reposition(selection, bounds)
+
+        assert bounds.contains(QRectF(bar.geometry()))
+
+    def test_room_below_is_still_preferred(self):
+        # The flip is a fallback, not a new rule: anywhere there is room,
+        # the bar stays where the spec puts it.
+        bounds = QRectF(0, 0, 1600, 1000)
+        selection = QRect(400, 200, 200, 100)
+        bar = FloatingBar()
+
+        bar.reposition(selection, bounds)
+
+        expected = QRectF(selection).bottom() + tokens.Metric.BAR_OFFSET_Y
+        assert bar.geometry().top() == expected
 
     def test_centre_clamps_away_from_the_left_screen_edge(self):
         bar = FloatingBar()
