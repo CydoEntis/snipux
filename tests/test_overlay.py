@@ -31,6 +31,7 @@ import snipux.overlay as overlay_module
 from conftest import skip_on_windows
 from snipux import capture as capture_module
 from snipux import setup_desktop
+from snipux.scroll import ScrollCaptureError
 from snipux.capture import (
     BackendRegistry,
     CaptureBackend,
@@ -7338,6 +7339,178 @@ class _FakeBrowserProvider(UnsupportedGeometryProvider):
 
     def browser_viewport(self):
         return None if self._viewport is None else (self._title, self._viewport)
+
+
+class _FakeScroller:
+    """Stands in for a real browser window: records what was asked of it,
+    and can refuse the foreground the way Windows lets a window do.
+    """
+
+    def __init__(self, focusable=True):
+        self.focusable = focusable
+        self.scrolls = []
+        self.restored = 0
+        self.focused = 0
+
+    def take_focus(self):
+        self.focused += 1
+        return self.focusable
+
+    def scroll(self, notches):
+        self.scrolls.append(notches)
+
+    def restore(self):
+        self.restored += 1
+
+
+class TestFullPageCapture:
+    """The one capture that is not a single shot of a frozen frame.
+
+    Driven through fakes: no browser, no focus stealing, no real mouse.
+    The scroll loop itself is tested in test_scroll.py; what matters here
+    is the session around it -- getting out of the way, putting things
+    back, and delivering the result.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    VIEWPORT = QRectF(0, 0, 400, 300)
+
+    def _overlay(self, scroller, viewport=None, monkeypatch=None):
+        provider = _FakeBrowserProvider(viewport or self.VIEWPORT)
+        provider.browser_scroller = lambda: scroller
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame, monitor_geometries=[QRectF(0, 0, 800, 600)],
+                                geometry_provider=provider)
+        overlay.setGeometry(0, 0, 800, 600)
+        return overlay
+
+    def test_a_browser_that_will_not_focus_is_reported_not_scrolled(self):
+        # SendInput reaches the focused window and nothing else, so
+        # scrolling without the foreground would send input somewhere else
+        # entirely -- into whatever the user is actually looking at.
+        scroller = _FakeScroller(focusable=False)
+        overlay = self._overlay(scroller)
+
+        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+
+        assert scroller.scrolls == []
+        assert scroller.restored == 1, "focus must be handed back anyway"
+
+    def test_focus_and_cursor_are_restored_even_when_it_fails(self):
+        scroller = _FakeScroller(focusable=False)
+        overlay = self._overlay(scroller)
+
+        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+
+        assert scroller.restored == 1
+
+    def test_no_browser_at_all_says_so_and_scrolls_nothing(self):
+        provider = _FakeBrowserProvider(None)
+        provider.browser_scroller = lambda: None
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame, monitor_geometries=[QRectF(0, 0, 800, 600)],
+                                geometry_provider=provider)
+
+        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+
+        assert overlay._selection is None
+
+    def test_the_overlay_is_hidden_while_the_page_scrolls(self):
+        # It is covering the page, and the whole point of the rest of this
+        # window is to stop the desktop changing under a capture -- here
+        # the desktop changing is the capture.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        seen = []
+
+        original = overlay._run_full_page_capture
+
+        def watching(*args, **kwargs):
+            seen.append(overlay.isVisible())
+            raise ScrollCaptureError("stop here")
+
+        overlay._run_full_page_capture = watching
+        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+
+        assert seen == [False], "the overlay was still up while scrolling"
+
+    def test_it_comes_back_after_a_failure(self):
+        # A page that could not be joined is worth being told about, and
+        # the user may well want to frame a region by hand instead -- so
+        # the snip stays open rather than closing with nothing.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._run_full_page_capture = lambda *a, **k: (_ for _ in ()).throw(
+            ScrollCaptureError("the page was still growing")
+        )
+
+        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+
+        assert overlay.isVisible()
+        assert not overlay.isHidden()
+
+    def test_a_captured_page_is_reported_and_copied(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        reported = []
+        overlay._on_captured = lambda image, path: reported.append((image, path))
+        page = QImage(400, 900, QImage.Format.Format_RGB32)
+        page.fill(0x202020)
+        overlay._run_full_page_capture = lambda *a, **k: page
+
+        overlay._chooser.set_after("edit")
+        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+
+        assert len(copied) == 1
+        assert copied[0].height() == 900
+        assert reported and reported[0][1] is None
+
+    def test_the_save_destination_writes_a_file(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        reported = []
+        overlay._on_captured = lambda image, path: reported.append(path)
+        page = QImage(400, 900, QImage.Format.Format_RGB32)
+        page.fill(0x202020)
+        overlay._run_full_page_capture = lambda *a, **k: page
+
+        overlay._chooser.set_after("save")
+        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+
+        assert reported and reported[0] is not None
+        assert reported[0].suffix == ".png"
+        assert reported[0].exists()
+
+    def test_the_mode_is_greyed_without_a_browser(self):
+        provider = _FakeBrowserProvider(None)
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame, monitor_geometries=[QRectF(0, 0, 800, 600)],
+                                geometry_provider=provider)
+
+        assert overlay._chooser._unavailable_reason(tokens.FULL_PAGE_MODE) is not None
+
+    def test_it_is_offered_when_a_browser_is_there(self):
+        overlay = self._overlay(_FakeScroller())
+
+        assert overlay._chooser._unavailable_reason(tokens.FULL_PAGE_MODE) is None
+
+    def test_it_is_not_offered_for_recording(self):
+        # Recording something that scrolls itself is a different feature,
+        # not this one with a video codec on the end.
+        overlay = self._overlay(_FakeScroller())
+        overlay._chooser.set_kind("record")
+
+        assert overlay._chooser._unavailable_reason(tokens.FULL_PAGE_MODE) is not None
 
 
 class TestTheTabModeCapturesTheBrowsersPage:
