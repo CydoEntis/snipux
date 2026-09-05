@@ -84,6 +84,38 @@ login onward.
 
 Already have Python? `pipx` works identically on Windows — see below.
 
+### Updating an existing install
+
+Check which version is running first: **tray → Settings**, bottom-left of
+the window, e.g. `Snipux 0.2.0 / Qt 6.11.0 · Windows`.
+
+**If they run `snipux.exe`:** send them the new one and have them run it.
+It copies itself over the old install at
+`%LocalAppData%\snipux\snipux.exe`, so the shortcuts keep working and the
+two versions never coexist.
+
+> **Quit Snipux from the tray first.** A running Snipux holds that file
+> open, the copy fails, and the update silently does not happen — the old
+> version just keeps running. There is no error; the version line in
+> Settings is the only way to tell.
+
+**If they installed with pipx:** `--force` is required, not optional —
+without it pipx sees the same package name and does nothing.
+
+```powershell
+pipx install --force C:\path\to\snipux-<version>-py3-none-any.whl
+```
+
+`snipux --setup` does **not** need re-running: the shortcut, Startup entry
+and hotkey all point at a stable location that does not change between
+versions.
+
+**There is no update check.** Snipux never phones home and has no idea a
+newer version exists, so someone has to tell each user. Adding one is not
+a small change while this repository is private: GitHub's API answers 404
+for a private repo without a token, and a token cannot be shipped inside a
+binary that anyone can open.
+
 ### Sending it to someone else
 
 The repository is private, so `pipx install git+https://…` only works for
