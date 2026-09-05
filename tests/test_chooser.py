@@ -273,12 +273,19 @@ class TestRecordSideModeSelectionIsInert:
         assert chooser.mode == "Window"
 
 
-class TestOnlyModeIsLabelled:
-    """The capture-flow handoff makes mode the only labelled trigger:
-    destination is "icon only ... secondary decision, so no label on the
-    trigger", and delay's "label appears only when set". Labelling all
-    three gave the row three equal-weight controls when only one of them
-    is the question being asked.
+class TestTheRowsTriggersAreReadable:
+    """The handoff made mode the only labelled trigger -- destination "icon
+    only ... secondary decision", delay's "label appears only when set".
+
+    Destination no longer follows that. The rule assumed the glyph would
+    carry the meaning and it does not: this control decides whether a snip
+    ends with a toolbar, a window, or nothing at all, and a pen glyph
+    versus an eye glyph does not say which. Icon-only, it was why a
+    destination of `instant` could not be got out of -- that one ends the
+    snip on the release of the drag, leaving no toolbar to notice it from.
+
+    Delay keeps the handoff's rule, because a delay of Off is genuinely
+    nothing to say.
     """
 
     def test_mode_keeps_its_label(self):
@@ -286,14 +293,39 @@ class TestOnlyModeIsLabelled:
 
         assert chooser.panel.mode_trigger._label == "Region"
 
-    def test_the_destination_trigger_carries_no_label(self):
+    def test_the_destination_trigger_says_which_destination(self):
         chooser = Chooser(parent=None)
 
         chooser.set_after("review")
 
-        assert chooser.panel.after_trigger._label == ""
-        # The label still exists where there is room for it.
+        assert chooser.panel.after_trigger._label == "Review"
         assert chooser.after == "review"
+
+    def test_every_destination_names_itself_on_both_sides(self):
+        # Whatever is showing, the row has to be able to say what it is --
+        # including the record side, whose vocabulary is different.
+        for kind, rows in (("stills", _AFTER_ROWS), ("record", _RECORD_AFTER_ROWS)):
+            chooser = Chooser(parent=None)
+            chooser.set_kind(kind)
+            for value, _icon, label, _note in rows:
+                chooser.set_after(value)
+                assert chooser.panel.after_trigger._label == label, (
+                    f"{value} on the {kind} side"
+                )
+
+    def test_instant_is_flagged_the_way_an_armed_delay_is(self):
+        # It is the one destination that can surprise you -- it ends the
+        # snip the moment the drag is released -- so it is visible before
+        # it does that rather than afterwards.
+        chooser = Chooser(parent=None)
+
+        chooser.set_after("instant")
+        flagged = chooser.panel.after_trigger._label_colour
+
+        chooser.set_after("edit")
+
+        assert flagged == tokens.ChooserColor.MODE_ACCENT
+        assert chooser.panel.after_trigger._label_colour != flagged
 
     def test_delay_is_bare_until_one_is_set(self):
         chooser = Chooser(parent=None)
