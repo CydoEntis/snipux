@@ -569,14 +569,17 @@ def build_default_geometry_provider() -> GeometryProvider:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="snipux",
-        description="A Windows Snipping Tool workalike for Linux.",
+        description="Snip, annotate and record your screen -- a Snipping Tool "
+        "workalike for Linux and Windows.",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--list-backends",
         action="store_true",
-        help="print each registered capture backend's name, availability, "
-        "and reason if unavailable",
+        help="print each registered capture and recording backend's name, "
+        "availability, and reason if unavailable -- the way to ask whether "
+        "this machine can snip and whether it can record, which are "
+        "separate questions with separate answers",
     )
     group.add_argument(
         "--snip",
@@ -596,17 +599,20 @@ def _build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--setup",
         action="store_true",
-        help="install the desktop entry, autostart entry, and GNOME "
-        "Super+Shift+S shortcut for this installed copy of Snipux -- no "
-        "repository checkout needed",
+        help="install desktop integration for this installed copy of "
+        "Snipux -- no repository checkout needed. On Linux: the desktop "
+        "entry, the autostart entry and the GNOME shortcut. On Windows: a "
+        "Start Menu shortcut, a Startup entry and the registered hotkey. "
+        f"The shortcut is {setup_desktop.DEFAULT_SHORTCUT} unless "
+        "--shortcut says otherwise",
     )
     group.add_argument(
         "--remove",
         action="store_true",
-        help="undo everything --setup did -- the desktop entry, autostart "
-        "entry, installed icons, GNOME shortcut and remembered shortcut "
-        "choice -- run this before `pipx uninstall snipux` so nothing is "
-        "left behind",
+        help="undo everything --setup did -- the desktop/Start Menu entry, "
+        "autostart entry, installed icons, bound shortcut and remembered "
+        "shortcut choice -- run this before `pipx uninstall snipux` so "
+        "nothing is left behind",
     )
     group.add_argument(
         "--update",
@@ -622,8 +628,10 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="ACCELERATOR",
         help="with --setup, bind this accelerator instead of the default "
         f"{setup_desktop.DEFAULT_SHORTCUT}, and remember it so later "
-        "--setup runs (every install.sh does one) keep it. GNOME "
-        "accelerator syntax, e.g. '<Super><Shift>x' or '<Alt>Print'",
+        "--setup runs (every install.sh does one) keep it. Either "
+        "spelling is accepted -- the readable 'Super+Shift+X' or "
+        "gsettings' '<Super><Shift>x' -- since normalise_shortcut() "
+        "reduces both to the same canonical form",
     )
     return parser
 

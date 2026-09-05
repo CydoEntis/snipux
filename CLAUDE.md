@@ -1,7 +1,8 @@
 # snipux — conventions
 
-A Windows Snipping Tool workalike, going cross-platform. Snip an area, window,
-freehand shape or the whole screen; annotate it; copy or save it.
+A Windows Snipping Tool workalike, cross-platform. Snip an area, window,
+freehand shape or the whole screen; annotate it; copy or save it. Or record
+the same selection to video and trim it in the player.
 
 ## The one architectural rule
 
@@ -29,12 +30,17 @@ Linux, Windows and macOS, aimed at full feature parity across all three.
   what we test against) is implemented today. Wayland is the primary session
   type and X11 must also work; the session type is detected at runtime,
   never assumed.
-- **Windows** is next, targeting full parity (SNX-85/86). The platform seam
-  (`snipux/platform/windows.py`) exists and is wired into the app, but
-  nothing behind it is implemented yet — every operation raises
-  `UnimplementedPlatformError` naming itself and the operation.
-- **macOS** comes after Windows. Same story: the seam
-  (`snipux/platform/darwin.py`) exists, nothing behind it is implemented.
+- **Windows** (10 2004+ / 11) is implemented and has been driven for real
+  (SNX-85/86 and after). `snipux/platform/windows.py` is ~985 lines of
+  real implementation: desktop integration through COM `IShellLinkW`
+  shortcuts, `RegisterHotKey` for the global hotkey, and the
+  `QScreenCapture` capture/recording registries. `default_save_folder` is
+  the one operation still raising `UnimplementedPlatformError`. What has
+  *not* been watched there is listed in TODO.md, "Windows: four jobs" —
+  treat that list as current, not the code's apparent completeness.
+- **macOS** is next. The seam (`snipux/platform/darwin.py`) exists and
+  nothing behind it is implemented; it needs a real Mac for the Screen
+  Recording and Accessibility permissions.
 
 Development happens on Windows and in an Ubuntu VM. Qt behaves the same on
 all three — everything except the platform seam below is ordinary, portable
@@ -46,18 +52,23 @@ PyQt6, so keep platform-specific code confined to the `platform/` package
 ```
 snipux/
   platform/     the platform seam: an ABC (`Platform`) plus one implementation
-                per OS -- linux.py is real; windows.py and darwin.py raise
-                UnimplementedPlatformError, naming both platform and
+                per OS -- linux.py and windows.py are real; darwin.py
+                raises UnimplementedPlatformError, naming both platform and
                 operation, for everything not built yet. Desktop
                 integration, global-shortcut (re)binding, the default save
-                folder, and which capture backends this OS can even try all
+                folder, whether the recorder can carry audio, and which
+                capture and recording backends this OS can even try all
                 get decided here. This is the one place `sys.platform` is
                 read and the one seam to fill in for a new OS -- see its
                 module docstring.
   capture.py    the Frame type, the CaptureBackend/BackendRegistry
                 abstraction, and the concrete backends a platform's
-                build_capture_registry() chooses between (today, Linux's
-                X11/Wayland ones)
+                build_capture_registry() chooses between (Linux's
+                X11/Wayland ones, and Windows')
+  recording.py  the recording twin of capture.py: RecordingBackend /
+                RecorderRegistry, plus GnomeScreencastBackend (D-Bus, the
+                only Linux route -- WebM, no audio) and
+                WindowsRecorderBackend (QScreenCapture -> QMediaRecorder)
   overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
                 (its pre-snip chooser diverges from the handoff -- see
                  docs/design/pre-snip-chooser.md)

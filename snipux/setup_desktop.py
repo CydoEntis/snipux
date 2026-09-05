@@ -132,7 +132,7 @@ def render_desktop_entry(exec_path: Path) -> str:
 
     A bare `Exec=snipux` would depend on `snipux` being on `PATH` in
     whatever environment GNOME builds for a graphical session -- not
-    reliable, per `docs/super-shift-s-gnome.md` -- so the template ships a
+    reliable, per `docs/gnome-shortcut.md` -- so the template ships a
     placeholder instead and this is the one place that gets replaced with
     the console script's actual location.
     """
@@ -986,7 +986,7 @@ def _append_slot(current_keybindings: str) -> str:
 def bind_gnome_shortcut(exec_path: Path, shortcut: str | None = None) -> str:
     """Bind `shortcut` to `exec_path --snip` via GNOME's
     custom-keybindings mechanism, the same slot `packaging/install.sh` used
-    to set up by hand -- see `docs/super-shift-s-gnome.md` for what this
+    to set up by hand -- see `docs/gnome-shortcut.md` for what this
     does and how to undo it.
 
     `shortcut` defaults to whatever `load_shortcut` remembers, which is
@@ -1006,7 +1006,7 @@ def bind_gnome_shortcut(exec_path: Path, shortcut: str | None = None) -> str:
     if shutil.which("gsettings") is None:
         return (
             f"Note: gsettings not found -- cannot bind {human_shortcut(shortcut)} "
-            "automatically. See docs/super-shift-s-gnome.md to bind it by hand."
+            "automatically. See docs/gnome-shortcut.md to bind it by hand."
         )
 
     try:
@@ -1020,7 +1020,7 @@ def bind_gnome_shortcut(exec_path: Path, shortcut: str | None = None) -> str:
         return (
             "Note: could not read GNOME's custom-keybindings list -- cannot "
             f"bind {human_shortcut(shortcut)} automatically. See "
-            "docs/super-shift-s-gnome.md to bind it by hand."
+            "docs/gnome-shortcut.md to bind it by hand."
         )
 
     new_keybindings = _append_slot(current)
@@ -1040,7 +1040,7 @@ def bind_gnome_shortcut(exec_path: Path, shortcut: str | None = None) -> str:
     except (OSError, subprocess.CalledProcessError):
         return (
             "Note: setting the GNOME shortcut failed -- cannot bind "
-            f"{human_shortcut(shortcut)} automatically. See docs/super-shift-s-gnome.md "
+            f"{human_shortcut(shortcut)} automatically. See docs/gnome-shortcut.md "
             "to bind it by hand."
         )
 
@@ -1069,8 +1069,8 @@ def _remove_slot(current_keybindings: str) -> str:
 
 
 def unbind_gnome_shortcut() -> str:
-    """Remove the Super+Shift+S GNOME custom-keybinding slot
-    `bind_gnome_shortcut()` set up -- see `docs/super-shift-s-gnome.md` for
+    """Remove the Snipux GNOME custom-keybinding slot
+    `bind_gnome_shortcut()` set up -- see `docs/gnome-shortcut.md` for
     what this undoes.
 
     Splices `_SLOT_PATH` out of the `custom-keybindings` list (via
@@ -1090,7 +1090,7 @@ def unbind_gnome_shortcut() -> str:
     if shutil.which("gsettings") is None:
         return (
             "Note: gsettings not found -- nothing to remove for the "
-            "Super+Shift+S shortcut."
+            "Snipux shortcut."
         )
 
     try:
@@ -1103,12 +1103,12 @@ def unbind_gnome_shortcut() -> str:
     except (OSError, subprocess.CalledProcessError):
         return (
             "Note: could not read GNOME's custom-keybindings list -- cannot "
-            "remove the Super+Shift+S shortcut automatically. See "
-            "docs/super-shift-s-gnome.md to remove it by hand."
+            "remove the Snipux shortcut automatically. See "
+            "docs/gnome-shortcut.md to remove it by hand."
         )
 
     if f"'{_SLOT_PATH}'" not in current:
-        return "Super+Shift+S shortcut was not set -- nothing to remove."
+        return "The Snipux shortcut was not set -- nothing to remove."
 
     new_keybindings = _remove_slot(current)
 
@@ -1121,10 +1121,10 @@ def unbind_gnome_shortcut() -> str:
     except (OSError, subprocess.CalledProcessError):
         return (
             "Note: removing the GNOME shortcut failed. See "
-            "docs/super-shift-s-gnome.md to remove it by hand."
+            "docs/gnome-shortcut.md to remove it by hand."
         )
 
-    return "Removed the Super+Shift+S shortcut."
+    return "Removed the Snipux shortcut."
 
 
 def install_icons(hicolor_dir: Path | None = None) -> bool:
@@ -1318,7 +1318,7 @@ def run_remove(
 ) -> int:
     """The body of `snipux --remove`: the exact counterpart to
     `run_setup()` -- deletes the desktop entry, the autostart entry, the
-    installed icons, and the GNOME Super+Shift+S shortcut slot, so
+    installed icons, and the GNOME shortcut slot, so
     `pipx uninstall snipux` afterwards leaves nothing behind (SNX-83).
 
     `applications_dir`/`autostart_dir`/`hicolor_dir` default to the same
