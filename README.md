@@ -226,7 +226,14 @@ paying startup cost on every snip.
    drag any edge or corner of the selection and the ink you've already
    drawn stays exactly where it was drawn, over the same pixels, instead of
    moving with the selection or getting clipped away.
-4. **Copy or save.** `Enter` (or the bar's Copy button) copies the
+4. **Copy or save.** Whichever way a snip ends, a tray notification
+   confirms it — `Copied to clipboard`, or `Saved to snipux/<filename>`.
+   That matters most for **Capture and finish**, which shows no overlay and
+   no toolbar at all, so the notification is the only sign anything
+   happened. A snip headed for the review window doesn't get one; the
+   window itself is the confirmation.
+
+   `Enter` (or the bar's Copy button) copies the
    annotated snip to the clipboard and closes the overlay. The bar's Save
    button writes it to disk and closes the overlay too. The bar's leading
    button is a split action: its face is whichever destination you chose

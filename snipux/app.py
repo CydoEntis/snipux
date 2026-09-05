@@ -1476,12 +1476,16 @@ class AppController:
         # The chooser is the authority: it is seeded from Settings when the
         # overlay opens, so its value is either what Settings says or what
         # the user changed it to for this snip. Either way it is the more
-        # current answer, and per the handoff a per-snip override never
-        # writes back to the stored preference.
+        # current answer.
         if self._overlay is not None:
-            if self._overlay.outcome != "review":
-                return
-        elif not setup_desktop.load_review_window():
+            opening_review = self._overlay.outcome == "review"
+        else:
+            opening_review = setup_desktop.load_review_window()
+
+        if not opening_review:
+            # Nothing else is about to appear, so this is the only
+            # confirmation there will be -- see `_notify_capture`.
+            self._notify_capture(path)
             return
         # A copy of the image, not the overlay's own: the overlay is about
         # to close, and `rendered_image()` hands back a QImage backed by
@@ -1496,6 +1500,37 @@ class AppController:
         review.show()
         review.raise_()
         review.activateWindow()
+
+    def _notify_capture(self, path: "Path | None") -> None:
+        """Confirm, through the tray, that a snip actually happened.
+
+        The overlay has a toast of its own and the user never sees it.
+        `copy()`/`save()` raise it and their callers immediately `close()`
+        the window, and `OverlayWindow.hideEvent` takes the toast down with
+        everything else -- so the confirmation is created and destroyed in
+        the same turn of the event loop. That is invisible for every snip
+        that dismisses, and worst for `instant`, which shows no bar, no
+        overlay and no window at all: the screen simply flickers and the
+        user is left to guess whether anything reached the clipboard.
+        Reported as wanting "a notification or something to let us know we
+        copied".
+
+        Only when nothing else is about to appear. A snip headed for the
+        review window announces itself by opening one, and a balloon saying
+        so as well would be telling the user what they are already looking
+        at.
+
+        `path` is the file if one was written and None if the image went to
+        the clipboard -- the same two cases `_on_captured` already receives
+        and the only thing that changes the wording. The folder is named
+        rather than the full path: it is the part that answers "where did
+        that go", and a full path elides to uselessness in a balloon.
+        """
+        if path is None:
+            message = "Copied to clipboard"
+        else:
+            message = f"Saved to {path.parent.name}/{path.name}"
+        self._report_shortcut(message)
 
     def _open_player(self, path: Path) -> None:
         """Open a landed recording in the trim editor.
