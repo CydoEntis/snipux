@@ -78,7 +78,7 @@ class TestRowSignatures:
         # content gets duplicated.
         source = page(20)
         changed = source.copy()
-        changed.setPixelColor(17, 9, QColor("#ff00ff"))
+        changed.setPixelColor(3, 9, QColor("#ff00ff"))
 
         before, after = row_signatures(source), row_signatures(changed)
 
@@ -86,6 +86,27 @@ class TestRowSignatures:
         assert [s for i, s in enumerate(before) if i != 9] == [
             s for i, s in enumerate(after) if i != 9
         ]
+
+    def test_the_right_edge_is_ignored(self):
+        # Where the scrollbar lives. It is in every row and it moves as the
+        # page scrolls, so hashing it makes almost every row differ from
+        # its own self one scroll later -- measured on a real page, 482 of
+        # 1311 rows matchable with it included against 1008 without.
+        source = page(20)
+        changed = source.copy()
+        changed.setPixelColor(source.width() - 2, 9, QColor("#ff00ff"))
+
+        assert row_signatures(source) == row_signatures(changed)
+
+    def test_a_narrow_image_still_hashes_something(self):
+        # The margin must never eat the whole frame, or every row would
+        # hash identically and match everywhere.
+        narrow = QImage(10, 4, QImage.Format.Format_RGB32)
+        narrow.fill(QColor("#000000"))
+        marked = narrow.copy()
+        marked.setPixelColor(1, 2, QColor("#ffffff"))
+
+        assert row_signatures(narrow) != row_signatures(marked)
 
     def test_a_null_image_has_no_signatures(self):
         assert row_signatures(QImage()) == []
