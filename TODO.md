@@ -20,6 +20,16 @@ a fiction. `tests/conftest.py` defaults `QT_QPA_FONTDIR` to
 `C:\Windows\Fonts` on win32 to fix it (and only on win32: on Linux it
 would narrow a working fontconfig database to one directory).
 
+**Next up: browser-aware capture.** SNX-1 captures the focused browser tab's
+page area (no tab strip, no toolbar); SNX-2 is full-page scroll-and-stitch,
+and is the sanctioned exception to the one-shot rule this file's "Out of
+scope" section reserved. SNX-3 came out of planning them: the Windows
+geometry provider returns physical pixels where its contract says logical,
+invisible on a 1.0-scale desk and wrong on a scaled one. Both new features
+read rects from that provider, so SNX-3 goes first. The plan, the spike
+numbers, and what would make each not worth doing:
+`docs/design/browser-capture.md`.
+
 Two locked handoffs are now built: `docs/design/flow/` (the capture flow)
 and `docs/design/player/` (the recording player / trim editor). What was
 built differently, and why, is in each directory's `divergences.md` --
