@@ -7768,6 +7768,53 @@ class TestFullPageCapture:
         assert not overlay._blur_tray.isVisible()
         assert overlay._bar.active_tool is None
 
+    def test_the_indicator_is_closed_whatever_goes_wrong(self):
+        # It is a top-level, always-on-top window that is transparent to
+        # input: one left behind cannot be closed, moved or clicked through
+        # by the user, and every later attempt stacks another on top. That
+        # happened -- three captions painted over each other, from three
+        # captures that each raised something the handler did not name.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        made = []
+
+        real_indicator = overlay_module.PageCaptureIndicator
+
+        def tracking(viewport, parent=None):
+            widget = real_indicator(viewport, parent)
+            made.append(widget)
+            return widget
+
+        overlay_module.PageCaptureIndicator = tracking
+        try:
+            overlay._run_full_page_capture = lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("something nobody predicted")
+            )
+            with pytest.raises(RuntimeError):
+                self._take_whole_page(overlay)
+        finally:
+            overlay_module.PageCaptureIndicator = real_indicator
+
+        assert made, "no indicator was created"
+        assert not made[0].isVisible(), "an indicator was left on screen"
+
+    def test_the_overlay_comes_back_whatever_goes_wrong(self):
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._run_full_page_capture = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("something nobody predicted")
+        )
+
+        with pytest.raises(RuntimeError):
+            self._take_whole_page(overlay)
+
+        assert overlay.isVisible()
+        assert scroller.restored == 1
+
     def test_it_is_not_offered_for_recording(self):
         # Recording something that scrolls itself is a different feature,
         # not this one with a video codec on the end.
