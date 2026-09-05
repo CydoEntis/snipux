@@ -2,7 +2,7 @@
 # Installs snipux for the current user: a self-contained virtual environment,
 # the package itself, a launcher on PATH, then `snipux --setup` (SNX-73) for
 # the desktop entry, autostart entry, and GNOME shortcut so it shows up in
-# GNOME's application list and Super+Shift+S works.
+# GNOME's application list and the shortcut (Ctrl+Alt+S by default) works.
 #
 # User-local throughout -- no sudo, nothing under /usr/share, and nothing
 # written into the system Python's site-packages. Ubuntu 23.04+ (including
@@ -92,7 +92,7 @@ exec "$venv_dir/bin/snipux" "\$@"
 LAUNCHER
 chmod +x "$launcher"
 
-# Desktop entry, autostart entry, and the GNOME Super+Shift+S shortcut are
+# Desktop entry, autostart entry, and the GNOME shortcut are
 # all `snipux --setup`'s job (SNX-73) -- it ships its own .desktop template
 # inside the package and writes it under both locations, plus the
 # gsettings dance below the keybinding used to be. Delegating here rather

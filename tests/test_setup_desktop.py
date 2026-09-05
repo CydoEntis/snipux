@@ -758,7 +758,7 @@ class TestUnbindGnomeShortcut:
 
         message = setup_desktop.unbind_gnome_shortcut()
 
-        assert "Removed the Super+Shift+S shortcut" in message
+        assert "Removed the Snipux shortcut" in message
         final_list = store.values[(setup_desktop._MEDIA_KEYS_SCHEMA, "custom-keybindings")]
         assert setup_desktop._SLOT_PATH not in final_list
         # reset-recursively cleared the slot's own keys.
