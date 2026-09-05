@@ -159,6 +159,26 @@ before writing the mode**, not after.
 
 ## SNX-2 — Full-page (scrolling) capture
 
+> **Status: built, then withdrawn from the UI in 0.5.0.** The engine
+> (`snipux/stitch.py`, `snipux/scroll.py`) is finished and tested, and end
+> to end it scrolled a real page and joined six frames into one clean
+> 2811px image. It is off the chooser because that only holds for a page
+> that sits still.
+>
+> `stitch.find_overlap` locates a join by finding runs of **pixel-identical**
+> rows. Anything that redraws itself between grabs — a live chart, an
+> animated ad, a playing video — breaks every run. Measured on a real site
+> with live content, scrolls of 1, 2, 3, 5 and 9 notches *all* reported no
+> overlap; measured on a page with playing video, only 3.5% of pixels had
+> actually changed. The information is there. The matcher is too strict to
+> use it.
+>
+> **What finishes this:** a tolerant match — accept an overlap when the
+> great majority of rows line up, instead of demanding all of them. That is
+> one function, not a rewrite, which is why the modules and their 36 tests
+> are kept rather than deleted. Everything below still describes the
+> intended feature.
+
 **Value.** The whole page, not the part that fits. The single most-requested
 thing screenshot tools get asked for.
 
