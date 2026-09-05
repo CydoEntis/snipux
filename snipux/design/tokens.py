@@ -252,7 +252,7 @@ CAPTURE_MODES = [
     ("Window",      "window",  "One application's window"),
     ("Full screen", "monitor", "The whole monitor you are on"),
     ("Freeform",    "pen",     "A shape you draw by hand"),
-    ("Tab",         "panel",   "The page in your browser, no toolbars"),
+    ("Tab",         "panel",   "Your browser page, no toolbars"),
 ]
 
 # The mode that captures a browser's page area. Named because three modules
