@@ -7323,6 +7323,140 @@ STAGGERED = [STAGGERED_CENTRE, STAGGERED_LEFT, STAGGERED_RIGHT]
 STAGGERED_UNION = QRectF(0, 0, 6400, 1440)
 
 
+class _FakeBrowserProvider(UnsupportedGeometryProvider):
+    """A geometry provider that answers about a browser, so these tests
+    never depend on one actually being open.
+
+    Subclasses the unsupported provider rather than the ABC: everything
+    except the one question under test should keep answering "no", which is
+    what the real thing does on a platform that cannot enumerate windows.
+    """
+
+    def __init__(self, viewport=None, title="Example — Brave"):
+        self._viewport = viewport
+        self._title = title
+
+    def browser_viewport(self):
+        return None if self._viewport is None else (self._title, self._viewport)
+
+
+class TestTheTabModeCapturesTheBrowsersPage:
+    """`Tab` selects the page area of the frontmost browser -- everything
+    below the tab strip and toolbars -- with no rectangle to frame by hand.
+
+    Driven entirely through a fake provider. Nothing here may pass or fail
+    by whether a browser happens to be running on the machine.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    # A desktop whose origin is not (0, 0), so a local-for-absolute mix-up
+    # is a whole monitor's error rather than an invisible one.
+    LEFT = QRectF(-1920, 0, 1920, 1080)
+    PRIMARY = QRectF(0, 0, 1920, 1080)
+    ORIGIN = (-1920, 0)
+
+    def _overlay(self, viewport=None, size=(3840, 1080), origin=None):
+        origin = self.ORIGIN if origin is None else origin
+        frame = make_frame(image_size=size, logical_size=size, logical_origin=origin)
+        overlay = OverlayWindow(
+            frame,
+            monitor_geometries=[self.PRIMARY, self.LEFT],
+            geometry_provider=_FakeBrowserProvider(viewport),
+        )
+        overlay.setGeometry(round(origin[0]), round(origin[1]), *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_it_selects_the_viewport(self):
+        # Absolute (-1720, 300) is window-local (200, 300) against this
+        # frame's origin.
+        overlay = self._overlay(QRectF(-1720, 300, 1280, 700))
+
+        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+
+        assert overlay._selection == QRect(200, 300, 1280, 700)
+
+    def test_the_row_is_offered_when_a_browser_is_found(self):
+        assert self._overlay(QRectF(-1720, 300, 1280, 700))._chooser._browser_available
+
+    def test_the_row_is_greyed_when_there_is_none(self):
+        assert not self._overlay(None)._chooser._browser_available
+
+    def test_no_browser_selects_nothing(self):
+        overlay = self._overlay(None)
+
+        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+
+        assert overlay._selection is None
+
+    def test_the_toolbar_lands_on_the_pages_own_monitor(self):
+        # No drag means no anchor, so `_chrome_bounds` falls back to
+        # largest overlap -- which must still be the left monitor.
+        overlay = self._overlay(QRectF(-1720, 300, 1280, 600))
+
+        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+
+        assert overlay._selection_anchor is None
+        bar = QRectF(overlay._bar.geometry()).translated(QPointF(*self.ORIGIN))
+        assert self.LEFT.contains(bar), f"bar at {bar}"
+
+    def test_a_viewport_reaching_past_the_desktop_is_clipped(self):
+        # A maximised browser's frame extends past the monitor by the width
+        # of its invisible resize border, and the frame is the only source
+        # of pixels there is.
+        overlay = self._overlay(QRectF(-2000, 300, 1280, 700))
+
+        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+
+        assert overlay._selection == QRect(0, 300, 1200, 700)
+
+    def test_a_viewport_entirely_off_the_desktop_selects_nothing(self):
+        overlay = self._overlay(QRectF(9000, 9000, 800, 600))
+
+        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+
+        assert overlay._selection is None
+
+    def test_the_provider_is_asked_once_when_the_overlay_opens(self):
+        # Enumerating windows walks the whole desktop, and the answer
+        # cannot change while a frozen frame is on screen -- so asking
+        # again at dispatch time would cost a desktop walk to re-learn what
+        # is already known, against a desktop that no longer matches the
+        # pixels being captured.
+        calls = []
+
+        class Counting(_FakeBrowserProvider):
+            def browser_viewport(self):
+                calls.append(1)
+                return super().browser_viewport()
+
+        frame = make_frame(image_size=(3840, 1080), logical_size=(3840, 1080),
+                           logical_origin=self.ORIGIN)
+        overlay = OverlayWindow(
+            frame,
+            monitor_geometries=[self.PRIMARY, self.LEFT],
+            geometry_provider=Counting(QRectF(-1720, 300, 1280, 700)),
+        )
+        overlay.setGeometry(-1920, 0, 3840, 1080)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+
+        assert calls == [1]
+
+    def test_a_provider_that_knows_nothing_about_browsers_still_works(self):
+        # The ABC defaults `browser_viewport` to None so an older provider
+        # -- and every platform that cannot enumerate windows -- keeps
+        # working rather than raising.
+        assert UnsupportedGeometryProvider().browser_viewport() is None
+
+
 class TestReuseLastRegionPreselectsIt:
     """The `reuse last region` preference: Region mode opens on the
     rectangle the last snip came from instead of an empty overlay.
@@ -7473,9 +7607,10 @@ class TestReuseLastRegionPreselectsIt:
         overlay = self._overlay()
 
         assert overlay._chooser.mode == "Region"
-        assert [m[0] for m in tokens.CAPTURE_MODES] == [
-            "Region", "Window", "Full screen", "Freeform"
-        ]
+        # Reuse is a preference on the row, never a mode of its own -- the
+        # point of the redesign. `Tab` is a mode because it captures
+        # something different, not because it changes how Region behaves.
+        assert "Last region" not in [m[0] for m in tokens.CAPTURE_MODES]
 
     def test_the_toolbar_is_up_on_the_rectangles_own_monitor(self):
         setup_desktop.save_last_region((-1720, 300, 640, 480))
@@ -8529,6 +8664,10 @@ class TestCaptureChooser:
     @pytest.mark.parametrize("key,mode", list(tokens.MODE_KEYS.items()))
     def test_each_shortcut_selects_its_mode(self, key, mode):
         overlay = self._overlay()
+        # `Tab` is greyed, and its key correspondingly inert, without a
+        # browser -- seeded so this test stays about the key map rather
+        # than that rule, which test_chooser.py covers on its own.
+        overlay._chooser.set_browser_available(True)
         fired = []
         overlay._chooser.fireImmediately.connect(fired.append)
 

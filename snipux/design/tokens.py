@@ -252,7 +252,20 @@ CAPTURE_MODES = [
     ("Window",      "window",  "One application's window"),
     ("Full screen", "monitor", "The whole monitor you are on"),
     ("Freeform",    "pen",     "A shape you draw by hand"),
+    ("Tab",         "panel",   "The page in your browser, no toolbars"),
 ]
+
+# The mode that captures a browser's page area. Named because three modules
+# read it -- the chooser greys the row, the overlay dispatches on it, and
+# IMMEDIATE_MODES lists it.
+TAB_MODE = "Tab"
+
+# What the row says instead of its note when there is no browser to capture
+# -- no browser open, a platform that cannot see other windows (Wayland), or
+# a browser that is not Chromium-family. One string for all three: the row
+# has space for a reason, not for a diagnosis, and every one of them means
+# the same thing to the user.
+TAB_UNAVAILABLE = "No browser window found"
 
 # Notes that replace the above on the record side only, where a mode means
 # something narrower than it does for a screenshot.
@@ -645,6 +658,7 @@ MODE_NEXT_STEP = {
     "Window":      "Hover a window, click to take it",
     "Full screen": "Grabs this monitor the moment you choose it",
     "Freeform":    "Draw a closed shape around anything",
+    "Tab":         "Grabs your browser's page the moment you choose it",
 }
 
 # Mode shortcuts. Live whenever the chooser is on screen, armed or not.
@@ -655,12 +669,15 @@ RECORD_MODE_NEXT_STEP = {
     "Window": "Click a window to frame it -- moving it later will not follow",
 }
 
-MODE_KEYS = {"R": "Region", "W": "Window", "F": "Full screen", "L": "Freeform"}
+MODE_KEYS = {
+    "R": "Region", "W": "Window", "F": "Full screen", "L": "Freeform",
+    "T": "Tab",
+}
 
 # Full screen is the only mode with nothing left to aim at, so choosing it
 # fires the grab immediately (after any delay). The other three arm and wait.
 # On the record side nothing fires immediately -- see RECORD_DISABLED_MODES.
-IMMEDIATE_MODES = ["Full screen"]
+IMMEDIATE_MODES = ["Full screen", TAB_MODE]
 
 # Destinations, from the locked capture-flow handoff (docs/design/flow/).
 # Merged one structure at a time as each gains a consumer rather than all at
@@ -738,6 +755,11 @@ KIND_DEFAULT = "stills"
 # not fire immediately there -- it arms and waits like Region does.
 RECORD_DISABLED_MODES = {
     "Freeform": "Video is rectangular",
+    # Recording a browser page is a perfectly sensible thing to want, and
+    # the rect is the same one. It is off here only because nothing has
+    # driven it end to end on the record side yet -- offering it untested
+    # would be a guess, not a feature.
+    "Tab": "Not wired up for recording yet",
 }
 
 # The record side's "then" vocabulary: Copy, Save and Open -- never Edit or

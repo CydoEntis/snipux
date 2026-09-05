@@ -108,6 +108,21 @@ class GeometryProvider(ABC):
     def window_at(self, point: QPointF) -> QRectF | None:
         """Absolute logical rect of the window under `point`, or None."""
 
+    def browser_viewport(self) -> "tuple[str, QRectF] | None":
+        """`(tab title, absolute logical rect)` of the frontmost browser's
+        page area -- everything below the tab strip and toolbars -- or None
+        when there is not one to capture.
+
+        Defaulted to None rather than abstract, the same way
+        `window_named_at` is defaulted: a provider that only knows window
+        geometry keeps working, and "no browser" and "this platform cannot
+        tell" are the same answer to the one caller. Wayland is permanently
+        the second case, since a client there cannot enumerate other
+        applications' windows at all -- which is why the mode greys itself
+        out rather than failing.
+        """
+        return None
+
     def window_named_at(self, point: QPointF) -> "tuple[str, QRectF] | None":
         """The window under `point` as `(title, rect)`, or None.
 
@@ -3691,6 +3706,12 @@ class OverlayWindow(QWidget):
         # `chooser._ReuseToggle`. Seeded here (which never emits) and
         # persisted on every real click, the same shape `kind` uses below.
         self._chooser.set_reuse_last_region(setup_desktop.load_reuse_last_region())
+        # `Tab` is greyed unless a browser page can actually be found. Asked
+        # once, here, rather than on every menu open: enumerating windows
+        # walks the whole desktop, and the answer cannot change while a
+        # frozen frame is on screen.
+        self._browser_tab = self._geometry_provider.browser_viewport()
+        self._chooser.set_browser_available(self._browser_tab is not None)
         self._chooser.reuseLastRegionChanged.connect(
             setup_desktop.save_reuse_last_region
         )
@@ -4029,6 +4050,8 @@ class OverlayWindow(QWidget):
             self._select_full_screen()
         elif mode == "Freeform":  # design.tokens.CAPTURE_MODES[3][0]
             self._enter_freeform_mode()
+        elif mode == design.tokens.TAB_MODE:
+            self._select_browser_tab()
         elif mode == "Region":  # design.tokens.CAPTURE_MODES[0][0]
             self._preselect_last_region()
         # handoff-chooser.md, Armed: "The cursor becomes a crosshair." The
@@ -4318,6 +4341,41 @@ class OverlayWindow(QWidget):
         )
         rect = self._monitor_at(self._to_absolute(cursor))
         self._commit_selection(self._to_local_rect(rect).toRect())
+
+    def _select_browser_tab(self) -> None:
+        """Set `_selection` to the page area of the frontmost browser.
+
+        Snaps immediately, like `_select_full_screen` above and for the
+        same reason: the rectangle is already decided, so there is nothing
+        left to aim at.
+
+        Uses the rect found when this overlay opened rather than asking
+        again. By now the frozen frame is on screen and this window is in
+        front of everything, so a second look would enumerate a desktop
+        that no longer matches the pixels being captured -- and the answer
+        could not have changed, because nothing can move while a frozen
+        frame is up.
+
+        Clipped to the frame, because a browser window can extend past the
+        virtual desktop's edge (a maximised window's frame does, by the
+        width of its invisible resize border) and the frame is the only
+        source of pixels there is. Nothing found leaves the selection
+        alone; the chooser will not normally offer the mode at all in that
+        case.
+        """
+        # No drag, so no anchor -- the page's own monitor is what
+        # `_chrome_bounds` should resolve against, as for Window and Full
+        # screen above.
+        self._selection_anchor = None
+        if self._browser_tab is None:
+            return
+        _title, viewport = self._browser_tab
+        usable = QRectF(viewport).intersected(
+            QRectF(self._frame.logical_origin, self._frame.logical_size)
+        )
+        if usable.isEmpty():
+            return
+        self._commit_selection(self._to_local_rect(usable).toRect())
 
     def _preselect_last_region(self) -> None:
         """Open Region mode on the rectangle the last snip was taken from,

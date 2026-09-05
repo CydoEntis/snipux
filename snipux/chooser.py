@@ -985,6 +985,11 @@ class Chooser(QWidget):
         self._record_after_default = tokens.RECORD_AFTER_DEFAULT
         self._delay = tokens.DELAY_DEFAULT
         self._kind = "stills"
+        # Whether there is a browser page for `Tab` to capture. False until
+        # told otherwise, so a Chooser built without a seed (every test that
+        # does) greys the row rather than promising a window nothing has
+        # found -- `OverlayWindow` is what asks the geometry provider.
+        self._browser_available = False
         # Each side's own destination, remembered across flips of the
         # switch. Only populated when a side is left, so a value that is
         # legal on both (`instant`, `save`) is never treated as displaced.
@@ -1045,7 +1050,7 @@ class Chooser(QWidget):
         """
         if mode not in dict((m[0], m) for m in tokens.CAPTURE_MODES):
             return
-        if self._kind == "record" and mode in tokens.RECORD_DISABLED_MODES:
+        if self._unavailable_reason(mode) is not None:
             # Window and Freeform aren't offered on the record side -- a
             # click on their disabled row is inert (`_MenuRow` already
             # swallows it), and a stray shortcut key must leave the current
@@ -1069,6 +1074,34 @@ class Chooser(QWidget):
     @property
     def reuse_last_region(self) -> bool:
         return self.panel.reuse_toggle.is_on()
+
+    def set_browser_available(self, available: bool) -> None:
+        """Say whether `Tab` has a browser page to capture.
+
+        Set from outside rather than looked up here: this widget is Qt and
+        `tokens` only -- no platform calls, no window enumeration -- which
+        is what lets its tests decide the answer instead of inheriting
+        whatever happens to be open on the machine running them.
+        """
+        self._browser_available = bool(available)
+        self._refresh_triggers()
+
+    def _unavailable_reason(self, mode: str) -> "str | None":
+        """Why `mode` cannot be picked right now, or None if it can.
+
+        Two independent reasons -- the record side does not offer every
+        mode, and `Tab` needs a browser to be open -- resolved in one place
+        so the menu's greyed rows and `set_mode`'s shortcut guard can never
+        disagree about which modes are live. A disabled row already
+        swallows its own click (`_MenuRow`); a stray shortcut key has to be
+        just as inert, and that only stays true if both ask the same
+        question.
+        """
+        if self._kind == "record" and mode in tokens.RECORD_DISABLED_MODES:
+            return tokens.RECORD_DISABLED_MODES[mode]
+        if mode == tokens.TAB_MODE and not self._browser_available:
+            return tokens.TAB_UNAVAILABLE
+        return None
 
     def set_reuse_last_region(self, on: bool) -> None:
         """Seed the toggle from stored config. Never emits -- see
@@ -1232,13 +1265,15 @@ class Chooser(QWidget):
             recording = self._kind == "record"
             rows = []
             for label, icon, note in tokens.CAPTURE_MODES:
-                disabled = recording and label in tokens.RECORD_DISABLED_MODES
-                if disabled:
+                unavailable = self._unavailable_reason(label)
+                if unavailable is not None:
                     # Why it cannot be picked outranks what it would do.
-                    note = tokens.RECORD_DISABLED_MODES[label]
+                    note = unavailable
                 elif recording:
                     note = tokens.RECORD_MODE_NOTE.get(label, note)
-                rows.append((label, icon, label, note, keys.get(label, ""), disabled))
+                rows.append(
+                    (label, icon, label, note, keys.get(label, ""), unavailable is not None)
+                )
             return rows, self._mode, tokens.ChooserMetric.MENU_MODE_W
         if kind == "after":
             after_rows = _RECORD_AFTER_ROWS if self._kind == "record" else _AFTER_ROWS

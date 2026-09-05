@@ -1309,6 +1309,159 @@ class WindowsWindowGeometryProvider:
     def is_available(self) -> bool:
         return sys.platform == "win32"
 
+    # Chromium-family executables. Firefox is deliberately absent: it has
+    # no `Chrome_RenderWidgetHostHWND` equivalent, so there is nothing to
+    # find and `browser_viewport()` correctly answers None for it. Matched
+    # case-insensitively -- Windows filenames are.
+    _BROWSER_PROCESSES = frozenset(
+        {"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe"}
+    )
+
+    # The child window Chromium puts the page itself in. Its rect is the
+    # viewport: everything below the tab strip, the address bar and the
+    # bookmarks bar, and nothing of them.
+    _RENDER_WIDGET_CLASS = "Chrome_RenderWidgetHostHWND"
+
+    def _process_name(self, hwnd) -> str:
+        """The executable name owning `hwnd` ("brave.exe"), or "".
+
+        `QueryFullProcessImageNameW` rather than `GetModuleFileNameExW`:
+        it needs only PROCESS_QUERY_LIMITED_INFORMATION (0x1000), which a
+        normal-integrity process is granted for other normal-integrity
+        processes. The fuller right `GetModuleFileNameEx` wants is refused
+        for anything elevated, which would make this answer "" for a
+        browser started as administrator.
+        """
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+        except (AttributeError, OSError):
+            return ""
+        pid = ctypes.c_uint32(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        handle = kernel32.OpenProcess(0x1000, False, pid.value)
+        if not handle:
+            return ""
+        try:
+            buffer = ctypes.create_unicode_buffer(260)
+            size = ctypes.c_uint32(len(buffer))
+            if not kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size)
+            ):
+                return ""
+            return buffer.value.rsplit("\\", 1)[-1]
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def _viewport_of(self, user32, hwnd) -> "QRectF | None":
+        """The page rect of Chromium window `hwnd`, in physical pixels.
+
+        A Chromium window carries **more than one**
+        `Chrome_RenderWidgetHostHWND`, and only one of them is the page.
+        Measured on a real browser window:
+
+            render widget  visible=False  rect=(2560,0)   8px below the frame
+            render widget  visible=True   rect=(2560,81)  89px below it
+
+        The hidden one starts level with the top of the window -- it would
+        take the tab strip and the address bar with it. `IsWindowVisible`
+        separates them cleanly, and is the whole of the rule.
+
+        None when the window has no visible one, which is what a
+        non-Chromium window and a Chromium window that has not finished
+        painting both look like.
+        """
+        found: list[QRectF] = []
+
+        def _visit(child, _lparam) -> bool:
+            buffer = ctypes.create_unicode_buffer(256)
+            if not user32.GetClassNameW(child, buffer, len(buffer)):
+                return True
+            if buffer.value != self._RENDER_WIDGET_CLASS:
+                return True
+            if not user32.IsWindowVisible(child):
+                return True
+            rect = _RECT()
+            if not user32.GetWindowRect(child, ctypes.byref(rect)):
+                return True
+            width = rect.right - rect.left
+            height = rect.bottom - rect.top
+            if width > 0 and height > 0:
+                found.append(QRectF(rect.left, rect.top, width, height))
+            return True
+
+        child_proc = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
+        )(_visit)
+        user32.EnumChildWindows(hwnd, child_proc, 0)
+        if not found:
+            return None
+        # Largest, on the vanishingly rare chance a window carries two
+        # visible ones: the page is the biggest thing in a browser window.
+        return max(found, key=lambda r: r.width() * r.height())
+
+    def browser_viewport(self) -> "tuple[str, QRectF] | None":
+        """`(tab title, absolute logical viewport rect)` for the frontmost
+        browser window, or None when there is not one.
+
+        The frontmost *browser* rather than the foreground window, because
+        by the time the user is choosing a capture mode the foreground
+        window is snipux's own overlay. `EnumWindows` visits in Z-order, so
+        the first Chromium window it reaches is the one the user was
+        looking at.
+
+        Windows belonging to this process are skipped by PID. The overlay
+        would usually be dropped anyway -- it spans the whole virtual
+        desktop, which `_is_larger_than_its_monitor` already rejects -- but
+        "usually" is not a thing to rely on for correctness.
+
+        The title is the window's, and on every Chromium browser that *is*
+        the focused tab's title. It is returned unparsed: stripping the
+        trailing " - Brave" would be a per-browser guess, and the caller
+        wants it to label a capture, not to identify a page.
+        """
+        if not self.is_available():
+            return None
+        try:
+            user32 = ctypes.windll.user32
+            dwmapi = ctypes.windll.dwmapi
+            kernel32 = ctypes.windll.kernel32
+        except (AttributeError, OSError):
+            return None
+
+        own_pid = kernel32.GetCurrentProcessId()
+        mapping = self.monitor_map()
+        found: list[tuple[str, QRectF]] = []
+
+        def _visit(hwnd, _lparam) -> bool:
+            if found:
+                return False  # Z-order: the first match is the frontmost
+            if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                return True
+            if self._is_cloaked(dwmapi, hwnd):
+                return True
+            pid = ctypes.c_uint32(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == own_pid:
+                return True
+            if self._process_name(hwnd).lower() not in self._BROWSER_PROCESSES:
+                return True
+            viewport = self._viewport_of(user32, hwnd)
+            if viewport is None:
+                return True
+            found.append(
+                (self._window_title(user32, hwnd), self._to_logical(viewport, mapping))
+            )
+            return False
+
+        enum_proc = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
+        )(_visit)
+        user32.EnumWindows(enum_proc, 0)
+        return found[0] if found else None
+
     def monitor_map(self) -> "list[tuple[QRectF, QRectF, float]]":
         """`[(physical monitor rect, logical screen rect, scale)]`, or `[]`
         when the two cannot be matched up with confidence.

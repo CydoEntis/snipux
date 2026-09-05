@@ -401,8 +401,11 @@ class TestEveryModeRowSaysWhatItCaptures:
 
 
 class TestTheModeMenuNarrowsOnTheRecordSide:
-    def test_stills_offers_all_four_modes_none_disabled(self):
+    def test_stills_offers_every_mode_and_disables_none_of_them(self):
         chooser = Chooser(parent=None)
+        # Seeded, or `Tab` is the one row the stills side does grey out --
+        # see TestTheTabModeNeedsABrowser, which is about that rule itself.
+        chooser.set_browser_available(True)
 
         rows, _selected, _width = chooser._rows_for("mode")
 
@@ -746,3 +749,54 @@ class TestFlippingKindDoesNotLeakTheDestination:
         chooser.set_kind("stills")
 
         assert chooser.after == "save"
+
+
+class TestTheTabModeNeedsABrowser:
+    """`Tab` captures the frontmost browser's page area. With no browser to
+    find -- none open, or a platform that cannot see other applications'
+    windows at all -- the row says so rather than offering a capture that
+    would produce nothing.
+    """
+
+    def test_it_is_greyed_with_a_reason_by_default(self):
+        chooser = Chooser(parent=None)
+
+        rows, _selected, _width = chooser._rows_for("mode")
+        by_value = {value: (note, disabled) for value, _i, _l, note, _s, disabled in rows}
+
+        note, disabled = by_value[tokens.TAB_MODE]
+        assert disabled is True
+        assert note == tokens.TAB_UNAVAILABLE
+
+    def test_the_shortcut_is_inert_while_the_row_is_disabled(self):
+        # A greyed row already swallows its own click; the shortcut key has
+        # to leave the current mode alone the same way, or the keyboard
+        # reaches a mode the menu says is unreachable.
+        chooser = Chooser(parent=None)
+        before = chooser.mode
+
+        chooser.set_mode(tokens.TAB_MODE)
+
+        assert chooser.mode == before
+
+    def test_seeding_a_browser_makes_it_pickable(self):
+        chooser = Chooser(parent=None)
+        chooser.set_browser_available(True)
+
+        chooser.set_mode(tokens.TAB_MODE)
+
+        assert chooser.mode == tokens.TAB_MODE
+
+    def test_it_is_greyed_on_the_record_side_even_with_a_browser(self):
+        # Recording a browser page is sensible and the rect is the same
+        # one; it is off because nothing has driven it end to end there.
+        chooser = Chooser(parent=None)
+        chooser.set_browser_available(True)
+        chooser.set_kind("record")
+
+        rows, _selected, _width = chooser._rows_for("mode")
+        by_value = {value: (note, disabled) for value, _i, _l, note, _s, disabled in rows}
+
+        note, disabled = by_value[tokens.TAB_MODE]
+        assert disabled is True
+        assert note == tokens.RECORD_DISABLED_MODES[tokens.TAB_MODE]
