@@ -24,6 +24,25 @@ signatures* -- one cheap hash per scanline, computed once per frame --
 rather than pixels. A 2560x1311 frame becomes 1311 integers, and finding
 the overlap between two frames is then integer comparison over a few
 thousand candidates instead of billions of pixel reads.
+
+NOT REACHABLE FROM THE UI TODAY, AND THAT IS DELIBERATE. Full-page capture
+was built, shipped in 0.4.x, and taken back off the chooser in 0.5.0. This
+module and `scroll.py` are correct as far as they go -- driven against a
+real browser they scrolled a real page and joined six frames into one
+2811px image with no seam -- and they are kept, with their tests, because
+the missing piece is one function's worth of work rather than a rewrite.
+
+What is missing is here, in `find_overlap`: it requires runs of
+**pixel-identical** rows to locate a join. That holds on a static page and
+fails on anything that redraws itself between grabs. Measured on a real
+site with live content, every scroll from 1 to 9 notches reported no
+overlap at all -- and on a page with playing video, only 3.5% of pixels
+actually changed. The information is there; the matcher is too strict to
+see it. Tolerating a small fraction of unmatched rows is what would make
+this shippable, and until then the mode works on some of the web and
+fails on the rest, which is worse than not offering it.
+
+See SNX-2 and docs/design/browser-capture.md.
 """
 
 from __future__ import annotations

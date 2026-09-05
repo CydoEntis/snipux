@@ -14,7 +14,6 @@ spanning two monitors arithmetic rather than a special case.
 from __future__ import annotations
 
 import math
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -55,7 +54,6 @@ from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.flowbars import FlowMenu
 from snipux.marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
-from snipux.scroll import ScrollCaptureError, capture_page
 from snipux.shapes import (
     Arrow,
     Blur,
@@ -1401,30 +1399,6 @@ class FloatingBar(_Chrome):
     def _on_tool_clicked(self, tool: str) -> None:
         self.select_tool(tool)
 
-    def set_annotation_visible(self, visible: bool) -> None:
-        """Show or hide the drawing half of the bar -- the tools, undo,
-        redo and discard.
-
-        For a capture that has not happened yet there is nothing to
-        annotate, and worse, anything drawn would be thrown away: a
-        full-page capture is assembled from frames grabbed *after* this
-        window steps aside, so marks made on the frozen frame beforehand
-        never reach it. Offering the tools would be offering work that
-        silently disappears.
-
-        The primary action, the destination caret and the bar itself all
-        stay: those still mean what they say.
-        """
-        for button in self._tool_buttons.values():
-            button.setVisible(visible)
-        self._undo_button.setVisible(visible)
-        # Redo only exists on the review window's bar; left to its own rule
-        # rather than forced visible here.
-        if self._trailing == "done":
-            self._redo_button.setVisible(visible)
-        self._clear_button.setVisible(visible)
-        self.adjustSize()
-
     def select_tool(self, tool: str) -> None:
         """Public equivalent of clicking `tool`'s own button: the same
         active-tool bookkeeping and `toolSelected` emission a click
@@ -2096,196 +2070,6 @@ class _BlurModeWell(QWidget):
         painter.setBrush(bg)
         painter.drawRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
         painter.end()
-
-
-class PageCaptureIndicator(QWidget):
-    """What the user watches while a page scrolls itself.
-
-    A full-page capture takes this overlay off screen for several seconds
-    -- it is covering the page it needs to scroll -- and until this existed
-    that left nothing at all: the outline vanished, the browser started
-    moving on its own, and the only report of the outcome was a toast on a
-    window that had just reappeared, which is easy to miss entirely.
-    Reported as "it scrolls but the borders disappear, it doesnt let me
-    know when its complete".
-
-    So this stays up in the overlay's place: the page's own bounds, and a
-    line saying what is happening. It is its own top-level window because
-    the overlay it replaces is hidden, and a child of a hidden window is
-    hidden too.
-
-    Transparent for input, and that is load-bearing rather than polish:
-    the browser is being driven with synthesised mouse input at the centre
-    of this very rectangle, and a window that accepted a click would
-    swallow the scroll it is reporting on.
-    """
-
-    _CAPTION_H = 34
-    _BORDER = 3
-
-    def __init__(self, viewport: QRectF, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.WindowTransparentForInput
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self._viewport = QRectF(viewport)
-        self._text = ""
-        self.setGeometry(
-            round(viewport.x()), round(viewport.y()),
-            round(viewport.width()), round(viewport.height()),
-        )
-
-    def say(self, text: str) -> None:
-        self._text = text
-        self.update()
-        # Painted now rather than on the next spin of the event loop: the
-        # caller is about to block on a scroll, and a caption that arrives
-        # after the thing it describes has finished is worse than none.
-        QApplication.processEvents()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(
-            self._BORDER / 2, self._BORDER / 2, -self._BORDER / 2, -self._BORDER / 2
-        )
-
-        pen = QPen(design.color("ACCENT"))
-        pen.setWidth(self._BORDER)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(rect)
-
-        if self._text:
-            font = _bar_font()
-            metrics = QFontMetricsF(font)
-            width = metrics.horizontalAdvance(self._text) + 28
-            caption = QRectF(
-                rect.center().x() - width / 2,
-                rect.top() + 16,
-                width,
-                self._CAPTION_H,
-            )
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(design.color("BAR_BG"))
-            painter.drawRoundedRect(caption, 8, 8)
-            painter.setPen(design.color("ACCENT"))
-            painter.setFont(font)
-            painter.drawText(
-                caption,
-                int(Qt.AlignmentFlag.AlignCenter),
-                self._text,
-            )
-        painter.end()
-
-
-class PageScopeSwitch(_Chrome):
-    """Visible / Full page, pinned to the outlined browser page.
-
-    The two things the browser mode can capture differ in *how much of the
-    page* is taken, not in what is being pointed at -- so they belong to
-    the page, not to a menu. Offering them as two menu rows made the user
-    choose before they could see what they were choosing between; this
-    outlines the page first and then asks.
-
-    Sits above the selection rather than below it. Below is where the
-    floating bar goes, and the two must not fight over the same strip of
-    screen when a page is framed near the bottom of a monitor.
-    """
-
-    scopeChanged = pyqtSignal(str)
-
-    _GAP_ABOVE = 12
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._scope = design.tokens.PAGE_SCOPE_DEFAULT
-        self._buttons: dict[str, _SegmentButton] = {}
-
-        metric = design.tokens.Metric
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
-        for value, label in design.tokens.PAGE_SCOPES:
-            button = _SegmentButton(label, self)
-            button.clicked.connect(lambda _c=False, v=value: self.set_scope(v))
-            self._buttons[value] = button
-            layout.addWidget(button)
-        self._sync()
-        self.adjustSize()
-
-    @property
-    def scope(self) -> str:
-        return self._scope
-
-    def set_scope(self, scope: str, *, announce: bool = True) -> None:
-        """Adopt `scope`. `announce=False` is for seeding, so a caller
-        putting the switch back to its default cannot be mistaken for the
-        user choosing something.
-        """
-        if scope not in dict(design.tokens.PAGE_SCOPES) or scope == self._scope:
-            return
-        self._scope = scope
-        self._sync()
-        if announce:
-            self.scopeChanged.emit(scope)
-
-    def _sync(self) -> None:
-        for value, button in self._buttons.items():
-            button.set_active(value == self._scope)
-
-    def paintEvent(self, event) -> None:
-        # The same glass panel `BlurTray`/`SettingsTray` paint, and painted
-        # the same way -- a translucent *brush*, never reduced widget
-        # opacity, so the segment labels drawn over it stay fully opaque
-        # (SNX-61). Without it the segments float on nothing and the active
-        # one is unreadable against whatever the frozen frame happens to
-        # show behind them.
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.Metric
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.color("BAR_BG"))
-        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
-
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.color("BAR_BORDER"))
-        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
-        painter.end()
-
-    def reposition(self, occupied: QRect, bounds: QRectF) -> None:
-        """Sit clear of the chrome already placed, centred on it.
-
-        `occupied` is everything the bar and its trays are using -- not
-        just the bar. Positioning against the bar alone was only half the
-        fix: with the drawing tools up, the colour tray sits below the bar,
-        and a switch pushed below the bar landed on top of it.
-
-        Positioned against chrome rather than against the selection,
-        because a browser page fills nearly the whole monitor. The bar then
-        has no room below the selection and flips above it, and a switch
-        that had *also* placed itself above the selection landed in the
-        same strip -- on the bar, and on the browser's own tab bar. The bar
-        has already solved "where is there room on this monitor"; following
-        what it decided is how the two cannot collide.
-        """
-        size = self.sizeHint()
-        bar = QRectF(occupied).toRect()
-        centre = QRectF(bar).center().x()
-        left = max(bounds.left(), min(centre - size.width() / 2,
-                                      bounds.right() - size.width()))
-        top = bar.top() - self._GAP_ABOVE - size.height()
-        if top < bounds.top():
-            top = bar.bottom() + self._GAP_ABOVE
-        top = max(bounds.top(), min(top, bounds.bottom() - size.height()))
-        self.setGeometry(round(left), round(top), size.width(), size.height())
 
 
 class ToolHintStrip(_Chrome):
@@ -4022,19 +3806,6 @@ class OverlayWindow(QWidget):
         # `.show()`, the same reason `_sync_bar_visibility` gates `_bar`.
         self._toast = Toast(self)
 
-        # Visible / Full page, pinned to the outlined page. Only ever up
-        # while the browser mode's own selection is -- see
-        # `_sync_scope_switch`.
-        self._scope_switch = PageScopeSwitch(self)
-        self._scope_switch.hide()
-        self._scope_switch.scopeChanged.connect(self._on_page_scope_changed)
-        # True while `_selection` is the browser page this window found,
-        # rather than anything the user framed. It is what lets the bar's
-        # Copy/Save/Open mean "the whole page" instead of "this rectangle".
-        self._browser_selection = False
-        # True only for the instant between `_select_browser_tab` asking
-        # for a selection and getting one -- see `_commit_selection`.
-        self._pending_browser_selection = False
 
         # The top hint HUD (SNX-46): behind the `hints` preference the spec
         # puts it behind -- SNX-65 changed the default to off. A real child
@@ -4131,11 +3902,6 @@ class OverlayWindow(QWidget):
         # way: framing anything by hand means the bar's actions are about
         # that rectangle again, not about a page.
         self._recalled_selection = False
-        self._browser_selection = False
-        if hasattr(self, "_bar"):
-            # Framing anything by hand means there is something to draw on
-            # again, whatever the switch last said.
-            self._bar.set_annotation_visible(True)
         self._selection = rect
         self._selection_path = path
         self._sync_bar_visibility()
@@ -4527,19 +4293,11 @@ class OverlayWindow(QWidget):
                 # only ever hands the choice along.
                 self._on_recording_requested(record_rect, self._delay, self.outcome)
             return
-        if self.outcome == "instant" and not self._pending_browser_selection:
+        if self.outcome == "instant":
             if setup_desktop.load_instant_saves():
                 self._on_bar_save()
             else:
                 self._on_bar_copy()
-        elif self._pending_browser_selection:
-            # `instant` means "finish the moment a selection is made", and
-            # for a browser page the selection is not the whole decision --
-            # visible or whole is still to come. Firing here would take the
-            # visible page and close before the switch was ever on screen,
-            # which is not a faster way to do what the user asked, it is a
-            # different thing entirely.
-            pass
 
     def absolute_selection(self) -> QRectF | None:
         """The current selection in absolute virtual-desktop coordinates,
@@ -4597,213 +4355,6 @@ class OverlayWindow(QWidget):
         rect = self._monitor_at(self._to_absolute(cursor))
         self._commit_selection(self._to_local_rect(rect).toRect())
 
-    # How far to scroll between grabs, as a fraction of the viewport. Well
-    # under a full screen, because overlap is the only evidence two frames
-    # belong together -- and further under it than that, because the join is
-    # found by matching a run of `stitch.PROBE_ROWS` rows and a thinner
-    # shared band cannot be matched even though it genuinely overlaps.
-    _FULL_PAGE_SCROLL_FRACTION = 0.65
-
-    # A wheel notch is three lines on a default Windows setup, and a line is
-    # about this many pixels. Only used to turn the fraction above into a
-    # number of notches -- how far the page *actually* moved is always
-    # measured from the pixels afterwards, never assumed from this.
-    _ASSUMED_PIXELS_PER_NOTCH = 100
-
-    # Milliseconds to let a scroll finish painting before grabbing. Smooth
-    # scrolling is an animation, and grabbing mid-animation yields a frame
-    # that matches neither its neighbours.
-    _FULL_PAGE_SETTLE_MS = 700
-
-    # How long the indicator holds its last word before closing. Long
-    # enough to read a sentence for a failure; a glance for a success,
-    # since the image itself is about to arrive.
-    _FAILURE_NOTICE_MS = 2600
-    _DONE_NOTICE_MS = 700
-
-    def _capture_full_page(self) -> None:
-        """Scroll the frontmost browser to the end and capture the lot.
-
-        The one capture in snipux that is not a single shot of a frozen
-        frame, and it cannot be: a page taller than the screen has no
-        pixels anywhere until something scrolls to them. CLAUDE.md reserved
-        this exception; `snipux/scroll.py` is where it lives.
-
-        This window has to get out of the way first. It is covering the
-        page, and its whole job the rest of the time is to *stop* the
-        desktop changing underneath a capture -- here the desktop changing
-        is the point. So the overlay hides, the browser takes focus, and
-        both are put back afterwards whatever happens.
-
-        Failures are reported through the toast and leave the snip open,
-        rather than closing with nothing: a page that could not be joined
-        is a thing to be told about, and the user may well want to frame a
-        region by hand instead.
-        """
-        self._selection_anchor = None
-        scroller = self._geometry_provider.browser_scroller()
-        if scroller is None or self._browser_tab is None:
-            self._show_toast("panel", "No browser page to capture")
-            return
-        _title, viewport = self._browser_tab
-
-        was_visible = self.isVisible()
-        # Takes this window's place while it is away. The overlay is about
-        # to disappear for several seconds -- it is covering the page it
-        # has to scroll -- and without something standing in, the outline
-        # vanishes, the browser starts moving on its own, and the outcome
-        # arrives as a toast on a window that has only just come back.
-        # Focus is taken *before* hiding, and that ordering is the whole
-        # of whether it works: Windows only lets a process call
-        # SetForegroundWindow while it already owns the foreground, and
-        # this overlay owns it right up until it hides. Asking afterwards
-        # is asking from a process with no foreground window, which Windows
-        # is entitled to refuse -- and did.
-        if not scroller.take_focus():
-            self._show_toast(
-                "panel",
-                "the browser would not come to the front, so it cannot be scrolled",
-            )
-            scroller.restore()
-            return
-
-        indicator = PageCaptureIndicator(viewport)
-        self.hide()
-        indicator.show()
-        indicator.raise_()
-        indicator.say("Preparing…")
-
-        image = None
-        try:
-            image = self._run_full_page_capture(scroller, viewport, indicator)
-            indicator.say(f"Done — {image.width()} × {image.height()}")
-            self._wait(self._DONE_NOTICE_MS)
-        except ScrollCaptureError as exc:
-            # Said where the user is already looking -- on the page, in the
-            # thing that has been reporting progress -- and held long
-            # enough to read, rather than flashed on an overlay that
-            # reappears at the same moment.
-            indicator.say(str(exc))
-            self._wait(self._FAILURE_NOTICE_MS)
-            self._show_toast("panel", str(exc))
-        finally:
-            # Both of these belong here and not on the paths above. The
-            # indicator is a top-level, always-on-top window that is
-            # transparent to input: one left behind by an unexpected
-            # failure cannot be closed, moved or clicked through by the
-            # user, and every later attempt stacks another on top of it.
-            # That is exactly what happened -- three captions painted over
-            # each other, from three captures that had each raised
-            # something the `except` above did not name.
-            scroller.restore()
-            indicator.close()
-            if was_visible:
-                self.show()
-
-        if image is not None:
-            self._deliver_full_page(image)
-
-    def _wait(self, milliseconds: int) -> None:
-        """Hold for `milliseconds` while staying answerable.
-
-        `processEvents` throughout rather than a bare sleep: this runs on
-        the UI thread, and a window that stops answering the compositor is
-        one Windows offers to close for you.
-        """
-        deadline = time.monotonic() + milliseconds / 1000
-        while time.monotonic() < deadline:
-            QApplication.processEvents()
-            time.sleep(0.02)
-
-    def _run_full_page_capture(self, scroller, viewport: QRectF, indicator=None) -> QImage:
-        """The scroll loop's arguments, bound to a real browser.
-
-        Split out so the loop itself (`scroll.capture_page`) stays free of
-        Qt, ctypes and this window -- it is tested with none of them.
-        """
-        notches = max(
-            1,
-            round(
-                viewport.height()
-                * self._FULL_PAGE_SCROLL_FRACTION
-                / self._ASSUMED_PIXELS_PER_NOTCH
-            ),
-        )
-
-        screens = {"n": 0}
-
-        def grab() -> QImage:
-            screens["n"] += 1
-            if indicator is not None:
-                # Counted, not shown as a percentage: how many screens a
-                # page has cannot be known until the bottom is reached, so
-                # a progress bar would be inventing its own denominator.
-                indicator.say(f"Capturing page… {screens['n']} screens")
-                # Hidden while the pixels are read: it is drawn over the
-                # very rectangle being captured and would land in the shot.
-                indicator.hide()
-                QApplication.processEvents()
-            image = self._registry.capture().crop(viewport).image.copy()
-            if indicator is not None:
-                indicator.show()
-                indicator.raise_()
-            return image
-
-        def scroll() -> None:
-            scroller.scroll(-notches)
-
-        def settle() -> None:
-            # processEvents as well as sleeping: this runs on the UI thread,
-            # and a window that stops answering the compositor while it
-            # waits is a window Windows offers to close for you.
-            deadline = time.monotonic() + self._FULL_PAGE_SETTLE_MS / 1000
-            while time.monotonic() < deadline:
-                QApplication.processEvents()
-                time.sleep(0.02)
-
-        # To the top first, so the capture starts at the beginning of the
-        # page rather than wherever it happened to be left. `capture_page`
-        # waits for this to finish landing before it takes anything --
-        # a jump up a long page is an animation of thousands of pixels, and
-        # one settle is nowhere near enough.
-        if indicator is not None:
-            indicator.say("Going to the top of the page…")
-        scroller.scroll(60)
-        settle()
-        return capture_page(grab, scroll, settle)
-
-    def _deliver_full_page(self, image: QImage) -> None:
-        """Finish a full-page capture the way the chosen destination says.
-
-        Not routed through `copy()`/`save()`: those flatten *the selection*
-        and its marks, and a full-page capture has neither -- there is no
-        selection, and nothing was annotated because the overlay was hidden
-        while it happened.
-        """
-        from snipux.app import copy_image_to_clipboard, save_image
-
-        # `edit` means "let me annotate this", and for a whole page that
-        # cannot happen here: the image is taller than the screen and this
-        # window is about to close. The review window is the same tools on
-        # a surface that can scroll, so `edit` is routed there rather than
-        # silently dropping the annotation step. `instant` and `save` are
-        # left alone -- both are explicit requests for no window.
-        if self.outcome == "edit":
-            self._chooser.set_after("review")
-
-        if self.outcome == "save" or (
-            self.outcome == "instant" and setup_desktop.load_instant_saves()
-        ):
-            directory = Path.home() / "Pictures" / self.SAVE_SUBDIRECTORY
-            path = save_image(image, directory)
-            self._show_toast("save", f"Saved to ~/Pictures/{self.SAVE_SUBDIRECTORY}")
-        else:
-            copy_image_to_clipboard(image)
-            path = None
-            self._show_toast("copy", "Copied to clipboard")
-        self._report_capture(image, path)
-        self.close()
-
     def _select_browser_tab(self) -> None:
         """Set `_selection` to the page area of the frontmost browser.
 
@@ -4837,80 +4388,7 @@ class OverlayWindow(QWidget):
         )
         if usable.isEmpty():
             return
-        # Set on the way in, not after: `_commit_selection` reads it to
-        # decide whether `instant` may finish the snip here, and
-        # `set_selection` clears it, so it is re-set immediately below.
-        self._pending_browser_selection = True
         self._commit_selection(self._to_local_rect(usable).toRect())
-        self._pending_browser_selection = False
-        self._browser_selection = True
-        self._scope_switch.set_scope(
-            design.tokens.PAGE_SCOPE_DEFAULT, announce=False
-        )
-        self._sync_annotation_tools()
-        self._sync_scope_switch()
-
-    def _on_page_scope_changed(self, _scope: str) -> None:
-        """The switch moved. Nothing is captured here -- the bar's own
-        Copy/Save/Open is still what takes the shot, and this only decides
-        how much of the page it takes.
-        """
-        self._sync_annotation_tools()
-        self._sync_bar_visibility()
-
-    def _sync_annotation_tools(self) -> None:
-        """Put the bar's drawing half away while a whole page is selected.
-
-        There is nothing to draw on yet, and worse, anything drawn would be
-        thrown away: a full-page capture is assembled from frames grabbed
-        *after* this window steps aside, so marks made on the frozen frame
-        beforehand never reach it. Showing the tools would be offering work
-        that silently disappears -- which is what happened before this
-        existed.
-
-        Annotating a whole page is not lost, only moved: the result opens
-        in the review window, which has the same tools and is the only
-        surface that can show an image taller than the screen.
-        """
-        drawing = not self._capturing_whole_page()
-        self._bar.set_annotation_visible(drawing)
-        if not drawing:
-            # Hiding the buttons is not enough: the colour/stroke tray
-            # follows the bar's *active tool*, not its buttons, so a pen
-            # left armed kept a whole tray on screen for a tool with no
-            # button and nothing to draw on. Disarm it, then let the trays
-            # re-sync against that.
-            self._bar.set_active_tool(None)
-            self.set_eraser_active(False)
-        self._sync_tray_visibility()
-
-    def _sync_scope_switch(self) -> None:
-        """Show the Visible / Full page switch exactly while the browser
-        mode's own selection is up.
-
-        Gated on `isVisible()` like every other piece of chrome here: a
-        child widget's own `show()` is enough to make Qt paint it into a
-        `grab()` of this window even when the window itself was never
-        shown, which would put it into this file's many pixel-sampling
-        tests uninvited.
-        """
-        if (
-            self._browser_selection
-            and self._selection is not None
-            and self.isVisible()
-            and not self._armed_for_recording
-        ):
-            # Everything already on screen, so the switch can place itself
-            # clear of all of it rather than only of the bar.
-            occupied = QRectF(self._bar.geometry())
-            for tray in (self._tray, self._blur_tray):
-                if tray.isVisible():
-                    occupied = occupied.united(QRectF(tray.geometry()))
-            self._scope_switch.reposition(occupied.toRect(), self._chrome_bounds())
-            self._scope_switch.show()
-            self._scope_switch.raise_()
-        else:
-            self._scope_switch.hide()
 
     def _preselect_last_region(self) -> None:
         """Open Region mode on the rectangle the last snip was taken from,
@@ -5309,12 +4787,8 @@ class OverlayWindow(QWidget):
             self._bar.reposition(self._selection, self._chrome_bounds())
             self._bar.show()
             self._sync_tray_visibility()
-            # Last, so `occupied` above already includes whatever tray the
-            # active tool just put on screen.
-            self._sync_scope_switch()
         else:
             self._bar.hide()
-            self._scope_switch.hide()
             self._tray.hide()
             self._blur_tray.hide()
             self._popover.hide()
@@ -5836,33 +5310,13 @@ class OverlayWindow(QWidget):
     # inside `copy()`/`save()` would make that toast invisible again before
     # a caller ever got to look at it.
 
-    def _capturing_whole_page(self) -> bool:
-        """Whether the bar's primary action should scroll the page rather
-        than crop the rectangle on screen.
-
-        Both conditions matter. `_browser_selection` says the rectangle is
-        a page this window found rather than anything the user framed --
-        drag a region and the bar is about that region again, whatever the
-        switch last said. The switch then says how much of that page.
-        """
-        return (
-            self._browser_selection
-            and self._scope_switch.scope == "full"
-        )
-
     def _on_bar_copy(self) -> None:
         """The floating bar's Copy button: copy, then dismiss."""
-        if self._capturing_whole_page():
-            self._capture_full_page()
-            return
         self.copy()
         self.close()
 
     def _on_bar_save(self) -> None:
         """The floating bar's Save button: save, then dismiss."""
-        if self._capturing_whole_page():
-            self._capture_full_page()
-            return
         self.save()
         self.close()
 
@@ -5877,9 +5331,6 @@ class OverlayWindow(QWidget):
         destination is "Review window -- annotate, crop, export".
         """
         self._chooser.set_after("review")
-        if self._capturing_whole_page():
-            self._capture_full_page()
-            return
         self.save()
         self.close()
 
@@ -5987,7 +5438,6 @@ class OverlayWindow(QWidget):
         self._popover.hide()
         self._shape_popover.hide()
         self._toast.hide()
-        self._scope_switch.hide()
         self._hud.hide()
         self._close_button.hide()
         self._chooser.hide()

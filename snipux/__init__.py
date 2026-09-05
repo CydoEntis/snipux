@@ -31,4 +31,4 @@ import os as _os
 # nothing for a per-platform override to buy.
 _os.environ.setdefault("QT_FFMPEG_ENCODING_HW_DEVICE_TYPES", "")
 
-__version__ = "0.4.5"
+__version__ = "0.5.0"

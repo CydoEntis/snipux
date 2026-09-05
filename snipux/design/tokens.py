@@ -252,7 +252,7 @@ CAPTURE_MODES = [
     ("Window",      "window",  "One application's window"),
     ("Full screen", "monitor", "The whole monitor you are on"),
     ("Freeform",    "pen",     "A shape you draw by hand"),
-    ("Browser",     "panel",   "A page, visible or whole"),
+    ("Browser",     "panel",   "Your browser page, no toolbars"),
 ]
 
 # The mode that captures a browser's page area. Named because three modules
@@ -260,13 +260,6 @@ CAPTURE_MODES = [
 # IMMEDIATE_MODES lists it.
 BROWSER_MODE = "Browser"
 
-# The two things the browser mode can capture, chosen from a switch pinned
-# to the outlined page rather than from two near-identical menu rows. They
-# differ in how much of the page is taken, not in what is being pointed at,
-# and a menu that offers both makes the user choose before they can see
-# what they are choosing between.
-PAGE_SCOPES = [("visible", "Visible"), ("full", "Full page")]
-PAGE_SCOPE_DEFAULT = "visible"
 
 
 # What the row says instead of its note when there is no browser to capture
@@ -667,7 +660,7 @@ MODE_NEXT_STEP = {
     "Window":      "Hover a window, click to take it",
     "Full screen": "Grabs this monitor the moment you choose it",
     "Freeform":    "Draw a closed shape around anything",
-    "Browser":     "Outlines the page -- pick visible or whole, then take it",
+    "Browser":     "Grabs your browser's page the moment you choose it",
 }
 
 # Mode shortcuts. Live whenever the chooser is on screen, armed or not.
