@@ -145,14 +145,48 @@ reasoning in
 ### Updating
 
 ```powershell
+snipux --update
+```
+
+If that answers `'snipux' is not recognized`, use:
+
+```powershell
 py -m snipux --update
 ```
 
 Then quit Snipux from the tray and press Ctrl+Alt+S to start the new one.
 
-That is all anyone needs to remember. `--update` runs exactly this on their
-behalf — it is not a second update mechanism, just the same one without a URL
-to keep somewhere findable:
+**Why two.** Neither form works everywhere, because it depends on how Snipux
+was installed, and the same machine cannot tell you which:
+
+| Installed with | `snipux --update` | `py -m snipux --update` |
+|---|---|---|
+| `py -m pip install …` (this README) | only if Python's `Scripts` folder is on `PATH` | ✅ |
+| `pipx install …` (an older README) | ✅ | ❌ `No module named snipux` |
+
+`pipx` puts Snipux in an environment of its own and a launcher on `PATH`, so
+the bare command works and `py -m` cannot see it at all — `py` runs the
+*system* Python, which has no Snipux in it. A plain `pip install` is the other
+way round. Try the bare command first, since it is shorter and covers the
+older instructions people may already have followed.
+
+**Installed with pipx? There is nothing to undo.** `pipx upgrade` is the
+cleanest route for those installs, and it needs no reinstalling and no
+uninstalling first:
+
+```powershell
+pipx upgrade snipux
+```
+
+The original `pipx install git+https://github.com/CydoEntis/snipux.git`
+recorded that URL, and it tracks the default branch — so upgrading refetches
+`main` and lands the same code the instructions above install. There is no
+reason to switch a working pipx install over to `pip`, and doing so without
+uninstalling first leaves two copies fighting over one Ctrl+Alt+S
+registration and two Startup entries.
+
+Either way `--update` runs exactly this on their behalf — it is not a second
+update mechanism, just the same one without a URL to keep somewhere findable:
 
 ```powershell
 py -m pip install --upgrade https://github.com/CydoEntis/snipux/archive/refs/heads/main.tar.gz
@@ -412,20 +446,35 @@ Settings.
 | `snipux --setup` | Install desktop integration. Safe to re-run |
 | `snipux --setup --shortcut '…'` | Same, binding a specific accelerator and remembering it |
 | `snipux --remove` | Undo everything `--setup` wrote |
-| `snipux --update` | Fetch and install the newest Snipux from GitHub, then say what to restart |
+| `snipux --update` | Fetch and install the newest Snipux from GitHub, then say what to restart. `py -m snipux --update` is the same thing where `PATH` has no `snipux` on it |
 | `snipux --list-backends` | Print every capture *and* recording backend, its availability, and why the unavailable ones aren't |
 
 ## Uninstall
 
-Run `snipux --remove` **before** `pipx uninstall snipux`, so the desktop entry,
-the autostart entry, the installed icons and the bound shortcut all go with it:
+Run `snipux --remove` **first**, so the desktop entry, the autostart entry,
+the installed icons and the bound shortcut all go with it. Then remove the
+package the way it was installed.
+
+Installed with pipx:
 
 ```sh
 snipux --remove
 pipx uninstall snipux
 ```
 
-`pipx uninstall` only removes the installed package — it has no idea `--setup`
+Installed with pip:
+
+```powershell
+py -m snipux --remove
+py -m pip uninstall snipux
+```
+
+If you are unsure which you have, `pipx list` and `py -m pip show snipux`
+answer it — and if both do, you have two copies, which is worth fixing:
+they fight over one Ctrl+Alt+S registration, and whichever loses simply
+never answers the shortcut. Remove one of them.
+
+Uninstalling only removes the installed package — it has no idea `--setup`
 also wrote files outside it, so skipping `--remove` first leaves an autostart
 entry pointing at a binary that no longer exists, a dead keyboard shortcut, and
 a ghost entry in your application list. `--remove` only ever splices its own
@@ -457,6 +506,25 @@ can't get pixels if the portal that owns them refuses, or isn't there at all.
 **Recording is unavailable.** `snipux --list-backends` answers this directly:
 capture and recording are separate registries with separate answers. On Linux,
 recording needs GNOME Shell — see [Recording](#recording).
+
+**`No module named snipux` when updating.** `py` runs the *system* Python,
+and Snipux is not installed in it — which is normal if it was installed with
+`pipx`, whose whole job is to keep it in an environment of its own. Use the
+bare command instead:
+
+```powershell
+snipux --update
+```
+
+If neither that nor `py -m snipux --update` works, nothing is installed where
+either can see it. `pipx list` says whether pipx has it; `py -m pip show
+snipux` says whether the system Python does. Install per
+[Windows](#windows) above and both will work.
+
+**`'snipux' is not recognized`.** The opposite case: it is installed in the
+system Python, but that Python's `Scripts` folder is not on `PATH`. Use
+`py -m snipux --update`, which does not need `PATH` at all. (Re-running the
+Python installer and ticking *"Add python.exe to PATH"* fixes it properly.)
 
 **Nothing happens when I press the shortcut.** Check `snipux --snip` works when
 run by hand from a terminal. On Windows, check Snipux is actually running: the
