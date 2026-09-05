@@ -31,130 +31,76 @@ drawing on an image already held in memory.
 
 ### Windows
 
-Windows ships as a single standalone `snipux.exe` (SNX-96) — no Python, and
-no terminal, required, and no installer to run first:
-
-1. Download `snipux.exe` from the
-   [Releases page](https://github.com/CydoEntis/snipux/releases) (newest
-   release, under Assets).
-2. Run it. The first run sets itself up — it relocates itself into your own
-   user folder, adds a Start Menu shortcut and a Startup entry, and
-   registers the Ctrl+Alt+S shortcut — the same as `snipux --setup` does
-   for the pipx route below. No administrator prompt.
-
-**Windows will interrupt that with a SmartScreen warning first**, and it's
-worth knowing exactly what you'll see so it doesn't look like the download
-failed: a blue box reading **"Windows protected your PC"**, with smaller
-text underneath naming "an unrecognized app". This is Microsoft Defender
-SmartScreen's standard reaction to *any* downloaded executable without a
-paid code-signing certificate — it is not a virus warning and not a sign
-the download is broken. Click **More info**, then **Run anyway**. (See
-[Why the exe isn't signed](docs/releasing.md#why-the-exe-isnt-signed) for
-the reasoning behind that certificate not existing.)
-
-**There is deliberately no installer.** An earlier version of Snipux
-shipped one (built with Inno Setup), and it ran straight into Smart App
-Control — a stricter, opt-in Windows 11 feature that is nonetheless on by
-default on a meaningful share of clean Windows 11 installs. Smart App
-Control blocked that installer outright: the message read like the file
-was corrupt or unsafe, not like a policy decision, and unlike SmartScreen
-there was no "More info → Run anyway" to click through — so for those
-users the installer did not just inconvenience, it did not work at all.
-Signing would satisfy Smart App Control, but costs a few hundred dollars a
-year and, since 2023, requires a hardware token (see
-[docs/releasing.md](docs/releasing.md#why-the-exe-isnt-signed)); that has
-been considered and declined. The portable exe above is not blocked by
-Smart App Control, and since it installs itself on first run it delivers
-what the installer was for without the thing that broke it — so don't
-re-add one without re-reading this. If you ever do hit Smart App Control
-blocking the exe itself, `pipx` (below) runs through the already-trusted
-`python.exe` instead of a new unsigned executable.
-
-Once running, Snipux's shortcut is **Ctrl+Alt+S**, not Windows'
-Win+Shift+S — that combination already belongs to the Windows Snipping
-Tool, and Windows won't hand the same combination to a second app. Change
-it from tray → Settings…, the same as on Linux.
-
-**Snipux has to actually be running for Ctrl+Alt+S to do anything.** Unlike
-GNOME's shortcut on Linux, which the desktop itself owns, Windows' hotkey is
-a registration the Snipux process holds only while it's alive. That's what
-autostart is for: the first run's Startup-folder entry means Snipux is
-already running by the time you'd want to press the shortcut, from the next
-login onward.
-
-Already have Python? `pipx` works identically on Windows — see below.
-
-### Updating an existing install
-
-Check which version is running first: **tray → Settings**, bottom-left of
-the window, e.g. `Snipux 0.2.0 / Qt 6.11.0 · Windows`.
-
-**If they run `snipux.exe`:** send them the new one and have them run it.
-It copies itself over the old install at
-`%LocalAppData%\snipux\snipux.exe`, so the shortcuts keep working and the
-two versions never coexist.
-
-> **Quit Snipux from the tray first.** A running Snipux holds that file
-> open, the copy fails, and the update silently does not happen — the old
-> version just keeps running. There is no error; the version line in
-> Settings is the only way to tell.
-
-**If they installed with pipx:** `--force` is required, not optional —
-without it pipx sees the same package name and does nothing.
+Snipux needs Python 3.10+ ([python.org](https://www.python.org/downloads/),
+tick **Add python.exe to PATH** if asked). Then, given the
+`snipux-<version>-py3-none-any.whl` file:
 
 ```powershell
-pipx install --force C:\path\to\snipux-<version>-py3-none-any.whl
+py -m pip install snipux-0.2.0-py3-none-any.whl
+py -m snipux --setup
 ```
 
-`snipux --setup` does **not** need re-running: the shortcut, Startup entry
-and hotkey all point at a stable location that does not change between
-versions.
+That is the whole install. The first command takes a few minutes the first
+time, because it pulls down Qt.
 
-**There is no update check.** Snipux never phones home and has no idea a
-newer version exists, so someone has to tell each user. Adding one is not
-a small change while this repository is private: GitHub's API answers 404
-for a private repo without a token, and a token cannot be shipped inside a
-binary that anyone can open.
+`--setup` writes the Start Menu shortcut, the Startup entry, and the
+**Ctrl+Alt+S** hotkey. Only ever needed once, not on later updates.
 
-### Sending it to someone else
+Both commands use `py -m ...` deliberately rather than a bare `snipux`.
+`py` is the Python launcher Windows installs with Python itself, and `-m`
+runs the package directly — so neither command depends on any folder
+having been added to `PATH`, which is the step that most often silently
+does not happen and leaves `'snipux' is not recognized` as the only
+symptom.
 
-The repository is private, so `pipx install git+https://…` only works for
-people who have access to it. To put Snipux on someone else's Windows
-machine without adding them as a collaborator — and without handing them an
-executable that Smart App Control may refuse to run — send them a **wheel**:
+**Nothing here trips Smart App Control or SmartScreen**, which is the
+point. Both react to unrecognised *executables*; a wheel is a zip of
+Python source and images, installed by the `python.exe` the user already
+trusts. See "Why there's no installer" in
+[docs/releasing.md](docs/releasing.md) for the history — an earlier Inno
+Setup installer was blocked outright, with no way to click through.
+
+### Updating
+
+One command. Same as installing, with the newer file:
 
 ```powershell
-python -m pip install --upgrade build
+py -m pip install snipux-0.3.0-py3-none-any.whl
+```
+
+No `--setup` again: the shortcut and hotkey point at a location that does
+not change between versions. No need to quit Snipux first either — the
+files being replaced are plain Python source, which Windows does not lock.
+Restart Snipux to actually run the new version.
+
+**Check it worked:** tray → Settings, bottom-left, e.g.
+`Snipux 0.2.0 / Qt 6.11.0 · Windows`.
+
+> Every release must carry a new version number. Handed a wheel whose
+> version already matches what is installed, pip prints *"already
+> installed with the same version"* and changes nothing — so re-issuing a
+> fixed build under an old number produces a silent no-op, and the user
+> reports the bug again. `--force-reinstall` overrides it, but bumping the
+> version in `pyproject.toml` is the fix.
+
+**There is no update check.** Snipux never phones home, so someone has to
+tell each user a new version exists. Adding one is not a small change
+while this repository is private: GitHub's API answers 404 for a private
+repo without a token, and a token cannot be shipped inside something
+anyone can open.
+
+### Building the wheel to send
+
+```powershell
 python -m build --wheel
 ```
 
-That writes `dist/snipux-<version>-py3-none-any.whl`. Send them that one
-file. On their machine, with Python 3.10+ installed:
+Writes `dist/snipux-<version>-py3-none-any.whl`. That single file is
+everything a user needs — send it however you like.
 
-```powershell
-python -m pip install --user pipx
-python -m pipx ensurepath
-pipx install C:\path\to\snipux-<version>-py3-none-any.whl
-snipux --setup
-```
-
-`--setup` writes the Start Menu shortcut, the Startup entry and the
-Ctrl+Alt+S binding, exactly as it does for a git install.
-
-**Smart App Control does not block this route**, which is the whole reason
-it exists alongside `snipux.exe`. The `snipux` launcher `pipx` puts on PATH
-is generated on their machine by pip, from the `python.exe` they already
-trust — nothing unsigned is ever downloaded and run, so there is no
-unrecognised binary for Smart App Control or SmartScreen to object to. The
-wheel is a zip of Python source and PNG/SVG assets; neither feature
-inspects it.
-
-The one thing they do need is Python, which the standalone `snipux.exe`
-does not require. If they have it (or will install it from python.org or
-the Microsoft Store), this is the smoothest path. If they don't and won't,
-`snipux.exe` is the alternative — and if Smart App Control blocks *that*,
-this section is the fallback.
-
+Bump `version` in `pyproject.toml` first (and `__version__` in
+`snipux/__init__.py`, which is not read from it), or the update above is
+the silent no-op described there.
 
 ### Linux
 
@@ -192,10 +138,12 @@ snipux --setup
 `--setup` writes the pieces `pipx install` can't: the `.desktop` entry, the
 autostart entry, and the GNOME Super+Shift+S shortcut. Safe to re-run.
 
-The same two `pipx install` commands work unchanged on Windows if you
-already have Python — `--setup` there writes the Start Menu shortcut, the
-Startup entry, and registers Ctrl+Alt+S instead, in place of the
-`.desktop`/GNOME pieces above.
+Either `pipx install` above also works on Windows, if you would rather have
+the isolated environment pipx gives than the plain `py -m pip install` the
+Windows section uses. `--setup` there writes the Start Menu shortcut, the
+Startup entry, and registers Ctrl+Alt+S instead of the `.desktop`/GNOME
+pieces. It needs access to this repository, which is why it is not the
+route someone is handed a wheel for.
 
 #### Using a different shortcut
 
@@ -322,19 +270,29 @@ time.
 
 ## Uninstall
 
-Run `snipux --remove` **before** `pipx uninstall snipux`, so the desktop
-entry, the autostart entry, the installed icons, and the GNOME
-Super+Shift+S shortcut all go with it:
+Run `snipux --remove` **first**, so the shortcuts, the autostart entry, the
+installed icons and the hotkey all go with it, then remove the package
+itself.
+
+On Windows:
+
+```powershell
+py -m snipux --remove
+py -m pip uninstall snipux
+```
+
+On Linux (or a Windows pipx install):
 
 ```sh
 snipux --remove
 pipx uninstall snipux
 ```
 
-`pipx uninstall` only removes the installed package — it has no idea
+Uninstalling only removes the installed package — it has no idea
 `--setup` also wrote files outside it, so skipping `--remove` first leaves
-an autostart entry pointing at a binary that no longer exists, a dead
-keyboard shortcut, and a ghost entry in GNOME's application list. `--remove`
+an autostart entry pointing at something that no longer exists, a dead
+keyboard shortcut, and — on Linux — a ghost entry in GNOME's application
+list. `--remove`
 only ever splices its own custom-keybinding slot out of GNOME's list, so any
 other shortcuts you've set up by hand are left alone. Safe to re-run, same
 as `--setup`.
