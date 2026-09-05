@@ -2074,6 +2074,105 @@ class _BlurModeWell(QWidget):
         painter.end()
 
 
+class PageScopeSwitch(_Chrome):
+    """Visible / Full page, pinned to the outlined browser page.
+
+    The two things the browser mode can capture differ in *how much of the
+    page* is taken, not in what is being pointed at -- so they belong to
+    the page, not to a menu. Offering them as two menu rows made the user
+    choose before they could see what they were choosing between; this
+    outlines the page first and then asks.
+
+    Sits above the selection rather than below it. Below is where the
+    floating bar goes, and the two must not fight over the same strip of
+    screen when a page is framed near the bottom of a monitor.
+    """
+
+    scopeChanged = pyqtSignal(str)
+
+    _GAP_ABOVE = 12
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scope = design.tokens.PAGE_SCOPE_DEFAULT
+        self._buttons: dict[str, _SegmentButton] = {}
+
+        metric = design.tokens.Metric
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        for value, label in design.tokens.PAGE_SCOPES:
+            button = _SegmentButton(label, self)
+            button.clicked.connect(lambda _c=False, v=value: self.set_scope(v))
+            self._buttons[value] = button
+            layout.addWidget(button)
+        self._sync()
+        self.adjustSize()
+
+    @property
+    def scope(self) -> str:
+        return self._scope
+
+    def set_scope(self, scope: str, *, announce: bool = True) -> None:
+        """Adopt `scope`. `announce=False` is for seeding, so a caller
+        putting the switch back to its default cannot be mistaken for the
+        user choosing something.
+        """
+        if scope not in dict(design.tokens.PAGE_SCOPES) or scope == self._scope:
+            return
+        self._scope = scope
+        self._sync()
+        if announce:
+            self.scopeChanged.emit(scope)
+
+    def _sync(self) -> None:
+        for value, button in self._buttons.items():
+            button.set_active(value == self._scope)
+
+    def paintEvent(self, event) -> None:
+        # The same glass panel `BlurTray`/`SettingsTray` paint, and painted
+        # the same way -- a translucent *brush*, never reduced widget
+        # opacity, so the segment labels drawn over it stay fully opaque
+        # (SNX-61). Without it the segments float on nothing and the active
+        # one is unreadable against whatever the frozen frame happens to
+        # show behind them.
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.Metric
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("BAR_BG"))
+        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.color("BAR_BORDER"))
+        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
+        painter.end()
+
+    def reposition(self, selection: QRect, bounds: QRectF) -> None:
+        """Centre on `selection`'s top edge, just above it, clamped into
+        `bounds` -- the monitor rect, the same one the floating bar is
+        clamped to and for the same reason: a union of monitors has gaps
+        in it that display nothing.
+
+        Falls *inside* the page when there is no room above, which is the
+        one case where covering a few pixels of what is about to be
+        captured is better than being off screen entirely. The capture
+        itself is unaffected either way -- this widget is chrome, and
+        `hideEvent` takes it down before any pixels are read.
+        """
+        size = self.sizeHint()
+        centre = QRectF(selection).center().x()
+        left = max(bounds.left(), min(centre - size.width() / 2,
+                                      bounds.right() - size.width()))
+        top = QRectF(selection).top() - self._GAP_ABOVE - size.height()
+        if top < bounds.top():
+            top = QRectF(selection).top() + self._GAP_ABOVE
+        top = max(bounds.top(), min(top, bounds.bottom() - size.height()))
+        self.setGeometry(round(left), round(top), size.width(), size.height())
+
+
 class ToolHintStrip(_Chrome):
     """Names the active tool and says what it does, for tools the settings
     tray does not cover.
@@ -3808,6 +3907,17 @@ class OverlayWindow(QWidget):
         # `.show()`, the same reason `_sync_bar_visibility` gates `_bar`.
         self._toast = Toast(self)
 
+        # Visible / Full page, pinned to the outlined page. Only ever up
+        # while the browser mode's own selection is -- see
+        # `_sync_scope_switch`.
+        self._scope_switch = PageScopeSwitch(self)
+        self._scope_switch.hide()
+        self._scope_switch.scopeChanged.connect(self._on_page_scope_changed)
+        # True while `_selection` is the browser page this window found,
+        # rather than anything the user framed. It is what lets the bar's
+        # Copy/Save/Open mean "the whole page" instead of "this rectangle".
+        self._browser_selection = False
+
         # The top hint HUD (SNX-46): behind the `hints` preference the spec
         # puts it behind -- SNX-65 changed the default to off. A real child
         # widget the same way `_bar`/`_toast` are -- see `_sync_hud_visibility`
@@ -3899,8 +4009,11 @@ class OverlayWindow(QWidget):
             self._selection_anchor = None
         # Every other route to a selection is one the user asked for, so
         # the recall flag is cleared here and re-set by
-        # `_preselect_last_region` alone.
+        # `_preselect_last_region` alone. The browser flag goes the same
+        # way: framing anything by hand means the bar's actions are about
+        # that rectangle again, not about a page.
         self._recalled_selection = False
+        self._browser_selection = False
         self._selection = rect
         self._selection_path = path
         self._sync_bar_visibility()
@@ -4062,10 +4175,8 @@ class OverlayWindow(QWidget):
             self._select_full_screen()
         elif mode == "Freeform":  # design.tokens.CAPTURE_MODES[3][0]
             self._enter_freeform_mode()
-        elif mode == design.tokens.TAB_MODE:
+        elif mode == design.tokens.BROWSER_MODE:
             self._select_browser_tab()
-        elif mode == design.tokens.FULL_PAGE_MODE:
-            self._capture_full_page()
         elif mode == "Region":  # design.tokens.CAPTURE_MODES[0][0]
             self._preselect_last_region()
         # handoff-chooser.md, Armed: "The cursor becomes a crosshair." The
@@ -4517,6 +4628,42 @@ class OverlayWindow(QWidget):
         if usable.isEmpty():
             return
         self._commit_selection(self._to_local_rect(usable).toRect())
+        # Set after committing: `set_selection` clears it, and this is the
+        # one caller for which it must survive.
+        self._browser_selection = True
+        self._scope_switch.set_scope(
+            design.tokens.PAGE_SCOPE_DEFAULT, announce=False
+        )
+        self._sync_scope_switch()
+
+    def _on_page_scope_changed(self, _scope: str) -> None:
+        """The switch moved. Nothing is captured here -- the bar's own
+        Copy/Save/Open is still what takes the shot, and this only decides
+        how much of the page it takes.
+        """
+        self._sync_bar_visibility()
+
+    def _sync_scope_switch(self) -> None:
+        """Show the Visible / Full page switch exactly while the browser
+        mode's own selection is up.
+
+        Gated on `isVisible()` like every other piece of chrome here: a
+        child widget's own `show()` is enough to make Qt paint it into a
+        `grab()` of this window even when the window itself was never
+        shown, which would put it into this file's many pixel-sampling
+        tests uninvited.
+        """
+        if (
+            self._browser_selection
+            and self._selection is not None
+            and self.isVisible()
+            and not self._armed_for_recording
+        ):
+            self._scope_switch.reposition(self._selection, self._chrome_bounds())
+            self._scope_switch.show()
+            self._scope_switch.raise_()
+        else:
+            self._scope_switch.hide()
 
     def _preselect_last_region(self) -> None:
         """Open Region mode on the rectangle the last snip was taken from,
@@ -4915,8 +5062,10 @@ class OverlayWindow(QWidget):
             self._bar.reposition(self._selection, self._chrome_bounds())
             self._bar.show()
             self._sync_tray_visibility()
+            self._sync_scope_switch()
         else:
             self._bar.hide()
+            self._scope_switch.hide()
             self._tray.hide()
             self._blur_tray.hide()
             self._popover.hide()
@@ -5438,13 +5587,33 @@ class OverlayWindow(QWidget):
     # inside `copy()`/`save()` would make that toast invisible again before
     # a caller ever got to look at it.
 
+    def _capturing_whole_page(self) -> bool:
+        """Whether the bar's primary action should scroll the page rather
+        than crop the rectangle on screen.
+
+        Both conditions matter. `_browser_selection` says the rectangle is
+        a page this window found rather than anything the user framed --
+        drag a region and the bar is about that region again, whatever the
+        switch last said. The switch then says how much of that page.
+        """
+        return (
+            self._browser_selection
+            and self._scope_switch.scope == "full"
+        )
+
     def _on_bar_copy(self) -> None:
         """The floating bar's Copy button: copy, then dismiss."""
+        if self._capturing_whole_page():
+            self._capture_full_page()
+            return
         self.copy()
         self.close()
 
     def _on_bar_save(self) -> None:
         """The floating bar's Save button: save, then dismiss."""
+        if self._capturing_whole_page():
+            self._capture_full_page()
+            return
         self.save()
         self.close()
 
@@ -5459,6 +5628,9 @@ class OverlayWindow(QWidget):
         destination is "Review window -- annotate, crop, export".
         """
         self._chooser.set_after("review")
+        if self._capturing_whole_page():
+            self._capture_full_page()
+            return
         self.save()
         self.close()
 
@@ -5566,6 +5738,7 @@ class OverlayWindow(QWidget):
         self._popover.hide()
         self._shape_popover.hide()
         self._toast.hide()
+        self._scope_switch.hide()
         self._hud.hide()
         self._close_button.hide()
         self._chooser.hide()

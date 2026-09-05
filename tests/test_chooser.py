@@ -793,9 +793,9 @@ class TestTheTabModeNeedsABrowser:
         rows, _selected, _width = chooser._rows_for("mode")
         by_value = {value: (note, disabled) for value, _i, _l, note, _s, disabled in rows}
 
-        note, disabled = by_value[tokens.TAB_MODE]
+        note, disabled = by_value[tokens.BROWSER_MODE]
         assert disabled is True
-        assert note == tokens.TAB_UNAVAILABLE
+        assert note == tokens.BROWSER_UNAVAILABLE
 
     def test_the_shortcut_is_inert_while_the_row_is_disabled(self):
         # A greyed row already swallows its own click; the shortcut key has
@@ -804,7 +804,7 @@ class TestTheTabModeNeedsABrowser:
         chooser = Chooser(parent=None)
         before = chooser.mode
 
-        chooser.set_mode(tokens.TAB_MODE)
+        chooser.set_mode(tokens.BROWSER_MODE)
 
         assert chooser.mode == before
 
@@ -812,9 +812,9 @@ class TestTheTabModeNeedsABrowser:
         chooser = Chooser(parent=None)
         chooser.set_browser_available(True)
 
-        chooser.set_mode(tokens.TAB_MODE)
+        chooser.set_mode(tokens.BROWSER_MODE)
 
-        assert chooser.mode == tokens.TAB_MODE
+        assert chooser.mode == tokens.BROWSER_MODE
 
     def test_it_is_greyed_on_the_record_side_even_with_a_browser(self):
         # Recording a browser page is sensible and the rect is the same
@@ -826,6 +826,6 @@ class TestTheTabModeNeedsABrowser:
         rows, _selected, _width = chooser._rows_for("mode")
         by_value = {value: (note, disabled) for value, _i, _l, note, _s, disabled in rows}
 
-        note, disabled = by_value[tokens.TAB_MODE]
+        note, disabled = by_value[tokens.BROWSER_MODE]
         assert disabled is True
-        assert note == tokens.RECORD_DISABLED_MODES[tokens.TAB_MODE]
+        assert note == tokens.RECORD_DISABLED_MODES[tokens.BROWSER_MODE]

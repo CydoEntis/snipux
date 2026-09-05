@@ -7387,6 +7387,15 @@ class TestFullPageCapture:
         overlay.setGeometry(0, 0, 800, 600)
         return overlay
 
+    def _take_whole_page(self, overlay):
+        """The real route: choose the mode, flip the switch to Full page,
+        then press the bar's primary action -- which is what actually takes
+        the shot, exactly as a user does it.
+        """
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+        overlay._scope_switch.set_scope("full")
+        overlay._on_bar_copy()
+
     def test_a_browser_that_will_not_focus_is_reported_not_scrolled(self):
         # SendInput reaches the focused window and nothing else, so
         # scrolling without the foreground would send input somewhere else
@@ -7394,7 +7403,7 @@ class TestFullPageCapture:
         scroller = _FakeScroller(focusable=False)
         overlay = self._overlay(scroller)
 
-        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+        self._take_whole_page(overlay)
 
         assert scroller.scrolls == []
         assert scroller.restored == 1, "focus must be handed back anyway"
@@ -7403,7 +7412,7 @@ class TestFullPageCapture:
         scroller = _FakeScroller(focusable=False)
         overlay = self._overlay(scroller)
 
-        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+        self._take_whole_page(overlay)
 
         assert scroller.restored == 1
 
@@ -7414,7 +7423,7 @@ class TestFullPageCapture:
         overlay = OverlayWindow(frame, monitor_geometries=[QRectF(0, 0, 800, 600)],
                                 geometry_provider=provider)
 
-        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
 
         assert overlay._selection is None
 
@@ -7435,7 +7444,7 @@ class TestFullPageCapture:
             raise ScrollCaptureError("stop here")
 
         overlay._run_full_page_capture = watching
-        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+        self._take_whole_page(overlay)
 
         assert seen == [False], "the overlay was still up while scrolling"
 
@@ -7451,7 +7460,7 @@ class TestFullPageCapture:
             ScrollCaptureError("the page was still growing")
         )
 
-        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
 
         assert overlay.isVisible()
         assert not overlay.isHidden()
@@ -7468,7 +7477,7 @@ class TestFullPageCapture:
         overlay._run_full_page_capture = lambda *a, **k: page
 
         overlay._chooser.set_after("edit")
-        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+        self._take_whole_page(overlay)
 
         assert len(copied) == 1
         assert copied[0].height() == 900
@@ -7485,7 +7494,7 @@ class TestFullPageCapture:
         overlay._run_full_page_capture = lambda *a, **k: page
 
         overlay._chooser.set_after("save")
-        overlay._dispatch_capture_mode(tokens.FULL_PAGE_MODE)
+        self._take_whole_page(overlay)
 
         assert reported and reported[0] is not None
         assert reported[0].suffix == ".png"
@@ -7497,12 +7506,62 @@ class TestFullPageCapture:
         overlay = OverlayWindow(frame, monitor_geometries=[QRectF(0, 0, 800, 600)],
                                 geometry_provider=provider)
 
-        assert overlay._chooser._unavailable_reason(tokens.FULL_PAGE_MODE) is not None
+        assert overlay._chooser._unavailable_reason(tokens.BROWSER_MODE) is not None
 
     def test_it_is_offered_when_a_browser_is_there(self):
         overlay = self._overlay(_FakeScroller())
 
-        assert overlay._chooser._unavailable_reason(tokens.FULL_PAGE_MODE) is None
+        assert overlay._chooser._unavailable_reason(tokens.BROWSER_MODE) is None
+
+    def test_visible_is_the_default_and_crops_rather_than_scrolls(self):
+        # The switch starts on Visible, so the ordinary case takes what is
+        # on screen and never touches the browser at all.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+
+        assert overlay._scope_switch.scope == "visible"
+        assert not overlay._capturing_whole_page()
+        assert scroller.focused == 0, "Visible must not take focus"
+
+    def test_the_switch_is_shown_with_the_outlined_page(self):
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+
+        assert overlay._scope_switch.isVisible()
+
+    def test_framing_a_region_by_hand_takes_the_switch_away(self):
+        # Drag anything and the bar is about that rectangle again, whatever
+        # the switch last said.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+        overlay._scope_switch.set_scope("full")
+
+        overlay.set_selection(QRect(10, 10, 120, 90))
+
+        assert not overlay._browser_selection
+        assert not overlay._capturing_whole_page()
+        assert not overlay._scope_switch.isVisible()
+
+    def test_the_switch_starts_fresh_for_each_page(self):
+        # Seeding it back to Visible must not read as the user choosing.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        heard = []
+        overlay._scope_switch.scopeChanged.connect(heard.append)
+
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+
+        assert overlay._scope_switch.scope == "visible"
+        assert heard == []
 
     def test_it_is_not_offered_for_recording(self):
         # Recording something that scrolls itself is a different feature,
@@ -7510,7 +7569,7 @@ class TestFullPageCapture:
         overlay = self._overlay(_FakeScroller())
         overlay._chooser.set_kind("record")
 
-        assert overlay._chooser._unavailable_reason(tokens.FULL_PAGE_MODE) is not None
+        assert overlay._chooser._unavailable_reason(tokens.BROWSER_MODE) is not None
 
 
 class TestTheTabModeCapturesTheBrowsersPage:
@@ -7549,7 +7608,7 @@ class TestTheTabModeCapturesTheBrowsersPage:
         # frame's origin.
         overlay = self._overlay(QRectF(-1720, 300, 1280, 700))
 
-        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
 
         assert overlay._selection == QRect(200, 300, 1280, 700)
 
@@ -7562,7 +7621,7 @@ class TestTheTabModeCapturesTheBrowsersPage:
     def test_no_browser_selects_nothing(self):
         overlay = self._overlay(None)
 
-        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
 
         assert overlay._selection is None
 
@@ -7571,7 +7630,7 @@ class TestTheTabModeCapturesTheBrowsersPage:
         # largest overlap -- which must still be the left monitor.
         overlay = self._overlay(QRectF(-1720, 300, 1280, 600))
 
-        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
 
         assert overlay._selection_anchor is None
         bar = QRectF(overlay._bar.geometry()).translated(QPointF(*self.ORIGIN))
@@ -7583,14 +7642,14 @@ class TestTheTabModeCapturesTheBrowsersPage:
         # of pixels there is.
         overlay = self._overlay(QRectF(-2000, 300, 1280, 700))
 
-        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
 
         assert overlay._selection == QRect(0, 300, 1200, 700)
 
     def test_a_viewport_entirely_off_the_desktop_selects_nothing(self):
         overlay = self._overlay(QRectF(9000, 9000, 800, 600))
 
-        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
 
         assert overlay._selection is None
 
@@ -7618,8 +7677,8 @@ class TestTheTabModeCapturesTheBrowsersPage:
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
 
-        overlay._dispatch_capture_mode(tokens.TAB_MODE)
-        overlay._dispatch_capture_mode(tokens.TAB_MODE)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
 
         assert calls == [1]
 

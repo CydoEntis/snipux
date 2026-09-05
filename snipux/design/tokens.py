@@ -252,26 +252,29 @@ CAPTURE_MODES = [
     ("Window",      "window",  "One application's window"),
     ("Full screen", "monitor", "The whole monitor you are on"),
     ("Freeform",    "pen",     "A shape you draw by hand"),
-    ("Tab",         "panel",   "Your browser page, no toolbars"),
-    ("Full page",   "expand",  "Scrolls the whole page"),
+    ("Browser",     "panel",   "A page, visible or whole"),
 ]
 
 # The mode that captures a browser's page area. Named because three modules
 # read it -- the chooser greys the row, the overlay dispatches on it, and
 # IMMEDIATE_MODES lists it.
-TAB_MODE = "Tab"
+BROWSER_MODE = "Browser"
 
-# The mode that scrolls a page past itself and joins the frames. Named
-# for the same reason TAB_MODE is: the chooser greys it, the overlay
-# dispatches on it, and IMMEDIATE_MODES lists it.
-FULL_PAGE_MODE = "Full page"
+# The two things the browser mode can capture, chosen from a switch pinned
+# to the outlined page rather than from two near-identical menu rows. They
+# differ in how much of the page is taken, not in what is being pointed at,
+# and a menu that offers both makes the user choose before they can see
+# what they are choosing between.
+PAGE_SCOPES = [("visible", "Visible"), ("full", "Full page")]
+PAGE_SCOPE_DEFAULT = "visible"
+
 
 # What the row says instead of its note when there is no browser to capture
 # -- no browser open, a platform that cannot see other windows (Wayland), or
 # a browser that is not Chromium-family. One string for all three: the row
 # has space for a reason, not for a diagnosis, and every one of them means
 # the same thing to the user.
-TAB_UNAVAILABLE = "No browser window found"
+BROWSER_UNAVAILABLE = "No browser window found"
 
 # Notes that replace the above on the record side only, where a mode means
 # something narrower than it does for a screenshot.
@@ -664,8 +667,7 @@ MODE_NEXT_STEP = {
     "Window":      "Hover a window, click to take it",
     "Full screen": "Grabs this monitor the moment you choose it",
     "Freeform":    "Draw a closed shape around anything",
-    "Tab":         "Grabs your browser's page the moment you choose it",
-    "Full page":   "Scrolls your browser to the end and joins it up",
+    "Browser":     "Outlines the page -- pick visible or whole, then take it",
 }
 
 # Mode shortcuts. Live whenever the chooser is on screen, armed or not.
@@ -678,13 +680,13 @@ RECORD_MODE_NEXT_STEP = {
 
 MODE_KEYS = {
     "R": "Region", "W": "Window", "F": "Full screen", "L": "Freeform",
-    "T": "Tab", "P": "Full page",
+    "B": "Browser",
 }
 
 # Full screen is the only mode with nothing left to aim at, so choosing it
 # fires the grab immediately (after any delay). The other three arm and wait.
 # On the record side nothing fires immediately -- see RECORD_DISABLED_MODES.
-IMMEDIATE_MODES = ["Full screen", TAB_MODE, FULL_PAGE_MODE]
+IMMEDIATE_MODES = ["Full screen", BROWSER_MODE]
 
 # Destinations, from the locked capture-flow handoff (docs/design/flow/).
 # Merged one structure at a time as each gains a consumer rather than all at
@@ -766,10 +768,11 @@ RECORD_DISABLED_MODES = {
     # the rect is the same one. It is off here only because nothing has
     # driven it end to end on the record side yet -- offering it untested
     # would be a guess, not a feature.
-    "Tab": "Not wired up for recording yet",
-    # Recording something that scrolls itself is a different feature
-    # entirely, not this one with a video codec on the end.
-    "Full page": "Screenshots only",
+    # Recording a browser page is sensible and the rect is the same one;
+    # it is off because nothing has driven it end to end there. Recording
+    # a page that scrolls itself is a different feature entirely, not this
+    # one with a video codec on the end.
+    "Browser": "Screenshots only",
 }
 
 # The record side's "then" vocabulary: Copy, Save and Open -- never Edit or
