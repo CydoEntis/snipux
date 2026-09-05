@@ -767,10 +767,17 @@ class _ReuseToggle(_Surface):
     """The row's one on/off control: whether Region opens on the rectangle
     the last snip came from.
 
-    Icon-only and the width of a trigger without its chevron, because it
-    opens no menu -- a chevron would promise one. It sits immediately after
-    the mode trigger since that is the mode it modifies, and nowhere near
-    the destination and delay triggers, which answer a different question.
+    Icon *and* label, with no chevron -- it opens no menu, and a chevron
+    would promise one. It sits immediately after the mode trigger since
+    that is the mode it modifies, and nowhere near the destination and
+    delay triggers, which answer a different question.
+
+    The label is not decoration. This shipped icon-only, on the reasoning
+    that the handoff makes mode the row's only labelled control, and that
+    was wrong: a `redo` glyph says "again" but not *what* again, and the
+    control could not be identified without hovering it. A toggle whose
+    state is legible but whose subject is not is worse than no toggle --
+    the user can see that something is on without being able to tell what.
 
     On the row rather than in Settings because a preference nobody finds is
     a preference nobody has: this one was in Settings first and went
@@ -794,7 +801,13 @@ class _ReuseToggle(_Surface):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(metric.TRIGGER_H)
-        self.setFixedWidth(round(metric.TRIGGER_PAD_R * 2 + 16))
+        # Sized the way a labelled `_Trigger` is, minus the chevron it does
+        # not have -- so it sits in the row at the same rhythm as the
+        # controls either side of it.
+        text = QFontMetricsF(_font(12.5, 500)).horizontalAdvance(tokens.REUSE_LABEL)
+        self.setFixedWidth(
+            round(metric.TRIGGER_PAD_L + 16 + 8 + text + metric.TRIGGER_PAD_R)
+        )
 
     def is_on(self) -> bool:
         return self._on
@@ -851,9 +864,24 @@ class _ReuseToggle(_Surface):
         painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
 
         glyph = colour.MODE_ACCENT if self._on else colour.ROW_IDLE_FG
+        x = metric.TRIGGER_PAD_L
         pixmap = design.icon("redo", QColor(glyph)).pixmap(16, 16)
-        painter.drawPixmap(
-            (self.width() - 16) // 2, (self.height() - 16) // 2, pixmap
+        painter.drawPixmap(x, (self.height() - 16) // 2, pixmap)
+
+        # The label goes accent alongside the glyph rather than staying
+        # neutral: on and off have to be tellable apart at a glance from
+        # across a monitor, and one recoloured element is easier to miss
+        # than two.
+        x += 16 + 8
+        painter.setFont(_font(12.5, 500))
+        painter.setPen(
+            QColor(colour.MODE_ACCENT) if self._on
+            else QColor(tokens.Color.TEXT_PRIMARY)
+        )
+        painter.drawText(
+            QRectF(x, 0, self.width() - x, self.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            tokens.REUSE_LABEL,
         )
         painter.end()
 
@@ -957,6 +985,10 @@ class Chooser(QWidget):
         self._record_after_default = tokens.RECORD_AFTER_DEFAULT
         self._delay = tokens.DELAY_DEFAULT
         self._kind = "stills"
+        # Each side's own destination, remembered across flips of the
+        # switch. Only populated when a side is left, so a value that is
+        # legal on both (`instant`, `save`) is never treated as displaced.
+        self._after_by_kind: dict[str, str] = {}
         self._phase = "choosing"
         self._menu: _Menu | None = None
         self._menu_kind: str | None = None
@@ -1111,9 +1143,17 @@ class Chooser(QWidget):
         Only `kind` changes, unless the current mode or destination has no
         meaning on the new side, in which case it snaps to one that does --
         assigned directly rather than through `set_mode`/`set_after`, so the
-        snap itself never fires `modeChosen`/`fireImmediately`. Switching
-        back to stills needs no such snap: its mode and after lists are the
-        original, unrestricted ones.
+        snap itself never fires `modeChosen`/`fireImmediately`.
+
+        Coming *back* to stills restores the destination this side had
+        before, which it used not to do. The two vocabularies overlap on
+        `instant` and `save`, so a stills destination of `edit` that snapped
+        to the record default on the way out stayed on the way back: flip
+        the switch twice and your screenshots were silently set to Instant
+        -- which takes the shot the moment the drag ends, with no overlay
+        and no toolbar, so the next capture just happened at you with no
+        visible cause. Reported as "sometimes it just instant captures when
+        i drag the region".
 
         Emits `kindChanged` on every real flip -- unlike `after`/`delay`,
         there is no Settings surface for this axis, so the chooser itself is
@@ -1122,14 +1162,39 @@ class Chooser(QWidget):
         """
         if kind not in ("stills", "record") or kind == self._kind:
             return
+        leaving = self._kind
         self._kind = kind
-        if kind == "record":
-            if self._mode in tokens.RECORD_DISABLED_MODES:
-                self._mode = tokens.CAPTURE_MODES[0][0]
-            if self._after not in dict.fromkeys(value for value, *_ in _RECORD_AFTER_ROWS):
-                self._after = self._record_after_default
+        if kind == "record" and self._mode in tokens.RECORD_DISABLED_MODES:
+            self._mode = tokens.CAPTURE_MODES[0][0]
+        # Remembered unconditionally, and restored unconditionally --
+        # never gated on the *current* value being illegal on the new side.
+        # That was the trap: `instant` and `save` are legal on both, so a
+        # record destination of `instant` looked perfectly valid arriving
+        # on the stills side and the stills value it displaced was never
+        # put back.
+        self._after_by_kind[leaving] = self._after
+        remembered = self._after_by_kind.get(kind)
+        if remembered is not None and self._valid_after(kind, remembered):
+            self._after = remembered
+        elif not self._valid_after(kind, self._after):
+            self._after = (
+                self._record_after_default if kind == "record"
+                else tokens.AFTER_DEFAULT
+            )
         self._refresh_triggers()
         self.kindChanged.emit(kind)
+
+    @staticmethod
+    def _valid_after(kind: str, after: str) -> bool:
+        """Whether `after` is a destination `kind` can actually offer.
+
+        The two lists overlap on `instant` and `save` and mean the same
+        thing by both, which is exactly why this is asked rather than
+        assumed: a shared id needs no snap at all, and snapping it anyway
+        is what silently moved screenshots to Instant.
+        """
+        rows = _RECORD_AFTER_ROWS if kind == "record" else _AFTER_ROWS
+        return after in {value for value, *_rest in rows}
 
     def reopen(self) -> None:
         """Back to choosing, with every selection intact."""

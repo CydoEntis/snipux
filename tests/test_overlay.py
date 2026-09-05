@@ -7479,6 +7479,94 @@ class TestReuseLastRegionPreselectsIt:
 
         assert overlay._selection == QRect(2400, 100, 500, 400)
 
+    def test_a_press_inside_a_recalled_region_reframes_rather_than_draws(self):
+        # The trap this closes: the recalled rectangle can be the size of a
+        # whole monitor, leaving nowhere outside it to press -- and with a
+        # tool armed, every press inside it drew. There was then no way to
+        # frame anything else short of Esc.
+        setup_desktop.save_last_region((-1900, 20, 1900, 1040))
+        setup_desktop.save_reuse_last_region(True)
+        overlay = self._overlay()
+        assert overlay._selection == QRect(20, 20, 1900, 1040)
+
+        start_at, end_at = QPoint(400, 300), QPoint(900, 700)
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start_at
+        )
+        QTest.mouseMove(overlay, end_at)
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end_at
+        )
+
+        assert overlay._selection == QRect(400, 300, 500, 400)
+        assert not overlay.marks, "the press drew instead of reframing"
+
+    def test_no_tool_is_armed_over_a_recalled_region(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay()
+
+        assert overlay._bar.active_tool is None
+
+    def test_the_pen_still_arms_for_a_region_the_user_draws(self):
+        # The latch must not be spent by the recalled selection, or
+        # reframing would cost the default tool.
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+        overlay = self._overlay()
+
+        start_at, end_at = QPoint(2400, 100), QPoint(2900, 500)
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start_at
+        )
+        QTest.mouseMove(overlay, end_at)
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end_at
+        )
+
+        assert overlay._bar.active_tool == "pen"
+
+    def test_picking_a_tool_adopts_the_recalled_region(self):
+        # Reaching for a tool means the framing is accepted, so presses
+        # inside it draw from then on -- which is the point of picking one.
+        setup_desktop.save_last_region((-1900, 20, 1900, 1040))
+        setup_desktop.save_reuse_last_region(True)
+        overlay = self._overlay()
+
+        overlay._bar.select_tool("pen")
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            QPoint(400, 300),
+        )
+        QTest.mouseMove(overlay, QPoint(600, 500))
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            QPoint(600, 500),
+        )
+
+        assert overlay._selection == QRect(20, 20, 1900, 1040), "reframed instead of drawing"
+        assert len(overlay.marks) == 1
+
+    def test_resizing_a_recalled_region_adopts_it_too(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+        overlay = self._overlay()
+
+        # Press the bottom-right corner handle of the recalled rectangle.
+        corner = QPoint(200 + 640, 300 + 480)
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, corner
+        )
+        QTest.mouseMove(overlay, QPoint(corner.x() + 60, corner.y() + 40))
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            QPoint(corner.x() + 60, corner.y() + 40),
+        )
+
+        assert overlay._recalled_selection is False
+        assert overlay._selection != QRect(200, 300, 640, 480)
+
     def test_the_record_side_is_left_alone(self):
         # Committing is what arms a recording, and arming one as a side
         # effect of opening the overlay is not something anyone asked for.

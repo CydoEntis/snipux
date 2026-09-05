@@ -656,3 +656,61 @@ class TestTheReuseLastRegionToggle:
         for state, text in tokens.REUSE_HINT.items():
             width = metrics.horizontalAdvance(text)
             assert width <= 420, f"reuse hint for {state} is {width:.0f}px: {text!r}"
+
+
+class TestFlippingKindDoesNotLeakTheDestination:
+    """The two vocabularies overlap on `instant` and `save`, so a stills
+    destination displaced by the record side used to stay displaced on the
+    way back -- and `instant` takes the shot the moment the drag ends, with
+    no overlay and no toolbar.
+    """
+
+    def test_the_stills_destination_comes_back(self):
+        chooser = Chooser(parent=None)
+        chooser.set_after("edit")
+
+        chooser.set_kind("record")
+        chooser.set_kind("stills")
+
+        assert chooser.after == "edit"
+
+    def test_it_survives_several_round_trips(self):
+        chooser = Chooser(parent=None)
+        chooser.set_after("review")
+
+        for _ in range(3):
+            chooser.set_kind("record")
+            chooser.set_kind("stills")
+
+        assert chooser.after == "review"
+
+    def test_the_record_side_still_gets_its_own_default(self):
+        chooser = Chooser(parent=None)
+        chooser.set_after("edit")
+
+        chooser.set_kind("record")
+
+        assert chooser.after == tokens.RECORD_AFTER_DEFAULT
+
+    def test_a_destination_chosen_on_the_record_side_is_kept_there(self):
+        chooser = Chooser(parent=None)
+        chooser.set_after("edit")
+        chooser.set_kind("record")
+        chooser.set_after("save")
+
+        chooser.set_kind("stills")
+        chooser.set_kind("record")
+
+        assert chooser.after == "save"
+
+    def test_a_shared_id_is_not_treated_as_displaced(self):
+        # `save` means the same thing on both sides, so it is never
+        # displaced and there is nothing to restore -- flipping back must
+        # leave it alone rather than resurrect something older.
+        chooser = Chooser(parent=None)
+        chooser.set_after("save")
+
+        chooser.set_kind("record")
+        chooser.set_kind("stills")
+
+        assert chooser.after == "save"

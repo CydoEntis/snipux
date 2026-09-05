@@ -3691,6 +3691,13 @@ class OverlayWindow(QWidget):
         # Latch for `_arm_default_tool`: the pen is armed once, the first
         # time this snip's toolbar appears, and never again -- see there.
         self._armed_default_tool = False
+        # True while `_selection` is a rectangle this window recalled by
+        # itself (`_preselect_last_region`) and the user has not yet
+        # adopted it by doing anything to it. It is the one selection
+        # nobody asked for, so until it is adopted a press anywhere reframes
+        # rather than draws, and no tool is armed over it -- see
+        # `_adopt_selection`.
+        self._recalled_selection = False
         self._delay: str = design.tokens.DELAYS[0]
         self._popover = CaptureModePopover(self)
         self._popover.hide()
@@ -3829,6 +3836,10 @@ class OverlayWindow(QWidget):
         """
         if rect is None:
             self._selection_anchor = None
+        # Every other route to a selection is one the user asked for, so
+        # the recall flag is cleared here and re-set by
+        # `_preselect_last_region` alone.
+        self._recalled_selection = False
         self._selection = rect
         self._selection_path = path
         self._sync_bar_visibility()
@@ -3849,6 +3860,10 @@ class OverlayWindow(QWidget):
         there is nothing for this method to track beyond the two things
         below that don't already live on the bar.
         """
+        # Reaching for a tool is adopting whatever is framed: from here on
+        # a press inside a recalled region draws rather than reframing,
+        # which is the whole point of having picked one.
+        self._recalled_selection = False
         self.set_eraser_active(tool == "eraser")
         self._sync_tray_visibility()
 
@@ -4350,6 +4365,9 @@ class OverlayWindow(QWidget):
         self._selection_anchor = None
         # `usable` is absolute; `_selection` is window-local.
         self.set_selection(self._to_local_rect(usable).toRect())
+        # Set *after* `set_selection`, which clears it: this is the one
+        # caller for which the flag must survive.
+        self._recalled_selection = True
 
     # -- Freeform capture mode (SNX-49) --------------------------------------
     # docs/design/overlay-redesign.md's "Capture modes" entry for Freeform is
@@ -4676,6 +4694,14 @@ class OverlayWindow(QWidget):
         selection can still be reframed by its handles or replaced by a
         drag outside it.
         """
+        if self._recalled_selection:
+            # Nothing is armed over a region the user did not ask for --
+            # and the latch is deliberately not spent, so the pen still
+            # arms for whatever selection they do make. Arming here was the
+            # other half of "it comes up on every screenshot and i dont
+            # want it to": on a recalled region the size of a monitor,
+            # every press landed inside it and drew.
+            return
         if self._armed_default_tool:
             return
         self._armed_default_tool = True
@@ -5599,8 +5625,19 @@ class OverlayWindow(QWidget):
             return
         handle = self._handle_at(event.position())
         if handle is None:
-            if self._selection is not None and QRectF(self._selection).contains(
-                event.position()
+            # `not self._recalled_selection`: a rectangle this window
+            # recalled by itself is a suggestion, not a selection, so a
+            # press inside it starts a fresh drag exactly as a press on
+            # bare overlay does. Without this the preference was a trap --
+            # a recalled region covering a whole monitor left nowhere
+            # outside it to press, so there was no way to frame anything
+            # else short of Esc. The handles still resize it (this branch
+            # is only reached when `_handle_at` found none), and adopting
+            # it any other way clears the flag.
+            if (
+                self._selection is not None
+                and not self._recalled_selection
+                and QRectF(self._selection).contains(event.position())
             ):
                 if self._eraser_active:
                     # Armed for the whole press so the eraser can be swept
@@ -5644,6 +5681,8 @@ class OverlayWindow(QWidget):
             return
         # Per the spec: a handle press is a resize, never a stroke, and
         # returning here means nothing past this point runs for it.
+        # Dragging an edge is adopting the rectangle, recalled or not.
+        self._recalled_selection = False
         self._active_handle = handle
         self._resize_anchor = QRect(self._selection)
 
