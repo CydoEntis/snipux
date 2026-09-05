@@ -7373,7 +7373,12 @@ class TestFullPageCapture:
     """
 
     @pytest.fixture(autouse=True)
-    def _clean_slate(self):
+    def _clean_slate(self, monkeypatch):
+        # The indicator holds its final message long enough for a person to
+        # read it, which is seconds the suite should not spend sleeping --
+        # several of these tests take the failure path deliberately.
+        monkeypatch.setattr(OverlayWindow, "_FAILURE_NOTICE_MS", 0)
+        monkeypatch.setattr(OverlayWindow, "_DONE_NOTICE_MS", 0)
         _close_stray_toplevel_windows()
 
     VIEWPORT = QRectF(0, 0, 400, 300)
@@ -7604,23 +7609,47 @@ class TestFullPageCapture:
 
         assert overlay._bar._tool_buttons["pen"].isVisible()
 
-    def test_it_says_what_it_is_doing_before_it_disappears(self):
-        # This window vanishes for several seconds while the browser
-        # scrolls itself, and a desktop that starts moving on its own with
-        # no explanation is alarming.
+    def test_the_page_keeps_an_outline_and_a_caption_while_it_scrolls(self):
+        # The overlay vanishes for several seconds while the browser
+        # scrolls itself. Until the indicator existed that left nothing:
+        # no bounds, no progress, and the outcome as a toast on a window
+        # that had only just come back.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        seen = []
+
+        def watching(_scroller, viewport, indicator=None):
+            seen.append(indicator)
+            assert indicator is not None, "nothing stood in for the overlay"
+            assert not overlay.isVisible(), "the overlay was still up"
+            indicator.say("checking")
+            raise ScrollCaptureError("stop")
+
+        overlay._run_full_page_capture = watching
+        self._take_whole_page(overlay)
+
+        assert seen and seen[0] is not None
+
+    def test_a_failure_is_said_on_the_page_not_only_in_a_toast(self):
+        # A toast on an overlay that reappears at the same instant is easy
+        # to miss entirely -- which is how "nothing happened" was reported
+        # for a capture that had in fact refused, loudly, and been ignored.
         scroller = _FakeScroller()
         overlay = self._overlay(scroller)
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         said = []
-        overlay._show_toast = lambda icon, text: said.append(text)
-        overlay._run_full_page_capture = lambda *a, **k: (_ for _ in ()).throw(
-            ScrollCaptureError("stop")
-        )
 
+        def watching(_scroller, viewport, indicator=None):
+            indicator.say = lambda text: said.append(text)
+            raise ScrollCaptureError("the page was still growing")
+
+        overlay._run_full_page_capture = watching
         self._take_whole_page(overlay)
 
-        assert any("Scrolling" in t for t in said)
+        assert any("still growing" in t for t in said)
 
     def test_edit_sends_a_whole_page_to_the_review_window(self, monkeypatch):
         # `edit` means "let me annotate this", and for an image taller than
