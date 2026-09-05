@@ -2098,6 +2098,92 @@ class _BlurModeWell(QWidget):
         painter.end()
 
 
+class PageCaptureIndicator(QWidget):
+    """What the user watches while a page scrolls itself.
+
+    A full-page capture takes this overlay off screen for several seconds
+    -- it is covering the page it needs to scroll -- and until this existed
+    that left nothing at all: the outline vanished, the browser started
+    moving on its own, and the only report of the outcome was a toast on a
+    window that had just reappeared, which is easy to miss entirely.
+    Reported as "it scrolls but the borders disappear, it doesnt let me
+    know when its complete".
+
+    So this stays up in the overlay's place: the page's own bounds, and a
+    line saying what is happening. It is its own top-level window because
+    the overlay it replaces is hidden, and a child of a hidden window is
+    hidden too.
+
+    Transparent for input, and that is load-bearing rather than polish:
+    the browser is being driven with synthesised mouse input at the centre
+    of this very rectangle, and a window that accepted a click would
+    swallow the scroll it is reporting on.
+    """
+
+    _CAPTION_H = 34
+    _BORDER = 3
+
+    def __init__(self, viewport: QRectF, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._viewport = QRectF(viewport)
+        self._text = ""
+        self.setGeometry(
+            round(viewport.x()), round(viewport.y()),
+            round(viewport.width()), round(viewport.height()),
+        )
+
+    def say(self, text: str) -> None:
+        self._text = text
+        self.update()
+        # Painted now rather than on the next spin of the event loop: the
+        # caller is about to block on a scroll, and a caption that arrives
+        # after the thing it describes has finished is worse than none.
+        QApplication.processEvents()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(
+            self._BORDER / 2, self._BORDER / 2, -self._BORDER / 2, -self._BORDER / 2
+        )
+
+        pen = QPen(design.color("ACCENT"))
+        pen.setWidth(self._BORDER)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
+
+        if self._text:
+            font = _bar_font()
+            metrics = QFontMetricsF(font)
+            width = metrics.horizontalAdvance(self._text) + 28
+            caption = QRectF(
+                rect.center().x() - width / 2,
+                rect.top() + 16,
+                width,
+                self._CAPTION_H,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(design.color("BAR_BG"))
+            painter.drawRoundedRect(caption, 8, 8)
+            painter.setPen(design.color("ACCENT"))
+            painter.setFont(font)
+            painter.drawText(
+                caption,
+                int(Qt.AlignmentFlag.AlignCenter),
+                self._text,
+            )
+        painter.end()
+
+
 class PageScopeSwitch(_Chrome):
     """Visible / Full page, pinned to the outlined browser page.
 
@@ -4529,6 +4615,12 @@ class OverlayWindow(QWidget):
     # that matches neither its neighbours.
     _FULL_PAGE_SETTLE_MS = 700
 
+    # How long the indicator holds its last word before closing. Long
+    # enough to read a sentence for a failure; a glance for a success,
+    # since the image itself is about to arrive.
+    _FAILURE_NOTICE_MS = 2600
+    _DONE_NOTICE_MS = 700
+
     def _capture_full_page(self) -> None:
         """Scroll the frontmost browser to the end and capture the lot.
 
@@ -4556,17 +4648,27 @@ class OverlayWindow(QWidget):
         _title, viewport = self._browser_tab
 
         was_visible = self.isVisible()
-        # Said before hiding, because this window is about to disappear for
-        # several seconds while the browser scrolls itself -- and a desktop
-        # that starts moving on its own with no explanation is alarming.
-        self._show_toast("expand", "Scrolling the page…")
-        QApplication.processEvents()
+        # Takes this window's place while it is away. The overlay is about
+        # to disappear for several seconds -- it is covering the page it
+        # has to scroll -- and without something standing in, the outline
+        # vanishes, the browser starts moving on its own, and the outcome
+        # arrives as a toast on a window that has only just come back.
+        indicator = PageCaptureIndicator(viewport)
         self.hide()
-        QApplication.processEvents()
+        indicator.show()
+        indicator.raise_()
+        indicator.say("Preparing…")
 
         try:
-            image = self._run_full_page_capture(scroller, viewport)
+            image = self._run_full_page_capture(scroller, viewport, indicator)
         except ScrollCaptureError as exc:
+            # Said where the user is already looking -- on the page, in the
+            # thing that has been reporting progress -- and held long
+            # enough to read, rather than flashed on an overlay that
+            # reappears at the same moment.
+            indicator.say(str(exc))
+            self._wait(self._FAILURE_NOTICE_MS)
+            indicator.close()
             if was_visible:
                 self.show()
             self._show_toast("panel", str(exc))
@@ -4574,11 +4676,26 @@ class OverlayWindow(QWidget):
         finally:
             scroller.restore()
 
+        indicator.say(f"Done — {image.width()} × {image.height()}")
+        self._wait(self._DONE_NOTICE_MS)
+        indicator.close()
         if was_visible:
             self.show()
         self._deliver_full_page(image)
 
-    def _run_full_page_capture(self, scroller, viewport: QRectF) -> QImage:
+    def _wait(self, milliseconds: int) -> None:
+        """Hold for `milliseconds` while staying answerable.
+
+        `processEvents` throughout rather than a bare sleep: this runs on
+        the UI thread, and a window that stops answering the compositor is
+        one Windows offers to close for you.
+        """
+        deadline = time.monotonic() + milliseconds / 1000
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.02)
+
+    def _run_full_page_capture(self, scroller, viewport: QRectF, indicator=None) -> QImage:
         """The scroll loop's arguments, bound to a real browser.
 
         Split out so the loop itself (`scroll.capture_page`) stays free of
@@ -4599,8 +4716,24 @@ class OverlayWindow(QWidget):
             ),
         )
 
+        screens = {"n": 0}
+
         def grab() -> QImage:
-            return self._registry.capture().crop(viewport).image.copy()
+            screens["n"] += 1
+            if indicator is not None:
+                # Counted, not shown as a percentage: how many screens a
+                # page has cannot be known until the bottom is reached, so
+                # a progress bar would be inventing its own denominator.
+                indicator.say(f"Capturing page… {screens['n']} screens")
+                # Hidden while the pixels are read: it is drawn over the
+                # very rectangle being captured and would land in the shot.
+                indicator.hide()
+                QApplication.processEvents()
+            image = self._registry.capture().crop(viewport).image.copy()
+            if indicator is not None:
+                indicator.show()
+                indicator.raise_()
+            return image
 
         def scroll() -> None:
             scroller.scroll(-notches)
