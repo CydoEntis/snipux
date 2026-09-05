@@ -48,8 +48,45 @@ MAX_FRAMES = 20
 STILL_GRABS_TO_STOP = 2
 
 
+# How many settle waits to allow for a page to stop moving before the first
+# frame is taken. A jump to the top of a long page is a smooth-scroll
+# animation of thousands of pixels and takes far longer than one settle.
+MAX_SETTLE_WAITS = 12
+
+
 class ScrollCaptureError(RuntimeError):
     """Raised when a page cannot be captured whole -- see `capture_page`."""
+
+
+def wait_until_still(grab, settle, max_waits: int = MAX_SETTLE_WAITS):
+    """Wait for the page to stop moving, and return the settled frame.
+
+    Needed because a capture does not begin where the page happens to be
+    left: it jumps to the top first, and on a long page that is a
+    smooth-scroll animation of thousands of pixels. One fixed settle is not
+    remotely enough, and grabbing mid-flight yields a first frame that
+    overlaps nothing -- reported as "frames 0 and 1 do not overlap", which
+    is true and was the capture's own fault rather than the page's.
+
+    Two identical grabs in a row is the signal, the same one `capture_page`
+    uses for the bottom: an animation cannot produce two matching frames
+    while it is running.
+
+    Returns the last frame taken even if it never settles, rather than
+    raising -- a page that never stops changing at all is a real thing (a
+    playing video, a ticker), and it is `find_overlap`'s job to say whether
+    what it produced can be joined, not this function's to refuse first.
+    """
+    previous = grab()
+    previous_signature = row_signatures(previous)
+    for _ in range(max_waits):
+        settle()
+        current = grab()
+        current_signature = row_signatures(current)
+        if current_signature == previous_signature:
+            return current
+        previous, previous_signature = current, current_signature
+    return previous
 
 
 def capture_page(
@@ -81,7 +118,9 @@ def capture_page(
     failed: the user cannot see what is absent from a picture of a page
     they were scrolling past.
     """
-    first = grab()
+    # Settled first, not simply grabbed: the caller has usually just sent
+    # the page to the top, and that is an animation.
+    first = wait_until_still(grab, settle)
     if first is None or first.isNull():
         raise ScrollCaptureError("nothing to capture")
 

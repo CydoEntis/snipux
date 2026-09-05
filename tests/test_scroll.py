@@ -9,7 +9,13 @@ import pytest
 from PyQt6.QtGui import QColor, QImage, QPainter
 from PyQt6.QtWidgets import QApplication
 
-from snipux.scroll import MAX_FRAMES, ScrollCaptureError, capture_page
+from snipux.scroll import (
+    MAX_FRAMES,
+    MAX_SETTLE_WAITS,
+    ScrollCaptureError,
+    capture_page,
+    wait_until_still,
+)
 from snipux.stitch import PROBE_ROWS
 
 
@@ -199,4 +205,69 @@ class TestCapturePage:
 
         capture_page(browser.grab, browser.scroll, settle)
 
-        assert waits["n"] == browser.scrolls
+        # At least one per scroll, plus the waits spent confirming the page
+        # had stopped moving before the first frame was taken.
+        assert waits["n"] >= browser.scrolls
+
+    def test_it_waits_for_the_page_to_settle_before_the_first_frame(self):
+        # A capture does not begin where the page happens to be left: the
+        # caller sends it to the top first, and on a long page that is a
+        # smooth-scroll animation of thousands of pixels. Grabbing
+        # mid-flight gives a first frame that overlaps nothing.
+        page = tall_page(800)
+        browser = FakeBrowser(page)
+        moving = {"left": 3}
+        real_grab = browser.grab
+
+        def still_animating():
+            # Pretend the jump-to-top is still running for three grabs.
+            if moving["left"] > 0:
+                moving["left"] -= 1
+                browser.top = moving["left"] * 40
+            return real_grab()
+
+        result = capture_page(still_animating, browser.scroll, browser.settle)
+
+        assert result.height() == 800
+        assert column(result) == column(page)
+
+
+class TestWaitUntilStill:
+    def test_it_returns_once_two_grabs_match(self):
+        page = tall_page(400)
+        browser = FakeBrowser(page)
+
+        settled = wait_until_still(browser.grab, browser.settle)
+
+        assert settled.height() == VIEW
+        assert browser.grabs == 2, "a still page needs no more than a confirmation"
+
+    def test_it_waits_out_an_animation(self):
+        page = tall_page(900)
+        browser = FakeBrowser(page)
+        frames = {"n": 0}
+
+        def animating():
+            frames["n"] += 1
+            browser.top = max(0, 200 - frames["n"] * 50)
+            return browser.grab()
+
+        wait_until_still(animating, browser.settle)
+
+        assert browser.top == 0, "it returned before the page had landed"
+
+    def test_a_page_that_never_settles_is_not_refused_here(self):
+        # A page that never stops changing is a real thing -- a playing
+        # video, a ticker -- and whether what it produced can be joined is
+        # `find_overlap`'s call, not this function's to pre-empt.
+        page = tall_page(2000)
+        browser = FakeBrowser(page)
+        forever = {"n": 0}
+
+        def never_still():
+            forever["n"] += 1
+            browser.top = forever["n"] * 7
+            return browser.grab()
+
+        assert wait_until_still(never_still, browser.settle) is not None
+        assert forever["n"] <= MAX_SETTLE_WAITS + 1
