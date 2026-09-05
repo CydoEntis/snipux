@@ -4673,8 +4673,11 @@ class OverlayWindow(QWidget):
         indicator.raise_()
         indicator.say("Preparing…")
 
+        image = None
         try:
             image = self._run_full_page_capture(scroller, viewport, indicator)
+            indicator.say(f"Done — {image.width()} × {image.height()}")
+            self._wait(self._DONE_NOTICE_MS)
         except ScrollCaptureError as exc:
             # Said where the user is already looking -- on the page, in the
             # thing that has been reporting progress -- and held long
@@ -4682,20 +4685,23 @@ class OverlayWindow(QWidget):
             # reappears at the same moment.
             indicator.say(str(exc))
             self._wait(self._FAILURE_NOTICE_MS)
+            self._show_toast("panel", str(exc))
+        finally:
+            # Both of these belong here and not on the paths above. The
+            # indicator is a top-level, always-on-top window that is
+            # transparent to input: one left behind by an unexpected
+            # failure cannot be closed, moved or clicked through by the
+            # user, and every later attempt stacks another on top of it.
+            # That is exactly what happened -- three captions painted over
+            # each other, from three captures that had each raised
+            # something the `except` above did not name.
+            scroller.restore()
             indicator.close()
             if was_visible:
                 self.show()
-            self._show_toast("panel", str(exc))
-            return
-        finally:
-            scroller.restore()
 
-        indicator.say(f"Done — {image.width()} × {image.height()}")
-        self._wait(self._DONE_NOTICE_MS)
-        indicator.close()
-        if was_visible:
-            self.show()
-        self._deliver_full_page(image)
+        if image is not None:
+            self._deliver_full_page(image)
 
     def _wait(self, milliseconds: int) -> None:
         """Hold for `milliseconds` while staying answerable.

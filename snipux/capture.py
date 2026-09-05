@@ -1861,7 +1861,32 @@ class WindowsPageScroller:
             self._prior_cursor = (point.x, point.y)
         self._prior_focus = user32.GetForegroundWindow()
 
-        user32.SetForegroundWindow(self._hwnd)
+        # `SetForegroundWindow` alone is not enough, and this is not
+        # belt-and-braces: Windows refuses it outright unless the caller is
+        # already the foreground process or owns the most recent input, and
+        # measured here it refused every time -- "the browser would not
+        # come to the front" with nothing else wrong.
+        #
+        # Attaching this thread's input queue to the current foreground
+        # thread makes the two count as one for that rule, which is the
+        # documented way to hand the foreground to a window deliberately.
+        # Detached again immediately: leaving two threads sharing an input
+        # queue makes each wait on the other's message loop.
+        current = user32.GetForegroundWindow()
+        our_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+        their_thread = user32.GetWindowThreadProcessId(current, None) if current else 0
+        attached = bool(
+            their_thread
+            and their_thread != our_thread
+            and user32.AttachThreadInput(our_thread, their_thread, True)
+        )
+        try:
+            user32.SetForegroundWindow(self._hwnd)
+            user32.BringWindowToTop(self._hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(our_thread, their_thread, False)
+
         centre = self._viewport.center()
         user32.SetCursorPos(round(centre.x()), round(centre.y()))
         return user32.GetForegroundWindow() == self._hwnd
