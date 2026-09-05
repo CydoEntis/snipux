@@ -84,10 +84,13 @@ Restart Snipux to actually run the new version.
 > version in `pyproject.toml` is the fix.
 
 **There is no update check.** Snipux never phones home, so someone has to
-tell each user a new version exists. Adding one is not a small change
-while this repository is private: GitHub's API answers 404 for a private
-repo without a token, and a token cannot be shipped inside something
-anyone can open.
+tell each user a new version exists.
+
+One is buildable, though — this repository is public, so
+`api.github.com/repos/CydoEntis/snipux/releases/latest` answers an
+unauthenticated request, and comparing that tag against
+`importlib.metadata.version("snipux")` is the whole of the logic. What it
+needs first is releases to compare against, which means tagging them.
 
 ### Building the wheel to send
 
@@ -104,9 +107,8 @@ the silent no-op described there.
 
 ### Linux
 
-Snipux isn't published to PyPI — publishing there isn't planned. This is a
-private repository, so install straight from it with
-[pipx](https://pipx.pypa.io/):
+Snipux isn't published to PyPI — publishing there isn't planned. Install
+straight from the repository with [pipx](https://pipx.pypa.io/):
 
 **Over SSH**, if you already have an SSH key on your GitHub account:
 
@@ -124,9 +126,10 @@ pipx install git+https://github.com/CydoEntis/snipux.git
 ```
 
 `gh auth setup-git` registers `gh` as git's credential helper for
-github.com, so the HTTPS clone `pipx` does under the hood authenticates
-automatically. Don't paste a personal access token into the URL — the `gh`
-credential helper is the supported way to reach a private repo over HTTPS.
+github.com. It is only needed if this repository is ever made private
+again — a public clone needs no credentials at all. Either way, don't
+paste a personal access token into the URL; the `gh` credential helper is
+the supported way to authenticate over HTTPS.
 
 Either route gives Snipux and its dependencies their own isolated
 environment and puts a `snipux` launcher on PATH. Then run:
