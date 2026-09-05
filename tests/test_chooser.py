@@ -357,8 +357,9 @@ class TestEveryModeRowSaysWhatItCaptures:
     user could actually pick explained nothing.
     """
 
-    def _notes(self, kind):
+    def _notes(self, kind, browser=False):
         chooser = Chooser(parent=None)
+        chooser.set_browser_available(browser)
         chooser.set_kind(kind)
         rows, _selected, _width = chooser._rows_for("mode")
         return {row[0]: row[3] for row in rows}
@@ -399,27 +400,33 @@ class TestEveryModeRowSaysWhatItCaptures:
         text_x = pad_h + metric.MENU_ROW_ICON + 9
         budget = metric.MENU_MODE_W - 10 - text_x - pad_h - (metric.MENU_TICK + 8)
         metrics = QFontMetricsF(_font(11, 400))
+        # Both browser states, because the notes differ between them: with
+        # no browser found, every browser mode shows the same short
+        # "unavailable" reason and their real notes are never measured at
+        # all. That gap let a 32-character note ship unchecked.
         for kind in ("stills", "record"):
-            for mode, note in self._notes(kind).items():
-                assert metrics.horizontalAdvance(note) <= budget, (
-                    f"{mode} on the {kind} side would elide: {note!r}"
-                )
-                # A second, cruder guard -- and the one that would actually
-                # have caught the bug this test missed. The measurement
-                # above is only as good as the font behind it, and the
-                # offscreen platform this suite runs on does not resolve
-                # the font the app uses: measured, the real Segoe UI is
-                # ~50% wider than whatever offscreen supplies, so a note
-                # needing 197px on screen measured 131px here and passed
-                # while eliding for the user. Characters are not
-                # proportional to pixels, but they do not depend on which
-                # font got loaded -- and 30 is the length of the longest
-                # note confirmed to fit on a real screen.
-                assert len(note) <= 30, (
-                    f"{mode} on the {kind} side is {len(note)} characters; over "
-                    f"30 risks eliding in the real font whatever this platform "
-                    f"measures: {note!r}"
-                )
+            for browser in (False, True):
+                for mode, note in self._notes(kind, browser).items():
+                    assert metrics.horizontalAdvance(note) <= budget, (
+                        f"{mode} on the {kind} side would elide: {note!r}"
+                    )
+                    # A second, cruder guard -- and the one that would
+                    # actually have caught the bug this test missed. The
+                    # measurement above is only as good as the font behind
+                    # it, and the offscreen platform this suite runs on
+                    # does not resolve the font the app uses: measured, the
+                    # real Segoe UI is ~50% wider than whatever offscreen
+                    # supplies, so a note needing 197px on screen measured
+                    # 131px here and passed while eliding for the user.
+                    # Characters are not proportional to pixels, but they
+                    # do not depend on which font got loaded -- and 30 is
+                    # the length of the longest note confirmed to fit on a
+                    # real screen.
+                    assert len(note) <= 30, (
+                        f"{mode} on the {kind} side is {len(note)} characters; "
+                        f"over 30 risks eliding in the real font whatever this "
+                        f"platform measures: {note!r}"
+                    )
 
 
 class TestTheModeMenuNarrowsOnTheRecordSide:

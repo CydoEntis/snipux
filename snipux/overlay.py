@@ -14,6 +14,7 @@ spanning two monitors arithmetic rather than a special case.
 from __future__ import annotations
 
 import math
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -54,6 +55,7 @@ from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.flowbars import FlowMenu
 from snipux.marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
+from snipux.scroll import ScrollCaptureError, capture_page
 from snipux.shapes import (
     Arrow,
     Blur,
@@ -107,6 +109,16 @@ class GeometryProvider(ABC):
     @abstractmethod
     def window_at(self, point: QPointF) -> QRectF | None:
         """Absolute logical rect of the window under `point`, or None."""
+
+    def browser_scroller(self):
+        """Something that can scroll the frontmost browser page, or None.
+
+        Defaulted like `browser_viewport` so a provider that only knows
+        geometry -- and every platform that cannot drive another
+        application's window -- keeps working, and full-page capture greys
+        itself out rather than failing.
+        """
+        return None
 
     def browser_viewport(self) -> "tuple[str, QRectF] | None":
         """`(tab title, absolute logical rect)` of the frontmost browser's
@@ -4052,6 +4064,8 @@ class OverlayWindow(QWidget):
             self._enter_freeform_mode()
         elif mode == design.tokens.TAB_MODE:
             self._select_browser_tab()
+        elif mode == design.tokens.FULL_PAGE_MODE:
+            self._capture_full_page()
         elif mode == "Region":  # design.tokens.CAPTURE_MODES[0][0]
             self._preselect_last_region()
         # handoff-chooser.md, Armed: "The cursor becomes a crosshair." The
@@ -4341,6 +4355,133 @@ class OverlayWindow(QWidget):
         )
         rect = self._monitor_at(self._to_absolute(cursor))
         self._commit_selection(self._to_local_rect(rect).toRect())
+
+    # How far to scroll between grabs, as a fraction of the viewport. Well
+    # under a full screen, because overlap is the only evidence two frames
+    # belong together -- and further under it than that, because the join is
+    # found by matching a run of `stitch.PROBE_ROWS` rows and a thinner
+    # shared band cannot be matched even though it genuinely overlaps.
+    _FULL_PAGE_SCROLL_FRACTION = 0.65
+
+    # A wheel notch is three lines on a default Windows setup, and a line is
+    # about this many pixels. Only used to turn the fraction above into a
+    # number of notches -- how far the page *actually* moved is always
+    # measured from the pixels afterwards, never assumed from this.
+    _ASSUMED_PIXELS_PER_NOTCH = 100
+
+    # Milliseconds to let a scroll finish painting before grabbing. Smooth
+    # scrolling is an animation, and grabbing mid-animation yields a frame
+    # that matches neither its neighbours.
+    _FULL_PAGE_SETTLE_MS = 700
+
+    def _capture_full_page(self) -> None:
+        """Scroll the frontmost browser to the end and capture the lot.
+
+        The one capture in snipux that is not a single shot of a frozen
+        frame, and it cannot be: a page taller than the screen has no
+        pixels anywhere until something scrolls to them. CLAUDE.md reserved
+        this exception; `snipux/scroll.py` is where it lives.
+
+        This window has to get out of the way first. It is covering the
+        page, and its whole job the rest of the time is to *stop* the
+        desktop changing underneath a capture -- here the desktop changing
+        is the point. So the overlay hides, the browser takes focus, and
+        both are put back afterwards whatever happens.
+
+        Failures are reported through the toast and leave the snip open,
+        rather than closing with nothing: a page that could not be joined
+        is a thing to be told about, and the user may well want to frame a
+        region by hand instead.
+        """
+        self._selection_anchor = None
+        scroller = self._geometry_provider.browser_scroller()
+        if scroller is None or self._browser_tab is None:
+            self._show_toast("panel", "No browser page to capture")
+            return
+        _title, viewport = self._browser_tab
+
+        was_visible = self.isVisible()
+        self.hide()
+        QApplication.processEvents()
+
+        try:
+            image = self._run_full_page_capture(scroller, viewport)
+        except ScrollCaptureError as exc:
+            if was_visible:
+                self.show()
+            self._show_toast("panel", str(exc))
+            return
+        finally:
+            scroller.restore()
+
+        if was_visible:
+            self.show()
+        self._deliver_full_page(image)
+
+    def _run_full_page_capture(self, scroller, viewport: QRectF) -> QImage:
+        """The scroll loop's arguments, bound to a real browser.
+
+        Split out so the loop itself (`scroll.capture_page`) stays free of
+        Qt, ctypes and this window -- it is tested with none of them.
+        """
+        if not scroller.take_focus():
+            raise ScrollCaptureError(
+                "the browser would not come to the front, so it cannot be "
+                "scrolled"
+            )
+
+        notches = max(
+            1,
+            round(
+                viewport.height()
+                * self._FULL_PAGE_SCROLL_FRACTION
+                / self._ASSUMED_PIXELS_PER_NOTCH
+            ),
+        )
+
+        def grab() -> QImage:
+            return self._registry.capture().crop(viewport).image.copy()
+
+        def scroll() -> None:
+            scroller.scroll(-notches)
+
+        def settle() -> None:
+            # processEvents as well as sleeping: this runs on the UI thread,
+            # and a window that stops answering the compositor while it
+            # waits is a window Windows offers to close for you.
+            deadline = time.monotonic() + self._FULL_PAGE_SETTLE_MS / 1000
+            while time.monotonic() < deadline:
+                QApplication.processEvents()
+                time.sleep(0.02)
+
+        # To the top first, so the capture starts at the beginning of the
+        # page rather than wherever it happened to be left.
+        scroller.scroll(60)
+        settle()
+        return capture_page(grab, scroll, settle)
+
+    def _deliver_full_page(self, image: QImage) -> None:
+        """Finish a full-page capture the way the chosen destination says.
+
+        Not routed through `copy()`/`save()`: those flatten *the selection*
+        and its marks, and a full-page capture has neither -- there is no
+        selection, and nothing was annotated because the overlay was hidden
+        while it happened.
+        """
+        from snipux.app import copy_image_to_clipboard, save_image
+
+        if self.outcome == "save" or (
+            self.outcome == "instant" and setup_desktop.load_instant_saves()
+        ):
+            directory = Path.home() / "Pictures" / self.SAVE_SUBDIRECTORY
+            path = save_image(image, directory)
+            self._show_toast("save", f"Saved to ~/Pictures/{self.SAVE_SUBDIRECTORY}")
+        else:
+            copy_image_to_clipboard(image)
+            path = None
+            self._show_toast("copy", "Copied to clipboard")
+        self._report_capture(image, path)
+        self.close()
 
     def _select_browser_tab(self) -> None:
         """Set `_selection` to the page area of the frontmost browser.

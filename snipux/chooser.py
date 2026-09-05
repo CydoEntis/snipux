@@ -1099,7 +1099,7 @@ class Chooser(QWidget):
         """
         if self._kind == "record" and mode in tokens.RECORD_DISABLED_MODES:
             return tokens.RECORD_DISABLED_MODES[mode]
-        if mode == tokens.TAB_MODE and not self._browser_available:
+        if mode in (tokens.TAB_MODE, tokens.FULL_PAGE_MODE) and not self._browser_available:
             return tokens.TAB_UNAVAILABLE
         return None
 

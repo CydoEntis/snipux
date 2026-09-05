@@ -253,12 +253,18 @@ CAPTURE_MODES = [
     ("Full screen", "monitor", "The whole monitor you are on"),
     ("Freeform",    "pen",     "A shape you draw by hand"),
     ("Tab",         "panel",   "Your browser page, no toolbars"),
+    ("Full page",   "expand",  "Scrolls the whole page"),
 ]
 
 # The mode that captures a browser's page area. Named because three modules
 # read it -- the chooser greys the row, the overlay dispatches on it, and
 # IMMEDIATE_MODES lists it.
 TAB_MODE = "Tab"
+
+# The mode that scrolls a page past itself and joins the frames. Named
+# for the same reason TAB_MODE is: the chooser greys it, the overlay
+# dispatches on it, and IMMEDIATE_MODES lists it.
+FULL_PAGE_MODE = "Full page"
 
 # What the row says instead of its note when there is no browser to capture
 # -- no browser open, a platform that cannot see other windows (Wayland), or
@@ -659,6 +665,7 @@ MODE_NEXT_STEP = {
     "Full screen": "Grabs this monitor the moment you choose it",
     "Freeform":    "Draw a closed shape around anything",
     "Tab":         "Grabs your browser's page the moment you choose it",
+    "Full page":   "Scrolls your browser to the end and joins it up",
 }
 
 # Mode shortcuts. Live whenever the chooser is on screen, armed or not.
@@ -671,13 +678,13 @@ RECORD_MODE_NEXT_STEP = {
 
 MODE_KEYS = {
     "R": "Region", "W": "Window", "F": "Full screen", "L": "Freeform",
-    "T": "Tab",
+    "T": "Tab", "P": "Full page",
 }
 
 # Full screen is the only mode with nothing left to aim at, so choosing it
 # fires the grab immediately (after any delay). The other three arm and wait.
 # On the record side nothing fires immediately -- see RECORD_DISABLED_MODES.
-IMMEDIATE_MODES = ["Full screen", TAB_MODE]
+IMMEDIATE_MODES = ["Full screen", TAB_MODE, FULL_PAGE_MODE]
 
 # Destinations, from the locked capture-flow handoff (docs/design/flow/).
 # Merged one structure at a time as each gains a consumer rather than all at
@@ -760,6 +767,9 @@ RECORD_DISABLED_MODES = {
     # driven it end to end on the record side yet -- offering it untested
     # would be a guess, not a feature.
     "Tab": "Not wired up for recording yet",
+    # Recording something that scrolls itself is a different feature
+    # entirely, not this one with a video codec on the end.
+    "Full page": "Screenshots only",
 }
 
 # The record side's "then" vocabulary: Copy, Save and Open -- never Edit or

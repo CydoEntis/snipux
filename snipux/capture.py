@@ -1462,6 +1462,53 @@ class WindowsWindowGeometryProvider:
         user32.EnumWindows(enum_proc, 0)
         return found[0] if found else None
 
+    def browser_scroller(self) -> "WindowsPageScroller | None":
+        """A `WindowsPageScroller` for the frontmost browser page, or None.
+
+        Separate from `browser_viewport()` because most captures never
+        scroll anything: finding the window is cheap, and taking focus
+        away from the user is not something to set up speculatively.
+        """
+        if not self.is_available():
+            return None
+        try:
+            user32 = ctypes.windll.user32
+            dwmapi = ctypes.windll.dwmapi
+            kernel32 = ctypes.windll.kernel32
+        except (AttributeError, OSError):
+            return None
+
+        own_pid = kernel32.GetCurrentProcessId()
+        mapping = self.monitor_map()
+        found: list[WindowsPageScroller] = []
+
+        def _visit(hwnd, _lparam) -> bool:
+            if found:
+                return False
+            if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                return True
+            if self._is_cloaked(dwmapi, hwnd):
+                return True
+            pid = ctypes.c_uint32(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == own_pid:
+                return True
+            if self._process_name(hwnd).lower() not in self._BROWSER_PROCESSES:
+                return True
+            viewport = self._viewport_of(user32, hwnd)
+            if viewport is None:
+                return True
+            found.append(
+                WindowsPageScroller(hwnd, self._to_logical(viewport, mapping))
+            )
+            return False
+
+        enum_proc = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
+        )(_visit)
+        user32.EnumWindows(enum_proc, 0)
+        return found[0] if found else None
+
     def monitor_map(self) -> "list[tuple[QRectF, QRectF, float]]":
         """`[(physical monitor rect, logical screen rect, scale)]`, or `[]`
         when the two cannot be matched up with confidence.
@@ -1724,6 +1771,128 @@ class WindowsWindowGeometryProvider:
             if rect.contains(point):
                 return rect
         return None
+
+
+class _POINT(ctypes.Structure):
+    """Win32 `POINT` -- `GetCursorPos`'s output, so the pointer can be put
+    back exactly where the user left it."""
+
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _MouseInput(ctypes.Structure):
+    """Win32 `MOUSEINPUT`, for `SendInput` -- ctypes has no symbolic
+    version, same as `_RECT` and `_BitmapInfoHeader` above.
+    """
+
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_uint32),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+
+class _Input(ctypes.Structure):
+    """Win32 `INPUT`, narrowed to its mouse arm.
+
+    The real union also carries keyboard and hardware members. Only the
+    mouse one is sent here, and a union is as large as its largest member
+    on any platform this runs on, so declaring the one in use is safe and
+    keeps the struct readable.
+    """
+
+    class _Union(ctypes.Union):
+        _fields_ = [("mi", _MouseInput)]
+
+    _anonymous_ = ("u",)
+    _fields_ = [("type", ctypes.c_uint32), ("u", _Union)]
+
+
+class WindowsPageScroller:
+    """Scrolls a window by synthesising real mouse-wheel input (SNX-2).
+
+    The platform half of full-page capture. `snipux/scroll.py` owns the
+    loop and stays free of any of this so it can be tested without a
+    browser, a desktop or a real mouse.
+
+    Two things were measured on a real browser rather than assumed, and
+    both rule out the tidier approaches:
+
+    * **`PostMessage(WM_MOUSEWHEEL)` does not scroll Chromium at all** --
+      1311 of 1311 rows unchanged afterwards. It ignores posted wheel
+      messages, so a window cannot be scrolled by messaging it.
+    * **`SendInput` only reaches a window that has focus.** Parking the
+      cursor over an unfocused window and sending a wheel event does
+      nothing. So this takes the foreground, and `restore()` gives it back
+      along with the cursor.
+
+    That is why full-page capture cannot happen quietly behind the user's
+    back: it is real input, to the real focused window, and the desktop
+    visibly does what it is told.
+    """
+
+    _WHEEL = 0x0800          # MOUSEEVENTF_WHEEL
+    _NOTCH = 120             # WHEEL_DELTA: one detent
+
+    def __init__(self, hwnd, viewport: QRectF):
+        self._hwnd = hwnd
+        self._viewport = viewport
+        self._prior_focus = None
+        self._prior_cursor = None
+
+    @staticmethod
+    def is_available() -> bool:
+        return sys.platform == "win32"
+
+    def take_focus(self) -> bool:
+        """Focus the window and park the cursor over the page, remembering
+        what to put back. False if the window refuses the foreground, which
+        Windows allows it to do -- the caller must not then scroll, since
+        the input would land on whatever *is* focused.
+        """
+        if not self.is_available():
+            return False
+        user32 = ctypes.windll.user32
+        point = _POINT()
+        if user32.GetCursorPos(ctypes.byref(point)):
+            self._prior_cursor = (point.x, point.y)
+        self._prior_focus = user32.GetForegroundWindow()
+
+        user32.SetForegroundWindow(self._hwnd)
+        centre = self._viewport.center()
+        user32.SetCursorPos(round(centre.x()), round(centre.y()))
+        return user32.GetForegroundWindow() == self._hwnd
+
+    def scroll(self, notches: int) -> None:
+        """Wheel by `notches` -- negative scrolls the page down, matching
+        the sign a real wheel reports.
+        """
+        if not self.is_available():
+            return
+        data = (notches * self._NOTCH) & 0xFFFFFFFF
+        event = _Input(type=0, mi=_MouseInput(0, 0, data, self._WHEEL, 0, None))
+        ctypes.windll.user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(_Input))
+
+    def restore(self) -> None:
+        """Put the focus and the cursor back where they were.
+
+        Never raises: this runs in a `finally`, and a capture that worked
+        must not be reported as a failure because the pointer could not be
+        moved back.
+        """
+        if not self.is_available():
+            return
+        user32 = ctypes.windll.user32
+        try:
+            if self._prior_cursor is not None:
+                user32.SetCursorPos(*self._prior_cursor)
+            if self._prior_focus:
+                user32.SetForegroundWindow(self._prior_focus)
+        except Exception:  # noqa: BLE001 - tidying up, never worth raising for
+            pass
 
 
 class UnsupportedPlatformBackend(CaptureBackend):
