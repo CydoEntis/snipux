@@ -3718,6 +3718,104 @@ class TestRunFirstLaunchSetup:
         assert save_calls == [True]
 
 
+class TestACaptureIsConfirmed:
+    """A snip that dismisses leaves nothing on screen to say it worked.
+
+    The overlay's own toast is raised by `copy()`/`save()` and then taken
+    down by `hideEvent` in the same turn of the event loop, because both
+    callers close the window immediately -- so it has never actually been
+    visible for a dismissing snip. `instant` is the worst case: no bar, no
+    overlay, no window, just a flicker.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    def _reported(self, controller, monkeypatch):
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        return said
+
+    def test_a_copy_says_so(self, make_controller, monkeypatch):
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "edit"
+        )
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        said = self._reported(controller, monkeypatch)
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+
+        controller._overlay.copy()
+
+        assert said == ["Copied to clipboard"]
+
+    def test_an_instant_capture_says_so_too(self, make_controller, monkeypatch):
+        # The case that prompted this: the destination that shows no bar
+        # and no overlay, so the screen simply flickers.
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "instant"
+        )
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        said = self._reported(controller, monkeypatch)
+
+        controller._overlay._commit_selection(QRect(10, 10, 100, 80))
+
+        assert said == ["Copied to clipboard"]
+
+    def test_a_save_names_where_it_went(self, make_controller, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "save"
+        )
+        monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        said = self._reported(controller, monkeypatch)
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+
+        controller._overlay.save()
+
+        assert len(said) == 1
+        assert said[0].startswith("Saved to snipux/")
+        assert said[0].endswith(".png")
+
+    def test_a_cancelled_snip_says_nothing(self, make_controller, monkeypatch):
+        # Esc is not a capture, so there is nothing to confirm.
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "edit"
+        )
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        said = self._reported(controller, monkeypatch)
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+
+        controller._overlay.close()
+
+        assert said == []
+
+    def test_a_snip_opening_the_review_window_is_not_also_announced(
+        self, make_controller, monkeypatch
+    ):
+        # It announces itself by opening a window; a balloon as well would
+        # be telling the user what they are already looking at.
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "review"
+        )
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        said = self._reported(controller, monkeypatch)
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+
+        controller._overlay.copy()
+
+        assert len(controller._reviews) == 1
+        assert said == []
+
+
 class TestReviewWindowIntegration:
     """The review window is off unless Settings turns it on, and opens only
     for a real capture -- never for a cancelled snip.
