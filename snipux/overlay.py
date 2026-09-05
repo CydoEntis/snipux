@@ -1401,6 +1401,30 @@ class FloatingBar(_Chrome):
     def _on_tool_clicked(self, tool: str) -> None:
         self.select_tool(tool)
 
+    def set_annotation_visible(self, visible: bool) -> None:
+        """Show or hide the drawing half of the bar -- the tools, undo,
+        redo and discard.
+
+        For a capture that has not happened yet there is nothing to
+        annotate, and worse, anything drawn would be thrown away: a
+        full-page capture is assembled from frames grabbed *after* this
+        window steps aside, so marks made on the frozen frame beforehand
+        never reach it. Offering the tools would be offering work that
+        silently disappears.
+
+        The primary action, the destination caret and the bar itself all
+        stay: those still mean what they say.
+        """
+        for button in self._tool_buttons.values():
+            button.setVisible(visible)
+        self._undo_button.setVisible(visible)
+        # Redo only exists on the review window's bar; left to its own rule
+        # rather than forced visible here.
+        if self._trailing == "done":
+            self._redo_button.setVisible(visible)
+        self._clear_button.setVisible(visible)
+        self.adjustSize()
+
     def select_tool(self, tool: str) -> None:
         """Public equivalent of clicking `tool`'s own button: the same
         active-tool bookkeeping and `toolSelected` emission a click
@@ -3917,6 +3941,9 @@ class OverlayWindow(QWidget):
         # rather than anything the user framed. It is what lets the bar's
         # Copy/Save/Open mean "the whole page" instead of "this rectangle".
         self._browser_selection = False
+        # True only for the instant between `_select_browser_tab` asking
+        # for a selection and getting one -- see `_commit_selection`.
+        self._pending_browser_selection = False
 
         # The top hint HUD (SNX-46): behind the `hints` preference the spec
         # puts it behind -- SNX-65 changed the default to off. A real child
@@ -4014,6 +4041,10 @@ class OverlayWindow(QWidget):
         # that rectangle again, not about a page.
         self._recalled_selection = False
         self._browser_selection = False
+        if hasattr(self, "_bar"):
+            # Framing anything by hand means there is something to draw on
+            # again, whatever the switch last said.
+            self._bar.set_annotation_visible(True)
         self._selection = rect
         self._selection_path = path
         self._sync_bar_visibility()
@@ -4405,11 +4436,19 @@ class OverlayWindow(QWidget):
                 # only ever hands the choice along.
                 self._on_recording_requested(record_rect, self._delay, self.outcome)
             return
-        if self.outcome == "instant":
+        if self.outcome == "instant" and not self._pending_browser_selection:
             if setup_desktop.load_instant_saves():
                 self._on_bar_save()
             else:
                 self._on_bar_copy()
+        elif self._pending_browser_selection:
+            # `instant` means "finish the moment a selection is made", and
+            # for a browser page the selection is not the whole decision --
+            # visible or whole is still to come. Firing here would take the
+            # visible page and close before the switch was ever on screen,
+            # which is not a faster way to do what the user asked, it is a
+            # different thing entirely.
+            pass
 
     def absolute_selection(self) -> QRectF | None:
         """The current selection in absolute virtual-desktop coordinates,
@@ -4512,6 +4551,11 @@ class OverlayWindow(QWidget):
         _title, viewport = self._browser_tab
 
         was_visible = self.isVisible()
+        # Said before hiding, because this window is about to disappear for
+        # several seconds while the browser scrolls itself -- and a desktop
+        # that starts moving on its own with no explanation is alarming.
+        self._show_toast("expand", "Scrolling the page…")
+        QApplication.processEvents()
         self.hide()
         QApplication.processEvents()
 
@@ -4581,6 +4625,15 @@ class OverlayWindow(QWidget):
         """
         from snipux.app import copy_image_to_clipboard, save_image
 
+        # `edit` means "let me annotate this", and for a whole page that
+        # cannot happen here: the image is taller than the screen and this
+        # window is about to close. The review window is the same tools on
+        # a surface that can scroll, so `edit` is routed there rather than
+        # silently dropping the annotation step. `instant` and `save` are
+        # left alone -- both are explicit requests for no window.
+        if self.outcome == "edit":
+            self._chooser.set_after("review")
+
         if self.outcome == "save" or (
             self.outcome == "instant" and setup_desktop.load_instant_saves()
         ):
@@ -4627,13 +4680,17 @@ class OverlayWindow(QWidget):
         )
         if usable.isEmpty():
             return
+        # Set on the way in, not after: `_commit_selection` reads it to
+        # decide whether `instant` may finish the snip here, and
+        # `set_selection` clears it, so it is re-set immediately below.
+        self._pending_browser_selection = True
         self._commit_selection(self._to_local_rect(usable).toRect())
-        # Set after committing: `set_selection` clears it, and this is the
-        # one caller for which it must survive.
+        self._pending_browser_selection = False
         self._browser_selection = True
         self._scope_switch.set_scope(
             design.tokens.PAGE_SCOPE_DEFAULT, announce=False
         )
+        self._sync_annotation_tools()
         self._sync_scope_switch()
 
     def _on_page_scope_changed(self, _scope: str) -> None:
@@ -4641,7 +4698,24 @@ class OverlayWindow(QWidget):
         Copy/Save/Open is still what takes the shot, and this only decides
         how much of the page it takes.
         """
+        self._sync_annotation_tools()
         self._sync_bar_visibility()
+
+    def _sync_annotation_tools(self) -> None:
+        """Put the bar's drawing half away while a whole page is selected.
+
+        There is nothing to draw on yet, and worse, anything drawn would be
+        thrown away: a full-page capture is assembled from frames grabbed
+        *after* this window steps aside, so marks made on the frozen frame
+        beforehand never reach it. Showing the tools would be offering work
+        that silently disappears -- which is what happened before this
+        existed.
+
+        Annotating a whole page is not lost, only moved: the result opens
+        in the review window, which has the same tools and is the only
+        surface that can show an image taller than the screen.
+        """
+        self._bar.set_annotation_visible(not self._capturing_whole_page())
 
     def _sync_scope_switch(self) -> None:
         """Show the Visible / Full page switch exactly while the browser

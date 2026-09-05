@@ -7563,6 +7563,116 @@ class TestFullPageCapture:
         assert overlay._scope_switch.scope == "visible"
         assert heard == []
 
+    def test_the_drawing_tools_go_away_for_a_whole_page(self):
+        # There is nothing to draw on yet, and anything drawn would be
+        # thrown away: the capture is assembled from frames grabbed after
+        # this window steps aside, so marks on the frozen frame never reach
+        # it. Offering the tools would be offering work that disappears.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+        assert overlay._bar._tool_buttons["pen"].isVisible()
+
+        overlay._scope_switch.set_scope("full")
+
+        assert not overlay._bar._tool_buttons["pen"].isVisible()
+        assert not overlay._bar._clear_button.isVisible()
+
+    def test_the_tools_come_back_for_the_visible_page(self):
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+        overlay._scope_switch.set_scope("full")
+
+        overlay._scope_switch.set_scope("visible")
+
+        assert overlay._bar._tool_buttons["pen"].isVisible()
+
+    def test_framing_a_region_brings_the_tools_back(self):
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+        overlay._scope_switch.set_scope("full")
+
+        overlay.set_selection(QRect(10, 10, 120, 90))
+
+        assert overlay._bar._tool_buttons["pen"].isVisible()
+
+    def test_it_says_what_it_is_doing_before_it_disappears(self):
+        # This window vanishes for several seconds while the browser
+        # scrolls itself, and a desktop that starts moving on its own with
+        # no explanation is alarming.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        said = []
+        overlay._show_toast = lambda icon, text: said.append(text)
+        overlay._run_full_page_capture = lambda *a, **k: (_ for _ in ()).throw(
+            ScrollCaptureError("stop")
+        )
+
+        self._take_whole_page(overlay)
+
+        assert any("Scrolling" in t for t in said)
+
+    def test_edit_sends_a_whole_page_to_the_review_window(self, monkeypatch):
+        # `edit` means "let me annotate this", and for an image taller than
+        # the screen that cannot happen on the overlay. The review window
+        # is the same tools on a surface that can scroll.
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", lambda i: None)
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        page = QImage(400, 2000, QImage.Format.Format_RGB32)
+        page.fill(0x202020)
+        overlay._run_full_page_capture = lambda *a, **k: page
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("edit")
+
+        self._take_whole_page(overlay)
+
+        assert overlay.outcome == "review"
+
+    def test_instant_still_means_no_window(self, monkeypatch):
+        # An explicit request for no window is not overridden just because
+        # the image is tall.
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        page = QImage(400, 2000, QImage.Format.Format_RGB32)
+        page.fill(0x202020)
+        overlay._run_full_page_capture = lambda *a, **k: page
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+
+        self._take_whole_page(overlay)
+
+        assert overlay.outcome == "instant"
+        assert len(copied) == 1
+
+    def test_instant_does_not_fire_before_the_scope_is_chosen(self, monkeypatch):
+        # `instant` means "finish the moment a selection is made", and for
+        # a browser page the selection is not the whole decision -- visible
+        # or whole is still to come. Firing on the selection took the
+        # visible page and closed before the switch was ever on screen.
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._overlay(_FakeScroller())
+        overlay._chooser.set_after("instant")
+
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+
+        assert copied == [], "it captured before the switch was offered"
+        assert overlay._selection is not None
+        assert overlay._browser_selection
+
     def test_it_is_not_offered_for_recording(self):
         # Recording something that scrolls itself is a different feature,
         # not this one with a video codec on the end.
