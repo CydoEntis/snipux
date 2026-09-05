@@ -16,6 +16,7 @@ from snipux.capture import (
     CaptureBackend,
     CaptureError,
     Frame,
+    WindowsWindowGeometryProvider,
     detect_session_type,
 )
 
@@ -1963,3 +1964,104 @@ class TestUnsupportedPlatformBackend:
             registry.capture()
 
         assert excinfo.value.failures == []
+
+
+class TestWin32RectsAreConvertedToLogicalCoordinates:
+    """`GeometryProvider` promises absolute *logical* rects, and every Win32
+    call the provider makes returns *physical* pixels -- Qt6 makes the
+    process per-monitor DPI aware, so Windows does not virtualise them.
+
+    At 100% scaling the two are numerically identical, which is why this
+    went unnoticed: the development desk is three monitors at 96 DPI, so
+    every rect was right by coincidence. Every test here therefore injects
+    a mapping with a scale the machine running it does not have -- a test
+    that could only run at 1.0 would prove nothing.
+    """
+
+    def _provider(self):
+        return WindowsWindowGeometryProvider()
+
+    # One monitor at 150%: 3840x2160 of real pixels presenting as 2560x1440.
+    SCALED = [(QRectF(0, 0, 3840, 2160), QRectF(0, 0, 2560, 1440), 1.5)]
+
+    def test_a_rect_is_divided_by_the_scale(self):
+        provider = self._provider()
+
+        got = provider._to_logical(QRectF(300, 600, 1200, 900), mapping=self.SCALED)
+
+        assert got == QRectF(200, 400, 800, 600)
+
+    def test_at_100_percent_nothing_moves(self):
+        # The case the development machine has, and the reason the bug was
+        # invisible: the conversion must be exactly the identity here.
+        provider = self._provider()
+        mapping = [(QRectF(0, 0, 2560, 1440), QRectF(0, 0, 2560, 1440), 1.0)]
+
+        rect = QRectF(700, 1330, 1123, 74)
+
+        assert provider._to_logical(rect, mapping=mapping) == rect
+
+    def test_a_monitor_origin_is_mapped_not_just_the_size(self):
+        # The half a naive `rect / scale` gets wrong. A second monitor sits
+        # at a different origin in each space, so dividing the absolute
+        # position by the scale lands somewhere that is on no monitor.
+        provider = self._provider()
+        mapping = [
+            (QRectF(0, 0, 2560, 1440), QRectF(0, 0, 2560, 1440), 1.0),
+            (QRectF(2560, 0, 3840, 2160), QRectF(2560, 0, 2560, 1440), 1.5),
+        ]
+
+        # Top-left corner of the scaled second monitor.
+        got = provider._to_logical(QRectF(2560, 0, 1500, 900), mapping=mapping)
+
+        assert got == QRectF(2560, 0, 1000, 600)
+
+    def test_a_negative_origin_survives(self):
+        # A monitor mounted above the primary has a negative y in both
+        # spaces -- an abs() or a bare divide moves it a whole monitor.
+        provider = self._provider()
+        mapping = [(QRectF(1164, -2160, 3840, 2160), QRectF(1164, -1440, 2560, 1440), 1.5)]
+
+        got = provider._to_logical(QRectF(1164, -2160, 1500, 900), mapping=mapping)
+
+        assert got == QRectF(1164, -1440, 1000, 600)
+
+    def test_mixed_scaling_uses_the_monitor_the_window_is_mostly_on(self):
+        # Straddling two different scales has no single right answer; the
+        # monitor holding the centre is the useful one.
+        provider = self._provider()
+        mapping = [
+            (QRectF(0, 0, 2560, 1440), QRectF(0, 0, 2560, 1440), 1.0),
+            (QRectF(2560, 0, 3840, 2160), QRectF(2560, 0, 2560, 1440), 1.5),
+        ]
+
+        mostly_second = QRectF(2400, 100, 800, 400)  # centre at x=2800
+        assert provider._to_logical(mostly_second, mapping=mapping).width() == 800 / 1.5
+
+    def test_no_verified_map_leaves_the_rect_exactly_as_it_was(self):
+        # The safety property: when the monitors cannot be matched up, the
+        # conversion is the identity -- which is precisely today's
+        # behaviour, and already correct wherever the scales are 1.0. A
+        # guess would be worse than doing nothing.
+        provider = self._provider()
+        rect = QRectF(10, 20, 300, 400)
+
+        assert provider._to_logical(rect, mapping=[]) == rect
+
+    def test_a_rect_on_no_known_monitor_is_left_alone(self):
+        # A staggered desk leaves gaps inside the bounding box that no
+        # display shows. Inventing a scale for one would be worse than
+        # returning what Windows said.
+        provider = self._provider()
+        rect = QRectF(9000, 9000, 100, 100)
+
+        assert provider._to_logical(rect, mapping=self.SCALED) == rect
+
+    def test_the_map_is_empty_off_windows(self):
+        # `monitor_map` is guarded by `is_available()`, so importing and
+        # calling this on Linux -- where the rest of this file's tests run
+        # -- must be a no-op rather than an AttributeError on ctypes.windll.
+        provider = self._provider()
+
+        if not provider.is_available():
+            assert provider.monitor_map() == []

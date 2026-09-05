@@ -1198,6 +1198,24 @@ class _RECT(ctypes.Structure):
     ]
 
 
+class _MonitorInfoExW(ctypes.Structure):
+    """Win32 `MONITORINFOEXW` -- `GetMonitorInfoW`'s output, for
+    `Win32GeometryProvider.monitor_map`.
+
+    `szDevice` is the trailing `WCHAR[32]` that makes this the EX variant;
+    it is not read, but the struct must carry it or `cbSize` describes a
+    shorter struct than the name promises and the call fails.
+    """
+
+    _fields_ = [
+        ("cbSize", ctypes.c_uint32),
+        ("rcMonitor", _RECT),
+        ("rcWork", _RECT),
+        ("dwFlags", ctypes.c_uint32),
+        ("szDevice", ctypes.c_wchar * 32),
+    ]
+
+
 class _MonitorInfo(ctypes.Structure):
     """Win32 `MONITORINFO`, just enough of it for `GetMonitorInfoW()` below
     -- ctypes has no symbolic version of this struct either, same as
@@ -1291,6 +1309,120 @@ class WindowsWindowGeometryProvider:
     def is_available(self) -> bool:
         return sys.platform == "win32"
 
+    def monitor_map(self) -> "list[tuple[QRectF, QRectF, float]]":
+        """`[(physical monitor rect, logical screen rect, scale)]`, or `[]`
+        when the two cannot be matched up with confidence.
+
+        Everything Win32 reports here -- `GetWindowRect`,
+        `DwmGetWindowAttribute`, `GetMonitorInfoW` -- is in **physical**
+        pixels, because Qt6 makes this process per-monitor DPI aware
+        (measured: `GetProcessDpiAwareness` answers
+        `PER_MONITOR_DPI_AWARE`). `GeometryProvider` promises **logical**
+        rects. At 100% scaling the two are numerically identical, which is
+        why this went unnoticed -- the development desk is three monitors
+        at 96 DPI, so every rect was right by coincidence.
+
+        The map is built rather than computed from a formula, and then
+        checked. Qt's logical layout is not a simple global divide once
+        monitors differ in scale, so each Win32 monitor is paired with the
+        `QScreen` at the same index and the pair is *verified*: the
+        monitor's physical size divided by its own DPI scale must equal
+        that screen's logical size. Index order matching was confirmed on a
+        real three-monitor desk (`EnumDisplayMonitors` and
+        `QGuiApplication.screens()` agreed, including a monitor mounted
+        above the others at a negative y), but it is not promised by either
+        API -- so the verification is what makes relying on it safe.
+
+        `[]` when any pair fails to verify, when the DPI cannot be read, or
+        when the counts differ. `_to_logical` then returns rects unchanged,
+        which is exactly today's behaviour: a guess would be worse than the
+        identity, and the identity is already correct everywhere the scales
+        are 1.0.
+        """
+        if not self.is_available():
+            return []
+        try:
+            user32 = ctypes.windll.user32
+            shcore = ctypes.windll.shcore
+        except (AttributeError, OSError):
+            return []
+
+        handles: list = []
+
+        def _visit(handle, _hdc, _rect, _lparam) -> bool:
+            handles.append(handle)
+            return True
+
+        monitor_proc = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_void_p, ctypes.c_void_p,
+        )(_visit)
+        user32.EnumDisplayMonitors(None, None, monitor_proc, 0)
+
+        screens = QGuiApplication.screens()
+        if not handles or len(handles) != len(screens):
+            return []
+
+        mapping: list[tuple[QRectF, QRectF, float]] = []
+        for handle, screen in zip(handles, screens):
+            info = _MonitorInfoExW()
+            info.cbSize = ctypes.sizeof(_MonitorInfoExW)
+            if not user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+                return []
+            dpi_x, dpi_y = ctypes.c_uint(), ctypes.c_uint()
+            # MDT_EFFECTIVE_DPI (0): the scale the user actually set, which
+            # is what Qt divides by -- not the panel's raw DPI.
+            if shcore.GetDpiForMonitor(handle, 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y)) != 0:
+                return []
+            if dpi_x.value <= 0:
+                return []
+            scale = dpi_x.value / 96.0
+
+            rect = info.rcMonitor
+            physical = QRectF(
+                rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+            )
+            logical = QRectF(screen.geometry())
+            # The check that makes index pairing safe. Rounded, because a
+            # 150% scale on an odd pixel count does not divide evenly and
+            # Qt rounds too -- a pixel of disagreement is arithmetic, not a
+            # mismatched monitor.
+            if (
+                round(physical.width() / scale) != round(logical.width())
+                or round(physical.height() / scale) != round(logical.height())
+            ):
+                return []
+            mapping.append((physical, logical, scale))
+        return mapping
+
+    def _to_logical(self, physical: QRectF, mapping=None) -> QRectF:
+        """A physical-pixel rect -> the absolute logical rect this class
+        promises. Unchanged when there is no verified map to use.
+
+        Mapped against the monitor the rect's **centre** falls on, so a
+        window straddling a bezel resolves to one monitor rather than being
+        stretched between two scales. Straddling monitors at different
+        scales has no single correct answer; the one the window is mostly
+        on is the useful one.
+
+        `mapping` is injectable so the conversion can be tested at scales
+        this machine does not have -- the whole bug is that it is invisible
+        at 1.0, so a test that could only run at 1.0 would prove nothing.
+        """
+        mapping = self.monitor_map() if mapping is None else mapping
+        if not mapping:
+            return physical
+        centre = physical.center()
+        for monitor, logical, scale in mapping:
+            if monitor.contains(centre):
+                return QRectF(
+                    logical.x() + (physical.x() - monitor.x()) / scale,
+                    logical.y() + (physical.y() - monitor.y()) / scale,
+                    physical.width() / scale,
+                    physical.height() / scale,
+                )
+        return physical
+
     def list_windows(self) -> list[tuple[str, QRectF]]:
         """(title, absolute logical rect) for every visible, non-minimised,
         non-cloaked top-level window, topmost first.
@@ -1319,6 +1451,9 @@ class WindowsWindowGeometryProvider:
         dwmapi = ctypes.windll.dwmapi
 
         windows: list[tuple[str, QRectF]] = []
+        # Built once per enumeration, not per window: it walks every
+        # monitor and this runs for every window on screen.
+        mapping = self.monitor_map()
 
         def _visit(hwnd, _lparam) -> bool:
             if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
@@ -1332,7 +1467,13 @@ class WindowsWindowGeometryProvider:
                 return True
             if self._is_larger_than_its_monitor(user32, hwnd, rect):
                 return True
-            windows.append((self._window_title(user32, hwnd), rect))
+            # Converted here, at the one place a rect leaves this class,
+            # and deliberately *after* `_is_larger_than_its_monitor`: that
+            # comparison is physical-against-physical and stays correct
+            # only while both sides are untouched.
+            windows.append(
+                (self._window_title(user32, hwnd), self._to_logical(rect, mapping))
+            )
             return True
 
         # ctypes.WINFUNCTYPE is only constructed here, guarded by

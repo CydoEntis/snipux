@@ -48,7 +48,7 @@ into the existing one.
 ## What has been measured
 
 Spiked on a real three-monitor Windows desktop with Brave running, against the
-existing `Win32GeometryProvider`.
+existing `WindowsWindowGeometryProvider`.
 
 **Browser windows are identifiable.** `EnumWindows` + `GetWindowTextW` (which
 `capture.py` already calls for the Window-mode hover preview) plus
@@ -81,7 +81,7 @@ codebase already uses.
 **What was not measured, and matters:** Firefox is not Chromium and has no
 `Chrome_RenderWidgetHostHWND`. Every number above is Chromium-family only.
 
-**And one thing the spike found by accident.** `Win32GeometryProvider`
+**And one thing the spike found by accident.** `WindowsWindowGeometryProvider`
 performs no physical-to-logical conversion anywhere — grepped, zero
 references to a pixel ratio or `GetDpiForWindow` — while `GeometryProvider`
 is documented to return *absolute logical* rects. `GetWindowRect` returns
