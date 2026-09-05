@@ -2174,25 +2174,30 @@ class PageScopeSwitch(_Chrome):
         painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
         painter.end()
 
-    def reposition(self, selection: QRect, bounds: QRectF) -> None:
-        """Centre on `selection`'s top edge, just above it, clamped into
-        `bounds` -- the monitor rect, the same one the floating bar is
-        clamped to and for the same reason: a union of monitors has gaps
-        in it that display nothing.
+    def reposition(self, occupied: QRect, bounds: QRectF) -> None:
+        """Sit clear of the chrome already placed, centred on it.
 
-        Falls *inside* the page when there is no room above, which is the
-        one case where covering a few pixels of what is about to be
-        captured is better than being off screen entirely. The capture
-        itself is unaffected either way -- this widget is chrome, and
-        `hideEvent` takes it down before any pixels are read.
+        `occupied` is everything the bar and its trays are using -- not
+        just the bar. Positioning against the bar alone was only half the
+        fix: with the drawing tools up, the colour tray sits below the bar,
+        and a switch pushed below the bar landed on top of it.
+
+        Positioned against chrome rather than against the selection,
+        because a browser page fills nearly the whole monitor. The bar then
+        has no room below the selection and flips above it, and a switch
+        that had *also* placed itself above the selection landed in the
+        same strip -- on the bar, and on the browser's own tab bar. The bar
+        has already solved "where is there room on this monitor"; following
+        what it decided is how the two cannot collide.
         """
         size = self.sizeHint()
-        centre = QRectF(selection).center().x()
+        bar = QRectF(occupied).toRect()
+        centre = QRectF(bar).center().x()
         left = max(bounds.left(), min(centre - size.width() / 2,
                                       bounds.right() - size.width()))
-        top = QRectF(selection).top() - self._GAP_ABOVE - size.height()
+        top = bar.top() - self._GAP_ABOVE - size.height()
         if top < bounds.top():
-            top = QRectF(selection).top() + self._GAP_ABOVE
+            top = bar.bottom() + self._GAP_ABOVE
         top = max(bounds.top(), min(top, bounds.bottom() - size.height()))
         self.setGeometry(round(left), round(top), size.width(), size.height())
 
@@ -4715,7 +4720,17 @@ class OverlayWindow(QWidget):
         in the review window, which has the same tools and is the only
         surface that can show an image taller than the screen.
         """
-        self._bar.set_annotation_visible(not self._capturing_whole_page())
+        drawing = not self._capturing_whole_page()
+        self._bar.set_annotation_visible(drawing)
+        if not drawing:
+            # Hiding the buttons is not enough: the colour/stroke tray
+            # follows the bar's *active tool*, not its buttons, so a pen
+            # left armed kept a whole tray on screen for a tool with no
+            # button and nothing to draw on. Disarm it, then let the trays
+            # re-sync against that.
+            self._bar.set_active_tool(None)
+            self.set_eraser_active(False)
+        self._sync_tray_visibility()
 
     def _sync_scope_switch(self) -> None:
         """Show the Visible / Full page switch exactly while the browser
@@ -4733,7 +4748,13 @@ class OverlayWindow(QWidget):
             and self.isVisible()
             and not self._armed_for_recording
         ):
-            self._scope_switch.reposition(self._selection, self._chrome_bounds())
+            # Everything already on screen, so the switch can place itself
+            # clear of all of it rather than only of the bar.
+            occupied = QRectF(self._bar.geometry())
+            for tray in (self._tray, self._blur_tray):
+                if tray.isVisible():
+                    occupied = occupied.united(QRectF(tray.geometry()))
+            self._scope_switch.reposition(occupied.toRect(), self._chrome_bounds())
             self._scope_switch.show()
             self._scope_switch.raise_()
         else:
@@ -5136,6 +5157,8 @@ class OverlayWindow(QWidget):
             self._bar.reposition(self._selection, self._chrome_bounds())
             self._bar.show()
             self._sync_tray_visibility()
+            # Last, so `occupied` above already includes whatever tray the
+            # active tool just put on screen.
             self._sync_scope_switch()
         else:
             self._bar.hide()
