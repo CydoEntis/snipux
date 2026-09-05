@@ -4653,6 +4653,20 @@ class OverlayWindow(QWidget):
         # has to scroll -- and without something standing in, the outline
         # vanishes, the browser starts moving on its own, and the outcome
         # arrives as a toast on a window that has only just come back.
+        # Focus is taken *before* hiding, and that ordering is the whole
+        # of whether it works: Windows only lets a process call
+        # SetForegroundWindow while it already owns the foreground, and
+        # this overlay owns it right up until it hides. Asking afterwards
+        # is asking from a process with no foreground window, which Windows
+        # is entitled to refuse -- and did.
+        if not scroller.take_focus():
+            self._show_toast(
+                "panel",
+                "the browser would not come to the front, so it cannot be scrolled",
+            )
+            scroller.restore()
+            return
+
         indicator = PageCaptureIndicator(viewport)
         self.hide()
         indicator.show()
@@ -4701,12 +4715,6 @@ class OverlayWindow(QWidget):
         Split out so the loop itself (`scroll.capture_page`) stays free of
         Qt, ctypes and this window -- it is tested with none of them.
         """
-        if not scroller.take_focus():
-            raise ScrollCaptureError(
-                "the browser would not come to the front, so it cannot be "
-                "scrolled"
-            )
-
         notches = max(
             1,
             round(
@@ -4748,7 +4756,12 @@ class OverlayWindow(QWidget):
                 time.sleep(0.02)
 
         # To the top first, so the capture starts at the beginning of the
-        # page rather than wherever it happened to be left.
+        # page rather than wherever it happened to be left. `capture_page`
+        # waits for this to finish landing before it takes anything --
+        # a jump up a long page is an animation of thousands of pixels, and
+        # one settle is nowhere near enough.
+        if indicator is not None:
+            indicator.say("Going to the top of the page…")
         scroller.scroll(60)
         settle()
         return capture_page(grab, scroll, settle)
