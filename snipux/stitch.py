@@ -44,7 +44,18 @@ PROBE_ROWS = 24
 MIN_SCROLL_ROWS = 8
 
 
-def row_signatures(image: QImage) -> list[int]:
+# Pixels ignored at the right edge when hashing a row. The scrollbar lives
+# there, it is present in *every* row, and it moves as the page scrolls --
+# so including it makes almost every row differ from its own self one scroll
+# later. Measured on a real page: a single scroll left 482 of 1311 rows
+# matchable with the scrollbar included, and 1008 with it excluded, which is
+# every row that had not been scrolled off. Generous enough for a scrollbar
+# at 150% scaling; it costs only matching accuracy at the extreme right
+# edge, never a pixel of the stitched image.
+SCROLLBAR_MARGIN = 24
+
+
+def row_signatures(image: QImage, ignore_right: int = SCROLLBAR_MARGIN) -> list[int]:
     """One hash per scanline, top to bottom.
 
     The whole reason this module is fast enough to exist without numpy.
@@ -70,7 +81,12 @@ def row_signatures(image: QImage) -> list[int]:
         image = image.convertToFormat(QImage.Format.Format_RGB32)
 
     width, height = image.width(), image.height()
-    usable = width * 4  # RGB32: four bytes a pixel, ignoring row padding
+    # RGB32: four bytes a pixel. The right margin is dropped before hashing
+    # -- see SCROLLBAR_MARGIN -- but never below a quarter of the frame, so
+    # a narrow image cannot end up hashing almost nothing and matching
+    # everything.
+    keep = max(width - max(ignore_right, 0), width // 4, 1)
+    usable = keep * 4
     signatures = []
     for y in range(height):
         line = image.constScanLine(y)
