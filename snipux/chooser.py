@@ -1299,9 +1299,29 @@ class Chooser(QWidget):
         self.panel.mode_trigger.set_content(icon, self._mode, colour.MODE_ACCENT)
 
         after_icon, after_label = _after_display(self._after, self._kind)
-        # Icon only. The label still exists for the tab and the menu, which
-        # have room for it and need it to be readable.
-        self.panel.after_trigger.set_content(after_icon, "", colour.ROW_IDLE_FG)
+        # Labelled, against the handoff's "secondary decision, so no label
+        # on the trigger". That rule assumed the icon would carry it, and
+        # it does not: this control decides whether a snip ends with a
+        # toolbar, a window, or nothing at all, and the difference between
+        # a pen glyph and an eye glyph does not say so. Icon-only, it was
+        # the reason a destination of `instant` could not be got out of --
+        # that one ends the snip on the release of the drag, so there is no
+        # toolbar left to notice it from, and the only control that could
+        # have changed it was an unlabelled icon two pills along. Reported
+        # as "i didnt click copy or anything as soon as i released the
+        # region it capped".
+        #
+        # `instant` additionally goes accent, for exactly the reason the
+        # delay below does: it is the one destination that can surprise
+        # you, and it should be visible before it does rather than
+        # afterwards.
+        surprising = self._after == "instant"
+        self.panel.after_trigger.set_content(
+            after_icon,
+            after_label,
+            colour.MODE_ACCENT if surprising else colour.ROW_IDLE_FG,
+            colour.MODE_ACCENT if surprising else tokens.Color.TEXT_PRIMARY,
+        )
 
         # A delay that is about to surprise you should be visible before it
         # does, so the label goes accent the moment one is set.
