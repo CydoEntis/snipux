@@ -608,6 +608,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "choice -- run this before `pipx uninstall snipux` so nothing is "
         "left behind",
     )
+    group.add_argument(
+        "--update",
+        action="store_true",
+        help="fetch and install the newest Snipux from GitHub, then report "
+        "what to restart -- the same pip command the README gives, without "
+        "anyone having to keep a URL",
+    )
     # Outside the mutually exclusive group above: this modifies --setup
     # rather than being an action of its own.
     parser.add_argument(
@@ -644,6 +651,71 @@ def _print_backends(registry, heading: str | None = None) -> None:
                 print(f"{backend.name()}: unavailable ({reason})")
             else:
                 print(f"{backend.name()}: unavailable")
+
+
+# Where `--update` installs from. `main` rather than a release tag: there
+# are no tagged releases, and this is the same URL the README hands out, so
+# the two cannot describe different things.
+UPDATE_URL = (
+    "https://github.com/CydoEntis/snipux/archive/refs/heads/main.tar.gz"
+)
+
+
+def run_update(runner=None) -> int:
+    """`snipux --update`: install the newest Snipux over this one.
+
+    Exists because the alternative was asking people to keep a
+    seventy-character URL somewhere they could find it again. The command
+    it runs is exactly what the README documents -- it is not a second
+    update mechanism, it is the same one with something memorable in front
+    of it.
+
+    `sys.executable -m pip`, never a bare `pip`: the interpreter running
+    Snipux is by definition the environment Snipux is installed into, and a
+    `pip` on PATH may well belong to a different one -- which would report
+    a cheerful success and upgrade nothing the user is running.
+
+    `--upgrade` and not `--force-reinstall`. Both would fetch the newer
+    code; only the first leaves the dependencies alone, and forcing would
+    re-download the whole of Qt on every update.
+
+    Refuses outright in a PyInstaller build, where `sys.executable` is
+    snipux.exe rather than an interpreter: `-m pip` would fail there with
+    something unreadable, and a frozen build is replaced by downloading a
+    new one, not by pip.
+
+    `runner` is the subprocess call, injected so the tests can assert on
+    the command without this actually reaching the network or the
+    filesystem.
+    """
+    if getattr(sys, "frozen", False):
+        print(
+            "This is a standalone build, which pip cannot update. Download "
+            "the newest snipux.exe and run it -- it replaces this copy."
+        )
+        return 1
+
+    command = [sys.executable, "-m", "pip", "install", "--upgrade", UPDATE_URL]
+    print(f"Updating from {UPDATE_URL}")
+    run = runner if runner is not None else subprocess.call
+    try:
+        code = run(command)
+    except OSError as exc:
+        # No pip, or an interpreter that cannot be re-executed. A step-level
+        # note, not a traceback, the same way every other thing that cannot
+        # run in this file reports itself.
+        print(f"Could not run pip: {exc}")
+        return 1
+
+    if code != 0:
+        print("Update failed -- nothing was changed.")
+        return code
+
+    print(
+        "Updated. Quit Snipux from the tray and press your capture shortcut "
+        "to start the new version."
+    )
+    return 0
 
 
 def main(
@@ -702,6 +774,11 @@ def main(
         # --setup wrote, so it has no more use for a registry or a display
         # than --setup did.
         return platform.current.remove_desktop_integration()
+
+    if args.update:
+        # Display-free, like --setup/--remove above, and handled before any
+        # registry or transport is built.
+        return run_update()
 
     if args.snip:
         # Forward to an already-resident instance when there is one. When

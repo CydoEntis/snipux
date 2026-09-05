@@ -65,16 +65,22 @@ Setup installer was blocked outright, with no way to click through.
 
 ### Updating
 
-One command, and it is the install command with `--upgrade` on it:
+```powershell
+py -m snipux --update
+```
+
+Then quit Snipux from the tray and press Ctrl+Alt+S to start the new one.
+
+That is all anyone needs to remember. `--update` runs exactly the command
+below on their behalf — it is not a second update mechanism, just the same
+one without a URL to keep somewhere findable:
 
 ```powershell
 py -m pip install --upgrade https://github.com/CydoEntis/snipux/archive/refs/heads/main.tar.gz
 ```
 
-Then quit Snipux from the tray and press Ctrl+Alt+S to start the new one.
-
-Nothing else to run: the shortcut and hotkey point at a location that does
-not change between versions.
+Either way, nothing else to run: the shortcut and hotkey point at a
+location that does not change between versions.
 
 **Check it worked:** tray → Settings, bottom-left, e.g.
 `Snipux 0.2.0 / Qt 6.11.0 · Windows`.
