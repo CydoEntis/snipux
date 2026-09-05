@@ -135,14 +135,32 @@ def find_overlap(
     """
     if not earlier or not later:
         return None
-    probe = later[: min(probe_rows, len(later))]
-    if not probe:
+    size = min(probe_rows, len(later))
+    if size <= 0:
         return None
 
-    highest = len(earlier) - len(probe)
-    for start in range(max(min_scroll, 0), highest + 1):
-        if earlier[start : start + len(probe)] == probe:
-            return len(earlier) - start
+    # Probe positions, as a fraction down `later`. The top comes first
+    # because it is the cheapest and is right whenever it works.
+    #
+    # The rest exist because on a real site the top is the *worst* place to
+    # look: a sticky masthead lives there, and frozen rows match everywhere
+    # and therefore nowhere -- measured, five consecutive scrolls that had
+    # plainly moved all reported no overlap from a top probe alone. Any one
+    # position can also land on a region that genuinely changed (a video, a
+    # spinner, an image that finished loading), so several are tried and
+    # the first that yields a legal scroll wins.
+    for fraction in (0.0, 0.5, 0.35, 0.65, 0.2, 0.8):
+        offset = int((len(later) - size) * fraction)
+        probe = later[offset : offset + size]
+        if len(probe) < size:
+            continue
+        # `probe` sits `offset` rows down `later`, so a match at `start`
+        # means the frames are shifted by `start - offset`, not by `start`.
+        # The search therefore begins where that shift is already legal.
+        for start in range(max(min_scroll + offset, 0), len(earlier) - size + 1):
+            if earlier[start : start + size] != probe:
+                continue
+            return len(earlier) - (start - offset)
     return None
 
 
