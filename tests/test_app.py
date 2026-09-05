@@ -3,6 +3,7 @@ import re
 import shutil
 import threading
 import time
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -4702,3 +4703,96 @@ class TestTheInterfaceStaysAliveWhileTheRecorderStarts:
 
         assert controller._active_recording is None
         assert controller._starting_recording is False
+
+
+class TestTheUpdateCommand:
+    """`snipux --update` exists so nobody has to keep a seventy-character
+    URL somewhere they can find it again. It is not a second update
+    mechanism -- it runs exactly the command the README documents.
+    """
+
+    def _ran(self, monkeypatch, code=0):
+        calls = []
+
+        def runner(command):
+            calls.append(command)
+            return code
+
+        return calls, runner
+
+    def test_it_runs_pip_against_this_interpreter(self, monkeypatch, capsys):
+        # Never a bare `pip`: the interpreter running Snipux is by
+        # definition the environment Snipux is installed into, and a `pip`
+        # on PATH may belong to a different one -- which would report
+        # success and upgrade nothing the user is running.
+        calls, runner = self._ran(monkeypatch)
+
+        assert app.run_update(runner=runner) == 0
+
+        assert calls[0][:4] == [sys.executable, "-m", "pip", "install"]
+
+    def test_it_upgrades_rather_than_forcing(self, monkeypatch):
+        # Both fetch the newer code; only --upgrade leaves the
+        # dependencies alone. Forcing would re-download the whole of Qt on
+        # every update.
+        calls, runner = self._ran(monkeypatch)
+
+        app.run_update(runner=runner)
+
+        assert "--upgrade" in calls[0]
+        assert "--force-reinstall" not in calls[0]
+
+    def test_it_installs_from_the_documented_url(self, monkeypatch):
+        calls, runner = self._ran(monkeypatch)
+
+        app.run_update(runner=runner)
+
+        assert calls[0][-1] == app.UPDATE_URL
+        assert app.UPDATE_URL.startswith("https://github.com/")
+
+    def test_success_says_what_to_restart(self, monkeypatch, capsys):
+        _calls, runner = self._ran(monkeypatch)
+
+        app.run_update(runner=runner)
+
+        assert "Quit Snipux" in capsys.readouterr().out
+
+    def test_a_failing_pip_is_reported_not_claimed_as_success(
+        self, monkeypatch, capsys
+    ):
+        _calls, runner = self._ran(monkeypatch, code=2)
+
+        assert app.run_update(runner=runner) == 2
+        assert "Update failed" in capsys.readouterr().out
+
+    def test_no_pip_at_all_is_a_note_not_a_traceback(self, capsys):
+        def boom(_command):
+            raise OSError("pip is not installed")
+
+        assert app.run_update(runner=boom) == 1
+        assert "Could not run pip" in capsys.readouterr().out
+
+    def test_a_frozen_build_refuses_and_says_why(self, monkeypatch, capsys):
+        # `sys.executable` is snipux.exe in a PyInstaller build, so `-m pip`
+        # would fail there with something unreadable. A frozen build is
+        # replaced by downloading a new one.
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        calls, runner = self._ran(monkeypatch)
+
+        assert app.run_update(runner=runner) == 1
+        assert calls == [], "pip must not be run in a frozen build"
+        assert "standalone build" in capsys.readouterr().out
+
+    def test_the_flag_reaches_it(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(app, "run_update", lambda: seen.append(1) or 0)
+
+        assert app.main(["--update"]) == 0
+
+        assert seen == [1]
+
+    def test_it_is_exclusive_with_the_other_actions(self, capsys):
+        # Every action is mutually exclusive; --update joining them must
+        # not quietly become the exception.
+        with pytest.raises(SystemExit):
+            app.main(["--update", "--setup"])
