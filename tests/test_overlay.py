@@ -7673,6 +7673,72 @@ class TestFullPageCapture:
         assert overlay._selection is not None
         assert overlay._browser_selection
 
+    def test_no_two_pieces_of_chrome_sit_on_each_other(self):
+        # Reported as "all controls are sitting on each other and i cant do
+        # anything". A browser page fills nearly the whole monitor, so the
+        # bar has no room below the selection and flips above it -- and the
+        # switch, placed against the *selection*, landed in the same strip.
+        # Then in Visible the colour tray joined them.
+        #
+        # Uses the reported geometry: a 2560x1440 monitor with a page
+        # starting 81px down, which is a maximised Chromium window.
+        monitor = QRectF(0, 0, 2560, 1440)
+        provider = _FakeBrowserProvider(QRectF(0, 81, 2560, 1311))
+        provider.browser_scroller = lambda: _FakeScroller()
+        frame = make_frame(image_size=(2560, 1440), logical_size=(2560, 1440))
+        overlay = OverlayWindow(frame, monitor_geometries=[monitor],
+                                geometry_provider=provider)
+        overlay.setGeometry(0, 0, 2560, 1440)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+
+        for label, scope, tool in (
+            ("visible/pen", "visible", "pen"),
+            ("visible/blur", "visible", "blur"),
+            ("full page", "full", None),
+        ):
+            overlay._scope_switch.set_scope(scope)
+            if tool is not None:
+                overlay._bar.select_tool(tool)
+                overlay._sync_bar_visibility()
+
+            pieces = {
+                "bar": QRectF(overlay._bar.geometry()),
+                "switch": QRectF(overlay._scope_switch.geometry()),
+            }
+            for name, tray in (("tray", overlay._tray), ("blur", overlay._blur_tray)):
+                if tray.isVisible():
+                    pieces[name] = QRectF(tray.geometry())
+
+            names = list(pieces)
+            for i, a in enumerate(names):
+                assert monitor.contains(pieces[a]), f"{label}: {a} is off the monitor"
+                for b in names[i + 1:]:
+                    assert not pieces[a].intersects(pieces[b]), (
+                        f"{label}: {a} {pieces[a].toRect()} overlaps "
+                        f"{b} {pieces[b].toRect()}"
+                    )
+
+    def test_a_whole_page_leaves_no_tray_on_screen(self):
+        # Hiding the tool *buttons* was not enough: the colour tray follows
+        # the bar's active tool, so a pen left armed kept a whole tray on
+        # screen for a tool with no button and nothing to draw on.
+        scroller = _FakeScroller()
+        overlay = self._overlay(scroller)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._dispatch_capture_mode(tokens.BROWSER_MODE)
+        overlay._bar.select_tool("pen")
+        overlay._sync_bar_visibility()
+        assert overlay._tray.isVisible()
+
+        overlay._scope_switch.set_scope("full")
+
+        assert not overlay._tray.isVisible()
+        assert not overlay._blur_tray.isVisible()
+        assert overlay._bar.active_tool is None
+
     def test_it_is_not_offered_for_recording(self):
         # Recording something that scrolls itself is a different feature,
         # not this one with a video codec on the end.
