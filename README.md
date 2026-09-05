@@ -31,84 +31,87 @@ drawing on an image already held in memory.
 
 ### Windows
 
-Snipux needs Python 3.10+ ([python.org](https://www.python.org/downloads/),
-tick **Add python.exe to PATH** if asked). Then, given the
-`snipux-<version>-py3-none-any.whl` file:
+You need Python 3.10+ first —
+[python.org](https://www.python.org/downloads/), and **tick "Add python.exe
+to PATH"** when the installer offers. That is the only fiddly step, and it
+is one-time.
+
+Then open PowerShell anywhere and run:
 
 ```powershell
-py -m pip install snipux-0.2.0-py3-none-any.whl
+py -m pip install https://github.com/CydoEntis/snipux/archive/refs/heads/main.tar.gz
 py -m snipux
 ```
 
-That is the whole install. The first line takes a few minutes the first
-time, because it pulls down Qt. The second just starts Snipux — and the
-first launch installs itself: the Start Menu shortcut, the Startup entry,
-and the **Ctrl+Alt+S** hotkey. After that it starts with Windows and the
-shortcut is the only way in anyone needs.
+Nothing to download by hand, and nothing to be sent — pip fetches the code
+from this page itself. The first line takes a few minutes, because it pulls
+down Qt. The second just starts Snipux.
 
-`snipux --setup` exists and does the same thing explicitly, but is not a
-step to hand anyone: it is for redoing the integration after a move, and
-`AppController._install_desktop_integration_once` already runs it the
-first time the app is ever the resident instance.
+**The first launch sets itself up**: a Start Menu shortcut, a Startup entry
+so it is running after every login, and the **Ctrl+Alt+S** shortcut. After
+that, Ctrl+Alt+S is the only thing anyone needs to know — no terminal
+again, ever.
 
-`py -m ...` deliberately, rather than a bare `snipux`.
-`py` is the Python launcher Windows installs with Python itself, and `-m`
-runs the package directly — so neither command depends on any folder
-having been added to `PATH`, which is the step that most often silently
-does not happen and leaves `'snipux' is not recognized` as the only
-symptom.
+`snipux --setup` does the same thing explicitly, but is not a step to hand
+anyone: it is for redoing the integration after a move.
+`AppController.run_first_launch_setup` already runs it the first time the
+app is ever the resident instance.
 
 **Nothing here trips Smart App Control or SmartScreen**, which is the
-point. Both react to unrecognised *executables*; a wheel is a zip of
-Python source and images, installed by the `python.exe` the user already
-trusts. See "Why there's no installer" in
-[docs/releasing.md](docs/releasing.md) for the history — an earlier Inno
+point. Both react to unrecognised *executables*; this is Python source
+installed by the `python.exe` the user already trusts. See "Why there's no
+installer" in [docs/releasing.md](docs/releasing.md) — an earlier Inno
 Setup installer was blocked outright, with no way to click through.
 
 ### Updating
 
-One command. Same as installing, with the newer file:
+One command, and it is the install command with `--upgrade` on it:
 
 ```powershell
-py -m pip install snipux-0.3.0-py3-none-any.whl
+py -m pip install --upgrade https://github.com/CydoEntis/snipux/archive/refs/heads/main.tar.gz
 ```
 
+Then quit Snipux from the tray and press Ctrl+Alt+S to start the new one.
+
 Nothing else to run: the shortcut and hotkey point at a location that does
-not change between versions. No need to quit Snipux first either — the
-files being replaced are plain Python source, which Windows does not lock.
-Restart Snipux to actually run the new version.
+not change between versions.
 
 **Check it worked:** tray → Settings, bottom-left, e.g.
 `Snipux 0.2.0 / Qt 6.11.0 · Windows`.
 
-> Every release must carry a new version number. Handed a wheel whose
-> version already matches what is installed, pip prints *"already
-> installed with the same version"* and changes nothing — so re-issuing a
-> fixed build under an old number produces a silent no-op, and the user
-> reports the bug again. `--force-reinstall` overrides it, but bumping the
-> version in `pyproject.toml` is the fix.
+> `--upgrade` compares versions, so **every release needs a new version
+> number** in `pyproject.toml`. Left the same, pip decides the requirement
+> is already satisfied and changes nothing — no error — so a fixed build
+> published under an old number is a silent no-op and the bug gets
+> reported a second time. (`--force-reinstall` overrides it, but it also
+> re-downloads Qt, so it is not what to tell people.)
 
-**There is no update check.** Snipux never phones home, so someone has to
-tell each user a new version exists.
-
-One is buildable, though — this repository is public, so
+**There is no update check.** Snipux never phones home, so nobody is told a
+new version exists — they update when they choose to. One is buildable now
+that this repository is public:
 `api.github.com/repos/CydoEntis/snipux/releases/latest` answers an
 unauthenticated request, and comparing that tag against
 `importlib.metadata.version("snipux")` is the whole of the logic. What it
-needs first is releases to compare against, which means tagging them.
+needs first is tagged releases to compare against.
 
-### Building the wheel to send
+### Installing a specific version, or offline
+
+The URL above tracks `main`. Any tag, branch or commit works the same way
+by swapping the last path segment:
+
+```powershell
+py -m pip install https://github.com/CydoEntis/snipux/archive/refs/tags/v0.2.0.tar.gz
+```
+
+For a machine with no network, or to pin exactly what someone runs, build
+a wheel and hand them the file instead:
 
 ```powershell
 python -m build --wheel
 ```
 
-Writes `dist/snipux-<version>-py3-none-any.whl`. That single file is
-everything a user needs — send it however you like.
-
-Bump `version` in `pyproject.toml` first (and `__version__` in
-`snipux/__init__.py`, which is not read from it), or the update above is
-the silent no-op described there.
+That writes `dist/snipux-<version>-py3-none-any.whl`, which installs the
+same way — `py -m pip install snipux-0.2.0-py3-none-any.whl`.
 
 ### Linux
 
