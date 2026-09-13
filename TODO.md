@@ -529,11 +529,5 @@ Habits that actually catch things here:
 
 ## Housekeeping
 
-`punch.config.yaml` became `hopper.config.yaml` (one key, `profile: Snipux`).
-The `hopper` on PATH at `C:\nvm4w\nodejs\hopper` is a **stale launcher** that
-points at a `node_modules` with no `@cydo/hopper` in it; the working binary is
-`~/.bun/bin/hopper`. Worth cleaning up, or every session trips on it. Windows
-only -- there is no `hopper` on the Linux box at all.
-
 Development on Linux needs a venv (`python -m venv .venv`, then
 `pip install -r requirements.txt`); there is no system PyQt6.

@@ -27,7 +27,7 @@ import os
 import sys
 
 # CLAUDE.md requires this suite to pass headless -- a build machine has no
-# display, and neither does a Hopper worktree -- so the QPA platform is
+# display, and neither does an agent's worktree -- so the QPA platform is
 # defaulted here rather than left to every caller to prefix.
 #
 # It is here, and not in the command, because the prefix form is POSIX-only:
