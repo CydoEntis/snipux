@@ -100,7 +100,7 @@ from snipux import capture, recording, setup_desktop
 from snipux.capture import BackendRegistry
 from snipux.recording import RecorderRegistry
 
-from . import Platform, UnimplementedPlatformError
+from . import Platform, UnimplementedPlatformError, windows_ocr
 
 _PLATFORM_NAME = "Windows"
 
@@ -991,6 +991,15 @@ class WindowsPlatform(Platform):
 
     def build_recording_registry(self) -> RecorderRegistry:
         return recording.build_windows_registry()
+
+    def recognizes_text(self) -> bool:
+        return windows_ocr.available()
+
+    def text_recognition_unavailable_reason(self) -> str:
+        return "" if windows_ocr.available() else "Needs Windows PowerShell"
+
+    def recognize_text(self, image) -> list:
+        return windows_ocr.recognize(image)
 
     def exclude_from_capture(self, widget) -> bool:
         """`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` -- the

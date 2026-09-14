@@ -658,7 +658,7 @@ class SettingsWindow(WinWindow):
         # in this pane first and went unnoticed until it was pointed out --
         # a preference nobody finds is a preference nobody has -- so it is a
         # toggle on the chooser row itself now, next to the mode it
-        # modifies. See `chooser._ReuseToggle`.
+        # modifies. See `chooser._RowToggle`.
 
         return _pane(
             SectionHeading("Shortcut"),

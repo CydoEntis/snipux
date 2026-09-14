@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 
 import snipux.app as app_module
 import snipux.overlay as overlay_module
+from snipux.sensitive import RecognizedWord
 from conftest import skip_on_windows
 from snipux import capture as capture_module
 from snipux import setup_desktop
@@ -42,6 +43,7 @@ from snipux.design import color as design_color
 from snipux.design import font_families
 from snipux.design import tokens
 from snipux.shapes import (
+    Redact,
     Arrow,
     Blur,
     Crop,
@@ -4035,6 +4037,65 @@ class TestBlurTraySegmentToggle:
         received.assert_called_once_with("pix")
 
 
+class TestBlurTraySolidSegment:
+    """Solid: the third segment, which blacks a region out rather than
+    obscuring it -- and has no strength to set.
+    """
+
+    def test_clicking_solid_activates_only_it(self):
+        tray = BlurTray()
+
+        QTest.mouseClick(tray._well.solid_button, Qt.MouseButton.LeftButton)
+
+        assert tray.blur_mode == "solid"
+        assert tray._well.solid_button.is_active
+        assert not tray._well.blur_button.is_active
+        assert not tray._well.pixelate_button.is_active
+
+    def test_clicking_solid_emits_blur_mode_changed(self):
+        tray = BlurTray()
+        received = Mock()
+        tray.blurModeChanged.connect(received)
+
+        QTest.mouseClick(tray._well.solid_button, Qt.MouseButton.LeftButton)
+
+        received.assert_called_once_with("solid")
+
+    def test_strength_is_disabled_while_solid_is_active(self):
+        tray = BlurTray()
+
+        tray.set_blur_mode("solid")
+
+        assert not tray._slider.isEnabled()
+        assert not tray._strength_label.isEnabled()
+        assert not tray._readout.isEnabled()
+
+    def test_strength_comes_back_for_blur_and_pixelate(self):
+        tray = BlurTray()
+        for mode in ("blur", "pix"):
+            tray.set_blur_mode("solid")
+
+            tray.set_blur_mode(mode)
+
+            assert tray._slider.isEnabled(), mode
+
+    def test_a_solid_drag_on_the_overlay_commits_a_redact(self):
+        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
+        overlay = OverlayWindow(frame)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 400, 300))
+        QTest.mouseClick(overlay._bar._tool_buttons["blur"], Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay._blur_tray._well.solid_button, Qt.MouseButton.LeftButton)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(450, 250))
+        QTest.mouseMove(overlay, QPoint(600, 320))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(600, 320))
+
+        assert len(overlay._marks) == 1
+        assert type(overlay._marks[0]).__name__ == "Redact"
+
+
 class TestBlurTrayStrengthReadout:
     """SNX-42: 'the strength slider covers the range in tokens.py and
     starts at the token default' and 'the readout shows the current
@@ -7321,6 +7382,230 @@ STAGGERED_CENTRE = QRectF(1920, 0, 2560, 1440)   # full height, the primary
 STAGGERED_RIGHT = QRectF(4480, 188, 1920, 1080)  # bottom edge y=1268
 STAGGERED = [STAGGERED_CENTRE, STAGGERED_LEFT, STAGGERED_RIGHT]
 STAGGERED_UNION = QRectF(0, 0, 6400, 1440)
+
+
+class TestHideSensitiveText:
+    """Hide sensitive: solid boxes over emails, cards and keys, placed when
+    a selection is made, driven through a fake recognizer so nothing here
+    depends on the machine having OCR.
+
+    The frame is 2x its logical size and sits at a non-zero origin, so a
+    box computed in the wrong coordinate space lands visibly in the wrong
+    place instead of coincidentally in the right one.
+    """
+
+    LOGICAL = (1600, 1000)
+    ORIGIN = (-1600, 0)
+    SELECTION = QRect(100, 50, 400, 300)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    @pytest.fixture
+    def recognizer(self, monkeypatch):
+        """Replaces the platform's text recognition. `words` is what it
+        returns, as (text, x, y, w, h) in the recognised image's pixels."""
+        state = SimpleNamespace(available=True, calls=[], words=[
+            ("Email:", 0, 20, 30, 30),
+            ("bob.smith@gmail.com", 40, 20, 200, 30),
+        ])
+        current = overlay_module.platform.current
+
+        def recognize_text(image):
+            state.calls.append(QImage(image))
+            return [[RecognizedWord(text, QRectF(x, y, w, h)) for text, x, y, w, h in state.words]]
+
+        monkeypatch.setattr(current, "recognizes_text", lambda: state.available)
+        monkeypatch.setattr(current, "text_recognition_unavailable_reason", lambda: "")
+        monkeypatch.setattr(current, "recognize_text", recognize_text)
+        return state
+
+    def _overlay(self, *, hide=True):
+        size = self.LOGICAL
+        frame = make_frame(
+            image_size=(size[0] * 2, size[1] * 2), logical_size=size, logical_origin=self.ORIGIN
+        )
+        overlay = OverlayWindow(
+            frame, monitor_geometries=[QRectF(QPointF(*self.ORIGIN), QSizeF(*size))]
+        )
+        overlay._chooser.set_hide_sensitive(hide)
+        return overlay
+
+    def test_the_box_covers_the_value_in_window_coordinates(self, recognizer):
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        [box] = overlay._marks
+        assert isinstance(box, Redact)
+        # Image rect (40, 20, 200x30) at 2x, offset by the selection's
+        # (100, 50), padded by 2 on every side.
+        rect = QRectF(box.start, box.end).normalized()
+        pad = OverlayWindow._HIDE_PADDING
+        assert rect.left() == pytest.approx(100 + 20 - pad)
+        assert rect.top() == pytest.approx(50 + 10 - pad)
+        assert rect.width() == pytest.approx(100 + 2 * pad)
+        assert rect.height() == pytest.approx(15 + 2 * pad)
+
+    def test_the_label_is_left_visible(self, recognizer):
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert len(overlay._marks) == 1
+
+    def test_the_recognizer_reads_the_selection_at_full_resolution(self, recognizer):
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        [image] = recognizer.calls
+        assert (image.width(), image.height()) == (800, 600)
+
+    def test_one_undo_removes_every_box(self, recognizer):
+        recognizer.words = [
+            ("bob.smith@gmail.com", 40, 20, 200, 30),
+            ("sk-ant-" + "api03-Xq7pL2mNvB9cR4tY8wZ1", 40, 80, 300, 30),
+            ("192.168.14.201", 40, 140, 150, 30),
+        ]
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+        assert len(overlay._marks) == 3
+
+        overlay.undo()
+        assert len(overlay._marks) == 0
+
+    def test_an_instant_copy_already_has_the_value_blacked_out(self, recognizer, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay()
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+
+        overlay._commit_selection(self.SELECTION)
+
+        [image] = copied
+        # Centre of the value, in exported pixels: the recognised rect's own.
+        assert image.pixelColor(140, 35) == QColor(0, 0, 0)
+        assert image.pixelColor(700, 500) == QColor(BASE_COLOR)
+
+    def test_nothing_is_read_when_the_toggle_is_off(self, recognizer):
+        overlay = self._overlay(hide=False)
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert recognizer.calls == []
+        assert overlay._marks == ()
+
+    def test_nothing_is_read_on_the_record_side(self, recognizer):
+        overlay = self._overlay()
+        overlay._chooser.set_kind("record")
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert recognizer.calls == []
+
+    def test_nothing_is_read_when_the_platform_cannot(self, recognizer):
+        recognizer.available = False
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert recognizer.calls == []
+        assert overlay._marks == ()
+
+    def test_ordinary_text_adds_nothing_and_no_history(self, recognizer):
+        recognizer.words = [("Deploy", 10, 10, 60, 20), ("finished", 80, 10, 70, 20)]
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert overlay._marks == ()
+        assert not overlay._mark_store.can_undo
+
+    def test_selecting_the_same_text_again_does_not_stack_duplicate_boxes(self, recognizer):
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+        overlay._commit_selection(self.SELECTION)
+
+        assert len(overlay._marks) == 1
+
+    def test_the_same_value_found_by_both_reads_is_one_box_covering_both(self, recognizer):
+        # Recognition reads small selections at two sizes; both usually
+        # find the same words, a pixel or two apart.
+        recognizer.words = [
+            ("bob.smith@gmail.com", 40, 20, 200, 30),
+            ("bob.smith@gmail.com", 42, 22, 204, 30),
+        ]
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        [box] = overlay._marks
+        rect = QRectF(box.start, box.end).normalized()
+        pad = OverlayWindow._HIDE_PADDING
+        assert rect.left() == pytest.approx(100 + 20 - pad)
+        assert rect.right() == pytest.approx(100 + 123 + pad)
+
+    def test_different_values_side_by_side_stay_separate(self, recognizer):
+        recognizer.words = [
+            ("bob.smith@gmail.com", 40, 20, 200, 30),
+            ("192.168.14.201", 260, 20, 150, 30),
+        ]
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert len(overlay._marks) == 2
+
+    def test_it_says_how_many_it_hid(self, recognizer):
+        recognizer.words = [
+            ("bob.smith@gmail.com", 40, 20, 200, 30),
+            ("192.168.14.201", 40, 140, 150, 30),
+        ]
+        overlay = self._overlay()
+        said = []
+        overlay._show_toast = lambda icon, text: said.append(text)
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert said == ["Hid 2 items"]
+
+    def test_a_recalled_last_region_is_scanned_too(self, recognizer):
+        # Last region pre-selects without committing, so without its own
+        # scan the two toggles together would hide nothing at all.
+        setup_desktop.save_last_region((-1500, 50, 400, 300))
+        overlay = self._overlay()
+        overlay._chooser.set_reuse_last_region(True)
+
+        overlay._preselect_last_region()
+
+        assert overlay._selection == self.SELECTION
+        assert len(overlay._marks) == 1
+
+    def test_the_toggle_is_seeded_from_and_saved_to_config(self, recognizer):
+        setup_desktop.save_hide_sensitive(True)
+        overlay = OverlayWindow(make_frame())
+        assert overlay._chooser.hide_sensitive is True
+
+        QTest.mouseClick(overlay._chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+
+        assert setup_desktop.load_hide_sensitive() is False
+
+    def test_the_toggle_is_greyed_when_the_platform_cannot_read_text(self, monkeypatch):
+        current = overlay_module.platform.current
+        monkeypatch.setattr(current, "recognizes_text", lambda: False)
+        monkeypatch.setattr(current, "text_recognition_unavailable_reason", lambda: "Windows only for now")
+
+        overlay = OverlayWindow(make_frame())
+
+        assert overlay._chooser.hide_sensitive_available is False
+        overlay._chooser._on_hide_hovered(True)
+        assert overlay._chooser.hint._text == "Windows only for now"
 
 
 class _FakeBrowserProvider(UnsupportedGeometryProvider):

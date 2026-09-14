@@ -1188,6 +1188,37 @@ class TestReuseLastRegionPreference:
         assert setup_desktop.load_last_region(tmp_path) == (1, 2, 3, 4)
 
 
+class TestHideSensitivePreference:
+    """Whether screenshots black out sensitive text: off unless asked for."""
+
+    def test_off_unless_asked_for(self, tmp_path):
+        assert setup_desktop.load_hide_sensitive(tmp_path) is False
+
+    def test_round_trips_through_save_and_load(self, tmp_path):
+        setup_desktop.save_hide_sensitive(True, tmp_path)
+
+        assert setup_desktop.load_hide_sensitive(tmp_path) is True
+
+    def test_turning_it_off_again_is_not_stuck_on(self, tmp_path):
+        setup_desktop.save_hide_sensitive(True, tmp_path)
+        setup_desktop.save_hide_sensitive(False, tmp_path)
+
+        assert setup_desktop.load_hide_sensitive(tmp_path) is False
+
+    def test_a_junk_value_reads_as_off(self, tmp_path):
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text('{"hide_sensitive": "yes"}')
+
+        assert setup_desktop.load_hide_sensitive(tmp_path) is False
+
+    def test_it_is_independent_of_last_region(self, tmp_path):
+        setup_desktop.save_hide_sensitive(True, tmp_path)
+        setup_desktop.save_reuse_last_region(False, tmp_path)
+
+        assert setup_desktop.load_hide_sensitive(tmp_path) is True
+        assert setup_desktop.load_reuse_last_region(tmp_path) is False
+
+
 class TestLastRegionPersistence:
     """The rectangle the chooser's `Last region` mode recaptures. Persisted
     because autostart means the process a user reaches for in the morning is

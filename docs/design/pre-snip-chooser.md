@@ -30,7 +30,7 @@ Full screen, Freeform.
 
 Region gained a preference rather than a fifth mode, and the row gained a
 fourth control to hold it: a `redo`-glyph toggle immediately after the mode
-trigger (`chooser._ReuseToggle`). With it on, Region opens with the
+trigger (`chooser._RowToggle`). With it on, Region opens with the
 previous snip's rectangle already framed and the toolbar up, so re-shooting
 the same area needs no second drag — accept it, nudge an edge, or drag
 anywhere outside it to frame something else. It is a *pre*-selection, never

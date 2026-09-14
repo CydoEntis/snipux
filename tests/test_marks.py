@@ -106,6 +106,64 @@ class TestHistory:
 
         assert len(store) == 0
 
+    def test_a_batch_is_one_undo_step(self):
+        store = MarkStore()
+        earlier = pen(0)
+        store.add(earlier)
+
+        store.add_all([pen(1), pen(2), pen(3)])
+        assert len(store) == 4
+
+        store.undo()
+        assert store.marks == (earlier,)
+
+    def test_redo_puts_a_batch_back_in_place_and_order(self):
+        store = MarkStore()
+        earlier = pen(0)
+        batch = [pen(1), pen(2), pen(3)]
+        store.add(earlier)
+        store.add_all(batch)
+        store.undo()
+
+        store.redo()
+
+        assert store.marks == (earlier, *batch)
+
+    def test_undoing_a_batch_leaves_marks_added_before_it(self):
+        # The trap: undo() used to send every kind it did not name to the
+        # clear branch, which would have wiped the whole list.
+        store = MarkStore()
+        first, second = pen(1), pen(2)
+        store.add(first)
+        store.add(second)
+        store.add_all([pen(3)])
+
+        store.undo()
+
+        assert store.marks == (first, second)
+
+    def test_an_empty_batch_is_not_a_step(self):
+        store = MarkStore()
+        fired = []
+        store.changed.connect(lambda: fired.append(True))
+
+        store.add_all([])
+
+        assert not store.can_undo
+        assert fired == []
+
+    def test_a_batch_clears_the_redo_stack_and_emits_once(self):
+        store = MarkStore()
+        store.add(pen())
+        store.undo()
+        fired = []
+        store.changed.connect(lambda: fired.append(True))
+
+        store.add_all([pen(1), pen(2)])
+
+        assert not store.can_redo
+        assert len(fired) == 1
+
     def test_changed_fires_once_per_mutation(self):
         store = MarkStore()
         fired = []
@@ -173,6 +231,22 @@ class TestStrokeFactory:
         shape = begin_stroke(
             "blur", QPointF(1, 1), colour=QColor("#fff"), stroke_width=4,
             blur_mode="pixelate",
+        )
+
+        assert isinstance(shape, shapes.Pixelate)
+
+    def test_solid_is_chosen_by_the_blur_mode(self):
+        shape = begin_stroke(
+            "blur", QPointF(1, 1), colour=QColor("#fff"), stroke_width=4,
+            blur_mode="solid",
+        )
+
+        assert isinstance(shape, shapes.Redact)
+
+    def test_the_trays_own_pix_spelling_still_pixelates(self):
+        shape = begin_stroke(
+            "blur", QPointF(1, 1), colour=QColor("#fff"), stroke_width=4,
+            blur_mode="pix",
         )
 
         assert isinstance(shape, shapes.Pixelate)

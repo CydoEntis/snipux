@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from snipux import design, platform, setup_desktop
+from snipux import design, platform, sensitive, setup_desktop
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.flowbars import FlowMenu
@@ -65,6 +65,7 @@ from snipux.shapes import (
     Pen,
     Pixelate,
     Rectangle,
+    Redact,
     Shape,
     StepMarker,
     Text,
@@ -2060,6 +2061,8 @@ class _BlurModeWell(QWidget):
         layout.addWidget(self.blur_button)
         self.pixelate_button = _SegmentButton("Pixelate", self)
         layout.addWidget(self.pixelate_button)
+        self.solid_button = _SegmentButton("Solid", self)
+        layout.addWidget(self.solid_button)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -2176,6 +2179,7 @@ class BlurTray(_Chrome):
         self._well = _BlurModeWell(self)
         self._well.blur_button.clicked.connect(lambda: self.set_blur_mode("blur"))
         self._well.pixelate_button.clicked.connect(lambda: self.set_blur_mode("pix"))
+        self._well.solid_button.clicked.connect(lambda: self.set_blur_mode("solid"))
         layout.addWidget(self._well)
 
         self._strength_label = QLabel("Strength", self)
@@ -2247,15 +2251,21 @@ class BlurTray(_Chrome):
         return self._strength
 
     def set_blur_mode(self, mode: str) -> None:
-        """Set the active segment -- `'blur'` or `'pix'` -- deselecting the
-        other one so exactly one always reads as active, per the spec's
-        "exactly one segment reads as active." This is the state that
-        decides which of shapes.py's `Blur`/`Pixelate` a drag commits, per
-        the spec's "the toggle chooses which of the two obscuring shapes a
-        drag commits."
+        """Set the active segment -- `'blur'`, `'pix'` or `'solid'` --
+        deselecting the others so exactly one always reads as active, per
+        the spec's "exactly one segment reads as active." This is the state
+        that decides which of shapes.py's `Blur`/`Pixelate`/`Redact` a drag
+        commits.
+
+        Strength is disabled rather than hidden while Solid is active: a
+        solid fill has no strength, but a tray that changes width as the
+        segment changes would move the very buttons being clicked.
         """
         self._blur_mode = mode
         self._select_segment(mode)
+        has_strength = mode != "solid"
+        for control in (self._strength_label, self._slider, self._readout):
+            control.setEnabled(has_strength)
         self.blurModeChanged.emit(mode)
 
     def set_strength(self, strength: int) -> None:
@@ -2273,6 +2283,7 @@ class BlurTray(_Chrome):
     def _select_segment(self, mode: str) -> None:
         self._well.blur_button.set_active(mode == "blur")
         self._well.pixelate_button.set_active(mode == "pix")
+        self._well.solid_button.set_active(mode == "solid")
 
     def _refresh_readout(self) -> None:
         self._readout.setText(str(self._strength))
@@ -3713,7 +3724,7 @@ class OverlayWindow(QWidget):
         # Only a real change from here on is the user choosing something.
         self._chooser.afterChanged.connect(self._remember_destination)
         # The reuse toggle lives on the row, not in Settings -- see
-        # `chooser._ReuseToggle`. Seeded here (which never emits) and
+        # `chooser._RowToggle`. Seeded here (which never emits) and
         # persisted on every real click, the same shape `kind` uses below.
         self._chooser.set_reuse_last_region(setup_desktop.load_reuse_last_region())
         # `Tab` is greyed unless a browser page can actually be found. Asked
@@ -3725,6 +3736,14 @@ class OverlayWindow(QWidget):
         self._chooser.reuseLastRegionChanged.connect(
             setup_desktop.save_reuse_last_region
         )
+        # Hide sensitive: seeded and persisted the way the reuse toggle is,
+        # and greyed on a machine that cannot read text out of an image.
+        self._chooser.set_hide_sensitive(setup_desktop.load_hide_sensitive())
+        self._chooser.set_hide_sensitive_available(
+            platform.current.recognizes_text(),
+            platform.current.text_recognition_unavailable_reason(),
+        )
+        self._chooser.hideSensitiveChanged.connect(setup_desktop.save_hide_sensitive)
         # `kind` (the stills/record switch) has no Settings surface the way
         # `after` does -- the chooser itself is the only place it is ever
         # set, so it is loaded the same way but persisted on every change
@@ -3941,7 +3960,7 @@ class OverlayWindow(QWidget):
     def _on_blur_mode_changed(self, mode: str) -> None:
         """Track the blur tray's active segment -- 'blur' or 'pix' -- which
         `_start_stroke` reads when deciding which of shapes.py's
-        Blur/Pixelate a blur drag commits.
+        Blur/Pixelate/Redact a blur drag commits.
         """
         self._blur_mode = mode
 
@@ -4293,11 +4312,134 @@ class OverlayWindow(QWidget):
                 # only ever hands the choice along.
                 self._on_recording_requested(record_rect, self._delay, self.outcome)
             return
+        self._hide_sensitive_text()
         if self.outcome == "instant":
             if setup_desktop.load_instant_saves():
                 self._on_bar_save()
             else:
                 self._on_bar_copy()
+
+    # Logical pixels added around each hidden value. OCR's word boxes sit
+    # tight on the glyphs, and the anti-aliased edges, descenders and
+    # accents that fall just outside them are exactly the slivers that
+    # make a covered value guessable.
+    _HIDE_PADDING = 2.0
+
+    # A found value already this much covered by an existing solid box is
+    # not boxed again -- selecting a second region over the same text must
+    # not stack a duplicate of every box, each needing its own erase.
+    _HIDE_ALREADY_COVERED = 0.9
+
+    # Two found boxes overlapping this much (of the smaller) are one value
+    # found twice -- recognition reads small selections at two sizes, and
+    # both reads usually find the same words -- and become one box.
+    _HIDE_SAME_VALUE = 0.5
+
+    def _hide_sensitive_text(self) -> None:
+        """Black out sensitive text inside the current selection, when Hide
+        sensitive is on.
+
+        Reads the selection's pixels out of the frozen frame -- never the
+        live screen, per CLAUDE.md's one rule -- asks the platform for the
+        words in them, and puts a solid `Redact` over each value
+        `sensitive.find_sensitive` flags. The boxes are ordinary marks,
+        added as one step of history: the user can erase any one of them,
+        and a single undo takes the whole batch away.
+
+        Coordinates: recognition happens on `Frame.crop`'s image, so every
+        rect comes back in *cropped-image pixels*. Marks live in window
+        coordinates. The mapping is the exact inverse of the one
+        `shapes.render_selection` applies at export -- divide by that crop's
+        own per-axis image-pixels-per-logical-unit ratio, then add the
+        selection's origin -- which is what keeps a box over its word on a
+        scaled display, where the two spaces differ by that ratio.
+        """
+        if self._selection is None or not self._chooser.hide_sensitive:
+            return
+        current = platform.current
+        if not current.recognizes_text():
+            return
+
+        selection = QRectF(self._selection)
+        cropped = self._frame.crop(selection.translated(self._frame.logical_origin))
+        logical_width = cropped.logical_size.width()
+        logical_height = cropped.logical_size.height()
+        if cropped.image.isNull() or logical_width <= 0 or logical_height <= 0:
+            return
+        scale_x = cropped.image.width() / logical_width
+        scale_y = cropped.image.height() / logical_height
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            lines = current.recognize_text(cropped.image)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        existing = [
+            QRectF(mark.start, mark.end).normalized()
+            for mark in self._marks
+            if isinstance(mark, Redact)
+        ]
+        pad = self._HIDE_PADDING
+        found = [
+            QRectF(
+                selection.x() + image_rect.x() / scale_x - pad,
+                selection.y() + image_rect.y() / scale_y - pad,
+                image_rect.width() / scale_x + 2 * pad,
+                image_rect.height() / scale_y + 2 * pad,
+            )
+            for image_rect in (finding.image_rect for finding in sensitive.find_sensitive(lines))
+        ]
+        boxes = []
+        for window_rect in self._merge_same_values(found):
+            if self._already_covered(window_rect, existing):
+                continue
+            existing.append(window_rect)
+            boxes.append(Redact(
+                colour=QColor("#000000"),
+                stroke_width=self._stroke_width,
+                start=window_rect.topLeft(),
+                end=window_rect.bottomRight(),
+            ))
+
+        self._mark_store.add_all(boxes)
+        if boxes:
+            count = len(boxes)
+            self._show_toast("blur", f"Hid {count} item{'' if count == 1 else 's'}")
+
+    @classmethod
+    def _merge_same_values(cls, rects: list[QRectF]) -> list[QRectF]:
+        """`rects` with every pair that is the same value found twice
+        replaced by their union. The union, not either one: the two reads
+        rarely agree to the pixel, and covering both is what guarantees
+        neither leaves an edge of the value showing."""
+        merged: list[QRectF] = []
+        for rect in rects:
+            rect = QRectF(rect)
+            joined = True
+            while joined:
+                joined = False
+                for other in merged:
+                    overlap = rect.intersected(other)
+                    smaller = min(rect.width() * rect.height(), other.width() * other.height())
+                    if smaller > 0 and overlap.width() * overlap.height() >= smaller * cls._HIDE_SAME_VALUE:
+                        merged.remove(other)
+                        rect = rect.united(other)
+                        joined = True
+                        break
+            merged.append(rect)
+        return merged
+
+    @classmethod
+    def _already_covered(cls, rect: QRectF, covers: list[QRectF]) -> bool:
+        area = rect.width() * rect.height()
+        if area <= 0:
+            return True
+        for cover in covers:
+            overlap = rect.intersected(cover)
+            if overlap.width() * overlap.height() >= area * cls._HIDE_ALREADY_COVERED:
+                return True
+        return False
 
     def absolute_selection(self) -> QRectF | None:
         """The current selection in absolute virtual-desktop coordinates,
@@ -4467,6 +4609,7 @@ class OverlayWindow(QWidget):
         # Set *after* `set_selection`, which clears it: this is the one
         # caller for which the flag must survive.
         self._recalled_selection = True
+        self._hide_sensitive_text()
 
     # -- Freeform capture mode (SNX-49) --------------------------------------
     # docs/design/overlay-redesign.md's "Capture modes" entry for Freeform is

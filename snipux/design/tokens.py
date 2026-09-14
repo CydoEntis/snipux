@@ -655,6 +655,16 @@ REUSE_HINT = {
     False: "Reuse your last region instead of dragging",
 }
 
+# The row's second toggle: black out sensitive text in every screenshot.
+# The hint names what gets covered rather than saying "sensitive info",
+# because someone deciding whether to trust it needs to know what it looks
+# for -- and, by omission, what it does not.
+HIDE_SENSITIVE_LABEL = "Hide sensitive"
+HIDE_SENSITIVE_HINT = {
+    True: "Blacks out passwords, keys, cards and personal info -- click to turn off",
+    False: "Black out passwords, keys, cards and personal info",
+}
+
 MODE_NEXT_STEP = {
     "Region":      "Drag anywhere to frame a region",
     "Window":      "Hover a window, click to take it",

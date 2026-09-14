@@ -763,9 +763,15 @@ class _Tab(_Surface):
         painter.end()
 
 
-class _ReuseToggle(_Surface):
-    """The row's one on/off control: whether Region opens on the rectangle
-    the last snip came from.
+class _RowToggle(_Surface):
+    """An on/off control on the row: a glyph and a label, no chevron.
+
+    There are two -- Last region (whether Region opens on the rectangle the
+    last snip came from) and Hide sensitive (whether screenshots black out
+    sensitive text). What follows was learned building the first.
+
+    A toggle can be unavailable: greyed, inert to clicks, and still
+    hoverable, so the reason it cannot be used has somewhere to be read.
 
     Icon *and* label, with no chevron -- it opens no menu, and a chevron
     would promise one. It sits immediately after the mode trigger since
@@ -793,10 +799,13 @@ class _ReuseToggle(_Surface):
     toggled = pyqtSignal(bool)
     hovered = pyqtSignal(bool)
 
-    def __init__(self, parent=None):
+    def __init__(self, glyph: str, label: str, parent=None):
         super().__init__(parent)
         metric = tokens.ChooserMetric
+        self._glyph = glyph
+        self._label = label
         self._on = False
+        self._available = True
         self._hovered = False
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -804,7 +813,7 @@ class _ReuseToggle(_Surface):
         # Sized the way a labelled `_Trigger` is, minus the chevron it does
         # not have -- so it sits in the row at the same rhythm as the
         # controls either side of it.
-        text = QFontMetricsF(_font(12.5, 500)).horizontalAdvance(tokens.REUSE_LABEL)
+        text = QFontMetricsF(_font(12.5, 500)).horizontalAdvance(label)
         self.setFixedWidth(
             round(metric.TRIGGER_PAD_L + 16 + 8 + text + metric.TRIGGER_PAD_R)
         )
@@ -820,6 +829,17 @@ class _ReuseToggle(_Surface):
         self._on = bool(on)
         self.update()
 
+    def is_available(self) -> bool:
+        return self._available
+
+    def set_available(self, available: bool) -> None:
+        self._available = bool(available)
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor if self._available
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.update()
+
     def enterEvent(self, event) -> None:
         self._hovered = True
         self.hovered.emit(True)
@@ -833,7 +853,7 @@ class _ReuseToggle(_Surface):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        if self._released_inside(event):
+        if self._available and self._released_inside(event):
             self._on = not self._on
             self.update()
             self.toggled.emit(self._on)
@@ -847,25 +867,30 @@ class _ReuseToggle(_Surface):
         # On reads as filled, the same way an open trigger does -- an
         # outline-only difference between on and off is exactly the
         # distinction that disappears at a glance on a busy desktop.
-        if self._on:
+        lit = self._on and self._available
+        if lit:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(_alpha(colour.MODE_ACCENT, 0.16))
             painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
-        elif self._hovered:
+        elif self._hovered and self._available:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(_alpha(colour.TRIGGER_BG_OPEN, 0.05))
             painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(
-            QColor(colour.MODE_ACCENT) if self._on
+            QColor(colour.MODE_ACCENT) if lit
             else design.chooser_color("TRIGGER_BORDER")
         )
         painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
 
-        glyph = colour.MODE_ACCENT if self._on else colour.ROW_IDLE_FG
+        glyph = (
+            colour.MODE_ACCENT if lit
+            else colour.ROW_IDLE_FG if self._available
+            else colour.ROW_DISABLED_FG
+        )
         x = metric.TRIGGER_PAD_L
-        pixmap = design.icon("redo", QColor(glyph)).pixmap(16, 16)
+        pixmap = design.icon(self._glyph, QColor(glyph)).pixmap(16, 16)
         painter.drawPixmap(x, (self.height() - 16) // 2, pixmap)
 
         # The label goes accent alongside the glyph rather than staying
@@ -875,13 +900,14 @@ class _ReuseToggle(_Surface):
         x += 16 + 8
         painter.setFont(_font(12.5, 500))
         painter.setPen(
-            QColor(colour.MODE_ACCENT) if self._on
-            else QColor(tokens.Color.TEXT_PRIMARY)
+            QColor(colour.MODE_ACCENT) if lit
+            else QColor(tokens.Color.TEXT_PRIMARY) if self._available
+            else QColor(colour.ROW_DISABLED_FG)
         )
         painter.drawText(
             QRectF(x, 0, self.width() - x, self.height()),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            tokens.REUSE_LABEL,
+            self._label,
         )
         painter.end()
 
@@ -918,8 +944,13 @@ class ChooserPanel(_Surface):
 
         # Immediately after the mode it modifies, before the destination
         # and delay triggers, which answer a different question entirely.
-        self.reuse_toggle = _ReuseToggle(self)
+        self.reuse_toggle = _RowToggle("redo", tokens.REUSE_LABEL, self)
         row.addWidget(self.reuse_toggle)
+        # Next to Last region: both change what a screenshot does, and
+        # neither is part of the "then" sentence the triggers after them
+        # spell out.
+        self.hide_toggle = _RowToggle("blur", tokens.HIDE_SENSITIVE_LABEL, self)
+        row.addWidget(self.hide_toggle)
 
         # No "then" text node, and no label on this trigger. The
         # capture-flow handoff makes mode the only labelled control and
@@ -967,6 +998,7 @@ class Chooser(QWidget):
     kindChanged = pyqtSignal(str)
     afterChanged = pyqtSignal(str)
     reuseLastRegionChanged = pyqtSignal(bool)
+    hideSensitiveChanged = pyqtSignal(bool)
 
     def __init__(self, parent=None, *, screen_rect: QRectF | None = None, origin=None):
         super().__init__(parent)
@@ -1004,6 +1036,10 @@ class Chooser(QWidget):
         self.hint = _Pill(parent)
         self.panel.reuse_toggle.toggled.connect(self.reuseLastRegionChanged)
         self.panel.reuse_toggle.hovered.connect(self._on_reuse_hovered)
+        self.panel.hide_toggle.toggled.connect(self.hideSensitiveChanged)
+        self.panel.hide_toggle.hovered.connect(self._on_hide_hovered)
+        # Why Hide sensitive is greyed, when it is. Empty while it is usable.
+        self._hide_sensitive_reason = ""
         self.tab = _Tab(parent)
         self.tab.clicked.connect(self.reopen)
         self.legend = _Legend(parent)
@@ -1105,9 +1141,48 @@ class Chooser(QWidget):
 
     def set_reuse_last_region(self, on: bool) -> None:
         """Seed the toggle from stored config. Never emits -- see
-        `_ReuseToggle.set_on`.
+        `_RowToggle.set_on`.
         """
         self.panel.reuse_toggle.set_on(on)
+
+    @property
+    def hide_sensitive(self) -> bool:
+        return self.panel.hide_toggle.is_on()
+
+    def set_hide_sensitive(self, on: bool) -> None:
+        """Seed Hide sensitive from stored config. Never emits."""
+        self.panel.hide_toggle.set_on(on)
+
+    @property
+    def hide_sensitive_available(self) -> bool:
+        return self.panel.hide_toggle.is_available()
+
+    def set_hide_sensitive_available(self, available: bool, reason: str = "") -> None:
+        """Say whether this machine can read text out of a capture.
+
+        Set from outside, like `set_browser_available`, so this widget
+        makes no platform calls and its tests decide the answer. Greyed
+        with a reason rather than hidden: an option that cannot work is
+        shown with why, so a missing feature is not mistaken for a broken
+        one.
+        """
+        self._hide_sensitive_reason = "" if available else reason
+        self.panel.hide_toggle.set_available(available)
+
+    def _on_hide_hovered(self, hovered: bool) -> None:
+        """Explain Hide sensitive in the hint pill -- or, when it is
+        greyed, why. The same borrowing of the pill `_on_reuse_hovered`
+        does."""
+        if not hovered:
+            self._refresh_triggers()
+            return
+        toggle = self.panel.hide_toggle
+        text = (
+            tokens.HIDE_SENSITIVE_HINT[toggle.is_on()] if toggle.is_available()
+            else self._hide_sensitive_reason
+        )
+        self.hint.set_content("blur", text)
+        self._layout()
 
     def _on_reuse_hovered(self, hovered: bool) -> None:
         """Borrow the hint pill to say what the toggle does.
@@ -1383,6 +1458,9 @@ class Chooser(QWidget):
         # (committing there arms a recording), so offering the control
         # would promise something that side does not do.
         self.panel.reuse_toggle.setVisible(self._kind != "record")
+        # Stills-only too: recognition reads a frozen frame, and a
+        # recording has no frozen frame to read.
+        self.panel.hide_toggle.setVisible(self._kind != "record")
         self.panel.adjustSize()
         self._layout()
 

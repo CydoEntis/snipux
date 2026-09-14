@@ -720,6 +720,133 @@ class TestTheReuseLastRegionToggle:
         for state, text in tokens.REUSE_HINT.items():
             width = metrics.horizontalAdvance(text)
             assert width <= 420, f"reuse hint for {state} is {width:.0f}px: {text!r}"
+        for state, text in tokens.HIDE_SENSITIVE_HINT.items():
+            width = metrics.horizontalAdvance(text)
+            assert width <= 420, f"hide-sensitive hint for {state} is {width:.0f}px: {text!r}"
+
+
+class TestTheHideSensitiveToggle:
+    """The row's second toggle: black out sensitive text in screenshots."""
+
+    def test_it_is_off_by_default(self):
+        assert Chooser(parent=None).hide_sensitive is False
+
+    def test_seeding_it_does_not_emit(self):
+        chooser = Chooser(parent=None)
+        fired = []
+        chooser.hideSensitiveChanged.connect(fired.append)
+
+        chooser.set_hide_sensitive(True)
+
+        assert chooser.hide_sensitive is True
+        assert fired == []
+
+    def test_clicking_it_flips_and_announces(self):
+        chooser = Chooser(parent=None)
+        fired = []
+        chooser.hideSensitiveChanged.connect(fired.append)
+
+        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+
+        assert fired == [True, False]
+        assert chooser.hide_sensitive is False
+
+    def test_it_does_not_change_last_region(self):
+        chooser = Chooser(parent=None)
+
+        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+
+        assert chooser.reuse_last_region is False
+
+    def test_it_sits_right_after_last_region(self):
+        chooser = Chooser(parent=None)
+        panel = chooser.panel
+        order = [panel.layout().itemAt(i).widget() for i in range(panel.layout().count())]
+
+        assert order.index(panel.hide_toggle) == order.index(panel.reuse_toggle) + 1
+        assert order.index(panel.hide_toggle) < order.index(panel.after_trigger)
+
+    def test_it_is_hidden_on_the_record_side_and_comes_back(self):
+        chooser = Chooser(parent=None)
+        chooser.panel.show()
+
+        chooser.set_kind("record")
+        assert chooser.panel.hide_toggle.isVisibleTo(chooser.panel) is False
+
+        chooser.set_kind("stills")
+        assert chooser.panel.hide_toggle.isVisibleTo(chooser.panel) is True
+
+    def test_hovering_it_explains_what_it_covers(self):
+        chooser = Chooser(parent=None)
+
+        chooser._on_hide_hovered(True)
+        assert chooser.hint._text == tokens.HIDE_SENSITIVE_HINT[False]
+
+        chooser.set_hide_sensitive(True)
+        chooser._on_hide_hovered(True)
+        assert chooser.hint._text == tokens.HIDE_SENSITIVE_HINT[True]
+
+    def test_leaving_it_restores_the_modes_own_hint(self):
+        chooser = Chooser(parent=None)
+        chooser._on_hide_hovered(True)
+
+        chooser._on_hide_hovered(False)
+
+        assert chooser.hint._text == tokens.MODE_NEXT_STEP["Region"]
+
+
+class TestHideSensitiveWhenTextCannotBeRead:
+    """Greyed with a reason, not hidden: a missing feature should not look
+    like a broken one."""
+
+    def test_available_until_told_otherwise(self):
+        assert Chooser(parent=None).hide_sensitive_available is True
+
+    def test_an_unavailable_toggle_ignores_clicks(self):
+        chooser = Chooser(parent=None)
+        chooser.set_hide_sensitive_available(False, "Windows only for now")
+        fired = []
+        chooser.hideSensitiveChanged.connect(fired.append)
+
+        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+
+        assert fired == []
+        assert chooser.hide_sensitive is False
+
+    def test_hovering_an_unavailable_toggle_says_why(self):
+        chooser = Chooser(parent=None)
+        chooser.set_hide_sensitive_available(False, "Windows only for now")
+
+        chooser._on_hide_hovered(True)
+
+        assert chooser.hint._text == "Windows only for now"
+
+    def test_it_stays_on_the_row(self):
+        chooser = Chooser(parent=None)
+        chooser.panel.show()
+
+        chooser.set_hide_sensitive_available(False, "Windows only for now")
+
+        assert chooser.panel.hide_toggle.isVisibleTo(chooser.panel) is True
+
+    def test_it_can_become_available_again(self):
+        chooser = Chooser(parent=None)
+        chooser.set_hide_sensitive_available(False, "nope")
+
+        chooser.set_hide_sensitive_available(True)
+        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+
+        assert chooser.hide_sensitive is True
+
+    def test_it_paints_differently_when_unavailable(self):
+        chooser = Chooser(parent=None)
+        toggle = chooser.panel.hide_toggle
+        usable = toggle.grab().toImage()
+
+        chooser.set_hide_sensitive_available(False, "nope")
+
+        assert toggle.grab().toImage() != usable
 
 
 class TestFlippingKindDoesNotLeakTheDestination:

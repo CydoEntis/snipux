@@ -233,6 +233,29 @@ class Platform(ABC):
         """
         return ""
 
+    def recognizes_text(self) -> bool:
+        """Whether `recognize_text` can read text out of an image here.
+
+        Decides whether automatic hiding of sensitive text is offered live
+        or greyed with `text_recognition_unavailable_reason()`. Defaults to
+        False: only Windows ships an OCR engine that needs no install, and a
+        platform without one should say so rather than silently hide
+        nothing.
+        """
+        return False
+
+    def text_recognition_unavailable_reason(self) -> str:
+        """Why `recognizes_text()` is False, for the greyed control to
+        carry. Empty when recognition is available."""
+        return "Windows only for now"
+
+    def recognize_text(self, image) -> list:
+        """The words in `image` (a `QImage`), as a list of lines, each a
+        list of `sensitive.RecognizedWord` with rects in `image`'s own
+        pixels. Never raises: a platform that cannot recognise, or a
+        recognition that fails, returns no lines."""
+        return []
+
 
 class UnimplementedPlatformError(NotImplementedError):
     """Raised by a stub platform implementation (`windows.py`/`darwin.py`

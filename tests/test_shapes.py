@@ -18,6 +18,7 @@ from snipux.shapes import (
     Pen,
     Pixelate,
     Rectangle,
+    Redact,
     Shape,
     StepMarker,
     Text,
@@ -677,6 +678,53 @@ class TestPixelateBlocky:
         )
 
         assert blur_result != pixelate_result
+
+
+class TestRedact:
+    """A solid fill leaves nothing of the original behind -- the property
+    Blur and Pixelate lack, and the reason automatic hiding uses this one.
+    """
+
+    def test_every_pixel_inside_is_black(self):
+        base = make_gradient_image(size=(80, 80))
+
+        result = render(base, [Redact(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 40))])
+
+        for x in (10, 30, 49):
+            for y in (10, 25, 39):
+                assert result.pixelColor(x, y) == QColor(0, 0, 0)
+
+    def test_pixels_outside_are_untouched(self):
+        base = make_gradient_image(size=(80, 80))
+
+        result = render(base, [Redact(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 40))])
+
+        assert result.pixelColor(70, 70) == base.pixelColor(70, 70)
+        assert result.pixelColor(5, 5) == base.pixelColor(5, 5)
+
+    def test_output_does_not_depend_on_what_was_underneath(self):
+        # The recoverability argument, as an assertion: two different
+        # images under the same box must export identically inside it.
+        a = make_gradient_image(size=(80, 80))
+        b = make_image(size=(80, 80), fill_color=qRgb(12, 200, 90))
+        box = dict(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(80, 80))
+
+        assert render(a, [Redact(**box)]) == render(b, [Redact(**box)])
+
+    def test_either_corner_order_fills_the_same_rect(self):
+        base = make_gradient_image(size=(80, 80))
+        forward = Redact(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 40))
+        backward = Redact(colour=RED, stroke_width=4, start=QPointF(50, 40), end=QPointF(10, 10))
+
+        assert render(base, [forward]) == render(base, [backward])
+
+    def test_does_not_mutate_the_base_image(self):
+        base = make_gradient_image(size=(80, 80))
+        before = QImage(base)
+
+        render(base, [Redact(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(80, 80))])
+
+        assert base == before
 
 
 class TestRectangleGeometry:

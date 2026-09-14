@@ -706,6 +706,20 @@ def save_reuse_last_region(enabled: bool, config_dir: Path | None = None) -> boo
     return _write_config("reuse_last_region", bool(enabled), config_dir)
 
 
+def load_hide_sensitive(config_dir: Path | None = None) -> bool:
+    """Whether screenshots get sensitive text blacked out automatically.
+
+    Off unless turned on: it reads the text of every capture and changes
+    what gets exported, neither of which should start happening to someone
+    who never asked for it.
+    """
+    return _read_config(config_dir).get("hide_sensitive") is True
+
+
+def save_hide_sensitive(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("hide_sensitive", bool(enabled), config_dir)
+
+
 def load_hints_enabled(config_dir: Path | None = None) -> bool:
     """Whether the overlay's top hint HUD (SNX-46) is shown from the start
     of a session.

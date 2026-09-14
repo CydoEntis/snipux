@@ -546,6 +546,35 @@ class Pixelate(ObscuringShape):
 
 
 @dataclass
+class Redact(ObscuringShape):
+    """Replaces its rect with opaque black -- the one obscuring shape whose
+    result carries nothing of what was underneath.
+
+    Blur and Pixelate average the original pixels, so what they export is
+    still a function of the text they covered, and short strings (PINs,
+    card numbers, keys) can be recovered by rendering candidates the same
+    way and comparing. A solid fill has no such function to invert, which
+    is why automatic hiding of sensitive text uses this and not the other
+    two.
+
+    `strength` is inherited and ignored: there is no degree of black.
+    """
+
+    _FILL = QColor("#000000")
+
+    def apply(self, image: QImage) -> QImage:
+        pixel_rect = _clamped_pixel_rect(self.start, self.end, image)
+        if pixel_rect is None:
+            return image
+
+        result = QImage(image)
+        painter = QPainter(result)
+        painter.fillRect(pixel_rect, self._FILL)
+        painter.end()  # closed before this apply() call returns the image
+        return result
+
+
+@dataclass
 class Crop(Shape):
     """A dashed, unfilled rectangle -- the visual style shared by the crop
     marquee and, since SNX-64, the restored Crop *annotation* tool in
@@ -818,7 +847,7 @@ def render(base_image: QImage, shapes: list[Shape]) -> QImage:
     list-order recomputation here that could disagree with a badge's
     original number. See StepMarker's own docstring.
 
-    An `ObscuringShape` (`Blur`/`Pixelate`) samples already-rendered pixels
+    An `ObscuringShape` (`Blur`/`Pixelate`/`Redact`) reads already-rendered pixels
     rather than painting onto a painter, so it gets different treatment
     here: the active painter is closed before `apply()` runs (making every
     shape drawn earlier in the list visible to it, since a painter left

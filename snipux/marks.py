@@ -30,12 +30,14 @@ from .shapes import Shape
 class MarkAction:
     """One entry in a `MarkStore`'s history.
 
-    `kind` is `'add'` for a mark that was appended, `'erase'` for one that
-    was removed, or `'clear'` for the whole list emptied in one step.
-    `index` is the position in draw order the action happened at -- unused
-    for `'clear'`, which always empties and restores the entire list.
-    `shape` is the single `Shape` for `'add'`/`'erase'`, or the tuple of
-    every mark that was on screen for `'clear'`.
+    `kind` is `'add'` for a mark that was appended, `'add_all'` for several
+    appended together, `'erase'` for one that was removed, or `'clear'` for
+    the whole list emptied in one step. `index` is the position in draw
+    order the action happened at -- for `'add_all'` the first of the batch,
+    and unused for `'clear'`, which always empties and restores the entire
+    list. `shape` is the single `Shape` for `'add'`/`'erase'`, or a tuple
+    for `'add_all'` (the batch) and `'clear'` (every mark that was on
+    screen).
 
     Carrying the index is what lets an undone erase go back exactly where
     it was rather than on the end: an erase can remove from the middle of
@@ -101,6 +103,24 @@ class MarkStore(QObject):
         """
         self._undo.append(MarkAction("add", len(self._marks), shape))
         self._marks.append(shape)
+        self._redo.clear()
+        self.changed.emit()
+
+    def add_all(self, shapes) -> None:
+        """Append every shape in `shapes`, in order, as one step of history.
+
+        For marks placed together rather than drawn one by one -- the boxes
+        automatic hiding puts down in a single pass. Undoing that should
+        take them all away at once: needing one undo per box would make a
+        wrong batch of twelve cost twelve presses to get rid of.
+
+        An empty batch is not a step and emits nothing.
+        """
+        batch = tuple(shapes)
+        if not batch:
+            return
+        self._undo.append(MarkAction("add_all", len(self._marks), batch))
+        self._marks.extend(batch)
         self._redo.clear()
         self.changed.emit()
 
@@ -183,6 +203,8 @@ class MarkStore(QObject):
         action = self._undo.pop()
         if action.kind == "add":
             self._marks.pop(action.index)
+        elif action.kind == "add_all":
+            del self._marks[action.index:action.index + len(action.shape)]
         elif action.kind == "erase":
             self._marks.insert(action.index, action.shape)
         else:
@@ -197,6 +219,8 @@ class MarkStore(QObject):
         action = self._redo.pop()
         if action.kind == "add":
             self._marks.insert(action.index, action.shape)
+        elif action.kind == "add_all":
+            self._marks[action.index:action.index] = list(action.shape)
         elif action.kind == "erase":
             self._marks.pop(action.index)
         else:
@@ -246,9 +270,13 @@ def begin_stroke(
             colour=colour, stroke_width=stroke_width, start=point, end=point
         )
     if tool == "blur":
-        shape_class = (
-            shapes_module.Blur if blur_mode == "blur" else shapes_module.Pixelate
-        )
+        # Anything that is neither blur nor solid pixelates: the tray has
+        # always spelled that segment "pix" and callers have passed
+        # "pixelate", and both must keep meaning the same thing.
+        shape_class = {
+            "blur": shapes_module.Blur,
+            "solid": shapes_module.Redact,
+        }.get(blur_mode, shapes_module.Pixelate)
         extra = {} if blur_strength is None else {"strength": blur_strength}
         return shape_class(
             colour=colour, stroke_width=stroke_width, start=point, end=point, **extra
