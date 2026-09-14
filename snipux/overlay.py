@@ -109,16 +109,6 @@ class GeometryProvider(ABC):
     def window_at(self, point: QPointF) -> QRectF | None:
         """Absolute logical rect of the window under `point`, or None."""
 
-    def browser_scroller(self):
-        """Something that can scroll the frontmost browser page, or None.
-
-        Defaulted like `browser_viewport` so a provider that only knows
-        geometry -- and every platform that cannot drive another
-        application's window -- keeps working, and full-page capture greys
-        itself out rather than failing.
-        """
-        return None
-
     def browser_viewport(self) -> "tuple[str, QRectF] | None":
         """`(tab title, absolute logical rect)` of the frontmost browser's
         page area -- everything below the tab strip and toolbars -- or None

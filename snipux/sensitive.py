@@ -60,11 +60,6 @@ class Finding:
     image_rect: QRectF
 
 
-KINDS = (
-    "email", "phone", "card", "iban", "national_id", "ip", "mac",
-    "crypto", "key", "secret", "private_key", "labelled",
-)
-
 # ---------------------------------------------------------------- shapes
 
 # Prefixes of credentials issued by services whose keys end up in
