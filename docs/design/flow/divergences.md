@@ -1,5 +1,10 @@
 # Divergences from the locked capture-flow handoff
 
+> **Chooser and stills bar: superseded by `../bars/`.** That handoff, and
+> its own `divergences.md`, replace this directory's chooser and stills-bar
+> material. The recording bars, stage machine and destination semantics
+> are still this handoff's.
+
 `README.md` in this directory is marked **LOCKED**. These are the points we
 build differently anyway, each with the reason, so nobody reads the handoff
 later and "fixes" the code back to it. Same purpose as

@@ -1,5 +1,9 @@
 # Divergence: the pre-snip chooser
 
+> **Superseded by `bars/`.** The chooser and stills-bar material here is
+> replaced by the locked handoff in `bars/` and its `divergences.md`. This
+> file records why the chooser exists and how it got here.
+
 `handoff-windows.md` and `overlay-redesign.md` both put capture mode on the
 **floating bar**, reached through a chip that opens a popover.
 

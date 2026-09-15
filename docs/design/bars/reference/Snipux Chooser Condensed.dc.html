@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  body { margin:0; background:#0a0b0d; font-family:'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color:#c8d96a; text-decoration:none; } a:hover { color:#e3ff4f; }
+</style>
+</helmet>
+
+<section style="display:flex; flex-direction:column; gap:30px; padding:64px 72px 96px">
+  <header style="display:flex; flex-direction:column; gap:12px; max-width:900px">
+    <div style="display:flex; align-items:center; gap:10px">
+      <div style="width:22px; height:22px; border-radius:6px; background:#e3ff4f; display:grid; place-items:center; color:#15170e">
+        <dc-import name="Icon" glyph="minus" size="13" stroke="2.4" hint-size="13px,13px"></dc-import>
+      </div>
+      <span style="font:600 13px/1 'IBM Plex Sans'; letter-spacing:.14em; text-transform:uppercase; color:#7f8798">snipux · condensing the chooser</span>
+    </div>
+    <h1 style="margin:0; font:600 30px/1.2 'IBM Plex Sans'; color:#eef1f6; letter-spacing:-.02em">Flags shouldn't look like decisions</h1>
+    <p style="margin:0; font:400 15px/1.6 'IBM Plex Sans'; color:#98a0b0; text-wrap:pretty">The bar has four labelled chips competing for the same attention, and only one of them is a decision you make every time. <strong style="color:#c3c9d4; font-weight:500">Last region</strong> is a shortcut — it answers <em>what to capture</em>, so it belongs inside the mode menu, not beside it. <strong style="color:#c3c9d4; font-weight:500">Hide sensitive</strong> is a persistent flag you set once and forget — it needs an on/off state, not a label. <a href="#10a">10a</a> keeps the flag visible as an icon toggle; <a href="#10b">10b</a> puts every flag behind one options button for the shortest possible row. Both are live.</p>
+  </header>
+
+  <div style="display:flex; flex-direction:column; gap:12px">
+    <div style="display:flex; align-items:center; gap:12px">
+      <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">What's built now</span>
+      <span style="font:400 11.5px/1 'IBM Plex Mono'; color:#6d7484">≈ 700 × 42 · four labelled chips</span>
+    </div>
+    <div style="position:relative; padding:22px 26px; border-radius:12px; background:#101216; border:1px solid #21242b; display:flex; justify-content:center">
+      <div style="display:flex; align-items:center; gap:5px; padding:6px; border-radius:12px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); opacity:.62">
+        <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.34); border-radius:9px">
+          <span style="width:28px; height:28px; display:grid; place-items:center; border-radius:7px; background:rgba(255,255,255,.14); color:#f1f3e8"><dc-import name="Icon" glyph="camera" size="15" hint-size="15px,15px"></dc-import></span>
+          <span style="width:28px; height:28px; display:grid; place-items:center; border-radius:7px; color:#8f9689"><span style="width:10px; height:10px; border-radius:50%; background:currentColor"></span></span>
+        </div>
+        <span style="display:flex; align-items:center; gap:6px; height:28px; padding:0 8px 0 10px; border:1px solid rgba(255,255,255,.1); border-radius:8px; color:#f1f3e8; font:500 12px 'IBM Plex Sans'; white-space:nowrap"><span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="crop" size="14" hint-size="14px,14px"></dc-import></span>Region<span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="12" hint-size="12px,12px"></dc-import></span></span>
+        <span style="display:flex; align-items:center; gap:6px; height:28px; padding:0 10px; border:1px solid rgba(255,255,255,.1); border-radius:8px; color:#c6cab8; font:500 12px 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="undo" size="14" hint-size="14px,14px"></dc-import>Last region</span>
+        <span style="display:flex; align-items:center; gap:6px; height:28px; padding:0 10px; border:1px solid rgba(227,255,79,.42); border-radius:8px; background:rgba(227,255,79,.14); color:#eaff7a; font:500 12px 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="blur" size="14" hint-size="14px,14px"></dc-import>Hide sensitive</span>
+        <span style="display:flex; align-items:center; gap:6px; height:28px; padding:0 8px 0 10px; border:1px solid rgba(255,255,255,.1); border-radius:8px; color:#c6cab8; font:500 12px 'IBM Plex Sans'; white-space:nowrap"><dc-import name="Icon" glyph="pen" size="14" hint-size="14px,14px"></dc-import>Edit<span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="12" hint-size="12px,12px"></dc-import></span></span>
+        <span style="display:flex; align-items:center; gap:5px; height:28px; padding:0 7px 0 9px; border:1px solid rgba(255,255,255,.1); border-radius:8px; color:#c6cab8; white-space:nowrap"><dc-import name="Icon" glyph="timer" size="15" hint-size="15px,15px"></dc-import><span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="12" hint-size="12px,12px"></dc-import></span></span>
+      </div>
+      <div style="position:absolute; left:26px; bottom:-1px; right:26px; height:1px; background:linear-gradient(90deg,transparent,#2a2e36,transparent)"></div>
+    </div>
+    <p style="margin:0; max-width:1140px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Four chips of near-identical weight, and the accent — the one colour that's supposed to mean <em>press this</em> — is spent on a background setting. Nothing in the row tells you which control you'll touch on a normal snip.</p>
+  </div>
+
+  <div style="display:flex; gap:26px; flex-wrap:wrap; align-items:flex-start">
+
+    <div id="10a" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">10a</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Flag stays visible</span>
+        <span style="font:400 12px/1 'IBM Plex Mono'; color:#6d7484">{{ a.size }}</span>
+      </div>
+
+      <div style="position:relative; width:556px; height:250px; border-radius:11px; overflow:hidden; border:1px solid #2a2e36; background:#26271f">
+        <div style="position:absolute; inset:0; padding:64px 20px 0; font:400 10.5px/21px 'IBM Plex Mono'; color:#8d8f7e">
+          <div>no error — the pill counts up like</div>
+          <div>it's working, then nothing lands.</div>
+          <div>unning again. Right now it's also</div>
+        </div>
+        <div style="position:absolute; inset:0; background:rgba(12,13,10,.62)"></div>
+
+        <div style="position:absolute; left:50%; top:0; transform:translateX(-50%); z-index:5; display:flex; flex-direction:column; align-items:center">
+          <div style="position:relative; z-index:2; display:flex; align-items:center; gap:3px; padding:6px; border-radius:0 0 12px 12px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); border-top:0; box-shadow:0 18px 40px -14px rgba(0,0,0,.9)">
+
+            <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.34); border-radius:9px">
+              <button onClick="{{ a.setStills }}" title="Still image" style="width:28px; height:28px; display:grid; place-items:center; border:0; padding:0; border-radius:7px; cursor:pointer; background:{{ a.stillsBg }}; color:{{ a.stillsFg }}" style-hover="background:rgba(255,255,255,.08)"><dc-import name="Icon" glyph="camera" size="15" hint-size="15px,15px"></dc-import></button>
+              <button onClick="{{ a.setRecord }}" title="Screen recording" style="width:28px; height:28px; display:grid; place-items:center; border:0; padding:0; border-radius:7px; cursor:pointer; background:{{ a.recordBg }}; color:{{ a.recordFg }}" style-hover="background:rgba(255,255,255,.08)"><span style="width:10px; height:10px; border-radius:50%; background:currentColor"></span></button>
+            </div>
+
+            <div style="position:relative">
+              <button onClick="{{ a.openMode }}" title="What to capture" style="display:flex; align-items:center; gap:6px; height:28px; padding:0 7px 0 9px; border:1px solid {{ a.modeBorder }}; border-radius:8px; cursor:pointer; background:{{ a.modeBg }}; color:#f1f3e8; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.09)">
+                <span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="{{ a.modeGlyph }}" size="14" hint-size="14px,14px"></dc-import></span>{{ a.mode }}
+                <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="12" hint-size="12px,12px"></dc-import></span>
+              </button>
+              <sc-if value="{{ a.modeOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="position:absolute; left:0; top:34px; z-index:40; width:240px; padding:4px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92)">
+                  <sc-for list="{{ a.modes }}" as="m" hint-placeholder-count="4">
+                    <button onClick="{{ m.pick }}" style="width:100%; display:flex; align-items:center; gap:9px; padding:7px 8px; border:0; border-radius:7px; cursor:pointer; text-align:left; background:{{ m.bg }}; color:{{ m.fg }}" style-hover="background:rgba(255,255,255,.09)">
+                      <dc-import name="Icon" glyph="{{ m.glyph }}" size="15" hint-size="15px,15px"></dc-import>
+                      <span style="flex:1; font:500 12px/1 'IBM Plex Sans'">{{ m.label }}</span>
+                      <span style="font:400 10px 'IBM Plex Mono'; color:#6f766a">{{ m.shortcut }}</span>
+                      <span style="opacity:{{ m.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="13" stroke="2" hint-size="13px,13px"></dc-import></span>
+                    </button>
+                  </sc-for>
+                  <div style="height:1px; background:rgba(255,255,255,.1); margin:4px 4px"></div>
+                  <button onClick="{{ a.useLast }}" style="width:100%; display:flex; align-items:center; gap:9px; padding:7px 8px; border:0; border-radius:7px; cursor:pointer; text-align:left; background:transparent; color:#a8afa0" style-hover="background:rgba(255,255,255,.09)">
+                    <dc-import name="Icon" glyph="undo" size="15" hint-size="15px,15px"></dc-import>
+                    <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+                      <span style="font:500 12px/1 'IBM Plex Sans'">Last region</span>
+                      <span style="font:400 10.5px/1 'IBM Plex Mono'; color:#8f9689">1017 × 562</span>
+                    </span>
+                    <span style="font:400 10px 'IBM Plex Mono'; color:#6f766a">⇧R</span>
+                  </button>
+                </div>
+              </sc-if>
+            </div>
+
+            <div style="width:1px; height:20px; background:rgba(255,255,255,.12); margin:0 4px"></div>
+
+            <button onClick="{{ a.cycleDest }}" title="{{ a.destTitle }}" style="width:28px; height:28px; display:grid; place-items:center; border:1px solid rgba(255,255,255,.1); padding:0; border-radius:8px; cursor:pointer; background:transparent; color:#a8afa0" style-hover="background:rgba(255,255,255,.07); color:#dfe4ec"><dc-import name="Icon" glyph="{{ a.destGlyph }}" size="15" hint-size="15px,15px"></dc-import></button>
+
+            <div title="Capture flags" style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.34); border-radius:9px">
+              <button onClick="{{ a.toggleHide }}" title="{{ a.hideTitle }}" style="width:28px; height:28px; display:grid; place-items:center; border:0; padding:0; border-radius:7px; cursor:pointer; background:{{ a.hideBg }}; color:{{ a.hideFg }}" style-hover="background:rgba(255,255,255,.07)"><dc-import name="Icon" glyph="{{ a.flagGlyph }}" size="15" hint-size="15px,15px"></dc-import></button>
+              <button onClick="{{ a.cycleDelay }}" title="{{ a.delayTitle }}" style="display:flex; align-items:center; gap:5px; height:28px; padding:0 8px; border:0; border-radius:7px; cursor:pointer; background:{{ a.delayBg }}; color:{{ a.delayFg }}; font:500 11px 'IBM Plex Mono'; white-space:nowrap" style-hover="background:rgba(255,255,255,.07)">
+                <span style="display:flex"><dc-import name="Icon" glyph="timer" size="15" hint-size="15px,15px"></dc-import></span>
+                <sc-if value="{{ a.hasDelay }}" hint-placeholder-val="{{ false }}">{{ a.delay }}</sc-if>
+              </button>
+            </div>
+          </div>
+
+          <div style="position:relative; z-index:1; display:flex; align-items:center; gap:6px; margin-top:7px; padding:4px 10px; border-radius:7px; background:rgba(16,18,14,.78); border:1px solid rgba(255,255,255,.07); font:400 11px/1 'IBM Plex Sans'; color:#7d8478; white-space:nowrap">
+            <span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="{{ a.hintGlyph }}" size="12" hint-size="12px,12px"></dc-import></span>{{ a.hint }}
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:9px; padding:13px 14px; border-radius:10px; background:#101216; border:1px solid #21242b">
+        <div style="display:flex; align-items:center; gap:10px">
+          <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Glyph for the flag</span>
+          <span style="font:400 11px/1 'IBM Plex Sans'; color:#6d7484">click one — it swaps in the bar above</span>
+        </div>
+        <div style="display:flex; gap:7px; flex-wrap:wrap">
+          <sc-for list="{{ a.flagOptions }}" as="g" hint-placeholder-count="5">
+            <button onClick="{{ g.pick }}" style="display:flex; align-items:center; gap:9px; padding:7px 11px 7px 8px; border:1px solid {{ g.border }}; border-radius:9px; cursor:pointer; background:{{ g.bg }}; text-align:left" style-hover="border-color:#3a3f49">
+              <span style="width:28px; height:28px; flex:none; display:grid; place-items:center; border-radius:7px; background:rgba(227,255,79,.18); color:#eaff7a"><dc-import name="Icon" glyph="{{ g.glyph }}" size="15" hint-size="15px,15px"></dc-import></span>
+              <span style="display:flex; flex-direction:column; gap:3px">
+                <span style="font:500 12px/1 'IBM Plex Sans'; color:{{ g.fg }}">{{ g.label }}</span>
+                <span style="font:400 10.5px/1.35 'IBM Plex Sans'; color:#79808f">{{ g.note }}</span>
+              </span>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+
+      <p style="margin:0; max-width:556px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">Last region moves into the mode menu, below a rule, carrying the dimensions it would restore — it's a mode, so it lives with the modes. The two flags sit together in a recessed well, borrowing the pattern the camera/record pair already uses: the sunken ground is what says <em>these are switches</em>, so an unlit one reads as off rather than as a button you haven't pressed. Each takes the accent only when armed, so the bar's one bright thing is always a live state. Four labelled chips become one, and the row loses 45% of its width.</p>
+    </div>
+
+    <div id="10b" style="display:flex; flex-direction:column; gap:14px">
+      <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap">
+        <span style="font:600 12px/1 'IBM Plex Mono'; letter-spacing:.06em; color:#0d0f14; background:#e3ff4f; padding:6px 9px; border-radius:6px">10b</span>
+        <span style="font:600 15px/1 'IBM Plex Sans'; color:#e7eaf1">Flags behind one button</span>
+        <span style="font:400 12px/1 'IBM Plex Mono'; color:#6d7484">{{ b.size }}</span>
+      </div>
+
+      <div style="position:relative; width:556px; height:250px; border-radius:11px; overflow:hidden; border:1px solid #2a2e36; background:#26271f">
+        <div style="position:absolute; inset:0; padding:64px 20px 0; font:400 10.5px/21px 'IBM Plex Mono'; color:#8d8f7e">
+          <div>no error — the pill counts up like</div>
+          <div>it's working, then nothing lands.</div>
+          <div>unning again. Right now it's also</div>
+        </div>
+        <div style="position:absolute; inset:0; background:rgba(12,13,10,.62)"></div>
+
+        <div style="position:absolute; left:50%; top:0; transform:translateX(-50%); z-index:5; display:flex; flex-direction:column; align-items:center">
+          <div style="position:relative; z-index:2; display:flex; align-items:center; gap:3px; padding:6px; border-radius:0 0 12px 12px; background:rgba(26,28,24,.93); border:1px solid rgba(255,255,255,.1); border-top:0; box-shadow:0 18px 40px -14px rgba(0,0,0,.9)">
+
+            <div style="display:flex; gap:2px; padding:2px; background:rgba(0,0,0,.34); border-radius:9px">
+              <button onClick="{{ b.setStills }}" title="Still image" style="width:28px; height:28px; display:grid; place-items:center; border:0; padding:0; border-radius:7px; cursor:pointer; background:{{ b.stillsBg }}; color:{{ b.stillsFg }}" style-hover="background:rgba(255,255,255,.08)"><dc-import name="Icon" glyph="camera" size="15" hint-size="15px,15px"></dc-import></button>
+              <button onClick="{{ b.setRecord }}" title="Screen recording" style="width:28px; height:28px; display:grid; place-items:center; border:0; padding:0; border-radius:7px; cursor:pointer; background:{{ b.recordBg }}; color:{{ b.recordFg }}" style-hover="background:rgba(255,255,255,.08)"><span style="width:10px; height:10px; border-radius:50%; background:currentColor"></span></button>
+            </div>
+
+            <div style="position:relative">
+              <button onClick="{{ b.openMode }}" title="What to capture" style="display:flex; align-items:center; gap:6px; height:28px; padding:0 7px 0 9px; border:1px solid {{ b.modeBorder }}; border-radius:8px; cursor:pointer; background:{{ b.modeBg }}; color:#f1f3e8; font:500 12px 'IBM Plex Sans'; white-space:nowrap" style-hover="background:rgba(255,255,255,.09)">
+                <span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="{{ b.modeGlyph }}" size="14" hint-size="14px,14px"></dc-import></span>{{ b.mode }}
+                <span style="color:#8f9689; display:flex"><dc-import name="Icon" glyph="chevron" size="12" hint-size="12px,12px"></dc-import></span>
+              </button>
+              <sc-if value="{{ b.modeOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="position:absolute; left:0; top:34px; z-index:40; width:240px; padding:4px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92)">
+                  <sc-for list="{{ b.modes }}" as="m" hint-placeholder-count="4">
+                    <button onClick="{{ m.pick }}" style="width:100%; display:flex; align-items:center; gap:9px; padding:7px 8px; border:0; border-radius:7px; cursor:pointer; text-align:left; background:{{ m.bg }}; color:{{ m.fg }}" style-hover="background:rgba(255,255,255,.09)">
+                      <dc-import name="Icon" glyph="{{ m.glyph }}" size="15" hint-size="15px,15px"></dc-import>
+                      <span style="flex:1; font:500 12px/1 'IBM Plex Sans'">{{ m.label }}</span>
+                      <span style="font:400 10px 'IBM Plex Mono'; color:#6f766a">{{ m.shortcut }}</span>
+                      <span style="opacity:{{ m.tick }}; color:#e3ff4f; display:flex"><dc-import name="Icon" glyph="check" size="13" stroke="2" hint-size="13px,13px"></dc-import></span>
+                    </button>
+                  </sc-for>
+                  <div style="height:1px; background:rgba(255,255,255,.1); margin:4px 4px"></div>
+                  <button onClick="{{ b.useLast }}" style="width:100%; display:flex; align-items:center; gap:9px; padding:7px 8px; border:0; border-radius:7px; cursor:pointer; text-align:left; background:transparent; color:#a8afa0" style-hover="background:rgba(255,255,255,.09)">
+                    <dc-import name="Icon" glyph="undo" size="15" hint-size="15px,15px"></dc-import>
+                    <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+                      <span style="font:500 12px/1 'IBM Plex Sans'">Last region</span>
+                      <span style="font:400 10.5px/1 'IBM Plex Mono'; color:#8f9689">1017 × 562</span>
+                    </span>
+                    <span style="font:400 10px 'IBM Plex Mono'; color:#6f766a">⇧R</span>
+                  </button>
+                </div>
+              </sc-if>
+            </div>
+
+            <div style="width:1px; height:20px; background:rgba(255,255,255,.12); margin:0 4px"></div>
+
+            <button onClick="{{ b.cycleDest }}" title="{{ b.destTitle }}" style="width:28px; height:28px; display:grid; place-items:center; border:1px solid rgba(255,255,255,.1); padding:0; border-radius:8px; cursor:pointer; background:transparent; color:#a8afa0" style-hover="background:rgba(255,255,255,.07); color:#dfe4ec"><dc-import name="Icon" glyph="{{ b.destGlyph }}" size="15" hint-size="15px,15px"></dc-import></button>
+
+            <div style="position:relative">
+              <button onClick="{{ b.openOpts }}" title="Options — delay, redaction" style="width:28px; height:28px; display:grid; place-items:center; border:1px solid {{ b.optsBorder }}; padding:0; border-radius:8px; cursor:pointer; background:{{ b.optsBg }}; color:{{ b.optsFg }}; position:relative" style-hover="background:rgba(255,255,255,.07)">
+                <dc-import name="Icon" glyph="cog" size="15" hint-size="15px,15px"></dc-import>
+                <sc-if value="{{ b.anyFlag }}" hint-placeholder-val="{{ false }}">
+                  <span style="position:absolute; right:-2px; top:-2px; width:7px; height:7px; border-radius:50%; background:#e3ff4f; box-shadow:0 0 0 2px #1a1c18"></span>
+                </sc-if>
+              </button>
+              <sc-if value="{{ b.optsOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="position:absolute; right:0; top:34px; z-index:40; width:262px; padding:5px; border-radius:11px; background:rgba(26,28,24,.98); border:1px solid rgba(255,255,255,.12); box-shadow:0 24px 54px -12px rgba(0,0,0,.92)">
+                  <button onClick="{{ b.toggleHide }}" style="width:100%; display:flex; align-items:center; gap:10px; padding:8px; border:0; border-radius:8px; cursor:pointer; text-align:left; background:transparent; color:#d7dacb" style-hover="background:rgba(255,255,255,.08)">
+                    <span style="flex:none; width:34px; height:19px; border-radius:99px; background:{{ b.hideTrack }}; padding:2px; display:flex; justify-content:{{ b.hideJustify }}">
+                      <span style="width:15px; height:15px; border-radius:50%; background:#f1f3e8"></span>
+                    </span>
+                    <span style="flex:1; display:flex; flex-direction:column; gap:2px">
+                      <span style="font:500 12px/1 'IBM Plex Sans'">Hide sensitive</span>
+                      <span style="font:400 10.5px/1.35 'IBM Plex Sans'; color:#8f9689">Blurs password fields and card numbers on capture.</span>
+                    </span>
+                  </button>
+                  <div style="height:1px; background:rgba(255,255,255,.1); margin:4px 4px"></div>
+                  <div style="padding:7px 8px 5px; font:600 9.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616a5c">Delay</div>
+                  <div style="display:flex; gap:2px; padding:2px; margin:0 4px 4px; background:rgba(0,0,0,.34); border-radius:8px">
+                    <sc-for list="{{ b.delays }}" as="d" hint-placeholder-count="4">
+                      <button onClick="{{ d.pick }}" style="flex:1; border:0; cursor:pointer; padding:6px 0; border-radius:6px; font:500 11px 'IBM Plex Mono'; background:{{ d.bg }}; color:{{ d.fg }}" style-hover="background:rgba(255,255,255,.07)">{{ d.label }}</button>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+
+          <div style="position:relative; z-index:1; display:flex; align-items:center; gap:6px; margin-top:7px; padding:4px 10px; border-radius:7px; background:rgba(16,18,14,.78); border:1px solid rgba(255,255,255,.07); font:400 11px/1 'IBM Plex Sans'; color:#7d8478; white-space:nowrap">
+            <span style="color:#eaff7a; display:flex"><dc-import name="Icon" glyph="{{ b.hintGlyph }}" size="12" hint-size="12px,12px"></dc-import></span>{{ b.hint }}
+          </div>
+        </div>
+      </div>
+
+      <p style="margin:0; max-width:556px; font:400 13px/1.65 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">One step further: delay and redaction both go behind a single options button, which wears a 7px accent dot whenever any flag is on — so an armed state is still visible without a label or a whole chip. That gets the row to 232px, barely wider than the mode name itself. The cost is honest: turning redaction on is now two clicks, and it's the kind of setting people do toggle per snip when they're screenshotting a billing page. If it's genuinely set-once, this is the better bar; if it's per-snip, <a href="#10a">10a</a> is.</p>
+    </div>
+
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:12px; max-width:1140px">
+    <span style="font:600 10.5px/1 'IBM Plex Sans'; letter-spacing:.1em; text-transform:uppercase; color:#616876">Either way</span>
+    <p style="margin:0; font:400 13px/1.7 'IBM Plex Sans'; color:#8a92a1; text-wrap:pretty">The rule both options follow, worth writing into the tokens: <strong style="color:#c3c9d4; font-weight:500">a labelled chip is for a decision you re-make every snip; an icon is for a decision you re-make occasionally; a menu row is for one you set and forget.</strong> Mode earns its label. Destination is an icon because the chooser only sets its default and the split button restates it later. Redaction and delay are flags, and a flag's job is to show state, not to explain itself — the explaining goes in the tooltip and the hint line. That also frees the accent to mean one thing again.</p>
+  </div>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;hide&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Flags&quot;}}">
+const MODES = [
+  ['Region', 'crop', 'R', 'Drag anywhere to frame a region'],
+  ['Window', 'window', 'W', 'Hover a window, click to take it'],
+  ['Full screen', 'monitor', 'F', 'Grabs this monitor the moment you choose it'],
+  ['Freeform', 'pen', 'L', 'Draw a closed shape around anything']
+];
+const DESTS = [['Copy', 'copy'], ['Save', 'save'], ['Edit', 'pen']];
+const DELAYS = ['Off', '3s', '5s', '10s'];
+const FLAG_GLYPHS = [
+  ['eyeOff', 'Eye, struck through ✓ chosen', 'Universal “hidden”. Reads at 15px, and it is about the viewer, not the pixels.'],
+  ['mask', 'Masked field', 'A field with its characters dotted out — literally what gets redacted.'],
+  ['shield', 'Shield with a tick', 'Protection, guaranteed. Slightly heavier promise than the feature makes.'],
+  ['lock', 'Padlock', 'Says encrypted, not hidden. Risks implying the file itself is secured.'],
+  ['blur', 'Droplet (current)', 'This is the blur tool’s glyph — it means “I will smudge this”, not “find secrets”.']
+];
+
+class Component extends DCLogic {
+  state = {
+    a: { kind: 'stills', mode: 'Region', dest: 'Edit', delay: 'Off', hide: true, menu: null, flag: 'eyeOff' },
+    b: { kind: 'stills', mode: 'Region', dest: 'Edit', delay: 'Off', hide: true, menu: null }
+  };
+
+  set(ns, patch) { this.setState(st => ({ [ns]: { ...st[ns], ...patch } })); }
+
+  shared(ns) {
+    const s = this.state[ns];
+    const m = MODES.find(x => x[0] === s.mode) || MODES[0];
+    const d = DESTS.find(x => x[0] === s.dest) || DESTS[0];
+    const stills = s.kind === 'stills';
+    return {
+      mode: s.mode, modeGlyph: m[1],
+      stillsBg: stills ? 'rgba(255,255,255,.14)' : 'transparent',
+      stillsFg: stills ? '#f1f3e8' : '#8f9689',
+      recordBg: stills ? 'transparent' : 'rgba(255,90,82,.2)',
+      recordFg: stills ? '#8f9689' : '#ff8d86',
+      setStills: () => this.set(ns, { kind: 'stills', menu: null }),
+      setRecord: () => this.set(ns, { kind: 'record', menu: null }),
+      modeOpen: s.menu === 'mode',
+      modeBg: s.menu === 'mode' ? 'rgba(255,255,255,.09)' : 'transparent',
+      modeBorder: s.menu === 'mode' ? 'rgba(255,255,255,.2)' : 'rgba(255,255,255,.1)',
+      openMode: () => this.set(ns, { menu: s.menu === 'mode' ? null : 'mode' }),
+      modes: MODES.map(([label, glyph, shortcut]) => {
+        const on = s.mode === label;
+        return { key: label, label, glyph, shortcut, tick: on ? 1 : 0,
+          bg: on ? 'rgba(255,255,255,.08)' : 'transparent',
+          fg: on ? '#f8faf0' : '#a8afa0',
+          pick: () => this.set(ns, { mode: label, menu: null }) };
+      }),
+      useLast: () => this.set(ns, { mode: 'Region', menu: null }),
+      destGlyph: d[1],
+      destTitle: 'After capture · ' + s.dest + ' — click to change',
+      cycleDest: () => this.set(ns, { dest: DESTS[(DESTS.findIndex(x => x[0] === s.dest) + 1) % DESTS.length][0], menu: null }),
+      delay: s.delay, hasDelay: s.delay !== 'Off',
+      hint: m[3], hintGlyph: m[1]
+    };
+  }
+
+  renderVals() {
+    const A = this.state.a, B = this.state.b;
+    const a = this.shared('a'), b = this.shared('b');
+    const aOn = A.hide;
+    return {
+      a: {
+        ...a,
+        size: '382 × 42 · one label',
+        flagGlyph: A.flag,
+        flagOptions: FLAG_GLYPHS.map(([glyph, label, note]) => ({
+          key: glyph, glyph, label, note,
+          bg: A.flag === glyph ? '#1e2229' : 'transparent',
+          border: A.flag === glyph ? '#3a3f49' : '#262a31',
+          fg: A.flag === glyph ? '#f1f3e8' : '#c3c9d4',
+          pick: () => this.set('a', { flag: glyph, hide: true })
+        })),
+        hideBg: aOn ? 'rgba(227,255,79,.18)' : 'transparent',
+        hideFg: aOn ? '#eaff7a' : '#8f9689',
+        hideTitle: aOn ? 'Hide sensitive is ON — password fields and card numbers blur on capture' : 'Hide sensitive is off',
+        toggleHide: () => this.set('a', { hide: !aOn, menu: null }),
+        delayBg: A.delay === 'Off' ? 'transparent' : 'rgba(227,255,79,.18)',
+        delayFg: A.delay === 'Off' ? '#8f9689' : '#eaff7a',
+        delayTitle: A.delay === 'Off' ? 'No delay — click to add one' : A.delay + ' countdown before the grab',
+        cycleDelay: () => this.set('a', { delay: DELAYS[(DELAYS.indexOf(A.delay) + 1) % DELAYS.length], menu: null })
+      },
+      b: {
+        ...b,
+        size: '232 × 42 · one label',
+        anyFlag: B.hide || B.delay !== 'Off',
+        optsOpen: B.menu === 'opts',
+        optsBg: B.menu === 'opts' ? 'rgba(255,255,255,.09)' : 'transparent',
+        optsBorder: B.menu === 'opts' ? 'rgba(255,255,255,.2)' : 'rgba(255,255,255,.1)',
+        optsFg: B.menu === 'opts' ? '#f1f3e8' : '#a8afa0',
+        openOpts: () => this.set('b', { menu: B.menu === 'opts' ? null : 'opts' }),
+        hideTrack: B.hide ? '#e3ff4f' : '#33383f',
+        hideJustify: B.hide ? 'flex-end' : 'flex-start',
+        toggleHide: () => this.set('b', { hide: !B.hide }),
+        delays: DELAYS.map(label => ({ key: label, label,
+          bg: B.delay === label ? 'rgba(255,255,255,.16)' : 'transparent',
+          fg: B.delay === label ? '#f8faf0' : '#a8afa0',
+          pick: () => this.set('b', { delay: label }) })),
+        hint: B.hide ? 'Sensitive fields will blur — ' + b.hint.toLowerCase() : b.hint
+      }
+    };
+  }
+}
+</script>
+</body>
+</html>

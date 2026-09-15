@@ -1,0 +1,255 @@
+# Divergences from the locked bars handoff
+
+`README.md` in this directory is marked **LOCKED**, and replaces the chooser
+and stills-bar material in `../flow/` and `../pre-snip-chooser.md`. These are
+the points we build differently anyway, each with the reason, so nobody reads
+the handoff later and "fixes" the code back to it. Where the handoff and an
+open issue disagree, the issue wins: each was decided on its own, usually
+after a user report.
+
+Everything not listed here is built as written. What is not decided yet is
+under **Still open** at the end, and today's behaviour stands for each.
+
+---
+
+## 1 · Freeform is removed, not rebuilt
+
+**The handoff lists it**: a row in `CAPTURE_MODES`, `L` in `SHORTCUTS`
+("mode Freeform / shape Line"), and "Still open" 1, which says it has no
+interaction design and behaves as a region drag.
+
+**We remove it** (#42). `L` is Straight line on the stills bar and nothing in
+the chooser.
+
+### Why
+
+The handoff leaves Freeform's design open, and #42 is the answer to that. It
+lands before either bar, so neither is rebuilt around a mode that is leaving.
+
+---
+
+## 2 · Browser stays in the mode menu, and Active window joins it
+
+**The handoff's** `CAPTURE_MODES` is Region, Window, Full screen and Freeform.
+There is no Browser row.
+
+**We keep Browser** as a row in the mode menu. Active window (#43) joins it
+as another row.
+
+### Why
+
+Browser ships today, and greys itself with its reason wherever it cannot
+work. Active window captures the focused app with nothing to aim at: it
+answers the same question, what to capture, so it is a row beside the others
+rather than a new control.
+
+---
+
+## 3 · Full screen arms on a desk with more than one monitor
+
+**The handoff says** (`IMMEDIATE_MODES = ["Full screen"]`): "`Full screen` is
+the exception: nothing left to aim at, so it captures immediately."
+
+**We capture the moment it is picked only on a desk with one monitor.** With
+more than one, picking it arms it like the other modes, and it follows the
+pointer before it commits (#53).
+
+### Why
+
+"Nothing left to aim at" is only true with one monitor. With two, which
+monitor is still a choice, and capturing on the pick takes whichever one the
+chooser happened to open on.
+
+---
+
+## 4 · Destinations do not change
+
+**The handoff's** `DESTINATIONS` are Copy, Save and Edit, and the chooser's
+destination icon cycles Copy → Save → Edit.
+
+**Ours stay as they are.** The destination icon cycles through today's stills
+destinations (`tokens.AFTER_CAPTURE`).
+
+### Why
+
+The handoff itself says destination semantics are unchanged and still come
+from the flow handoff, and `../flow/divergences.md` already records how ours
+differ from that.
+
+---
+
+## 5 · Hide sensitive blacks text out; it does not blur it
+
+**The handoff's** tooltip (`FLAGS`): "Blurs password fields, tokens and card
+numbers on capture."
+
+**Ours blacks it out**, and the tooltip keeps `tokens.HIDE_SENSITIVE_HINT`'s
+wording: "Black out passwords, keys, cards and personal info". The glyph is
+the handoff's `eyeOff`.
+
+### Why
+
+That tooltip describes a feature we do not ship. Someone deciding whether to
+trust it needs to know what it does, and here the difference matters: the
+handoff's own redaction notes say blur "Softens it — shapes still readable",
+where blackout leaves "Nothing to reconstruct".
+
+---
+
+## 6 · The minimum selection stays 16 x 16
+
+**The handoff says** a drag under 80 × 50 is discarded (`BarMetric.MIN_SEL_W`
+/ `MIN_SEL_H`, and `sel` in the state model).
+
+**Ours stays 16 x 16** (`tokens.Metric.SEL_MIN_W` / `SEL_MIN_H`), the minimum
+`../flow/divergences.md` §7 already records as outranking a handoff.
+
+### Why
+
+SNX-33 set that floor so a taskbar icon or a single line of text can still be
+snipped, and 80 × 50 would discard both.
+
+`tokens.FlowMetric.MIN_SEL_W` / `MIN_SEL_H` (60 x 40, the flow handoff's
+figure) is still in `tokens.py`, but nothing reads it: the overlay enforces
+`Metric.SEL_MIN_W` / `SEL_MIN_H`.
+
+---
+
+## 7 · Crop stays, as a fifth shapes sibling
+
+**The handoff's** shapes family is four: rectangle, ellipse, straight line and
+arrow (`SHAPES`, `R O L A`). Crop is not in `ANNOTATION_TOOLS` at all.
+
+**We keep Crop**, as a fifth sibling in the shapes family.
+
+### Why
+
+The owner asked for all eleven tools to stay reachable (`tokens.RECT_GROUP`,
+SNX-64), which already outranks the eight-slot rule once
+(`../flow/divergences.md` §7). The handoff's own answer for a tool that does
+not fit is a sibling, so that is where it goes, and the slot count does not
+move.
+
+---
+
+## 8 · The stills bar goes above the selection when there is no room below
+
+**The handoff says**: centred on the selection, 16px below it, clamped 12px
+from any monitor edge and to `monitor_h − 108` (`BAR_OFFSET_Y`,
+`BAR_EDGE_MARGIN`, `BAR_BOTTOM_ROOM`).
+
+**We centre it 16px below, as written, when it fits.** When it does not, it
+goes above the selection instead of being clamped back up over it.
+
+### Why
+
+The clamp puts the bar over the pixels the user just framed in order to mark
+them up. That is the report `FloatingBar.reposition`'s docstring and comments
+in `snipux/overlay.py` record: "when u select a small region the controls are
+in the region so u cant edit anything", on a 1123x74 strip. A short selection
+is the usual way to hit it, but distance to the monitor's bottom edge is what
+decides it.
+
+---
+
+## 9 · A bar with no room anywhere can be dragged, and remembers where
+
+**The handoff's** only answer for a bar that does not fit is the clamp in §8.
+
+**We make the bar draggable** (#50), and it remembers where it was put. It is
+not moved to another monitor, and there is no key to hold it out of the way.
+
+### Why
+
+No room above or below means the selection is essentially the whole monitor,
+so any position the code picks covers something. The owner chose drag on #50,
+over another monitor or a hold-to-hide key. This supersedes #63's "another
+monitor, or wherever the user drags it": it is drag only.
+
+#50 lands after the stills bar (#67), so its placement rules are written once,
+against the new bar.
+
+---
+
+## 10 · The watermark is text or an image
+
+**The handoff** leaves what the mark is ("logo, text, colour") to Settings
+(`WATERMARK["content_lives_in"]`), and no Settings design covers it.
+
+**Ours is text or an image**, and Settings will edit both (#69).
+
+### Why
+
+The owner's decision on #69, which closes #63's open question 2.
+
+---
+
+## 11 · PyQt6 only
+
+**The handoff targets** "Python + Qt (PySide6 / PyQt6)".
+
+**This repo is PyQt6 only.**
+
+### Why
+
+The dependencies are PyQt6, jeepney and pytest (`CLAUDE.md`), and adding one
+is a decision for its own ticket, not a detail of a design.
+
+---
+
+## 12 · Three shared glyphs keep the repo's drawing
+
+**The handoff's** `icons/` holds 28 glyphs, each with an embedded metadata
+block. Its README says 27, with `eyeOff`, `blackout` and `mask` new; `layers`,
+the watermark's glyph, is new too.
+
+**`snipux/design/icons/` takes the four new ones** with the metadata block
+stripped, the plain form every icon there already has. Of the 24 glyphs both
+sets share, 21 are identical once stripped. `ellipse`, `highlighter` and
+`line` differ, and ours stay.
+
+### Why
+
+The repo's three were deliberately re-centred in their 24x24 box: the artwork
+is the designer's, only its placement was wrong. The comment inside
+`highlighter.svg` gives the measurements.
+
+---
+
+## Still open
+
+Not decided. Today's behaviour stands for each until it is, and each is
+repeated on the child of #63 that it blocks.
+
+### Fonts
+
+**The handoff says** ship IBM Plex Sans for chrome and IBM Plex Mono for every
+numeral, dimension, hex and shortcut: "sizes are fixed and the layout is tuned
+to them."
+
+**Today** (d3c13f9) Plex is not bundled. The app asks for it and falls back to
+faces each platform ships -- Segoe UI Variable Text and Cascadia Mono on
+Windows, SF Pro and SF Mono on macOS, Cantarell and DejaVu on Linux -- and Plex
+wins only where it is installed.
+
+**What it affects.** #66's 382px chooser (`BarMetric.CHOOSER_W`) is measured
+in Plex, as is the stills bar's 478. A fallback face has different advance
+widths, so text-sized controls must be measured rather than trusted to the
+token (`../flow/divergences.md` §8). Bundling is a packaging decision (OFL, a
+few hundred KB) rather than a dependency, but it is still a decision.
+
+### Hint lines
+
+**The handoff** leaves open ("Still open" 3) whether they show forever or
+retire after some number of successful snips, and suggests tying them to the
+overlay hint bar's preference rather than adding a second toggle.
+
+**Today's behaviour stands** until that is decided.
+
+### Custom colour
+
+**The handoff's** `+` opens `QColorDialog`, and it leaves open ("Still open"
+4) whether a picked colour joins the seven swatches for good or lasts only the
+session.
+
+**Today's behaviour stands** until that is decided.
