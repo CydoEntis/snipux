@@ -966,6 +966,74 @@ class TestOverlayWindowMarks:
         assert pixel(result, 30, 50) == self.RED
 
 
+class TestExportedStrokeWidth:
+    """#72: a mark exports as thick as the overlay painted it.
+
+    Runs at whatever scale the suite does -- it is kept green at
+    QT_SCALE_FACTOR=1 and 1.5 -- over a frame the size a real capture at
+    that scale would be: the screen's physical pixels, not its logical
+    ones. Every width is read straight across the stroke in each image's
+    own physical pixels, the overlay's through its grab and the export's
+    off the image it produces.
+    """
+
+    RED = QColor(255, 0, 0)
+    LOGICAL = (400, 300)
+    SELECTION = QRect(40, 60, 320, 200)
+
+    def _overlay(self):
+        ratio = QGuiApplication.primaryScreen().devicePixelRatio()
+        width, height = self.LOGICAL
+        frame = make_frame(
+            image_size=(round(width * ratio), round(height * ratio)),
+            logical_size=self.LOGICAL,
+        )
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SELECTION)
+        return overlay, ratio
+
+    @staticmethod
+    def _red_width(image, y, x_from, x_to):
+        """How many pixels along row `y` are redder than halfway between the
+        frame's own colour and the ink: a stroke's width, wherever its
+        antialiased edges fall. Arguments are `image`'s own pixels."""
+        reds = [image.pixelColor(x, y).red() for x in range(x_from, x_to)]
+        half = (max(reds) + min(reds)) / 2
+        return sum(1 for red in reds if red > half)
+
+    @pytest.mark.parametrize("stroke_width", [3, 6, 12])
+    @pytest.mark.parametrize("kind", [Line, Rectangle])
+    def test_a_mark_exports_as_thick_as_the_overlay_painted_it(self, kind, stroke_width):
+        overlay, ratio = self._overlay()
+        # An upright stroke at logical x=120 either way: the line itself, or
+        # the rectangle's left side.
+        end = QPointF(120, 220) if kind is Line else QPointF(280, 220)
+        overlay.add_mark(
+            kind(colour=self.RED, stroke_width=stroke_width, start=QPointF(120, 100), end=end)
+        )
+
+        on_screen = overlay.grab().toImage()
+        exported = overlay.rendered_image()
+
+        # Logical row y=160, from x=100 to x=140: in the window's physical
+        # pixels for the grab, and the crop's -- shifted by the selection's
+        # origin first -- for the export.
+        seen = self._red_width(
+            on_screen, round(160 * ratio), round(100 * ratio), round(140 * ratio)
+        )
+        left, top = self.SELECTION.x(), self.SELECTION.y()
+        saved = self._red_width(
+            exported,
+            round((160 - top) * ratio),
+            round((100 - left) * ratio),
+            round((140 - left) * ratio),
+        )
+
+        assert on_screen.devicePixelRatio() == ratio  # the grab really is physical
+        assert abs(seen - stroke_width * ratio) <= 1
+        assert abs(saved - seen) <= 1
+
+
 class TestOverlayWindowObscuringMarks:
     """SNX-63: a committed Blur/Pixelate mark used to be invisible until
     export -- `_paint_marks` skipped every `ObscuringShape` outright, with

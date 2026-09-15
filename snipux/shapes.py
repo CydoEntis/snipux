@@ -16,9 +16,9 @@ widget's own top-left, the same space its `_selection` already lives in — per
 docs/design/overlay-redesign.md's "Ink lives in screen coordinates": marks
 never move when the selection is re-framed, only the clip rect drawn over
 them does. `render_selection()` below is what bridges that second convention
-back to image-pixel space, once, at export. Per CLAUDE.md's coordinate-space
-convention, each caller's choice is stated once here rather than re-derived
-per shape.
+back to image-pixel space, once, at export -- points and painted lengths
+alike, see `Shape._scaled`. Per CLAUDE.md's coordinate-space convention,
+each caller's choice is stated once here rather than re-derived per shape.
 """
 
 from __future__ import annotations
@@ -57,6 +57,11 @@ class Shape(ABC):
 
     colour: QColor
     stroke_width: float
+    # Pixels of the space this mark's points are in, per pixel of the space
+    # its lengths are in -- see `_scaled`. Set by `render_selection`, never
+    # by a caller. Keyword-only so it cannot shift any subclass's own fields
+    # out of position.
+    length_scale: float = field(default=1.0, kw_only=True)
 
     # Fixed slack (in whichever coordinate space a shape's own points are
     # in -- see the module docstring) added on top of a stroke-only
@@ -92,9 +97,30 @@ class Shape(ABC):
         """
         return False
 
+    def _scaled(self, length: float) -> float:
+        """`length`, one this mark paints with, in the pixels its points are in.
+
+        A mark's points and its lengths -- stroke width, font size, corner
+        and badge radii, arrowhead, a label's padding -- start out in one
+        space, the one it was drawn in: logical pixels on the overlay, which
+        the window's device turns physical, or image pixels in the review
+        window. `render_selection` then moves the points into the crop's
+        physical pixels, and every length has to follow them there, or a 6px
+        stroke drawn on a 1.5x monitor exports 6 pixels wide instead of the 9
+        it covered on screen. `length_scale` is that move's ratio, image
+        pixels per logical pixel.
+
+        Everywhere else it is 1.0, and this returns `length` exactly -- a
+        float times 1.0 is that float -- which is what keeps every mark
+        painting byte for byte as it did before lengths scaled. Every length
+        a shape paints with goes through here, so the constants stay in the
+        logical pixels the design gives them in.
+        """
+        return length * self.length_scale
+
     def _pen(self) -> QPen:
         pen = QPen(self.colour)
-        pen.setWidthF(self.stroke_width)
+        pen.setWidthF(self._scaled(self.stroke_width))
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         return pen
@@ -182,13 +208,11 @@ def _line_pen(shape: Shape) -> QPen:
     is what leaves every mark made before line styles existed exactly as it
     was.
 
-    Coordinates: the lengths are in the mark's own space, like its points
-    and stroke width -- logical pixels on the overlay, which the window's
-    device turns physical, and image pixels once `render_selection` has
-    mapped the mark into an export. There `dash_scale` is the crop's
-    image-pixels-per-logical-pixel ratio, so a dash exported from a 1.5x
-    monitor spans 1.5 times the pixels, the same stretch of the picture it
-    covered on that monitor.
+    Coordinates: the handoff's lengths are logical pixels, like the stroke
+    width, and go through `Shape._scaled` as it does. The pen's width has
+    already been through it, so in an export from a 1.5x monitor a 9px dash
+    and a 2px stroke both span 1.5 times the pixels, and the pattern handed
+    to Qt -- one divided by the other -- is the one the screen used.
     """
     pen = shape._pen()
     pattern = _DASH_PATTERNS[shape.dash]
@@ -198,7 +222,7 @@ def _line_pen(shape: Shape) -> QPen:
     # those pixels.
     width = pen.widthF() or 1.0
     pen.setCapStyle(Qt.PenCapStyle.FlatCap)
-    pen.setDashPattern([length * shape.dash_scale / width for length in pattern])
+    pen.setDashPattern([shape._scaled(length) / width for length in pattern])
     return pen
 
 
@@ -258,7 +282,7 @@ class Highlighter(Shape):
 
     def _pen(self) -> QPen:
         pen = super()._pen()
-        pen.setWidthF(self.stroke_width * design.tokens.Metric.HIGHLIGHT_MULT)
+        pen.setWidthF(self._scaled(self.stroke_width * design.tokens.Metric.HIGHLIGHT_MULT))
         return pen
 
     def draw(self, painter: QPainter) -> None:
@@ -285,7 +309,6 @@ class Line(Shape):
     start: QPointF = field(default_factory=QPointF)
     end: QPointF = field(default_factory=QPointF)
     dash: str = "solid"
-    dash_scale: float = 1.0  # set by render_selection, never by a caller: see _line_pen
 
     def __post_init__(self) -> None:
         _check_style(self)
@@ -325,7 +348,6 @@ class Arrow(Shape):
     start: QPointF = field(default_factory=QPointF)
     end: QPointF = field(default_factory=QPointF)
     dash: str = "solid"
-    dash_scale: float = 1.0  # set by render_selection, never by a caller: see _line_pen
 
     def __post_init__(self) -> None:
         _check_style(self)
@@ -342,9 +364,14 @@ class Arrow(Shape):
             painter.drawLine(self.start, self.end)  # degenerate arrow: a dot
             return
 
-        head_length = max(self.HEAD_LENGTH_MIN, self.stroke_width * self.HEAD_LENGTH_FACTOR)
-        head_half_width = max(
-            self.HEAD_HALF_WIDTH_MIN, self.stroke_width * self.HEAD_HALF_WIDTH_FACTOR
+        # Sized in logical pixels, floors included, and only then scaled: a
+        # floor is a length too, and scaling the stroke but not the floor
+        # would export a thin arrow with a smaller head than the screen drew.
+        head_length = self._scaled(
+            max(self.HEAD_LENGTH_MIN, self.stroke_width * self.HEAD_LENGTH_FACTOR)
+        )
+        head_half_width = self._scaled(
+            max(self.HEAD_HALF_WIDTH_MIN, self.stroke_width * self.HEAD_HALF_WIDTH_FACTOR)
         )
 
         # Unit vector along the shaft, tip-ward, and its perpendicular --
@@ -405,16 +432,14 @@ class Rectangle(Shape):
     end: QPointF = field(default_factory=QPointF)
     fill: str = "outline"
     dash: str = "solid"
-    dash_scale: float = 1.0  # set by render_selection, never by a caller: see _line_pen
 
     def __post_init__(self) -> None:
         _check_style(self)
 
     def draw(self, painter: QPainter) -> None:
         _set_fill_and_outline(painter, self)
-        painter.drawRoundedRect(
-            _rect_from_corners(self.start, self.end), self.CORNER_RADIUS, self.CORNER_RADIUS
-        )
+        radius = self._scaled(self.CORNER_RADIUS)
+        painter.drawRoundedRect(_rect_from_corners(self.start, self.end), radius, radius)
 
     def hit_test(self, point: QPointF) -> bool:
         # The stroked outline, plus the interior only when `filled`.
@@ -501,7 +526,6 @@ class Ellipse(Shape):
     end: QPointF = field(default_factory=QPointF)
     fill: str = "outline"
     dash: str = "solid"
-    dash_scale: float = 1.0  # set by render_selection, never by a caller: see _line_pen
 
     def __post_init__(self) -> None:
         _check_style(self)
@@ -573,6 +597,15 @@ class ObscuringShape(Shape):
     "Blur tray"), range `Metric.BLUR_MIN`-`Metric.BLUR_MAX`, defaulting to
     `Metric.BLUR_DEFAULT` here so a shape built without the tray (tests,
     programmatic callers) still gets the same effect the UI defaults to.
+
+    `strength` is not one of the lengths `_scaled` stretches, though it
+    reads like one -- a pixelate block is about `strength` pixels across.
+    It is already in the frozen frame's own physical pixels wherever it
+    shows: the overlay bakes a committed blur into the frame image itself
+    (`OverlayWindow._base_layer_image`), and `render_selection` applies it
+    to the crop of that same image. Screen and export already agree;
+    scaling it on export would make the export blockier than the screen by
+    the crop's ratio.
     """
 
     start: QPointF = field(default_factory=QPointF)
@@ -747,7 +780,9 @@ class Text(Shape):
     stroke-width control the toolbar already exposes for every other tool.
     Chrome (background, corner radius, padding, ring) comes from tokens.py
     and is fixed regardless of stroke_width — only the type inside it
-    scales.
+    scales. Type and chrome alike are logical-pixel lengths, though, and
+    every one of them goes through `_scaled`, so a label exports at the size
+    the screen showed it.
     """
 
     # Design gives this formula directly ("Font size max(12, stroke x 3)"),
@@ -761,13 +796,15 @@ class Text(Shape):
     point: QPointF = field(default_factory=QPointF)
 
     def _font(self) -> QFont:
-        font = QFont()
-        font.setPixelSize(
-            max(
-                self.TEXT_FONT_SIZE_MIN,
-                round(self.stroke_width * self.TEXT_FONT_SIZE_FACTOR),
-            )
+        # The overlay's own logical size, floor and all, scaled only after.
+        # `setPixelSize` takes whole pixels, so at 1.5x a 15px label exports
+        # at 22 where the screen drew 22.5.
+        logical_size = max(
+            self.TEXT_FONT_SIZE_MIN,
+            round(self.stroke_width * self.TEXT_FONT_SIZE_FACTOR),
         )
+        font = QFont()
+        font.setPixelSize(round(self._scaled(logical_size)))
         return font
 
     def chip_rect(self) -> QRectF:
@@ -781,8 +818,8 @@ class Text(Shape):
         it. That is what made the eraser look like it ignored labels.
         """
         metrics = QFontMetricsF(self._font())
-        pad_h = design.tokens.Metric.TEXT_LABEL_PAD_H
-        pad_v = design.tokens.Metric.TEXT_LABEL_PAD_V
+        pad_h = self._scaled(design.tokens.Metric.TEXT_LABEL_PAD_H)
+        pad_v = self._scaled(design.tokens.Metric.TEXT_LABEL_PAD_V)
         return QRectF(
             self.point.x(),
             self.point.y(),
@@ -796,10 +833,10 @@ class Text(Shape):
 
         font = self._font()
         metrics = QFontMetricsF(font)
-        pad_h = design.tokens.Metric.TEXT_LABEL_PAD_H
-        pad_v = design.tokens.Metric.TEXT_LABEL_PAD_V
+        pad_h = self._scaled(design.tokens.Metric.TEXT_LABEL_PAD_H)
+        pad_v = self._scaled(design.tokens.Metric.TEXT_LABEL_PAD_V)
         chip = self.chip_rect()
-        radius = design.tokens.Metric.TEXT_LABEL_RADIUS
+        radius = self._scaled(design.tokens.Metric.TEXT_LABEL_RADIUS)
 
         # Background then ring, each its own drawRoundedRect call at the
         # same geometry -- a stroked pen straddles the fill's edge rather
@@ -814,7 +851,7 @@ class Text(Shape):
         ring_colour = QColor(design.tokens.Color.TEXT_LABEL_RING)
         ring_colour.setAlphaF(design.tokens.Color.TEXT_LABEL_RING_ALPHA)
         ring_pen = QPen(ring_colour)
-        ring_pen.setWidthF(design.tokens.Metric.TEXT_LABEL_RING_W)
+        ring_pen.setWidthF(self._scaled(design.tokens.Metric.TEXT_LABEL_RING_W))
         painter.setPen(ring_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(chip, radius, radius)
@@ -854,7 +891,9 @@ class StepMarker(Shape):
     are fixed regardless of `stroke_width`, unlike every drawing tool. The
     design gives the badge a constant size on purpose: a step counter that
     grew every time the user picked a thicker pen would be a strange
-    reading experience.
+    reading experience. Constant in logical pixels, that is: like every
+    other length a mark paints with, each of these goes through `_scaled`,
+    so an export from a scaled monitor shows the badge the size it was.
     """
 
     # Qt has no per-shape blur outside a QGraphicsScene (see tokens.Shadow's
@@ -880,12 +919,12 @@ class StepMarker(Shape):
     def _font(self) -> QFont:
         size, weight = design.tokens.Font.STEP_BADGE
         font = QFont()
-        font.setPixelSize(round(size))
+        font.setPixelSize(round(self._scaled(size)))
         font.setWeight(QFont.Weight(weight))
         return font
 
     def _rect(self) -> QRectF:
-        radius = self.RADIUS
+        radius = self._scaled(self.RADIUS)
         return QRectF(
             self.point.x() - radius, self.point.y() - radius, radius * 2, radius * 2
         )
@@ -896,14 +935,14 @@ class StepMarker(Shape):
             # Outermost layer first (biggest, faintest) so each inner layer
             # paints over it rather than the reverse -- otherwise a fainter
             # outer ellipse would be visible on top of a stronger inner one.
-            grown = self._SHADOW_SPREAD * layer / self._SHADOW_LAYERS
+            grown = self._scaled(self._SHADOW_SPREAD * layer / self._SHADOW_LAYERS)
             alpha = self._SHADOW_MAX_ALPHA * (1 - (layer - 1) / self._SHADOW_LAYERS)
             shadow_colour = QColor(0, 0, 0)
             shadow_colour.setAlphaF(alpha)
             painter.setBrush(shadow_colour)
             painter.drawEllipse(
                 rect.adjusted(-grown, -grown, grown, grown).translated(
-                    0, self._SHADOW_OFFSET_Y
+                    0, self._scaled(self._SHADOW_OFFSET_Y)
                 )
             )
 
@@ -917,7 +956,7 @@ class StepMarker(Shape):
         painter.drawEllipse(rect)
 
         ring_pen = QPen(QColor(design.tokens.Color.STEP_RING))
-        ring_pen.setWidthF(design.tokens.Metric.STEP_RING_W)
+        ring_pen.setWidthF(self._scaled(design.tokens.Metric.STEP_RING_W))
         painter.setPen(ring_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(rect)
@@ -927,11 +966,13 @@ class StepMarker(Shape):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(self.number))
 
     def hit_test(self, point: QPointF) -> bool:
-        # Fixed at RADIUS (tokens.py's STEP_D / 2), not stroke-derived --
-        # mirrors draw()'s own sizing, and the badge's filled area is
-        # already generous enough that no extra HIT_TOLERANCE is needed.
+        # RADIUS (tokens.py's STEP_D / 2) through `_scaled`, not
+        # stroke-derived -- mirrors draw()'s own sizing, and the badge's
+        # filled area is already generous enough that no extra
+        # HIT_TOLERANCE is needed.
+        radius = self._scaled(self.RADIUS)
         path = QPainterPath()
-        path.addEllipse(self.point, self.RADIUS, self.RADIUS)
+        path.addEllipse(self.point, radius, radius)
         return path.contains(point)
 
 
@@ -1032,20 +1073,19 @@ def apply_crop(frame: Frame, shapes: list[Shape], crop_rect: QRectF) -> Frame:
 
 def _transformed(shape: Shape, map_point, length_scale: float = 1.0) -> Shape:
     """Return a copy of `shape` with every point passed through `map_point`
-    (a `QPointF -> QPointF` callable), and its dash lengths multiplied by
-    `length_scale`, the factor `map_point` stretches distances by. `shape`
-    itself is left untouched.
+    (a `QPointF -> QPointF` callable), and every length it paints with
+    stretched by `length_scale`, the factor `map_point` stretches distances
+    by (see `Shape._scaled`). `shape` itself is left untouched.
 
     Dispatches on field name rather than shape type: every shape class ink
     can be made of stores its geometry under one of exactly three names —
     `points` (Pen/Highlighter), `start`/`end` (Line/Arrow/Rectangle/Ellipse/
     ObscuringShape/Crop) or `point` (Text/StepMarker) — so a future shape
     class needs no matching update here as long as it reuses one of those
-    names, which every existing one already does. The same goes for
-    `dash_scale`, on every shape that takes a line style.
+    names, which every existing one already does. Lengths need no such
+    convention: `length_scale` lives on `Shape` itself.
     """
-    if hasattr(shape, "dash_scale"):
-        shape = replace(shape, dash_scale=shape.dash_scale * length_scale)
+    shape = replace(shape, length_scale=shape.length_scale * length_scale)
     if hasattr(shape, "points"):
         return replace(shape, points=[map_point(point) for point in shape.points])
     if hasattr(shape, "start") and hasattr(shape, "end"):
@@ -1075,10 +1115,10 @@ def render_selection(
     is offset back onto `frame.logical_origin` for `Frame.crop()`'s sake,
     then every mark is shifted by `-selection`'s own origin and scaled by
     the crop's own image-pixels-per-logical-unit ratio — the same ratio
-    `Frame.crop()` derives internally, and its dash lengths with it, though
-    not its stroke width — before `render()` flattens them onto
-    the cropped pixels. A mark whose points land outside the cropped image's
-    bounds is simply never painted there, which is what keeps this
+    `Frame.crop()` derives internally, and every length it paints with by
+    the same ratio (see `Shape._scaled`) — before `render()` flattens them
+    onto the cropped pixels. A mark whose points land outside the cropped
+    image's bounds is simply never painted there, which is what keeps this
     consistent with the live ink layer's clip-rect behaviour without this
     function needing its own explicit clip.
     """
@@ -1094,12 +1134,14 @@ def render_selection(
         local = point - origin
         return QPointF(local.x() * scale_x, local.y() * scale_y)
 
-    # A dash runs in any direction, so it takes one ratio for both axes; the
-    # two differ only by the crop's rounding. Stroke widths are not scaled
-    # here, and never have been, so an export's lines are thinner than the
-    # screen's by this ratio. A dash left unscaled would not just be thinner:
-    # it would repeat more often along every edge, a different pattern from
-    # the one on screen. See `_line_pen`.
+    # Image pixels per logical pixel, for lengths. A length has no axis -- a
+    # stroke's width runs across it, a dash along it, a badge's radius every
+    # way -- so it takes one ratio for both; the two differ only by the
+    # crop's rounding. A length left out of it exports smaller than the
+    # screen drew it by this ratio, and a dash left out repeats more often
+    # along its edge, a different pattern from the screen's. An overlay
+    # selection is whole logical pixels, so at 1x the crop is exactly as
+    # many image pixels and this is exactly 1.0: nothing painted there moves.
     length_scale = (scale_x + scale_y) / 2
     mapped_shapes = [_transformed(shape, to_cropped_pixel, length_scale) for shape in shapes]
     return render(cropped.image, mapped_shapes)

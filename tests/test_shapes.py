@@ -1,9 +1,19 @@
 import itertools
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 from PyQt6.QtCore import Qt, QPointF, QRect, QRectF, QSizeF
-from PyQt6.QtGui import QColor, QFontMetrics, QFontMetricsF, QImage, QPainter, qRgb
+from PyQt6.QtGui import (
+    QColor,
+    QFontMetrics,
+    QFontMetricsF,
+    QImage,
+    QPainter,
+    qBlue,
+    qGreen,
+    qRed,
+    qRgb,
+)
 from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
@@ -1377,7 +1387,7 @@ class TestStyledExport:
         # window's device makes them physical, so a 9px dash covers 13.5 of
         # the frame's pixels. The export must lay each dash over that same
         # stretch of the picture. Only where ink starts and stops along the
-        # line is compared: an export has never scaled stroke widths.
+        # line is compared here; its width is TestExportedLengths' to check.
         image = make_image(size=(300, 150))
         frame = Frame(image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(200, 100))
         line = Line(
@@ -1398,3 +1408,215 @@ class TestStyledExport:
         export_edges = ink_edges(exported, row, 15, 285)
         assert len(screen_edges) == len(export_edges) > 10
         assert all(abs(seen - saved) <= 1 for seen, saved in zip(screen_edges, export_edges))
+
+
+def half_max_width(image: QImage, pixels) -> int:
+    """How many of `pixels` -- (x, y) pairs in `image`'s own pixels, running
+    straight across a stroke on a white ground -- the ink darkens past half
+    its own depth. That is the stroke's width however opaque its ink, and
+    wherever its antialiased edges happen to fall.
+    """
+    greens = [image.pixelColor(x, y).green() for x, y in pixels]
+    half = (max(greens) + min(greens)) / 2
+    return sum(1 for green in greens if green < half)
+
+
+def painted_extent(image: QImage) -> tuple[int, int, int]:
+    """(pixels, width, height): how many pixels of a white image anything
+    painted noticeably, and the size of the box they span."""
+    xs, ys = [], []
+    for y in range(image.height()):
+        for x in range(image.width()):
+            rgb = image.pixel(x, y)
+            if min(qRed(rgb), qGreen(rgb), qBlue(rgb)) < 223:
+                xs.append(x)
+                ys.append(y)
+    return len(xs), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+
+
+class TestExportedLengths:
+    """#72: a mark exports at the size the screen drew it -- every length it
+    paints with, not only its points.
+
+    "The screen" is what the overlay's ink layer does: each mark's own
+    draw() onto a device at a 1.5 pixel ratio, which turns its logical
+    pixels physical. The export is render_selection over a frame holding
+    those same physical pixels. Both are measured in physical pixels.
+    """
+
+    RATIO = 1.5
+    LOGICAL = QSizeF(200, 120)
+    PHYSICAL = (300, 180)
+
+    def on_screen(self, mark: Shape, ratio: float = RATIO, size=PHYSICAL) -> QImage:
+        image = make_image(size=size)
+        image.setDevicePixelRatio(ratio)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        mark.draw(painter)
+        painter.end()
+        return image
+
+    def frame(self, image: QImage | None = None) -> Frame:
+        if image is None:
+            image = make_image(size=self.PHYSICAL)
+        return Frame(image=image, logical_origin=QPointF(0, 0), logical_size=self.LOGICAL)
+
+    def exported(self, mark: Shape) -> QImage:
+        return render_selection(self.frame(), [mark], QRectF(QPointF(0, 0), self.LOGICAL))
+
+    # Each stroke, and a run of physical pixels straight across it: row 90
+    # (logical y=60) through an upright stroke, or column 90 through the
+    # arrow's level shaft.
+    STROKES = {
+        "line": (
+            lambda width: Line(
+                colour=RED, stroke_width=width, start=QPointF(100, 20), end=QPointF(100, 100)
+            ),
+            [(x, 90) for x in range(120, 180)],
+        ),
+        "rectangle": (
+            lambda width: Rectangle(
+                colour=RED, stroke_width=width, start=QPointF(40, 20), end=QPointF(160, 100)
+            ),
+            [(x, 90) for x in range(30, 90)],
+        ),
+        "ellipse": (
+            lambda width: Ellipse(
+                colour=RED, stroke_width=width, start=QPointF(40, 20), end=QPointF(160, 100)
+            ),
+            [(x, 90) for x in range(30, 90)],
+        ),
+        "pen": (
+            lambda width: Pen(
+                colour=RED, stroke_width=width, points=[QPointF(100, 20), QPointF(100, 100)]
+            ),
+            [(x, 90) for x in range(120, 180)],
+        ),
+        "highlighter": (
+            lambda width: Highlighter(
+                colour=RED, stroke_width=width, points=[QPointF(100, 20), QPointF(100, 100)]
+            ),
+            [(x, 90) for x in range(90, 210)],
+        ),
+        "arrow": (
+            lambda width: Arrow(
+                colour=RED, stroke_width=width, start=QPointF(20, 60), end=QPointF(180, 60)
+            ),
+            [(90, y) for y in range(60, 120)],
+        ),
+    }
+
+    @pytest.mark.parametrize("width", [2, 5, 6, 12])
+    @pytest.mark.parametrize("kind", list(STROKES))
+    def test_a_stroke_exports_as_wide_as_the_screen_drew_it(self, kind, width):
+        make, across = self.STROKES[kind]
+        mark = make(width)
+        logical_width = width * (Metric.HIGHLIGHT_MULT if kind == "highlighter" else 1)
+
+        seen = half_max_width(self.on_screen(mark), across)
+        saved = half_max_width(self.exported(mark), across)
+
+        assert abs(seen - logical_width * self.RATIO) <= 1
+        assert abs(saved - seen) <= 1
+
+    @pytest.mark.parametrize("width", [2, 6])
+    def test_an_arrowhead_exports_the_size_the_screen_drew_it(self, width):
+        # At 2 the head is all floor, and a floor is a length in its own
+        # right: scaling the stroke alone would leave it behind.
+        arrow = Arrow(colour=RED, stroke_width=width, start=QPointF(20, 60), end=QPointF(180, 60))
+        head_length = max(Arrow.HEAD_LENGTH_MIN, width * Arrow.HEAD_LENGTH_FACTOR)
+        half_width = max(Arrow.HEAD_HALF_WIDTH_MIN, width * Arrow.HEAD_HALF_WIDTH_FACTOR)
+        # Straight down through the head, a tenth of its length short of the base.
+        x = round((180 - head_length * 0.9) * self.RATIO)
+        down = [(x, y) for y in range(20, 160)]
+
+        seen = half_max_width(self.on_screen(arrow), down)
+        saved = half_max_width(self.exported(arrow), down)
+
+        assert abs(seen - 2 * 0.9 * half_width * self.RATIO) <= 2
+        assert abs(saved - seen) <= 1
+
+    @pytest.mark.parametrize("width", [2, 5, 8])
+    @pytest.mark.parametrize("kind", ["text", "step", "crop"])
+    def test_a_label_badge_or_dashed_box_exports_the_size_the_screen_drew_it(self, kind, width):
+        mark = {
+            "text": lambda: Text(
+                colour=RED, stroke_width=width, text="Label gy", point=QPointF(20, 20)
+            ),
+            "step": lambda: StepMarker(
+                colour=BLUE, stroke_width=width, point=QPointF(100, 60), number=3
+            ),
+            "crop": lambda: Crop(
+                colour=RED, stroke_width=width, start=QPointF(30, 20), end=QPointF(170, 100)
+            ),
+        }[kind]()
+
+        seen_pixels, seen_width, seen_height = painted_extent(self.on_screen(mark))
+        saved_pixels, saved_width, saved_height = painted_extent(self.exported(mark))
+
+        # A font's pixel size is whole pixels, so at 1.5x a 15px label
+        # exports at 22 where the screen drew 22.5: a pixel or two out,
+        # where an unscaled label comes out a third smaller.
+        assert abs(saved_width - seen_width) <= 3
+        assert abs(saved_height - seen_height) <= 3
+        assert abs(saved_pixels - seen_pixels) <= seen_pixels * 0.06
+
+    @pytest.mark.parametrize("kind", [Blur, Pixelate])
+    def test_blur_strength_stays_in_the_frames_own_pixels(self, kind):
+        # The overlay bakes a blur into the frozen frame itself: the mark
+        # mapped into the frame's physical pixels, strength as it stands.
+        # An export that scaled strength with the lengths would come out
+        # blockier than the screen.
+        image = make_gradient_image(size=self.PHYSICAL)
+        mark = kind(
+            colour=RED, stroke_width=4, start=QPointF(30, 20), end=QPointF(150, 90), strength=8
+        )
+
+        baked = replace(
+            mark,
+            start=QPointF(30 * self.RATIO, 20 * self.RATIO),
+            end=QPointF(150 * self.RATIO, 90 * self.RATIO),
+        ).apply(image)
+        exported = render_selection(
+            self.frame(image), [mark], QRectF(QPointF(0, 0), self.LOGICAL)
+        )
+
+        assert exported.convertToFormat(baked.format()) == baked
+
+    def test_exporting_leaves_the_marks_themselves_at_screen_size(self):
+        # The overlay keeps its marks and repaints them after an export; one
+        # stretched in place would thicken the screen's ink every time.
+        line = Line(colour=RED, stroke_width=6, start=QPointF(100, 20), end=QPointF(100, 100))
+        before = self.on_screen(line)
+
+        self.exported(line)
+
+        assert line.length_scale == 1.0
+        assert self.on_screen(line) == before
+
+    @pytest.mark.parametrize("width", [2, 6])
+    def test_at_1x_an_export_is_exactly_the_screens_pixels(self, width):
+        # The crop's ratio is exactly 1.0 there, and a length times 1.0 is
+        # itself. TestStyledExport covers the two-point shapes; these are
+        # the marks whose other lengths -- a highlighter's widening, an
+        # arrowhead, a label's type and chip, a badge -- now scale too.
+        frame = Frame(
+            image=make_image(size=(200, 120)), logical_origin=QPointF(0, 0),
+            logical_size=QSizeF(200, 120),
+        )
+        selection = QRectF(10, 20, 180, 90)
+        marks = [
+            Pen(colour=RED, stroke_width=width,
+                points=[QPointF(20, 30), QPointF(60, 80), QPointF(150, 40)]),
+            Highlighter(colour=BLUE, stroke_width=width,
+                        points=[QPointF(20, 90), QPointF(120, 50)]),
+            Arrow(colour=BLUE, stroke_width=width, start=QPointF(30, 100), end=QPointF(170, 40)),
+            Text(colour=RED, stroke_width=width, text="Hi gy", point=QPointF(30, 40)),
+            StepMarker(colour=BLUE, stroke_width=width, point=QPointF(140, 60), number=2),
+        ]
+
+        for mark in marks:
+            expected = self.on_screen(mark, ratio=1.0, size=(200, 120)).copy(selection.toRect())
+            exported = render_selection(frame, [mark], selection)
+            assert exported.convertToFormat(expected.format()) == expected, type(mark).__name__
