@@ -957,7 +957,11 @@ class SettingsWindow(WinWindow):
         cancel.clicked.connect(self._cancel)
         self.footer_right.addWidget(cancel)
 
-        save = AccentButton("✓  Save")
+        # No tick on the label: it is a text glyph, so Windows paints it
+        # from a symbol font that does not match the label beside it and
+        # reads as ragged. A primary action does not need decoration --
+        # Cancel next to it has none.
+        save = AccentButton("Save")
         save.clicked.connect(self._save)
         self.footer_right.addWidget(save)
 
