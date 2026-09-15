@@ -14,6 +14,7 @@ from PyQt6.QtGui import (
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QRegion,
     qRgb,
 )
 from PyQt6.QtTest import QTest
@@ -3807,14 +3808,55 @@ class TestFloatingBarActiveTool:
 
         assert bar.active_tool == "ellipse"
 
-    def test_a_click_arms_the_sibling_and_never_cycles(self):
+    def test_a_second_click_asks_for_the_menu_and_never_cycles(self):
         bar = FloatingBar()
+        asked = Mock()
+        bar.familyMenuRequested.connect(asked)
         slot = bar._tool_buttons["redact"]
 
         QTest.mouseClick(slot, Qt.MouseButton.LeftButton)
+        asked.assert_not_called()
         QTest.mouseClick(slot, Qt.MouseButton.LeftButton)
 
+        asked.assert_called_once_with("redact")
         assert bar.active_tool == "blur"
+
+    def test_a_second_click_picks_nothing(self):
+        # A picked tool closes whatever menu is open, so a second click that
+        # also reported a pick would close the menu it had just asked for.
+        bar = FloatingBar()
+        slot = bar._tool_buttons["shapes"]
+        QTest.mouseClick(slot, Qt.MouseButton.LeftButton)
+        picked, selected = Mock(), Mock()
+        bar.toolPicked.connect(picked)
+        bar.toolSelected.connect(selected)
+
+        QTest.mouseClick(slot, Qt.MouseButton.LeftButton)
+
+        picked.assert_not_called()
+        selected.assert_not_called()
+
+    def test_a_family_slot_arms_its_sibling_while_another_familys_is_armed(self):
+        bar = FloatingBar()
+        asked = Mock()
+        bar.familyMenuRequested.connect(asked)
+        bar.select_tool("pixelate")
+
+        QTest.mouseClick(bar._tool_buttons["shapes"], Qt.MouseButton.LeftButton)
+
+        assert bar.active_tool == "rect"
+        asked.assert_not_called()
+
+    def test_a_plain_slot_clicked_again_stays_armed_and_asks_for_nothing(self):
+        bar = FloatingBar()
+        asked = Mock()
+        bar.familyMenuRequested.connect(asked)
+
+        QTest.mouseClick(bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        QTest.mouseClick(bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+
+        assert bar.active_tool == "pen"
+        asked.assert_not_called()
 
     def test_pixelate_is_drawn_with_the_mask_glyph(self):
         bar = FloatingBar()
@@ -3832,6 +3874,42 @@ class TestFloatingBarActiveTool:
 
         asked.assert_called_once_with("shapes")
         assert bar.active_tool is None
+
+    @pytest.mark.parametrize("slot", ["shapes", "redact", "watermark"])
+    def test_a_notch_answers_across_its_slots_corner(self, slot):
+        # #77: the 9px box the spec draws the triangle in was missed often
+        # enough that the menu seemed not to open at all.
+        bar = FloatingBar()
+        button = bar._watermark if slot == "watermark" else bar._tool_buttons[slot]
+        side = tokens.BarMetric.BTN
+
+        assert button.childAt(QPoint(side - 12, side - 12)) is button.notch
+        assert button.childAt(QPoint(side - 1, side - 1)) is button.notch
+        # The middle of the glyph, and either edge beside the corner, stay
+        # the slot's.
+        assert button.childAt(QPoint(side // 2, side // 2)) is None
+        assert button.childAt(QPoint(side - 13, side - 1)) is None
+        assert button.childAt(QPoint(side - 1, side - 13)) is None
+
+    def test_the_notchs_triangle_stays_where_the_spec_draws_it(self):
+        # Flush right in a 9px box 1px in from the slot's corner, however
+        # big the area that answers a press.
+        slot = FloatingBar()._tool_buttons["shapes"]
+        # The notch alone, onto a clear image the slot's size and in the
+        # slot's coordinates: grab() paints a background in under it.
+        image = QImage(slot.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        slot.notch.render(image, slot.notch.pos(), QRegion(), QWidget.RenderFlag.DrawChildren)
+        side = tokens.BarMetric.BTN
+
+        def painted(x, y):
+            return image.pixelColor(x, y).alpha() > 0
+
+        # Its right angle sits at (side - 1, side - 3), its legs 5px long.
+        assert painted(side - 2, side - 4)
+        assert painted(side - 3, side - 5)
+        assert not painted(side - 6, side - 8)
+        assert not painted(side - 12, side - 12)
 
 
 class TestFloatingBarUndoRedo:
@@ -3895,10 +3973,10 @@ class TestFloatingBarTooltips:
         [
             ("pen", "Pen — P"),
             ("highlighter", "Highlighter — H"),
-            ("shapes", "Rectangle — R · notch for more shapes"),
+            ("shapes", "Rectangle — R · click again for more shapes"),
             ("step", "Numbered step — S"),
             ("text", "Text — T"),
-            ("redact", "Blur — B · notch to switch"),
+            ("redact", "Blur — B · click again to switch"),
             ("eraser", "Eraser — E"),
         ],
     )
@@ -3914,8 +3992,8 @@ class TestFloatingBarTooltips:
         bar.select_tool("blackout")
 
         # Crop has no key, so it is named alone.
-        assert bar._tool_buttons["shapes"].toolTip() == "Crop · notch for more shapes"
-        assert bar._tool_buttons["redact"].toolTip() == "Blackout — B · notch to switch"
+        assert bar._tool_buttons["shapes"].toolTip() == "Crop · click again for more shapes"
+        assert bar._tool_buttons["redact"].toolTip() == "Blackout — B · click again to switch"
 
     def test_each_notch_says_what_it_opens(self):
         bar = FloatingBar()
@@ -5903,6 +5981,108 @@ class TestFamilyMenuRowsStayClickable:
 
         assert overlay._family_menus["shapes"].isHidden()
         assert overlay._tool_hint.isVisible()
+
+
+class TestAnArmedFamilySlotOpensItsMenu:
+    """A click on a shape or redaction slot that is already armed opens its
+    menu, and the next one closes it (#77).
+
+    Reported as having to click in one exact place for anything to open:
+    the menu answered only to a 9px triangle in the slot's corner, and a
+    click anywhere else armed the shape the slot already had. Driven through
+    the window, hover first, the way a pointer arrives.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self):
+        # The whole offscreen screen, so every point is on a real widget at
+        # any scale factor.
+        screen = QGuiApplication.primaryScreen().geometry()
+        width, height = screen.width(), screen.height()
+        overlay = OverlayWindow(make_frame(image_size=(width, height), logical_size=(width, height)))
+        overlay.setGeometry(0, 0, width, height)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        margin = height // 10
+        overlay.set_selection(QRect(margin, margin, width - 2 * margin, height // 3))
+        QApplication.processEvents()
+        return overlay
+
+    @staticmethod
+    def _click(overlay, widget, local=None):
+        point = widget.mapTo(overlay, widget.rect().center() if local is None else local)
+        QTest.mouseMove(overlay.windowHandle(), point)
+        QApplication.processEvents()
+        QTest.mouseClick(
+            overlay.windowHandle(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point
+        )
+        QApplication.processEvents()
+
+    def test_rectangle_then_ellipse_from_the_menu_then_the_menu_again(self):
+        overlay = self._overlay()
+        bar = overlay._bar
+        slot = bar._tool_buttons["shapes"]
+        menu = overlay._family_menus["shapes"]
+        self._click(overlay, slot)
+        assert bar.active_tool == "rect"
+        assert menu.isHidden(), "the first click arms the shape the slot shows"
+        self._click(overlay, slot)
+        assert not menu.isHidden()
+        self._click(overlay, menu._rows["ellipse"])
+        assert bar.active_tool == "ellipse"
+        assert menu.isHidden()
+
+        self._click(overlay, slot)
+
+        assert not menu.isHidden()
+        assert bar.active_tool == "ellipse"
+
+    @pytest.mark.parametrize("family", ["shapes", "redact"])
+    def test_each_click_on_the_armed_slot_opens_or_closes_its_menu(self, family):
+        overlay = self._overlay()
+        bar = overlay._bar
+        slot = bar._tool_buttons[family]
+        menu = overlay._family_menus[family]
+        self._click(overlay, slot)
+        armed = bar.active_tool
+
+        opened = []
+        for _ in range(3):
+            self._click(overlay, slot)
+            opened.append(not menu.isHidden())
+
+        assert opened == [True, False, True]
+        assert bar.active_tool == armed
+
+    def test_the_click_that_opens_the_menu_closes_the_style_popover(self):
+        overlay = self._overlay()
+        bar = overlay._bar
+        slot = bar._tool_buttons["shapes"]
+        self._click(overlay, slot)
+        self._click(overlay, bar._style_dot)
+        assert not overlay._style_popover.isHidden()
+
+        self._click(overlay, slot)
+
+        assert overlay._style_popover.isHidden()
+        assert not overlay._family_menus["shapes"].isHidden()
+
+    def test_a_press_just_off_the_triangle_still_opens_the_menu(self):
+        overlay = self._overlay()
+        bar = overlay._bar
+        slot = bar._tool_buttons["shapes"]
+        armed = bar.active_tool
+        side = tokens.BarMetric.BTN
+
+        # Inside the corner the notch answers to, outside the 9px box its
+        # triangle is drawn in.
+        self._click(overlay, slot, QPoint(side - 11, side - 11))
+
+        assert not overlay._family_menus["shapes"].isHidden()
+        assert bar.active_tool == armed
 
 
 class TestCaptureModeRowSizing:

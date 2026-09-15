@@ -937,7 +937,8 @@ class TestEraserReachesEveryMark:
 
 class TestFamilySlots:
     """The review window's bar is the overlay's, families and all. Picking a
-    tool uses it: a click arms the sibling the slot shows, and never cycles.
+    tool uses it: a click arms the sibling the slot shows, a click on the
+    armed slot opens or closes its menu, and neither ever cycles.
     """
 
     def _editing(self) -> ReviewWindow:
@@ -953,13 +954,24 @@ class TestFamilySlots:
 
         assert window._bar.active_tool == "rect"
 
-    def test_clicking_again_keeps_the_same_shape(self):
+    def test_clicking_the_armed_slot_opens_its_menu_and_keeps_the_shape(self):
         window = self._editing()
         button = window._bar._tool_buttons["shapes"]
 
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
 
+        assert window._family_menus["shapes"].isVisibleTo(window._canvas)
+        assert window._bar.active_tool == "rect"
+
+    def test_clicking_it_once_more_closes_the_menu(self):
+        window = self._editing()
+        button = window._bar._tool_buttons["shapes"]
+
+        for _ in range(3):
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+
+        assert not window._family_menus["shapes"].isVisibleTo(window._canvas)
         assert window._bar.active_tool == "rect"
 
     def test_the_notch_opens_the_family_menu(self):

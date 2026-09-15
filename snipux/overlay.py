@@ -687,6 +687,11 @@ class _Notch(QWidget):
     the mark goes and how strongly. A child of the slot rather than a hit
     test inside it: a press on the notch is delivered here, so it opens the
     menu and never also presses the slot underneath.
+
+    It answers to more of the corner than the triangle covers (#77): the
+    spec's 9px box was missed often enough that the menu seemed not to open
+    at all. It stops short of the middle of the slot, so a click aimed at
+    the glyph still reaches the slot.
     """
 
     clicked = pyqtSignal()
@@ -695,7 +700,7 @@ class _Notch(QWidget):
         super().__init__(parent)
         metric = design.tokens.BarMetric
         self.setFixedSize(metric.NOTCH, metric.NOTCH)
-        corner = metric.BTN - metric.NOTCH_INSET - metric.NOTCH
+        corner = metric.BTN - metric.NOTCH
         self.move(corner, corner)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         # Qt's tooltip wake-up timer is driven by mouse moves over the
@@ -722,12 +727,14 @@ class _Notch(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        leg = design.tokens.BarMetric.NOTCH_TRIANGLE
-        right = float(self.width())
-        # Flush right and centred top to bottom in the hit area, which is
-        # where the spec's markup lands its triangle: the right angle points
-        # into the slot's corner.
-        bottom = (self.height() + leg) / 2
+        metric = design.tokens.BarMetric
+        leg = metric.NOTCH_TRIANGLE
+        # Where the spec's markup lands its triangle: flush right and centred
+        # top to bottom in a NOTCH_BOX box NOTCH_INSET in from the slot's
+        # corner, the right angle pointing into the corner. The hit area
+        # around that box is bigger, and the triangle does not grow with it.
+        right = float(self.width() - metric.NOTCH_INSET)
+        bottom = self.height() - metric.NOTCH_INSET - (metric.NOTCH_BOX - leg) / 2
         path = QPainterPath()
         path.moveTo(right, bottom - leg)
         path.lineTo(right, bottom)
@@ -826,9 +833,10 @@ class _IconButton(QPushButton):
     def mousePressEvent(self, event) -> None:
         """A right-click is its own signal.
 
-        A family slot opens its menu from the notch, and from a right-click
-        anywhere on it -- the way that menu was reached before the notch
-        existed. `QPushButton` reports only left presses, hence this.
+        A family slot opens its menu from the notch, from a click once its
+        sibling is armed, and from a right-click anywhere on it -- the way
+        that menu was reached before the notch existed. `QPushButton`
+        reports only left presses, hence this.
         """
         if event.button() == Qt.MouseButton.RightButton:
             self.rightClicked.emit()
@@ -1486,7 +1494,10 @@ class FloatingBar(_Chrome):
 
     # The spec's own wording for each family's two ways in.
     _NOTCH_TOOLTIPS = {"shapes": "Choose a shape", "redact": "Redaction mode"}
-    _FAMILY_TOOLTIP_TAILS = {"shapes": "notch for more shapes", "redact": "notch to switch"}
+    _FAMILY_TOOLTIP_TAILS = {
+        "shapes": "click again for more shapes",
+        "redact": "click again to switch",
+    }
 
     def __init__(self, parent=None, *, capture_chip: bool = True, trailing: str = "save"):
         """`capture_chip` and `trailing` exist for the review window, which
@@ -1759,14 +1770,23 @@ class FloatingBar(_Chrome):
     # -- tools -------------------------------------------------------------
 
     def _on_slot_clicked(self, slot: str) -> None:
-        """Arm the slot's tool: for a family, the sibling it is showing.
+        """Arm the slot's tool: for a family, the sibling it is showing. A
+        family slot whose sibling is already armed asks for the family's
+        menu instead, so a second click opens it and a third closes it (#77).
 
-        A click never moves on to the next sibling. The notch is how to
-        reach another, and each has its key; a click that sometimes changed
-        what the slot draws would make the one gesture used most the one
-        that cannot be trusted.
+        A click never moves on to the next sibling. The menu is how to reach
+        another, and each has its key; a click that sometimes changed what
+        the slot draws would make the one gesture used most the one that
+        cannot be trusted. A click on an armed slot changed nothing at all,
+        so opening the menu costs the first click none of its certainty --
+        and the pointer is no longer sent to the notch alone to find it.
+        No pick is reported either: a pick closes the bar's menus, this one
+        included.
         """
         tool = self._family_choice.get(slot, slot)
+        if slot in design.tokens.FAMILIES and tool == self._active_tool:
+            self.familyMenuRequested.emit(slot)
+            return
         self.toolPicked.emit(tool)
         self.select_tool(tool)
 
@@ -5150,8 +5170,9 @@ class OverlayWindow(QWidget):
     # -- the bar's menus -----------------------------------------------------
 
     def _toggle_family_menu(self, family: str) -> None:
-        """Open `family`'s menu from its slot's notch, or close it if it is
-        the one already open.
+        """Open `family`'s menu from its slot -- the notch, a right-click or
+        a click on the armed slot -- or close it if it is the one already
+        open.
 
         Seeded with the sibling the slot shows, and anchored to that slot in
         this window's coordinates -- the slot's own geometry is the bar's.

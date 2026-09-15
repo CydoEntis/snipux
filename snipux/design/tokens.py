@@ -1222,7 +1222,8 @@ class BarMetric:
     DIVIDER_H        = 20
     DIVIDER_MARGIN   = 4
 
-    NOTCH            = 9           # corner hit area on a family slot
+    NOTCH            = 12          # corner hit area, past the spec's box (#77)
+    NOTCH_BOX        = 9           # spec markup: the box its triangle sits in
     NOTCH_TRIANGLE   = 5           # visible triangle leg
     NOTCH_INSET      = 1           # spec markup: right:1px; bottom:1px
 

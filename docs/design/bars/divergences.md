@@ -520,6 +520,35 @@ review window's bar keeps its own fill (#70, `snipux/glass.py`).
 
 ---
 
+## 23 · A click on an armed family slot opens its menu
+
+**The handoff says** (`README.md`, "Notch families"): the slot shows
+whichever sibling you used last, and the corner triangle opens the family.
+Its markup draws the triangle in a 9px box, 1px in from the slot's corner.
+
+**We** also open a family from a click on its slot while the sibling the
+slot shows is armed, and close it on the next click. The triangle is drawn
+where the handoff puts it, but the notch answers to a 12px corner around it
+(#77). The watermark's notch grows the same way.
+
+### Why
+
+- **The triangle was the only way in with the pointer, and it was
+  missed.** It was reported as having to click in exactly the right place
+  for anything to open. A press a few pixels off the 9px box landed on the
+  slot, which armed the shape it already had, so nothing seemed to happen.
+- **A click on an armed slot had nothing else to do.** A click arms the
+  sibling the slot shows and never the next one, so a second click changed
+  nothing. Opening the menu gives it a use without making the first click,
+  the one used most, any less predictable.
+- **12px, not more.** Nearly twice the area of the 9px box, and still short
+  of the middle of a 28px slot, so a click aimed at the glyph arms the tool
+  rather than opening the menu over it.
+- **Right-click and the keys are unchanged**, and so is the watermark
+  slot's own click: it switches the mark, having no sibling to arm.
+
+---
+
 ## Still open
 
 Not decided. Today's behaviour stands for each until it is, and each is
