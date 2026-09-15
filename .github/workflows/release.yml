@@ -66,7 +66,16 @@ jobs:
         with:
           name: dist
           path: dist/
-      - name: Attach the files to the release
+      - name: Publish the release with the files on it
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+        # Create it when the tag has no release yet -- pushing a tag alone
+        # does not make one, which is how the first run of this workflow
+        # failed with "release not found" after PyPI had already accepted
+        # the upload.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes               --title "snipux ${GITHUB_REF_NAME#v}" --repo "$GITHUB_REPOSITORY"
+          fi
