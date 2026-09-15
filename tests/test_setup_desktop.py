@@ -1713,3 +1713,148 @@ class TestRecordingDrawCursorPersistence:
         setup_desktop.save_recording_draw_cursor(True, tmp_path)
 
         assert setup_desktop.load_recording_draw_cursor(tmp_path) is True
+
+
+class TestWatermarkContentPersistence:
+    """#69: what the stills bar's watermark stamps. Only what the mark is --
+    whether it is on, its corner and its opacity last a session and are
+    never stored."""
+
+    @staticmethod
+    def _write_config(config_dir, text: str) -> None:
+        setup_desktop.config_path(config_dir).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(config_dir).write_text(text)
+
+    @staticmethod
+    def _picture(tmp_path, name="logo.png", data=b"a logo's bytes"):
+        source = tmp_path / "Downloads" / name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(data)
+        return source
+
+    def test_the_kind_is_text_unless_asked_otherwise(self, tmp_path):
+        assert setup_desktop.load_watermark_kind(tmp_path) == "text"
+
+    def test_the_kind_round_trips(self, tmp_path):
+        setup_desktop.save_watermark_kind("image", tmp_path)
+
+        assert setup_desktop.load_watermark_kind(tmp_path) == "image"
+
+    def test_a_junk_kind_reads_as_text(self, tmp_path):
+        self._write_config(tmp_path, '{"watermark_kind": "banner"}')
+
+        assert setup_desktop.load_watermark_kind(tmp_path) == "text"
+
+    def test_there_is_no_text_until_some_is_saved(self, tmp_path):
+        assert setup_desktop.load_watermark_text(tmp_path) == ""
+
+    def test_the_text_round_trips_on_one_line(self, tmp_path):
+        setup_desktop.save_watermark_text("  acme\n   internal ", tmp_path)
+
+        assert setup_desktop.load_watermark_text(tmp_path) == "acme internal"
+
+    @pytest.mark.parametrize(
+        "stored,expected",
+        [('["not", "text"]', ""), ("42", ""), ('"two\\nlines"', "two lines")],
+    )
+    def test_a_hand_edited_text_reads_as_something_usable(self, tmp_path, stored, expected):
+        self._write_config(tmp_path, '{"watermark_text": %s}' % stored)
+
+        assert setup_desktop.load_watermark_text(tmp_path) == expected
+
+    def test_there_is_no_image_until_one_is_chosen(self, tmp_path):
+        assert setup_desktop.load_watermark_image_name(tmp_path) is None
+        assert setup_desktop.load_watermark_image(tmp_path) is None
+
+    def test_an_image_is_copied_into_snipuxs_own_folder(self, tmp_path):
+        config = tmp_path / "config"
+        source = self._picture(tmp_path)
+
+        assert setup_desktop.save_watermark_image(source, config) is True
+
+        kept = setup_desktop.load_watermark_image(config)
+        assert kept == setup_desktop.watermark_folder(config) / "logo.png"
+        assert kept.read_bytes() == b"a logo's bytes"
+
+    def test_the_copy_outlives_the_original(self, tmp_path):
+        # The point of copying: a logo tidied out of Downloads must not take
+        # the watermark with it.
+        config = tmp_path / "config"
+        source = self._picture(tmp_path)
+        setup_desktop.save_watermark_image(source, config)
+
+        source.unlink()
+
+        assert setup_desktop.load_watermark_image(config).read_bytes() == b"a logo's bytes"
+
+    def test_the_kept_image_lives_beside_config_json(self, tmp_path):
+        assert (
+            setup_desktop.watermark_folder(tmp_path).parent
+            == setup_desktop.config_path(tmp_path).parent
+        )
+
+    def test_choosing_another_image_replaces_the_kept_copy(self, tmp_path):
+        config = tmp_path / "config"
+        setup_desktop.save_watermark_image(self._picture(tmp_path, "a.png"), config)
+
+        setup_desktop.save_watermark_image(self._picture(tmp_path, "b.jpg", b"b"), config)
+
+        folder = setup_desktop.watermark_folder(config)
+        assert sorted(path.name for path in folder.iterdir()) == ["b.jpg"]
+        assert setup_desktop.load_watermark_image_name(config) == "b.jpg"
+
+    def test_choosing_the_kept_copy_again_does_not_lose_it(self, tmp_path):
+        config = tmp_path / "config"
+        setup_desktop.save_watermark_image(self._picture(tmp_path), config)
+        kept = setup_desktop.load_watermark_image(config)
+
+        assert setup_desktop.save_watermark_image(kept, config) is True
+
+        assert setup_desktop.load_watermark_image(config).read_bytes() == b"a logo's bytes"
+
+    def test_a_source_that_cannot_be_read_changes_nothing(self, tmp_path):
+        config = tmp_path / "config"
+        setup_desktop.save_watermark_image(self._picture(tmp_path), config)
+
+        assert setup_desktop.save_watermark_image(tmp_path / "gone.png", config) is False
+
+        assert setup_desktop.load_watermark_image(config).read_bytes() == b"a logo's bytes"
+
+    def test_a_kept_copy_that_went_missing_keeps_its_name(self, tmp_path):
+        # So Settings can say which image went, rather than that none was
+        # ever chosen.
+        config = tmp_path / "config"
+        setup_desktop.save_watermark_image(self._picture(tmp_path), config)
+
+        setup_desktop.load_watermark_image(config).unlink()
+
+        assert setup_desktop.load_watermark_image_name(config) == "logo.png"
+        assert setup_desktop.load_watermark_image(config) is None
+
+    @pytest.mark.parametrize(
+        "stored",
+        ['"../config.json"', '"sub/logo.png"', '"sub\\\\logo.png"', '".."', '""', "42", "null"],
+    )
+    def test_a_hand_edited_name_cannot_reach_outside_the_folder(self, tmp_path, stored):
+        self._write_config(tmp_path, '{"watermark_image": %s}' % stored)
+
+        assert setup_desktop.load_watermark_image_name(tmp_path) is None
+        assert setup_desktop.load_watermark_image(tmp_path) is None
+
+    def test_clearing_forgets_the_image_and_deletes_the_copy(self, tmp_path):
+        config = tmp_path / "config"
+        setup_desktop.save_watermark_image(self._picture(tmp_path), config)
+
+        assert setup_desktop.clear_watermark_image(config) is True
+
+        assert setup_desktop.load_watermark_image_name(config) is None
+        assert list(setup_desktop.watermark_folder(config).iterdir()) == []
+
+    def test_the_content_is_independent_of_every_other_setting(self, tmp_path):
+        setup_desktop.save_watermark_kind("image", tmp_path)
+        setup_desktop.save_watermark_text("acme", tmp_path)
+
+        setup_desktop.save_hide_sensitive(True, tmp_path)
+
+        assert setup_desktop.load_watermark_kind(tmp_path) == "image"
+        assert setup_desktop.load_watermark_text(tmp_path) == "acme"

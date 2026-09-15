@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QKeyEvent, QKeySequence
+from PyQt6.QtGui import QFont, QImage, QImageReader, QKeyEvent, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
@@ -1056,13 +1056,18 @@ class SettingsWindow(WinWindow):
     def _build_panes(self) -> QWidget:
         self._panes = QStackedWidget()
         self._panes.setStyleSheet("background: transparent;")
-        for build in (
-            self._capture_pane,
-            self._saving_pane,
-            self._annotation_pane,
-            self._hide_pane,
-            self._tray_pane,
-        ):
+        # Built in the rail's own order and looked up by id, so a page added
+        # to `tokens.SETTINGS_NAV` cannot open under another page's row.
+        builders = {
+            "capture": self._capture_pane,
+            "saving": self._saving_pane,
+            "ink": self._annotation_pane,
+            "watermark": self._watermark_pane,
+            "hide": self._hide_pane,
+            "tray": self._tray_pane,
+        }
+        for identifier, _icon, _label in tokens.SETTINGS_NAV:
+            build = builders[identifier]
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1420,6 +1425,222 @@ class SettingsWindow(WinWindow):
             self._show_hints,
         )
 
+    def _watermark_pane(self) -> QWidget:
+        """What the stills bar's watermark stamps: a line of text, or an
+        image.
+
+        Only what the mark is. Whether it is on, its corner and its opacity
+        are the bar's, picked per snip where its preview shows them, so none
+        of that is here. Nothing is written before Save, the image included:
+        choosing one only shows it, and Save is what copies it in.
+        """
+        win, metric = tokens.Win, tokens.WinMetric
+        mark = tokens.WatermarkMetric
+
+        intro = QLabel(
+            "The watermark button on the stills bar stamps this on a snip, in "
+            "the corner and at the opacity picked there. It lands once, when "
+            "the snip is copied or saved, above everything drawn on it."
+        )
+        intro.setWordWrap(True)
+        intro.setFont(_ui_font(11.5, 400))
+        intro.setStyleSheet(f"color: {win.TEXT_FAINT};")
+
+        self._watermark_kind_group = QButtonGroup(self)
+        self._watermark_kind_group.setExclusive(True)
+        self._watermark_cards: dict[str, RadioCard] = {}
+        stored_kind = setup_desktop.load_watermark_kind(self._config_dir)
+        for index, (kind, label, note) in enumerate(tokens.WATERMARK_KINDS):
+            card = RadioCard(label, note)
+            card.setChecked(kind == stored_kind)
+            card.toggled.connect(lambda _c: self._mark_dirty())
+            self._watermark_kind_group.addButton(card, index)
+            self._watermark_cards[kind] = card
+
+        self._watermark_text = QLineEdit(setup_desktop.load_watermark_text(self._config_dir))
+        self._watermark_text.setPlaceholderText("Your name, a team, a project")
+        self._watermark_text.setMaxLength(mark.TEXT_MAX_CHARS)
+        self._watermark_text.setFont(_ui_font(12.5, 400))
+        self._watermark_text.setFixedHeight(metric.CONTROL_H)
+        self._watermark_text.setStyleSheet(_field_style())
+        # `textEdited`, not `textChanged`: only typing is an edit.
+        self._watermark_text.textEdited.connect(self._on_watermark_text_edited)
+
+        self._watermark_thumb = QLabel()
+        self._watermark_thumb.setFixedSize(mark.THUMB_W, mark.THUMB_H)
+        self._watermark_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._watermark_thumb.setFont(_ui_font(11.5, 400))
+        self._watermark_thumb.setStyleSheet(
+            f"QLabel {{ background: {win.FIELD_BG}; border: 1px solid {win.FIELD_BORDER};"
+            f" border-radius: {metric.CONTROL_RADIUS}px; color: {win.TEXT_FAINT}; }}"
+        )
+        choose = SecondaryButton("Choose…")
+        choose.clicked.connect(lambda _checked=False: self._choose_watermark_image())
+        self._watermark_remove = SecondaryButton("Remove")
+        self._watermark_remove.clicked.connect(lambda _checked=False: self._remove_watermark_image())
+        buttons = QVBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(metric.ENTRY_ROW_GAP)
+        buttons.addWidget(choose)
+        buttons.addWidget(self._watermark_remove)
+        buttons.addStretch()
+        image_row = QHBoxLayout()
+        image_row.setContentsMargins(0, 0, 0, 0)
+        image_row.setSpacing(metric.ENTRY_GAP)
+        image_row.addWidget(self._watermark_thumb)
+        image_row.addLayout(buttons)
+        image_row.addStretch()
+        image_widget = QWidget()
+        image_widget.setLayout(image_row)
+
+        self._watermark_image_note = QLabel()
+        self._watermark_image_note.setTextFormat(Qt.TextFormat.PlainText)
+        self._watermark_image_note.setWordWrap(True)
+        self._watermark_image_note.setFont(_ui_font(11.5, 400))
+
+        # A file chosen on this visit, copied in by Save; or, once the kept
+        # image is removed, the removal Save will make.
+        self._watermark_image_source: Path | None = None
+        self._watermark_image_removed = False
+        self._refresh_watermark_image()
+
+        size_note = QLabel(
+            f"Sized to the snip: {round(mark.MARK_H_SHARE * 100)}% of its shorter "
+            f"side, between {mark.MARK_H_MIN} and {mark.MARK_H_MAX} pixels tall, "
+            "and never stretched past an image's own pixels."
+        )
+        size_note.setWordWrap(True)
+        size_note.setFont(_ui_font(11.5, 400))
+        size_note.setStyleSheet(f"color: {win.TEXT_FAINT};")
+
+        return _pane(
+            SectionHeading("Watermark"),
+            intro,
+            None,
+            SectionHeading("What the mark is"),
+            self._watermark_cards["text"],
+            self._watermark_text,
+            None,
+            self._watermark_cards["image"],
+            image_widget,
+            self._watermark_image_note,
+            None,
+            SectionHeading("Size"),
+            size_note,
+        )
+
+    def _refresh_watermark_image(self) -> None:
+        """Show the image the page would save: the one chosen on this visit,
+        else the kept copy -- or say there is none, or that the kept copy is
+        gone, which is the one case the overlay greys its button for that
+        only this page can explain.
+        """
+        win, mark = tokens.Win, tokens.WatermarkMetric
+        name: str | None = None
+        image = QImage()
+        missing = False
+        if self._watermark_image_source is not None:
+            name = self._watermark_image_source.name
+            image = QImage(str(self._watermark_image_source))
+        elif not self._watermark_image_removed:
+            name = setup_desktop.load_watermark_image_name(self._config_dir)
+            path = setup_desktop.load_watermark_image(self._config_dir)
+            missing = name is not None and path is None
+            if path is not None:
+                image = QImage(str(path))
+
+        self._watermark_remove.setEnabled(name is not None)
+        self._watermark_thumb.setPixmap(QPixmap())
+        if name is None:
+            self._watermark_thumb.setText("No image")
+            note, colour = "No image chosen yet. Pick a logo, or any picture.", win.TEXT_NOTE
+        elif image.isNull():
+            self._watermark_thumb.setText("Missing")
+            problem = (
+                "is no longer in Snipux's settings folder"
+                if missing
+                else "can no longer be read"
+            )
+            note = (
+                f"{name} {problem}, so the watermark button stays greyed while "
+                "Image is chosen. Choose the image again."
+            )
+            colour = win.ERR_FG
+        else:
+            self._watermark_thumb.setText("")
+            ratio = self.devicePixelRatioF()
+            room_w = (mark.THUMB_W - 2 * mark.THUMB_PAD) * ratio
+            room_h = (mark.THUMB_H - 2 * mark.THUMB_PAD) * ratio
+            shown = image
+            # Shrunk to fit and never enlarged: a small logo shown blown up
+            # would promise a sharper mark than it can make.
+            if image.width() > room_w or image.height() > room_h:
+                shown = image.scaled(
+                    round(room_w),
+                    round(room_h),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            pixmap = QPixmap.fromImage(shown)
+            pixmap.setDevicePixelRatio(ratio)
+            self._watermark_thumb.setPixmap(pixmap)
+            note = (
+                f"{name} · {image.width()} × {image.height()} px. Snipux keeps "
+                "its own copy, so moving or deleting the original does not lose it."
+            )
+            colour = win.TEXT_NOTE
+        self._watermark_image_note.setText(note)
+        self._watermark_image_note.setStyleSheet(f"color: {colour};")
+
+    def _on_watermark_text_edited(self, _text: str) -> None:
+        # Typing a mark is choosing to stamp text.
+        self._watermark_cards["text"].setChecked(True)
+        self._mark_dirty()
+
+    def _choose_watermark_image(self, path: Path | str | None = None) -> None:
+        """Pick the watermark image. `path` is only ever passed by tests:
+        QFileDialog cannot be driven offscreen, the reason
+        `ReviewWindow.save_as` takes one too.
+        """
+        if path is None:
+            patterns = " ".join(
+                sorted(
+                    {
+                        f"*.{bytes(fmt).decode()}"
+                        for fmt in QImageReader.supportedImageFormats()
+                    }
+                )
+            )
+            chosen, _ = QFileDialog.getOpenFileName(
+                self, "Choose a watermark image", str(Path.home()), f"Images ({patterns})"
+            )
+            if not chosen:
+                return
+            path = chosen
+        path = Path(path)
+        if QImage(str(path)).isNull():
+            # Refused here, while the user is looking at it, rather than
+            # saved and found out on the next snip as a greyed button.
+            QMessageBox.warning(
+                self,
+                "Not an image",
+                f"Snipux cannot read {path.name} as an image. Choose a PNG, a "
+                "JPEG or another picture file.",
+            )
+            return
+        self._watermark_image_source = path
+        self._watermark_image_removed = False
+        # Choosing an image is choosing to stamp one.
+        self._watermark_cards["image"].setChecked(True)
+        self._refresh_watermark_image()
+        self._mark_dirty()
+
+    def _remove_watermark_image(self) -> None:
+        self._watermark_image_source = None
+        self._watermark_image_removed = True
+        self._refresh_watermark_image()
+        self._mark_dirty()
+
     def _tray_pane(self) -> QWidget:
         self._tray_rows: dict[str, SwitchRow] = {}
         rows: list[QWidget] = [SectionHeading("Tray & startup")]
@@ -1589,6 +1810,15 @@ class SettingsWindow(WinWindow):
         setup_desktop.save_hints_enabled(
             self._show_hints.switch.isChecked(), self._config_dir
         )
+        setup_desktop.save_watermark_kind(
+            tokens.WATERMARK_KINDS[self._watermark_kind_group.checkedId()][0],
+            self._config_dir,
+        )
+        setup_desktop.save_watermark_text(self._watermark_text.text(), self._config_dir)
+        if self._watermark_image_source is not None:
+            setup_desktop.save_watermark_image(self._watermark_image_source, self._config_dir)
+        elif self._watermark_image_removed:
+            setup_desktop.clear_watermark_image(self._config_dir)
         entries = self._hide_list_entries()
         setup_desktop.save_hide_list(
             entries["words"], entries["labels"], entries["patterns"], self._config_dir

@@ -149,6 +149,19 @@ def bar_color(token_name: str) -> QColor:
     return qcolour
 
 
+def watermark_color(token_name: str) -> QColor:
+    """`tokens.WatermarkColor.<token_name>` -> QColor, alpha included.
+
+    The watermark slot, its menu and the mark itself, on the same pairing
+    rule as `bar_color()`.
+    """
+    if not hasattr(tokens.WatermarkColor, token_name):
+        raise ValueError(f"no such watermark colour: {token_name!r}")
+    qcolour = QColor(getattr(tokens.WatermarkColor, token_name))
+    qcolour.setAlphaF(getattr(tokens.WatermarkColor, f"{token_name}_ALPHA", 1.0))
+    return qcolour
+
+
 def color(token_name: str) -> QColor:
     """Resolve `tokens.Color.<token_name>` to a QColor, alpha included.
 

@@ -468,6 +468,7 @@ SETTINGS_NAV = [
     ("capture", "camera", "Capture"),
     ("saving",  "save",   "Saving"),
     ("ink",     "pen",    "Annotation"),
+    ("watermark", "layers", "Watermark"),
     ("hide",    "blur",   "Hide sensitive"),
     ("tray",    "panel",  "Tray & startup"),
 ]
@@ -1603,3 +1604,157 @@ DESTINATION_TOOLTIP = "After capture: {label} -- {note}"
 DELAY_TOOLTIP_OFF = "No delay -- click to add one"
 DELAY_TOOLTIP_ON = "{delay} countdown before the grab -- click for the next"
 TAB_TOOLTIP = "Reopen the chooser -- Space"
+
+
+# ---------------------------------------------------------------------------
+# The watermark (#69)
+# ---------------------------------------------------------------------------
+# The stills bar's watermark slot, its menu, the mark it stamps, and the
+# Settings page that says what the mark is. The slot and the menu are
+# docs/design/bars/tokens_bars.py's `WATERMARK` and
+# `BarMetric.MENU_W_WATERMARK`, with the figures the spec writes into its
+# markup rather than its tokens (reference/Snipux Handoff Preview.dc.html).
+# What the mark is -- text or an image -- is divergences.md 10. The handoff
+# leaves the mark to Settings and draws only a placeholder, so how it is
+# sized and coloured is decided here, and each figure says why.
+
+# As tokens_bars.py has it. `inset` is logical pixels, from the capture's
+# edge to the mark's; the opacities are percent.
+WATERMARK = {
+    "glyph": "layers",
+    "corners": ["tl", "tr", "bl", "br"],
+    "default_corner": "br",
+    "inset": 14,
+    "opacity_range": (20, 100),
+    "default_opacity": 70,
+    "content_lives_in": "Settings",
+}
+
+# (corner, name), in the order the menu's two-by-two grid reads them.
+WATERMARK_CORNERS = [
+    ("tl", "Top left"), ("tr", "Top right"),
+    ("bl", "Bottom left"), ("br", "Bottom right"),
+]
+
+
+class WatermarkMetric:
+    """The slot's menu, the mark, and the Settings page. Logical pixels."""
+
+    # The menu: spec markup, except its width.
+    MENU_W           = 238         # tokens_bars.BarMetric.MENU_W_WATERMARK, border included
+    MENU_PAD         = (11, 12)    # v, h
+    MENU_RADIUS      = 12
+    MENU_OVERHANG    = 6           # right:-6px -- its right edge, past its slot's
+    MENU_SECTION_GAP = 11
+    MENU_LABEL_GAP   = 6           # "Corner" to its grid
+    CORNER_GAP       = 4
+    CORNER_H         = 30
+    CORNER_RADIUS    = 7
+    CORNER_FRAME     = (26, 16)    # the capture drawn inside each corner button
+    CORNER_FRAME_RADIUS = 3
+    CORNER_DOT       = (7, 4)      # the mark drawn inside that capture
+    CORNER_DOT_RADIUS = 1
+    CORNER_DOT_INSET = 3
+    OPACITY_GAP      = 9
+    READOUT_MIN_W    = 30
+
+    # The mark. Its height follows the capture, so a logo in the corner of a
+    # whole monitor is not the size of one on a single button: this share of
+    # the capture's shorter side, held between a floor that stays legible
+    # and a ceiling that keeps it a watermark rather than a banner.
+    MARK_H_SHARE     = 0.05
+    MARK_H_MIN       = 20
+    MARK_H_MAX       = 64
+    # A wide logo is held to this share of the capture's width, so a
+    # banner-shaped image cannot run the length of a short capture.
+    MARK_W_SHARE     = 0.4
+    # A text mark is the spec's own placeholder chip -- font 600 10.5px/1,
+    # padding 5px 9px, radius 6px, letter-spacing .04em -- grown as a whole
+    # to the mark's height, so at the floor it is very nearly that chip.
+    TEXT_PX          = 10.5
+    TEXT_PAD         = (5, 9)      # v, h
+    TEXT_RADIUS      = 6
+    TEXT_TRACKING    = 0.04        # em
+
+    # The Settings page.
+    THUMB_W          = 132
+    THUMB_H          = 72
+    THUMB_PAD        = 8
+    TEXT_MAX_CHARS   = 120
+
+
+class WatermarkFont:
+    """(px, weight). Spec markup."""
+
+    SECTION          = (9.5, 600)  # upper-cased
+    SECTION_TRACKING = 0.10        # em
+    LABEL            = (11.0, 400)
+    READOUT          = (11.0, 500) # mono
+    NOTE             = (10.5, 400)
+    MARK_WEIGHT      = 600
+
+
+class WatermarkColor:
+    """The slot, its menu and the mark. Opacities ride as `<TOKEN>_ALPHA`
+    siblings, and `design.watermark_color()` resolves the pair.
+
+    The spec spends its accent on the slot while the watermark is on: its
+    #e3ff4f washed at 18% under a #eaff7a glyph. Ours is `Color.ACCENT`, for
+    the reason that token gives, under `FlowColor.ACCENT_SOFT`, the lighter
+    accent this repo already draws small glyphs in.
+    """
+
+    ON_BG            = "#a8e05f"   # at 18%
+    ON_BG_ALPHA      = 0.18
+    ON_FG            = "#c3e399"
+    OFF_FG           = "#8f9689"
+    NOTCH_ON         = "#c3e399"   # at 70%
+    NOTCH_ON_ALPHA   = 0.70
+    NOTCH_OFF        = "#8f9689"   # at 55%
+    NOTCH_OFF_ALPHA  = 0.55
+
+    SECTION_FG       = "#616a5c"
+    LABEL_FG         = "#8f9689"
+    READOUT_FG       = "#c6cab8"
+    NOTE_FG          = "#6d7484"
+    CORNER_BORDER    = "#2b2f36"
+    CORNER_ON_BORDER = "#a8e05f"   # at 45%
+    CORNER_ON_BORDER_ALPHA = 0.45
+    CORNER_ON_BG     = "#a8e05f"   # at 14%
+    CORNER_ON_BG_ALPHA = 0.14
+    CORNER_HOVER_BG  = "#ffffff"   # at 7%
+    CORNER_HOVER_BG_ALPHA = 0.07
+    CORNER_FRAME     = "#ffffff"   # at 22%
+    CORNER_FRAME_ALPHA = 0.22
+    CORNER_DOT       = "#8f9689"
+    CORNER_DOT_ON    = "#c3e399"
+
+    # The text mark: the spec's placeholder chip, light type on a dark
+    # plate. Not a colour of the user's: a watermark lands on whatever the
+    # capture holds in that corner, and the plate brings its own dark ground
+    # with it, where a colour picked against one capture can vanish into the
+    # next one's background.
+    MARK_TEXT        = "#f1f3e8"
+    MARK_PLATE       = "#0c0d0a"   # at 42%
+    MARK_PLATE_ALPHA = 0.42
+
+
+WATERMARK_TOOLTIP_ON = "Watermark is on — applied on export"
+WATERMARK_TOOLTIP_OFF = "Watermark is off"
+WATERMARK_NOTCH_TOOLTIP = "Watermark options"
+WATERMARK_MENU_NOTE = "The mark itself — text or an image — is set once in Settings."
+
+# Why the slot is greyed. It stays on the bar either way, so its tooltip
+# says why instead of what it does.
+WATERMARK_UNSET = "Watermark — set its text or image in Settings first"
+WATERMARK_IMAGE_MISSING = "Watermark image is missing — choose it again in Settings"
+WATERMARK_IMAGE_UNREADABLE = "Watermark image can't be read — choose it again in Settings"
+
+# What a watermark can be, as the Settings page offers it: (kind, label, note).
+WATERMARK_KINDS = [
+    ("text", "Text",
+     "A line of text, in light type on a dark plate of its own."),
+    ("image", "Image",
+     "A logo or any picture, drawn as it is. A PNG keeps its transparency."),
+]
+WATERMARK_KIND_DEFAULT = "text"

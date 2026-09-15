@@ -9,7 +9,8 @@ import re
 
 import pytest
 from PyQt6.QtCore import QEvent, QPointF, QSizeF, Qt
-from PyQt6.QtGui import QFocusEvent, QKeyEvent, QMouseEvent
+from PyQt6.QtGui import QColor, QFocusEvent, QImage, QKeyEvent, QMouseEvent
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QAbstractButton, QApplication, QLabel, QMessageBox
 
 from snipux import platform, settings, setup_desktop
@@ -1397,3 +1398,167 @@ class TestVersionLine:
         monkeypatch.setattr(setup_desktop.sys, "platform", "darwin")
 
         assert setup_desktop.version_line().endswith("macOS")
+
+
+class TestTheWatermarkPage:
+    """#69: what the stills bar's watermark stamps -- a line of text, or an
+    image. Where it goes and how strongly are the bar's, per snip."""
+
+    def _window(self, tmp_path, **kwargs):
+        return SettingsWindow(config_dir=tmp_path, **kwargs)
+
+    @staticmethod
+    def _picture(tmp_path, name="logo.png", size=(64, 32)):
+        image = QImage(*size, QImage.Format.Format_ARGB32)
+        image.fill(QColor(255, 0, 255))
+        path = tmp_path / "pictures" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert image.save(str(path))
+        return path
+
+    @staticmethod
+    def _no_dialogs(monkeypatch) -> list:
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox, "warning", lambda parent, title, text: warnings.append(text)
+        )
+        return warnings
+
+    def test_the_rail_has_a_page_for_it_after_annotation(self, tmp_path):
+        window = self._window(tmp_path)
+
+        labels = [r.text().replace("&&", "&") for r in window._nav_group.buttons()]
+
+        assert labels.index("Watermark") == labels.index("Annotation") + 1
+
+    def test_its_row_opens_its_page(self, tmp_path):
+        window = self._window(tmp_path)
+        index = [identifier for identifier, _icon, _label in tokens.SETTINGS_NAV].index("watermark")
+
+        window._nav_group.button(index).click()
+
+        assert window._panes.currentWidget().widget().isAncestorOf(window._watermark_text)
+
+    def test_every_other_row_still_opens_its_own_page(self, tmp_path):
+        window = self._window(tmp_path)
+        pages = {
+            "capture": window._recorder,
+            "saving": window._folder,
+            "ink": window._show_hints,
+            "hide": window._hide_file,
+        }
+
+        for index, (identifier, _icon, _label) in enumerate(tokens.SETTINGS_NAV):
+            if identifier not in pages:
+                continue
+            window._nav_group.button(index).click()
+            assert window._panes.currentWidget().widget().isAncestorOf(pages[identifier]), identifier
+
+    def test_with_nothing_set_it_opens_on_text_and_no_image(self, tmp_path):
+        window = self._window(tmp_path)
+
+        assert window._watermark_cards["text"].isChecked()
+        assert window._watermark_text.text() == ""
+        assert window._watermark_thumb.text() == "No image"
+        assert window._watermark_image_note.text().startswith("No image chosen yet")
+        assert not window._watermark_remove.isEnabled()
+
+    def test_it_opens_showing_what_is_stored(self, tmp_path):
+        setup_desktop.save_watermark_kind("image", tmp_path)
+        setup_desktop.save_watermark_text("acme", tmp_path)
+        setup_desktop.save_watermark_image(self._picture(tmp_path), tmp_path)
+
+        window = self._window(tmp_path)
+
+        assert window._watermark_cards["image"].isChecked()
+        assert window._watermark_text.text() == "acme"
+        assert not window._watermark_thumb.pixmap().isNull()
+        assert window._watermark_image_note.text().startswith("logo.png · 64 × 32 px")
+        assert window._watermark_remove.isEnabled()
+        assert not window._dirty
+
+    def test_typing_a_mark_chooses_text_and_marks_the_window_dirty(self, tmp_path):
+        setup_desktop.save_watermark_kind("image", tmp_path)
+        window = self._window(tmp_path)
+
+        QTest.keyClicks(window._watermark_text, "acme")
+
+        assert window._watermark_cards["text"].isChecked()
+        assert window._dirty
+
+    def test_choosing_an_image_shows_it_and_chooses_image(self, tmp_path):
+        window = self._window(tmp_path)
+
+        window._choose_watermark_image(self._picture(tmp_path))
+
+        assert window._watermark_cards["image"].isChecked()
+        assert not window._watermark_thumb.pixmap().isNull()
+        assert "Snipux keeps its own copy" in window._watermark_image_note.text()
+        assert window._dirty
+
+    def test_nothing_is_written_until_save(self, tmp_path):
+        window = self._window(tmp_path)
+        window._choose_watermark_image(self._picture(tmp_path))
+        QTest.keyClicks(window._watermark_text, "acme")
+
+        assert setup_desktop.load_watermark_image_name(tmp_path) is None
+        assert setup_desktop.load_watermark_text(tmp_path) == ""
+
+    def test_save_keeps_a_copy_of_the_chosen_image(self, tmp_path):
+        source = self._picture(tmp_path)
+        window = self._window(tmp_path)
+        window._choose_watermark_image(source)
+
+        window._save()
+
+        kept = setup_desktop.load_watermark_image(tmp_path)
+        assert kept is not None and kept != source
+        assert kept.read_bytes() == source.read_bytes()
+        assert setup_desktop.load_watermark_kind(tmp_path) == "image"
+
+    def test_save_writes_the_kind_and_the_text(self, tmp_path):
+        setup_desktop.save_watermark_kind("image", tmp_path)
+        window = self._window(tmp_path)
+        QTest.keyClicks(window._watermark_text, "acme · internal")
+
+        window._save()
+
+        assert setup_desktop.load_watermark_kind(tmp_path) == "text"
+        assert setup_desktop.load_watermark_text(tmp_path) == "acme · internal"
+
+    def test_a_file_that_is_not_an_image_is_refused_on_the_spot(self, tmp_path, monkeypatch):
+        warnings = self._no_dialogs(monkeypatch)
+        not_a_picture = tmp_path / "notes.png"
+        not_a_picture.write_text("these are notes")
+        window = self._window(tmp_path)
+
+        window._choose_watermark_image(not_a_picture)
+
+        assert len(warnings) == 1 and "notes.png" in warnings[0]
+        assert window._watermark_cards["text"].isChecked()
+        assert window._watermark_thumb.text() == "No image"
+        assert not window._dirty
+
+    def test_a_kept_image_that_went_missing_is_named_and_asked_for_again(self, tmp_path):
+        setup_desktop.save_watermark_kind("image", tmp_path)
+        setup_desktop.save_watermark_image(self._picture(tmp_path), tmp_path)
+        setup_desktop.load_watermark_image(tmp_path).unlink()
+
+        window = self._window(tmp_path)
+
+        note = window._watermark_image_note.text()
+        assert window._watermark_thumb.text() == "Missing"
+        assert "logo.png" in note and "Choose the image again" in note
+        assert window._watermark_remove.isEnabled()
+
+    def test_remove_then_save_forgets_the_image(self, tmp_path):
+        setup_desktop.save_watermark_image(self._picture(tmp_path), tmp_path)
+        window = self._window(tmp_path)
+
+        window._watermark_remove.click()
+
+        assert window._watermark_thumb.text() == "No image"
+        assert not window._watermark_remove.isEnabled()
+        assert window._dirty
+        window._save()
+        assert setup_desktop.load_watermark_image_name(tmp_path) is None

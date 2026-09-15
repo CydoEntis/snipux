@@ -942,6 +942,122 @@ def _tidy(lines: list[str]) -> list[str]:
     return kept
 
 
+# What the stills bar's watermark stamps (#69): a line of text, or an image.
+# Only what the mark *is* is a preference. Whether it is on, its corner and
+# its opacity belong to the bar and last a session, so none of those is
+# stored here.
+#
+# An image is copied into snipux's own folder rather than remembered by
+# path. A logo picked out of Downloads is the file most likely to be moved
+# or tidied away, and a remembered path would turn that into a watermark
+# that silently stopped working; a copy also travels with a backup of the
+# config folder, the way `hide-list.txt` does.
+WATERMARK_KINDS = tuple(kind for kind, _label, _note in tokens.WATERMARK_KINDS)
+
+
+def load_watermark_kind(config_dir: Path | None = None) -> str:
+    """`text` or `image`: which of the two the watermark stamps.
+
+    Anything else reads as `tokens.WATERMARK_KIND_DEFAULT`. Every reader of
+    the watermark is tolerant the same way, because the overlay reads them
+    at the start of every snip, and a mistyped value must never stop one.
+    """
+    stored = _read_config(config_dir).get("watermark_kind")
+    return stored if stored in WATERMARK_KINDS else tokens.WATERMARK_KIND_DEFAULT
+
+
+def save_watermark_kind(kind: str, config_dir: Path | None = None) -> bool:
+    return _write_config("watermark_kind", kind, config_dir)
+
+
+def load_watermark_text(config_dir: Path | None = None) -> str:
+    """The watermark's text, on one line, or "" when there is none.
+
+    Runs of whitespace, newlines included, are one space: the mark is a
+    single line, and a hand-edited value must not be able to make it two.
+    """
+    stored = _read_config(config_dir).get("watermark_text")
+    return " ".join(stored.split()) if isinstance(stored, str) else ""
+
+
+def save_watermark_text(text: str, config_dir: Path | None = None) -> bool:
+    return _write_config("watermark_text", " ".join(str(text).split()), config_dir)
+
+
+def watermark_folder(config_dir: Path | None = None) -> Path:
+    """Where snipux keeps its copy of the watermark image: beside
+    `config.json`, so a backup of one folder takes both."""
+    return config_path(config_dir).parent / "watermark"
+
+
+def load_watermark_image_name(config_dir: Path | None = None) -> str | None:
+    """The file name of the kept watermark image, whether or not the file
+    is still there -- Settings names a missing one -- or None if no image
+    was ever chosen.
+
+    Only a bare name counts. The copy always lives in `watermark_folder`,
+    and a hand-edited `../config.json` must not reach outside it.
+    """
+    stored = _read_config(config_dir).get("watermark_image")
+    if not isinstance(stored, str):
+        return None
+    name = stored.strip()
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        return None
+    return name
+
+
+def load_watermark_image(config_dir: Path | None = None) -> Path | None:
+    """The kept watermark image, or None if none was chosen or it is gone.
+
+    Whether it still reads as an image is the overlay's question, and
+    Settings': this module deliberately imports no Qt.
+    """
+    name = load_watermark_image_name(config_dir)
+    if name is None:
+        return None
+    path = watermark_folder(config_dir) / name
+    return path if path.is_file() else None
+
+
+def save_watermark_image(source: str | Path, config_dir: Path | None = None) -> bool:
+    """Copy `source` into `watermark_folder` and make it the watermark image,
+    replacing any copy kept before. False, never an exception, if it cannot
+    be done, and then nothing already stored is touched.
+
+    Read whole before the old copy goes, so choosing the kept copy itself
+    again cannot delete it on the way.
+    """
+    source = Path(source)
+    try:
+        data = source.read_bytes()
+    except OSError:
+        return False
+    folder = watermark_folder(config_dir)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        for old in folder.iterdir():
+            if old.is_file():
+                old.unlink()
+        (folder / source.name).write_bytes(data)
+    except OSError:
+        return False
+    return _write_config("watermark_image", source.name, config_dir)
+
+
+def clear_watermark_image(config_dir: Path | None = None) -> bool:
+    """Forget the watermark image and delete snipux's copy of it."""
+    folder = watermark_folder(config_dir)
+    try:
+        if folder.is_dir():
+            for old in folder.iterdir():
+                if old.is_file():
+                    old.unlink()
+    except OSError:
+        return False
+    return _write_config("watermark_image", None, config_dir)
+
+
 def load_hints_enabled(config_dir: Path | None = None) -> bool:
     """Whether the overlay's top hint HUD (SNX-46) is shown from the start
     of a session.
