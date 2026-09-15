@@ -5749,6 +5749,102 @@ class TestFamilyMenuOverlayIntegration:
         assert not menu.isVisible()
 
 
+class TestFamilyMenuRowsStayClickable:
+    """The tool hint strip gives way to an open family menu.
+
+    Hovering a slot shows the strip just under the bar. With the bar above
+    the selection a family menu opens below the bar as well, and the strip
+    sat on top of its first row: a click on Rectangle landed on the strip,
+    the menu stayed open and the shape stayed what it was -- reported as not
+    being able to switch shape until another tool had been picked first.
+    Driven through the window, hover first, the way a pointer arrives.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self, placement):
+        # The whole offscreen screen, so every point is on a real widget at
+        # any scale factor.
+        screen = QGuiApplication.primaryScreen().geometry()
+        width, height = screen.width(), screen.height()
+        overlay = OverlayWindow(make_frame(image_size=(width, height), logical_size=(width, height)))
+        overlay.setGeometry(0, 0, width, height)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        margin = height // 10
+        if placement == "below":
+            overlay.set_selection(QRect(margin, margin, width - 2 * margin, height // 3))
+        else:
+            top = height // 3
+            overlay.set_selection(QRect(margin, top, width - 2 * margin, height - top - 4))
+        QApplication.processEvents()
+        bar, selection = overlay._bar.geometry(), overlay._selection
+        if placement == "below":
+            assert bar.top() > selection.bottom()
+        else:
+            assert bar.bottom() < selection.top()
+        return overlay
+
+    @staticmethod
+    def _move_to(overlay, widget):
+        point = widget.mapTo(overlay, widget.rect().center())
+        QTest.mouseMove(overlay.windowHandle(), point)
+        QApplication.processEvents()
+        return point
+
+    def _click(self, overlay, widget):
+        point = self._move_to(overlay, widget)
+        QTest.mouseClick(
+            overlay.windowHandle(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point
+        )
+        QApplication.processEvents()
+
+    @pytest.mark.parametrize("placement", ["below", "above"])
+    def test_every_shape_row_can_be_picked_after_hovering_the_slot(self, placement):
+        overlay = self._overlay(placement)
+        bar = overlay._bar
+        slot = bar._tool_buttons["shapes"]
+        menu = overlay._family_menus["shapes"]
+
+        for tool in ("ellipse", "rect", "line", "arrow", "crop", "rect"):
+            self._move_to(overlay, slot)
+            self._click(overlay, slot._notch)
+            assert not menu.isHidden()
+            assert overlay._tool_hint.isHidden()
+            row = menu._rows[tool]
+            hit = overlay.childAt(row.mapTo(overlay, row.rect().center()))
+            assert hit is row or row.isAncestorOf(hit), f"{tool} row is under {type(hit).__name__}"
+
+            self._click(overlay, row)
+
+            assert bar.active_tool == tool
+            assert menu.isHidden()
+            assert overlay._tool_hint.isVisible()
+
+    def test_hovering_the_slots_with_a_menu_open_keeps_the_hint_away(self):
+        overlay = self._overlay("above")
+        bar = overlay._bar
+        self._click(overlay, bar._tool_buttons["redact"]._notch)
+        assert not overlay._family_menus["redact"].isHidden()
+
+        for slot in bar._tool_buttons.values():
+            self._move_to(overlay, slot)
+            assert overlay._tool_hint.isHidden()
+
+    def test_closing_the_menu_brings_the_hint_back(self):
+        overlay = self._overlay("above")
+        notch = overlay._bar._tool_buttons["shapes"]._notch
+        self._click(overlay, notch)
+        assert overlay._tool_hint.isHidden()
+
+        self._click(overlay, notch)
+
+        assert overlay._family_menus["shapes"].isHidden()
+        assert overlay._tool_hint.isVisible()
+
+
 class TestCaptureModeRowSizing:
     """SNX-75: `_CaptureModeRow` and `_DelayRow` are `QPushButton`s whose
     real content -- glyph, two-line label, check mark -- lives in a child

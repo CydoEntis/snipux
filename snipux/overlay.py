@@ -4671,6 +4671,7 @@ class OverlayWindow(QWidget):
         # children, and its menu would reopen on every toggle.
         if not menu.isHidden():
             menu.hide()
+            self._sync_tool_hint()
             return
         self._close_bar_menus()
         menu.set_current(self._bar.family_choice(family))
@@ -4679,6 +4680,7 @@ class OverlayWindow(QWidget):
         )
         menu.show()
         menu.raise_()
+        self._sync_tool_hint()
 
     def _on_family_sibling_picked(self, tool: str) -> None:
         """A row picked in a family menu: the same path a click on a slot
@@ -4691,16 +4693,24 @@ class OverlayWindow(QWidget):
         """A tool clicked on the bar closes whatever menu is open."""
         self._close_bar_menus()
 
-    def _close_bar_menus(self) -> bool:
-        """Close the family menus and the style popover, and say whether any
-        of them was open.
+    def _bar_menu_open(self) -> bool:
+        """Whether anything hangs open off the bar: the style popover or a
+        family menu. A menu added to the bar belongs here too, because the
+        tool hint strip has to give way to every one of them.
         """
-        was_open = not self._style_popover.isHidden() or any(
+        return not self._style_popover.isHidden() or any(
             not menu.isHidden() for menu in self._family_menus.values()
         )
+
+    def _close_bar_menus(self) -> bool:
+        """Close the family menus and the style popover, and say whether any
+        of them was open. The tool hint strip comes back once none is.
+        """
+        was_open = self._bar_menu_open()
         for menu in self._family_menus.values():
             menu.hide()
         self._style_popover.hide()
+        self._sync_tool_hint()
         return was_open
 
     def _toggle_style(self) -> None:
@@ -5872,13 +5882,13 @@ class OverlayWindow(QWidget):
 
     def _preview_tool(self, tool: str) -> None:
         """Name the tool under the cursor without arming it. Reverts on
-        leave, so hovering only ever reads. Not while the style popover is
-        open: the strip gives way to it (`_sync_tool_hint`).
+        leave, so hovering only ever reads. Not while the style popover or a
+        family menu is open: the strip gives way to them (`_sync_tool_hint`).
         """
         if (
             not self.isVisible()
             or tool not in design.tokens.TOOL_HINTS
-            or not self._style_popover.isHidden()
+            or self._bar_menu_open()
         ):
             return
         self._tool_hint.set_tool(tool)
@@ -5929,7 +5939,7 @@ class OverlayWindow(QWidget):
 
     def _sync_tool_hint(self) -> None:
         """Name the active tool under the bar, and say what it does, while
-        the bar is up and the style popover is not.
+        the bar is up and nothing hangs open off it.
 
         The trays used to come up by themselves for every tool that had
         one, so the bar and the tray under it stood about 110px tall. The
@@ -5937,10 +5947,14 @@ class OverlayWindow(QWidget):
         with what it does -- the one part of a tray that was always worth
         having up.
 
-        It gives way to the style popover rather than sharing the screen
-        with it. Where the bar has no room below it both would open above
-        it, one on top of the other, and the lit slot already says which
-        tool the popover is styling.
+        It gives way to the style popover and to the family menus rather
+        than sharing the screen with them (`_bar_menu_open`). Where the bar
+        has no room below it, the strip and the popover would both open above
+        it, one on top of the other. And where a family menu opens on the
+        strip's side of the bar, the strip sat on the menu's first row and
+        took the click meant for it: a shape could not be picked from its own
+        menu until the pointer left the bar. The lit slot already says which
+        tool is armed.
 
         Gated on the bar's own visibility rather than re-checking
         `_selection`/`self.isVisible()` directly -- the bar is already the
@@ -5948,7 +5962,7 @@ class OverlayWindow(QWidget):
         screen right now", and everything here hangs off it.
         """
         tool = self._bar.active_tool
-        if not (self._bar.isVisible() and tool and self._style_popover.isHidden()):
+        if not (self._bar.isVisible() and tool) or self._bar_menu_open():
             self._tool_hint.hide()
             return
         # Told the tool each time, so it never names whichever it showed last.
