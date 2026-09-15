@@ -165,7 +165,13 @@ class TestRender:
 
         result = render(base, [text, marker])
 
-        assert result.pixelColor(50, 50) == BLUE  # marker centre: filled badge
+        # Sampled 7px off centre, not at it: the badge's own number is drawn
+        # across the middle, so the centre pixel is whatever colour that
+        # glyph happens to be in the font this machine has. CI paints a
+        # digit wide enough to cover the centre; this machine does not.
+        # 7px is inside the fill (radius 13, less the 2px ring) and clear of
+        # any digit.
+        assert result.pixelColor(57, 50) == BLUE  # badge fill
         assert result != base
 
 
@@ -383,7 +389,10 @@ class TestStepMarkerRendering:
 
         result = render(base, [marker])
 
-        assert result.pixelColor(50, 50) == RED
+        # Off centre: see the note in TestRender above -- the number sits in
+        # the middle of the badge and is font-dependent.
+        assert result.pixelColor(57, 50) == RED
+        assert result.pixelColor(50, 50) != QColor(BACKGROUND)  # badge covers it
 
     def test_diameter_is_fixed_regardless_of_stroke_width(self):
         # STEP_D is a constant in the design, unlike every drawing tool --
