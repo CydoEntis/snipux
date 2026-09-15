@@ -67,9 +67,12 @@ snipux --setup
 snipux &
 ```
 
-**pipx, not `pip`, on Linux.** A distribution's Python refuses a system-wide
-`pip install` outright — "externally-managed-environment" — and it is right
-to: that Python belongs to apt. pipx gives Snipux and its dependencies an
+**pipx, not `pip`, on Linux.** On Ubuntu 23.04 and newer (and Debian 12+) a
+system-wide `pip install` is refused outright — "externally-managed-
+environment" — because that Python belongs to apt. On 22.04 pip does not
+refuse, which is worse rather than better: it installs into `~/.local`,
+where a later `apt upgrade` of PyQt6 can leave two versions disagreeing
+about which one is loaded. pipx gives Snipux and its dependencies an
 environment of their own and puts a `snipux` launcher on `PATH`. `--setup`
 writes the pieces pipx can't — the `.desktop` entry, the autostart entry, and
 the GNOME shortcut — and is safe to re-run.
