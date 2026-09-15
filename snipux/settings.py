@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -590,6 +591,7 @@ class SettingsWindow(WinWindow):
             self._capture_pane,
             self._saving_pane,
             self._annotation_pane,
+            self._hide_pane,
             self._tray_pane,
         ):
             scroll = QScrollArea()
@@ -670,6 +672,94 @@ class SettingsWindow(WinWindow):
             *cards,
             self._instant_saves,
         )
+
+    def _hide_pane(self) -> QWidget:
+        """The user's own hide list: three boxes, one entry per line.
+
+        Edited here rather than in a text editor because the file is no use
+        if nobody can find it -- and because a line that would black out
+        half the screen is worth catching while the user is looking at it,
+        not on the next capture.
+        """
+        stored = setup_desktop.load_hide_list(self._config_dir)
+        intro = QLabel(
+            "Snipux already finds cards, keys, emails and the values next to "
+            "labels like Password. Add the things only you know are "
+            "sensitive."
+        )
+        intro.setWordWrap(True)
+        intro.setFont(_ui_font(11.5, 400))
+        intro.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
+
+        rows: list[QWidget] = []
+        self._hide_boxes: dict[str, QPlainTextEdit] = {}
+        for section, title, note in tokens.HIDE_LIST_FIELDS:
+            heading = QLabel(title)
+            heading.setFont(_ui_font(12.5, 600))
+            heading.setStyleSheet(f"color: {tokens.Win.TEXT_PRIMARY};")
+            caption = QLabel(note)
+            caption.setWordWrap(True)
+            caption.setFont(_ui_font(11.5, 400))
+            caption.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
+
+            box = QPlainTextEdit("\n".join(stored.get(section, [])))
+            box.setFont(_mono_font(12))
+            box.setFixedHeight(self._HIDE_BOX_H)
+            box.setStyleSheet(self._field_style().replace("QLineEdit", "QPlainTextEdit"))
+            box.textChanged.connect(self._on_hide_list_edited)
+            self._hide_boxes[section] = box
+            rows += [heading, caption, box, None]
+
+        self._hide_complaints = QLabel()
+        self._hide_complaints.setWordWrap(True)
+        self._hide_complaints.setFont(_ui_font(11.5, 400))
+        self._hide_complaints.setStyleSheet(f"color: {tokens.Win.WARN_FG};")
+        self._hide_complaints.hide()
+
+        self._hide_file = QLineEdit(str(setup_desktop.hide_list_path(self._config_dir)))
+        self._hide_file.setReadOnly(True)
+        self._hide_file.setFont(_mono_font(12))
+        self._hide_file.setFixedHeight(tokens.WinMetric.CONTROL_H)
+        self._hide_file.setStyleSheet(self._field_style())
+        where = QLabel(
+            "The same list as a plain text file -- edit it here, or by hand, "
+            "or copy it to another machine."
+        )
+        where.setWordWrap(True)
+        where.setFont(_ui_font(11.5, 400))
+        where.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
+
+        return _pane(
+            SectionHeading("Your own list"),
+            intro,
+            None,
+            *rows,
+            self._hide_complaints,
+            SectionHeading("Where it is kept"),
+            where,
+            self._hide_file,
+        )
+
+    def _on_hide_list_edited(self) -> None:
+        self._mark_dirty()
+        self._refresh_hide_complaints()
+
+    def _hide_list_entries(self) -> dict[str, list[str]]:
+        return {
+            section: self._hide_boxes[section].toPlainText().splitlines()
+            for section, _title, _note in tokens.HIDE_LIST_FIELDS
+        }
+
+    def _hide_list_complaints(self) -> list[str]:
+        entries = self._hide_list_entries()
+        return setup_desktop.validate_hide_list(
+            entries["words"], entries["labels"], entries["patterns"]
+        )
+
+    def _refresh_hide_complaints(self) -> None:
+        complaints = self._hide_list_complaints()
+        self._hide_complaints.setText("\n".join(complaints))
+        self._hide_complaints.setVisible(bool(complaints))
 
     def _saving_pane(self) -> QWidget:
         folder_row = QHBoxLayout()
@@ -865,6 +955,10 @@ class SettingsWindow(WinWindow):
         save.clicked.connect(self._save)
         self.footer_right.addWidget(save)
 
+    # Tall enough for a handful of entries without a scrollbar, short
+    # enough that all three boxes and their notes fit one pane.
+    _HIDE_BOX_H = 96
+
     def _refresh_dirty(self) -> None:
         if self._dirty:
             self._dirty_label.setText("Unsaved changes")
@@ -968,6 +1062,18 @@ class SettingsWindow(WinWindow):
                     "register it too. Choose a different combination.",
                 )
                 return
+        complaints = self._hide_list_complaints()
+        if complaints:
+            # Saving a list that cannot work, and only finding out on the
+            # next capture, is the failure this check exists to prevent --
+            # the same reasoning as the shortcut clash above.
+            QMessageBox.warning(
+                self,
+                "Check your hide list",
+                "Snipux cannot use these lines:\n\n" + "\n".join(complaints),
+            )
+            return
+
         setup_desktop.save_shortcut(shortcut, self._config_dir)
         setup_desktop.save_after_capture(
             tokens.AFTER_CAPTURE[self._after_group.checkedId()][0], self._config_dir
@@ -1001,6 +1107,10 @@ class SettingsWindow(WinWindow):
         )
         setup_desktop.save_hints_enabled(
             self._show_hints.switch.isChecked(), self._config_dir
+        )
+        entries = self._hide_list_entries()
+        setup_desktop.save_hide_list(
+            entries["words"], entries["labels"], entries["patterns"], self._config_dir
         )
         setup_desktop.save_tray_toggles(
             {key: row.switch.isChecked() for key, row in self._tray_rows.items()},

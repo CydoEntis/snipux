@@ -632,6 +632,131 @@ class TestSettingsWindow:
         assert offenders == []
 
 
+class TestTheHideSensitivePage:
+    """The user's own hide list, edited in Snipux rather than in a text
+    editor: the file is no use if nobody can find it."""
+
+    def _window(self, tmp_path, **kwargs):
+        return SettingsWindow(config_dir=tmp_path, **kwargs)
+
+    def _no_dialogs(self, monkeypatch) -> list:
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox, "warning", lambda parent, title, text: warnings.append(text)
+        )
+        return warnings
+
+    def test_the_rail_has_a_page_for_it(self, tmp_path):
+        window = self._window(tmp_path)
+
+        labels = [r.text().replace("&&", "&") for r in window._nav_group.buttons()]
+
+        assert "Hide sensitive" in labels
+
+    def test_it_opens_showing_what_is_stored(self, tmp_path):
+        setup_desktop.save_hide_list(
+            ["Acme Corporation", "12 Maple Street"], ["Employee ID"], [r"ACME-\d{6}"], tmp_path
+        )
+
+        window = self._window(tmp_path)
+
+        assert window._hide_boxes["words"].toPlainText() == "Acme Corporation\n12 Maple Street"
+        assert window._hide_boxes["labels"].toPlainText() == "Employee ID"
+        assert window._hide_boxes["patterns"].toPlainText() == r"ACME-\d{6}"
+
+    def test_a_box_for_each_kind_of_entry(self, tmp_path):
+        window = self._window(tmp_path)
+
+        assert set(window._hide_boxes) == {section for section, _t, _n in tokens.HIDE_LIST_FIELDS}
+
+    def test_typing_marks_the_window_dirty(self, tmp_path):
+        window = self._window(tmp_path)
+        assert window._dirty is False
+
+        window._hide_boxes["words"].setPlainText("Acme Corporation")
+
+        assert window._dirty is True
+
+    def test_nothing_is_written_until_save(self, tmp_path):
+        window = self._window(tmp_path)
+
+        window._hide_boxes["words"].setPlainText("Acme Corporation")
+
+        assert setup_desktop.load_hide_list(tmp_path)["words"] == []
+
+    def test_save_writes_all_three_boxes(self, tmp_path, monkeypatch):
+        self._no_dialogs(monkeypatch)
+        window = self._window(tmp_path)
+        window._hide_boxes["words"].setPlainText("Acme Corporation\n12 Maple Street")
+        window._hide_boxes["labels"].setPlainText("Employee ID")
+        window._hide_boxes["patterns"].setPlainText(r"ACME-\d{6}")
+
+        window._save()
+
+        assert setup_desktop.load_hide_list(tmp_path) == {
+            "words": ["Acme Corporation", "12 Maple Street"],
+            "labels": ["Employee ID"],
+            "patterns": [r"ACME-\d{6}"],
+        }
+
+    def test_a_bad_line_is_called_out_as_it_is_typed(self, tmp_path):
+        window = self._window(tmp_path)
+
+        window._hide_boxes["words"].setPlainText("bob")
+
+        # `isHidden`, not `isVisible`: this page is not the one on screen
+        # when Settings opens, so nothing on it is visible yet.
+        assert not window._hide_complaints.isHidden()
+        assert "bob" in window._hide_complaints.text()
+
+    def test_the_complaint_goes_away_once_it_is_fixed(self, tmp_path):
+        window = self._window(tmp_path)
+        window._hide_boxes["words"].setPlainText("bob")
+
+        window._hide_boxes["words"].setPlainText("bob.smith@example.com")
+
+        assert window._hide_complaints.text() == ""
+        assert window._hide_complaints.isHidden()
+
+    def test_save_refuses_while_a_line_cannot_work(self, tmp_path, monkeypatch):
+        warnings = self._no_dialogs(monkeypatch)
+        window = self._window(tmp_path)
+        window._hide_boxes["patterns"].setPlainText("ACME-[0-9")
+
+        window._save()
+
+        assert len(warnings) == 1
+        assert "ACME-[0-9" in warnings[0]
+        assert setup_desktop.load_hide_list(tmp_path)["patterns"] == []
+
+    def test_a_refusal_saves_nothing_at_all(self, tmp_path, monkeypatch):
+        # Not even the settings on other pages: a half-applied Save is worse
+        # than a refused one.
+        self._no_dialogs(monkeypatch)
+        window = self._window(tmp_path)
+        window._recorder.set_shortcut("Control+Alt+K")
+        window._hide_boxes["words"].setPlainText("bob")
+
+        window._save()
+
+        assert setup_desktop.load_shortcut(tmp_path) == tokens.SHORTCUT_DEFAULT
+
+    def test_it_says_where_the_file_is(self, tmp_path):
+        window = self._window(tmp_path)
+
+        assert window._hide_file.text() == str(setup_desktop.hide_list_path(tmp_path))
+        assert window._hide_file.isReadOnly()
+
+    def test_blank_lines_and_spacing_survive_a_round_trip(self, tmp_path, monkeypatch):
+        self._no_dialogs(monkeypatch)
+        window = self._window(tmp_path)
+        window._hide_boxes["words"].setPlainText("\n  Acme Corporation  \n\n")
+
+        window._save()
+
+        assert setup_desktop.load_hide_list(tmp_path)["words"] == ["Acme Corporation"]
+
+
 class TestVersionLine:
     """`setup_desktop.version_line()`'s trailing field -- what
     `TestSettingsWindow`'s footer test above renders, tested here without a

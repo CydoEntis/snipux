@@ -412,8 +412,34 @@ SETTINGS_NAV = [
     ("capture", "camera", "Capture"),
     ("saving",  "save",   "Saving"),
     ("ink",     "pen",    "Annotation"),
+    ("hide",    "blur",   "Hide sensitive"),
     ("tray",    "panel",  "Tray & startup"),
 ]
+
+# The three kinds of entry in the user's own hide list, as the Settings page
+# presents them: (section, title, what it does). The note is the whole
+# explanation a user gets, so it says what the entry *does* rather than what
+# it is called.
+HIDE_LIST_FIELDS = (
+    (
+        "words",
+        "Words to hide",
+        "Hidden wherever they appear -- your address, your employer, a "
+        "project codename. One per line.",
+    ),
+    (
+        "labels",
+        "Field names",
+        "The value next to one of these is hidden, the way Password already "
+        "is: on the same line, or in the box beside or beneath it.",
+    ),
+    (
+        "patterns",
+        "Patterns",
+        "Regular expressions, if you want them: ACME-\\d{6} hides any "
+        "ACME- badge number.",
+    ),
+)
 
 # "After capture" — mutually exclusive, radio cards. (id, label, note)
 # What happens once the selection is made. One axis, three answers, in
