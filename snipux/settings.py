@@ -465,6 +465,370 @@ class SpinRow(QWidget):
         row.addWidget(self.spin, 0, Qt.AlignmentFlag.AlignTop)
 
 
+def _field_style() -> str:
+    """The Settings text field, as a stylesheet.
+
+    A module function rather than a method of the window, because
+    `EntryList`'s add field has to look like the folder and filename fields
+    around it and has no window to ask.
+    """
+    win, metric = tokens.Win, tokens.WinMetric
+    return (
+        f"QLineEdit {{ background: {win.FIELD_BG};"
+        f" border: 1px solid {win.FIELD_BORDER};"
+        f" border-radius: {metric.CONTROL_RADIUS}px;"
+        f" color: {win.TEXT_PRIMARY}; padding: 0 11px; }}"
+    )
+
+
+class _EntryText(QLabel):
+    """An entry as its row shows it: elided, with the whole of it in a
+    tooltip when it does not fit.
+
+    Elided rather than left to size itself: a label as wide as a long
+    pattern widens the pane, the pane never scrolls sideways, and the row's
+    remove control is what would end up out of sight.
+    """
+
+    def __init__(self, text: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._full = ""
+        # Plain, always: an entry is whatever the user typed, and `<b>` in
+        # a hide list is text to hide, not markup to render.
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setFont(_mono_font(12))
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.set_full_text(text)
+
+    def full_text(self) -> str:
+        return self._full
+
+    def set_full_text(self, text: str) -> None:
+        self._full = text
+        self._elide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, self.width()
+        )
+        self.setText(shown)
+        self.setToolTip("" if shown == self._full else self._full)
+
+
+class _RowEditor(QLineEdit):
+    """The field an `_EntryRow` becomes while it is being edited.
+
+    Enter, Escape and focus leaving are all caught here rather than read off
+    `editingFinished`: that has no notion of abandoning an edit, and on
+    focus loss it only fires if the text changed -- so a row clicked and
+    then left untouched would stay open as a field.
+    """
+
+    committed = pyqtSignal()
+    abandoned = pyqtSignal()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.abandoned.emit()
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            # Accepted rather than passed up: Enter here finishes this row
+            # and nothing else in the window.
+            self.committed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        self.committed.emit()
+
+
+class _EntryRow(QWidget):
+    """One entry in an `EntryList`: its text, which becomes a field when
+    clicked, its remove control, and room beneath for why it is wrong.
+
+    The row judges nothing. It reports an edit or a removal and the list
+    decides, because only the list can see whether new text duplicates
+    another row.
+    """
+
+    edit_committed = pyqtSignal(str)
+    remove_requested = pyqtSignal()
+
+    def __init__(self, entry: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        win, metric = tokens.Win, tokens.WinMetric
+        self._entry = entry
+        self._editing = False
+        self._problem = ""
+
+        column = QVBoxLayout(self)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(metric.ENTRY_REASON_GAP)
+
+        # Named so its stylesheet can say `#entryRow`: QLabel is a QFrame
+        # too, and an unqualified QFrame rule would draw a second border
+        # around the text inside it.
+        self._frame = QFrame()
+        self._frame.setObjectName("entryRow")
+        self._frame.setFixedHeight(metric.ENTRY_ROW_H)
+        self._frame.setCursor(Qt.CursorShape.IBeamCursor)
+        # A plain frame is not sent hover events unless it asks, and without
+        # them its stylesheet's :hover never applies.
+        self._frame.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        line = QHBoxLayout(self._frame)
+        line.setContentsMargins(metric.ENTRY_TEXT_INSET, 0, metric.ENTRY_REMOVE_INSET, 0)
+        line.setSpacing(metric.ENTRY_GAP)
+
+        self._text = _EntryText(entry)
+        line.addWidget(self._text, 1)
+
+        self._editor = _RowEditor()
+        self._editor.setFont(_mono_font(12))
+        self._editor.setStyleSheet(
+            "QLineEdit { background: transparent; border: none; padding: 0;"
+            f" color: {win.TEXT_PRIMARY}; }}"
+        )
+        self._editor.committed.connect(lambda: self._finish(commit=True))
+        self._editor.abandoned.connect(lambda: self._finish(commit=False))
+        self._editor.hide()
+        line.addWidget(self._editor, 1)
+
+        self._remove = QPushButton()
+        self._remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._remove.setToolTip("Remove")
+        self._remove.setIcon(design.icon("close", win.ICON_IDLE))
+        self._remove.setIconSize(QSize(metric.ENTRY_REMOVE_ICON, metric.ENTRY_REMOVE_ICON))
+        self._remove.setFixedSize(metric.ENTRY_REMOVE, metric.ENTRY_REMOVE)
+        self._remove.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            f" border-radius: {metric.ENTRY_REMOVE_RADIUS}px; }}"
+            f"QPushButton:hover {{ background: {win.CONTROL_BG_HOVER}; }}"
+        )
+        self._remove.clicked.connect(self.remove_requested)
+        line.addWidget(self._remove)
+        column.addWidget(self._frame)
+
+        self._reason = QLabel()
+        self._reason.setTextFormat(Qt.TextFormat.PlainText)
+        self._reason.setWordWrap(True)
+        self._reason.setFont(_ui_font(11.5, 400))
+        self._reason.setStyleSheet(f"color: {win.ERR_FG};")
+        self._reason.hide()
+        column.addWidget(self._reason)
+
+        self._refresh()
+
+    def entry(self) -> str:
+        return self._entry
+
+    def set_entry(self, entry: str) -> None:
+        self._entry = entry
+        self._text.set_full_text(entry)
+
+    def is_editing(self) -> bool:
+        return self._editing
+
+    def set_problem(self, reason: str | None) -> None:
+        self._problem = reason or ""
+        self._reason.setText(self._problem)
+        self._reason.setVisible(bool(self._problem))
+        self._refresh()
+
+    def begin_edit(self) -> None:
+        if self._editing:
+            return
+        self._editing = True
+        self._editor.setText(self._entry)
+        self._editor.selectAll()
+        self._text.hide()
+        self._editor.show()
+        self._editor.setFocus(Qt.FocusReason.MouseFocusReason)
+        self._refresh()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.begin_edit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _finish(self, commit: bool) -> None:
+        if not self._editing:
+            return
+        # Cleared before the editor is hidden: hiding a focused field moves
+        # focus away from it, and the focus-out that follows must find the
+        # edit already over rather than commit it a second time -- or commit
+        # one that Escape just abandoned.
+        self._editing = False
+        text = self._editor.text()
+        self._editor.hide()
+        self._text.show()
+        self._refresh()
+        if commit:
+            self.edit_committed.emit(text)
+
+    def _refresh(self) -> None:
+        win, metric = tokens.Win, tokens.WinMetric
+        if self._problem:
+            border, fill, colour = _rgba("ERR_BORDER"), _rgba("ERR_BG"), win.ERR_FG
+        else:
+            border, fill, colour = win.FIELD_BORDER, win.FIELD_BG, win.TEXT_PRIMARY
+        if self._editing:
+            border = tokens.Color.ACCENT
+        hover = (
+            ""
+            if self._editing or self._problem
+            else f"#entryRow:hover {{ border-color: {win.CONTROL_BORDER_HOVER}; }}"
+        )
+        self._frame.setStyleSheet(
+            f"#entryRow {{ background: {fill}; border: 1px solid {border};"
+            f" border-radius: {metric.ENTRY_ROW_RADIUS}px; }}" + hover
+        )
+        self._text.setStyleSheet(f"color: {colour}; background: transparent;")
+
+
+class EntryList(QWidget):
+    """A list of short strings edited as rows: one row per entry, each with
+    its own remove control, and a field beneath for adding the next.
+
+    Rows rather than lines in a textarea because an entry has its own
+    mistakes -- a row can be told it is wrong, where a line in a box can
+    only be listed somewhere underneath it.
+
+    Entries are always trimmed, never blank and never repeated. The add
+    field refuses a blank or a duplicate as it is typed, rather than
+    accepting it here for a save to drop silently later.
+    """
+
+    changed = pyqtSignal()
+
+    def __init__(self, placeholder: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        win, metric = tokens.Win, tokens.WinMetric
+        self._rows: list[_EntryRow] = []
+        self._problems: dict[str, str] = {}
+
+        column = QVBoxLayout(self)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(metric.ENTRY_ROW_GAP)
+
+        self._row_column = QVBoxLayout()
+        self._row_column.setContentsMargins(0, 0, 0, 0)
+        self._row_column.setSpacing(metric.ENTRY_ROW_GAP)
+        column.addLayout(self._row_column)
+
+        add_row = QHBoxLayout()
+        add_row.setContentsMargins(0, 0, 0, 0)
+        add_row.setSpacing(metric.ENTRY_GAP)
+        self._add_field = QLineEdit()
+        self._add_field.setPlaceholderText(placeholder)
+        self._add_field.setFont(_mono_font(12))
+        self._add_field.setFixedHeight(metric.CONTROL_H)
+        self._add_field.setStyleSheet(_field_style())
+        self._add_field.textChanged.connect(lambda _text: self._refresh_add())
+        self._add_field.returnPressed.connect(self._add_typed)
+        add_row.addWidget(self._add_field, 1)
+        self._add_button = SecondaryButton("Add")
+        self._add_button.clicked.connect(self._add_typed)
+        add_row.addWidget(self._add_button)
+        column.addLayout(add_row)
+
+        self._add_note = QLabel("Already in the list.")
+        self._add_note.setFont(_ui_font(11.5, 400))
+        self._add_note.setStyleSheet(f"color: {win.WARN_FG};")
+        self._add_note.hide()
+        column.addWidget(self._add_note)
+
+        self._refresh_add()
+
+    def entries(self) -> list[str]:
+        return [row.entry() for row in self._rows]
+
+    def set_entries(self, entries: list[str]) -> None:
+        """Replace every entry without emitting `changed`: seeding from what
+        is stored is not an edit, the same split every other control in
+        Settings keeps."""
+        # Emptied before the old rows go: a row still open for editing
+        # commits as it is hidden, and that commit must find nothing to
+        # change rather than report an edit to a list being replaced.
+        old, self._rows = self._rows, []
+        for row in old:
+            self._discard(row)
+        for entry in entries:
+            entry = entry.strip()
+            if entry and entry not in self.entries():
+                self._append(entry)
+        self._refresh_add()
+
+    def set_problems(self, problems: dict[str, str]) -> None:
+        """Show `{entry: reason}` beneath the rows it names. Kept, not just
+        applied, so a row added or edited into a named entry shows it too;
+        an empty dict clears every row."""
+        self._problems = dict(problems)
+        for row in self._rows:
+            row.set_problem(self._problems.get(row.entry()))
+
+    def _append(self, entry: str) -> None:
+        row = _EntryRow(entry)
+        row.edit_committed.connect(lambda text, r=row: self._commit_edit(r, text))
+        row.remove_requested.connect(lambda r=row: self._remove(r))
+        row.set_problem(self._problems.get(entry))
+        self._rows.append(row)
+        self._row_column.addWidget(row)
+
+    def _discard(self, row: _EntryRow) -> None:
+        self._row_column.removeWidget(row)
+        row.hide()
+        row.deleteLater()
+
+    def _add_typed(self) -> None:
+        entry = self._add_field.text().strip()
+        if not entry or entry in self.entries():
+            # Left in the field, not cleared: a duplicate is most likely a
+            # near-miss the user will want to correct rather than retype.
+            return
+        self._append(entry)
+        self._add_field.clear()
+        self.changed.emit()
+
+    def _commit_edit(self, row: _EntryRow, text: str) -> None:
+        if row not in self._rows:
+            return
+        entry = text.strip()
+        others = [r.entry() for r in self._rows if r is not row]
+        if not entry or entry == row.entry() or entry in others:
+            # Abandoned rather than applied. Clearing a row is not how an
+            # entry is removed -- that is what its remove control is for --
+            # and two rows with the same text could not be told apart by
+            # `set_problems`.
+            return
+        row.set_entry(entry)
+        row.set_problem(self._problems.get(entry))
+        self._refresh_add()
+        self.changed.emit()
+
+    def _remove(self, row: _EntryRow) -> None:
+        if row not in self._rows:
+            return
+        self._rows.remove(row)
+        self._discard(row)
+        self._refresh_add()
+        self.changed.emit()
+
+    def _refresh_add(self) -> None:
+        entry = self._add_field.text().strip()
+        duplicate = bool(entry) and entry in self.entries()
+        self._add_button.setEnabled(bool(entry) and not duplicate)
+        self._add_note.setVisible(duplicate)
+
+
 class _NavRow(QPushButton):
     def __init__(self, icon_name: str, label: str, parent=None):
         super().__init__(label, parent)
@@ -710,7 +1074,7 @@ class SettingsWindow(WinWindow):
             box.setFont(_mono_font(12))
             box.setFixedHeight(self._HIDE_BOX_H)
             box.setStyleSheet(
-                self._field_style().replace("QLineEdit", "QPlainTextEdit") + scrollbar_style()
+                _field_style().replace("QLineEdit", "QPlainTextEdit") + scrollbar_style()
             )
             box.textChanged.connect(self._on_hide_list_edited)
             self._hide_boxes[section] = box
@@ -726,7 +1090,7 @@ class SettingsWindow(WinWindow):
         self._hide_file.setReadOnly(True)
         self._hide_file.setFont(_mono_font(12))
         self._hide_file.setFixedHeight(tokens.WinMetric.CONTROL_H)
-        self._hide_file.setStyleSheet(self._field_style())
+        self._hide_file.setStyleSheet(_field_style())
         where = QLabel(
             "The same list as a plain text file -- edit it here, or by hand, "
             "or copy it to another machine."
@@ -773,7 +1137,7 @@ class SettingsWindow(WinWindow):
         self._folder.setReadOnly(True)
         self._folder.setFont(_mono_font(12))
         self._folder.setFixedHeight(tokens.WinMetric.CONTROL_H)
-        self._folder.setStyleSheet(self._field_style())
+        self._folder.setStyleSheet(_field_style())
         choose = SecondaryButton("Choose…")
         choose.clicked.connect(self._choose_folder)
         folder_row.addWidget(self._folder, 1)
@@ -785,7 +1149,7 @@ class SettingsWindow(WinWindow):
         self._filename = QLineEdit(setup_desktop.load_filename_pattern(self._config_dir))
         self._filename.setFont(_mono_font(12))
         self._filename.setFixedHeight(tokens.WinMetric.CONTROL_H)
-        self._filename.setStyleSheet(self._field_style())
+        self._filename.setStyleSheet(_field_style())
         self._filename.textChanged.connect(self._refresh_preview)
 
         self._preview = QLabel()
@@ -855,7 +1219,7 @@ class SettingsWindow(WinWindow):
         self._recording_folder.setReadOnly(True)
         self._recording_folder.setFont(_mono_font(12))
         self._recording_folder.setFixedHeight(tokens.WinMetric.CONTROL_H)
-        self._recording_folder.setStyleSheet(self._field_style())
+        self._recording_folder.setStyleSheet(_field_style())
         choose_recording = SecondaryButton("Choose…")
         choose_recording.clicked.connect(self._choose_recording_folder)
         recording_folder_row.addWidget(self._recording_folder, 1)
@@ -869,7 +1233,7 @@ class SettingsWindow(WinWindow):
         )
         self._recording_filename.setFont(_mono_font(12))
         self._recording_filename.setFixedHeight(tokens.WinMetric.CONTROL_H)
-        self._recording_filename.setStyleSheet(self._field_style())
+        self._recording_filename.setStyleSheet(_field_style())
         self._recording_filename.textChanged.connect(self._refresh_recording_preview)
 
         self._recording_preview = QLabel()
@@ -982,16 +1346,6 @@ class SettingsWindow(WinWindow):
         self._refresh_dirty()
 
     # -- behaviour -------------------------------------------------------
-
-    @staticmethod
-    def _field_style() -> str:
-        win, metric = tokens.Win, tokens.WinMetric
-        return (
-            f"QLineEdit {{ background: {win.FIELD_BG};"
-            f" border: 1px solid {win.FIELD_BORDER};"
-            f" border-radius: {metric.CONTROL_RADIUS}px;"
-            f" color: {win.TEXT_PRIMARY}; padding: 0 11px; }}"
-        )
 
     def _on_recorded(self, accelerator: str) -> None:
         self._conflict.show_for(accelerator)

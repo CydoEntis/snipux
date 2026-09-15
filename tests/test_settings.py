@@ -4,22 +4,27 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 
 import pytest
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtCore import QEvent, QPointF, QSizeF, Qt
+from PyQt6.QtGui import QFocusEvent, QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import QAbstractButton, QApplication, QLabel, QMessageBox
 
-from snipux import platform, setup_desktop
+from snipux import platform, settings, setup_desktop
 from snipux.design import tokens
 from snipux.settings import (
     ConflictBanner,
+    EntryList,
     HotkeyEventFilter,
     SettingsWindow,
     ShortcutRecorder,
+    _field_style,
+    _rgba,
     accelerator_from_event,
 )
+from snipux.winchrome import SecondaryButton
 
 # An internal tracker id (SNX-105, PROJ-42, ...) reads as a leaked note to
 # anyone outside the team maintaining this -- AC: none may appear in text a
@@ -247,6 +252,382 @@ class TestConflictBanner:
         banner.show_for("Control+Alt+S")
 
         assert banner.text() == "✓  Control+Alt+S is free to register."
+
+
+def left_click() -> QMouseEvent:
+    return QMouseEvent(
+        QEvent.Type.MouseButtonPress, QPointF(4, 4), QPointF(4, 4),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def focus_out() -> QFocusEvent:
+    return QFocusEvent(QEvent.Type.FocusOut, Qt.FocusReason.MouseFocusReason)
+
+
+class TestEntryList:
+    """The Settings list control: short strings edited as rows, each with
+    its own remove control, and an add field beneath."""
+
+    @staticmethod
+    def _list(*entries: str) -> EntryList:
+        entry_list = EntryList("Add a word")
+        entry_list.set_entries(list(entries))
+        return entry_list
+
+    @staticmethod
+    def _changes(entry_list: EntryList) -> list:
+        fired = []
+        entry_list.changed.connect(lambda: fired.append(True))
+        return fired
+
+    @staticmethod
+    def _add(entry_list: EntryList, text: str) -> None:
+        entry_list._add_field.setText(text)
+        entry_list._add_button.click()
+
+    @staticmethod
+    def _edit(entry_list: EntryList, index: int, text: str):
+        row = entry_list._rows[index]
+        row.mousePressEvent(left_click())
+        row._editor.setText(text)
+        return row
+
+    # -- rows ------------------------------------------------------------
+
+    def test_shows_one_row_per_entry(self):
+        entry_list = self._list("Acme Corporation", "12 Maple Street")
+
+        assert [row._text.full_text() for row in entry_list._rows] == [
+            "Acme Corporation",
+            "12 Maple Street",
+        ]
+
+    def test_the_add_field_carries_the_placeholder(self):
+        assert EntryList("Add a pattern")._add_field.placeholderText() == "Add a pattern"
+
+    def test_the_button_adds_what_is_typed(self):
+        entry_list = self._list("Acme Corporation")
+
+        self._add(entry_list, "12 Maple Street")
+
+        assert entry_list.entries() == ["Acme Corporation", "12 Maple Street"]
+        # Emptied, ready for the next one.
+        assert entry_list._add_field.text() == ""
+
+    def test_enter_in_the_add_field_adds_too(self):
+        entry_list = self._list()
+        entry_list._add_field.setText("Acme Corporation")
+
+        entry_list._add_field.keyPressEvent(press(Qt.Key.Key_Return))
+
+        assert entry_list.entries() == ["Acme Corporation"]
+
+    def test_what_is_added_is_trimmed(self):
+        entry_list = self._list()
+
+        self._add(entry_list, "  Acme Corporation  ")
+
+        assert entry_list.entries() == ["Acme Corporation"]
+
+    # -- editing in place ------------------------------------------------
+
+    def test_clicking_a_row_opens_that_entry_for_editing_in_place(self):
+        entry_list = self._list("Acme Corporation", "12 Maple Street")
+        row = entry_list._rows[1]
+
+        row.mousePressEvent(left_click())
+
+        assert row.is_editing()
+        assert row._editor.text() == "12 Maple Street"
+        # In place: the row's own text gives way to a field in the same row.
+        assert not row._editor.isHidden()
+        assert row._text.isHidden()
+        assert not entry_list._rows[0].is_editing()
+
+    def test_enter_commits_an_edit(self):
+        entry_list = self._list("Acme Corporation")
+        row = self._edit(entry_list, 0, "Acme Corp")
+
+        row._editor.keyPressEvent(press(Qt.Key.Key_Return))
+
+        assert entry_list.entries() == ["Acme Corp"]
+        assert not row.is_editing()
+        assert row._text.full_text() == "Acme Corp"
+
+    def test_leaving_the_row_commits_an_edit(self):
+        entry_list = self._list("Acme Corporation")
+        row = self._edit(entry_list, 0, "Acme Corp")
+
+        row._editor.focusOutEvent(focus_out())
+
+        assert entry_list.entries() == ["Acme Corp"]
+        assert not row.is_editing()
+
+    def test_leaving_an_untouched_row_closes_it(self):
+        # Qt's own editingFinished would not fire here -- the text did not
+        # change -- and the row would be left open as a field.
+        entry_list = self._list("Acme Corporation")
+        row = entry_list._rows[0]
+        row.mousePressEvent(left_click())
+
+        row._editor.focusOutEvent(focus_out())
+
+        assert not row.is_editing()
+        assert row._editor.isHidden()
+
+    def test_escape_abandons_an_edit(self):
+        entry_list = self._list("Acme Corporation")
+        changes = self._changes(entry_list)
+        row = self._edit(entry_list, 0, "Acme Corp")
+
+        row._editor.keyPressEvent(press(Qt.Key.Key_Escape))
+
+        assert entry_list.entries() == ["Acme Corporation"]
+        assert row._text.full_text() == "Acme Corporation"
+        assert not row.is_editing()
+        assert changes == []
+
+    def test_the_focus_out_after_escape_does_not_commit_it_after_all(self):
+        # Hiding the field on Escape moves focus off it in a real window;
+        # that focus-out must not bring back the text Escape abandoned.
+        entry_list = self._list("Acme Corporation")
+        row = self._edit(entry_list, 0, "Acme Corp")
+
+        row._editor.keyPressEvent(press(Qt.Key.Key_Escape))
+        row._editor.focusOutEvent(focus_out())
+
+        assert entry_list.entries() == ["Acme Corporation"]
+
+    @pytest.mark.parametrize("text", ["", "   ", "12 Maple Street"])
+    def test_an_edit_into_a_blank_or_a_duplicate_is_abandoned(self, text):
+        # Clearing a row is not how an entry is removed, and two rows with
+        # the same text could not be told apart by set_problems.
+        entry_list = self._list("Acme Corporation", "12 Maple Street")
+        changes = self._changes(entry_list)
+        row = self._edit(entry_list, 0, text)
+
+        row._editor.keyPressEvent(press(Qt.Key.Key_Return))
+
+        assert entry_list.entries() == ["Acme Corporation", "12 Maple Street"]
+        assert row._text.full_text() == "Acme Corporation"
+        assert changes == []
+
+    # -- removing ----------------------------------------------------------
+
+    def test_each_row_removes_only_its_own_entry(self):
+        entry_list = self._list("Acme Corporation", "12 Maple Street", "Project Nightjar")
+
+        entry_list._rows[1]._remove.click()
+
+        assert entry_list.entries() == ["Acme Corporation", "Project Nightjar"]
+        assert len(entry_list._rows) == 2
+
+    # -- entries, seeding and changed ----------------------------------------
+
+    def test_entries_come_back_in_order(self):
+        entry_list = self._list("Project Nightjar", "Acme Corporation")
+
+        self._add(entry_list, "12 Maple Street")
+
+        assert entry_list.entries() == [
+            "Project Nightjar",
+            "Acme Corporation",
+            "12 Maple Street",
+        ]
+
+    def test_set_entries_replaces_rather_than_appends(self):
+        entry_list = self._list("Acme Corporation")
+
+        entry_list.set_entries(["12 Maple Street"])
+
+        assert entry_list.entries() == ["12 Maple Street"]
+        assert len(entry_list._rows) == 1
+
+    def test_set_entries_keeps_the_list_free_of_blanks_and_repeats(self):
+        entry_list = self._list(" Acme Corporation ", "", "Acme Corporation", "12 Maple Street")
+
+        assert entry_list.entries() == ["Acme Corporation", "12 Maple Street"]
+
+    def test_seeding_is_not_a_change(self):
+        entry_list = EntryList("Add a word")
+        changes = self._changes(entry_list)
+
+        entry_list.set_entries(["Acme Corporation", "12 Maple Street"])
+        entry_list.set_entries([])
+
+        assert changes == []
+
+    def test_reseeding_while_a_row_is_open_is_not_a_change_either(self):
+        entry_list = self._list("Acme Corporation")
+        changes = self._changes(entry_list)
+        row = self._edit(entry_list, 0, "Acme Corp")
+
+        entry_list.set_entries(["12 Maple Street"])
+        row._editor.focusOutEvent(focus_out())
+
+        assert entry_list.entries() == ["12 Maple Street"]
+        assert changes == []
+
+    def test_an_add_is_one_change(self):
+        entry_list = self._list()
+        changes = self._changes(entry_list)
+
+        self._add(entry_list, "Acme Corporation")
+
+        assert changes == [True]
+
+    def test_an_edit_is_one_change_even_when_enter_is_followed_by_a_focus_out(self):
+        entry_list = self._list("Acme Corporation")
+        changes = self._changes(entry_list)
+        row = self._edit(entry_list, 0, "Acme Corp")
+
+        row._editor.keyPressEvent(press(Qt.Key.Key_Return))
+        row._editor.focusOutEvent(focus_out())
+
+        assert changes == [True]
+
+    def test_a_removal_is_one_change(self):
+        entry_list = self._list("Acme Corporation", "12 Maple Street")
+        changes = self._changes(entry_list)
+
+        entry_list._rows[0]._remove.click()
+
+        assert changes == [True]
+
+    def test_an_edit_that_changes_nothing_is_not_a_change(self):
+        entry_list = self._list("Acme Corporation")
+        changes = self._changes(entry_list)
+        row = self._edit(entry_list, 0, "  Acme Corporation ")
+
+        row._editor.keyPressEvent(press(Qt.Key.Key_Return))
+
+        assert changes == []
+
+    # -- problems --------------------------------------------------------
+
+    def test_a_problem_is_shown_beneath_the_row_it_names(self):
+        entry_list = self._list("Acme Corporation", "bob")
+
+        entry_list.set_problems({"bob": "'bob' is too short"})
+
+        acme, bob = entry_list._rows
+        assert not bob._reason.isHidden()
+        assert bob._reason.text() == "'bob' is too short"
+        assert bob.layout().indexOf(bob._reason) > bob.layout().indexOf(bob._frame)
+        assert acme._reason.isHidden()
+
+    def test_a_row_with_a_problem_reads_as_wrong(self):
+        entry_list = self._list("Acme Corporation", "bob")
+
+        entry_list.set_problems({"bob": "'bob' is too short"})
+
+        acme, bob = entry_list._rows
+        assert _rgba("ERR_BORDER") in bob._frame.styleSheet()
+        assert tokens.Win.ERR_FG in bob._text.styleSheet()
+        assert _rgba("ERR_BORDER") not in acme._frame.styleSheet()
+        assert tokens.Win.ERR_FG not in acme._text.styleSheet()
+
+    def test_clearing_problems_clears_them(self):
+        entry_list = self._list("bob")
+        entry_list.set_problems({"bob": "'bob' is too short"})
+
+        entry_list.set_problems({})
+
+        bob = entry_list._rows[0]
+        assert bob._reason.isHidden()
+        assert _rgba("ERR_BORDER") not in bob._frame.styleSheet()
+
+    def test_a_problem_is_shown_on_a_row_added_after_it_was_set(self):
+        entry_list = self._list()
+        entry_list.set_problems({"bob": "'bob' is too short"})
+
+        self._add(entry_list, "bob")
+
+        assert not entry_list._rows[0]._reason.isHidden()
+
+    def test_an_entry_is_shown_as_text_not_markup(self):
+        entry_list = self._list("<b>Acme</b>")
+
+        assert entry_list._rows[0]._text.textFormat() == Qt.TextFormat.PlainText
+
+    # -- refusing blanks and duplicates ------------------------------------
+
+    @pytest.mark.parametrize("text", ["", "   "])
+    def test_a_blank_entry_is_refused_by_the_add_field(self, text):
+        entry_list = self._list("Acme Corporation")
+        changes = self._changes(entry_list)
+
+        entry_list._add_field.setText(text)
+        entry_list._add_field.keyPressEvent(press(Qt.Key.Key_Return))
+
+        assert not entry_list._add_button.isEnabled()
+        assert entry_list.entries() == ["Acme Corporation"]
+        assert changes == []
+
+    def test_a_duplicate_is_refused_and_says_why(self):
+        entry_list = self._list("Acme Corporation")
+        changes = self._changes(entry_list)
+
+        entry_list._add_field.setText(" Acme Corporation ")
+        entry_list._add_field.keyPressEvent(press(Qt.Key.Key_Return))
+
+        assert not entry_list._add_button.isEnabled()
+        assert not entry_list._add_note.isHidden()
+        assert entry_list.entries() == ["Acme Corporation"]
+        assert changes == []
+        # Left where it was typed, to be corrected rather than retyped.
+        assert entry_list._add_field.text() == " Acme Corporation "
+
+    def test_removing_the_original_lets_the_same_text_in(self):
+        entry_list = self._list("Acme Corporation")
+        entry_list._add_field.setText("Acme Corporation")
+
+        entry_list._rows[0]._remove.click()
+
+        assert entry_list._add_button.isEnabled()
+        assert entry_list._add_note.isHidden()
+
+    # -- the look ----------------------------------------------------------
+
+    def test_the_add_row_reuses_the_settings_field_and_button(self):
+        entry_list = self._list()
+
+        assert isinstance(entry_list._add_button, SecondaryButton)
+        assert entry_list._add_field.styleSheet() == _field_style()
+
+    def test_its_sizes_are_the_tokens(self):
+        # deviceIndependentSize, not grab().height(): grab() is physical
+        # pixels, and a correct row reads 1.5x taller on a 1.5x display.
+        metric = tokens.WinMetric
+        entry_list = self._list("Acme Corporation", "bob")
+        entry_list.set_problems({"bob": "'bob' is too short"})
+        entry_list._rows[0].mousePressEvent(left_click())
+        entry_list.grab()  # a full paintEvent, open field and problem row included
+
+        row = entry_list._rows[1]
+        assert row._frame.grab().deviceIndependentSize().height() == metric.ENTRY_ROW_H
+        assert row._remove.grab().deviceIndependentSize() == QSizeF(
+            metric.ENTRY_REMOVE, metric.ENTRY_REMOVE
+        )
+        assert entry_list._add_field.grab().deviceIndependentSize().height() == metric.CONTROL_H
+
+    def test_no_literal_colour_anywhere_in_it(self):
+        # AC: tokens.Win colours only. A hex typed into the control is the
+        # one that is left behind when the palette changes.
+        source = "".join(
+            inspect.getsource(part)
+            for part in (
+                settings.EntryList,
+                settings._EntryRow,
+                settings._EntryText,
+                settings._RowEditor,
+                settings._field_style,
+            )
+        )
+
+        assert not re.search(r"#[0-9a-fA-F]{3,8}\b", source)
 
 
 class TestSettingsWindow:

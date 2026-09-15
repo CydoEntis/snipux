@@ -435,6 +435,20 @@ class WinMetric:
     CARD_PAD         = (11, 12)
     SETTINGS_SWATCH  = 30         # larger than the overlay's 22px tray swatch
 
+    # EntryList, the Settings list control: an entry per row, an add field
+    # beneath. A row is the design's 8px inset row and a step shorter than a
+    # field, so a list of them reads as contents rather than as more inputs.
+    ENTRY_ROW_H      = 32
+    ENTRY_ROW_RADIUS = 8
+    ENTRY_ROW_GAP    = 6          # between rows, and above the add field
+    ENTRY_TEXT_INSET = 11         # lines an entry up with a field's own text
+    ENTRY_GAP        = 8          # a field and the button beside it
+    ENTRY_REMOVE     = 24         # the remove control, square
+    ENTRY_REMOVE_ICON = 12
+    ENTRY_REMOVE_RADIUS = 6
+    ENTRY_REMOVE_INSET = 4        # keeps it off the row's right edge
+    ENTRY_REASON_GAP = 4          # a row and the reason beneath it
+
     # Review window
     REVIEW_IMG_BORDER = 1
     REVIEW_IMG_RING   = 7        # rgba(255,255,255,.02) outer ring
