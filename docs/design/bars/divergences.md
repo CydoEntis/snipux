@@ -278,6 +278,35 @@ ever reaching that handler.
 
 ---
 
+## 15 · Six details of the style popover
+
+**The handoff** gives `STYLE_SECTIONS` and `DEFAULT_STYLE` for the tools it
+has, keeps one `strength` in its state model, steps only the stroke with `[`
+and `]`, and rings the picked swatch.
+
+**We** keep a strength per redaction tool and let `[` and `]` step it, give
+Crop a colour and a stroke, draw a redaction's style dot in the bar's grey,
+draw the picked swatch's ring inside the swatch, and hide the tool hint while
+the popover is open.
+
+### Why
+
+- **A strength per tool:** the same number is a light smudge to blur and
+  coarse blocks to pixelate (`marks.ToolStyles`).
+- **`[` and `]` on a redaction:** strength is the one length a redaction's
+  popover offers, so the stepping keys step it.
+- **Crop:** it is ours, not the handoff's (§7). Its dashes are its own, so it
+  takes a colour and a stroke and no line style, seeded from what the spec
+  gives every tool `DEFAULT_STYLE` leaves out (`DEFAULT_STYLE_OTHER`).
+- **The grey dot:** a redaction has no colour for the dot to preview.
+- **The ring inside:** each swatch is its own widget, and a child widget
+  cannot paint outside its own rect.
+- **The hidden hint:** where the bar has no room below, the hint and the
+  popover would both open above it, one on top of the other, and the lit
+  slot already says which tool the popover is styling.
+
+---
+
 ## Still open
 
 Not decided. Today's behaviour stands for each until it is, and each is
