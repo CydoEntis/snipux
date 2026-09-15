@@ -5,6 +5,16 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 0.7.1 — 2026-09-15
+
+The shapes and redaction menus open from a second click, Crop is gone, and
+there are patch notes now.
+
+### New
+
+- **Patch notes.** What changed in each release is written up in
+  CHANGELOG.md, back to 0.2.0.
+
 ### Changed
 
 - **The shapes and redaction buttons open their menu on a second click.** The
