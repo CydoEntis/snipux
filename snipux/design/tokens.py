@@ -786,6 +786,12 @@ RECORD_MODE_NEXT_STEP = {
     "Active window": "Frames the window you are in -- moving it later will not follow",
 }
 
+# The next-step hint on a desk with more than one monitor, for the
+# MONITOR_MODES that arm there instead of firing.
+MULTI_MONITOR_NEXT_STEP = {
+    "Full screen": "Hover a monitor, click to take it",
+}
+
 MODE_KEYS = {
     "R": "Region", "W": "Window", "F": "Full screen", "B": "Browser",
     # A is also Arrow on the stills bar, and the two are never live at the
@@ -799,6 +805,12 @@ MODE_KEYS = {
 # immediately (after any delay). Region and Window arm and wait.
 # On the record side nothing fires immediately -- see RECORD_DISABLED_MODES.
 IMMEDIATE_MODES = ["Full screen", BROWSER_MODE, ACTIVE_WINDOW_MODE]
+
+# The immediate modes that aim at a monitor. "Nothing left to aim at" holds
+# for them only on a desk with one: with more, which monitor is still a
+# choice, so they arm and follow the pointer instead
+# (docs/design/bars/divergences.md 3).
+MONITOR_MODES = ["Full screen"]
 
 # Destinations, from the locked capture-flow handoff (docs/design/flow/).
 # Merged one structure at a time as each gains a consumer rather than all at

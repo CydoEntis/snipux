@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QMargins, QMarginsF
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QMargins, QMarginsF
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -11,6 +11,7 @@ from PyQt6.QtGui import (
     QGuiApplication,
     QIcon,
     QImage,
+    QMouseEvent,
     QPainter,
     QPainterPath,
     qRgb,
@@ -5428,7 +5429,9 @@ class TestCommitToRecord:
 class TestCaptureModeFullScreenIntegration:
     """SNX-48 AC: picking Full screen in the popover sets `_selection` to
     the whole display the cursor is on, immediately -- no drag or click
-    needed past picking the row.
+    needed past picking the row -- on a desk with one monitor. With more it
+    arms, previews the monitor under the pointer and takes the one clicked
+    (#53).
     """
 
     @pytest.fixture(autouse=True)
@@ -5458,7 +5461,7 @@ class TestCaptureModeFullScreenIntegration:
 
         assert overlay._selection == QRect(0, 0, 600, 600)
 
-    def test_selects_the_monitor_the_cursor_last_moved_over(self):
+    def test_with_two_monitors_it_previews_the_one_the_cursor_last_moved_over(self):
         left = QRectF(0, 0, 250, 600)
         right = QRectF(250, 0, 350, 600)
         overlay = self._overlay(monitor_geometries=[left, right])
@@ -5471,9 +5474,15 @@ class TestCaptureModeFullScreenIntegration:
 
         self._pick_full_screen(overlay)
 
+        assert overlay._selection is None
+        assert overlay._picking_monitor
+        assert overlay._hovered_monitor == left
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 300))
+
         assert overlay._selection == left.toRect()
 
-    def test_with_no_prior_cursor_move_it_takes_the_monitor_the_os_has_the_pointer_on(
+    def test_with_no_prior_cursor_move_the_preview_opens_where_the_os_has_the_pointer(
         self, monkeypatch
     ):
         # No move has reached the overlay, so the OS's own pointer decides:
@@ -5487,7 +5496,7 @@ class TestCaptureModeFullScreenIntegration:
 
         self._pick_full_screen(overlay)
 
-        assert overlay._selection == left.toRect()
+        assert overlay._hovered_monitor == left
 
     def test_selection_from_full_screen_is_reframable_like_a_dragged_one(self):
         overlay = self._overlay()
@@ -9258,7 +9267,14 @@ class TestControlsLandOnTheCapturesMonitor:
         assert self._off(overlay, monitor) == []
 
     def _take_full_screen(self, overlay, monitor: QRectF) -> None:
+        # Armed rather than taken on this desk (#53): the preview opens on
+        # the monitor the pointer is on, and a click there takes it.
         overlay._chooser.set_mode("Full screen")
+        assert overlay._hovered_monitor == monitor
+        QTest.mouseClick(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            self._local(monitor.center()),
+        )
 
     @ON_EACH_MONITOR
     def test_a_drag(self, monkeypatch, monitor):
@@ -9288,8 +9304,8 @@ class TestControlsLandOnTheCapturesMonitor:
     @ON_EACH_MONITOR
     def test_full_screen(self, monkeypatch, monitor):
         # The report's own words: the capture is on the second monitor. The
-        # pointer is there and nothing has moved over the overlay yet -- `F`
-        # pressed as it opens.
+        # pointer is there and nothing has moved over the overlay yet --
+        # Full screen chosen the moment it opens.
         overlay = self._overlay(monkeypatch, monitor)
 
         self._take_full_screen(overlay, monitor)
@@ -9364,6 +9380,244 @@ class TestControlsLandOnTheCapturesMonitor:
         finally:
             overlay._delay_timer.stop()
             overlay._countdown.close()
+
+
+class TestFullScreenFollowsThePointerBeforeItCommits:
+    """#53: on a desk with more than one monitor Full screen arms, previews
+    the monitor under the pointer and takes the one clicked -- the loop
+    Window mode already has. On a desk with one it still captures the moment
+    it is picked.
+
+    On #49's desk, so the monitor mounted above -- and its negative origin --
+    is one of the monitors being crossed into.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    ORIGIN = QPointF(*MOUNTED_ABOVE_ORIGIN)
+
+    def _overlay(self, monkeypatch, pointer_on=ABOVE_SECOND, *, after="edit", **kwargs):
+        _point_the_os_at(monkeypatch, pointer_on)
+        frame = make_frame(
+            image_size=MOUNTED_ABOVE_SIZE,
+            logical_size=MOUNTED_ABOVE_SIZE,
+            logical_origin=MOUNTED_ABOVE_ORIGIN,
+        )
+        overlay = OverlayWindow(frame, monitor_geometries=list(MOUNTED_ABOVE), **kwargs)
+        overlay._chooser.set_after(after)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _hover(self, overlay, absolute: QPointF) -> None:
+        # Sent to the overlay itself rather than synthesised with QTest: a
+        # bare hover goes to whichever window the platform thinks is under
+        # the pointer, which offscreen is not reliably this one.
+        local = absolute - self.ORIGIN
+        QApplication.sendEvent(
+            overlay,
+            QMouseEvent(
+                QEvent.Type.MouseMove, local, local,
+                Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+
+    def _click(self, overlay, absolute: QPointF) -> None:
+        QTest.mouseClick(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            (absolute - self.ORIGIN).toPoint(),
+        )
+
+    def test_picking_it_arms_rather_than_captures(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay(monkeypatch, after="instant")
+
+        overlay._chooser.set_mode("Full screen")
+
+        assert overlay._picking_monitor
+        assert overlay._selection is None
+        assert overlay._chooser.phase == "armed"
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_the_preview_opens_on_the_monitor_the_pointer_is_on(self, monkeypatch):
+        overlay = self._overlay(monkeypatch, ABOVE_TOP)
+
+        overlay._chooser.set_mode("Full screen")
+
+        assert overlay._hovered_monitor == ABOVE_TOP
+
+    def test_moving_across_a_bezel_previews_the_new_monitor(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        overlay._chooser.set_mode("Full screen")
+
+        for monitor in (ABOVE_TOP, ABOVE_MAIN, ABOVE_SECOND):
+            self._hover(overlay, monitor.center())
+            assert overlay._hovered_monitor == monitor
+
+    def test_a_gap_between_monitors_previews_nothing(self, monkeypatch):
+        # Above the main monitor and left of the one mounted above.
+        overlay = self._overlay(monkeypatch)
+        overlay._chooser.set_mode("Full screen")
+
+        self._hover(overlay, QPointF(500, -700))
+
+        assert overlay._hovered_monitor is None
+        assert overlay._picking_monitor
+
+    def test_clicking_takes_the_previewed_monitor(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        overlay._chooser.set_mode("Full screen")
+        self._hover(overlay, ABOVE_TOP.center())
+
+        self._click(overlay, ABOVE_TOP.center())
+
+        assert overlay.absolute_selection() == ABOVE_TOP
+        assert not overlay._picking_monitor
+        assert overlay._hovered_monitor is None
+
+    def test_a_click_in_a_gap_takes_nothing_and_stays_armed(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        overlay._chooser.set_mode("Full screen")
+
+        self._click(overlay, QPointF(500, -700))
+
+        assert overlay._selection is None
+        assert overlay._picking_monitor
+
+    def test_instant_finishes_on_the_click_not_on_the_pick(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay(monkeypatch, after="instant")
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_mode("Full screen")
+        assert copied == []
+
+        self._click(overlay, ABOVE_MAIN.center())
+
+        assert len(copied) == 1
+        assert not overlay.isVisible()
+        # What was taken is remembered absolute: the monitor clicked, not
+        # the one the pointer was on when Full screen was chosen.
+        assert setup_desktop.load_last_region() == (0, 0, 2560, 1440)
+
+    def test_escape_leaves_the_mode_without_capturing(self, monkeypatch):
+        reported = []
+        overlay = self._overlay(
+            monkeypatch, on_captured=lambda image, path: reported.append(path)
+        )
+        overlay._chooser.set_mode("Full screen")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay._picking_monitor
+        assert overlay._hovered_monitor is None
+        assert overlay._selection is None
+        assert overlay._chooser.phase == "choosing"
+        assert overlay.isVisible()
+        assert reported == []
+
+    def test_the_next_escape_leaves_the_snip(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        overlay._chooser.set_mode("Full screen")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay.isVisible()
+
+    def test_the_chooser_tab_follows_the_pointer_while_it_is_armed(self, monkeypatch):
+        # Gated on there being no selection yet, which a snap never left.
+        overlay = self._overlay(monkeypatch)
+        overlay._chooser.set_mode("Full screen")
+
+        self._hover(overlay, ABOVE_TOP.center())
+
+        tab = QRectF(overlay._chooser.tab.geometry()).translated(self.ORIGIN)
+        assert ABOVE_TOP.contains(tab), f"tab at {tab}"
+
+    def test_choosing_another_mode_disarms_it(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        overlay._chooser.set_mode("Full screen")
+
+        overlay._chooser.set_mode("Region")
+
+        assert not overlay._picking_monitor
+        assert overlay._hovered_monitor is None
+
+    def test_choosing_it_from_a_selection_already_made_arms_it_too(self, monkeypatch):
+        # The mode menu reached from the bar rather than the chooser.
+        overlay = self._overlay(monkeypatch)
+        overlay.set_selection(QRect(3000, 1700, 400, 300))
+
+        overlay._on_capture_mode_selected("Full screen")
+
+        assert overlay._picking_monitor
+        assert overlay._selection is None
+
+    def test_on_the_record_side_the_monitor_clicked_is_the_one_recorded(self, monkeypatch):
+        requests = []
+        overlay = self._overlay(
+            monkeypatch,
+            on_recording_requested=lambda rect, delay, after: requests.append(rect),
+        )
+        overlay._chooser.set_kind("record")
+        overlay._chooser.set_mode("Full screen")
+        assert requests == []
+        assert overlay._picking_monitor
+
+        self._click(overlay, ABOVE_TOP.center())
+
+        assert requests == [ABOVE_TOP]
+        assert overlay._armed_for_recording
+
+    def test_on_a_single_monitor_it_still_captures_the_moment_it_is_picked(
+        self, monkeypatch
+    ):
+        _point_the_os_at(monkeypatch, ABOVE_TOP)
+        frame = make_frame(
+            image_size=(2560, 1440), logical_size=(2560, 1440), logical_origin=(1164, -1440)
+        )
+        overlay = OverlayWindow(frame, monitor_geometries=[ABOVE_TOP])
+        overlay._chooser.set_after("edit")
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        overlay._chooser.set_mode("Full screen")
+
+        assert not overlay._picking_monitor
+        assert overlay.absolute_selection() == ABOVE_TOP
+
+    def test_the_preview_is_window_modes_highlight(self, monkeypatch):
+        # A small desk, painted unshown, so the grab holds nothing but the
+        # frame, the scrim and the highlight.
+        left, right = QRectF(0, 0, 300, 200), QRectF(300, 0, 300, 200)
+        _point_the_os_at(monkeypatch, right)
+        overlay = OverlayWindow(
+            make_frame(image_size=(600, 200), logical_size=(600, 200)),
+            monitor_geometries=[left, right],
+        )
+        overlay._chooser.set_mode("Full screen")
+        assert overlay._hovered_monitor == right
+        previewing_monitor = overlay.grab().toImage()
+
+        overlay._picking_monitor = False
+        overlay._picking_window = True
+        overlay._hovered_window = ("", right)
+        previewing_window = overlay.grab().toImage()
+
+        def at(image, x, y):
+            ratio = image.devicePixelRatio()
+            return image.pixelColor(round(x * ratio), round(y * ratio))
+
+        assert at(previewing_monitor, 450, 120) == at(previewing_window, 450, 120)
+        assert at(previewing_monitor, 450, 120) != at(previewing_monitor, 150, 120)
 
 
 class TestTheChooserTakesItsOwnClicks:

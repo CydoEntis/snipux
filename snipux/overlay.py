@@ -3457,6 +3457,15 @@ class OverlayWindow(QWidget):
         # (title, absolute rect) of the window under the pointer while
         # Window mode is armed, so the preview can name what it would take.
         self._hovered_window: "tuple[str, QRectF] | None" = None
+        # Full screen's version of the two above, on a desk with more than
+        # one monitor (#53): armed from `_enter_monitor_mode` until a click
+        # lands on a monitor (`_confirm_monitor_pick`), with
+        # `_hovered_monitor` the absolute rect the preview highlights.
+        # Unlike Window mode's hover the preview is never a selection --
+        # nothing is chosen until the click -- so the chooser tab stays up
+        # and keeps following the pointer.
+        self._picking_monitor = False
+        self._hovered_monitor: QRectF | None = None
 
         # Handle currently being dragged (SNX-33 re-framing), and the
         # selection as it stood the moment that drag started. The anchor is
@@ -3653,6 +3662,10 @@ class OverlayWindow(QWidget):
             if self._geometry_provider.is_available()
             else design.tokens.ACTIVE_WINDOW_UNSUPPORTED,
         )
+        # Whether Full screen fires on the pick or arms (#53): the monitors
+        # this window covers, which on Wayland with several is only the
+        # interactive one -- the others cannot be offered from here.
+        self._chooser.set_monitor_count(len(self._monitor_geometries))
         self._chooser.reuseLastRegionChanged.connect(
             setup_desktop.save_reuse_last_region
         )
@@ -3952,6 +3965,9 @@ class OverlayWindow(QWidget):
         is in.
         """
         self._picking_window = False
+        self._picking_monitor = False
+        self._hovered_monitor = None
+        self.update()
         # SNX-57: a mode switch mid-drag must not leave this armed under
         # whatever the newly-picked mode does instead.
         self._region_drag_anchor = None
@@ -3979,7 +3995,13 @@ class OverlayWindow(QWidget):
         if mode == "Window":  # design.tokens.CAPTURE_MODES[1][0]
             self._enter_window_mode()
         elif mode == "Full screen":  # design.tokens.CAPTURE_MODES[2][0]
-            self._select_full_screen()
+            # One monitor leaves nothing to choose; more leave which one
+            # (docs/design/bars/divergences.md 3) -- the line
+            # `Chooser._fires_immediately` draws too.
+            if len(self._monitor_geometries) > 1:
+                self._enter_monitor_mode()
+            else:
+                self._select_full_screen()
         elif mode == design.tokens.BROWSER_MODE:
             self._select_browser_tab()
         elif mode == design.tokens.ACTIVE_WINDOW_MODE:
@@ -4208,11 +4230,12 @@ class OverlayWindow(QWidget):
             # hand over None, which the backend reads as the whole virtual
             # desktop -- so choosing it on a three-monitor machine produced
             # one 6400x1440 video of all three, while the identical row on
-            # the stills side captured one display. `_select_full_screen`
-            # has already set `rect` to the display under the cursor, so
-            # this needs no special case at all: it is a region like any
-            # other, and the backend's None is left for a caller that
-            # genuinely wants every monitor at once.
+            # the stills side captured one display. Full screen has already
+            # set `rect` to one display -- the one under the cursor or, on a
+            # desk with several, the one clicked (#53) -- so this needs no
+            # special case at all: it is a region like any other, and the
+            # backend's None is left for a caller that genuinely wants every
+            # monitor at once.
             record_rect = self._to_absolute_rect(rect)
 
             self._armed_for_recording = True
@@ -4400,7 +4423,10 @@ class OverlayWindow(QWidget):
         """Set `_selection` to the whole display the cursor is on, per
         the spec's "Full screen -- selection = the whole display" and
         this ticket's cursor-aware acceptance criterion. Snaps
-        immediately -- no drag, no click needed past picking the row.
+        immediately -- no drag, no click needed past picking the row. Only
+        on a desk with one monitor, or on Wayland where this window covers
+        one; with more to choose between, `_enter_monitor_mode` arms
+        instead (#53).
 
         The display is `_active_screen_rect`'s: the monitor under the last
         tracked move or, before any move has reached this window, the one
@@ -4416,6 +4442,61 @@ class OverlayWindow(QWidget):
         self._selection_anchor = None
         rect = self._active_screen_rect()
         self._commit_selection(self._to_local_rect(rect).toRect())
+
+    def _enter_monitor_mode(self) -> None:
+        """Arm Full screen on a desk with more than one monitor: preview the
+        monitor under the pointer and take the one clicked (#53).
+
+        Window mode's loop, with "the monitor under the pointer" in place of
+        "the window under the pointer" -- `mouseMoveEvent` previews and
+        `_confirm_monitor_pick` takes. Snapping on the pick took whichever
+        monitor the pointer happened to be on at that instant, with no way
+        to change your mind: the chooser had stood down by then, so the
+        other monitors could no longer be offered.
+
+        The preview opens on `_active_screen_rect`, the monitor the chooser
+        was just picked from, so something is highlighted before the pointer
+        moves at all.
+        """
+        self._picking_monitor = True
+        self.set_selection(None)
+        start = self._active_screen_rect()
+        self._hovered_monitor = start if start in self._monitor_geometries else None
+        self._sync_chooser_visibility()
+        self.update()
+
+    def _confirm_monitor_pick(self, pos: QPointF) -> None:
+        """Take the monitor under `pos` (window-local) and disarm. Only
+        reached from `mousePressEvent` while `_picking_monitor` is armed.
+
+        A press in a gap between monitors takes nothing and leaves the mode
+        armed, as a click that misses every window does in Window mode.
+        """
+        monitor = self._monitor_containing(self._to_absolute(pos))
+        if monitor is None:
+            return
+        self._picking_monitor = False
+        self._hovered_monitor = None
+        # No drag, so no anchor: the monitor's own rect is what
+        # `_chrome_bounds` should resolve against.
+        self._selection_anchor = None
+        self._commit_selection(self._to_local_rect(monitor).toRect())
+
+    def _leave_monitor_mode(self) -> None:
+        """Escape while Full screen is armed: disarm, drop the preview and
+        put the chooser back, having captured nothing.
+
+        Back to the chooser rather than out of the snip, because what is on
+        screen is a highlighted monitor waiting for a click -- what a hovered
+        window is in Window mode, where Escape backs out a stage
+        (`_handle_escape`). The next Escape leaves the snip.
+        """
+        self._picking_monitor = False
+        self._hovered_monitor = None
+        self._chooser.reopen()
+        self._sync_chooser_visibility()
+        self._apply_idle_cursor()
+        self.update()
 
     def _select_browser_tab(self) -> None:
         """Set `_selection` to the page area of the frontmost browser.
@@ -4820,8 +4901,9 @@ class OverlayWindow(QWidget):
         self._on_capture_mode_selected(mode)
 
     def _on_chooser_immediate(self, mode: str) -> None:
-        """`Full screen` has nothing left to aim at, so choosing it fires
-        the grab rather than arming -- `tokens.IMMEDIATE_MODES`.
+        """A mode with nothing left to aim at fires the grab rather than
+        arming: Browser, and Full screen on a desk with one monitor
+        (`Chooser._fires_immediately`).
         """
         self._on_capture_mode_selected(mode)
 
@@ -5700,6 +5782,13 @@ class OverlayWindow(QWidget):
         key = event.key()
         modifiers = event.modifiers()
 
+        # Ahead of the chooser, which reads a bare Escape as cancelling the
+        # snip: with Full screen armed it leaves the mode instead -- see
+        # `_leave_monitor_mode`.
+        if key == Qt.Key.Key_Escape and self._picking_monitor:
+            self._leave_monitor_mode()
+            return
+
         # The chooser's shortcuts are live for as long as it is -- R/W/F/L
         # to switch mode, Space to reopen it, Esc to close a menu. It gets
         # first refusal while there is no selection, and returns False for
@@ -5823,6 +5912,10 @@ class OverlayWindow(QWidget):
             # stroke -- returns unconditionally, the same "stop event
             # propagation" rule the handle branch below already follows.
             self._confirm_window_pick(event.position())
+            return
+        if self._picking_monitor:
+            # The same rule for Full screen's monitor pick (#53).
+            self._confirm_monitor_pick(event.position())
             return
         handle = self._handle_at(event.position())
         if handle is None:
@@ -6026,6 +6119,19 @@ class OverlayWindow(QWidget):
             super().mouseMoveEvent(event)
             return
 
+        if self._picking_monitor:
+            # Full screen's preview follows the pointer across a bezel
+            # (#53). Repainted only when the monitor under it changes, since
+            # this runs on every pixel of every move; a gap between monitors
+            # highlights nothing.
+            monitor = self._monitor_containing(self._to_absolute(event.position()))
+            if monitor != self._hovered_monitor:
+                self._hovered_monitor = monitor
+                self.update()
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            super().mouseMoveEvent(event)
+            return
+
         if self._region_drag_anchor is not None:
             # SNX-57: same "handled here, nothing else runs" shape the
             # Window branch above already uses for its own
@@ -6219,6 +6325,8 @@ class OverlayWindow(QWidget):
             self._paint_frozen_pill(painter)
         if self._picking_window and self._hovered_window is not None:
             self._paint_window_hover(painter)
+        if self._picking_monitor and self._hovered_monitor is not None:
+            self._paint_monitor_hover(painter)
         painter.end()
 
     def _paint_window_hover(self, painter: QPainter) -> None:
@@ -6232,26 +6340,76 @@ class OverlayWindow(QWidget):
         """
         title, absolute = self._hovered_window
         rect = QRectF(self._to_local_rect(absolute))
+        self._paint_pick_highlight(
+            painter,
+            fill=rect,
+            outline=rect,
+            title=title,
+            size=absolute.size(),
+            chip_origin=QPointF(rect.left(), rect.top() - design.tokens.Metric.CHIP_OFFSET_Y),
+        )
 
+    def _paint_monitor_hover(self, painter: QPainter) -> None:
+        """Full screen's preview on a desk with more than one monitor (#53):
+        Window mode's highlight, over the monitor under the pointer.
+
+        Placed so all of it is on the monitor it names. The 2px outline is
+        drawn inside the edge, where Window mode's straddles it: a monitor's
+        edge is a bezel, and half the line would land on the neighbour. The
+        chip sits inside the usable top-left corner, the close button's
+        margin in, rather than above the rect -- which is the monitor above,
+        or a gap no monitor shows.
+
+        The chip gives the size alone. A window needs its title because two
+        same-sized windows can sit in the same place; two monitors cannot,
+        and where the highlight is already says which one it is.
+        """
+        monitor = self._hovered_monitor
+        rect = QRectF(self._to_local_rect(monitor))
+        usable = QRectF(self._to_local_rect(self._usable_area(monitor)))
+        margin = self._CLOSE_BUTTON_MARGIN
+        self._paint_pick_highlight(
+            painter,
+            fill=rect,
+            outline=rect.adjusted(1, 1, -1, -1),
+            title="",
+            size=monitor.size(),
+            chip_origin=usable.topLeft() + QPointF(margin, margin),
+        )
+
+    def _paint_pick_highlight(
+        self,
+        painter: QPainter,
+        *,
+        fill: QRectF,
+        outline: QRectF,
+        title: str,
+        size: QSizeF,
+        chip_origin: QPointF,
+    ) -> None:
+        """The accent fill, outline and chip over what a click would take,
+        shared by Window and Full screen's previews. Rects and the chip's
+        origin are window-local; `size` is the target's own, for the chip.
+        """
         painter.setBrush(design.flow_color("WINDOW_HOVER_FILL"))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRect(rect)
+        painter.drawRect(fill)
 
         pen = QPen(design.flow_color("WINDOW_HOVER"))
         pen.setWidth(2)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(rect)
+        painter.drawRect(outline)
 
-        size = f"{round(absolute.width())} × {round(absolute.height())}"
-        label = f"{title} — {size}" if title else size
+        dimensions = f"{round(size.width())} × {round(size.height())}"
+        label = f"{title} — {dimensions}" if title else dimensions
         font = QFont(design.font_families().ui)
         font.setPixelSize(12)
         font.setWeight(QFont.Weight(600))
         metrics = QFontMetricsF(font)
         chip = QRectF(
-            rect.left(),
-            rect.top() - design.tokens.Metric.CHIP_OFFSET_Y,
+            chip_origin.x(),
+            chip_origin.y(),
             metrics.horizontalAdvance(label) + 20,
             22,
         )

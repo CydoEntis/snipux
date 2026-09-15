@@ -985,7 +985,9 @@ class Chooser(QWidget):
 
     Full screen is the exception and does not arm at all: it has nothing
     left to aim at, so choosing it fires the grab. `IMMEDIATE_MODES` carries
-    that rather than a branch on the mode's name.
+    that rather than a branch on the mode's name -- and `MONITOR_MODES` the
+    exception to it: with more than one monitor, which one is still a
+    choice, so Full screen arms there after all (`_fires_immediately`).
 
     Everything positions against `screen`, the monitor the snip opened on --
     never the virtual desktop, which on a staggered multi-monitor setup puts
@@ -1026,6 +1028,11 @@ class Chooser(QWidget):
         # has found the window the user was in. Greyed until then, for the
         # reason `_browser_available` starts False.
         self._active_window_reason: str | None = tokens.ACTIVE_WINDOW_UNAVAILABLE
+        # How many monitors the host window covers. One until told
+        # otherwise, so a Chooser built without a seed (every test that does)
+        # keeps Full screen firing on the pick -- `OverlayWindow` is what
+        # knows the desk.
+        self._monitor_count = 1
         # Each side's own destination, remembered across flips of the
         # switch. Only populated when a side is left, so a value that is
         # legal on both (`instant`, `save`) is never treated as displaced.
@@ -1100,11 +1107,7 @@ class Chooser(QWidget):
         self._refresh_triggers()
         if not arm:
             return
-        if mode in tokens.IMMEDIATE_MODES and self._kind == "stills":
-            # Nothing left to aim at, so choosing it *is* the capture -- but
-            # only on the stills side. Nothing downstream knows how to
-            # record yet, so on the record side Full screen arms and waits
-            # like Region does, rather than silently taking a screenshot.
+        if self._fires_immediately(mode):
             self.fireImmediately.emit(mode)
             return
         self._phase = "armed"
@@ -1138,6 +1141,33 @@ class Chooser(QWidget):
         """
         self._active_window_reason = None if available else reason
         self._refresh_triggers()
+
+    def set_monitor_count(self, count: int) -> None:
+        """Say how many monitors the host window covers.
+
+        Set from outside, like `set_browser_available`: this widget knows
+        nothing of screens. It decides whether a monitor mode fires on the
+        pick (`_fires_immediately`), and what the hint says about it.
+        """
+        self._monitor_count = max(1, int(count))
+        self._refresh_triggers()
+
+    def _fires_immediately(self, mode: str) -> bool:
+        """Whether choosing `mode` *is* the capture, rather than arming it.
+
+        `IMMEDIATE_MODES` have nothing left to aim at -- but only on the
+        stills side. Nothing downstream knows how to record from a fire, so
+        on the record side they arm and wait like Region does, rather than
+        silently taking a screenshot.
+
+        A monitor mode has nothing left to aim at only while there is one
+        monitor. With more, which one is still the choice, and capturing on
+        the pick took whichever monitor the row happened to open on -- so it
+        arms and follows the pointer, as Window mode does (#53).
+        """
+        if self._kind != "stills" or mode not in tokens.IMMEDIATE_MODES:
+            return False
+        return not (mode in tokens.MONITOR_MODES and self._monitor_count > 1)
 
     def _unavailable_reason(self, mode: str) -> "str | None":
         """Why `mode` cannot be picked right now, or None if it can.
@@ -1466,6 +1496,8 @@ class Chooser(QWidget):
         )
 
         next_step = tokens.MODE_NEXT_STEP.get(self._mode, "")
+        if self._monitor_count > 1:
+            next_step = tokens.MULTI_MONITOR_NEXT_STEP.get(self._mode, next_step)
         if self._kind == "record":
             next_step = tokens.RECORD_MODE_NEXT_STEP.get(self._mode, next_step)
         self.hint.set_content(icon, next_step)

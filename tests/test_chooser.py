@@ -245,6 +245,67 @@ class TestFullScreenBehavesDifferentlyPerKind:
         assert chooser.phase == "armed"
 
 
+class TestFullScreenArmsWithMoreThanOneMonitor:
+    """#53: which monitor is still a choice when there is more than one, so
+    Full screen arms there instead of firing on the pick
+    (docs/design/bars/divergences.md 3).
+    """
+
+    def test_it_arms_on_a_desk_with_more_than_one(self):
+        chooser = Chooser(parent=None)
+        chooser.set_monitor_count(3)
+        fired, chosen = [], []
+        chooser.fireImmediately.connect(fired.append)
+        chooser.modeChosen.connect(chosen.append)
+
+        chooser.set_mode("Full screen")
+
+        assert fired == []
+        assert chosen == ["Full screen"]
+        assert chooser.phase == "armed"
+
+    def test_one_monitor_still_fires_on_the_pick(self):
+        chooser = Chooser(parent=None)
+        chooser.set_monitor_count(1)
+        fired = []
+        chooser.fireImmediately.connect(fired.append)
+
+        chooser.set_mode("Full screen")
+
+        assert fired == ["Full screen"]
+
+    @pytest.mark.parametrize("mode", [tokens.BROWSER_MODE, tokens.ACTIVE_WINDOW_MODE])
+    def test_modes_aimed_at_something_else_fire_however_many_monitors(self, mode):
+        # A page or a window is one rectangle wherever it is; there is no
+        # monitor to choose.
+        chooser = Chooser(parent=None)
+        chooser.set_browser_available(True)
+        chooser.set_active_window_available(True)
+        chooser.set_monitor_count(3)
+        fired = []
+        chooser.fireImmediately.connect(fired.append)
+
+        chooser.set_mode(mode)
+
+        assert fired == [mode]
+
+    def test_the_hint_says_to_click_a_monitor(self):
+        # "Grabs this monitor the moment you choose it" would be untrue.
+        chooser = Chooser(parent=None)
+        chooser.set_monitor_count(2)
+
+        chooser.set_mode("Full screen", arm=False)
+
+        assert chooser.hint._text == tokens.MULTI_MONITOR_NEXT_STEP["Full screen"]
+
+    def test_with_one_monitor_the_hint_is_unchanged(self):
+        chooser = Chooser(parent=None)
+
+        chooser.set_mode("Full screen", arm=False)
+
+        assert chooser.hint._text == tokens.MODE_NEXT_STEP["Full screen"]
+
+
 class TestRecordSideModeSelectionIsInert:
     @pytest.mark.parametrize("mode", ["Browser"])
     def test_picking_a_disabled_mode_leaves_it_unchanged(self, mode):
