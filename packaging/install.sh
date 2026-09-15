@@ -21,8 +21,25 @@ fi
 
 set -e
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
+# Two ways in: run from a clone, or piped straight from the web
+# (`curl -fsSL .../install.sh | bash`), where there is no checkout to install
+# from and $BASH_SOURCE is not a path. A clone installs itself, so a
+# contributor tests what they have changed; anyone else gets the published
+# release.
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    repo_root="$(cd "$script_dir/.." && pwd)"
+else
+    repo_root=""
+fi
+
+if [ -n "$repo_root" ] && [ -f "$repo_root/pyproject.toml" ]; then
+    install_from="$repo_root"
+    install_source="this checkout"
+else
+    install_from="snipux"
+    install_source="PyPI"
+fi
 
 # $XDG_DATA_HOME if the user has set it, ~/.local/share otherwise. The venv
 # lives under here -- not under the repo checkout -- so it survives
@@ -74,9 +91,9 @@ python3 -m venv "$venv_dir"
 # its dependencies out of the distribution's site-packages, no
 # --break-system-packages needed. Runtime dependencies come from
 # pyproject.toml's own [project] metadata.
-echo "Installing snipux and its runtime dependencies..."
+echo "Installing snipux and its runtime dependencies (from $install_source)..."
 "$venv_dir/bin/python" -m pip install --quiet --upgrade pip
-"$venv_dir/bin/python" -m pip install "$repo_root"
+"$venv_dir/bin/python" -m pip install "$install_from"
 
 # A thin launcher on PATH rather than pointing PATH at the venv's bin/
 # directly -- that would also expose the venv's own python/pip, shadowing

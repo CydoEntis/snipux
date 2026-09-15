@@ -52,6 +52,16 @@ you are dragging.
 First, the things Ubuntu may not already have — [pipx](https://pipx.pypa.io/)
 and one library Qt needs that nothing else on a stock desktop pulls in:
 
+**One line, if you would rather not read the rest of this section:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/CydoEntis/snipux/main/packaging/install.sh | bash
+```
+
+That checks the two prerequisites below by name, installs Snipux into an
+environment of its own, runs `--setup` and starts it. The rest of this
+section is the same thing by hand.
+
 ```sh
 sudo apt install pipx libxcb-cursor0
 pipx ensurepath      # only needed once, and only if pipx was just installed
@@ -106,11 +116,21 @@ cd snipux
 
 ### Windows
 
-The one prerequisite is **[Python 3.10+](https://www.python.org/downloads/)** —
-tick *"Add python.exe to PATH"* in the installer. Nothing else: no Git, no
-pipx, no file to download by hand.
+**One line, in PowerShell:**
 
-Then, in PowerShell:
+```powershell
+irm https://raw.githubusercontent.com/CydoEntis/snipux/main/packaging/install.ps1 | iex
+```
+
+That finds a Python 3.10+, installs one with winget if there is none,
+installs Snipux from PyPI, writes the Start Menu and Startup entries and the
+Ctrl+Alt+S shortcut, and starts it. Re-running it upgrades an existing
+install. Nothing needs administrator rights.
+
+**Or by hand.** The one prerequisite is
+**[Python 3.10+](https://www.python.org/downloads/)** — tick *"Add python.exe
+to PATH"* in the installer. Nothing else: no Git, no pipx, no file to
+download by hand. Then, in PowerShell:
 
 ```powershell
 py -m pip install snipux
