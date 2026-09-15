@@ -757,6 +757,26 @@ class TestTheHideSensitivePage:
         assert setup_desktop.load_hide_list(tmp_path)["words"] == ["Acme Corporation"]
 
 
+class TestSettingsScrollbars:
+    def test_the_panes_keep_the_apps_scrollbar(self, tmp_path):
+        # The pane sets its own stylesheet, which would otherwise beat the
+        # window's to its scrollbar.
+        window = SettingsWindow(config_dir=tmp_path)
+
+        style = window._panes.widget(0).styleSheet()
+
+        assert "QScrollBar" in style
+        assert "QScrollArea { background: transparent; }" in style
+
+    def test_the_hide_list_boxes_keep_it_too(self, tmp_path):
+        window = SettingsWindow(config_dir=tmp_path)
+
+        style = window._hide_boxes["words"].styleSheet()
+
+        assert "QScrollBar" in style
+        assert "QPlainTextEdit" in style
+
+
 class TestVersionLine:
     """`setup_desktop.version_line()`'s trailing field -- what
     `TestSettingsWindow`'s footer test above renders, tested here without a

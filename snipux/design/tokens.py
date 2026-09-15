@@ -317,6 +317,9 @@ class Win:
     SELECTED_BG     = "#2c313c"   # active nav row, active segment
     ROW_HOVER       = "#20242b"
     TOGGLE_OFF      = "#33383f"   # switch track, off
+    SCROLL_THUMB    = "#2f333b"   # scrollbar handle, idle -- same weight as a control border
+    SCROLL_THUMB_HOVER = "#3a3f49"
+    SCROLL_THUMB_ACTIVE = "#454b56"
     TOGGLE_KNOB     = "#f1f3e8"
 
     # Text

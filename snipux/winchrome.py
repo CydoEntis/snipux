@@ -214,6 +214,41 @@ class _TitleBarButton(QPushButton):
         )
 
 
+# Windows' own scrollbar is 17px of grey chrome with two arrow buttons and,
+# on a themed desktop, the system accent colour -- which is how a lime-green
+# scrollbar appeared down the side of Settings. Qt cannot restyle the native
+# one; a stylesheet replaces it outright, so this is the only way for a
+# scrollbar to look like it belongs to this app.
+#
+# No arrow buttons (nothing has clicked them since about 2010), a track that
+# is simply the window behind it, and a handle with the same weight as a
+# control border.
+SCROLLBAR_W = 10
+_SCROLLBAR_RADIUS = SCROLLBAR_W // 2
+_SCROLLBAR_MIN = 28
+
+
+def scrollbar_style() -> str:
+    """The app's scrollbar, as a stylesheet. Applied by `WinWindow` to every
+    window, and by anything that sets its own stylesheet on a widget that
+    scrolls -- a widget's own sheet takes precedence over its window's."""
+    win = tokens.Win
+    return f"""
+        QScrollBar:vertical {{ background: transparent; width: {SCROLLBAR_W}px;
+            margin: 2px 2px 2px 0; }}
+        QScrollBar:horizontal {{ background: transparent; height: {SCROLLBAR_W}px;
+            margin: 0 2px 2px 2px; }}
+        QScrollBar::handle:vertical {{ background: {win.SCROLL_THUMB};
+            border-radius: {_SCROLLBAR_RADIUS}px; min-height: {_SCROLLBAR_MIN}px; }}
+        QScrollBar::handle:horizontal {{ background: {win.SCROLL_THUMB};
+            border-radius: {_SCROLLBAR_RADIUS}px; min-width: {_SCROLLBAR_MIN}px; }}
+        QScrollBar::handle:hover {{ background: {win.SCROLL_THUMB_HOVER}; }}
+        QScrollBar::handle:pressed {{ background: {win.SCROLL_THUMB_ACTIVE}; }}
+        QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+        QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+    """
+
+
 class WinWindow(QWidget):
     """A frameless window with snipux's own title bar and an optional footer.
 
@@ -248,6 +283,7 @@ class WinWindow(QWidget):
         # player's 980x640) set their own over the top of this.
         self.setMinimumSize(420, 300)
         self._drag_origin: QPoint | None = None
+        self.setStyleSheet(scrollbar_style())
 
         # Frameless means the window manager gives us no resize borders, so
         # we grow our own. The edges are covered by child widgets -- the

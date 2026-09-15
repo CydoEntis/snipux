@@ -333,3 +333,44 @@ class TestFramelessWindowsCanStillBeResized:
         # half worth asserting.
         assert late.hasMouseTracking()
         assert QLabel("deeper still", late).hasMouseTracking()
+
+
+class TestTheAppsOwnScrollbar:
+    """Windows' native scrollbar is 17px of grey chrome with arrow buttons,
+    tinted by the system accent -- which is how a lime-green bar appeared
+    down the side of Settings. Qt cannot restyle the native one, so it is
+    replaced outright."""
+
+    def test_it_is_slimmer_than_the_native_one(self):
+        style = winchrome.scrollbar_style()
+
+        assert f"width: {winchrome.SCROLLBAR_W}px" in style
+        assert winchrome.SCROLLBAR_W < 17
+
+    def test_it_has_no_arrow_buttons(self):
+        style = " ".join(winchrome.scrollbar_style().split())
+
+        assert "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }" in style
+
+    def test_the_track_is_the_window_behind_it(self):
+        style = winchrome.scrollbar_style()
+
+        assert "QScrollBar:vertical" in style
+        assert "background: transparent" in style
+
+    def test_the_handle_uses_the_windows_own_palette(self):
+        style = winchrome.scrollbar_style()
+
+        assert tokens.Win.SCROLL_THUMB in style
+        assert tokens.Win.SCROLL_THUMB_HOVER in style
+        assert tokens.Win.SCROLL_THUMB_ACTIVE in style
+
+    def test_it_never_uses_the_system_accent(self):
+        # The bug: Windows painted its scrollbar in the desktop accent
+        # colour, which has nothing to do with this app.
+        assert "palette(" not in winchrome.scrollbar_style()
+
+    def test_every_window_carries_it(self):
+        window = winchrome.WinWindow("Test", size=(400, 300))
+
+        assert "QScrollBar" in window.styleSheet()

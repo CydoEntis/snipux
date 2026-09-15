@@ -795,6 +795,71 @@ class TestSnipFlag:
         assert excinfo.value.code != 0
 
 
+class TestClickingTheTrayIcon:
+    """Nothing listened to the icon itself before, so clicking it did
+    nothing -- and the menu's Settings item is a right-click plus a click
+    away."""
+
+    def _controller(self):
+        # Built without running __init__: this is about one signal handler,
+        # not about a tray, a hotkey or a capture registry.
+        controller = AppController.__new__(AppController)
+        opened = []
+        controller.open_settings = lambda: opened.append(True)
+        return controller, opened
+
+    @pytest.mark.parametrize("reason", [
+        QSystemTrayIcon.ActivationReason.Trigger,       # one click
+        QSystemTrayIcon.ActivationReason.DoubleClick,   # two
+    ])
+    def test_a_click_opens_settings(self, reason):
+        controller, opened = self._controller()
+
+        controller._on_tray_activated(reason)
+
+        assert opened == [True]
+
+    @pytest.mark.parametrize("reason", [
+        QSystemTrayIcon.ActivationReason.Context,       # the right-click menu
+        QSystemTrayIcon.ActivationReason.MiddleClick,   # paste, on X11
+        QSystemTrayIcon.ActivationReason.Unknown,
+    ])
+    def test_other_gestures_are_left_alone(self, reason):
+        controller, opened = self._controller()
+
+        controller._on_tray_activated(reason)
+
+        assert opened == []
+
+    def test_the_real_tray_icon_is_wired_to_it(self, monkeypatch):
+        # The connection itself, which testing the handler alone would miss.
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+
+        try:
+            main(["--settings"], registry=registry, transport=FakeTransport(make_transport_state()))
+            controller = created[0]
+            controller._settings.close()
+            controller._settings = None
+
+            controller._tray_icon.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
+
+            assert isinstance(controller._settings, SettingsDialog)
+        finally:
+            if created and created[0]._settings is not None:
+                created[0]._settings.close()
+            if created:
+                created[0]._tray_icon.hide()
+
+
 class TestSettingsFlag:
     """SNX-78: `--settings` follows the same forward-or-become-resident
     shape `TestSnipFlag` above already covers for `--snip`, and for the

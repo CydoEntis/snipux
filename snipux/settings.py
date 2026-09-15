@@ -57,6 +57,7 @@ from .design import tokens
 from .platform.windows import HotkeyEventFilter
 from .winchrome import (
     AccentButton,
+    scrollbar_style,
     SecondaryButton,
     SectionHeading,
     Switch,
@@ -600,7 +601,10 @@ class SettingsWindow(WinWindow):
             # Panes wrap; they never scroll sideways. A horizontal scrollbar
             # here hides the right-hand control of every row behind it.
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            scroll.setStyleSheet("background: transparent;")
+            # Scoped to the scroll area itself: an unqualified rule here
+            # would also claim its scrollbar, and beat the window's own
+            # sheet to it.
+            scroll.setStyleSheet("QScrollArea { background: transparent; }" + scrollbar_style())
             scroll.setWidget(build())
             self._panes.addWidget(scroll)
         return self._panes
@@ -705,7 +709,9 @@ class SettingsWindow(WinWindow):
             box = QPlainTextEdit("\n".join(stored.get(section, [])))
             box.setFont(_mono_font(12))
             box.setFixedHeight(self._HIDE_BOX_H)
-            box.setStyleSheet(self._field_style().replace("QLineEdit", "QPlainTextEdit"))
+            box.setStyleSheet(
+                self._field_style().replace("QLineEdit", "QPlainTextEdit") + scrollbar_style()
+            )
             box.textChanged.connect(self._on_hide_list_edited)
             self._hide_boxes[section] = box
             rows += [heading, caption, box, None]

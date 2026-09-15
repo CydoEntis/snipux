@@ -1226,6 +1226,10 @@ class AppController:
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         self._tray_icon.setContextMenu(menu)
+        # A click on the icon itself opens Settings. Nothing listened to
+        # the icon before, so clicking it did nothing at all -- and the
+        # menu's own Settings item is a right-click plus a click away.
+        self._tray_icon.activated.connect(self._on_tray_activated)
 
         if self._tray_available:
             self._tray_icon.show()
@@ -1242,6 +1246,23 @@ class AppController:
             )
 
         self._transport.listen(self.start_capture, self.open_settings)
+
+    # Windows sends `Trigger` for a single click and both `Trigger` and
+    # `DoubleClick` for a double one; GNOME's indicator sends neither and
+    # only opens the menu. Acting on both is what makes one click and two
+    # clicks agree -- `open_settings` raises the window it already opened
+    # rather than opening a second, so the extra event costs nothing.
+    #
+    # `MiddleClick` is deliberately not here: it pastes on X11, and a paste
+    # gesture that opened a window would be a surprise.
+    _TRAY_OPENS_SETTINGS = (
+        QSystemTrayIcon.ActivationReason.Trigger,
+        QSystemTrayIcon.ActivationReason.DoubleClick,
+    )
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason in self._TRAY_OPENS_SETTINGS:
+            self.open_settings()
 
     def open_settings(self) -> None:
         """Show the Settings window, or raise the one already open.
