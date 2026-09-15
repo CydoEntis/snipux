@@ -5,6 +5,12 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **Highlights on tightly packed lines no longer overlap each other.** On a
+  terminal or a dense editor, where a line's type is taller than the space
+  between lines, each band now stops halfway to the line above and below.
+
 ## 0.8.0 — 2026-09-15
 
 The highlighter snaps to the text you sweep, and recording is always chosen

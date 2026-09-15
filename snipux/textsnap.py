@@ -100,6 +100,12 @@ class _Line:
     columns: bytes  # 1 where any row of the line has ink, across the image
     reach: list[float]  # the x of every sweep point that fell on this line, in order
     first_point: int  # index of the first sweep point on this line
+    # Halfway to the line above and to the line below, in the region's rows:
+    # the rows this line may have. A band is the height of the type, which on
+    # tightly set text is taller than the line pitch, so without this the
+    # bands of two swept lines would overlap each other.
+    slot_top: float
+    slot_bottom: float
 
     @property
     def height(self) -> int:
@@ -246,7 +252,19 @@ def _lines_swept(
         if len(xs) < max(2, BRUSHED_SHARE * longest):
             continue
         top, bottom = runs[run_index]
-        lines.append(_Line(top, bottom, _columns(masks[top : bottom + 1]), xs, first[run_index]))
+        above = runs[run_index - 1][1] if run_index else None
+        below = runs[run_index + 1][0] if run_index + 1 < len(runs) else None
+        lines.append(
+            _Line(
+                top,
+                bottom,
+                _columns(masks[top : bottom + 1]),
+                xs,
+                first[run_index],
+                slot_top=(above + top) / 2 if above is not None else float("-inf"),
+                slot_bottom=(bottom + below) / 2 if below is not None else float("inf"),
+            )
+        )
     return lines
 
 
@@ -488,9 +506,9 @@ def _band(masks: list[bytes], line: _Line, start: int, end: int) -> QRectF:
     top = min(ink_top, core[0] - ASCENT * x_height)
     bottom = max(ink_bottom + 1, core[-1] + 1 + DESCENT * x_height)
     pad = max(1.0, round((bottom - top) * 0.08))
-    return QRectF(
-        start - pad,
-        line.top + top - pad,
-        end - start + 1 + 2 * pad,
-        bottom - top + 2 * pad,
-    )
+    # Kept inside the line's own slot: on tightly set text -- a terminal, a
+    # dense editor -- the type is taller than the pitch, and two swept lines
+    # would otherwise be highlighted by two overlapping bands.
+    first_row = max(line.top + top - pad, line.slot_top)
+    last_row = min(line.top + bottom + pad, line.slot_bottom)
+    return QRectF(start - pad, first_row, end - start + 1 + 2 * pad, last_row - first_row)
