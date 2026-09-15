@@ -20,5 +20,5 @@ export default {
   chain: "",
 
   // Any command that prints a JSON list of tickets. `mule init` detected this one.
-  pull: "gh issue list --assignee @me --state open --limit 50 --json number,title,body,url,labels",
+  pull: "gh issue list --assignee=@me --state=open --limit=50 --json=number,title,body,url,labels",
 }
