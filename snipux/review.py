@@ -115,6 +115,22 @@ class ImageCanvas(QWidget):
         self.setMouseTracking(True)
         self._store.changed.connect(self.update)
 
+    def glass_backdrop(self) -> None:
+        """None: the bar, the strip and the menus over this canvas keep the
+        fill they were designed with, with no blur under it and no fallback
+        (`snipux.glass`).
+
+        What is behind them here is this canvas, not a frozen frame, and it
+        does not hold still: a zoom or a stroke changes it under the bar. A
+        crop blurred once would be stale by the next of those, and one
+        blurred for each is the live blur the handoff rules out. At the fit
+        this window opens on, the bar sits on the workspace gradient, which
+        a blur would leave as it is. The fallback's denser fill is for glass
+        that should have had a blur of a busy desktop under it; the ground
+        here is the window's own.
+        """
+        return None
+
     # -- geometry --------------------------------------------------------
 
     @property

@@ -478,6 +478,48 @@ and only the sections a tool supports -- and only the sizes grow.
 
 ---
 
+## 22 · What the glass blurs, how far, and where it does not
+
+**The handoff says** (`README.md`, "Qt notes"): `backdrop-filter` has no Qt
+equivalent. The desktop behind is a static grab, so blur each bar's region
+once, cache it and paint that crop behind the fill; where that cannot be
+had, raise the fill alpha to about 0.97 and skip the blur; never a live
+blur.
+
+**We** blur the frozen frame as captured, 16px on every surface, and keep a
+moving surface's crop from where it last rested until it rests again. The
+fallback raises a fill to 97% only where the fill is thinner, and the
+review window's bar keeps its own fill (#70, `snipux/glass.py`).
+
+### Why
+
+- **The frame, not the scrim over it.** A CSS backdrop filter blurs
+  whatever is painted behind the element, which outside the selection is
+  the frame under the 62% scrim. A crop of the frame alone holds for the
+  whole snip. One with the scrim in it would change whenever a re-frame of
+  the selection passed under a bar, and would have to be taken again each
+  time. The frame shows through a 94% fill at 6%, so over white the bar
+  reads up to about ten levels lighter than it would over the dimmed frame.
+- **16px everywhere.** The bars handoff names the filter without a radius.
+  16px is the flow handoff's figure for a bar, and the overlay redesign's;
+  one radius keeps a menu on the same glass as the bar it opens from.
+- **A moving surface keeps its last crop.** A dragged bar (§9), or a bar
+  following a selection being re-framed, moves on every mouse event, and a
+  crop for each move is a live blur. The crop from where the surface set
+  off stands in until it has stayed put for 150ms, and then one is taken
+  there: two blurs a drag. Under the fill, the stale crop does not show
+  while the surface moves.
+- **The fallback raises a fill, never lowers one.** A menu's fill is
+  already 98%, and stays 98% where there is no blur.
+- **The review window's bar keeps its fill, with no blur and no fallback.**
+  It sits over the review canvas, not a frozen frame, and the canvas
+  changes under it with every zoom and stroke: a cached crop would be stale
+  by the next change, and a fresh one each time is a live blur. At the fit
+  the window opens on, what is behind the bar is the workspace gradient,
+  which a blur would leave as it is.
+
+---
+
 ## Still open
 
 Not decided. Today's behaviour stands for each until it is, and each is

@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import design
+from . import design, glass
 from .design import tokens
 
 
@@ -108,17 +108,16 @@ def _docked_path(rect: QRectF, radii, *, closed: bool) -> QPainterPath:
     return path
 
 
-def _paint_docked(painter: QPainter, widget: QWidget, radii, fill: QColor, border: QColor) -> None:
-    """Fill and border a docked surface.
+def _paint_docked(painter: QPainter, widget: "_Surface", radii, fill: QColor, border: QColor) -> None:
+    """Fill and border a docked surface, on its glass: the frame behind it
+    blurred, under the fill (`snipux.glass`).
 
     Alpha, never opacity: the fill is translucent and everything painted on
     it afterwards is fully opaque. `windowOpacity` would wash the icons out
     with the ground.
     """
     rect = QRectF(widget.rect())
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(fill)
-    painter.drawPath(_docked_path(rect, radii, closed=True))
+    widget.glass.paint(painter, _docked_path(rect, radii, closed=True), fill)
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.setPen(border)
     # Half a pixel in, so the 1px border lands on whole logical pixels.
@@ -152,12 +151,17 @@ class _Surface(QWidget):
     It carries the control, so one bound method can listen to them all -- a
     lambda closing over the listener would keep it alive as long as the
     control, which for a chooser without a parent is for ever.
+
+    `glass` is what a surface paints its ground on: the frame behind it,
+    blurred, under the fill (`snipux.glass`). Here, so every surface on the
+    row has one to paint with.
     """
 
     hovered = pyqtSignal(QWidget, bool)
 
     def __init__(self, parent=None, *, clickable: bool = True):
         super().__init__(parent)
+        self.glass = glass.Glass(self)
         self._hovered = False
         self.setMouseTracking(True)
         self.setCursor(
@@ -724,6 +728,9 @@ class _Menu(QWidget):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         metric = tokens.BarMetric
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # Its own window, but still the row's child, which is how its glass
+        # finds the overlay behind it.
+        self.glass = glass.Glass(self)
         column = QVBoxLayout(self)
         column.setContentsMargins(
             metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD
@@ -752,10 +759,11 @@ class _Menu(QWidget):
         metric = tokens.BarMetric
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setBrush(_colour("MENU_BG"))
+        path = glass.rounded(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), metric.MENU_RADIUS)
+        self.glass.paint(painter, path, _colour("MENU_BG"))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(_colour("MENU_BORDER"))
-        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.drawPath(path)
         painter.end()
 
 
@@ -764,7 +772,8 @@ class ChooserRow(_Surface):
 
     Square top corners, 12px bottom corners and no top border, so it hangs
     from the monitor's edge -- the visual claim that it belongs to this
-    monitor. The fill is 94% alpha and every control on it is opaque.
+    monitor. The fill is 94% alpha over a blur of the frame behind it
+    (`snipux.glass`), and every control on it is opaque.
 
     A press anywhere on it, gaps included, is still a press on the row
     (`_Surface`), and its background keeps an ordinary arrow while the
@@ -841,6 +850,8 @@ class _HintPill(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # A plain widget, not a `_Surface`, so it builds its own.
+        self.glass = glass.Glass(self)
         metric = tokens.BarMetric
         pad_v, _pad_h = metric.HINT_PAD
         self._glyph = "crop"
@@ -869,10 +880,11 @@ class _HintPill(QWidget):
         metric = tokens.BarMetric
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setBrush(_colour("HINT_BG"))
+        path = glass.rounded(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), metric.HINT_RADIUS)
+        self.glass.paint(painter, path, _colour("HINT_BG"))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(_colour("HINT_BORDER"))
-        painter.drawRoundedRect(rect, metric.HINT_RADIUS, metric.HINT_RADIUS)
+        painter.drawPath(path)
         _pad_v, pad_h = metric.HINT_PAD
         x = metric.BORDER + pad_h
         _draw_icon(

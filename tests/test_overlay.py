@@ -2936,7 +2936,10 @@ class TestFloatingBarFill:
     alpha component instead of blending against a known backdrop.
     """
 
-    def test_background_pixel_is_painted_at_the_token_alpha(self):
+    def test_background_pixel_is_painted_at_the_fallback_alpha(self):
+        # Built with no overlay behind it, the bar has no frame to blur, so
+        # its fill rises to the fallback's alpha (#70). The token's 94% over
+        # a blur of the frame is in test_glass.py.
         bar = FloatingBar()
         bar.resize(bar.sizeHint())
 
@@ -2945,7 +2948,7 @@ class TestFloatingBarFill:
         # every button, so this is background only.
         sampled = pixel(rendered, bar.width() // 2, 2)
 
-        expected_alpha = round(tokens.BarColor.BAR_BG_ALPHA * 255)
+        expected_alpha = round(tokens.BarColor.FALLBACK_BG_ALPHA * 255)
         assert sampled.alpha() == pytest.approx(expected_alpha, abs=2)
         assert (sampled.red(), sampled.green(), sampled.blue()) == QColor(
             tokens.BarColor.BAR_BG

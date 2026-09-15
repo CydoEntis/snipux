@@ -51,7 +51,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from snipux import design, platform, sensitive, setup_desktop
+from snipux import design, glass, platform, sensitive, setup_desktop
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.flowbars import FlowMenu
@@ -1019,7 +1019,16 @@ class _Chrome(QWidget):
 
     `chooser._Surface` is this same fix on the pre-snip chooser (SNX-108);
     together they are the whole of the overlay's own chrome.
+
+    Each also carries its `glass` (`snipux.glass`): the blurred crop of the
+    frozen frame behind it, which a surface paints under its fill by
+    calling `self.glass.paint` from its `paintEvent`. It lives here so that
+    chrome built on this class has it without asking.
     """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.glass = glass.Glass(self)
 
     def mousePressEvent(self, event) -> None:
         event.accept()
@@ -1417,7 +1426,8 @@ class FloatingBar(_Chrome):
     A real child widget of the window it sits over, built from real buttons
     -- never painted inside that window's paintEvent -- which is what gives
     every control a tooltip and hover state for free. `paintEvent` paints the
-    glass as a translucent *brush*, not a reduced-*opacity* widget:
+    glass -- the frame behind the bar blurred, under a translucent fill
+    (`snipux.glass`) -- as a *brush*, not a reduced-*opacity* widget:
     `setWindowOpacity` would dim every glyph along with the background.
 
     The bar can be dragged by its own surface -- the padding round the row,
@@ -1879,17 +1889,17 @@ class FloatingBar(_Chrome):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         metric = design.tokens.BarMetric
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = glass.rounded(rect, metric.RADIUS)
 
         # design.bar_color("BAR_BG") already carries its 94% alpha --
-        # painted here as a translucent *fill*, never as reduced *widget*
-        # opacity, so every child painted after this stays fully opaque.
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.bar_color("BAR_BG"))
-        painter.drawRoundedRect(rect, metric.RADIUS, metric.RADIUS)
+        # painted here as a translucent *fill* over the blurred frame, never
+        # as reduced *widget* opacity, so every child painted after this
+        # stays fully opaque.
+        self.glass.paint(painter, path, design.bar_color("BAR_BG"))
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(design.bar_color("BAR_BORDER"))
-        painter.drawRoundedRect(rect, metric.RADIUS, metric.RADIUS)
+        painter.drawPath(path)
         painter.end()
 
     # -- dragging (#50) ----------------------------------------------------
@@ -2385,9 +2395,7 @@ class ToolHintStrip(_Chrome):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bg = design.color("BAR_BG")
         bg.setAlphaF(self._BG_ALPHA)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        painter.drawRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
+        self.glass.paint(painter, glass.rounded(QRectF(self.rect()), self._RADIUS), bg)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(design.color("BAR_BORDER"))
         painter.drawRoundedRect(
@@ -2933,13 +2941,11 @@ class StylePopover(_Chrome):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         metric = design.tokens.BarMetric
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.bar_color("MENU_BG"))
-        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        path = glass.rounded(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), metric.MENU_RADIUS)
+        self.glass.paint(painter, path, design.bar_color("MENU_BG"))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(design.bar_color("MENU_BORDER"))
-        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.drawPath(path)
         painter.end()
 
 
@@ -3404,9 +3410,7 @@ class CaptureModePopover(_Chrome):
 
         bg = QColor(design.tokens.Color.BAR_BG)
         bg.setAlphaF(self._BG_ALPHA)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        self.glass.paint(painter, glass.rounded(rect, metric.MENU_RADIUS), bg)
 
         # DIVIDER is the same #ffffff/12% pair the spec's popover border
         # uses -- reused rather than re-typed, the same precedent
@@ -3685,13 +3689,11 @@ class FamilyMenu(_Chrome):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         metric = design.tokens.BarMetric
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.bar_color("MENU_BG"))
-        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        path = glass.rounded(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), metric.MENU_RADIUS)
+        self.glass.paint(painter, path, design.bar_color("MENU_BG"))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(design.bar_color("MENU_BORDER"))
-        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.drawPath(path)
         painter.end()
 
 
@@ -4001,13 +4003,11 @@ class WatermarkMenu(_Chrome):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         radius = design.tokens.WatermarkMetric.MENU_RADIUS
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.bar_color("MENU_BG"))
-        painter.drawRoundedRect(rect, radius, radius)
+        path = glass.rounded(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius)
+        self.glass.paint(painter, path, design.bar_color("MENU_BG"))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(design.bar_color("MENU_BORDER"))
-        painter.drawRoundedRect(rect, radius, radius)
+        painter.drawPath(path)
         painter.end()
 
 
@@ -4105,10 +4105,10 @@ class HintHUD(_Chrome):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        # A flat, translucent fill -- per the Qt notes' "cheaper fallback:
-        # raise the fill alpha... and skip the blur," the same trade-off
-        # FloatingBar/StylePopover/CaptureModePopover already make for their
-        # own backdrop-filter blur.
+        # A flat, translucent fill with no glass under it. The redesign's
+        # spec gives the HUD a 3px backdrop blur, but the glass (#70) is the
+        # bars handoff's, for its bars and menus; this banner predates it
+        # and is off unless asked for.
         painter.fillRect(QRectF(self.rect()), design.color("HUD_BG"))
         painter.end()
 
@@ -6122,6 +6122,20 @@ class OverlayWindow(QWidget):
         """
         return QRectF(rect).translated(self._frame.logical_origin)
 
+    def glass_backdrop(self) -> "tuple[QImage, QRectF]":
+        """What the chrome over this window is glass over (`snipux.glass`):
+        the frozen frame's image, and the rect of this window it is painted
+        across -- window-local logical, and all of it, as `paintEvent`'s
+        layer 1 draws it.
+
+        The frame as captured rather than `_base_layer_image`, and without
+        the scrim: a crop of it holds for the whole snip, where one taken
+        from either of those would be retaken with every blur mark
+        committed or every re-frame of the selection that passed under a
+        bar. docs/design/bars/divergences.md 22.
+        """
+        return self._frame.image, QRectF(self.rect())
+
     def _chrome_bounds(self) -> QRectF:
         """The rect every piece of floating chrome -- bar, popovers, menus
         -- must stay inside, in this window's own local coordinates.
@@ -7020,6 +7034,8 @@ class OverlayWindow(QWidget):
             )
         ]
         menu = FlowMenu(rows, current, design.tokens.FlowMetric.MENU_W_DEST, None)
+        # No parent to find this window through, so its glass is told.
+        menu.glass.set_host(self)
         menu.chosen.connect(self._on_destination_chosen)
         anchor = self._bar._action
         top_left = anchor.mapToGlobal(anchor.rect().topLeft())

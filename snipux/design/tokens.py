@@ -1328,6 +1328,11 @@ class BarMetric:
     SHADOW_BLUR      = 40
     SHADOW_DY        = 4
 
+    # The glass under every bar and menu: the frame behind it blurred by
+    # this radius (snipux/glass.py). The bars handoff names its
+    # backdrop-filter without a radius; 16 is the flow handoff's.
+    BACKDROP_BLUR    = 16
+
     # Placement: centred on the selection, BAR_OFFSET_Y below it, and at
     # least BAR_EDGE_MARGIN inside the selection's monitor. The handoff's
     # BAR_BOTTOM_ROOM clamp is deliberately absent -- see divergences.md 8.
@@ -1470,6 +1475,9 @@ class BarColor:
     TAB_SEP_ALPHA        = 0.16
     SHADOW               = "#000000"   # the row's drop shadow
     SHADOW_ALPHA         = 0.90
+    # Where no blur can be had under the glass, a fill thinner than this
+    # rises to it and nothing else changes (README, "Qt notes").
+    FALLBACK_BG_ALPHA    = 0.97
 
 
 # The bar's slots, left to right. The order is a gradient of consequence --

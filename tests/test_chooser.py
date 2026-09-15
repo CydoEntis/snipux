@@ -1477,9 +1477,12 @@ class TestTheCollapsedTab:
 
 
 class TestTheRowIsAFillNotAnOpacity:
-    """Alpha is not opacity: the row is a 94%-alpha fill with fully opaque
+    """Alpha is not opacity: the row is a translucent fill with fully opaque
     controls. `windowOpacity` would wash the icons out with the ground; the
-    tab's 70% is the one real opacity."""
+    tab's 70% is the one real opacity.
+
+    Built here with no overlay behind it, there is no frame to blur, so the
+    fill is the fallback's (#70). Its 94% over a blur is in test_glass.py."""
 
     def test_nothing_makes_the_row_translucent_as_a_whole(self):
         chooser = Chooser(parent=None)
@@ -1488,7 +1491,7 @@ class TestTheRowIsAFillNotAnOpacity:
         assert not isinstance(chooser.row.graphicsEffect(), QGraphicsOpacityEffect)
         assert isinstance(chooser.tab.graphicsEffect(), QGraphicsOpacityEffect)
 
-    def test_its_ground_is_94_percent_and_its_controls_opaque(self):
+    def test_its_ground_is_the_fallbacks_and_its_controls_opaque(self):
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
         # The shadow would darken the ground under it; the fill is the point.
@@ -1507,7 +1510,7 @@ class TestTheRowIsAFillNotAnOpacity:
             + 2 * METRIC.WELL_PAD + 2 * METRIC.BTN + METRIC.WELL_GAP + METRIC.GAP / 2,
             METRIC.ROW_H / 2,
         )
-        assert at(gap).alphaF() == pytest.approx(tokens.BarColor.BAR_BG_ALPHA, abs=0.02)
+        assert at(gap).alphaF() == pytest.approx(tokens.BarColor.FALLBACK_BG_ALPHA, abs=0.01)
         dot = QPointF(chooser.row.record.mapTo(chooser.row, QPoint(METRIC.BTN // 2, METRIC.BTN // 2)))
         assert at(dot).alphaF() == pytest.approx(1.0)
         assert at(dot).name() == tokens.BarColor.REC_ON_FG

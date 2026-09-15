@@ -40,7 +40,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
-from snipux import design
+from snipux import design, glass
 from snipux.design import tokens
 
 
@@ -480,6 +480,10 @@ class FlowMenu(QWidget):
             Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # A top-level window with no parent has no host to find: a caller
+        # opening this over the frozen frame names it (`Glass.set_host`).
+        # Anywhere else the menu's own 98% already clears the fallback's.
+        self.glass = glass.Glass(self)
         self._rows = list(rows)
         self._current = current
         self._footnote = footnote
@@ -567,11 +571,8 @@ class FlowMenu(QWidget):
         metric = tokens.FlowMetric
 
         surface = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        path = QPainterPath()
-        path.addRoundedRect(surface, metric.MENU_RADIUS, metric.MENU_RADIUS)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.flow_color("MENU_BG"))
-        painter.drawPath(path)
+        path = glass.rounded(surface, metric.MENU_RADIUS)
+        self.glass.paint(painter, path, design.flow_color("MENU_BG"))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(design.flow_color("MENU_BORDER"))
         painter.drawPath(path)
