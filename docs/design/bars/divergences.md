@@ -163,13 +163,14 @@ decides it.
 
 ---
 
-## 9 · A bar with no room goes to another monitor, and can be dragged
+## 9 · A bar with no room stays on its monitor, and can be dragged off it
 
 **The handoff's** only answer for a bar that does not fit is the clamp in §8.
 
-**We send the bar to another monitor when there is one, and make it
-draggable** (#50). Where it is dragged to in that case is remembered. There
-is no key to hold it out of the way.
+**We make the bar draggable** (#50), onto another monitor too, and remember
+where it is dragged to when the selection leaves it no room. There is no key
+to hold it out of the way. For a while the bar also went to another monitor
+on its own; #79 took that back.
 
 ### Why
 
@@ -182,6 +183,13 @@ escape hatch when the automatic choice is wrong. That is #63's "another
 monitor, or wherever the user drags it", with the order between the two
 settled. The hold-to-hide key is dropped.
 
+In use, the automatic move put the controls a monitor away from the selection
+they were for, pinned to the bottom of that monitor beside the bezel, and it
+was reported as bad UX (#79). The bar now stays at the foot of the selection
+on its own monitor, where the eye already is. A drag is how it gets out of
+the way, onto another monitor if that is where it is wanted, and it is
+remembered from then on.
+
 #50 lands after the stills bar (#67), so its placement rules are written once,
 against the new bar.
 
@@ -193,19 +201,15 @@ In priority order:
    says. A drag there moves the bar for that selection only, keeps it on the
    selection's monitor and is not remembered. Neither a remembered place nor
    another monitor can put the bar over a selection that had room.
-2. **With no room, on a desk where the overlay covers more than one
-   monitor,** the bar goes to the nearest other monitor that none of the
-   selection is on. Nearest is measured between monitor centres, the rule the
-   recording bar already uses. On that monitor the bar sits at the place
-   nearest to where it would otherwise have covered the selection. That is
-   just across the bezel, so a trip to a tool is a short hop, and beside a
-   monitor of the same height it is at the bottom, where the bar always sits.
-   A fixed place such as bottom-centre would be a whole monitor's height from
-   the work whenever that monitor is below the selection's.
-3. **With no room on a single monitor** -- including Wayland, where the
-   overlay covers only one output -- the bar sits inside that monitor against
-   its bottom margin, as before.
-4. **A drag with no room is remembered, and wins over 2 and 3 next time**, so
+2. **With no room,** the bar sits inside the selection's own monitor against
+   its bottom margin, centred on the selection, on a desk with any number of
+   monitors -- including Wayland, where the overlay covers only one output.
+   Until #79, a desk with another monitor sent the bar there instead.
+3. **A drag with no room can carry the bar onto another monitor**: the
+   nearest one that none of the selection is on and that can hold the bar,
+   nearest measured between monitor centres, the rule the recording bar
+   already uses.
+4. **A drag with no room is remembered, and wins over 2 next time**, so
    the automatic choice and the user's correction of it never take turns. The
    drag can carry the bar between the selection's monitor and the other one.
    What is remembered is which of the two, relative to the selection's, and

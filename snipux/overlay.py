@@ -1446,10 +1446,11 @@ class FloatingBar(_Chrome):
     itself and never calls `reposition`, so its bar does not drag: a drag
     has nothing to be clamped to until then.
 
-    A selection that leaves the bar no room beside it, on a desk with
-    another monitor the host covers, sends the bar to that monitor, and a
-    drag can carry it between the two (#50). `current_bounds` says which
-    usable area it is in, so the host can keep what hangs off it there too.
+    A selection that leaves the bar no room beside it keeps the bar on the
+    selection's monitor, against its bottom margin (#79). On a desk with
+    another monitor the host covers, a drag can carry it between the two
+    (#50). `current_bounds` says which usable area it is in, so the host can
+    keep what hangs off it there too.
     """
 
     # A drag of the bar itself crossed the drag threshold, and moved the
@@ -1545,8 +1546,8 @@ class FloatingBar(_Chrome):
         # back to a plain resize.
         self._last_selection: QRect | None = None
         self._last_bounds: QRectF | None = None
-        # The usable area of the monitor the bar is sent to when the
-        # selection leaves it no room on its own (#50), in the parent's
+        # The usable area of the monitor a drag can carry the bar to when
+        # the selection leaves it no room on its own (#50), in the parent's
         # logical coordinates like `_last_bounds`, or None on a desk with no
         # such monitor -- and which of the two the bar is on now.
         self._last_elsewhere: QRectF | None = None
@@ -1942,8 +1943,8 @@ class FloatingBar(_Chrome):
     def current_bounds(self) -> "QRectF | None":
         """The usable area the bar is on now, in the parent's logical
         coordinates: the selection's own monitor's, or the other monitor's
-        once the bar has been sent or dragged there. None until `reposition`
-        has placed it.
+        once a drag, or a place remembered from one, has put the bar there.
+        None until `reposition` has placed it.
 
         What hangs off the bar is clamped into this. Clamped into the
         selection's monitor on behalf of a bar on the next one, a menu would
@@ -2067,11 +2068,11 @@ class FloatingBar(_Chrome):
         A drag made while the selection has no room beside it is
         remembered (`positionRemembered`): the monitor it ended on, relative
         to the selection's, and the spot on it. From then on it is the
-        answer whenever a selection leaves no room, over the automatic move
-        to another monitor, so the two never take turns. One made beside a
-        selection with room is kept for that selection only: it moved the
-        bar for this snip, and remembering it would change where the bar
-        goes for a whole-monitor snip that it was never about.
+        answer whenever a selection leaves no room, over the placement at the
+        foot of the selection's monitor, so the two never take turns. One
+        made beside a selection with room is kept for that selection only:
+        it moved the bar for this snip, and remembering it would change
+        where the bar goes for a whole-monitor snip that it was never about.
         """
         dragged = self._dragging
         self._drag_press = None
@@ -2101,9 +2102,10 @@ class FloatingBar(_Chrome):
         for this same selection, and otherwise where `placement` says.
 
         `bounds` is the usable area of the selection's own monitor.
-        `elsewhere` is the usable area of the monitor the bar goes to when
-        the selection leaves it no room there, or None on a desk with no
-        such monitor. All three are in the parent's logical coordinates.
+        `elsewhere` is the usable area of the monitor a drag can carry the
+        bar to when the selection leaves it no room there, or None on a desk
+        with no such monitor. All three are in the parent's logical
+        coordinates.
 
         Kept apart from `placement` so the rule and applying it stay two
         things: a position the user chose replaces the one, not the other.
@@ -2167,21 +2169,15 @@ class FloatingBar(_Chrome):
         With room on neither side the selection is essentially the whole
         monitor, and anywhere on it covers some of it (#50). Then, in turn:
 
-        - A `remembered` drag wins, on the monitor it names (`resolve`).
-          Were the automatic move below allowed to override it, the user's
-          correction and the rule would take turns on every snip.
-        - `elsewhere` -- the usable area of another monitor, which none of
-          the selection is on -- takes the bar, at the place on it nearest
-          to where the bar would otherwise have sat over the selection. That
-          is just across the bezel from the work, so each trip from the
-          selection to a tool is a short hop rather than a monitor's width.
-          Beside a monitor of the same height it keeps the bar at the
-          bottom, where it always sits. And it is one rule for a monitor
-          beside, above, below or offset, where a fixed place such as
-          bottom-centre would put the bar a whole monitor's height from a
-          selection on the monitor above it.
+        - A `remembered` drag wins, on the monitor it names (`resolve`) --
+          `elsewhere`, when that drag ended on another monitor. Were the
+          placement below allowed to override it, the user's correction and
+          the rule would take turns on every snip.
         - Otherwise the bar is held inside `bounds` against its bottom
-          margin, centred on the selection.
+          margin, centred on the selection, over the foot of the selection.
+          It once went to `elsewhere` on its own, just across the bezel
+          (#50), and that put the controls a monitor away from the work they
+          were for (#79). Only a drag takes it there now.
 
         None of that is consulted while there is room beside the selection,
         so neither a remembered place nor another monitor can take the bar
@@ -2198,12 +2194,7 @@ class FloatingBar(_Chrome):
         if remembered is not None:
             return FloatingBar.resolve(remembered, bounds, elsewhere, size)
         top = max(bounds.top() + margin, bounds.bottom() - margin - size.height())
-        if elsewhere is None:
-            return own, QPoint(round(left), round(top))
-        return (
-            setup_desktop.BAR_ON_OTHER_MONITOR,
-            FloatingBar.clamped(QPointF(left, top), elsewhere, size),
-        )
+        return own, QPoint(round(left), round(top))
 
     @staticmethod
     def resolve(
@@ -6201,11 +6192,10 @@ class OverlayWindow(QWidget):
         That monitor is then inset by whatever the desktop's own chrome
         reserves on it (`_usable_area`). The close button and the toast are
         clamped into this rect. So are the bar, its menus and tool hint and
-        the popovers, through `_bar_bounds` -- except while a selection with
-        no room beside it has sent the bar to another monitor (#50). A dock
-        paints over this window: before the inset, a selection reaching the
-        bottom of the monitor put the whole bar under a bottom dock, where
-        none of it could be clicked.
+        the popovers, through `_bar_bounds` -- except while a drag has taken
+        the bar to another monitor (#50). A dock paints over this window:
+        before the inset, a selection reaching the bottom of the monitor put
+        the whole bar under a bottom dock, where none of it could be clicked.
         """
         return self._to_local_rect(self._usable_area(self._chrome_monitor()))
 
@@ -6237,8 +6227,8 @@ class OverlayWindow(QWidget):
         menus, the style popover, the tool hint and the capture popover -- must
         stay inside, in this window's own local logical coordinates.
 
-        `_chrome_bounds`, unless a selection with no room beside it has sent
-        the bar to another monitor, or a drag has carried it there (#50).
+        `_chrome_bounds`, unless a drag has carried the bar to another
+        monitor, or a place remembered from one has put it there (#50).
         Then it is that monitor's usable area, `FloatingBar.current_bounds`:
         a menu clamped into the selection's monitor on behalf of a bar on
         the next one would open across the gap between the two, where
@@ -6252,9 +6242,9 @@ class OverlayWindow(QWidget):
         return QRectF(bounds) if bounds is not None else self._chrome_bounds()
 
     def _bar_elsewhere(self) -> QRectF | None:
-        """The usable area of the monitor the stills bar goes to when the
-        selection leaves it no room on its own, in this window's own local
-        logical coordinates, or None when there is no such monitor.
+        """The usable area of the monitor a drag can carry the stills bar to
+        when the selection leaves it no room on its own, in this window's
+        own local logical coordinates, or None when there is no such monitor.
 
         The monitor nearest the selection's (`_chrome_monitor`) that none of
         the selection reaches into, as `other_screens_nearest_first` already
@@ -8674,12 +8664,13 @@ def other_screens_nearest_first(
 
     Where a bar goes when the monitor it belongs on leaves it nowhere to
     sit: the recording bar when the whole of `home` is being recorded
-    (`app`), and the stills bar when a selection is essentially the whole
-    of `home` (`OverlayWindow._bar_elsewhere`, #50). Nearest, so the bar
-    turns up beside the work rather than three displays away, where it is a
-    control nobody looks at. A monitor `rect` reaches into is excluded
-    outright: a bar there would be in the recording, which is the one thing
-    placement may never do, or over the very pixels being marked up.
+    (`app`), and where a drag can take the stills bar when a selection is
+    essentially the whole of `home` (`OverlayWindow._bar_elsewhere`, #50).
+    Nearest, so the bar turns up beside the work rather than three displays
+    away, where it is a control nobody looks at. A monitor `rect` reaches
+    into is excluded outright: a bar there would be in the recording, which
+    is the one thing placement may never do, or over the very pixels being
+    marked up.
 
     Near is measured between monitor centres, across plus down.
     """

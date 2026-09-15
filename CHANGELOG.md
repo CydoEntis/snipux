@@ -5,6 +5,13 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Changed
+
+- **The toolbar stays on the monitor you are snipping.** When a selection
+  filled most of a monitor, the toolbar jumped to the next monitor over. Now
+  it sits along the bottom of your selection. Drag it anywhere, another monitor
+  included, and it remembers the spot.
+
 ## 0.7.1 — 2026-09-15
 
 The shapes and redaction menus open from a second click, Crop is gone, and
