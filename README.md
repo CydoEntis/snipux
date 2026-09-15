@@ -8,9 +8,9 @@ out the parts that shouldn't be shared, and copy or save it. Or record the same
 region to a video file and trim it down. The workflow Windows gives you for
 free, on Linux too — and a slightly better one back on Windows.
 
-MIT licensed, and installed from this repository with pipx — see
-[Install](#install). There is no PyPI package and no Windows installer;
-both are deliberate, and both are explained where they'd be missed.
+MIT licensed, and installed with `pip install snipux` — see
+[Install](#install). There is no Windows installer: that is deliberate, and
+explained where it'd be missed.
 
 ## Platform support
 
@@ -108,12 +108,10 @@ pipx, no file to download by hand.
 Then, in PowerShell:
 
 ```powershell
-py -m pip install https://github.com/CydoEntis/snipux/archive/refs/heads/main.tar.gz
+py -m pip install snipux
 py -m snipux
 ```
 
-pip fetches the code from this page itself — the archive endpoint GitHub
-already serves, so there is nothing to be sent and no credentials involved.
 The first line takes a few minutes because it pulls down Qt. The second
 starts Snipux.
 
@@ -186,10 +184,11 @@ uninstalling first leaves two copies fighting over one Ctrl+Alt+S
 registration and two Startup entries.
 
 Either way `--update` runs exactly this on their behalf — it is not a second
-update mechanism, just the same one without a URL to keep somewhere findable:
+update mechanism, just the same one without a command to keep somewhere
+findable:
 
 ```powershell
-py -m pip install --upgrade https://github.com/CydoEntis/snipux/archive/refs/heads/main.tar.gz
+py -m pip install --upgrade snipux
 ```
 
 Nothing else to run: the shortcut and hotkey point at a location that does not
@@ -202,8 +201,10 @@ change between versions.
 > number** in `pyproject.toml`. Left the same, pip decides the requirement is
 > already satisfied and changes nothing — no error — so a fixed build
 > published under an old number is a silent no-op and the bug gets reported a
-> second time. (`--force-reinstall` overrides it, but it also re-downloads Qt,
-> so it is not what to tell people.)
+> second time. `.github/workflows/release.yml` refuses to publish a tag whose
+> number disagrees with `pyproject.toml`, which is the half of this a person
+> can get wrong. (`--force-reinstall` overrides the comparison, but it also
+> re-downloads Qt, so it is not what to tell people.)
 
 **There is no update check.** Snipux never phones home, so nobody is told a new
 version exists — they update when they choose to. One is buildable now that
@@ -215,11 +216,16 @@ first is tagged releases to compare against.
 
 ### Installing a specific version, or offline
 
-The URL above tracks `main`. Any tag, branch or commit works the same way by
-swapping the last path segment:
+Any published version installs by name:
 
 ```powershell
-py -m pip install https://github.com/CydoEntis/snipux/archive/refs/tags/v0.2.0.tar.gz
+py -m pip install snipux==0.5.0
+```
+
+An unreleased commit still installs from this repository directly:
+
+```powershell
+py -m pip install https://github.com/CydoEntis/snipux/archive/refs/heads/main.tar.gz
 ```
 
 For a machine with no network, or to pin exactly what someone runs, build a

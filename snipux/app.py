@@ -664,9 +664,12 @@ def _print_backends(registry, heading: str | None = None) -> None:
 # Where `--update` installs from. `main` rather than a release tag: there
 # are no tagged releases, and this is the same URL the README hands out, so
 # the two cannot describe different things.
-UPDATE_URL = (
-    "https://github.com/CydoEntis/snipux/archive/refs/heads/main.tar.gz"
-)
+# What `--update` installs. The package name, not a URL: snipux is on PyPI,
+# so pip resolves the newest release itself. This also fixes what the long
+# GitHub archive URL could not -- pip compares the published version against
+# the installed one, so an update that is already current says so instead of
+# re-downloading Qt to land the same code.
+UPDATE_TARGET = "snipux"
 
 
 def run_update(runner=None) -> int:
@@ -687,6 +690,10 @@ def run_update(runner=None) -> int:
     code; only the first leaves the dependencies alone, and forcing would
     re-download the whole of Qt on every update.
 
+    Someone installed from the old GitHub archive URL is upgraded onto the
+    PyPI package by this: same distribution name, so pip replaces it in
+    place rather than leaving two.
+
     Refuses outright in a PyInstaller build, where `sys.executable` is
     snipux.exe rather than an interpreter: `-m pip` would fail there with
     something unreadable, and a frozen build is replaced by downloading a
@@ -703,8 +710,8 @@ def run_update(runner=None) -> int:
         )
         return 1
 
-    command = [sys.executable, "-m", "pip", "install", "--upgrade", UPDATE_URL]
-    print(f"Updating from {UPDATE_URL}")
+    command = [sys.executable, "-m", "pip", "install", "--upgrade", UPDATE_TARGET]
+    print(f"Updating {UPDATE_TARGET} from PyPI")
     run = runner if runner is not None else subprocess.call
     try:
         code = run(command)

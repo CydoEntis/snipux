@@ -4812,8 +4812,11 @@ class TestTheUpdateCommand:
 
         app.run_update(runner=runner)
 
-        assert calls[0][-1] == app.UPDATE_URL
-        assert app.UPDATE_URL.startswith("https://github.com/")
+        assert calls[0][-1] == app.UPDATE_TARGET
+        # The package name, not a URL: pip resolves the newest release from
+        # PyPI, and can tell an already-current install from an old one.
+        assert app.UPDATE_TARGET == "snipux"
+        assert "://" not in app.UPDATE_TARGET
 
     def test_success_says_what_to_restart(self, monkeypatch, capsys):
         _calls, runner = self._ran(monkeypatch)

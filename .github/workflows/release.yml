@@ -1,0 +1,72 @@
+# Pushing a v* tag publishes that version: the wheel and sdist go to PyPI
+# and onto the GitHub Release. Releasing was a person typing commands
+# before this, which is fine for one person and nothing else.
+#
+# No API token is stored. PyPI's trusted publishing verifies the workflow's
+# own OIDC identity (repository, workflow file, ref), which is why the
+# `id-token: write` permission below is load-bearing rather than
+# boilerplate -- and why the PyPI side has to name this file exactly.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches the version in pyproject.toml
+        # A tag that disagrees with the package version publishes something
+        # nobody can install by the name they were given.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$tag" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version $version in pyproject.toml"
+            exit 1
+          fi
+
+      - name: Build the wheel and sdist
+        run: |
+          python -m pip install build
+          python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # what trusted publishing authenticates with
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github_release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # to attach the files to the release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Attach the files to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
