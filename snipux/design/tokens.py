@@ -250,10 +250,6 @@ class Shadow:
 # the stills bar's tokens at the end of this file (`STILLS_SLOTS`, `SHAPES`,
 # `REDACTIONS`, `TOOLS`, `SHORTCUTS`).
 
-# Tools whose settings tray is the colour + stroke tray: every tool that puts
-# ink down, which is every shape sibling, Crop included.
-DRAW_TOOLS = ["pen", "highlighter", "arrow", "rect", "step", "text", "ellipse", "line", "crop"]
-
 # The third field is the note under each row in the mode menu. It says
 # *what gets captured*, because Window and Full screen are the two that
 # read as the same thing until you have used both -- "if you're capturing a
@@ -1380,6 +1376,33 @@ class BarMetric:
     MENU_NOTE_GAP    = 2           # spec markup: label to note
     MENU_W_SHAPES    = 186
     MENU_W_REDACT    = 244         # widest: rows carry a security note
+    MENU_W_STYLE     = 216
+
+    # The style popover's two rows -- spec markup. Border-box, like every
+    # menu: MENU_W_STYLE is the outside edge, padding and border included.
+    STYLE_PAD_V      = 9
+    STYLE_PAD_H      = 10
+    STYLE_ROW_GAP    = 9           # colour row to controls row
+    STYLE_CONTROL_GAP = 7          # between the controls in the second row
+    SWATCH_H         = 21          # seven swatches and `+`, sharing the row's width
+    SWATCH_GAP       = 4
+    SWATCH_RADIUS    = 6
+    SWATCH_RING      = 1.5         # the light ring round the picked swatch
+    SWATCH_RING_GAP  = 2           # the dark gap between that ring and the colour
+    CUSTOM_ICON      = 11
+    CYCLE_W          = 30          # fill and line: click-through buttons
+    CYCLE_H          = 24
+    CYCLE_RADIUS     = 7
+    FILL_GLYPH_W     = 17
+    FILL_GLYPH_H     = 11
+    FILL_GLYPH_RADIUS = 2
+    FILL_GLYPH_BORDER = 1.5
+    DASH_GLYPH_W     = 18          # a 20px line, 1px in from each end
+    DASH_GLYPH_STROKE = 2
+    SLIDER_TRACK     = 4
+    SLIDER_THUMB     = 13
+    READOUT_W_SIZE   = 30          # "26px" without the row reflowing
+    READOUT_W_STRENGTH = 18        # "20"
 
     # The style dot's diameter is the stroke at this scale, clamped -- spec
     # markup. The highlighter's own stroke paints wider, so its dot does too.
@@ -1388,6 +1411,8 @@ class BarMetric:
     STYLE_DOT_MIN    = 6
     STYLE_DOT_MAX    = 20
     STYLE_DOT_RING   = 1
+    # An outline-only shape's dot is a ring this wide, inside its diameter.
+    STYLE_DOT_OUTLINE = 2
 
     # Placement: centred on the selection, BAR_OFFSET_Y below it, and at
     # least BAR_EDGE_MARGIN inside the selection's monitor. The handoff's
@@ -1404,6 +1429,7 @@ class BarFont:
     MENU_LABEL       = (12.0, 500)
     MENU_NOTE        = (10.5, 400)
     MENU_SHORTCUT    = (10.0, 400)  # mono
+    READOUT          = (11.0, 500)  # mono: "5px", "8"
 
 
 class BarColor:
@@ -1464,6 +1490,29 @@ class BarColor:
     STYLE_DOT_RING       = "#ffffff"   # spec markup
     STYLE_DOT_RING_ALPHA = 0.22
     DISABLED_OPACITY     = 0.34        # the style dot, for a tool with nothing to style
+
+    # The style popover -- spec markup.
+    SWATCH_BORDER        = "#ffffff"
+    SWATCH_BORDER_ALPHA  = 0.20
+    SWATCH_RING          = "#f1f3e8"   # the picked swatch's light ring
+    SWATCH_RING_GAP      = "#1a1c18"   # and the dark gap inside it
+    CUSTOM_BORDER        = "#ffffff"   # dashed
+    CUSTOM_BORDER_ALPHA  = 0.32
+    CUSTOM_FG            = "#a8afa0"
+    CYCLE_BG             = "#000000"
+    CYCLE_BG_ALPHA       = 0.34
+    CYCLE_HOVER_BG       = "#ffffff"
+    CYCLE_HOVER_BG_ALPHA = 0.10
+    # The glyph a fill or line button draws its state in. The spec's is its
+    # accent as a glyph, #eaff7a; this is ours, `FlowColor.ACCENT_SOFT`, for
+    # the reason ACCENT above gives.
+    CYCLE_GLYPH          = "#c3e399"
+    CYCLE_GLYPH_WASH     = "#c3e399"   # "Outline and filled": the glyph's fill
+    CYCLE_GLYPH_WASH_ALPHA = 0.30
+    SLIDER_TRACK         = "#ffffff"
+    SLIDER_TRACK_ALPHA   = 0.20
+    SLIDER_THUMB         = "#f1f3e8"
+    READOUT_FG           = "#c6cab8"
 
 
 # The bar's slots, left to right. The order is a gradient of consequence --
@@ -1530,6 +1579,44 @@ SHORTCUTS = {
 # The redaction family has one key between three siblings, and it cycles.
 REDACTION_KEY = "B"
 
+# Which style popover sections a tool shows, in the order they are laid out.
+# Anything absent is not rendered -- never rendered-but-inert. Crop is ours
+# (divergences.md 7): a dashed box whose dashes are its own, so it takes a
+# colour and a stroke and no line style.
+STYLE_SECTIONS = {
+    "pen":         ["color", "size"],
+    "highlighter": ["color", "size"],
+    "rect":        ["color", "fill", "dash", "size"],
+    "ellipse":     ["color", "fill", "dash", "size"],
+    "line":        ["color", "dash", "size"],
+    "arrow":       ["color", "dash", "size"],
+    "crop":        ["color", "size"],
+    "step":        ["color", "size"],
+    "text":        ["color", "size"],
+    "blur":        ["strength"],
+    "pixelate":    ["strength"],
+    "blackout":    [],
+    "eraser":      [],
+}
+
 # Nothing on the style dot can change what these draw, so it dims and does
 # not open for them.
-UNSTYLED_TOOLS = ["blackout", "eraser"]
+UNSTYLED_TOOLS = [tool for tool, sections in STYLE_SECTIONS.items() if not sections]
+
+# Style is per tool and remembered for the session, so a dashed red box never
+# turns the pen red. The handoff's first-run seed, as it wrote it.
+DEFAULT_STYLE = {
+    "pen":         {"color": "#e3ff4f", "size": 5, "dash": "solid", "fill": "outline"},
+    "highlighter": {"color": "#f59e0b", "size": 5, "dash": "solid", "fill": "outline"},
+    "rect":        {"color": "#ef4444", "size": 3, "dash": "dashed", "fill": "both"},
+    "ellipse":     {"color": "#38bdf8", "size": 3, "dash": "solid", "fill": "outline"},
+    "line":        {"color": "#e3ff4f", "size": 3, "dash": "solid", "fill": "outline"},
+    "arrow":       {"color": "#ef4444", "size": 3, "dash": "solid", "fill": "outline"},
+    "step":        {"color": "#ef4444", "size": 5, "dash": "solid", "fill": "filled"},
+    "text":        {"color": "#ffffff", "size": 5, "dash": "solid", "fill": "outline"},
+}
+# What the spec seeds every tool DEFAULT_STYLE leaves out with -- Crop, here.
+DEFAULT_STYLE_OTHER = {"color": "#e3ff4f", "size": 5, "dash": "solid", "fill": "outline"}
+
+STROKE_RANGE   = (1, 26)
+STRENGTH_RANGE = (2, 20)

@@ -68,6 +68,23 @@ if sys.platform == "win32":
 import pytest
 
 from snipux import setup_desktop
+from snipux.marks import session_styles
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tool_styles():
+    """Every test starts from the first-run per-tool style.
+
+    `marks.session_styles` outlives every window by design -- the style set
+    on one snip is still set on the next -- which within a test run means it
+    would also outlive every test, and one test's red pen would be the next
+    one's.
+    """
+    session_styles.reset()
+    try:
+        yield
+    finally:
+        session_styles.reset()
 
 
 @pytest.fixture(autouse=True)

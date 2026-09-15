@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import QApplication
 
 from snipux import shapes
 from snipux.design import tokens
+from snipux.marks import session_styles
 from snipux.overlay import FloatingBar
 from snipux.review import ImageCanvas, ReviewWindow
 
@@ -499,94 +500,160 @@ class TestEveryToolSurvivesAPaint:
         assert window._canvas._composited() is not first
 
 
-class TestTraysAreReachable:
+class TestTheStylePopoverIsReachable:
     """The other half of the report: the tools were selectable but not
-    configurable -- no pen size, no brush size, no colour -- because the
-    trays that set those live on the overlay window, and the review window
-    had none. The bar's style dot is what opens them now.
+    configurable -- no pen size, no brush size, no colour -- because what
+    set those lived on the overlay window, and the review window had none.
+    It gets the overlay's own style popover (#68), from the same style dot,
+    over the same per-tool style.
     """
 
     def _editing(self) -> ReviewWindow:
-        window = ReviewWindow(make_image())
+        window = ReviewWindow(make_image(600, 400))
         window.resize(1020, 700)
         window._set_annotating(True)
+        window._canvas.resize(1020, 600)
         return window
 
-    def test_the_trays_stay_down_until_the_style_dot_opens_them(self):
+    @staticmethod
+    def _drag(window: ReviewWindow, tool: str):
+        window._bar.select_tool(tool)
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 400, 300))
+        canvas.mouseMoveEvent(_move(canvas, 500, 380))
+        canvas.mouseReleaseEvent(_release(canvas, 500, 380))
+        return window._store.marks[-1]
+
+    def _opened(self, tool: str) -> ReviewWindow:
+        window = self._editing()
+        window._bar.select_tool(tool)
+        QTest.mouseClick(window._bar._style_dot, Qt.MouseButton.LeftButton)
+        return window
+
+    def test_it_stays_down_until_the_style_dot_opens_it(self):
         window = self._editing()
 
         window._bar.select_tool("pen")
 
-        assert not window._tray.isVisibleTo(window._canvas)
+        assert not window._style_popover.isVisibleTo(window._canvas)
 
-    def test_the_style_dot_opens_the_colour_and_stroke_tray(self):
-        window = self._editing()
-        window._bar.select_tool("pen")
+    def test_the_style_dot_opens_it_for_the_active_tool(self):
+        window = self._opened("pen")
 
-        QTest.mouseClick(window._bar._style_dot, Qt.MouseButton.LeftButton)
+        assert window._style_popover.isVisibleTo(window._canvas)
+        assert window._style_popover.sections() == ["color", "size"]
+        assert window._bar._style_dot.is_open
 
-        assert window._tray.isVisibleTo(window._canvas)
+    def test_for_a_redaction_it_offers_the_strength_alone(self):
+        window = self._opened("blur")
 
-    def test_for_a_redaction_it_opens_the_blur_tray_instead(self):
-        # At most one is ever up: it replaces the tray rather than joining it.
-        window = self._editing()
-        window._bar.select_tool("blur")
+        assert window._style_popover.sections() == ["strength"]
 
-        QTest.mouseClick(window._bar._style_dot, Qt.MouseButton.LeftButton)
+    def test_the_eraser_does_not_open_it(self):
+        window = self._opened("eraser")
 
-        assert window._blur_tray.isVisibleTo(window._canvas)
-        assert not window._tray.isVisibleTo(window._canvas)
+        assert not window._style_popover.isVisibleTo(window._canvas)
 
-    def test_the_eraser_gets_neither(self):
-        window = self._editing()
-        window._bar.select_tool("eraser")
+    def test_it_opens_above_the_bar(self):
+        window = ReviewWindow(make_image(900, 600))
+        window.resize(1020, 700)
+        window.show()
+        window._set_annotating(True)
+        window._bar.select_tool("rect")
 
-        QTest.mouseClick(window._bar._style_dot, Qt.MouseButton.LeftButton)
-
-        assert not window._tray.isVisibleTo(window._canvas)
-        assert not window._blur_tray.isVisibleTo(window._canvas)
-
-    def test_the_stroke_slider_actually_changes_the_stroke(self):
-        window = self._editing()
-
-        window._tray.strokeChanged.emit(22)
-
-        assert window._canvas._stroke_width == 22
-
-    def test_the_swatches_actually_change_the_colour(self):
-        window = self._editing()
-
-        window._tray.colourChanged.emit("#ff0000")
-
-        assert window._canvas._ink_colour == "#ff0000"
-
-    def test_the_style_dot_previews_what_the_tray_set(self):
-        window = self._editing()
-
-        window._tray.colourChanged.emit("#ff0000")
-        window._tray.strokeChanged.emit(11)
-
-        assert window._bar._style_dot._colour == QColor("#ff0000")
-        assert window._bar._style_dot._stroke == 11
-
-    def test_blur_strength_reaches_the_canvas_and_a_segment_arms_its_tool(self):
-        window = self._editing()
-
-        window._blur_tray.strengthChanged.emit(14)
-        window._blur_tray.blurModeChanged.emit("pixelate")
-
-        assert window._canvas._blur_strength == 14
-        assert window._bar.active_tool == "pixelate"
-        assert window._canvas._tool == "pixelate"
-
-    def test_leaving_edit_mode_puts_the_trays_away(self):
-        window = self._editing()
-        window._bar.select_tool("pen")
         window._toggle_style()
+
+        assert window._style_popover.isVisible()
+        assert window._style_popover.geometry().bottom() < window._bar.geometry().top()
+
+    def test_it_stays_open_across_picks_and_keys(self):
+        window = self._opened("rect")
+        popover = window._style_popover
+
+        QTest.mouseClick(popover._swatch_buttons[tokens.INK_SWATCHES[2][1]], Qt.MouseButton.LeftButton)
+        QTest.mouseClick(popover._fill_button, Qt.MouseButton.LeftButton)
+        QTest.keyClick(window, Qt.Key.Key_D)
+
+        assert popover.isVisibleTo(window._canvas)
+
+    def test_the_stroke_slider_sets_the_next_marks_stroke(self):
+        window = self._opened("pen")
+
+        window._style_popover._size_slider.setValue(22)
+
+        assert self._drag(window, "pen").stroke_width == 22
+
+    def test_a_swatch_sets_the_next_marks_colour(self):
+        window = self._opened("rect")
+        _name, hex_colour = tokens.INK_SWATCHES[5]
+
+        QTest.mouseClick(window._style_popover._swatch_buttons[hex_colour], Qt.MouseButton.LeftButton)
+
+        assert self._drag(window, "rect").colour == QColor(hex_colour)
+
+    def test_a_fill_and_line_pick_reach_the_next_mark(self):
+        window = self._opened("ellipse")
+
+        QTest.mouseClick(window._style_popover._fill_button, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(window._style_popover._dash_button, Qt.MouseButton.LeftButton)
+
+        mark = self._drag(window, "ellipse")
+        assert (mark.fill, mark.dash) == ("filled", "dashed")
+
+    def test_a_strength_reaches_the_next_redaction(self):
+        window = self._opened("pixelate")
+
+        window._style_popover._strength_slider.setValue(14)
+
+        assert self._drag(window, "pixelate").strength == 14
+
+    def test_the_style_dot_previews_what_it_set(self):
+        window = self._opened("pen")
+        _name, red = tokens.INK_SWATCHES[1]
+
+        QTest.mouseClick(window._style_popover._swatch_buttons[red], Qt.MouseButton.LeftButton)
+        window._style_popover._size_slider.setValue(11)
+
+        assert (window._bar._style_dot.style.colour, window._bar._style_dot.style.size) == (red, 11)
+
+    def test_the_style_keys_work_while_editing(self):
+        window = self._editing()
+        window._bar.select_tool("arrow")
+        seed = window._styles.of("arrow")
+
+        QTest.keyClick(window, Qt.Key.Key_2)
+        QTest.keyClick(window, Qt.Key.Key_BracketRight)
+        QTest.keyClick(window, Qt.Key.Key_D)
+
+        style = window._styles.of("arrow")
+        assert (style.colour, style.size, style.dash) == (
+            tokens.INK_SWATCHES[1][1], seed.size + 1, "dashed"
+        )
+
+    def test_the_style_keys_do_nothing_while_not_editing(self):
+        window = ReviewWindow(make_image())
+        window._bar.select_tool("pen")
+        before = window._styles.of("pen")
+
+        QTest.keyClick(window, Qt.Key.Key_2)
+
+        assert window._styles.of("pen") == before
+
+    def test_it_draws_with_the_style_the_overlay_left_for_the_session(self):
+        session_styles.update("pen", colour="#123456", size=9)
+        window = self._editing()
+
+        mark = self._drag(window, "pen")
+
+        assert (mark.colour, mark.stroke_width) == (QColor("#123456"), 9)
+
+    def test_leaving_edit_mode_puts_it_away(self):
+        window = self._opened("pen")
 
         window._set_annotating(False)
 
-        assert not window._tray.isVisibleTo(window._canvas)
+        assert not window._style_popover.isVisibleTo(window._canvas)
+        assert not window._bar._style_dot.is_open
 
 
 class TestEditLabel:
@@ -710,25 +777,27 @@ class TestTextTool:
         assert any(getattr(m, "text", None) == "exported" for m in window._store.marks)
 
 
-class TestTrayNamesTheActiveTool:
-    def test_the_tray_label_follows_the_tool(self):
-        # It carries the tool's name and hint; left untold it reads as
-        # whichever tool it last showed.
+class TestThePopoverFollowsTheTool:
+    def test_it_styles_whichever_tool_is_armed(self):
+        # Left untold it would style whichever tool it last showed.
         window = ReviewWindow(make_image())
         window.resize(1020, 700)
         window._set_annotating(True)
-
-        window._bar.select_tool("text")
+        window._bar.select_tool("pen")
         window._toggle_style()
 
-        assert window._tray._tool == "text"
+        QTest.keyClick(window, Qt.Key.Key_T)
+
+        assert window._style_popover.tool == "text"
+        assert window._style_popover.isVisibleTo(window._canvas)
+        assert window._style_popover._size_slider.toolTip() == "Text size — [ ]"
 
 
 class TestEveryToolIsNamedOnScreen:
-    """The eraser had no on-screen name anywhere: the settings tray names
-    every other tool, but only appears for tools with colour and stroke to
-    set. Its glyph is not self-explanatory at 16px, so the one tool with
-    nothing to configure was the one tool you could not identify.
+    """The eraser had no on-screen name anywhere: the old settings tray
+    named every other tool, but only appeared for tools with colour and
+    stroke to set. Its glyph is not self-explanatory at 16px, so the one tool
+    with nothing to configure was the one tool you could not identify.
     """
 
     def _editing(self) -> ReviewWindow:
@@ -741,7 +810,7 @@ class TestEveryToolIsNamedOnScreen:
         window = self._editing()
 
         window._bar.select_tool("eraser")
-        window._sync_tray()
+        window._sync_tool_hint()
 
         assert window._tool_hint.isVisibleTo(window._canvas)
         assert window._tool_hint._pill._text_label.text() == "Eraser"
@@ -750,13 +819,13 @@ class TestEveryToolIsNamedOnScreen:
         window = self._editing()
 
         window._bar.select_tool("eraser")
-        window._sync_tray()
+        window._sync_tool_hint()
 
         assert window._tool_hint._hint.text() == tokens.TOOL_HINTS["eraser"]
 
-    def test_a_draw_tool_is_named_too_until_its_tray_opens(self):
-        # The trays no longer come up by themselves, so the strip names every
-        # tool -- and gives way to the tray, rather than naming it twice.
+    def test_a_draw_tool_is_named_too_until_the_style_popover_opens(self):
+        # The strip names every tool, and gives way to the popover rather
+        # than landing on it.
         window = self._editing()
         window._bar.select_tool("pen")
 
@@ -766,12 +835,16 @@ class TestEveryToolIsNamedOnScreen:
         window._toggle_style()
 
         assert not window._tool_hint.isVisibleTo(window._canvas)
-        assert window._tray.isVisibleTo(window._canvas)
+        assert window._style_popover.isVisibleTo(window._canvas)
+
+        window._toggle_style()
+
+        assert window._tool_hint.isVisibleTo(window._canvas)
 
     def test_leaving_edit_mode_puts_the_strip_away(self):
         window = self._editing()
         window._bar.select_tool("eraser")
-        window._sync_tray()
+        window._sync_tool_hint()
 
         window._set_annotating(False)
 
@@ -970,24 +1043,27 @@ class TestHoverNamesTheTool:
         window.resize(1020, 700)
         window._set_annotating(True)
         window._bar.select_tool("pen")
-        window._sync_tray()
+        window._sync_tool_hint()
 
         window._bar._tool_buttons["eraser"].hovered.emit("eraser")
 
         assert window._tool_hint._pill._text_label.text() == "Eraser"
         assert window._bar.active_tool == "pen", "hovering must not arm anything"
 
-    def test_leaving_restores_the_active_tools_tray(self):
+    def test_hovering_leaves_an_open_style_popover_alone(self):
+        # The strip would land on the popover, which is what is being used.
         window = ReviewWindow(make_image())
         window.resize(1020, 700)
         window._set_annotating(True)
         window._bar.select_tool("pen")
         window._toggle_style()
-        window._bar._tool_buttons["eraser"].hovered.emit("eraser")
 
+        window._bar._tool_buttons["eraser"].hovered.emit("eraser")
+        on_hover = window._tool_hint.isVisibleTo(window._canvas)
         window._bar._tool_buttons["eraser"].unhovered.emit()
 
-        assert window._tray.isVisibleTo(window._canvas)
+        assert not on_hover
+        assert window._style_popover.isVisibleTo(window._canvas)
 
 
 class TestCopyConfirms:
@@ -1149,16 +1225,18 @@ class TestToastClearsTheBar:
 
         assert not window._toast.geometry().intersects(window._bar.geometry())
 
-    def test_it_also_clears_whatever_tray_is_up(self):
+    def test_it_also_clears_an_open_style_popover(self):
         window = self._window()
         window._set_annotating(True)
         window._bar.select_tool("pen")
         window._toggle_style()
+        popover = window._style_popover.geometry()
+        assert window._style_popover.isVisible()
 
         window.copy()
 
-        assert not window._toast.geometry().intersects(window._tray.geometry())
-        assert window._toast.geometry().bottom() <= window._tray.geometry().top()
+        assert not window._toast.geometry().intersects(popover)
+        assert window._toast.geometry().bottom() <= popover.top()
 
 
 def _hover(widget, x, y):

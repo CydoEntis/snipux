@@ -14,7 +14,8 @@ from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication
 
 from snipux import shapes
-from snipux.marks import MarkStore, begin_stroke, extend_stroke
+from snipux.design import tokens
+from snipux.marks import MarkStore, ToolStyle, ToolStyles, begin_stroke, extend_stroke, session_styles
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -362,3 +363,74 @@ class TestStyledMarks:
 
         assert (store.marks[0].fill, store.marks[0].dash) == ("filled", "dotted")
         assert (store.marks[1].fill, store.marks[1].dash) == ("outline", "solid")
+
+
+class TestToolStyles:
+    """#68: style is per tool and remembered, first seeded from the
+    handoff's `DEFAULT_STYLE`."""
+
+    @pytest.mark.parametrize("tool", list(tokens.DEFAULT_STYLE))
+    def test_each_tool_starts_from_the_handoffs_seed(self, tool):
+        seed = tokens.DEFAULT_STYLE[tool]
+
+        style = ToolStyles().of(tool)
+
+        assert (style.colour, style.size, style.dash, style.fill) == (
+            seed["color"], seed["size"], seed["dash"], seed["fill"]
+        )
+
+    @pytest.mark.parametrize("tool", ["crop", "blur", "pixelate", "blackout", "eraser", None])
+    def test_a_tool_the_seed_leaves_out_starts_where_the_spec_starts_it(self, tool):
+        other = tokens.DEFAULT_STYLE_OTHER
+
+        style = ToolStyles().of(tool)
+
+        assert (style.colour, style.size) == (other["color"], other["size"])
+        assert style.strength == tokens.Metric.BLUR_DEFAULT
+
+    def test_a_dashed_red_box_leaves_the_pen_alone(self):
+        styles = ToolStyles()
+        pen = styles.of("pen")
+
+        styles.update("rect", colour="#ff0000", dash="dashed", size=9)
+
+        assert styles.of("pen") == pen
+        assert (styles.of("rect").colour, styles.of("rect").dash) == ("#ff0000", "dashed")
+
+    def test_blur_and_pixelate_keep_their_own_strength(self):
+        styles = ToolStyles()
+
+        styles.update("blur", strength=18)
+
+        assert styles.of("blur").strength == 18
+        assert styles.of("pixelate").strength == tokens.Metric.BLUR_DEFAULT
+
+    def test_size_and_strength_stay_inside_their_ranges(self):
+        styles = ToolStyles()
+        low, high = tokens.STROKE_RANGE
+        weakest, strongest = tokens.STRENGTH_RANGE
+
+        assert styles.update("pen", size=high + 40).size == high
+        assert styles.update("pen", size=low - 40).size == low
+        assert styles.update("blur", strength=strongest + 40).strength == strongest
+        assert styles.update("blur", strength=weakest - 40).strength == weakest
+
+    def test_a_style_handed_out_cannot_be_changed_behind_the_store(self):
+        styles = ToolStyles()
+
+        with pytest.raises(AttributeError):
+            styles.of("pen").colour = "#000000"
+
+    def test_reset_goes_back_to_the_seed(self):
+        styles = ToolStyles()
+        styles.update("pen", colour="#123456", size=20)
+
+        styles.reset()
+
+        assert styles.of("pen") == ToolStyles().of("pen")
+
+    def test_the_session_has_one(self):
+        # What the overlay and the review window both draw with, so a style
+        # set on one snip is still set on the next.
+        assert isinstance(session_styles, ToolStyles)
+        assert isinstance(session_styles.of("pen"), ToolStyle)

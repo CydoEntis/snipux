@@ -17,12 +17,13 @@ at them except to hit-test, which the shapes do themselves.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 
 from PyQt6.QtCore import QObject, QPointF, Qt, pyqtSignal
 from PyQt6.QtWidgets import QLineEdit
 
 from . import shapes as shapes_module
+from .design import tokens
 from .shapes import Shape
 
 
@@ -227,6 +228,83 @@ class MarkStore(QObject):
             self._marks = []
         self._undo.append(action)
         self.changed.emit()
+
+
+@dataclass(frozen=True)
+class ToolStyle:
+    """What one tool's next mark is drawn with.
+
+    Every tool carries every field whether it uses it or not, the way the
+    handoff's per-tool style does; `begin_stroke` passes `fill` and `dash` on
+    only to a shape that has them, and `tokens.STYLE_SECTIONS` is what says
+    which fields a tool's popover offers. `colour` is a hex string, the form
+    the swatches are in.
+    """
+
+    colour: str
+    size: int
+    dash: str = "solid"
+    fill: str = "outline"
+    strength: int = tokens.Metric.BLUR_DEFAULT
+
+
+def _clamped(value: int, bounds: tuple[int, int]) -> int:
+    low, high = bounds
+    return max(low, min(value, high))
+
+
+class ToolStyles:
+    """Each tool's style, kept apart: setting a dashed red box leaves the pen
+    the acid line it was.
+
+    Seeded from `tokens.DEFAULT_STYLE` and never written to disk -- the
+    handoff's state model is explicit that a per-snip override must not
+    silently change the user's preferences.
+
+    A redaction's strength is its own too, rather than one strength the blur
+    and pixelate tools share: the same number is a light smudge to one and
+    coarse blocks to the other.
+    """
+
+    def __init__(self) -> None:
+        self._styles: dict[str, ToolStyle] = {}
+        self.reset()
+
+    def reset(self) -> None:
+        """Every tool back to its first-run seed."""
+        self._styles = {tool: self._seed(tool) for tool in tokens.TOOLS}
+
+    @staticmethod
+    def _seed(tool: str | None) -> ToolStyle:
+        seed = tokens.DEFAULT_STYLE.get(tool, tokens.DEFAULT_STYLE_OTHER)
+        return ToolStyle(
+            colour=seed["color"], size=seed["size"], dash=seed["dash"], fill=seed["fill"]
+        )
+
+    def of(self, tool: str | None) -> ToolStyle:
+        """`tool`'s style. None -- nothing armed yet -- has the seed every
+        tool without one of its own starts from.
+        """
+        return self._styles.get(tool) or self._seed(tool)
+
+    def update(self, tool: str, **changes) -> ToolStyle:
+        """Change `tool`'s style and return what it is now, with its size and
+        strength held inside `tokens.STROKE_RANGE` and `STRENGTH_RANGE`.
+        """
+        style = replace(self.of(tool), **changes)
+        style = replace(
+            style,
+            size=_clamped(style.size, tokens.STROKE_RANGE),
+            strength=_clamped(style.strength, tokens.STRENGTH_RANGE),
+        )
+        self._styles[tool] = style
+        return style
+
+
+# One for the whole process. The handoff has per-tool style persist across
+# snips within a session, and every overlay and review window is built fresh,
+# so the style has to live somewhere that outlives each of them.
+session_styles = ToolStyles()
 
 
 # Tool name -> Shape subclass. Kept here rather than in overlay.py because

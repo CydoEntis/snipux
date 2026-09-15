@@ -58,8 +58,8 @@ from snipux.shapes import (
     StepMarker,
     Text,
 )
+from snipux.marks import ToolStyle, ToolStyles, session_styles
 from snipux.overlay import (
-    BlurTray,
     CaptureModePopover,
     DelayCountdown,
     FamilyMenu,
@@ -70,19 +70,17 @@ from snipux.overlay import (
     Overlay,
     OverlayWindow,
     SelectionMode,
-    SettingsTray,
+    StylePopover,
     Toast,
     UnsupportedGeometryProvider,
-    _BlurModeWell,
     _CaptureModeRow,
     _CustomColorButton,
+    _CycleButton,
     _DelayRow,
     _Divider,
     _HANDLE_CURSORS,
     _MenuSeparator,
     _PillButton,
-    _PreviewDot,
-    _SegmentButton,
     _SwatchButton,
     _TOOL_SHORTCUT_KEYS,
     _ToolPill,
@@ -952,8 +950,7 @@ class TestOverlayWindowMarks:
         overlay = OverlayWindow(frame)
         overlay.set_selection(QRect(50, 50, 100, 100))
         overlay._bar.select_tool("ellipse")
-        overlay._ink_colour = "#ff0000"
-        overlay._stroke_width = 6
+        overlay._styles.update("ellipse", colour="#ff0000", size=6)
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 80))
         QTest.mouseMove(overlay, QPoint(120, 120))
@@ -1332,9 +1329,9 @@ class TestDrawingTools:
     """SNX-52: a press inside the selection starts a mark for whichever
     tool `_bar.active_tool` names; move extends it; release either commits
     it (via shapes.finalize_mark) or discards it if it never reached the
-    spec's minimum size. A committed mark takes its colour/stroke from
-    `_ink_colour`/`_stroke_width`, and -- for a redaction -- its shape
-    class from the tool itself and its strength from `_blur_strength`, per
+    spec's minimum size. A committed mark takes its colour, stroke,
+    fill, line style and -- for a redaction -- strength from the active
+    tool's own style (`_styles`), and its shape class from the tool, per
     docs/design/overlay-redesign.md's "Drawing".
     """
 
@@ -1413,8 +1410,9 @@ class TestDrawingTools:
         # tests already rely on for a clean, fully-covered sample pixel.
         overlay = self._overlay()
         overlay._bar.select_tool("rect")
-        overlay._ink_colour = "#ff0000"
-        overlay._stroke_width = 6
+        # Solid: the rectangle's seed is dashed, and a dash gap could fall
+        # on the pixel sampled.
+        overlay._styles.update("rect", colour="#ff0000", size=6, dash="solid", fill="outline")
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
         QTest.mouseMove(overlay, QPoint(80, 60))
@@ -1471,11 +1469,10 @@ class TestDrawingTools:
         assert mark.end == QPointF(80, 60)
 
     @pytest.mark.parametrize("tool", ["ellipse", "line", "crop"])
-    def test_restored_shape_tools_take_ink_colour_and_stroke_from_the_tray(self, tool):
+    def test_restored_shape_tools_take_colour_and_stroke_from_their_own_style(self, tool):
         overlay = self._overlay()
         overlay._bar.select_tool(tool)
-        overlay._ink_colour = "#38bdf8"
-        overlay._stroke_width = 9
+        overlay._styles.update(tool, colour="#38bdf8", size=9)
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
         QTest.mouseMove(overlay, QPoint(80, 60))
@@ -1488,7 +1485,7 @@ class TestDrawingTools:
     def test_blur_press_move_release_commits_a_blur_shape(self):
         overlay = self._overlay()
         overlay._bar.select_tool("blur")
-        overlay._blur_strength = 12
+        overlay._styles.update("blur", strength=12)
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
         QTest.mouseMove(overlay, QPoint(80, 60))
@@ -1607,8 +1604,7 @@ class TestDrawingTools:
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
         overlay._bar.select_tool("text")
-        overlay._ink_colour = "#123456"
-        overlay._stroke_width = 5
+        overlay._styles.update("text", colour="#123456", size=5)
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
         QApplication.processEvents()
@@ -1616,9 +1612,8 @@ class TestDrawingTools:
 
         # Changed before the second click, so the assertions below can tell
         # apart "the first label kept its own colour/size" from "it silently
-        # picked up whatever the tray happens to hold at commit time."
-        overlay._ink_colour = "#abcdef"
-        overlay._stroke_width = 12
+        # picked up whatever the text tool's style holds at commit time."
+        overlay._styles.update("text", colour="#abcdef", size=12)
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 80))
         QApplication.processEvents()
@@ -1671,11 +1666,10 @@ class TestDrawingTools:
         assert overlay.marks == ()
         assert overlay._selection.width() != 100  # the resize itself did happen
 
-    def test_committed_mark_takes_the_current_tray_colour_and_stroke(self):
+    def test_committed_mark_takes_the_tools_own_colour_and_stroke(self):
         overlay = self._overlay()
         overlay._bar.select_tool("pen")
-        overlay._ink_colour = "#123456"
-        overlay._stroke_width = 17
+        overlay._styles.update("pen", colour="#123456", size=17)
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
         QTest.mouseMove(overlay, QPoint(40, 40))
@@ -3620,15 +3614,16 @@ class TestTheBarWithNoRoomAnywhere:
 
         assert menu.isHidden()
 
-    def test_a_drag_closes_the_style_tray_and_the_tool_hint_follows(self, monkeypatch):
+    def test_a_drag_closes_the_style_popover_and_the_tool_hint_follows(self, monkeypatch):
         overlay = self._whole(self._overlay(monkeypatch))
         overlay._bar.select_tool("pen")
         overlay._toggle_style()
-        assert overlay._tray.isVisible()
+        assert overlay._style_popover.isVisible()
 
         _drag_bar(overlay._bar, QPointF(0, -400))
 
-        assert not overlay._tray.isVisible()
+        assert not overlay._style_popover.isVisible()
+        assert not overlay._bar._style_dot.is_open
         hint = overlay._tool_hint
         assert hint.isVisible()
         assert hint.geometry().center().x() == pytest.approx(
@@ -3707,7 +3702,7 @@ class TestADraggedBarClearsTheDock:
         assert overlay._chrome_bounds().contains(bar)
         assert bar.bottom() == overlay.rect().height() - self.DOCK.bottom() - self.MARGIN
 
-    def test_menus_trays_and_the_hint_stay_inside_after_a_drag_into_a_corner(
+    def test_menus_the_style_popover_and_the_hint_stay_inside_after_a_drag_into_a_corner(
         self, monkeypatch
     ):
         overlay = self._overlay(monkeypatch)
@@ -3722,13 +3717,10 @@ class TestADraggedBarClearsTheDock:
         assert bounds.contains(QRectF(overlay._family_menus["redact"].geometry()))
 
         overlay._toggle_style()
-        assert overlay._tray.isVisible()
-        tray = QRectF(overlay._tray.geometry())
-        # Top to bottom is what the dock and top bar take. Across, the
-        # offscreen screen is 533 logical px at 1.5x -- narrower than this
-        # tray, which no placement can fix -- so only its left edge is held.
-        assert bounds.top() <= tray.top() and tray.bottom() <= bounds.bottom()
-        assert tray.left() >= bounds.left()
+        assert overlay._style_popover.isVisible()
+        # 216px wide, so unlike the tray it replaced it fits across even the
+        # offscreen screen at 1.5x, 533 logical px.
+        assert bounds.contains(QRectF(overlay._style_popover.geometry()))
 
 
 class TestFloatingBarActiveTool:
@@ -4216,62 +4208,133 @@ class TestBlackoutBakesItsFill:
         assert pixel(rendered, QPoint(150, 130)) != fill
 
 
+def _styled_overlay(selection=QRect(400, 200, 400, 300)) -> OverlayWindow:
+    frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
+    overlay = OverlayWindow(frame)
+    overlay.show()
+    QTest.qWaitForWindowExposed(overlay)
+    overlay.set_selection(selection)
+    return overlay
+
+
+def _close_to(colour: QColor, hex_colour: str, tolerance: int = 10) -> bool:
+    """Within `tolerance` of `hex_colour` on every channel -- for a pixel an
+    antialiased edge may have nudged.
+    """
+    target = QColor(hex_colour)
+    return all(
+        abs(a - b) <= tolerance
+        for a, b in zip(colour.getRgb()[:3], target.getRgb()[:3])
+    )
+
+
 class TestStyleDot:
-    """The style dot is its own preview, and -- until the style popover
-    replaces them -- it opens the active tool's tray.
+    """#68: the style dot is its own preview -- a dot in the active tool's
+    colour at its stroke's diameter, a ring for a shape that is outline
+    only, dimmed for a tool with nothing to style -- and it opens the style
+    popover.
     """
 
-    def _overlay(self) -> OverlayWindow:
-        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
-        overlay = OverlayWindow(frame)
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 400, 300))
-        return overlay
+    RED = "#ef4444"
 
     @staticmethod
-    def _dot_centre(bar: FloatingBar) -> QColor:
-        """The dot's centre as the bar draws it. Grabbed through the bar,
-        not the dot alone: a grab of the bare dot has no alpha channel, so
-        a dimmed dot would read as fully opaque.
+    def _dot_pixel(bar: FloatingBar, dx: float = 0.0) -> QColor:
+        """A pixel `dx` right of the dot's centre, as the bar draws it.
+        Grabbed through the bar, not the dot alone: a grab of the bare dot
+        has no alpha channel, so a dimmed dot would read as fully opaque.
         """
         bar.resize(bar.sizeHint())
-        return pixel(bar.grab().toImage(), bar._style_dot.geometry().center())
+        image = bar.grab().toImage()
+        centre = QRectF(bar._style_dot.geometry()).center()
+        return pixel(image, centre.x() + dx, centre.y())
 
-    def test_it_is_a_dot_in_the_ink_colour(self):
+    def test_it_is_a_dot_in_the_tools_colour_at_its_stroke(self):
         bar = FloatingBar()
         bar.select_tool("pen")
-        bar.set_style_preview("#ef4444", 10)
+        bar.set_style_preview(ToolStyle(colour=self.RED, size=10))
 
-        centre = self._dot_centre(bar)
+        centre = self._dot_pixel(bar)
+        inside = self._dot_pixel(bar, 6)
+        outside = self._dot_pixel(bar, 11)
 
         assert (centre.red(), centre.green(), centre.blue(), centre.alpha()) == (
             0xEF, 0x44, 0x44, 255
         )
+        # 10px at the spec's scale is a 16px dot: 6px out is still the ink,
+        # 11px out is past it and its ring.
+        assert bar._style_dot.diameter == 10 * tokens.BarMetric.STYLE_DOT_SCALE
+        assert _close_to(inside, self.RED)
+        assert not _close_to(outside, self.RED, tolerance=60)
+
+    def test_a_shape_that_is_outline_only_is_a_ring(self):
+        bar = FloatingBar()
+        bar.select_tool("rect")
+        bar.set_style_preview(ToolStyle(colour=self.RED, size=10, fill="outline"))
+
+        # A 16px dot with a 2px ring inside its edge: 7px out is the ring,
+        # the centre is the button showing through.
+        ring = self._dot_pixel(bar, 7)
+        hole = self._dot_pixel(bar)
+
+        assert bar._style_dot.is_ring
+        assert _close_to(ring, self.RED)
+        assert not _close_to(hole, self.RED, tolerance=60)
+
+    @pytest.mark.parametrize("fill", ["filled", "both"])
+    def test_a_shape_with_any_fill_is_a_dot(self, fill):
+        bar = FloatingBar()
+        bar.select_tool("ellipse")
+        bar.set_style_preview(ToolStyle(colour=self.RED, size=10, fill=fill))
+
+        assert not bar._style_dot.is_ring
+        assert _close_to(self._dot_pixel(bar), self.RED)
+
+    def test_a_tool_with_no_fill_is_never_a_ring(self):
+        # A line remembers "outline" like every tool, but a ring would say
+        # something about it that is not true.
+        bar = FloatingBar()
+        bar.select_tool("line")
+        bar.set_style_preview(ToolStyle(colour=self.RED, size=10, fill="outline"))
+
+        assert not bar._style_dot.is_ring
+        assert _close_to(self._dot_pixel(bar), self.RED)
 
     def test_it_dims_for_a_tool_with_nothing_to_style(self):
         bar = FloatingBar()
-        bar.set_style_preview("#ef4444", 10)
+        bar.set_style_preview(ToolStyle(colour=self.RED, size=10))
         bar.select_tool("pen")
-        lit = self._dot_centre(bar)
+        lit = self._dot_pixel(bar)
 
         bar.select_tool("eraser")
-        dimmed = self._dot_centre(bar)
+        dimmed = self._dot_pixel(bar)
 
         # At a third of its opacity the dot mostly shows the bar's dark glass
         # through it, so its red falls well short of the ink's.
         assert dimmed.red() < lit.red() - 60
 
+    def test_its_tooltip_reads_the_colour_and_stroke(self):
+        bar = FloatingBar()
+        bar.select_tool("pen")
+        bar.set_style_preview(ToolStyle(colour=self.RED, size=7))
+
+        assert bar._style_dot.toolTip() == f"Pen · {self.RED} · 7px — click for style"
+
+    def test_a_redactions_tooltip_reads_its_strength(self):
+        bar = FloatingBar()
+        bar.select_tool("pixelate")
+        bar.set_style_preview(ToolStyle(colour=self.RED, size=7, strength=12))
+
+        assert bar._style_dot.toolTip() == "Pixelate · strength 12 — click for style"
+
     def test_it_will_not_open_for_a_tool_with_nothing_to_style(self):
-        overlay = self._overlay()
+        overlay = _styled_overlay()
         QTest.mouseClick(overlay._bar._tool_buttons["eraser"], Qt.MouseButton.LeftButton)
         dot = overlay._bar._style_dot
 
         QTest.mouseClick(dot, Qt.MouseButton.LeftButton)
 
-        assert not overlay._style_open
-        assert not overlay._tray.isVisible()
-        assert not overlay._blur_tray.isVisible()
+        assert overlay._style_popover.isHidden()
+        assert not dot.is_open
         assert dot.toolTip() == "Eraser has nothing to style"
 
     def test_blackout_has_nothing_to_style_either(self):
@@ -4282,41 +4345,693 @@ class TestStyleDot:
         assert not bar._style_dot.is_stylable
         assert bar._style_dot.toolTip() == "Blackout has nothing to style"
 
-    def test_it_opens_the_blur_tray_for_a_redaction_and_closes_it_again(self):
-        overlay = self._overlay()
+    def test_it_opens_the_popover_and_closes_it_again(self):
+        overlay = _styled_overlay()
         QTest.mouseClick(overlay._bar._tool_buttons["redact"], Qt.MouseButton.LeftButton)
         dot = overlay._bar._style_dot
 
         QTest.mouseClick(dot, Qt.MouseButton.LeftButton)
-        assert overlay._blur_tray.isVisible()
+        assert overlay._style_popover.isVisible()
         assert dot.is_open
 
         QTest.mouseClick(dot, Qt.MouseButton.LeftButton)
-        assert not overlay._blur_tray.isVisible()
+        assert not overlay._style_popover.isVisible()
         assert not dot.is_open
         assert overlay._tool_hint.isVisible()
 
-    def test_a_swatch_repaints_the_dot_and_the_tray_stays_open(self):
-        overlay = self._overlay()
-        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        _name, hex_colour = tokens.INK_SWATCHES[2]
+    def test_the_active_tools_own_style_is_what_it_shows(self):
+        overlay = _styled_overlay()
 
-        QTest.mouseClick(overlay._tray._swatch_buttons[hex_colour], Qt.MouseButton.LeftButton)
+        overlay._bar.select_tool("rect")
 
-        assert overlay._bar._style_dot._colour == QColor(hex_colour)
-        assert overlay._tray.isVisible()
+        assert overlay._bar._style_dot.style == overlay._styles.of("rect")
 
-    def test_opening_a_family_menu_closes_the_tray(self):
-        # One menu at a time, and the tray counts as one.
-        overlay = self._overlay()
+    def test_opening_a_family_menu_closes_the_popover(self):
+        # One menu at a time, and the popover counts as one.
+        overlay = _styled_overlay()
         QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
         QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
 
         QTest.mouseClick(overlay._bar._tool_buttons["shapes"].notch, Qt.MouseButton.LeftButton)
 
         assert overlay._family_menus["shapes"].isVisible()
-        assert not overlay._tray.isVisible()
+        assert not overlay._style_popover.isVisible()
+
+
+class TestStylePopoverSections:
+    """#68: 'The popover shows only what the active tool supports
+    (STYLE_SECTIONS) ... A section the tool cannot use is not rendered --
+    never rendered and inert.'"""
+
+    @pytest.mark.parametrize(
+        "tool,sections",
+        [(tool, sections) for tool, sections in tokens.STYLE_SECTIONS.items() if sections],
+    )
+    def test_each_tool_shows_its_own_sections_and_no_others(self, tool, sections):
+        popover = StylePopover(ToolStyles())
+
+        popover.set_tool(tool)
+
+        assert popover.sections() == sections
+
+    def test_a_section_left_out_leaves_no_gap_where_it_would_be(self):
+        popover = StylePopover(ToolStyles())
+        popover.set_tool("pen")
+        popover.grab()
+
+        assert popover._fill_button.isHidden() and popover._dash_button.isHidden()
+        assert popover._size_slider.geometry().left() == 0
+
+    def test_a_redaction_is_one_row(self):
+        styles = ToolStyles()
+        blur = StylePopover(styles)
+        blur.set_tool("blur")
+        rect = StylePopover(styles)
+        rect.set_tool("rect")
+        metric = tokens.BarMetric
+
+        assert blur._colour_row.isHidden()
+        assert rect.height() == (
+            2 * (metric.BORDER + metric.STYLE_PAD_V)
+            + metric.SWATCH_H
+            + metric.STYLE_ROW_GAP
+            + metric.CYCLE_H
+        )
+        assert blur.height() < rect.height() - metric.SWATCH_H
+
+    def test_switching_tools_swaps_the_sections(self):
+        popover = StylePopover(ToolStyles())
+        popover.set_tool("blur")
+
+        popover.set_tool("arrow")
+
+        assert popover.sections() == ["color", "dash", "size"]
+
+    def test_the_size_slider_is_named_for_what_it_sizes(self):
+        popover = StylePopover(ToolStyles())
+
+        popover.set_tool("text")
+        text = popover._size_slider.toolTip()
+        popover.set_tool("pen")
+
+        assert text == "Text size — [ ]"
+        assert popover._size_slider.toolTip() == "Stroke — [ ]"
+
+
+class TestStylePopoverComposition:
+    """#68: 216px wide; seven swatches and `+` across one row; a slider with
+    a mono readout -- and nothing in it that takes the keyboard.
+    """
+
+    @staticmethod
+    def _laid_out(tool="rect") -> StylePopover:
+        popover = StylePopover(ToolStyles())
+        popover.set_tool(tool)
+        popover.grab()
+        return popover
+
+    def test_it_is_the_handoffs_width(self):
+        popover = self._laid_out()
+
+        assert popover.width() == tokens.BarMetric.MENU_W_STYLE
+        assert popover.grab().deviceIndependentSize().width() == tokens.BarMetric.MENU_W_STYLE
+
+    def test_the_colour_row_is_the_seven_swatches_then_plus(self):
+        popover = self._laid_out()
+        row = [*popover._swatch_buttons.values(), popover._custom_button]
+
+        lefts = [button.geometry().left() for button in row]
+
+        assert list(popover._swatch_buttons) == [hex for _name, hex in tokens.INK_SWATCHES]
+        assert lefts == sorted(set(lefts))
+
+    def test_the_eight_share_the_row_and_fit_inside_it(self):
+        popover = self._laid_out()
+        row = [*popover._swatch_buttons.values(), popover._custom_button]
+        widths = [button.width() for button in row]
+
+        assert max(widths) - min(widths) <= 1
+        assert row[-1].geometry().right() < popover._colour_row.width()
+        inset = tokens.BarMetric.STYLE_PAD_H + tokens.BarMetric.BORDER
+        assert popover._colour_row.width() == tokens.BarMetric.MENU_W_STYLE - 2 * inset
+
+    def test_each_swatch_names_its_key(self):
+        popover = self._laid_out()
+
+        tooltips = [button.toolTip() for button in popover._swatch_buttons.values()]
+
+        assert tooltips == [
+            f"{name} — {index}" for index, (name, _hex) in enumerate(tokens.INK_SWATCHES, 1)
+        ]
+
+    def test_the_sliders_cover_the_handoffs_ranges(self):
+        popover = self._laid_out()
+
+        assert (popover._size_slider.minimum(), popover._size_slider.maximum()) == (
+            tokens.STROKE_RANGE
+        )
+        assert (popover._strength_slider.minimum(), popover._strength_slider.maximum()) == (
+            tokens.STRENGTH_RANGE
+        )
+
+    def test_the_readouts_hold_their_width_and_read_the_style(self):
+        styles = ToolStyles()
+        popover = StylePopover(styles)
+        popover.set_tool("pen")
+        size_readout = popover._size_readout.text()
+        popover.set_tool("blur")
+
+        assert popover._size_readout.minimumWidth() == tokens.BarMetric.READOUT_W_SIZE
+        assert popover._strength_readout.minimumWidth() == tokens.BarMetric.READOUT_W_STRENGTH
+        assert size_readout == f"{styles.of('pen').size}px"
+        assert popover._strength_readout.text() == str(styles.of("blur").strength)
+
+    def test_nothing_in_it_takes_the_keyboard(self):
+        # A focused slider or button would keep 1-7, [ ] and D from the
+        # window -- the keys the one-row layout is only worth having with.
+        popover = self._laid_out()
+
+        focusable = [
+            type(child).__name__
+            for child in popover.findChildren(QWidget)
+            if child.focusPolicy() != Qt.FocusPolicy.NoFocus
+        ]
+
+        assert focusable == []
+
+
+class TestStylePopoverFill:
+    """Glass like the family menus: a translucent paint, not a translucent
+    widget, so every control on it stays opaque.
+    """
+
+    def test_background_pixel_is_painted_at_the_menu_alpha(self):
+        popover = StylePopover(ToolStyles())
+        popover.set_tool("pen")
+
+        rendered = popover.grab().toImage()
+        # Top padding, mid-width: inside the rounded fill, above every
+        # control.
+        sampled = pixel(rendered, popover.width() // 2, 3)
+
+        assert sampled.alpha() == pytest.approx(round(tokens.BarColor.MENU_BG_ALPHA * 255), abs=2)
+        assert _close_to(sampled, tokens.BarColor.MENU_BG, tolerance=2)
+
+    def test_control_pixels_stay_fully_opaque_over_it(self):
+        popover = StylePopover(ToolStyles())
+        popover.set_tool("pen")
+
+        rendered = popover.grab().toImage()
+        button = popover._swatch_buttons[tokens.INK_SWATCHES[1][1]]
+        rect = QRect(button.mapTo(popover, QPoint(0, 0)), button.size())
+        alphas = [
+            pixel(rendered, x, y).alpha()
+            for x in range(rect.left(), rect.right())
+            for y in range(rect.top(), rect.bottom())
+        ]
+
+        assert max(alphas) == 255
+
+
+class TestStylePopoverSwatches:
+    """The picked colour is ringed, and picking one changes the colour the
+    tool's next mark is drawn in -- that tool's, and no other's.
+    """
+
+    def test_the_tools_own_colour_is_ringed(self):
+        styles = ToolStyles()
+        popover = StylePopover(styles)
+
+        popover.set_tool("rect")
+
+        ringed = [hex for hex, button in popover._swatch_buttons.items() if button.is_selected]
+        assert ringed == [styles.of("rect").colour]
+
+    def test_a_colour_no_swatch_holds_rings_none(self):
+        # The highlighter's seed amber is not one of the seven.
+        popover = StylePopover(ToolStyles())
+
+        popover.set_tool("highlighter")
+
+        assert not any(button.is_selected for button in popover._swatch_buttons.values())
+
+    def test_clicking_a_swatch_sets_the_tools_colour_and_moves_the_ring(self):
+        styles = ToolStyles()
+        popover = StylePopover(styles)
+        popover.set_tool("pen")
+        received = Mock()
+        popover.styleChanged.connect(received)
+        _name, target = tokens.INK_SWATCHES[4]
+
+        QTest.mouseClick(popover._swatch_buttons[target], Qt.MouseButton.LeftButton)
+
+        assert styles.of("pen").colour == target
+        assert styles.of("rect") == ToolStyles().of("rect")
+        assert [h for h, b in popover._swatch_buttons.items() if b.is_selected] == [target]
+        received.assert_called_once_with("pen")
+
+    def test_an_unpicked_swatch_paints_its_own_colour(self):
+        _name, hex_colour = tokens.INK_SWATCHES[3]
+        button = _SwatchButton("Emerald", hex_colour, "4")
+        button.resize(tokens.BarMetric.SWATCH_H, tokens.BarMetric.SWATCH_H)
+
+        rendered = button.grab().toImage()
+        centre = pixel(rendered, button.width() / 2, button.height() / 2)
+
+        assert _close_to(centre, hex_colour, tolerance=0)
+
+    def test_the_picked_swatch_paints_the_double_ring(self):
+        _name, hex_colour = tokens.INK_SWATCHES[1]
+        button = _SwatchButton("Red", hex_colour, "2")
+        button.set_selected(True)
+        button.resize(tokens.BarMetric.SWATCH_H, tokens.BarMetric.SWATCH_H)
+
+        rendered = button.grab().toImage()
+        centre = pixel(rendered, button.width() / 2, button.height() / 2)
+        # The outermost pixel, halfway down its flat side, is the light ring.
+        edge = pixel(rendered, 0, button.height() / 2)
+
+        assert _close_to(centre, hex_colour, tolerance=0)
+        assert _close_to(edge, tokens.BarColor.SWATCH_RING, tolerance=12)
+
+
+class TestStylePopoverCustomColour:
+    """#68: 'A custom colour works as today's tray's does' -- `+` opens the
+    colour dialog on the current colour, and what it returns is the tool's
+    colour until something else is picked.
+    """
+
+    def _popover(self):
+        styles = ToolStyles()
+        popover = StylePopover(styles)
+        popover.set_tool("arrow")
+        return popover, styles
+
+    def test_it_opens_the_dialog_on_the_tools_colour(self, monkeypatch):
+        popover, styles = self._popover()
+        seen = []
+        monkeypatch.setattr(
+            QColorDialog,
+            "getColor",
+            staticmethod(lambda initial, *a, **k: seen.append(initial) or QColor()),
+        )
+
+        QTest.mouseClick(popover._custom_button, Qt.MouseButton.LeftButton)
+
+        assert seen == [QColor(styles.of("arrow").colour)]
+
+    def test_a_colour_chosen_becomes_the_tools_colour(self, monkeypatch):
+        popover, styles = self._popover()
+        chosen = QColor("#336699")
+        monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: chosen))
+
+        QTest.mouseClick(popover._custom_button, Qt.MouseButton.LeftButton)
+
+        assert styles.of("arrow").colour == chosen.name()
+        assert not any(button.is_selected for button in popover._swatch_buttons.values())
+
+    def test_cancelling_the_dialog_changes_nothing(self, monkeypatch):
+        popover, styles = self._popover()
+        before = styles.of("arrow")
+        # QColorDialog.getColor() returns an invalid QColor on Cancel.
+        monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor()))
+
+        QTest.mouseClick(popover._custom_button, Qt.MouseButton.LeftButton)
+
+        assert styles.of("arrow") == before
+
+
+class TestFillAndLineClickThrough:
+    """#68: 'Fill and line are click-through: a click advances to the next
+    state and the button shows the current one.'"""
+
+    def test_a_fill_click_advances_through_the_cycle_and_wraps(self):
+        styles = ToolStyles()
+        popover = StylePopover(styles)
+        popover.set_tool("ellipse")
+
+        seen = [popover._fill_button.state]
+        for _ in range(3):
+            QTest.mouseClick(popover._fill_button, Qt.MouseButton.LeftButton)
+            seen.append(popover._fill_button.state)
+
+        assert seen == ["outline", "filled", "both", "outline"]
+        assert styles.of("ellipse").fill == "outline"
+
+    def test_a_line_click_advances_through_the_cycle_and_wraps(self):
+        styles = ToolStyles()
+        popover = StylePopover(styles)
+        popover.set_tool("arrow")
+
+        seen = [popover._dash_button.state]
+        for _ in range(3):
+            QTest.mouseClick(popover._dash_button, Qt.MouseButton.LeftButton)
+            seen.append(styles.of("arrow").dash)
+
+        assert seen == ["solid", "dashed", "dotted", "solid"]
+
+    def test_the_tooltips_name_the_state_and_what_a_click_does(self):
+        popover = StylePopover(ToolStyles())
+        popover.set_tool("rect")  # seeded dashed, outline and filled
+
+        assert popover._fill_button.toolTip() == "Fill · Outline and filled → click for Outline only"
+        assert popover._dash_button.toolTip() == "Line · Dashed → click for Dotted — D"
+
+    def test_the_button_shows_its_state(self):
+        filled = _CycleButton("fill")
+        filled.set_state("filled", "")
+        outline = _CycleButton("fill")
+        outline.set_state("outline", "")
+        solid = _CycleButton("dash")
+        solid.set_state("solid", "")
+        dotted = _CycleButton("dash")
+        dotted.set_state("dotted", "")
+
+        filled_centre = pixel(filled.grab().toImage(), filled.width() / 2, filled.height() / 2)
+        outline_centre = pixel(outline.grab().toImage(), outline.width() / 2, outline.height() / 2)
+
+        assert _close_to(filled_centre, tokens.BarColor.CYCLE_GLYPH, tolerance=4)
+        assert not _close_to(outline_centre, tokens.BarColor.CYCLE_GLYPH, tolerance=40)
+        assert solid.grab().toImage() != dotted.grab().toImage()
+
+
+class TestStyleShortcuts:
+    """#68: '1-7 pick a colour, [ and ] step the stroke, D cycles line
+    style' -- each on the active tool, and only on a tool with that section.
+    """
+
+    def _overlay(self, tool="pen"):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay._bar.select_tool(tool)
+        return overlay
+
+    @pytest.mark.parametrize("number", range(1, 8))
+    def test_a_number_picks_its_swatch(self, number):
+        overlay = self._overlay()
+        _name, hex_colour = tokens.INK_SWATCHES[number - 1]
+
+        QTest.keyClick(overlay, getattr(Qt.Key, f"Key_{number}"))
+
+        assert overlay._styles.of("pen").colour == hex_colour
+        assert overlay._bar._style_dot.style.colour == hex_colour
+
+    def test_right_bracket_thickens_and_left_bracket_thins(self):
+        overlay = self._overlay()
+        start = overlay._styles.of("pen").size
+
+        QTest.keyClick(overlay, Qt.Key.Key_BracketRight)
+        thicker = overlay._styles.of("pen").size
+        QTest.keyClick(overlay, Qt.Key.Key_BracketLeft)
+        QTest.keyClick(overlay, Qt.Key.Key_BracketLeft)
+
+        assert thicker == start + 1
+        assert overlay._styles.of("pen").size == start - 1
+        assert overlay._bar._style_dot.style.size == start - 1
+
+    def test_the_brackets_stop_at_the_ends_of_the_range(self):
+        overlay = self._overlay()
+        low, high = tokens.STROKE_RANGE
+        overlay._styles.update("pen", size=low)
+
+        QTest.keyClick(overlay, Qt.Key.Key_BracketLeft)
+        at_low = overlay._styles.of("pen").size
+        overlay._styles.update("pen", size=high)
+        QTest.keyClick(overlay, Qt.Key.Key_BracketRight)
+
+        assert (at_low, overlay._styles.of("pen").size) == (low, high)
+
+    def test_the_brackets_step_a_redactions_strength(self):
+        overlay = self._overlay("pixelate")
+        start = overlay._styles.of("pixelate").strength
+
+        QTest.keyClick(overlay, Qt.Key.Key_BracketRight)
+
+        assert overlay._styles.of("pixelate").strength == start + 1
+
+    def test_d_cycles_the_line_style(self):
+        overlay = self._overlay("arrow")
+
+        seen = []
+        for _ in range(3):
+            QTest.keyClick(overlay, Qt.Key.Key_D)
+            seen.append(overlay._styles.of("arrow").dash)
+
+        assert seen == ["dashed", "dotted", "solid"]
+
+    def test_a_key_for_a_section_the_tool_lacks_does_nothing(self):
+        pen = self._overlay("pen")
+        blur = self._overlay("blur")
+        eraser = self._overlay("eraser")
+
+        QTest.keyClick(pen, Qt.Key.Key_D)
+        QTest.keyClick(blur, Qt.Key.Key_2)
+        QTest.keyClick(eraser, Qt.Key.Key_BracketRight)
+
+        assert pen._styles.of("pen") == ToolStyles().of("pen")
+        assert blur._styles.of("blur") == ToolStyles().of("blur")
+        assert eraser._styles.of("eraser") == ToolStyles().of("eraser")
+
+    def test_a_key_styles_only_the_active_tool(self):
+        overlay = self._overlay("pen")
+
+        QTest.keyClick(overlay, Qt.Key.Key_2)
+        QTest.keyClick(overlay, Qt.Key.Key_R)
+
+        assert overlay._styles.of("rect") == ToolStyles().of("rect")
+        assert overlay._bar._style_dot.style == overlay._styles.of("rect")
+
+    def test_the_keys_yield_to_a_label_being_typed(self):
+        overlay = self._overlay("pen")
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_2)
+
+        assert overlay._styles.of("pen") == ToolStyles().of("pen")
+
+
+class TestStylePopoverOverlayIntegration:
+    """The popover wired into `OverlayWindow`: where it opens, what keeps it
+    open, and that what it sets is what the next mark is drawn with.
+    """
+
+    def test_it_opens_above_the_bar_centred_on_the_dot(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("rect")
+
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+
+        popover = overlay._style_popover.geometry()
+        bar = overlay._bar.geometry()
+        dot = overlay._bar.style_dot_rect(overlay)
+        assert popover.bottom() + tokens.BarMetric.MENU_OFFSET < bar.top()
+        assert popover.center().x() == pytest.approx(dot.center().x(), abs=1)
+
+    def test_it_stays_open_across_picks_and_keys(self, monkeypatch):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("rect")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        popover = overlay._style_popover
+        monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor("#123456")))
+
+        still_open = []
+        for pick in (
+            lambda: QTest.mouseClick(
+                popover._swatch_buttons[tokens.INK_SWATCHES[2][1]], Qt.MouseButton.LeftButton
+            ),
+            lambda: QTest.mouseClick(popover._fill_button, Qt.MouseButton.LeftButton),
+            lambda: QTest.mouseClick(popover._dash_button, Qt.MouseButton.LeftButton),
+            lambda: popover._size_slider.setValue(12),
+            lambda: QTest.mouseClick(popover._custom_button, Qt.MouseButton.LeftButton),
+            lambda: QTest.keyClick(overlay, Qt.Key.Key_5),
+            lambda: QTest.keyClick(overlay, Qt.Key.Key_BracketRight),
+            lambda: QTest.keyClick(overlay, Qt.Key.Key_D),
+        ):
+            pick()
+            still_open.append(popover.isVisible())
+
+        assert still_open == [True] * 8
+        assert overlay._bar._style_dot.is_open
+
+    def test_what_it_shows_follows_each_pick(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("pen")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        popover = overlay._style_popover
+
+        QTest.keyClick(overlay, Qt.Key.Key_3)
+        QTest.keyClick(overlay, Qt.Key.Key_BracketRight)
+
+        _name, hex_colour = tokens.INK_SWATCHES[2]
+        assert popover._swatch_buttons[hex_colour].is_selected
+        assert popover._size_slider.value() == overlay._styles.of("pen").size
+        assert popover._size_readout.text() == f"{overlay._styles.of('pen').size}px"
+
+    def test_a_tools_style_survives_a_switch_to_another_and_back(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("rect")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        popover = overlay._style_popover
+        _name, violet = tokens.INK_SWATCHES[4]
+        QTest.mouseClick(popover._swatch_buttons[violet], Qt.MouseButton.LeftButton)
+        QTest.mouseClick(popover._fill_button, Qt.MouseButton.LeftButton)
+        popover._size_slider.setValue(14)
+        rect = overlay._styles.of("rect")
+        pen = overlay._styles.of("pen")
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+        on_the_pen = (popover.tool, overlay._bar._style_dot.style)
+        QTest.keyClick(overlay, Qt.Key.Key_R)
+
+        assert on_the_pen == ("pen", pen)
+        assert overlay._styles.of("rect") == rect
+        assert (rect.colour, rect.size) == (violet, 14)
+        assert popover._swatch_buttons[violet].is_selected
+        assert popover._fill_button.state == rect.fill
+        assert overlay._bar._style_dot.style == rect
+
+    def test_a_fill_and_line_pick_reach_the_next_mark_drawn(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("ellipse")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay._style_popover._fill_button, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay._style_popover._dash_button, Qt.MouseButton.LeftButton)
+        # Closed first: a press on the frame while it is open only closes it.
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(450, 250))
+        QTest.mouseMove(overlay, QPoint(600, 330))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(600, 330))
+
+        mark = overlay.marks[-1]
+        assert isinstance(mark, Ellipse)
+        assert (mark.fill, mark.dash) == ("filled", "dashed")
+        assert mark.colour == QColor(tokens.DEFAULT_STYLE["ellipse"]["color"])
+        assert mark.stroke_width == tokens.DEFAULT_STYLE["ellipse"]["size"]
+
+    def test_a_strength_reaches_the_next_redaction(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("blur")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        overlay._style_popover._strength_slider.setValue(17)
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(450, 250))
+        QTest.mouseMove(overlay, QPoint(600, 330))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(600, 330))
+
+        assert overlay.marks[-1].strength == 17
+
+    def test_a_key_to_another_tool_keeps_it_open_for_that_tool(self):
+        # A key changes the tool without dismissing anything, so the popover
+        # follows it, and is placed again for its new height.
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("blur")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        popover = overlay._style_popover
+
+        QTest.keyClick(overlay, Qt.Key.Key_P)
+
+        assert popover.isVisible()
+        assert popover.sections() == ["color", "size"]
+        assert popover.geometry().bottom() < overlay._bar.geometry().top()
+
+    def test_a_key_to_a_tool_with_nothing_to_style_closes_it(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("pen")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+
+        QTest.keyClick(overlay, Qt.Key.Key_E)
+
+        assert not overlay._style_popover.isVisible()
+        assert not overlay._bar._style_dot.is_open
+
+    def test_clicking_another_tool_closes_it(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("pen")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._bar._tool_buttons["text"], Qt.MouseButton.LeftButton)
+
+        assert not overlay._style_popover.isVisible()
+        assert overlay._tool_hint.isVisible()
+
+    def test_escape_closes_it_before_anything_else(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("pen")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        selection = QRect(overlay._selection)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay._style_popover.isVisible()
+        assert overlay._selection == selection
+
+    def test_the_tool_hint_gives_way_to_it_and_comes_back(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("pen")
+        assert overlay._tool_hint.isVisible()
+
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        while_open = overlay._tool_hint.isVisible()
+        overlay._bar._tool_buttons["eraser"].hovered.emit("eraser")
+        on_hover = overlay._tool_hint.isVisible()
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+
+        assert (while_open, on_hover) == (False, False)
+        assert overlay._tool_hint.isVisible()
+
+    def test_it_hides_when_the_selection_is_cleared(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("pen")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+
+        overlay.set_selection(None)
+
+        assert not overlay._style_popover.isVisible()
+        assert not overlay._bar._style_dot.is_open
+
+    def test_it_stays_down_while_the_overlay_itself_is_not_shown(self):
+        # None of this file's pixel-sampling OverlayWindow tests call
+        # .show(), so the popover may not start painting into a grab() they
+        # did not ask for.
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(50, 50, 50, 50))
+
+        overlay._on_tool_selected("pen")
+        overlay._toggle_style()
+
+        assert overlay._style_popover.isHidden()
+
+    def test_a_click_on_its_slider_leaves_the_keys_with_the_window(self):
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("pen")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        slider = overlay._style_popover._size_slider
+
+        QTest.mouseClick(slider, Qt.MouseButton.LeftButton, pos=QPoint(slider.width() - 3, slider.height() // 2))
+        QTest.keyClick(overlay, Qt.Key.Key_6)
+
+        assert overlay.focusWidget() is not slider
+        assert overlay._styles.of("pen").colour == tokens.INK_SWATCHES[5][1]
+
+    def test_the_style_is_there_on_the_next_snip(self):
+        # Remembered for the session: every overlay is built fresh, and the
+        # style set on one is still set on the next.
+        first = _styled_overlay()
+        first._bar.select_tool("pen")
+        QTest.keyClick(first, Qt.Key.Key_3)
+        first.close()
+
+        second = _styled_overlay()
+        second._bar.select_tool("pen")
+
+        assert second._styles is session_styles
+        assert second._styles.of("pen").colour == tokens.INK_SWATCHES[2][1]
+        assert second._bar._style_dot.style.colour == tokens.INK_SWATCHES[2][1]
 
 
 class TestOverlayWindowToasts:
@@ -4433,821 +5148,6 @@ class TestToastExcludedFromExport:
 
         toast_center = overlay._toast.geometry().center()
         assert pixel(rendered, toast_center) == QColor(10, 20, 30)
-
-
-class TestSettingsTrayVisibility:
-    """SNX-41: 'colour and stroke are not controls until the user is
-    holding something that draws' -- the tray's whole reason for existing.
-    """
-
-    @pytest.mark.parametrize("tool", tokens.DRAW_TOOLS)
-    def test_shown_for_every_draw_tool(self, tool):
-        tray = SettingsTray()
-
-        tray.set_tool(tool)
-
-        assert tray.isVisible()
-
-    def test_hidden_for_the_eraser(self):
-        tray = SettingsTray()
-        tray.set_tool("pen")
-        assert tray.isVisible()
-
-        tray.set_tool("eraser")
-
-        assert not tray.isVisible()
-
-    def test_hidden_for_blur(self):
-        # Blur gets its own strength/mode tray (BlurTray, SNX-42) in this
-        # one's place -- 'blur' is simply not a tokens.DRAW_TOOLS member,
-        # so this tray hides for it exactly like the eraser.
-        tray = SettingsTray()
-        tray.set_tool("pen")
-
-        tray.set_tool("blur")
-
-        assert not tray.isVisible()
-
-
-class TestSettingsTrayComposition:
-    """SNX-41: the tray carries the active-tool pill, the ink swatches, a
-    custom-colour button, a stroke slider, a readout, a preview dot and a
-    hint -- separated by dividers, per the spec's "Settings tray" table.
-    """
-
-    def test_contains_one_swatch_per_ink_swatch_token(self):
-        tray = SettingsTray()
-
-        assert list(tray._swatch_buttons.keys()) == [hex for _name, hex in tokens.INK_SWATCHES]
-
-    def test_contains_the_custom_colour_button(self):
-        tray = SettingsTray()
-
-        assert isinstance(tray._custom_button, _CustomColorButton)
-
-    def test_three_dividers_separate_the_four_groups(self):
-        tray = SettingsTray()
-
-        assert len(tray.findChildren(_Divider)) == 3
-
-    def test_contains_the_slider_readout_and_preview_dot(self):
-        tray = SettingsTray()
-
-        assert isinstance(tray._slider, QSlider)
-        assert tray._readout is not None
-        assert isinstance(tray._preview, _PreviewDot)
-
-    def test_pill_names_the_active_tool(self):
-        tray = SettingsTray()
-
-        tray.set_tool("arrow")
-
-        assert tray._pill._text_label.text() == _tool_label("arrow")
-
-    def test_hint_matches_the_active_tools_token_hint(self):
-        tray = SettingsTray()
-
-        tray.set_tool("rect")
-
-        assert tray._hint.text() == tokens.TOOL_HINTS["rect"]
-
-    def test_slider_range_matches_the_stroke_tokens(self):
-        tray = SettingsTray()
-
-        assert tray._slider.minimum() == tokens.Metric.STROKE_MIN
-        assert tray._slider.maximum() == tokens.Metric.STROKE_MAX
-
-    def test_default_stroke_matches_the_token_default(self):
-        tray = SettingsTray()
-
-        assert tray.stroke == tokens.Metric.STROKE_DEFAULT
-        assert tray._slider.value() == tokens.Metric.STROKE_DEFAULT
-
-    def test_default_colour_is_the_first_ink_swatch(self):
-        tray = SettingsTray()
-
-        assert tray.colour == tokens.INK_SWATCHES[0][1]
-
-
-class TestSettingsTrayFill:
-    """SNX-61: 'the settings tray paints a rounded panel behind its
-    controls' -- same glass treatment as FloatingBar, same alpha-not-opacity
-    rule (see TestFloatingBarFill above). Before this ticket, SettingsTray
-    set WA_TranslucentBackground and defined no paintEvent, so this pixel
-    read as fully transparent (alpha 0) -- background, not panel.
-    """
-
-    def test_background_pixel_is_painted_at_the_token_alpha(self):
-        tray = SettingsTray()
-        tray.resize(tray.sizeHint())
-
-        rendered = tray.grab().toImage()
-        # Top padding strip, mid-width: inside the rounded fill but above
-        # every control, so this is background only.
-        sampled = pixel(rendered, tray.width() // 2, 2)
-
-        expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
-        assert sampled.alpha() == pytest.approx(expected_alpha, abs=2)
-        assert (sampled.red(), sampled.green(), sampled.blue()) == QColor(
-            tokens.Color.BAR_BG
-        ).getRgb()[:3]
-
-    def test_control_pixels_stay_fully_opaque_over_the_translucent_fill(self):
-        # Painting the whole widget at reduced *opacity* would leave every
-        # control pixel translucent too, at the same alpha as the
-        # background -- exactly the mistake the README warns FloatingBar
-        # away from. Scans a swatch button's whole rect and takes the max,
-        # not the min, the same way TestFloatingBarFill's equivalent test
-        # does -- a swatch is a rounded shape, so its own corner pixels sit
-        # outside the fill it paints and would otherwise read as the tray's
-        # translucent background rather than the button's own opacity.
-        tray = SettingsTray()
-        tray.resize(tray.sizeHint())
-
-        rendered = tray.grab().toImage()
-        rect = tray._swatch_buttons[tokens.INK_SWATCHES[0][1]].geometry()
-        alphas = [
-            pixel(rendered, x, y).alpha()
-            for x in range(rect.left(), rect.right())
-            for y in range(rect.top(), rect.bottom())
-        ]
-
-        assert max(alphas) == 255
-
-
-class TestSettingsTraySwatchSelection:
-    """SNX-41: 'the selected swatch is drawn with the double ring the spec
-    describes, and picking one changes the colour new marks are drawn in.'
-    """
-
-    def test_default_swatch_is_selected(self):
-        tray = SettingsTray()
-
-        default_hex = tokens.INK_SWATCHES[0][1]
-        assert tray._swatch_buttons[default_hex].is_selected
-        assert all(
-            not button.is_selected
-            for hex_colour, button in tray._swatch_buttons.items()
-            if hex_colour != default_hex
-        )
-
-    def test_clicking_a_swatch_selects_it_and_deselects_the_rest(self):
-        tray = SettingsTray()
-        _name, target_hex = tokens.INK_SWATCHES[2]
-
-        QTest.mouseClick(tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
-
-        assert tray._swatch_buttons[target_hex].is_selected
-        assert tray.colour == target_hex
-        assert all(
-            not button.is_selected
-            for hex_colour, button in tray._swatch_buttons.items()
-            if hex_colour != target_hex
-        )
-
-    def test_clicking_a_swatch_emits_colour_changed(self):
-        tray = SettingsTray()
-        received = Mock()
-        tray.colourChanged.connect(received)
-        _name, target_hex = tokens.INK_SWATCHES[1]
-
-        QTest.mouseClick(tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
-
-        received.assert_called_once_with(target_hex)
-
-    def test_unselected_swatch_paints_only_its_own_flat_colour(self):
-        # No ring at all for a swatch that isn't the selected one -- this
-        # is the negative case the double-ring test below leans on.
-        tray = SettingsTray()
-        _name, hex_colour = tokens.INK_SWATCHES[3]
-        button = tray._swatch_buttons[hex_colour]
-        button.resize(button.sizeHint())
-
-        rendered = button.grab().toImage()
-        center = pixel(rendered, button.width() // 2, button.height() // 2)
-
-        assert (center.red(), center.green(), center.blue()) == QColor(hex_colour).getRgb()[:3]
-
-    def test_selected_swatch_paints_the_double_ring(self):
-        tray = SettingsTray()
-        _name, hex_colour = tokens.INK_SWATCHES[0]
-        button = tray._swatch_buttons[hex_colour]
-        button.set_selected(True)
-        button.resize(button.sizeHint())
-
-        rendered = button.grab().toImage()
-        center = pixel(rendered, button.width() // 2, button.height() // 2)
-        # The outermost pixel: the light ring painted flush against the
-        # button's own edge, at mid-height so it falls on the ring's flat
-        # side rather than its rounded corner.
-        edge = pixel(rendered, 0, button.height() // 2)
-
-        assert (center.red(), center.green(), center.blue()) == QColor(hex_colour).getRgb()[:3]
-        assert (edge.red(), edge.green(), edge.blue()) == QColor(
-            tokens.Color.TEXT_PRIMARY
-        ).getRgb()[:3]
-
-
-class TestSettingsTrayCustomColour:
-    """SNX-41: 'the custom-colour button opens a colour dialog and the
-    colour it returns becomes the current ink colour.'
-    """
-
-    def test_click_opens_the_colour_dialog_seeded_with_the_current_colour(self, monkeypatch):
-        tray = SettingsTray()
-        seen = []
-        monkeypatch.setattr(
-            QColorDialog,
-            "getColor",
-            staticmethod(lambda initial, *a, **k: seen.append(initial) or QColor()),
-        )
-
-        QTest.mouseClick(tray._custom_button, Qt.MouseButton.LeftButton)
-
-        assert seen == [QColor(tray.colour)]
-
-    def test_a_valid_returned_colour_becomes_the_current_ink_colour(self, monkeypatch):
-        tray = SettingsTray()
-        chosen = QColor("#336699")
-        monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: chosen))
-
-        QTest.mouseClick(tray._custom_button, Qt.MouseButton.LeftButton)
-
-        assert tray.colour == chosen.name()
-        # No swatch reads as selected once the colour is a custom one that
-        # doesn't match any of them.
-        assert not any(button.is_selected for button in tray._swatch_buttons.values())
-
-    def test_cancelling_the_dialog_leaves_the_colour_unchanged(self, monkeypatch):
-        tray = SettingsTray()
-        original = tray.colour
-        # QColorDialog.getColor() returns an invalid QColor on Cancel.
-        monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor()))
-
-        QTest.mouseClick(tray._custom_button, Qt.MouseButton.LeftButton)
-
-        assert tray.colour == original
-
-
-class TestSettingsTrayStrokeReadout:
-    """SNX-41: 'the stroke readout has a minimum width so the tray does
-    not change width as the number does.'
-    """
-
-    def test_readout_has_the_specs_minimum_width(self):
-        tray = SettingsTray()
-
-        assert tray._readout.minimumWidth() == SettingsTray._READOUT_MIN_W
-
-    def test_readout_shows_the_default_stroke(self):
-        tray = SettingsTray()
-
-        assert tray._readout.text() == f"{tokens.Metric.STROKE_DEFAULT}px"
-
-    def test_moving_the_slider_updates_the_readout(self):
-        tray = SettingsTray()
-
-        tray._slider.setValue(17)
-
-        assert tray._readout.text() == "17px"
-        assert tray.stroke == 17
-
-    def test_moving_the_slider_emits_stroke_changed(self):
-        tray = SettingsTray()
-        received = Mock()
-        tray.strokeChanged.connect(received)
-
-        tray._slider.setValue(9)
-
-        received.assert_called_once_with(9)
-
-    def test_set_stroke_clamps_to_the_token_range(self):
-        tray = SettingsTray()
-
-        tray.set_stroke(tokens.Metric.STROKE_MAX + 50)
-        assert tray.stroke == tokens.Metric.STROKE_MAX
-
-        tray.set_stroke(tokens.Metric.STROKE_MIN - 50)
-        assert tray.stroke == tokens.Metric.STROKE_MIN
-
-
-class TestSettingsTrayPreviewDot:
-    """SNX-41: 'the preview dot shows the current colour at the current
-    stroke, multiplied for the highlighter and clamped to the token
-    range.'
-    """
-
-    def test_preview_matches_colour_and_stroke_for_a_plain_tool(self):
-        tray = SettingsTray()
-        tray.set_tool("pen")
-
-        tray.set_colour(tokens.INK_SWATCHES[4][1])
-        tray.set_stroke(10)
-
-        assert tray._preview._colour == QColor(tokens.INK_SWATCHES[4][1])
-        assert tray._preview._diameter == 10
-
-    def test_preview_diameter_is_multiplied_for_the_highlighter(self):
-        tray = SettingsTray()
-        tray.set_tool("highlighter")
-
-        tray.set_stroke(4)
-
-        assert tray._preview._diameter == pytest.approx(4 * tokens.Metric.HIGHLIGHT_MULT)
-
-    def test_preview_diameter_is_clamped_to_the_stroke_token_range(self):
-        tray = SettingsTray()
-        tray.set_tool("highlighter")
-
-        # 4 * HIGHLIGHT_MULT (3.5) == 14, well inside range; a stroke near
-        # the top of the range multiplied by 3.5 blows past STROKE_MAX and
-        # must clamp down to it rather than overflowing the 28px box.
-        tray.set_stroke(tokens.Metric.STROKE_MAX)
-
-        assert tray._preview._diameter == tokens.Metric.STROKE_MAX
-
-    def test_switching_back_to_a_plain_tool_drops_the_multiplier(self):
-        tray = SettingsTray()
-        tray.set_tool("highlighter")
-        tray.set_stroke(6)
-        assert tray._preview._diameter == pytest.approx(6 * tokens.Metric.HIGHLIGHT_MULT)
-
-        tray.set_tool("pen")
-
-        assert tray._preview._diameter == 6
-
-
-class TestSettingsTrayOverlayIntegration:
-    """SNX-41: the tray wired into `OverlayWindow`, positioned under the
-    bar and shown only while the bar's active tool draws -- mirroring how
-    SNX-40 wired `FloatingBar` in.
-    """
-
-    def _overlay(self, size=(1600, 1000)):
-        frame = make_frame(image_size=size, logical_size=size)
-        return OverlayWindow(frame)
-
-    def test_picking_a_draw_tool_names_it_and_leaves_the_tray_down(self):
-        # The tray no longer comes up by itself -- that is what made the bar
-        # and its tray about 110px tall -- and the strip names the tool.
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-
-        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
-
-        assert not overlay._tray.isVisible()
-        assert overlay._tool_hint.isVisible()
-        assert overlay._tool_hint._pill._text_label.text() == "Pen"
-
-    def test_tray_shown_and_positioned_once_the_style_dot_opens_it(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
-
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-
-        assert overlay._tray.isVisible()
-        assert not overlay._tool_hint.isVisible()
-        expected_top = overlay._bar.geometry().bottom() + tokens.Metric.TRAY_OFFSET_Y
-        assert overlay._tray.geometry().top() == expected_top
-        # abs=1: the bar's and tray's own sizeHint widths can differ in
-        # parity, the same one-pixel rounding TestFloatingBarPositioning
-        # already tolerates for the same reason.
-        assert overlay._tray.geometry().center().x() == pytest.approx(
-            overlay._bar.geometry().center().x(), abs=1
-        )
-
-    def test_tray_hidden_for_the_eraser(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        assert overlay._tray.isVisible()
-
-        QTest.mouseClick(overlay._bar._tool_buttons["eraser"], Qt.MouseButton.LeftButton)
-
-        assert not overlay._tray.isVisible()
-
-    def test_tray_hides_when_the_selection_is_cleared(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        assert overlay._tray.isVisible()
-
-        overlay.set_selection(None)
-
-        assert not overlay._tray.isVisible()
-
-    def test_tray_stays_hidden_while_the_overlay_itself_is_not_shown(self):
-        # Same guarantee TestFloatingBarIntegration establishes for `_bar`:
-        # none of this file's pixel-sampling OverlayWindow tests call
-        # .show(), so neither child widget may start painting into a
-        # grab() they didn't ask for.
-        overlay = self._overlay(size=(200, 200))
-        overlay.set_selection(QRect(50, 50, 50, 50))
-
-        overlay._on_tool_selected("pen")
-
-        assert not overlay._tray.isVisible()
-
-    def test_picking_a_swatch_updates_the_overlays_ink_colour(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
-        _name, target_hex = tokens.INK_SWATCHES[3]
-
-        QTest.mouseClick(overlay._tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
-
-        assert overlay._ink_colour == target_hex
-
-    def test_moving_the_stroke_slider_updates_the_overlays_stroke_width(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
-
-        overlay._tray._slider.setValue(21)
-
-        assert overlay._stroke_width == 21
-
-
-class TestBlurTrayComposition:
-    """SNX-42: the blur tray replaces SettingsTray's colour/stroke controls
-    with a Blur/Pixelate toggle, a strength slider/readout and the hint --
-    per docs/design/overlay-redesign.md's "Blur tray" paragraph.
-    """
-
-    def test_contains_the_mode_well_with_both_segments(self):
-        tray = BlurTray()
-
-        assert isinstance(tray._well, _BlurModeWell)
-        assert isinstance(tray._well.blur_button, _SegmentButton)
-        assert isinstance(tray._well.pixelate_button, _SegmentButton)
-
-    def test_contains_the_slider_and_readout(self):
-        tray = BlurTray()
-
-        assert isinstance(tray._slider, QSlider)
-        assert tray._readout is not None
-
-    def test_hint_matches_the_blur_tools_token_hint(self):
-        tray = BlurTray()
-
-        assert tray._hint.text() == tokens.TOOL_HINTS["blur"]
-
-    def test_slider_range_matches_the_blur_tokens(self):
-        tray = BlurTray()
-
-        assert tray._slider.minimum() == tokens.Metric.BLUR_MIN
-        assert tray._slider.maximum() == tokens.Metric.BLUR_MAX
-
-    def test_default_strength_matches_the_token_default(self):
-        tray = BlurTray()
-
-        assert tray.strength == tokens.Metric.BLUR_DEFAULT
-        assert tray._slider.value() == tokens.Metric.BLUR_DEFAULT
-
-    def test_default_blur_mode_is_blur(self):
-        tray = BlurTray()
-
-        assert tray.blur_mode == "blur"
-
-
-class TestBlurTrayFill:
-    """SNX-61: 'the blur tray paints the same panel treatment' as
-    SettingsTray. Before this ticket, BlurTray set WA_TranslucentBackground
-    and defined no paintEvent either, so this pixel read as fully
-    transparent -- background, not panel.
-    """
-
-    def test_background_pixel_is_painted_at_the_token_alpha(self):
-        tray = BlurTray()
-        tray.resize(tray.sizeHint())
-
-        rendered = tray.grab().toImage()
-        # Top padding strip, mid-width: inside the rounded fill but above
-        # every control, so this is background only.
-        sampled = pixel(rendered, tray.width() // 2, 2)
-
-        expected_alpha = round(tokens.Color.BAR_BG_ALPHA * 255)
-        assert sampled.alpha() == pytest.approx(expected_alpha, abs=2)
-        assert (sampled.red(), sampled.green(), sampled.blue()) == QColor(
-            tokens.Color.BAR_BG
-        ).getRgb()[:3]
-
-    def test_control_pixels_stay_fully_opaque_over_the_translucent_fill(self):
-        # Same rationale as TestSettingsTrayFill's equivalent test: scans
-        # the active (Blur) segment button's whole rect and takes the max,
-        # since its own rounded corners fall outside the segment's own
-        # fill.
-        tray = BlurTray()
-        tray.resize(tray.sizeHint())
-
-        rendered = tray.grab().toImage()
-        rect = tray._well.blur_button.geometry()
-        rect = QRect(
-            tray._well.geometry().topLeft() + rect.topLeft(), rect.size()
-        )
-        alphas = [
-            pixel(rendered, x, y).alpha()
-            for x in range(rect.left(), rect.right())
-            for y in range(rect.top(), rect.bottom())
-        ]
-
-        assert max(alphas) == 255
-
-
-class TestBlurTraySegmentToggle:
-    """SNX-42: 'the two-segment toggle chooses between blur and pixelate,
-    and exactly one segment reads as active,' and 'the segment that is
-    active decides which obscuring shape a drag commits.'
-    """
-
-    def test_blur_segment_is_active_by_default(self):
-        tray = BlurTray()
-
-        assert tray._well.blur_button.is_active
-        assert not tray._well.pixelate_button.is_active
-
-    def test_clicking_pixelate_activates_it_and_deactivates_blur(self):
-        tray = BlurTray()
-
-        QTest.mouseClick(tray._well.pixelate_button, Qt.MouseButton.LeftButton)
-
-        assert tray.blur_mode == "pix"
-        assert tray._well.pixelate_button.is_active
-        assert not tray._well.blur_button.is_active
-
-    def test_clicking_blur_after_pixelate_activates_it_and_deactivates_pixelate(self):
-        tray = BlurTray()
-        QTest.mouseClick(tray._well.pixelate_button, Qt.MouseButton.LeftButton)
-
-        QTest.mouseClick(tray._well.blur_button, Qt.MouseButton.LeftButton)
-
-        assert tray.blur_mode == "blur"
-        assert tray._well.blur_button.is_active
-        assert not tray._well.pixelate_button.is_active
-
-    def test_clicking_a_segment_emits_blur_mode_changed(self):
-        tray = BlurTray()
-        received = Mock()
-        tray.blurModeChanged.connect(received)
-
-        QTest.mouseClick(tray._well.pixelate_button, Qt.MouseButton.LeftButton)
-
-        received.assert_called_once_with("pix")
-
-
-class TestBlurTraySolidSegment:
-    """Solid: the third segment, which blacks a region out rather than
-    obscuring it -- and has no strength to set.
-    """
-
-    def test_clicking_solid_activates_only_it(self):
-        tray = BlurTray()
-
-        QTest.mouseClick(tray._well.solid_button, Qt.MouseButton.LeftButton)
-
-        assert tray.blur_mode == "solid"
-        assert tray._well.solid_button.is_active
-        assert not tray._well.blur_button.is_active
-        assert not tray._well.pixelate_button.is_active
-
-    def test_clicking_solid_emits_blur_mode_changed(self):
-        tray = BlurTray()
-        received = Mock()
-        tray.blurModeChanged.connect(received)
-
-        QTest.mouseClick(tray._well.solid_button, Qt.MouseButton.LeftButton)
-
-        received.assert_called_once_with("solid")
-
-    def test_strength_is_disabled_while_solid_is_active(self):
-        tray = BlurTray()
-
-        tray.set_blur_mode("solid")
-
-        assert not tray._slider.isEnabled()
-        assert not tray._strength_label.isEnabled()
-        assert not tray._readout.isEnabled()
-
-    def test_strength_comes_back_for_blur_and_pixelate(self):
-        tray = BlurTray()
-        for mode in ("blur", "pix"):
-            tray.set_blur_mode("solid")
-
-            tray.set_blur_mode(mode)
-
-            assert tray._slider.isEnabled(), mode
-
-    def test_the_solid_segment_arms_blackout_and_a_drag_commits_one(self):
-        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
-        overlay = OverlayWindow(frame)
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 400, 300))
-        QTest.mouseClick(overlay._bar._tool_buttons["redact"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._blur_tray._well.solid_button, Qt.MouseButton.LeftButton)
-        assert overlay._bar.active_tool == "blackout"
-        # Closed first: a press on the frame while the tray is open closes
-        # it and does nothing more.
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)
-
-        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(450, 250))
-        QTest.mouseMove(overlay, QPoint(600, 320))
-        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(600, 320))
-
-        assert len(overlay._marks) == 1
-        assert type(overlay._marks[0]).__name__ == "Blackout"
-
-
-class TestBlurTrayStrengthReadout:
-    """SNX-42: 'the strength slider covers the range in tokens.py and
-    starts at the token default' and 'the readout shows the current
-    strength and has a minimum width so the tray does not reflow.'
-    """
-
-    def test_readout_has_a_minimum_width(self):
-        tray = BlurTray()
-
-        assert tray._readout.minimumWidth() == BlurTray._READOUT_MIN_W
-
-    def test_readout_shows_the_default_strength(self):
-        tray = BlurTray()
-
-        assert tray._readout.text() == str(tokens.Metric.BLUR_DEFAULT)
-
-    def test_moving_the_slider_updates_the_readout(self):
-        tray = BlurTray()
-
-        tray._slider.setValue(15)
-
-        assert tray._readout.text() == "15"
-        assert tray.strength == 15
-
-    def test_moving_the_slider_emits_strength_changed(self):
-        tray = BlurTray()
-        received = Mock()
-        tray.strengthChanged.connect(received)
-
-        tray._slider.setValue(12)
-
-        received.assert_called_once_with(12)
-
-    def test_set_strength_clamps_to_the_token_range(self):
-        tray = BlurTray()
-
-        tray.set_strength(tokens.Metric.BLUR_MAX + 50)
-        assert tray.strength == tokens.Metric.BLUR_MAX
-
-        tray.set_strength(tokens.Metric.BLUR_MIN - 50)
-        assert tray.strength == tokens.Metric.BLUR_MIN
-
-
-class TestBlurTrayOverlayIntegration:
-    """SNX-42: the blur tray wired into OverlayWindow, shown in place of
-    SettingsTray -- never alongside it -- while the bar's active tool is
-    'blur', mirroring how SNX-41 wired SettingsTray in.
-    """
-
-    def _overlay(self, size=(1600, 1000)):
-        frame = make_frame(image_size=size, logical_size=size)
-        return OverlayWindow(frame)
-
-    def test_blur_tray_shown_and_positioned_once_blur_is_picked(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-
-        QTest.mouseClick(overlay._bar._tool_buttons["redact"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-
-        assert overlay._blur_tray.isVisible()
-        assert not overlay._tray.isVisible()
-        expected_top = overlay._bar.geometry().bottom() + tokens.Metric.TRAY_OFFSET_Y
-        assert overlay._blur_tray.geometry().top() == expected_top
-        assert overlay._blur_tray.geometry().center().x() == pytest.approx(
-            overlay._bar.geometry().center().x(), abs=1
-        )
-
-    def test_a_key_to_a_draw_tool_swaps_in_the_draw_tray(self):
-        # A key changes the tool without dismissing anything, so the open
-        # tray follows the tool rather than closing.
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["redact"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        assert overlay._blur_tray.isVisible()
-
-        QTest.keyClick(overlay, Qt.Key.Key_P)
-
-        assert overlay._tray.isVisible()
-        assert not overlay._blur_tray.isVisible()
-
-    def test_clicking_another_tool_closes_the_open_tray(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["redact"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        assert overlay._blur_tray.isVisible()
-
-        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
-
-        assert not overlay._tray.isVisible()
-        assert not overlay._blur_tray.isVisible()
-        assert overlay._tool_hint.isVisible()
-
-    def test_blur_tray_hidden_for_the_eraser(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["redact"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        assert overlay._blur_tray.isVisible()
-
-        QTest.mouseClick(overlay._bar._tool_buttons["eraser"], Qt.MouseButton.LeftButton)
-
-        assert not overlay._blur_tray.isVisible()
-        assert not overlay._tray.isVisible()
-
-    def test_blur_tray_hides_when_the_selection_is_cleared(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["redact"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        assert overlay._blur_tray.isVisible()
-
-        overlay.set_selection(None)
-
-        assert not overlay._blur_tray.isVisible()
-
-    def test_blur_tray_stays_hidden_while_the_overlay_itself_is_not_shown(self):
-        # Same guarantee TestSettingsTrayOverlayIntegration establishes for
-        # `_tray`: none of this file's pixel-sampling OverlayWindow tests
-        # call .show(), so `_blur_tray` may not start painting into a
-        # grab() it wasn't asked for either.
-        overlay = self._overlay(size=(200, 200))
-        overlay.set_selection(QRect(50, 50, 50, 50))
-
-        overlay._on_tool_selected("blur")
-
-        assert not overlay._blur_tray.isVisible()
-
-    def test_a_segment_arms_the_redaction_tool_it_names(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["redact"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        assert overlay._bar.active_tool == "blur"
-
-        QTest.mouseClick(overlay._blur_tray._well.pixelate_button, Qt.MouseButton.LeftButton)
-
-        assert overlay._bar.active_tool == "pixelate"
-        assert overlay._bar._tool_buttons["redact"]._icon_name == "mask"
-        assert overlay._blur_tray.isVisible(), "a pick inside the tray keeps it open"
-
-    def test_arming_a_redaction_tool_lights_its_segment(self):
-        overlay = self._overlay()
-        overlay.set_selection(QRect(400, 200, 200, 150))
-
-        overlay._bar.select_tool("blackout")
-
-        assert overlay._blur_tray.blur_mode == "solid"
-
-    def test_moving_the_strength_slider_updates_the_overlays_blur_strength(self):
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-        overlay.set_selection(QRect(400, 200, 200, 150))
-        QTest.mouseClick(overlay._bar._tool_buttons["redact"], Qt.MouseButton.LeftButton)
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-
-        overlay._blur_tray._slider.setValue(17)
-
-        assert overlay._blur_strength == 17
 
 
 class TestCaptureModePopoverComposition:
@@ -5750,13 +5650,14 @@ class TestFamilyMenuOverlayIntegration:
         assert overlay._bar.active_tool == "ellipse"
         assert not overlay._family_menus["shapes"].isVisible(), "a click uses the slot"
 
-    def test_picking_crop_shows_the_colour_and_stroke_tray_when_opened(self):
+    def test_picking_crop_offers_its_colour_and_stroke_when_styled(self):
         overlay = self._overlay()
         QTest.mouseClick(self._notch(overlay, "shapes")._rows["crop"], Qt.MouseButton.LeftButton)
 
         QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
 
-        assert overlay._tray.isVisible()
+        assert overlay._style_popover.isVisible()
+        assert overlay._style_popover.sections() == ["color", "size"]
 
     def test_reopening_ticks_the_sibling_the_slot_shows(self):
         overlay = self._overlay()
@@ -6836,9 +6737,13 @@ class TestCaptureModeDelayIntegration:
         registry = BackendRegistry([_FakeCaptureBackend(regrabbed_frame)])
         overlay = self._overlay(registry=registry)
         QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
         _name, target_hex = tokens.INK_SWATCHES[3]
-        QTest.mouseClick(overlay._tray._swatch_buttons[target_hex], Qt.MouseButton.LeftButton)
-        overlay._tray._slider.setValue(21)
+        QTest.mouseClick(
+            overlay._style_popover._swatch_buttons[target_hex], Qt.MouseButton.LeftButton
+        )
+        overlay._style_popover._size_slider.setValue(21)
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)  # closes the popover, nothing more
         self._open_popover_and_set_delay(overlay)
         self._confirm_mode(overlay, self.REGION_LABEL)
 
@@ -6846,8 +6751,9 @@ class TestCaptureModeDelayIntegration:
             overlay._delay_timer.timeout.emit()
 
         assert overlay._bar.active_tool == "pen"
-        assert overlay._ink_colour == target_hex
-        assert overlay._stroke_width == 21
+        assert overlay._styles.of("pen").colour == target_hex
+        assert overlay._styles.of("pen").size == 21
+        assert overlay._bar._style_dot.style == overlay._styles.of("pen")
 
     def test_delayed_window_pick_still_arms_window_picking_on_the_new_frame(self):
         # The picked mode isn't forgotten across the wait -- Window and Full
@@ -7872,6 +7778,18 @@ class TestCloseButton:
         assert pixel(rendered, button_center) == QColor(10, 20, 30)
 
 
+def _focused_slider(parent: QWidget) -> QSlider:
+    """A slider holding the keyboard focus, standing in for any slider.
+
+    Shown first: a child that was never shown cannot take the focus from a
+    window that is on screen.
+    """
+    slider = QSlider(parent)
+    slider.show()
+    slider.setFocus()
+    return slider
+
+
 class TestKeyboardShortcutSuppression:
     """SNX-47 AC: 'none of these keys fire while a text label is being
     edited or a slider has focus, and the key reaches the focused widget
@@ -7879,6 +7797,10 @@ class TestKeyboardShortcutSuppression:
     see TestEscapeAndUndoRedoBypassSuppression below for those; this class
     now only covers the shortcuts that must keep yielding to a focused
     slider or label.
+
+    A bare `QSlider` stands in for any slider, as a bare `QLineEdit` does for
+    a label: the style popover's own sliders never take focus, so that its
+    keys keep working while it is open (TestStylePopoverComposition).
     """
 
     RED = QColor(255, 0, 0)
@@ -7891,7 +7813,7 @@ class TestKeyboardShortcutSuppression:
 
     def test_tool_letter_does_not_fire_while_a_slider_has_focus(self):
         overlay = self._overlay()
-        overlay._tray._slider.setFocus()
+        _focused_slider(overlay)
 
         QTest.keyClick(overlay, Qt.Key.Key_P)
 
@@ -7920,7 +7842,7 @@ class TestKeyboardShortcutSuppression:
         overlay = self._overlay()
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
-        overlay._tray._slider.setFocus()
+        _focused_slider(overlay)
 
         QTest.keyClick(overlay, Qt.Key.Key_Return)
 
@@ -7934,8 +7856,7 @@ class TestKeyboardShortcutSuppression:
         # OverlayWindow's own suppression above never has to get involved
         # for the slider's own keys to keep working.
         overlay = self._overlay()
-        slider = overlay._tray._slider
-        slider.setFocus()
+        slider = _focused_slider(overlay)
         original = slider.value()
 
         QTest.keyClick(slider, Qt.Key.Key_Right)
@@ -7978,7 +7899,7 @@ class TestEscapeAndUndoRedoBypassSuppression:
         # Escape, not which stage Escape is at -- so it presses through to
         # the close rather than asserting on the first press.
         overlay = self._overlay()
-        overlay._tray._slider.setFocus()
+        _focused_slider(overlay)
 
         QTest.keyClick(overlay, Qt.Key.Key_Escape)
         QTest.keyClick(overlay, Qt.Key.Key_Escape)
@@ -8009,7 +7930,7 @@ class TestEscapeAndUndoRedoBypassSuppression:
         # label, in turn, and Escape must get the user out of the overlay
         # both times.
         overlay = self._overlay()
-        overlay._tray._slider.setFocus()
+        _focused_slider(overlay)
 
         # Pressed until it is out: the claim is that a focused child never
         # swallows Escape, not how many stages Escape has.
@@ -8032,7 +7953,7 @@ class TestEscapeAndUndoRedoBypassSuppression:
         overlay.add_mark(
             Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
         )
-        overlay._tray._slider.setFocus()
+        _focused_slider(overlay)
 
         QTest.keyClick(overlay, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
 
@@ -8044,7 +7965,7 @@ class TestEscapeAndUndoRedoBypassSuppression:
             Rectangle(colour=self.RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
         )
         overlay.undo()
-        overlay._tray._slider.setFocus()
+        _focused_slider(overlay)
 
         QTest.keyClick(
             overlay,
@@ -8067,7 +7988,7 @@ class TestEscapeAndUndoRedoBypassSuppression:
         # default is not.
         overlay = self._overlay()
         before = overlay._bar.active_tool
-        overlay._tray._slider.setFocus()
+        _focused_slider(overlay)
 
         QTest.keyClick(overlay, Qt.Key.Key_H)
 
@@ -8076,8 +7997,7 @@ class TestEscapeAndUndoRedoBypassSuppression:
 
     def test_arrow_key_still_reaches_the_slider_after_the_escape_fix(self):
         overlay = self._overlay()
-        slider = overlay._tray._slider
-        slider.setFocus()
+        slider = _focused_slider(overlay)
         original = slider.value()
 
         QTest.keyClick(slider, Qt.Key.Key_Right)
@@ -9574,14 +9494,15 @@ class TestChromeStaysOnTheSelectionsMonitor:
 
         assert overlay._chrome_bounds() == STAGGERED_UNION
 
-    def test_settings_tray_stays_on_the_selections_monitor(self):
+    def test_the_style_popover_stays_on_the_selections_monitor(self):
         overlay = self._overlay(QRect(300, 950, 600, 250))
-        overlay._bar.select_tool(sorted(tokens.DRAW_TOOLS)[0])
+        overlay._bar.select_tool("arrow")
         overlay._toggle_style()
 
-        tray = overlay._tray.geometry()
+        popover = overlay._style_popover.geometry()
 
-        assert self._on_a_monitor(tray), f"tray at {tray} is on no monitor"
+        assert overlay._style_popover.isVisible()
+        assert self._on_a_monitor(popover), f"popover at {popover} is on no monitor"
 
     def test_capture_popover_stays_on_the_selections_monitor(self):
         overlay = self._overlay(QRect(300, 1000, 600, 250))
@@ -9868,7 +9789,7 @@ class TestPressOutsideStartsANewSelection:
         overlay = self._overlay()
         self._drag(overlay, QPoint(100, 100), QPoint(500, 400))
         before = QRect(overlay._selection)
-        overlay._bar.select_tool(sorted(tokens.DRAW_TOOLS)[0])
+        overlay._bar.select_tool("arrow")
 
         self._drag(overlay, QPoint(200, 200), QPoint(300, 300))
 
@@ -9880,7 +9801,7 @@ class TestPressOutsideStartsANewSelection:
         # destroy them -- Ctrl+Z could not bring them back.
         overlay = self._overlay()
         self._drag(overlay, QPoint(100, 100), QPoint(500, 400))
-        overlay._bar.select_tool(sorted(tokens.DRAW_TOOLS)[0])
+        overlay._bar.select_tool("arrow")
         self._drag(overlay, QPoint(200, 200), QPoint(300, 300))
         marks_before = len(overlay._marks)
         assert marks_before
@@ -9977,7 +9898,7 @@ class TestAPressOnChromeIsNotAPressOnTheOverlay:
         # to be asking anything.
         overlay = self._overlay()
         before = self._selected(overlay)
-        overlay._bar.select_tool(sorted(tokens.DRAW_TOOLS)[0])
+        overlay._bar.select_tool("arrow")
         QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
         assert overlay._popover.isVisible()
 
@@ -10052,18 +9973,39 @@ class TestAPressOnChromeIsNotAPressOnTheOverlay:
         assert overlay._selection == before
         assert overlay._in_progress_shape is None
 
-    def test_a_press_on_the_open_style_tray_keeps_it_open(self):
+    def test_a_press_on_the_open_style_popover_keeps_it_open(self):
         overlay = self._overlay()
         before = self._selected(overlay)
         overlay._bar.select_tool("pen")
         QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-        assert overlay._tray.isVisible()
+        popover = overlay._style_popover
+        assert popover.isVisible()
 
-        self._press(overlay._tray, self._background_of(overlay._tray))
+        self._press(popover, self._background_of(popover))
 
-        assert overlay._tray.isVisible()
+        assert popover.isVisible()
         assert overlay._selection == before
         assert overlay._in_progress_shape is None
+
+    def test_a_press_on_a_swatch_reaches_the_swatch_not_the_frame(self):
+        # The popover opens over the selection with the pen armed, so a press
+        # the frame saw first would close it and start a stroke.
+        overlay = self._overlay()
+        before = self._selected(overlay)
+        overlay._bar.select_tool("pen")
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        _name, violet = tokens.INK_SWATCHES[4]
+        swatch = overlay._style_popover._swatch_buttons[violet]
+        centre = swatch.rect().center()
+
+        QTest.mousePress(swatch, Qt.MouseButton.LeftButton, pos=centre)
+        QTest.mouseRelease(swatch, Qt.MouseButton.LeftButton, pos=centre)
+
+        assert overlay._style_popover.isVisible()
+        assert overlay._styles.of("pen").colour == violet
+        assert overlay._in_progress_shape is None
+        assert overlay._selection == before
+        assert overlay.marks == ()
 
     def test_a_press_on_the_frame_while_a_menu_is_open_only_closes_it(self):
         overlay = self._overlay()
@@ -10540,10 +10482,11 @@ class TestControlsLandOnTheCapturesMonitor:
         overlay._toggle_capture_popover()
         overlay._show_toast("save", "Saved")
         names = [name for name, _rect in self._chrome_on_screen(overlay)]
-        assert {"FloatingBar", "SettingsTray", "Toast", "_CloseButton"} <= set(names), names
+        assert {"FloatingBar", "StylePopover", "Toast", "_CloseButton"} <= set(names), names
         assert self._off(overlay, monitor) == []
         # A family menu is placed by a path of its own too, and closes the
-        # tray as it opens -- one menu at a time -- so it is checked apart.
+        # style popover as it opens -- one menu at a time -- so it is
+        # checked apart.
         overlay._toggle_family_menu("shapes")
         names = [name for name, _rect in self._chrome_on_screen(overlay)]
         assert "FamilyMenu" in names, names

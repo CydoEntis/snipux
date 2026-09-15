@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -53,7 +54,15 @@ from snipux import design, platform, sensitive, setup_desktop
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.flowbars import FlowMenu
-from snipux.marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
+from snipux.marks import (
+    MarkStore,
+    TextLabelEditor,
+    ToolStyle,
+    ToolStyles,
+    begin_stroke,
+    extend_stroke,
+    session_styles,
+)
 from snipux.shapes import (
     Arrow,
     Blur,
@@ -1152,14 +1161,16 @@ class _SplitAction(QWidget):
 
 class _StyleDot(QWidget):
     """The style slot: one button that is its own preview -- a dot in the
-    ink colour at the stroke's diameter -- so colour and stroke read without
-    opening anything.
+    active tool's colour at its stroke's diameter, or a ring in that colour
+    for a shape that is outline only -- so colour, stroke and fill read
+    without opening anything. A redaction has no colour, so its dot is the
+    bar's own idle grey, at its strength.
 
-    It opens the tray the active tool is styled with. A tool nothing on it
-    can change (`tokens.UNSTYLED_TOOLS`) dims it and it stops opening,
-    because a control that can do nothing should not look live. That dim is
-    real opacity -- one of the two places the handoff allows it -- painted
-    here rather than put on the widget as an effect.
+    It opens the style popover. A tool nothing on it can change
+    (`tokens.UNSTYLED_TOOLS`) dims it and it stops opening, because a
+    control that can do nothing should not look live. That dim is real
+    opacity -- one of the two places the handoff allows it -- painted here
+    rather than put on the widget as an effect.
     """
 
     clicked = pyqtSignal()
@@ -1169,8 +1180,9 @@ class _StyleDot(QWidget):
         metric = design.tokens.BarMetric
         self.setFixedSize(metric.BTN, metric.BTN)
         self.setMouseTracking(True)
-        self._colour = QColor(design.tokens.INK_SWATCHES[0][1])
-        self._stroke = design.tokens.Metric.STROKE_DEFAULT
+        self._style = ToolStyle(
+            colour=design.tokens.INK_SWATCHES[0][1], size=design.tokens.Metric.STROKE_DEFAULT
+        )
         self._tool: str | None = None
         self._open = False
         self._refresh()
@@ -1184,6 +1196,18 @@ class _StyleDot(QWidget):
         return self._open
 
     @property
+    def style(self) -> ToolStyle:
+        return self._style
+
+    def _sections(self) -> list[str]:
+        return design.tokens.STYLE_SECTIONS.get(self._tool, [])
+
+    @property
+    def is_ring(self) -> bool:
+        """Outline only: the fill is part of what the dot has to show."""
+        return "fill" in self._sections() and self._style.fill == "outline"
+
+    @property
     def diameter(self) -> float:
         metric = design.tokens.BarMetric
         scale = (
@@ -1191,11 +1215,11 @@ class _StyleDot(QWidget):
             if self._tool == "highlighter"
             else metric.STYLE_DOT_SCALE
         )
-        return max(metric.STYLE_DOT_MIN, min(self._stroke * scale, metric.STYLE_DOT_MAX))
+        value = self._style.strength if "strength" in self._sections() else self._style.size
+        return max(metric.STYLE_DOT_MIN, min(value * scale, metric.STYLE_DOT_MAX))
 
-    def set_preview(self, colour: str, stroke: int) -> None:
-        self._colour = QColor(colour)
-        self._stroke = stroke
+    def set_style(self, style: ToolStyle) -> None:
+        self._style = style
         self._refresh()
 
     def set_tool(self, tool: str | None) -> None:
@@ -1213,10 +1237,11 @@ class _StyleDot(QWidget):
             tooltip = "Style — pick a tool first"
         elif not self.is_stylable:
             tooltip = f"{name} has nothing to style"
-        elif _family_of(tool) == "redact":
-            tooltip = f"{name} — click for style"
+        elif "strength" in self._sections():
+            tooltip = f"{name} · strength {self._style.strength} — click for style"
         else:
-            tooltip = f"{name} · {self._colour.name()} · {self._stroke}px — click for style"
+            colour = QColor(self._style.colour).name()
+            tooltip = f"{name} · {colour} · {self._style.size}px — click for style"
         self.setToolTip(tooltip)
         self.setCursor(
             Qt.CursorShape.PointingHandCursor if self.is_stylable else Qt.CursorShape.ArrowCursor
@@ -1249,12 +1274,26 @@ class _StyleDot(QWidget):
 
         centre = QRectF(self.rect()).center()
         radius = self.diameter / 2
+        colour = (
+            design.bar_color("TOOL_IDLE_FG")
+            if "strength" in self._sections()
+            else QColor(self._style.colour)
+        )
+        if self.is_ring:
+            # The spec's inset ring: drawn inside the diameter, so an outline
+            # and a filled shape at the same stroke read the same size.
+            width = metric.STYLE_DOT_OUTLINE
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(colour, width))
+            painter.drawEllipse(centre, radius - width / 2, radius - width / 2)
+            painter.end()
+            return
         # The ring sits outside the dot, so a dot in a colour close to the
         # bar's own still has an edge.
         ring = radius + metric.STYLE_DOT_RING
         painter.setBrush(design.bar_color("STYLE_DOT_RING"))
         painter.drawEllipse(centre, ring, ring)
-        painter.setBrush(self._colour)
+        painter.setBrush(colour)
         painter.drawEllipse(centre, radius, radius)
         painter.end()
 
@@ -1268,7 +1307,7 @@ class FloatingBar(_Chrome):
     Two of the slots hold families (`tokens.FAMILIES`): shapes and
     redaction. A family slot shows whichever sibling was used last, a notch
     in its corner asks for the family's menu, and each sibling keeps its own
-    shortcut. The menu itself is the hosting window's, as are the trays the
+    shortcut. The menu itself is the hosting window's, as is the popover the
     style dot opens: they are chrome over that window, not part of this row
     (see `FamilyMenu`).
 
@@ -1653,11 +1692,18 @@ class FloatingBar(_Chrome):
 
     # -- style -------------------------------------------------------------
 
-    def set_style_preview(self, colour: str, stroke: int) -> None:
-        self._style_dot.set_preview(colour, stroke)
+    def set_style_preview(self, style: ToolStyle) -> None:
+        """What the style dot shows: the active tool's style."""
+        self._style_dot.set_style(style)
 
     def set_style_open(self, open_: bool) -> None:
         self._style_dot.set_open(open_)
+
+    def style_dot_rect(self, host: QWidget) -> QRect:
+        """The style dot, in `host`'s coordinates -- where its popover is
+        anchored.
+        """
+        return QRect(self._style_dot.mapTo(host, QPoint(0, 0)), self._style_dot.size())
 
     # -- undo / redo -------------------------------------------------------
 
@@ -1946,21 +1992,17 @@ class FloatingBar(_Chrome):
 
 
 # ---------------------------------------------------------------------------
-# Settings tray (SNX-41)
+# The tool hint strip
 # ---------------------------------------------------------------------------
-# docs/design/overlay-redesign.md's "Settings tray" section is the authority
-# here. The conditional visibility is the design's core idea, not a detail:
-# colour and stroke are not controls until the user is holding something
-# that draws, which is what keeps the bar itself at eleven groups instead of
-# growing a twelfth for settings that only sometimes apply. tokens.DRAW_TOOLS
-# names the tools that get *this* tray; blur gets a different one --
-# `BlurTray` below (SNX-42) -- and the eraser gets none at all.
+# What hangs under the bar while the style popover is closed: the active
+# tool's name and what it does. It used to lead the colour-and-stroke tray,
+# and it is the part of that tray that was always worth having up.
 
 
 class _ToolPill(QWidget):
-    """The tray's leftmost control: a static (non-clickable) pill naming
-    the active tool -- glyph + label, per the spec's "Active-tool pill"
-    bullet. A plain QWidget, not a QPushButton: nothing here is clickable,
+    """The tool hint strip's pill: a static (non-clickable) pill naming
+    the active tool -- glyph + label, per the old tray spec's "Active-tool
+    pill" bullet. A plain QWidget, not a QPushButton: nothing here is clickable,
     only its translucent fill and its two child QLabels change when the
     tool does.
     """
@@ -2014,479 +2056,14 @@ class _ToolPill(QWidget):
         painter.end()
 
 
-class _SwatchButton(QPushButton):
-    """One 22px ink swatch in the tray. A real `QPushButton` for its click
-    handling and tooltip, with the fill/border/ring hand-painted -- Qt's
-    stylesheet has no primitive for the spec's two-colour selection ring,
-    so `paintEvent` is overridden the same way `FloatingBar.paintEvent`
-    already hand-paints a translucent fill rather than leaning on QSS.
-    """
-
-    # Prose-only literals from the spec's "Seven ink swatches" bullet, not
-    # tokens.Metric entries -- same convention as OverlayWindow's own
-    # _CORNER_BRACKET_OFFSET and friends.
-    _BORDER_ALPHA = 0.20
-    _RING_W = 1.5      # the light outer ring
-    _RING_GAP_W = 2.0  # the dark gap between the ring and the fill
-
-    def __init__(self, name: str, hex_colour: str, parent=None):
-        super().__init__(parent)
-        metric = design.tokens.Metric
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self._colour = QColor(hex_colour)
-        self._selected = False
-        self.setFixedSize(metric.SWATCH, metric.SWATCH)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(name)
-        self.setFlat(True)
-        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
-
-    @property
-    def hex_colour(self) -> str:
-        return self._colour.name()
-
-    @property
-    def is_selected(self) -> bool:
-        return self._selected
-
-    def set_selected(self, selected: bool) -> None:
-        self._selected = selected
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        metric = design.tokens.Metric
-        rect = QRectF(self.rect())
-        radius = metric.SWATCH_RADIUS
-
-        if self._selected:
-            # The spec's double ring is an outward box-shadow --
-            # "0 0 0 2px #1a1c18, 0 0 0 3.5px #f1f3e8" -- reproduced inward
-            # here since a fixed-size button has no room to paint past its
-            # own bounds: light ring at the very edge, dark gap inside it,
-            # fill inside that -- the same near-to-far order the box-shadow
-            # gives reading outward from the fill.
-            painter.setBrush(design.color("TEXT_PRIMARY"))
-            painter.drawRoundedRect(rect, radius, radius)
-            gap_rect = rect.adjusted(
-                self._RING_W, self._RING_W, -self._RING_W, -self._RING_W
-            )
-            painter.setBrush(design.color("BAR_BG"))
-            painter.drawRoundedRect(
-                gap_rect, max(radius - self._RING_W, 0), max(radius - self._RING_W, 0)
-            )
-            inset = self._RING_W + self._RING_GAP_W
-        else:
-            border = QColor("#ffffff")
-            border.setAlphaF(self._BORDER_ALPHA)
-            painter.setPen(QPen(border, 1))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            border_rect = rect.adjusted(0.5, 0.5, -0.5, -0.5)
-            painter.drawRoundedRect(border_rect, radius, radius)
-            painter.setPen(Qt.PenStyle.NoPen)
-            inset = 1.0
-
-        fill_rect = rect.adjusted(inset, inset, -inset, -inset)
-        painter.setBrush(self._colour)
-        painter.drawRoundedRect(fill_rect, max(radius - inset, 0), max(radius - inset, 0))
-        painter.end()
-
-
-class _CustomColorButton(QPushButton):
-    """The tray's "custom colour" control: the same 22px box as a swatch,
-    but a dashed, dim border and a plus glyph instead of a colour fill --
-    per the spec's "custom colour" bullet. `SettingsTray` opens
-    `QColorDialog` on its click and wires the result back in, mirroring
-    editor.py's own `_pick_colour`.
-    """
-
-    _BORDER_ALPHA = 0.32
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        metric = design.tokens.Metric
-        self.setFixedSize(metric.SWATCH, metric.SWATCH)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Custom colour")
-        self.setFlat(True)
-        border = QColor("#ffffff")
-        border.setAlphaF(self._BORDER_ALPHA)
-        # A dashed border and a transparent fill are both plain QSS here --
-        # unlike _SwatchButton's ring, there's only ever one border to draw,
-        # so a stylesheet is enough and a custom paintEvent isn't needed.
-        self.setStyleSheet(
-            "QPushButton { border: 1px dashed rgba(%d, %d, %d, %s);"
-            " border-radius: %dpx; background: transparent; }"
-            % (
-                border.red(),
-                border.green(),
-                border.blue(),
-                border.alphaF(),
-                metric.SWATCH_RADIUS,
-            )
-        )
-        self.setIcon(design.icon("plus", design.color("TEXT_PRIMARY")))
-        self.setIconSize(QSize(12, 12))
-
-
-class _PreviewDot(QWidget):
-    """The tray's live preview: a filled circle of the current ink colour
-    at the current stroke's diameter, inside a fixed 28px box, per the
-    spec's "Live preview dot" bullet. `set_preview` is the single entry
-    point `SettingsTray` calls whenever colour, stroke or tool changes, so
-    this widget itself holds no state that could fall out of sync with it.
-    """
-
-    _BOX = 28
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(self._BOX, self._BOX)
-        self._colour = QColor(design.tokens.INK_SWATCHES[0][1])
-        self._diameter = float(design.tokens.Metric.STROKE_DEFAULT)
-
-    def set_preview(self, colour: QColor, diameter: float) -> None:
-        self._colour = colour
-        self._diameter = diameter
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(self._colour)
-        center = QRectF(self.rect()).center()
-        radius = self._diameter / 2
-        painter.drawEllipse(center, radius, radius)
-        painter.end()
-
-
-class SettingsTray(_Chrome):
-    """The overlay redesign's settings tray: an active-tool pill, the ink
-    swatches, a custom-colour button, a stroke slider/readout and a live
-    preview dot, per docs/design/overlay-redesign.md's "Settings tray"
-    section.
-
-    Visible only once `set_tool` is called with a member of
-    `tokens.DRAW_TOOLS` -- every other tool (blur, whose own strength/mode
-    tray is `BlurTray` below, and the eraser, which gets no tray at all)
-    hides this one outright, per the spec: "colour and stroke are not
-    controls until the user is holding something that draws."
-
-    A real child widget, built the same way `FloatingBar` is -- never
-    painted inside `OverlayWindow.paintEvent` -- so its buttons, slider and
-    tooltips come for free.
-    """
-
-    colourChanged = pyqtSignal(str)
-    strokeChanged = pyqtSignal(int)
-
-    # The README gives this literal directly ("minimum width 34px") rather
-    # than as a tokens.Metric entry -- same convention FloatingBar's own
-    # _TOP_MAX_FROM_BOTTOM already follows for a prose-only constant. This
-    # is what keeps the tray from reflowing as the stroke readout's digit
-    # count changes width.
-    _READOUT_MIN_W = 34
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        metric = design.tokens.Metric
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(
-            metric.TRAY_PAD_H, metric.TRAY_PAD_V, metric.TRAY_PAD_H, metric.TRAY_PAD_V
-        )
-        layout.setSpacing(metric.TRAY_GAP)
-
-        self._tool: str = design.tokens.DRAW_TOOLS[0]
-        self._colour: str = design.tokens.INK_SWATCHES[0][1]
-        self._stroke: int = metric.STROKE_DEFAULT
-
-        self._pill = _ToolPill(self)
-        layout.addWidget(self._pill)
-        layout.addWidget(_Divider(self))
-
-        self._swatch_buttons: dict[str, _SwatchButton] = {}
-        for name, hex_colour in design.tokens.INK_SWATCHES:
-            button = _SwatchButton(name, hex_colour, self)
-            button.clicked.connect(lambda checked=False, c=hex_colour: self.set_colour(c))
-            self._swatch_buttons[hex_colour] = button
-            layout.addWidget(button)
-
-        self._custom_button = _CustomColorButton(self)
-        self._custom_button.clicked.connect(self._on_custom_colour_clicked)
-        layout.addWidget(self._custom_button)
-        layout.addWidget(_Divider(self))
-
-        self._slider = QSlider(Qt.Orientation.Horizontal, self)
-        self._slider.setRange(metric.STROKE_MIN, metric.STROKE_MAX)
-        self._slider.setValue(self._stroke)
-        self._slider.setFixedWidth(metric.SLIDER_W)
-        self._slider.valueChanged.connect(self.set_stroke)
-        layout.addWidget(self._slider)
-
-        self._readout = QLabel(self)
-        self._readout.setMinimumWidth(self._READOUT_MIN_W)
-        font = QFont(design.font_families().mono)
-        size, weight = design.tokens.Font.READOUT
-        font.setPixelSize(round(size))
-        font.setWeight(QFont.Weight(weight))
-        self._readout.setFont(font)
-        self._readout.setStyleSheet(f"color: {design.color('TEXT_READOUT').name()};")
-        layout.addWidget(self._readout)
-
-        self._preview = _PreviewDot(self)
-        layout.addWidget(self._preview)
-        layout.addWidget(_Divider(self))
-
-        self._hint = QLabel(self)
-        hint_font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.TRAY_HINT
-        hint_font.setPixelSize(round(size))
-        hint_font.setWeight(QFont.Weight(weight))
-        self._hint.setFont(hint_font)
-        self._hint.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
-        layout.addWidget(self._hint)
-
-        self._select_swatch(self._colour)
-        self._pill.set_tool(self._tool)
-        self._hint.setText(design.tokens.TOOL_HINTS.get(self._tool, ""))
-        self._refresh_readout_and_preview()
-
-    # -- fill ------------------------------------------------------------
-
-    def paintEvent(self, event) -> None:
-        # Same glass treatment as FloatingBar.paintEvent -- design.color's
-        # BAR_BG/BAR_BORDER already carry their alphas (93%/10%), painted
-        # here as a translucent fill+stroke rather than reduced widget
-        # opacity, so every child on top (swatches, slider, readout,
-        # preview dot, hint) stays fully opaque, per SNX-61.
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.Metric
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.color("BAR_BG"))
-        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
-
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.color("BAR_BORDER"))
-        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
-        painter.end()
-
-    # -- state ---------------------------------------------------------
-
-    @property
-    def tool(self) -> str:
-        return self._tool
-
-    @property
-    def colour(self) -> str:
-        return self._colour
-
-    @property
-    def stroke(self) -> int:
-        return self._stroke
-
-    def set_tool(self, tool: str) -> None:
-        """Show this tray for `tool` if it's one of `tokens.DRAW_TOOLS`,
-        hide it otherwise -- the tray's whole reason for existing, per the
-        spec's "Settings tray" section.
-        """
-        self._tool = tool
-        if tool in design.tokens.DRAW_TOOLS:
-            self._pill.set_tool(tool)
-            self._hint.setText(design.tokens.TOOL_HINTS.get(tool, ""))
-            self._refresh_readout_and_preview()
-            self.show()
-        else:
-            self.hide()
-
-    def set_colour(self, hex_colour: str) -> None:
-        """Set the current ink colour -- from a swatch click or the custom
-        colour dialog -- and repaint the selection ring and preview dot to
-        match. This is the colour new marks are drawn in.
-        """
-        self._colour = hex_colour
-        self._select_swatch(hex_colour)
-        self._refresh_readout_and_preview()
-        self.colourChanged.emit(hex_colour)
-
-    def set_stroke(self, stroke: int) -> None:
-        """Set the current stroke width, clamped to `tokens.Metric`'s
-        `STROKE_MIN`/`STROKE_MAX` range, and refresh the readout/preview.
-        """
-        metric = design.tokens.Metric
-        stroke = max(metric.STROKE_MIN, min(stroke, metric.STROKE_MAX))
-        self._stroke = stroke
-        if self._slider.value() != stroke:
-            self._slider.setValue(stroke)
-        self._refresh_readout_and_preview()
-        self.strokeChanged.emit(stroke)
-
-    def _select_swatch(self, hex_colour: str) -> None:
-        for colour, button in self._swatch_buttons.items():
-            button.set_selected(colour.lower() == hex_colour.lower())
-
-    def _on_custom_colour_clicked(self) -> None:
-        # QColorDialog.getColor() returns an invalid QColor on Cancel
-        # (rather than raising or returning None), so isValid() is the
-        # correct "did the user actually choose something" check here --
-        # same as editor.py's own _pick_colour.
-        colour = QColorDialog.getColor(QColor(self._colour), self, "Custom Colour")
-        if colour.isValid():
-            self.set_colour(colour.name())
-
-    def _refresh_readout_and_preview(self) -> None:
-        self._readout.setText(f"{self._stroke}px")
-        metric = design.tokens.Metric
-        # The highlighter's stroke paints wider than every other tool
-        # (HIGHLIGHT_MULT, see shapes.py) -- the preview dot mirrors that
-        # so it shows the mark's real drawn size, not just the slider's raw
-        # number. Clamped to the same STROKE_MIN/STROKE_MAX range the
-        # slider itself uses, per the ticket, rather than the 28px box's
-        # own literal size.
-        mult = metric.HIGHLIGHT_MULT if self._tool == "highlighter" else 1.0
-        diameter = max(metric.STROKE_MIN, min(self._stroke * mult, metric.STROKE_MAX))
-        self._preview.set_preview(QColor(self._colour), diameter)
-
-
-# ---------------------------------------------------------------------------
-# Blur tray (SNX-42)
-# ---------------------------------------------------------------------------
-# docs/design/overlay-redesign.md's "Settings tray" section, "Blur tray"
-# paragraph, is the authority here. It replaces `SettingsTray` outright
-# rather than sitting alongside it -- neither colour nor stroke means
-# anything to an obscuring shape -- with a two-segment Blur/Pixelate toggle,
-# a strength slider/readout and the tool hint. The active segment is the
-# state that decides which of shapes.py's two `ObscuringShape` subclasses a
-# blur drag commits -- `OverlayWindow._start_stroke` reads it, the same way
-# it reads `SettingsTray`'s colour/stroke for every other tool (see
-# `OverlayWindow`'s docstring).
-
-
-class _SegmentButton(QPushButton):
-    """One half of the blur tray's Blur/Pixelate toggle, per the reference's
-    computed `blurBg`/`blurFg` (and `pixBg`/`pixFg`) pair: transparent fill
-    and `ICON_IDLE` text when idle, `ICON_ACTIVE_BG` fill and `ICON_ACTIVE`
-    text when this segment is the tray's current `blur_mode`. A flat
-    `QPushButton` recoloured by stylesheet, the same approach
-    `_CustomColorButton` already uses for its single-state border -- there's
-    only ever one fill/text pair active at a time here, so a hand-painted
-    `paintEvent` (as `_SwatchButton` needs for its two-ring selected state)
-    would be more machinery than this control needs.
-    """
-
-    # Prose-only literals from the reference's inline styles for the two
-    # segment buttons ("padding:6px 11px; border-radius:6px; font:500
-    # 11.5px") -- not tokens.Metric/Font entries, same convention
-    # OverlayWindow's own _CORNER_BRACKET_OFFSET and friends already follow.
-    _RADIUS = 6
-    _PAD_V = 6
-    _PAD_H = 11
-    _FONT_PX = 11.5
-    _FONT_WEIGHT = 500
-
-    def __init__(self, text: str, parent=None):
-        super().__init__(text, parent)
-        self.setFlat(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        font = QFont(design.font_families().ui)
-        font.setPixelSize(round(self._FONT_PX))
-        font.setWeight(QFont.Weight(self._FONT_WEIGHT))
-        self.setFont(font)
-        self._active = False
-        self._refresh()
-
-    @property
-    def is_active(self) -> bool:
-        return self._active
-
-    def set_active(self, active: bool) -> None:
-        self._active = active
-        self._refresh()
-
-    def _refresh(self) -> None:
-        if self._active:
-            bg = design.color("ICON_ACTIVE_BG")
-            fg = design.color("ICON_ACTIVE")
-        else:
-            bg = QColor(0, 0, 0, 0)
-            fg = design.color("ICON_IDLE")
-        self.setStyleSheet(
-            "QPushButton { border: none; border-radius: %dpx; padding: %dpx %dpx;"
-            " background: rgba(%d, %d, %d, %s); color: %s; }"
-            % (
-                self._RADIUS,
-                self._PAD_V,
-                self._PAD_H,
-                bg.red(),
-                bg.green(),
-                bg.blue(),
-                bg.alphaF(),
-                fg.name(),
-            )
-        )
-
-
-class _BlurModeWell(QWidget):
-    """The inset well the two segment buttons sit in -- `#000000` at 35%
-    alpha, radius 8, 2px padding and gap, per the spec's "in a #000000 35%
-    inset well." Paints its own translucent fill the same way `_ToolPill`
-    does, rather than a stylesheet, since a stylesheet fill here would also
-    have to survive being a parent of two more heavily-styled children.
-    """
-
-    _BG_ALPHA = 0.35
-    _RADIUS = 8
-    _PAD = 2
-    _GAP = 2
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(self._PAD, self._PAD, self._PAD, self._PAD)
-        layout.setSpacing(self._GAP)
-
-        self.blur_button = _SegmentButton("Blur", self)
-        layout.addWidget(self.blur_button)
-        self.pixelate_button = _SegmentButton("Pixelate", self)
-        layout.addWidget(self.pixelate_button)
-        self.solid_button = _SegmentButton("Solid", self)
-        layout.addWidget(self.solid_button)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        bg = QColor("#000000")
-        bg.setAlphaF(self._BG_ALPHA)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        painter.drawRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
-        painter.end()
-
-
 class ToolHintStrip(_Chrome):
-    """Names the active tool and says what it does, for tools the settings
-    tray does not cover.
+    """Names the active tool and says what it does.
 
-    The tray is where every other tool gets named -- pill, then hint -- but
-    it only appears for something with colour and stroke to set, so the
-    eraser had no on-screen name anywhere. Its glyph is not
-    self-explanatory at 16px and a tooltip is a hover away at best, so the
-    one tool with nothing to configure was also the one tool you could not
-    identify.
-
-    Deliberately the tray's own two left-hand pieces and nothing else: the
-    same pill, the same hint from `tokens.TOOL_HINTS`, so it reads as that
-    tray with its controls omitted rather than as a different thing.
+    A glyph is not self-explanatory at 15px and a tooltip is a hover away
+    at best: when only the old colour tray named a tool, the eraser -- with
+    nothing to configure -- was the one tool nobody could identify. The
+    strip is up for every tool whenever the bar is and the style popover is
+    not: the pill, and the hint from `tokens.TOOL_HINTS`.
     """
 
     _BG_ALPHA = 0.93
@@ -2531,182 +2108,544 @@ class ToolHintStrip(_Chrome):
         painter.end()
 
 
-class BlurTray(_Chrome):
-    """The overlay redesign's blur tray: the Blur/Pixelate toggle, a
-    strength slider/readout and the tool hint, per
-    docs/design/overlay-redesign.md's "Blur tray" paragraph.
+# ---------------------------------------------------------------------------
+# The style popover
+# ---------------------------------------------------------------------------
+# docs/design/bars/README.md, "Style dot + popover" and "11a is conditional on
+# the keyboard", is the authority, and docs/design/bars/divergences.md
+# overrides it wherever the two differ. One 216px popover over the style dot
+# replaces the colour-and-stroke tray and the blur tray that used to hang
+# under the bar. It renders only the sections the active tool can use
+# (`tokens.STYLE_SECTIONS`), and every change goes into that tool's own style
+# (`marks.ToolStyles`).
+#
+# The handoff is plain that one row with a popover is only better than a
+# visible tray if the keyboard is behind it: 1-7 pick a swatch, [ and ] step
+# the stroke, D cycles the line style, and a pick never closes the popover.
+# So nothing in it takes the keyboard focus -- a focused slider swallows
+# every one of those keys (`OverlayWindow._shortcuts_suppressed`) -- and it
+# is a child of the window the bar sits over rather than a popup, for the
+# reasons `FamilyMenu` gives.
 
-    Shown in place of `SettingsTray` -- never alongside it -- while the
-    bar's active tool is `'blur'`; see `OverlayWindow._sync_tray_visibility`.
-    Unlike `SettingsTray`, there is only ever one tool this tray applies to,
-    so it carries no `set_tool` of its own.
+# The swatch keys, by Qt key code: 1 is the first of `tokens.INK_SWATCHES`.
+_SWATCH_KEY_CODES = {
+    getattr(Qt.Key, f"Key_{number}"): number - 1
+    for number in range(1, len(design.tokens.INK_SWATCHES) + 1)
+}
+# [ thinner, ] thicker -- or, for a redaction, weaker and stronger.
+_STEP_KEY_CODES = {Qt.Key.Key_BracketLeft: -1, Qt.Key.Key_BracketRight: 1}
+_LINE_STYLE_KEY_CODE = Qt.Key.Key_D
+_LINE_STYLE_KEY = "D"
+_STEP_KEYS = "[ ]"
+
+
+def _cycle_step(cycle: list[tuple], name: str) -> tuple[tuple, tuple]:
+    """The entry `name` is in a click-through `cycle`, and the one a click
+    moves on to. A name the cycle does not know reads as its first entry.
+    """
+    names = [entry[0] for entry in cycle]
+    index = names.index(name) if name in names else 0
+    return cycle[index], cycle[(index + 1) % len(cycle)]
+
+
+class _SwatchButton(QPushButton):
+    """One ink swatch in the popover's colour row, and its key.
+
+    A real `QPushButton` for its click handling and tooltip, with the colour
+    and ring hand-painted. The spec rings the picked swatch outward -- "0 0 0
+    2px #1a1c18, 0 0 0 3.5px #f1f3e8" -- and a child widget cannot paint past
+    its own bounds, so the same two rings are drawn inward: the light ring at
+    the edge, the dark gap inside it, the colour inside that.
     """
 
-    blurModeChanged = pyqtSignal(str)
-    strengthChanged = pyqtSignal(int)
+    def __init__(self, name: str, hex_colour: str, key: str, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._colour = QColor(hex_colour)
+        self._selected = False
+        _fit_to_the_colour_row(self)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setToolTip(f"{name} — {key}")
+        self.setFlat(True)
+        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
 
-    # Each segment as the redaction tool it arms. The segments were a mode
-    # the one blur tool read; the redaction family made each its own tool,
-    # and these keep the tray in step with it for as long as the style dot
-    # opens this tray. The tray has always spelled Pixelate "pix" and
-    # callers have passed "pixelate", so both mean the same tool.
-    MODE_TOOLS = {"blur": "blur", "pix": "pixelate", "pixelate": "pixelate", "solid": "blackout"}
-    TOOL_MODES = {"blur": "blur", "pixelate": "pix", "blackout": "solid"}
+    def sizeHint(self) -> QSize:
+        # The row shares its width out between the swatches, so this only
+        # has to be small enough never to push the row past the popover.
+        return QSize(design.tokens.BarMetric.SWATCH_H // 2, design.tokens.BarMetric.SWATCH_H)
 
-    # The reference's strength readout is a narrower `min-width:20px` than
-    # SettingsTray's own 34px -- a plain number ("8") never runs as wide as
-    # a stroke's "26px" -- so this is its own literal, not
-    # SettingsTray._READOUT_MIN_W reused.
-    _READOUT_MIN_W = 20
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
 
-    # The "Strength" label's own font, per the reference's "font:400 11px" --
-    # distinct from tokens.Font.TRAY_HINT (11.5px), which the hint text at
-    # the tray's far end still uses.
-    _STRENGTH_LABEL_PX = 11
-    _STRENGTH_LABEL_WEIGHT = 400
+    @property
+    def hex_colour(self) -> str:
+        return self._colour.name()
+
+    @property
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        metric = design.tokens.BarMetric
+        rect = QRectF(self.rect())
+        radius = metric.SWATCH_RADIUS
+
+        if self._selected:
+            painter.setBrush(design.bar_color("SWATCH_RING"))
+            painter.drawRoundedRect(rect, radius, radius)
+            ring = metric.SWATCH_RING
+            painter.setBrush(design.bar_color("SWATCH_RING_GAP"))
+            inner = max(radius - ring, 0)
+            painter.drawRoundedRect(rect.adjusted(ring, ring, -ring, -ring), inner, inner)
+            inset = ring + metric.SWATCH_RING_GAP
+            painter.setBrush(self._colour)
+            inner = max(radius - inset, 0)
+            painter.drawRoundedRect(rect.adjusted(inset, inset, -inset, -inset), inner, inner)
+        else:
+            # The spec's border lies over the colour, not beside it, so a
+            # swatch the colour of the popover still has an edge.
+            painter.setBrush(self._colour)
+            painter.drawRoundedRect(rect, radius, radius)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(design.bar_color("SWATCH_BORDER"), 1))
+            painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        painter.end()
+
+
+class _CustomColorButton(QPushButton):
+    """The colour row's `+`: a swatch's box with a dashed border and a plus,
+    that opens `QColorDialog`. Whether a colour picked here should join the
+    swatches for good is still open on #63, so it does what it always has.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        metric = design.tokens.Metric
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(
-            metric.TRAY_PAD_H, metric.TRAY_PAD_V, metric.TRAY_PAD_H, metric.TRAY_PAD_V
+        metric = design.tokens.BarMetric
+        _fit_to_the_colour_row(self)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setToolTip("Custom colour")
+        self.setFlat(True)
+        border = design.bar_color("CUSTOM_BORDER")
+        # One border in one state, so a stylesheet can draw it.
+        self.setStyleSheet(
+            "QPushButton { border: 1px dashed rgba(%d, %d, %d, %s);"
+            " border-radius: %dpx; background: transparent; }"
+            % (border.red(), border.green(), border.blue(), border.alphaF(), metric.SWATCH_RADIUS)
         )
-        layout.setSpacing(metric.TRAY_GAP)
+        self.setIcon(design.icon("plus", design.bar_color("CUSTOM_FG")))
+        self.setIconSize(QSize(metric.CUSTOM_ICON, metric.CUSTOM_ICON))
 
-        # No dividers in this tray, unlike SettingsTray -- the reference's
-        # own isBlur markup never places one between the well, the strength
-        # controls and the hint, just the same 12px flex gap throughout.
-        self._blur_mode: str = "blur"
-        self._strength: int = metric.BLUR_DEFAULT
+    def sizeHint(self) -> QSize:
+        # `QPushButton`'s own hint is wide enough for placeholder text this
+        # button never has, which would take the row's width from the
+        # swatches.
+        return QSize(design.tokens.BarMetric.SWATCH_H // 2, design.tokens.BarMetric.SWATCH_H)
 
-        self._well = _BlurModeWell(self)
-        self._well.blur_button.clicked.connect(lambda: self.set_blur_mode("blur"))
-        self._well.pixelate_button.clicked.connect(lambda: self.set_blur_mode("pix"))
-        self._well.solid_button.clicked.connect(lambda: self.set_blur_mode("solid"))
-        layout.addWidget(self._well)
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
 
-        self._strength_label = QLabel("Strength", self)
-        label_font = QFont(design.font_families().ui)
-        label_font.setPixelSize(self._STRENGTH_LABEL_PX)
-        label_font.setWeight(QFont.Weight(self._STRENGTH_LABEL_WEIGHT))
-        self._strength_label.setFont(label_font)
-        self._strength_label.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
-        layout.addWidget(self._strength_label)
 
-        self._slider = QSlider(Qt.Orientation.Horizontal, self)
-        self._slider.setRange(metric.BLUR_MIN, metric.BLUR_MAX)
-        self._slider.setValue(self._strength)
-        self._slider.setFixedWidth(metric.SLIDER_W)
-        self._slider.valueChanged.connect(self.set_strength)
-        layout.addWidget(self._slider)
+def _fit_to_the_colour_row(button: QPushButton) -> None:
+    """The spec's `flex: 1`: every box in the colour row the same width, the
+    row's width shared between them, and none of them taking keyboard focus.
+    """
+    button.setFixedHeight(design.tokens.BarMetric.SWATCH_H)
+    button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        self._readout = QLabel(self)
-        self._readout.setMinimumWidth(self._READOUT_MIN_W)
-        font = QFont(design.font_families().mono)
-        size, weight = design.tokens.Font.READOUT
-        font.setPixelSize(round(size))
-        font.setWeight(QFont.Weight(weight))
-        self._readout.setFont(font)
-        self._readout.setStyleSheet(f"color: {design.color('TEXT_READOUT').name()};")
-        layout.addWidget(self._readout)
 
-        self._hint = QLabel(self)
-        hint_font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.TRAY_HINT
-        hint_font.setPixelSize(round(size))
-        hint_font.setWeight(QFont.Weight(weight))
-        self._hint.setFont(hint_font)
-        self._hint.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
-        self._hint.setText(design.tokens.TOOL_HINTS.get("blur", ""))
-        layout.addWidget(self._hint)
+class _CycleButton(QPushButton):
+    """Fill or line: one click-through button that shows the state it is in.
 
-        self._select_segment(self._blur_mode)
-        self._refresh_readout()
+    A click moves on to the next state, the way the chooser's destination and
+    delay do -- one behaviour to learn, and what took the popover from three
+    rows to two. The glyph is the state; the tooltip names it, and what a
+    click changes it to.
+    """
 
-    # -- fill ------------------------------------------------------------
+    def __init__(self, kind: str, parent=None):
+        super().__init__(parent)
+        metric = design.tokens.BarMetric
+        self.kind = kind
+        self._state = (
+            design.tokens.FILL_CYCLE if kind == "fill" else design.tokens.DASH_CYCLE
+        )[0][0]
+        self._hovered = False
+        self.setFixedSize(metric.CYCLE_W, metric.CYCLE_H)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setFlat(True)
+        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def set_state(self, state: str, tooltip: str) -> None:
+        self._state = state
+        self.setToolTip(tooltip)
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
 
     def paintEvent(self, event) -> None:
-        # Same panel treatment as SettingsTray.paintEvent -- see that
-        # method's docstring for why the fill/border are painted as a
-        # translucent brush rather than widget opacity, per SNX-61.
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.Metric
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-
+        metric = design.tokens.BarMetric
+        rect = QRectF(self.rect())
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.color("BAR_BG"))
-        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
-
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.color("BAR_BORDER"))
-        painter.drawRoundedRect(rect, metric.TRAY_RADIUS, metric.TRAY_RADIUS)
+        painter.setBrush(design.bar_color("CYCLE_HOVER_BG" if self._hovered else "CYCLE_BG"))
+        painter.drawRoundedRect(rect, metric.CYCLE_RADIUS, metric.CYCLE_RADIUS)
+        if self.kind == "fill":
+            self._paint_fill_glyph(painter, rect.center())
+        else:
+            self._paint_dash_glyph(painter, rect.center())
         painter.end()
 
-    # -- state ---------------------------------------------------------
+    def _paint_fill_glyph(self, painter: QPainter, centre: QPointF) -> None:
+        """A small box drawn the way the state fills a shape: an outline, a
+        solid box, or an outline round a wash.
+        """
+        metric = design.tokens.BarMetric
+        box = QRectF(0, 0, metric.FILL_GLYPH_W, metric.FILL_GLYPH_H)
+        box.moveCenter(centre)
+        radius = metric.FILL_GLYPH_RADIUS
+        glyph = design.bar_color("CYCLE_GLYPH")
+        if self._state != "outline":
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(
+                glyph if self._state == "filled" else design.bar_color("CYCLE_GLYPH_WASH")
+            )
+            painter.drawRoundedRect(box, radius, radius)
+        if self._state != "filled":
+            border = metric.FILL_GLYPH_BORDER
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(glyph, border))
+            # Inside the box, as a CSS border is.
+            half = border / 2
+            inner = max(radius - half, 0)
+            painter.drawRoundedRect(box.adjusted(half, half, -half, -half), inner, inner)
+
+    def _paint_dash_glyph(self, painter: QPainter, centre: QPointF) -> None:
+        """A short line in the state's own dash pattern."""
+        metric = design.tokens.BarMetric
+        width = metric.DASH_GLYPH_STROKE
+        pen = QPen(design.bar_color("CYCLE_GLYPH"), width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        (_name, pattern, _label), _next = _cycle_step(design.tokens.DASH_CYCLE, self._state)
+        if pattern:
+            # The spec's SVG dash array is in pixels, a QPen's in widths.
+            pen.setDashPattern([length / width for length in pattern])
+        painter.setPen(pen)
+        half = metric.DASH_GLYPH_W / 2
+        painter.drawLine(
+            QPointF(centre.x() - half, centre.y()), QPointF(centre.x() + half, centre.y())
+        )
+
+
+def _style_slider(bounds: tuple[int, int], parent: QWidget) -> QSlider:
+    """A slider in the spec's look that never takes the keyboard focus: a
+    focused slider would keep [ and ] and the swatch keys from the window.
+    """
+    metric = design.tokens.BarMetric
+    slider = QSlider(Qt.Orientation.Horizontal, parent)
+    slider.setRange(*bounds)
+    slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    slider.setCursor(Qt.CursorShape.PointingHandCursor)
+    slider.setMouseTracking(True)
+    track = design.bar_color("SLIDER_TRACK")
+    # A stylesheet counts in whole pixels, so the thumb's overhang either
+    # side of the track rounds up, and the thumb is a pixel over the spec's.
+    overhang = math.ceil((metric.SLIDER_THUMB - metric.SLIDER_TRACK) / 2)
+    thumb = metric.SLIDER_TRACK + 2 * overhang
+    slider.setStyleSheet(
+        "QSlider { background: transparent; min-height: %dpx; }"
+        " QSlider::groove:horizontal { height: %dpx; border-radius: %dpx;"
+        " background: rgba(%d, %d, %d, %s); }"
+        " QSlider::handle:horizontal { width: %dpx; margin: -%dpx 0;"
+        " border-radius: %dpx; background: %s; }"
+        % (
+            thumb,
+            metric.SLIDER_TRACK,
+            metric.SLIDER_TRACK // 2,
+            track.red(),
+            track.green(),
+            track.blue(),
+            track.alphaF(),
+            thumb,
+            overhang,
+            thumb // 2,
+            design.bar_color("SLIDER_THUMB").name(),
+        )
+    )
+    return slider
+
+
+def _style_readout(min_width: int, parent: QWidget) -> QLabel:
+    """A slider's mono number, wide enough that the row never reflows as it
+    changes.
+    """
+    readout = QLabel(parent)
+    readout.setMinimumWidth(min_width)
+    readout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    font = QFont(design.font_families().mono)
+    size, weight = design.tokens.BarFont.READOUT
+    font.setPixelSize(round(size))
+    font.setWeight(QFont.Weight(weight))
+    readout.setFont(font)
+    readout.setStyleSheet(f"color: {design.bar_color('READOUT_FG').name()};")
+    return readout
+
+
+class StylePopover(_Chrome):
+    """The style dot's popover: the active tool's style, and only the parts
+    of it that tool can use.
+
+    Two rows at most. The seven swatches and `+`, across one row; then fill
+    and line, each one click-through button, and a strength or a stroke
+    slider with its readout. A section the tool cannot use is hidden, never
+    shown and inert.
+
+    It is also where a tool's style changes from the keyboard, open or
+    closed (`handle_key`), so a key and a click can never disagree about
+    what they did. Every change goes into the `marks.ToolStyles` it was
+    given, and `styleChanged` names the tool it changed.
+    """
+
+    styleChanged = pyqtSignal(str)
+    # Shown or hidden -- the style dot reads as pressed while it is open.
+    openChanged = pyqtSignal(bool)
+
+    SECTIONS = ("color", "fill", "dash", "strength", "size")
+
+    def __init__(self, styles: ToolStyles, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        metric = design.tokens.BarMetric
+        tokens = design.tokens
+        self._styles = styles
+        self._tool: str | None = None
+
+        # Border-box, as the handoff insists: the width is the popover's
+        # whole outside edge, padding and border included.
+        self.setFixedWidth(metric.MENU_W_STYLE)
+        layout = QVBoxLayout(self)
+        inset_h = metric.STYLE_PAD_H + metric.BORDER
+        inset_v = metric.STYLE_PAD_V + metric.BORDER
+        layout.setContentsMargins(inset_h, inset_v, inset_h, inset_v)
+        layout.setSpacing(metric.STYLE_ROW_GAP)
+        self._layout = layout
+
+        self._colour_row = QWidget(self)
+        colours = QHBoxLayout(self._colour_row)
+        colours.setContentsMargins(0, 0, 0, 0)
+        colours.setSpacing(metric.SWATCH_GAP)
+        self._swatch_buttons: dict[str, _SwatchButton] = {}
+        for index, (name, hex_colour) in enumerate(tokens.INK_SWATCHES):
+            button = _SwatchButton(name, hex_colour, str(index + 1), self._colour_row)
+            button.clicked.connect(lambda checked=False, c=hex_colour: self._apply(colour=c))
+            self._swatch_buttons[hex_colour] = button
+            colours.addWidget(button)
+        self._custom_button = _CustomColorButton(self._colour_row)
+        self._custom_button.clicked.connect(self._pick_custom_colour)
+        colours.addWidget(self._custom_button)
+        layout.addWidget(self._colour_row)
+
+        self._controls_row = QWidget(self)
+        controls = QHBoxLayout(self._controls_row)
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(metric.STYLE_CONTROL_GAP)
+        self._fill_button = _CycleButton("fill", self._controls_row)
+        self._fill_button.clicked.connect(lambda: self._cycle("fill"))
+        self._dash_button = _CycleButton("dash", self._controls_row)
+        self._dash_button.clicked.connect(lambda: self._cycle("dash"))
+        self._strength_slider = _style_slider(tokens.STRENGTH_RANGE, self._controls_row)
+        self._strength_slider.setToolTip(f"Redaction strength — {_STEP_KEYS}")
+        self._strength_slider.valueChanged.connect(lambda value: self._apply(strength=value))
+        self._strength_readout = _style_readout(metric.READOUT_W_STRENGTH, self._controls_row)
+        self._size_slider = _style_slider(tokens.STROKE_RANGE, self._controls_row)
+        self._size_slider.valueChanged.connect(lambda value: self._apply(size=value))
+        self._size_readout = _style_readout(metric.READOUT_W_SIZE, self._controls_row)
+        for widget in (
+            self._fill_button,
+            self._dash_button,
+            self._strength_slider,
+            self._strength_readout,
+            self._size_slider,
+            self._size_readout,
+        ):
+            controls.addWidget(widget)
+        layout.addWidget(self._controls_row)
+
+        self._section_widgets = {
+            "color": (self._colour_row,),
+            "fill": (self._fill_button,),
+            "dash": (self._dash_button,),
+            "strength": (self._strength_slider, self._strength_readout),
+            "size": (self._size_slider, self._size_readout),
+        }
+        self.refresh()
 
     @property
-    def blur_mode(self) -> str:
-        return self._blur_mode
+    def tool(self) -> str | None:
+        return self._tool
 
-    @property
-    def strength(self) -> int:
-        return self._strength
+    def set_tool(self, tool: str | None) -> None:
+        """Style `tool` from here on: its sections, holding its style."""
+        self._tool = tool
+        self.refresh()
 
-    def set_blur_mode(self, mode: str) -> None:
-        """Set the active segment -- `'blur'`, `'pix'` or `'solid'` --
-        deselecting the others so exactly one always reads as active, per
-        the spec's "exactly one segment reads as active." This is the state
-        that decides which of shapes.py's `Blur`/`Pixelate`/`Redact` a drag
-        commits.
+    def sections(self) -> list[str]:
+        """The sections showing, in the order they are laid out."""
+        return [
+            name for name in self.SECTIONS if not self._section_widgets[name][0].isHidden()
+        ]
 
-        Strength is disabled rather than hidden while Solid is active: a
-        solid fill has no strength, but a tray that changes width as the
-        segment changes would move the very buttons being clicked.
+    def setVisible(self, visible: bool) -> None:
+        # Every way a popover opens or closes -- the dot, Esc, a press on the
+        # frame, the window hiding -- ends here, so the dot cannot be left
+        # looking pressed over a popover that is gone.
+        was_hidden = self.isHidden()
+        super().setVisible(visible)
+        if self.isHidden() != was_hidden:
+            self.openChanged.emit(not self.isHidden())
+
+    def refresh(self) -> None:
+        """Show the tool's sections and nothing else, each holding what the
+        tool's style is now.
         """
-        self._blur_mode = mode
-        self._select_segment(mode)
-        has_strength = mode != "solid"
-        for control in (self._strength_label, self._slider, self._readout):
-            control.setEnabled(has_strength)
-        self.blurModeChanged.emit(mode)
+        tool = self._tool
+        wanted = design.tokens.STYLE_SECTIONS.get(tool, [])
+        for name, widgets in self._section_widgets.items():
+            for widget in widgets:
+                widget.setHidden(name not in wanted)
+        self._controls_row.setHidden(not any(name in wanted for name in self.SECTIONS[1:]))
 
-    def show_tool(self, tool: str | None) -> None:
-        """Light the segment for redaction tool `tool`, without announcing
-        it: the change came from the tool, and echoing it back would arm
-        that tool a second time.
-        """
-        mode = self.TOOL_MODES.get(tool)
-        if mode is None or mode == self._blur_mode:
+        style = self._styles.of(tool)
+        for hex_colour, button in self._swatch_buttons.items():
+            button.set_selected(hex_colour.lower() == style.colour.lower())
+        self._fill_button.set_state(style.fill, self._cycle_tooltip("fill", style.fill))
+        self._dash_button.set_state(style.dash, self._cycle_tooltip("dash", style.dash))
+        for slider, value in (
+            (self._strength_slider, style.strength),
+            (self._size_slider, style.size),
+        ):
+            # Quietly: this is the popover catching up with the style, not
+            # the user moving the slider.
+            blocked = slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(blocked)
+        self._strength_readout.setText(str(style.strength))
+        self._size_readout.setText(f"{style.size}px")
+        size_name = "Text size" if tool == "text" else "Stroke"
+        self._size_slider.setToolTip(f"{size_name} — {_STEP_KEYS}")
+
+        # Hiding a row changes the popover's height, and a layout only
+        # notices on its next pass.
+        self._layout.invalidate()
+        self.resize(self.width(), self.sizeHint().height())
+
+    @staticmethod
+    def _cycle_tooltip(kind: str, state: str) -> str:
+        if kind == "fill":
+            (_name, label), (_next, next_label) = _cycle_step(design.tokens.FILL_CYCLE, state)
+            return f"Fill · {label} → click for {next_label}"
+        (_name, _pattern, label), (_next, _next_pattern, next_label) = _cycle_step(
+            design.tokens.DASH_CYCLE, state
+        )
+        return f"Line · {label} → click for {next_label} — {_LINE_STYLE_KEY}"
+
+    def _apply(self, **changes) -> None:
+        if self._tool is None:
             return
-        blocked = self.blockSignals(True)
-        try:
-            self.set_blur_mode(mode)
-        finally:
-            self.blockSignals(blocked)
+        self._styles.update(self._tool, **changes)
+        self.refresh()
+        self.styleChanged.emit(self._tool)
 
-    def set_strength(self, strength: int) -> None:
-        """Set the current blur strength, clamped to `tokens.Metric`'s
-        `BLUR_MIN`/`BLUR_MAX` range, and refresh the readout.
+    def _cycle(self, kind: str) -> None:
+        cycle = design.tokens.FILL_CYCLE if kind == "fill" else design.tokens.DASH_CYCLE
+        _now, then = _cycle_step(cycle, getattr(self._styles.of(self._tool), kind))
+        self._apply(**{kind: then[0]})
+
+    def _pick_custom_colour(self) -> None:
+        # QColorDialog.getColor() returns an invalid QColor on Cancel rather
+        # than raising or returning None, so isValid() is the "did the user
+        # choose something" check.
+        colour = QColorDialog.getColor(
+            QColor(self._styles.of(self._tool).colour), self, "Custom Colour"
+        )
+        if colour.isValid():
+            self._apply(colour=colour.name())
+
+    def handle_key(self, key: int) -> bool:
+        """Apply a style key to the tool, and say whether it did anything.
+
+        1-7 pick a swatch, [ and ] step the stroke -- or a redaction's
+        strength, the one slider it has -- and D cycles the line style. A
+        key the tool has no section for does nothing, and is left for
+        whatever else wants it.
         """
-        metric = design.tokens.Metric
-        strength = max(metric.BLUR_MIN, min(strength, metric.BLUR_MAX))
-        self._strength = strength
-        if self._slider.value() != strength:
-            self._slider.setValue(strength)
-        self._refresh_readout()
-        self.strengthChanged.emit(strength)
+        sections = design.tokens.STYLE_SECTIONS.get(self._tool, [])
+        if key in _SWATCH_KEY_CODES:
+            if "color" not in sections:
+                return False
+            _name, hex_colour = design.tokens.INK_SWATCHES[_SWATCH_KEY_CODES[key]]
+            self._apply(colour=hex_colour)
+            return True
+        if key in _STEP_KEY_CODES:
+            step = _STEP_KEY_CODES[key]
+            style = self._styles.of(self._tool)
+            if "size" in sections:
+                self._apply(size=style.size + step)
+            elif "strength" in sections:
+                self._apply(strength=style.strength + step)
+            else:
+                return False
+            return True
+        if key == _LINE_STYLE_KEY_CODE and "dash" in sections:
+            self._cycle("dash")
+            return True
+        return False
 
-    def _select_segment(self, mode: str) -> None:
-        self._well.blur_button.set_active(mode == "blur")
-        self._well.pixelate_button.set_active(mode == "pix")
-        self._well.solid_button.set_active(mode == "solid")
+    def reposition(self, anchor: QRect, bar: QRect, bounds: QRectF) -> None:
+        """Open over `anchor` -- the style dot -- the way a family menu opens
+        over its slot: above `bar`, below it when there is no room above
+        inside `bounds`. All three are in the parent's coordinates.
+        """
+        size = QSize(self.width(), self.sizeHint().height())
+        self.setGeometry(_menu_geometry(size, anchor, bar, bounds))
 
-    def _refresh_readout(self) -> None:
-        self._readout.setText(str(self._strength))
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.BarMetric
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.bar_color("MENU_BG"))
+        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.bar_color("MENU_BORDER"))
+        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.end()
 
 
 # ---------------------------------------------------------------------------
@@ -2736,8 +2675,8 @@ class _CaptureModeRow(QPushButton):
     _LABEL_GAP = 2
     # Prose-only literals from the spec's "hover `#ffffff` at 9%" /
     # "Selected row background `#ffffff` at 8%" -- not tokens.Color entries,
-    # same convention `_ToolPill._BG_ALPHA`/`_BlurModeWell._BG_ALPHA` already
-    # follow for a one-off fill no other control shares.
+    # same convention `_ToolPill._BG_ALPHA` already follows for a one-off
+    # fill no other control shares.
     _HOVER_BG_ALPHA = 0.09
     _SELECTED_BG_ALPHA = 0.08
 
@@ -2892,7 +2831,7 @@ class _DelayRow(QPushButton):
     _HOVER_BG_ALPHA = 0.09  # same one-off fill _CaptureModeRow's hover uses
     # "mono 11.5px `#8f9689`" -- the closest tokens.Font entry, MENU_NOTE,
     # is 11.0px and already spoken for by the mode rows' own notes, so this
-    # stays a local literal per `BlurTray._STRENGTH_LABEL_PX`'s convention.
+    # stays a local literal.
     _VALUE_PX = 11.5
     _VALUE_WEIGHT = 400
 
@@ -3020,7 +2959,7 @@ class CaptureModePopover(_Chrome):
     docs/design/overlay-redesign.md's "Capture-mode popover" section.
 
     A real child widget of `OverlayWindow`, built the same way
-    `FloatingBar`/`SettingsTray` are -- opened and positioned by
+    `FloatingBar`/`StylePopover` are -- opened and positioned by
     `OverlayWindow._toggle_capture_popover`, never painted in its own
     `paintEvent`. Picking a row only records the choice and closes the
     popover; Window and Full screen don't do anything past that
@@ -3127,7 +3066,7 @@ class CaptureModePopover(_Chrome):
         the spec's rule: "if bar top > 300px, place the popover at
         bar_top - popover_height - 8; otherwise place it below the bar."
         Horizontally centred on the bar and clamped inside `bounds`,
-        mirroring `OverlayWindow._reposition_tray`'s own centring.
+        mirroring `OverlayWindow._reposition_tool_hint`'s own centring.
 
         `bounds` is the selection's own monitor, in parent coordinates --
         see `FloatingBar.reposition`, which this deliberately mirrors. The
@@ -3182,6 +3121,25 @@ class CaptureModePopover(_Chrome):
 # is for discovering a shape rather than for reaching it; redaction rows
 # carry what each one guarantees instead, because blur on small text is
 # famously recoverable and a user choosing between the three needs to know.
+
+
+def _menu_geometry(size: QSize, anchor: QRect, bar: QRect, bounds: QRectF) -> QRect:
+    """Where a menu of `size` opens for the control at `anchor` on `bar`:
+    centred over it and `MENU_OFFSET` above the bar, or below the bar when
+    there is no room above inside `bounds`. All in the parent's coordinates.
+
+    Shared by the family menus and the style popover, so every menu off the
+    bar opens the same way.
+    """
+    metric = design.tokens.BarMetric
+    width, height = size.width(), size.height()
+    left = anchor.center().x() - width / 2
+    left = max(bounds.left(), min(left, bounds.right() - width))
+    bar_rect = QRectF(bar)
+    top = bar_rect.top() - metric.MENU_OFFSET - height
+    if top < bounds.top():
+        top = min(bar_rect.bottom() + metric.MENU_OFFSET, bounds.bottom() - height)
+    return QRect(round(left), round(top), width, height)
 
 
 class _FamilyRow(QPushButton):
@@ -3416,16 +3374,8 @@ class FamilyMenu(_Chrome):
         selection whenever it can, so a menu opening downward would hang off
         the bottom of the monitor more often than not.
         """
-        metric = design.tokens.BarMetric
-        height = self.sizeHint().height()
-        width = self.width()
-        left = slot.center().x() - width / 2
-        left = max(bounds.left(), min(left, bounds.right() - width))
-        bar_rect = QRectF(bar)
-        top = bar_rect.top() - metric.MENU_OFFSET - height
-        if top < bounds.top():
-            top = min(bar_rect.bottom() + metric.MENU_OFFSET, bounds.bottom() - height)
-        self.setGeometry(round(left), round(top), width, height)
+        size = QSize(self.width(), self.sizeHint().height())
+        self.setGeometry(_menu_geometry(size, slot, bar, bounds))
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -3537,7 +3487,7 @@ class HintHUD(_Chrome):
         painter = QPainter(self)
         # A flat, translucent fill -- per the Qt notes' "cheaper fallback:
         # raise the fill alpha... and skip the blur," the same trade-off
-        # FloatingBar/SettingsTray/CaptureModePopover already make for their
+        # FloatingBar/StylePopover/CaptureModePopover already make for their
         # own backdrop-filter blur.
         painter.fillRect(QRectF(self.rect()), design.color("HUD_BG"))
         painter.end()
@@ -3553,7 +3503,7 @@ class Toast(_Chrome):
     docs/design/overlay-redesign.md's "Toast" section.
 
     A real child widget of `OverlayWindow`, built and positioned the same
-    way `FloatingBar`/`SettingsTray`/`CaptureModePopover` are -- never
+    way `FloatingBar`/`StylePopover`/`CaptureModePopover` are -- never
     painted inside `OverlayWindow.paintEvent`, which is what the spec means
     by "chrome painted over the overlay rather than something drawn into
     the frame": `OverlayWindow.rendered_image` flattens `_marks` onto the
@@ -3746,7 +3696,7 @@ class DelayCountdown(QWidget):
     dismisses... so it is not in its own screenshot" is the point of Delay
     in the first place), and a child widget goes invisible the instant its
     parent does -- see `OverlayWindow.hideEvent`, which relies on exactly
-    that to take `_bar`/`_tray`/`_popover`/`_toast`/`_hud` down with it. A
+    that to take `_bar`/`_style_popover`/`_popover`/`_toast`/`_hud` down with it. A
     countdown built the same way would vanish along with the window it is
     supposed to be standing in for, which is the one thing it must not do.
     """
@@ -3855,21 +3805,20 @@ class OverlayWindow(QWidget):
       itself at the edge.
     - Chrome must never reach the export. `rendered_image()` flattens
       `_marks` onto the selection's crop of the frozen frame; it never
-      touches `_bar`, `_tray`/`_blur_tray`, `_toast`, `_hud`, `_popover`,
+      touches `_bar`, `_style_popover`, `_toast`, `_hud`, `_popover`,
       `_family_menus`, `_close_button` or any other widget painted over
       the overlay, so none of that chrome can ever leak into a copy or a
       save.
 
     Everything else here is chrome and mode-handling built around those
     three constraints. `FloatingBar` (`_bar`) is the real child widget
-    driving undo/redo/clear/copy/save and the active tool; `SettingsTray`/
-    `BlurTray` hang under it when its style dot opens them, for whichever
-    tool is active, with the eraser getting neither. A press
+    driving undo/redo/clear/copy/save and the active tool; `StylePopover`
+    opens over its style dot for whichever tool is active, unless that tool
+    has nothing to style. A press
     that misses every resize handle and lands inside the selection starts a
     stroke (`_start_stroke`), drag extends it, and release commits it as a
-    mark -- taking its colour/stroke from `_ink_colour`/`_stroke_width` or,
-    for a redaction tool, its strength from `_blur_strength` -- through the
-    same undo/redo/clear history every
+    mark -- drawn in the active tool's own style from `_styles` -- through
+    the same undo/redo/clear history every
     other mutation of `_marks` goes through (`_MarkAction`, folding `add`,
     `erase` and `clear` into one stack so any of them can be undone and
     redone in the order they happened). `CaptureModePopover` picks among
@@ -3882,7 +3831,8 @@ class OverlayWindow(QWidget):
     bar's notched slots. `keyPressEvent` wires tool-letter shortcuts from
     `tokens.SHORTCUTS` and the redaction family's key, Ctrl+Z/Ctrl+Shift+Z
     for undo/redo, Enter to
-    copy-and-dismiss, `?` to reveal the hint HUD, and the two-stage Esc
+    copy-and-dismiss, 1-7, [, ] and D for the active tool's style
+    (`StylePopover.handle_key`), `?` to reveal the hint HUD, and the two-stage Esc
     (`_handle_escape`) the spec leaves for us to decide -- all of it
     suppressed while a slider or a text-editing widget has focus
     (`_shortcuts_suppressed`). `_close_button` (SNX-80) is Esc's visible
@@ -4226,32 +4176,20 @@ class OverlayWindow(QWidget):
         self._bar.dragMoved.connect(self._on_bar_dragged)
         self._bar.spotRemembered.connect(self._remember_bar_spot)
 
-        # The settings tray (SNX-41): shown only while the bar's active
-        # tool is one of tokens.DRAW_TOOLS -- see `_sync_tray_visibility`,
-        # which `_sync_bar_visibility` calls alongside the bar's own
-        # show/hide so the two stay in lockstep with `_selection` and this
-        # window's own visibility, for the same reason `_bar` is gated
-        # there rather than following `_selection` unconditionally.
-        self._ink_colour: str = design.tokens.INK_SWATCHES[0][1]
-        self._stroke_width: int = design.tokens.Metric.STROKE_DEFAULT
-        self._tray = SettingsTray(self)
-        self._tray.hide()
-        self._tray.colourChanged.connect(self._on_ink_colour_changed)
-        self._tray.strokeChanged.connect(self._on_stroke_width_changed)
-        self._bar.set_style_preview(self._ink_colour, self._stroke_width)
+        # Each tool's style -- the session's, so what was set on the last
+        # snip is still set on this one -- and the popover the style dot
+        # opens to change it. Its keys work whether it is open or not; see
+        # `StylePopover`. It is one of the bar's menus: one of those is open
+        # at a time.
+        self._styles: ToolStyles = session_styles
+        self._style_popover = StylePopover(self._styles, self)
+        self._style_popover.hide()
+        self._style_popover.styleChanged.connect(self._on_style_changed)
+        self._style_popover.openChanged.connect(self._on_style_open_changed)
 
-        # The blur tray: `_tray`'s replacement, not its companion, for a
-        # redaction tool -- see `_sync_tray_visibility`, which shows at most
-        # one of the two. `_blur_strength` is tracked the way
-        # `_ink_colour`/`_stroke_width` are above, for `_start_stroke`;
-        # which redaction a drag commits is the tool itself.
-        self._blur_strength: int = design.tokens.Metric.BLUR_DEFAULT
-        self._blur_tray = BlurTray(self)
-        self._blur_tray.hide()
-
-        # Names whichever tool has no tray of its own -- the eraser -- so
-        # there is never an active tool with nothing on screen identifying
-        # it. See `ToolHintStrip`.
+        # Names the active tool and what it does, so there is never an
+        # active tool with nothing on screen identifying it. See
+        # `ToolHintStrip`.
         self._tool_hint = ToolHintStrip(self)
         self._tool_hint.hide()
 
@@ -4317,8 +4255,6 @@ class OverlayWindow(QWidget):
         self._chooser.set_kind(setup_desktop.load_kind())
         self._chooser.kindChanged.connect(setup_desktop.save_kind)
         self._chooser.hide_all()
-        self._blur_tray.blurModeChanged.connect(self._on_blur_mode_changed)
-        self._blur_tray.strengthChanged.connect(self._on_blur_strength_changed)
 
         # The capture-mode popover: opened from the bar's chip click via
         # `_toggle_capture_popover`, positioned by the popover's own
@@ -4351,20 +4287,17 @@ class OverlayWindow(QWidget):
 
         # The notched slots' menus, one per family -- see `FamilyMenu` for
         # why they belong to this window rather than to the bar. One is open
-        # at a time, and the style dot's tray counts as one.
+        # at a time, and the style popover counts as one.
         self._family_menus = {
             family: FamilyMenu(family, self) for family in design.tokens.FAMILIES
         }
         for menu in self._family_menus.values():
             menu.hide()
             menu.siblingPicked.connect(self._on_family_sibling_picked)
-        # Whether the style dot has the active tool's tray open. The trays
-        # no longer come up by themselves -- see `_sync_tray_visibility`.
-        self._style_open = False
         # Hovering a tool names it -- see `ToolHintStrip`. Not Qt's tooltip,
         # which on an always-on-top frameless window is a coin toss.
         self._bar.toolHovered.connect(self._preview_tool)
-        self._bar.toolUnhovered.connect(self._sync_tray_visibility)
+        self._bar.toolUnhovered.connect(self._sync_tool_hint)
 
         # The delayed re-capture (SNX-50): `_registry` is what
         # `_finish_delayed_capture` re-grabs through -- an empty
@@ -4419,7 +4352,7 @@ class OverlayWindow(QWidget):
         # window's own geometry is set once at construction and never
         # resized afterwards (a fullscreen overlay), so there is no
         # resizeEvent to keep a fixed corner offset in sync with. Starts
-        # hidden, like `_bar`/`_tray`/`_toast`/`_hud`, so a caller that
+        # hidden, like `_bar`/`_style_popover`/`_toast`/`_hud`, so a caller that
         # never shows this window (most of this file's own tests, which
         # `grab()` an unshown widget to sample pixels) never has it painted
         # over whatever they're sampling; `showEvent`/`hideEvent` are what
@@ -4489,8 +4422,8 @@ class OverlayWindow(QWidget):
 
     def _on_tool_selected(self, tool: str) -> None:
         """Wire the bar's tool buttons to the eraser's hit-testing
-        arm/disarm (see `set_eraser_active`) and the settings tray's
-        visibility. `mousePressEvent`/`_start_stroke` read `self._bar.
+        arm/disarm (see `set_eraser_active`), the style dot and popover, and
+        the strip naming the tool. `mousePressEvent`/`_start_stroke` read `self._bar.
         active_tool` directly at press time rather than this class keeping
         a second copy of it -- `FloatingBar` is already the one place a
         click and a shortcut key (`keyPressEvent`'s tool letters) both
@@ -4505,29 +4438,34 @@ class OverlayWindow(QWidget):
         self.set_eraser_active(tool == "eraser")
         for menu in self._family_menus.values():
             menu.hide()
-        self._blur_tray.show_tool(tool)
-        self._sync_tray_visibility()
+        self._follow_tool_with_style(tool)
+        self._sync_tool_hint()
 
-    def _on_ink_colour_changed(self, hex_colour: str) -> None:
-        """Track the tray's current ink colour -- "the colour new marks are
-        drawn in" -- which `_start_stroke` reads when a stroke starts.
+    def _follow_tool_with_style(self, tool: str | None) -> None:
+        """Point the style dot and the popover at `tool`.
+
+        An open popover follows a tool changed by key -- a key dismisses
+        nothing -- and closes for a tool with nothing to style. A tool
+        clicked on the bar has already closed it (`_on_tool_picked`).
         """
-        self._ink_colour = hex_colour
-        self._bar.set_style_preview(self._ink_colour, self._stroke_width)
+        self._style_popover.set_tool(tool)
+        self._bar.set_style_preview(self._styles.of(tool))
+        if self._style_popover.isHidden():
+            return
+        if design.tokens.STYLE_SECTIONS.get(tool):
+            # Another tool's sections can make it another height.
+            self._place_style_popover()
+        else:
+            self._style_popover.hide()
 
-    def _on_stroke_width_changed(self, stroke: int) -> None:
-        self._stroke_width = stroke
-        self._bar.set_style_preview(self._ink_colour, self._stroke_width)
+    def _on_style_changed(self, tool: str) -> None:
+        """A pick or a style key: the dot shows it at once."""
+        if tool == self._bar.active_tool:
+            self._bar.set_style_preview(self._styles.of(tool))
 
-    def _on_blur_mode_changed(self, mode: str) -> None:
-        """A segment in the blur tray arms the redaction tool it names, so
-        the tray and the redaction slot can never disagree about what a drag
-        will commit.
-        """
-        self._bar.select_tool(BlurTray.MODE_TOOLS.get(mode, "pixelate"))
-
-    def _on_blur_strength_changed(self, strength: int) -> None:
-        self._blur_strength = strength
+    def _on_style_open_changed(self, open_: bool) -> None:
+        self._bar.set_style_open(open_)
+        self._sync_tool_hint()
 
     # -- capture-mode popover (SNX-44) --------------------------------------
 
@@ -4582,37 +4520,48 @@ class OverlayWindow(QWidget):
         self._close_bar_menus()
 
     def _close_bar_menus(self) -> bool:
-        """Close the family menus and the style dot's tray, and say whether
-        any of them was open.
+        """Close the family menus and the style popover, and say whether any
+        of them was open.
         """
-        was_open = self._style_open or any(
+        was_open = not self._style_popover.isHidden() or any(
             not menu.isHidden() for menu in self._family_menus.values()
         )
         for menu in self._family_menus.values():
             menu.hide()
-        if self._style_open:
-            self._style_open = False
-            self._sync_tray_visibility()
+        self._style_popover.hide()
         return was_open
 
     def _toggle_style(self) -> None:
-        """The style dot: open the active tool's tray, or close it."""
-        if not self._style_open and self._style_tray_for(self._bar.active_tool) is None:
+        """The style dot: open the popover for the active tool, or close it.
+
+        Picks inside it never close it -- only this, Esc, a press outside
+        it, or another menu opening.
+        """
+        if not self._style_popover.isHidden():
+            self._style_popover.hide()
             return
-        opening = not self._style_open
-        for menu in self._family_menus.values():
-            menu.hide()
-        self._style_open = opening
-        self._sync_tray_visibility()
+        tool = self._bar.active_tool
+        if not self._bar.isVisible() or not design.tokens.STYLE_SECTIONS.get(tool):
+            return
+        self._close_bar_menus()
+        self._style_popover.set_tool(tool)
+        self._place_style_popover()
+        self._style_popover.show()
+        self._style_popover.raise_()
+
+    def _place_style_popover(self) -> None:
+        self._style_popover.reposition(
+            self._bar.style_dot_rect(self), self._bar.geometry(), self._chrome_bounds()
+        )
 
     # -- dragging the bar (#50) ------------------------------------------------
 
     def _on_bar_drag_started(self) -> None:
-        """A drag of the bar is a press outside every menu and tray, so it
-        closes them the way a press on the frame does.
+        """A drag of the bar is a press outside every menu and the style
+        popover, so it closes them the way a press on the frame does.
 
-        Closed rather than carried along: a menu is anchored to the slot it
-        opened from, and a tray left open over a moving bar would be
+        Closed rather than carried along: each is anchored to the control it
+        opened from, and one left open over a moving bar would be
         re-flipping above and below it for the length of the drag. Only
         once the pointer has moved past the drag threshold, so a press on
         the bar's padding that goes nowhere still changes nothing.
@@ -4624,7 +4573,7 @@ class OverlayWindow(QWidget):
         """What still hangs off the bar -- the strip naming the tool --
         follows it, clamped into `_chrome_bounds` as always.
         """
-        self._sync_tray_visibility()
+        self._sync_tool_hint()
 
     def _remember_bar_spot(self, x: float, y: float) -> None:
         """Keep where the bar was dragged to for the next snip with no room,
@@ -4786,8 +4735,8 @@ class OverlayWindow(QWidget):
 
         On success, `_frame` and this window's own geometry are replaced
         in place (this is still the same `OverlayWindow`, never a second
-        one) -- which is what leaves `_ink_colour`/`_stroke_width`/the
-        bar's active tool/`_capture_mode` itself exactly as the user had
+        one) -- which is what leaves each tool's style, the
+        bar's active tool and `_capture_mode` itself exactly as the user had
         them, with nothing to copy across, per the ticket's "the overlay
         re-opens... with the tool, colour and stroke settings the user had
         chosen" acceptance criterion. The stale selection is cleared --
@@ -5034,7 +4983,7 @@ class OverlayWindow(QWidget):
             existing.append(window_rect)
             boxes.append(Redact(
                 colour=QColor("#000000"),
-                stroke_width=self._stroke_width,
+                stroke_width=design.tokens.Metric.STROKE_DEFAULT,
                 start=window_rect.topLeft(),
                 end=window_rect.bottomRight(),
             ))
@@ -5378,7 +5327,7 @@ class OverlayWindow(QWidget):
         return QRectF(rect).translated(self._frame.logical_origin)
 
     def _chrome_bounds(self) -> QRectF:
-        """The rect every piece of floating chrome -- bar, popovers, trays
+        """The rect every piece of floating chrome -- bar, popovers, menus
         -- must stay inside, in this window's own local coordinates.
 
         This is the monitor the current selection sits on, **not**
@@ -5414,7 +5363,7 @@ class OverlayWindow(QWidget):
         full span.
 
         That monitor is then inset by whatever the desktop's own chrome
-        reserves on it (`_usable_area`). The bar, its trays and tool hint,
+        reserves on it (`_usable_area`). The bar, its menus and tool hint,
         the popovers and the toast are all clamped into this rect, and a
         dock paints over this window: before the inset, a selection reaching
         the bottom of the monitor put the whole bar under a bottom dock,
@@ -5618,8 +5567,7 @@ class OverlayWindow(QWidget):
         # Reported twice as "i shouldnt see the whole screenshooting tools".
         if self._armed_for_recording or self._chooser.kind == "record":
             self._bar.hide()
-            self._tray.hide()
-            self._blur_tray.hide()
+            self._style_popover.hide()
             self._popover.hide()
             self._tool_hint.hide()
             for menu in self._family_menus.values():
@@ -5629,11 +5577,10 @@ class OverlayWindow(QWidget):
             self._arm_default_tool()
             self._bar.reposition(self._selection, self._chrome_bounds())
             self._bar.show()
-            self._sync_tray_visibility()
+            self._sync_tool_hint()
         else:
             self._bar.hide()
-            self._tray.hide()
-            self._blur_tray.hide()
+            self._style_popover.hide()
             self._popover.hide()
             self._tool_hint.hide()
             for menu in self._family_menus.values():
@@ -5641,16 +5588,19 @@ class OverlayWindow(QWidget):
 
     def _preview_tool(self, tool: str) -> None:
         """Name the tool under the cursor without arming it. Reverts on
-        leave, so hovering only ever reads.
+        leave, so hovering only ever reads. Not while the style popover is
+        open: the strip gives way to it (`_sync_tool_hint`).
         """
-        if not self.isVisible() or tool not in design.tokens.TOOL_HINTS:
+        if (
+            not self.isVisible()
+            or tool not in design.tokens.TOOL_HINTS
+            or not self._style_popover.isHidden()
+        ):
             return
-        self._tray.hide()
-        self._blur_tray.hide()
         self._tool_hint.set_tool(tool)
         self._tool_hint.show()
         self._tool_hint.raise_()
-        self._reposition_tray(self._tool_hint)
+        self._reposition_tool_hint()
 
     def _arm_default_tool(self) -> None:
         """Arm the pen the first time the toolbar comes up for a snip.
@@ -5659,8 +5609,7 @@ class OverlayWindow(QWidget):
         with nothing armed at all -- so the first stroke of every
         annotation cost a trip to the bar to pick the tool that was going
         to be picked anyway. Pen is the one that is: it is
-        `tokens.TOOLS`' own first entry and the swatch tray's default
-        colour is chosen for it.
+        `tokens.TOOLS`' own first entry.
 
         Once only, and only while nothing is armed. `_sync_bar_visibility`
         runs on every mouse-move of a live drag, so re-arming here
@@ -5694,58 +5643,35 @@ class OverlayWindow(QWidget):
         if self._bar.active_tool is None and not self._eraser_active:
             self._bar.select_tool(design.tokens.TOOLS[0])
 
-    def _style_tray_for(self, tool: str | None) -> "QWidget | None":
-        """The tray `tool` is styled with -- colour and stroke for a tool
-        that draws, strength for a redaction -- or None for the eraser.
-        """
-        if tool in design.tokens.DRAW_TOOLS:
-            return self._tray
-        if tool in BlurTray.TOOL_MODES:
-            return self._blur_tray
-        return None
-
-    def _sync_tray_visibility(self) -> None:
-        """Show what hangs under the bar for the active tool: its tray while
-        the style dot has it open, and otherwise the strip naming the tool.
+    def _sync_tool_hint(self) -> None:
+        """Name the active tool under the bar, and say what it does, while
+        the bar is up and the style popover is not.
 
         The trays used to come up by themselves for every tool that had
         one, so the bar and the tray under it stood about 110px tall. The
-        style dot opening them is what makes the bar one row; the strip
-        holds their place, so the active tool is still named on screen with
-        what it does -- the one part of a tray that was always worth
+        strip holds their place, so the active tool is still named on screen
+        with what it does -- the one part of a tray that was always worth
         having up.
 
-        At most one of the three is visible. Gated on the bar's own
-        visibility rather than re-checking `_selection`/`self.isVisible()`
-        directly -- the bar is already the single source of truth for "is
-        this window's chrome allowed to be on screen right now", and
-        everything here hangs off it.
+        It gives way to the style popover rather than sharing the screen
+        with it. Where the bar has no room below it both would open above
+        it, one on top of the other, and the lit slot already says which
+        tool the popover is styling.
+
+        Gated on the bar's own visibility rather than re-checking
+        `_selection`/`self.isVisible()` directly -- the bar is already the
+        single source of truth for "is this window's chrome allowed to be on
+        screen right now", and everything here hangs off it.
         """
         tool = self._bar.active_tool
-        tray = self._style_tray_for(tool)
-        if tray is None:
-            self._style_open = False
-        self._bar.set_style_open(self._style_open)
-
-        shown = None
-        if self._bar.isVisible():
-            if self._style_open:
-                shown = tray
-            elif tool:
-                shown = self._tool_hint
-        for widget in (self._tray, self._blur_tray, self._tool_hint):
-            if widget is not shown:
-                widget.hide()
-        if shown is None:
+        if not (self._bar.isVisible() and tool and self._style_popover.isHidden()):
+            self._tool_hint.hide()
             return
-        # Told the tool each time, so neither names whichever it showed last.
-        if shown is self._tray:
-            self._tray.set_tool(tool)
-        elif shown is self._tool_hint:
-            self._tool_hint.set_tool(tool)
-        shown.show()
-        shown.raise_()
-        self._reposition_tray(shown)
+        # Told the tool each time, so it never names whichever it showed last.
+        self._tool_hint.set_tool(tool)
+        self._tool_hint.show()
+        self._tool_hint.raise_()
+        self._reposition_tool_hint()
 
     def _reserved_margins(self, monitor: QRectF) -> QMargins:
         """Logical pixels along each edge of `monitor` that the desktop's
@@ -5800,24 +5726,24 @@ class OverlayWindow(QWidget):
             round(bounds.top() + self._CLOSE_BUTTON_MARGIN),
         )
 
-    def _reposition_tray(self, tray: QWidget) -> None:
-        """Centre `tray` under the bar, `TRAY_OFFSET_Y` below it -- per the
-        spec's "Sits 8px below the bar, centred on it." Shared by `_tray`
-        and `_blur_tray`, which `_sync_tray_visibility` never shows at the
-        same time.
+    def _reposition_tool_hint(self) -> None:
+        """Centre the tool hint strip under the bar, `TRAY_OFFSET_Y` below
+        it -- where the old tray spec put its tray: "Sits 8px below the bar,
+        centred on it."
 
         Clamped into `_chrome_bounds` afterwards, the same monitor rect the
         bar itself is clamped to: the bar can legitimately sit close enough
-        to its monitor's bottom edge that a tray placed the spec's 8px
-        below it would hang off that monitor -- on a multi-monitor desktop
-        that means a gap displaying nothing, not merely a screen edge. When
-        there is no room below, the tray flips above the bar rather than
-        being pushed back over it.
+        to its monitor's bottom edge that a strip placed 8px below it would
+        hang off that monitor -- on a multi-monitor desktop that means a gap
+        displaying nothing, not merely a screen edge. When there is no room
+        below, the strip flips above the bar rather than being pushed back
+        over it.
         """
+        strip = self._tool_hint
         metric = design.tokens.Metric
         bar_geometry = self._bar.geometry()
         bounds = self._chrome_bounds()
-        size = tray.sizeHint()
+        size = strip.sizeHint()
         center_x = bar_geometry.center().x()
         top = bar_geometry.bottom() + metric.TRAY_OFFSET_Y
         if top + size.height() > bounds.bottom():
@@ -5825,7 +5751,7 @@ class OverlayWindow(QWidget):
         top = max(bounds.top(), min(top, bounds.bottom() - size.height()))
         left = center_x - size.width() / 2
         left = max(bounds.left(), min(left, bounds.right() - size.width()))
-        tray.setGeometry(round(left), round(top), size.width(), size.height())
+        strip.setGeometry(round(left), round(top), size.width(), size.height())
 
     def _sync_bar_undo_redo(self) -> None:
         self._bar.set_undo_enabled(self.can_undo)
@@ -5842,7 +5768,7 @@ class OverlayWindow(QWidget):
         was ever shown, and none of this file's many other pixel-sampling
         tests call `.show()` first -- so a toast triggered by copy()/
         save()/clear()/discard() must stay off screen until this window
-        actually is, same as the bar/tray/popover already do.
+        actually is, same as the bar and popovers already do.
         """
         if self.isVisible():
             self._toast.show_message(icon_name, text, self._chrome_bounds())
@@ -5874,7 +5800,7 @@ class OverlayWindow(QWidget):
         regardless of whether this window itself was ever shown, and this
         file's many pixel-sampling tests never call `.show()` first -- so
         the HUD must stay off screen until this window actually is, same as
-        the bar/tray/toast already do, on top of respecting the preference.
+        the bar/popovers/toast already do, on top of respecting the preference.
         """
         if self._hints_enabled and self.isVisible():
             self._hud.show()
@@ -6289,13 +6215,11 @@ class OverlayWindow(QWidget):
         super().hideEvent(event)
         self._ants_timer.stop()
         self._bar.hide()
-        self._tray.hide()
-        self._blur_tray.hide()
+        self._style_popover.hide()
         self._tool_hint.hide()
         self._popover.hide()
         for menu in self._family_menus.values():
             menu.hide()
-        self._style_open = False
         self._toast.hide()
         self._hud.hide()
         self._close_button.hide()
@@ -6419,17 +6343,19 @@ class OverlayWindow(QWidget):
 
     def _shortcuts_suppressed(self) -> bool:
         """True while keyboard focus is on a widget these shortcuts must
-        leave alone: a slider (either tray's stroke/strength control) or a
-        text-editing widget -- `QLineEdit` is what the text tool's own label
-        editor (`_text_edit`) is, per `shapes.Text`'s docstring, mirroring
-        editor.py's `Canvas._ensure_text_edit`.
+        leave alone: a slider or a text-editing widget -- `QLineEdit` is
+        what the text tool's own label editor (`_text_edit`) is, per
+        `shapes.Text`'s docstring, mirroring editor.py's
+        `Canvas._ensure_text_edit`. The style popover's own sliders never
+        take focus, for exactly this reason: its keys have to keep working
+        while it is open.
 
         `self.focusWidget()`, not the process-wide `QApplication.
         focusWidget()`, is enough here: every widget these shortcuts must
         yield to lives inside this window, and `QWidget.focusWidget()`
         reports a child that's been given focus via `setFocus()` regardless
         of whether this window itself is ever shown -- which is what lets a
-        test give a tray's slider focus without a real, visible window.
+        test give a slider focus without a real, visible window.
         """
         focus = self.focusWidget()
         return isinstance(focus, (QSlider, QLineEdit))
@@ -6572,6 +6498,11 @@ class OverlayWindow(QWidget):
         if self._bar.handle_tool_key(key):
             return
 
+        # 1-7, [ ] and D style the active tool, whether the popover is open
+        # or not, and never close it.
+        if self._style_popover.handle_key(key):
+            return
+
         if key == Qt.Key.Key_Question:
             # SNX-65: hints default off now (see the "Top hint HUD" comment
             # block above `HintHUD`), so this is the escape hatch that keeps
@@ -6616,8 +6547,8 @@ class OverlayWindow(QWidget):
             self._popover.hide()
             return
         if self._close_bar_menus():
-            # A press outside the bar's open menu or tray closes it and does
-            # nothing more. A press *on* one never gets this far -- see
+            # A press outside the bar's open menu or popover closes it and
+            # does nothing more. A press *on* one never gets this far -- see
             # `_Chrome` -- or this line would close the menu before the row
             # under the pointer could take the click.
             return
@@ -6713,7 +6644,8 @@ class OverlayWindow(QWidget):
         guard on `self._tool is None`.
         """
         tool = self._bar.active_tool
-        colour = QColor(self._ink_colour)
+        style = self._styles.of(tool)
+        colour = QColor(style.colour)
 
         # One factory, shared with the review window's Annotate mode -- see
         # snipux/marks.py. `step` and `text` fall through to their own
@@ -6723,8 +6655,10 @@ class OverlayWindow(QWidget):
             tool,
             pos,
             colour=colour,
-            stroke_width=self._stroke_width,
-            blur_strength=self._blur_strength,
+            stroke_width=style.size,
+            blur_strength=style.strength,
+            fill=style.fill,
+            dash=style.dash,
         )
         if started is not None:
             self._in_progress_shape = started
@@ -6733,7 +6667,7 @@ class OverlayWindow(QWidget):
             self.add_mark(
                 StepMarker(
                     colour=colour,
-                    stroke_width=self._stroke_width,
+                    stroke_width=style.size,
                     point=pos,
                     number=next_step_number(self._marks),
                 )
@@ -6800,7 +6734,7 @@ class OverlayWindow(QWidget):
         field (nothing typed yet, or the very first label ever) still has
         nothing to commit, per `_commit_text`'s own guard.
         """
-        self._text_editor.begin(pos, colour, self._stroke_width)
+        self._text_editor.begin(pos, colour, self._styles.of("text").size)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._dragging() and not event.buttons() & Qt.MouseButton.LeftButton:
@@ -7238,7 +7172,7 @@ class OverlayWindow(QWidget):
         sampling for every obscuring mark on every single frame. Keying
         on `strength` rather than just object identity is also what
         makes an already-committed mark's on-screen look track a change
-        to its own `strength` (e.g. a settings-tray slider write) on the
+        to its own `strength` (e.g. a direct write to the mark) on the
         very next repaint, instead of it staying stuck at whatever this
         method last cached.
 
