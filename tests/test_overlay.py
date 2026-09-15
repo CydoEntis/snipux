@@ -6448,6 +6448,20 @@ class TestCommitToRecord:
 
         assert requests[0][1] == tokens.DELAYS[1]
 
+    def test_a_delay_picked_on_the_chooser_row_reaches_the_callback(self):
+        # #73: the row is where a recording's delay is chosen -- there is no
+        # floating bar on the record side to pick one from -- and its value
+        # used to stop at the row.
+        requests = []
+        overlay = self._overlay(
+            on_recording_requested=lambda rect, delay, after: requests.append(delay)
+        )
+        overlay._chooser.set_delay(tokens.DELAYS[1])
+
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+
+        assert requests == [tokens.DELAYS[1]]
+
     @pytest.mark.parametrize("after", ["instant", "save"])
     def test_the_chosen_after_reaches_the_callback_as_a_third_argument(self, after):
         # SNX-124 ticket 9: app.py's `_on_recording_requested` needs to know
@@ -6800,6 +6814,102 @@ class TestCaptureModeDelayIntegration:
         # Window's own immediate arming (SNX-48) still ran -- proving this
         # went through the ordinary dispatch path, not a delay that just
         # happened to finish instantly.
+        assert overlay._picking_window
+
+
+class TestADelayPickedOnTheChooserRowDelaysTheCapture:
+    """#73: the chooser row's Delay showed as set and the capture happened
+    at once anyway. The overlay kept its own copy of the delay, fed only by
+    the floating bar's popover, and every reader used that copy.
+
+    These drive the row itself rather than `set_delay`, because the bug was
+    that a value the row held never reached anything.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(self, registry=None, size=(1200, 800)):
+        frame = make_frame(image_size=size, logical_size=size)
+        # A provider that can answer, so Window arms rather than falling
+        # back to Region: it waits for a click, so the snip does not finish
+        # underneath the assertions.
+        overlay = OverlayWindow(
+            frame,
+            registry=registry,
+            geometry_provider=_FakeWindowProvider(QRectF(0, 0, 100, 100)),
+        )
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    @staticmethod
+    def _click(widget):
+        QTest.mouseClick(
+            widget, Qt.MouseButton.LeftButton,
+            pos=QPoint(widget.width() // 2, widget.height() // 2),
+        )
+
+    def _pick_delay_on_the_row(self, overlay, delay):
+        self._click(overlay._chooser.panel.delay_trigger)
+        self._click(overlay._chooser._menu._rows[delay])
+
+    def _pick_mode_on_the_row(self, overlay, mode):
+        self._click(overlay._chooser.panel.mode_trigger)
+        self._click(overlay._chooser._menu._rows[mode])
+
+    def test_picking_a_mode_hides_the_overlay_and_counts_down(self):
+        overlay = self._overlay()
+        self._pick_delay_on_the_row(overlay, "3s")
+
+        self._pick_mode_on_the_row(overlay, "Window")
+
+        assert not overlay.isVisible()
+        assert overlay._countdown is not None and overlay._countdown.isVisible()
+        assert overlay._countdown._label.text() == "3"
+
+    def test_the_countdown_ends_in_a_fresh_grab(self):
+        regrabbed = make_frame(image_size=(1200, 800), logical_size=(1200, 800))
+        overlay = self._overlay(
+            registry=BackendRegistry([_FakeCaptureBackend(regrabbed)])
+        )
+        self._pick_delay_on_the_row(overlay, "3s")
+        self._pick_mode_on_the_row(overlay, "Window")
+
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay._frame is regrabbed
+        assert overlay.isVisible()
+        assert overlay._picking_window, "the picked mode was lost across the wait"
+
+    def test_the_bars_popover_shows_the_rows_delay(self):
+        overlay = self._overlay()
+
+        self._pick_delay_on_the_row(overlay, "5s")
+
+        assert overlay._delay == "5s"
+        assert overlay._popover.delay == "5s"
+
+    def test_the_row_shows_the_popovers_delay(self):
+        overlay = self._overlay()
+        overlay.set_selection(QRect(100, 100, 300, 200))
+        QTest.mouseClick(overlay._bar._chip, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._popover._delay_row, Qt.MouseButton.LeftButton)
+
+        assert overlay._delay == tokens.DELAYS[1]
+        assert overlay._chooser.delay == tokens.DELAYS[1]
+
+    def test_no_delay_on_the_row_still_takes_the_mode_at_once(self):
+        overlay = self._overlay()
+
+        self._pick_mode_on_the_row(overlay, "Window")
+
+        assert overlay.isVisible()
+        assert overlay._countdown is None
         assert overlay._picking_window
 
 

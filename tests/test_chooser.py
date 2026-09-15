@@ -162,6 +162,43 @@ class TestKindChangedSignal:
         assert emitted == []
 
 
+class TestDelayChangedSignal:
+    """#73: the row's delay has to reach the capture, and `delayChanged` is
+    the only way out of this widget -- nothing downstream reads `delay`.
+    """
+
+    def test_picking_a_delay_emits_it(self):
+        chooser = Chooser(parent=None)
+        emitted = []
+        chooser.delayChanged.connect(emitted.append)
+
+        chooser.set_delay("5s")
+
+        assert emitted == ["5s"]
+
+    def test_the_same_delay_again_emits_nothing(self):
+        # The overlay seeds this back from the bar's popover; a signal here
+        # would send the value straight back to where it came from.
+        chooser = Chooser(parent=None)
+        chooser.set_delay("5s")
+        emitted = []
+        chooser.delayChanged.connect(emitted.append)
+
+        chooser.set_delay("5s")
+
+        assert emitted == []
+
+    def test_a_delay_that_is_not_offered_is_refused(self):
+        chooser = Chooser(parent=None)
+        emitted = []
+        chooser.delayChanged.connect(emitted.append)
+
+        chooser.set_delay("7s")
+
+        assert chooser.delay == tokens.DELAY_DEFAULT
+        assert emitted == []
+
+
 class TestSwitchingToRecordSnapsAnUnavailableMode:
     # Window came off this list once recording gained it -- it was only
     # ever disabled because nobody had asked, and it resolves to a rect

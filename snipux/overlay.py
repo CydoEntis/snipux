@@ -3033,6 +3033,15 @@ class CaptureModePopover(_Chrome):
         self._mode = mode
         self._select_row(mode)
 
+    def set_delay(self, delay: str) -> None:
+        """Show `delay` without emitting `delayChanged` -- the chooser row
+        sets the same delay, and this popover has to agree with it (#73).
+        """
+        if delay not in design.tokens.DELAYS:
+            return
+        self._delay = delay
+        self._delay_row.set_value(delay)
+
     def _select_row(self, mode: str) -> None:
         for label, row in self._rows.items():
             row.set_selected(label == mode)
@@ -4283,6 +4292,10 @@ class OverlayWindow(QWidget):
         self._popover.hide()
         self._popover.modeSelected.connect(self._on_capture_mode_selected)
         self._popover.delayChanged.connect(self._on_delay_changed)
+        # The row's delay is the same delay (#73). Connected here rather than
+        # beside the chooser's other signals, because `_delay` and
+        # `_popover` have to exist before the first change can land.
+        self._chooser.delayChanged.connect(self._on_delay_changed)
         self._bar.captureChipClicked.connect(self._toggle_capture_popover)
 
         # The notched slots' menus, one per family -- see `FamilyMenu` for
@@ -5395,7 +5408,19 @@ class OverlayWindow(QWidget):
         return self._active_screen_rect()
 
     def _on_delay_changed(self, delay: str) -> None:
+        """One delay, set from either surface: the chooser row or the
+        floating bar's popover. `_delay` is what the capture reads, so both
+        surfaces feed it and are seeded back from it -- the way the mode is
+        shared between the chooser and the bar's chip.
+
+        The early return is what ends the round trip: seeding the chooser
+        emits `delayChanged` straight back here with the value just stored.
+        """
+        if delay == self._delay:
+            return
         self._delay = delay
+        self._chooser.set_delay(delay)
+        self._popover.set_delay(delay)
 
     @property
     def outcome(self) -> str:

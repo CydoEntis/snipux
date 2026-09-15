@@ -999,6 +999,7 @@ class Chooser(QWidget):
     cancelled = pyqtSignal()
     kindChanged = pyqtSignal(str)
     afterChanged = pyqtSignal(str)
+    delayChanged = pyqtSignal(str)
     reuseLastRegionChanged = pyqtSignal(bool)
     hideSensitiveChanged = pyqtSignal(bool)
 
@@ -1287,8 +1288,20 @@ class Chooser(QWidget):
         self.afterChanged.emit(after)
 
     def set_delay(self, delay: str) -> None:
+        """Adopt `delay` as the countdown before this snip's grab.
+
+        Emits `delayChanged` on a real change only. Without the signal the
+        row's delay was a value nothing downstream ever read: the overlay
+        kept its own copy, fed only by the floating bar's popover, so a
+        delay picked here showed as set and the capture happened at once
+        anyway (#73). The guard is what lets the overlay seed this back
+        from the popover without the change bouncing between the two.
+        """
+        if delay not in tokens.DELAYS or delay == self._delay:
+            return
         self._delay = delay
         self._refresh_triggers()
+        self.delayChanged.emit(delay)
 
     def _toggle_kind(self) -> None:
         self.set_kind("record" if self._kind == "stills" else "stills")
