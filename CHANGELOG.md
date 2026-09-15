@@ -5,6 +5,11 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 0.8.0 — 2026-09-15
+
+The highlighter snaps to the text you sweep, and recording is always chosen
+on purpose.
+
 ### Added
 
 - **The highlighter snaps to text.** Sweep roughly over a line and it becomes
