@@ -229,7 +229,7 @@ Nothing else to run: the shortcut and hotkey point at a location that does not
 change between versions.
 
 **Check it worked:** tray → Settings, bottom-left, e.g.
-`Snipux 0.6.0 / Qt 6.11.0 · Windows`.
+`Snipux 0.7.0 / Qt 6.11.0 · Windows`.
 
 > `--upgrade` compares versions, so **every release needs a new version
 > number** in `pyproject.toml`. Left the same, pip decides the requirement is
@@ -270,7 +270,7 @@ python -m build --wheel
 ```
 
 That writes `dist/snipux-<version>-py3-none-any.whl`, which installs the same
-way — `py -m pip install snipux-0.6.0-py3-none-any.whl`. Every release
+way — `py -m pip install snipux-0.7.0-py3-none-any.whl`. Every release
 also carries its wheel and sdist on
 [its GitHub release page](https://github.com/CydoEntis/snipux/releases), so
 there is nothing to build for this.
