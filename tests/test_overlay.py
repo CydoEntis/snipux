@@ -10374,6 +10374,33 @@ class TestOverlayIsRevealedNotAnimatedOpen:
 
         assert overlay.windowOpacity() == 0.0
 
+    def test_where_the_platform_skips_the_animation_it_maps_at_full_opacity(self, monkeypatch):
+        # Nothing to wait out, so nothing to hide: the reveal wait was nearly
+        # half of the time a snip took to appear.
+        monkeypatch.setattr(
+            overlay_module.platform.current, "skip_map_animation", lambda widget: True
+        )
+        overlay = self._overlay()
+
+        overlay.show_on_screen(None)
+
+        assert overlay.windowOpacity() == 1.0
+
+    def test_the_platform_is_asked_before_the_window_exists(self, monkeypatch):
+        # A window type is read when the native window is created, so asking
+        # any later would change nothing.
+        created = []
+        monkeypatch.setattr(
+            overlay_module.platform.current,
+            "skip_map_animation",
+            lambda widget: created.append(widget.testAttribute(Qt.WidgetAttribute.WA_WState_Created))
+            or False,
+        )
+
+        self._overlay()
+
+        assert created == [False]
+
     def test_the_reveal_brings_it_to_full_opacity(self):
         overlay = self._overlay()
         overlay.show_on_screen(None)

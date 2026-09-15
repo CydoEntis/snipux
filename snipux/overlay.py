@@ -4575,6 +4575,11 @@ class OverlayWindow(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         )
+        # Asked here, before the native window exists, because a window type
+        # is read when that window is created. Where the platform can map this
+        # window without the compositor's opening animation, `show_on_screen`
+        # has nothing to wait out.
+        self._map_animation_skipped = platform.current.skip_map_animation(self)
         # Every pixel of this window is the frozen frame, so Qt must not
         # fill it with the palette's background first. That fill is what
         # flashed: the window maps, gets one frame of flat colour, and only
@@ -7203,18 +7208,24 @@ class OverlayWindow(QWidget):
             # the frozen frame when the window appears rather than being
             # filled on the first exposure.
             self.grab()
-            # Mapped transparent, then revealed. Mutter stages a newly
-            # mapped window by scaling it up into place, and over a frozen
-            # desktop that reads as a page expanding across the very area
-            # being captured -- a recording of it shows a shrunken copy of
-            # the desktop sliding outwards. The animation cannot be turned
-            # off per window, and the one flag that skips it entirely
-            # (X11BypassWindowManagerHint) costs this window the keyboard
-            # focus it lives on -- measured, and recorded where the flags
-            # are set. So the compositor plays it on something invisible.
-            self.setWindowOpacity(0.0)
-            self.show()
-            QTimer.singleShot(self._REVEAL_DELAY_MS, self._reveal)
+            if self._map_animation_skipped:
+                # A window type the compositor maps without animating
+                # (`Platform.skip_map_animation`): nothing to wait out, so
+                # nothing to hide.
+                self.show()
+            else:
+                # Mapped transparent, then revealed. Mutter stages a newly
+                # mapped window by scaling it up into place, and over a frozen
+                # desktop that reads as a page expanding across the very area
+                # being captured -- a recording of it shows a shrunken copy of
+                # the desktop sliding outwards. Where the platform cannot map
+                # this window without it, and X11BypassWindowManagerHint would
+                # cost the window the keyboard focus it lives on (recorded
+                # where the flags are set), the compositor plays the animation
+                # on something invisible.
+                self.setWindowOpacity(0.0)
+                self.show()
+                QTimer.singleShot(self._REVEAL_DELAY_MS, self._reveal)
         else:
             self.winId()
             handle = self.windowHandle()

@@ -34,7 +34,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PyQt6.QtCore import QMargins, QRect
+from PyQt6.QtCore import QMargins, QRect, Qt
 
 import snipux.platform as platform_pkg
 from snipux import recording, setup_desktop
@@ -371,6 +371,49 @@ class TestReservedMargins:
         middle = _FakeScreen(QRect(1920, 0, 2560, 1440))
         assert platform_impl.reserved_margins(left) == QMargins(64, 0, 0, 0)
         assert platform_impl.reserved_margins(middle) == QMargins(0, 32, 0, 0)
+
+
+class TestSkipMapAnimation:
+    """Whether the overlay can be mapped without the compositor's opening
+    animation. The reveal wait it needs otherwise was nearly half of the time
+    a snip took to appear.
+    """
+
+    _linux = TestReservedTop._linux
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self):
+        from PyQt6.QtWidgets import QApplication
+
+        return QApplication.instance() or QApplication([])
+
+    @staticmethod
+    def _widget():
+        from PyQt6.QtWidgets import QWidget
+
+        return QWidget()
+
+    def test_no_other_platform_claims_it(self):
+        widget = self._widget()
+
+        assert windows.WindowsPlatform().skip_map_animation(widget) is False
+        assert darwin.DarwinPlatform().skip_map_animation(widget) is False
+        assert not widget.testAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash)
+
+    def test_x11_marks_the_window_a_splash_screen(self, monkeypatch):
+        platform_impl = self._linux(monkeypatch)
+        widget = self._widget()
+
+        assert platform_impl.skip_map_animation(widget) is True
+        assert widget.testAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash)
+
+    @pytest.mark.parametrize("session,qt_platform", [("wayland", "wayland"), ("x11", "offscreen")])
+    def test_anywhere_else_on_linux_the_reveal_stays(self, monkeypatch, session, qt_platform):
+        platform_impl = self._linux(monkeypatch, session=session, qt_platform=qt_platform)
+        widget = self._widget()
+
+        assert platform_impl.skip_map_animation(widget) is False
+        assert not widget.testAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash)
 
 
 class TestStubPlatforms:

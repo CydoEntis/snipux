@@ -21,7 +21,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from PyQt6.QtCore import QMargins
+from PyQt6.QtCore import QMargins, Qt
 from PyQt6.QtGui import QGuiApplication
 
 from snipux import capture, recording, setup_desktop
@@ -106,6 +106,29 @@ class LinuxPlatform(Platform):
             # test that passes or fails depending on whose desk it runs on.
             return portable
         return _x11_reserved_margins(screen)
+
+    def skip_map_animation(self, widget) -> bool:
+        """True under X11, where `widget` is marked a splash window.
+
+        GNOME Shell animates the mapping of `NORMAL`, `DIALOG` and
+        `MODAL_DIALOG` windows only (`windowManager.js`, `_mapWindow`), and
+        maps every other type at once. Of the types it leaves alone, splash
+        took keyboard focus soonest when tried with real overlays on a GNOME 46
+        X11 desk: utility and notification windows still had none 120ms after
+        mapping, and the overlay lives on the keyboard. Bypassing the window
+        manager skips the animation too, but such a window never becomes the
+        active window at all (see the flags in `OverlayWindow.__init__`).
+
+        Wayland clients cannot choose a window type, so the reveal stays
+        there, and so it does on any Qt platform that is not xcb -- the
+        headless suite's offscreen one included.
+        """
+        if capture.detect_session_type() != "x11":
+            return False
+        if QGuiApplication.platformName() != "xcb":
+            return False
+        widget.setAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash, True)
+        return True
 
     def records_audio(self) -> bool:
         """False. `org.gnome.Shell.Screencast` takes `draw-cursor` and

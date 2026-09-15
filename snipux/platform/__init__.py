@@ -215,6 +215,24 @@ class Platform(ABC):
         """
         return self.reserved_margins(screen).top()
 
+    def skip_map_animation(self, widget) -> bool:
+        """Ask the desktop to show `widget` without its window-opening
+        animation, and say whether it will. Called before `widget` is first
+        shown, while its native window does not exist yet.
+
+        Chrome only. The overlay is a frozen picture of the desktop, and a
+        compositor that scales a newly mapped window into place makes that
+        picture look like the screen zooming. Where this returns False the
+        overlay maps itself transparent and reveals itself once the animation
+        is over -- `OverlayWindow._REVEAL_DELAY_MS` on every snip, nearly half
+        the time one took to appear. So True is worth that much, and must only
+        be returned where the animation really is skipped.
+
+        False by default: nothing is known to skip it on Windows or macOS,
+        and neither has been measured.
+        """
+        return False
+
     def exclude_from_capture(self, widget) -> bool:
         """Ask the OS to leave `widget` out of screen captures while
         leaving it visible on screen. True if it took.
