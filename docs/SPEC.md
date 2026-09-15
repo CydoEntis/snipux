@@ -70,7 +70,7 @@ verifiable in an Ubuntu VM.
 7. **Selection overlay.** One frameless fullscreen window per monitor painting
    its slice of the frozen frame, a dimmed veil outside the selection, a live
    size readout, and a zoomed magnifier with a pixel crosshair.
-8. **Selection modes:** rectangle, freeform, window, full screen.
+8. **Selection modes:** rectangle, window, full screen. (Freeform was built, then removed in #42.)
 9. **Capture backend — X11.**
 10. **Capture backend — Wayland.**
 11. **Tray-resident background process**, so a hotkey reaches an already-warm

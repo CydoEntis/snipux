@@ -1228,7 +1228,7 @@ class AppController:
         menu = QMenu()
         # A single Snip item, not one per SelectionMode: OverlayWindow's own
         # capture-mode popover (CaptureModePopover, opened from its floating
-        # bar's chip) is what picks Region/Window/Full screen/Freeform now,
+        # bar's chip) is what picks Region/Window/Full screen/Browser now,
         # so the tray no longer needs a separate entry point for each -- the
         # old per-mode menu existed only because the previous Overlay/Editor
         # pair couldn't change mode once a selection was already open.
@@ -1482,7 +1482,7 @@ class AppController:
 
         # No mode parameter: unlike the old per-monitor Overlay, a single
         # OverlayWindow starts in Region and lets its own capture-mode
-        # popover switch to Window/Full screen/Freeform after the fact, so
+        # popover switch to Window/Full screen/Browser after the fact, so
         # every caller here -- the tray's own Snip action, the --snip
         # transport listener wired below, and a forwarded request from a
         # second launch -- needs no mode of its own to pass in.

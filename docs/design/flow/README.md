@@ -17,7 +17,7 @@ edge), the **stills bar**, and the **recording bar** (both floating under the se
 They never coexist.
 
 Two decisions, asked in the order they matter: **what to capture** (Region / Window / Full
-screen / Freeform) and **what happens to it** (Copy / Save / Open). Delay lives with them.
+screen / Freeform — since removed, #42) and **what happens to it** (Copy / Save / Open). Delay lives with them.
 
 Target: **Python + Qt (PySide6 / PyQt6)**, Wayland primary, X11 must work.
 
@@ -114,7 +114,7 @@ The chooser collapses to a 22px tab still attached to the same edge, at 70% opac
 to 100% on hover, carrying mode + destination. Click it or press `Space` to reopen the full
 row with selections intact. The next-step hint reappears centred below it with a 180ms rise.
 
-- **Region / Freeform** — drag. A drag under 60 × 40 is discarded and returns to `choose`,
+- **Region / Freeform** (Freeform since removed, #42) — drag. A drag under 60 × 40 is discarded and returns to `choose`,
   not captured.
 - **Window** — the window under the cursor is outlined live in `#e3ff4f` (85% border, 7%
   fill) with a name + size chip; click takes it. In the prototype the two mock "windows" are
@@ -282,7 +282,7 @@ design_handoff_snipux_flow/
 
 Not blockers for this build, but unresolved:
 
-1. **Freeform** has no interaction design — the lasso, how the scrim inverts against a path,
+1. *Resolved by removing Freeform (#42).* **Freeform** has no interaction design — the lasso, how the scrim inverts against a path,
    how export crops to the bounding box. It behaves as a region drag in the prototype.
 2. **Pause/resume semantics** — one continuous file, or segments concatenated on stop.
 3. **The review window's video mode** (player, trim, mute, GIF export) is described but not

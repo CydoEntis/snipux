@@ -1387,7 +1387,7 @@ class TestAppControllerCapture:
 
         # A single OverlayWindow spanning the whole desktop, not one Overlay
         # per monitor -- the new overlay's own capture-mode popover is what
-        # picks Region/Window/Full screen/Freeform now, so nothing here
+        # picks Region/Window/Full screen/Browser now, so nothing here
         # constructs the old editor.py window either.
         assert isinstance(controller._overlay, OverlayWindow)
 
@@ -3214,7 +3214,7 @@ class TestAppControllerTrayMenu:
 
         # The old per-SelectionMode items are gone: OverlayWindow's own
         # capture-mode popover is what picks Region/Window/Full screen/
-        # Freeform once the overlay is open, per the ticket.
+        # Browser once the overlay is open, per the ticket.
         assert controller.snip_action.text() == "Snip"
         assert controller.quit_action.text() == "Quit"
         # Settings sits between them: it is the second thing anyone opens a

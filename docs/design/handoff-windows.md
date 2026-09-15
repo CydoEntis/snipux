@@ -309,7 +309,7 @@ prototype simulates.
 - **Window** — hover highlights the window under the cursor (snap the selection to its
   frame); click accepts it. Then annotation proceeds identically.
 - **Full screen** — selection = the whole display.
-- **Freeform** — lasso; the selection becomes a path, the dim scrim inverts against it,
+- **Freeform** — *removed in #42.* Specified as: lasso; the selection becomes a path, the dim scrim inverts against it,
   and export crops to its bounding box with the outside transparent.
 - **Delay** — `Off / 3s / 5s / 10s`. When set, the overlay dismisses, waits, re-grabs and
   re-opens. Show a countdown.
@@ -639,7 +639,7 @@ The handful of places where CSS and Qt genuinely diverge:
 1. The overlay, Region mode, with the shared bar / tray / mark-layer widgets.
 2. The review window — it reuses all three, so it is mostly chrome and the footer.
 3. Settings, starting with the shortcut recorder and conflict check.
-4. The remaining capture modes (Window, Full screen, Freeform) and Delay.
+4. The remaining capture modes (Window, Full screen, Freeform) and Delay. Freeform was later removed (#42).
 
 ## Files
 
@@ -667,5 +667,5 @@ Three calls I flagged rather than made:
    A two-stage Esc (ink first, then dismiss) is my suggestion.
 2. **`Copy` in the review window** leaves the window open so you can keep marking. Windows
    Snip closes on copy. Pick one.
-3. **Capture modes beyond Region** (Window, Full screen, Freeform, Delay) are specified but
+3. **Capture modes beyond Region** (Window, Full screen, Freeform — since removed, #42 — and Delay) are specified but
    not prototyped — worth a design pass once Region is real.

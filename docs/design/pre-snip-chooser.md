@@ -26,7 +26,7 @@ that way more than once before anyone worked out what it was doing.
 Two groups, because a snip is two decisions.
 
 **What to capture** — `tokens.CAPTURE_MODES`, unchanged: Region, Window,
-Full screen, Freeform.
+Full screen. (Freeform was removed in #42.)
 
 Region gained a preference rather than a fifth mode, and the row gained a
 fourth control to hold it: a `redo`-glyph toggle immediately after the mode
@@ -66,8 +66,7 @@ it survives the restart autostart makes routine, and clipped to the
 monitors that exist at recall time: a rectangle remembered on a
 three-monitor desk and recalled on the laptop alone is trimmed to the
 frame, and discarded outright if it no longer touches any real display or
-survives only in a gap between them. A lasso is never stored, because its
-bounding box is not what was captured.
+survives only in a gap between them.
 
 **What happens to it** — `tokens.AFTER_CAPTURE`, surfaced per-snip: finish
 instantly, annotate in place, save, or open the review window.
@@ -102,6 +101,7 @@ seeds it, and picking a mode either way keeps the two in step.
 - **Once anything is selected.** It answers "what am I capturing", which
   stops being a question the moment something is. The floating bar has the
   opposite condition, so the two never share the screen.
-- **Once Window or Freeform is armed.** Both need the whole screen — one
-  previews whatever is under the cursor, the other is traced anywhere — and
-  a bar across the top would be a band those modes cannot reach.
+- **Once Window is armed.** It needs the whole screen — it previews
+  whatever is under the cursor — and a bar across the top would be a band
+  that mode cannot reach. (Freeform, which stood it down too, was removed
+  in #42.)

@@ -282,7 +282,6 @@ CAPTURE_MODES = [
     ("Region",      "crop",    "Any rectangle you drag"),
     ("Window",      "window",  "One application's window"),
     ("Full screen", "monitor", "The whole monitor you are on"),
-    ("Freeform",    "pen",     "A shape you draw by hand"),
     ("Browser",     "panel",   "Your browser page, no toolbars"),
 ]
 
@@ -733,7 +732,6 @@ MODE_NEXT_STEP = {
     "Region":      "Drag anywhere to frame a region",
     "Window":      "Hover a window, click to take it",
     "Full screen": "Grabs this monitor the moment you choose it",
-    "Freeform":    "Draw a closed shape around anything",
     "Browser":     "Grabs your browser's page the moment you choose it",
 }
 
@@ -746,12 +744,11 @@ RECORD_MODE_NEXT_STEP = {
 }
 
 MODE_KEYS = {
-    "R": "Region", "W": "Window", "F": "Full screen", "L": "Freeform",
-    "B": "Browser",
+    "R": "Region", "W": "Window", "F": "Full screen", "B": "Browser",
 }
 
 # Full screen is the only mode with nothing left to aim at, so choosing it
-# fires the grab immediately (after any delay). The other three arm and wait.
+# fires the grab immediately (after any delay). Region and Window arm and wait.
 # On the record side nothing fires immediately -- see RECORD_DISABLED_MODES.
 IMMEDIATE_MODES = ["Full screen", BROWSER_MODE]
 
@@ -815,11 +812,10 @@ DESTINATION_WORDING = {
 # first".
 KIND_DEFAULT = "stills"
 
-# Freeform is close to meaningless for a recording, since video is
-# rectangular -- it stays in the mode list, greyed out, with the value
-# naming why rather than being hidden (handoff for this ticket).
+# A mode the recorder cannot take stays in the mode list, greyed out, with
+# the value naming why rather than being hidden (handoff for this ticket).
 #
-# Window used to sit here too, reading "Not offered for recording yet",
+# Window used to sit here, reading "Not offered for recording yet",
 # which was the honest reason: nobody had asked for it, not that anything
 # stopped it. Window mode already resolves to a rect
 # (`_confirm_window_pick`), and a rect is exactly what the recorder takes,
@@ -830,7 +826,6 @@ KIND_DEFAULT = "stills"
 # record side there is equally nothing *downstream* wired up yet, so it must
 # not fire immediately there -- it arms and waits like Region does.
 RECORD_DISABLED_MODES = {
-    "Freeform": "Video is rectangular",
     # Recording a browser page is a perfectly sensible thing to want, and
     # the rect is the same one. It is off here only because nothing has
     # driven it end to end on the record side yet -- offering it untested

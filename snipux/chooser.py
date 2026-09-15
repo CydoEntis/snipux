@@ -664,7 +664,7 @@ class _Tab(_Surface):
 
     26px of the monitor's top edge -- which on GNOME is the top bar's
     territory anyway, so in practice it costs nothing that was not already
-    spoken for. Window previews and Freeform tracing work everywhere below.
+    spoken for. Window previews work everywhere below.
 
     This is the one place `windowOpacity`-style translucency is genuinely
     right: the whole widget really is see-through at rest, so an opacity
@@ -980,8 +980,8 @@ class Chooser(QWidget):
     Two phases, and the second is the design problem the handoff is mostly
     about. **Choosing**: the full row, the hint, the legend. **Armed**: the
     row collapses to a 26px tab still hanging from the same edge, because
-    Region, Window and Freeform all need the screen back -- one to drag on,
-    one to hover over, one to trace across.
+    Region and Window both need the screen back -- one to drag on, the
+    other to hover over.
 
     Full screen is the exception and does not arm at all: it has nothing
     left to aim at, so choosing it fires the grab. `IMMEDIATE_MODES` carries
@@ -1087,8 +1087,8 @@ class Chooser(QWidget):
         if mode not in dict((m[0], m) for m in tokens.CAPTURE_MODES):
             return
         if self._unavailable_reason(mode) is not None:
-            # Window and Freeform aren't offered on the record side -- a
-            # click on their disabled row is inert (`_MenuRow` already
+            # A mode the record side does not offer: a click on its
+            # disabled row is inert (`_MenuRow` already
             # swallows it), and a stray shortcut key must leave the current
             # mode alone the same way.
             return

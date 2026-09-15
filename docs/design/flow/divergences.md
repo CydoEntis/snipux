@@ -77,8 +77,7 @@ ticket).
 A control that is visible and does nothing is the failure mode this
 handoff already names elsewhere — "a control that opens a menu it can't act
 on is a lie" — so the options that cannot work are disabled and say why,
-exactly as `RECORD_DISABLED_MODES` already does for Window and Freeform on
-the record side.
+exactly as `RECORD_DISABLED_MODES` already does on the record side.
 
 Windows gets all three.
 
@@ -99,7 +98,8 @@ things the handoff itself leaves unresolved.
   designed. Trim is separately deferred (`recording.md`: v1 records, it
   does not edit). Until it exists, Open on the record side is not offered.
 - **Freeform** — "Still open" #1 says it has no interaction design and
-  behaves as a region drag in the prototype. It stays as it is today.
+  behaves as a region drag in the prototype. It was removed (#42) rather
+  than designed.
 
 ---
 

@@ -285,7 +285,7 @@ prototype simulates.
 - **Window** — hover highlights the window under the cursor (snap the selection to its
   frame); click accepts it. Then annotation proceeds identically.
 - **Full screen** — selection = the whole display.
-- **Freeform** — lasso; the selection becomes a path, the dim scrim inverts against it,
+- **Freeform** — *removed in #42.* Specified as: lasso; the selection becomes a path, the dim scrim inverts against it,
   and export crops to its bounding box with the outside transparent.
 - **Delay** — `Off / 3s / 5s / 10s`. When set, the overlay dismisses, waits, re-grabs and
   re-opens. Show a countdown.

@@ -165,11 +165,14 @@ class TestKindChangedSignal:
 class TestSwitchingToRecordSnapsAnUnavailableMode:
     # Window came off this list once recording gained it -- it was only
     # ever disabled because nobody had asked, and it resolves to a rect
-    # like any region. Freeform stays: video is rectangular.
-    @pytest.mark.parametrize("mode", ["Freeform"])
+    # like any region. Browser stays: nothing has driven it end to end on
+    # the record side.
+    @pytest.mark.parametrize("mode", ["Browser"])
     def test_it_snaps_to_region(self, mode):
         chooser = Chooser(parent=None)
+        chooser.set_browser_available(True)
         chooser.set_mode(mode, arm=False)
+        assert chooser.mode == mode
 
         chooser.set_kind("record")
 
@@ -187,7 +190,8 @@ class TestSwitchingToRecordSnapsAnUnavailableMode:
         # The stills side's mode/after lists are the original, unrestricted
         # ones, so nothing there can ever be invalid.
         chooser = Chooser(parent=None)
-        chooser.set_mode("Freeform", arm=False)
+        chooser.set_browser_available(True)
+        chooser.set_mode("Browser", arm=False)
         chooser.set_kind("record")
         assert chooser.mode == "Region"
 
@@ -242,7 +246,7 @@ class TestFullScreenBehavesDifferentlyPerKind:
 
 
 class TestRecordSideModeSelectionIsInert:
-    @pytest.mark.parametrize("mode", ["Freeform"])
+    @pytest.mark.parametrize("mode", ["Browser"])
     def test_picking_a_disabled_mode_leaves_it_unchanged(self, mode):
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
@@ -252,7 +256,7 @@ class TestRecordSideModeSelectionIsInert:
         assert chooser.mode == "Region"
         assert chooser.phase == "choosing"
 
-    @pytest.mark.parametrize("key,mode", [("L", "Freeform")])
+    @pytest.mark.parametrize("key,mode", [("B", "Browser")])
     def test_the_shortcut_key_is_inert_too(self, key, mode):
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
@@ -384,7 +388,7 @@ class TestEveryModeRowSaysWhatItCaptures:
     def test_a_disabled_rows_reason_outranks_its_description(self):
         notes = self._notes("record")
 
-        assert notes["Freeform"] == tokens.RECORD_DISABLED_MODES["Freeform"]
+        assert notes["Browser"] == tokens.RECORD_DISABLED_MODES["Browser"]
 
     def test_no_note_is_long_enough_to_be_elided(self):
         # A note cut off mid-sentence is worse than none at all, and the
@@ -441,7 +445,7 @@ class TestTheModeMenuNarrowsOnTheRecordSide:
         assert [row[0] for row in rows] == [m[0] for m in tokens.CAPTURE_MODES]
         assert all(row[5] is False for row in rows)
 
-    def test_record_disables_window_and_freeform_with_a_note(self):
+    def test_record_disables_its_unavailable_modes_with_a_note(self):
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
 

@@ -336,9 +336,6 @@ startup cost on every snip.
 | **Region** | Any rectangle you drag |
 | **Window** | One application's window |
 | **Full screen** | The whole monitor you are on — not every monitor |
-| **Freeform** | A shape you draw by hand |
-
-Freeform is stills-only; video is rectangular.
 
 ### What happens after a snip
 
@@ -371,7 +368,7 @@ row leave several windows open.
 
 Switch the chooser row from snipping to recording and the same selection you'd
 have screenshotted becomes the thing that gets filmed. Region, Window and Full
-screen all record; Freeform does not.
+screen all record.
 
 Committing a selection **arms** a recording rather than starting one, so you can
 still reframe it with the handles. One pill carries the whole thing and its

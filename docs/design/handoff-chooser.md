@@ -6,7 +6,7 @@ The chooser is the first thing a snip shows: a single 54px row hanging from the 
 the active monitor, asking the two questions that have to be answered before anything is
 captured.
 
-1. **What to capture** — Region, Window, Full screen, Freeform
+1. **What to capture** — Region, Window, Full screen, Freeform *(Freeform since removed, #42)*
 2. **What happens to it** — open the review window, copy and get out of the way, save silently
 
 Plus **delay** (Off / 3s / 5s / 10s), which previously lived in the mode popover on the
@@ -171,7 +171,7 @@ pointer with a `#e3ff4f` frame at 85% and a 7% fill, and a mono size chip above 
 
 **Why a tab and not nothing:** the dead band is 26px of the monitor's top edge, which on
 GNOME is already the top bar's territory — so in practice the chooser costs nothing that
-wasn't already spoken for. Window previews and Freeform tracing work everywhere below it.
+wasn't already spoken for. Window previews and Freeform tracing work everywhere below it. (Freeform has since been removed, #42.)
 Alternatives were considered and rejected: collapsing to a pill at *bottom* centre (3a) put
 a translucent object over live desktop; vanishing entirely onto the cursor (3c) left the
 destination unreadable and un-changeable without a keystroke.
@@ -190,7 +190,7 @@ Its hint line says so: *"Grabs this monitor the moment you choose it."*
 
 | Key | Action |
 |-----|--------|
-| `R` `W` `F` `L` | select Region / Window / Full screen / Freeform, and arm it |
+| `R` `W` `F` `L` | select Region / Window / Full screen / Freeform, and arm it (`L` and Freeform since removed, #42) |
 | `Space` | reopen the chooser from the armed tab |
 | `Esc` | close any open dropdown; if none is open, cancel the snip entirely |
 | `Return` | nothing — deliberately. There is no default action to confirm. |
@@ -229,7 +229,7 @@ Settings (`after_capture`, and the annotation pane's defaults). Nothing here wri
 ## State model
 
 ```
-mode        : str    # 'Region' | 'Window' | 'Full screen' | 'Freeform'
+mode        : str    # 'Region' | 'Window' | 'Full screen' | 'Freeform' (Freeform removed, #42)
 after       : str    # 'Review' | 'Copy' | 'Save'
 delay       : str    # 'No delay' | '3s' | '5s' | '10s'
 phase       : str    # 'choosing' | 'armed'
@@ -300,6 +300,6 @@ Everything else — the overlay palette, `Metric`, `Shadow`, `CAPTURE_MODES`, `A
 2. **Should `Esc` from armed return to choosing, or cancel outright?** Currently it cancels.
    A two-stage Esc would match what I suggested for the overlay — worth deciding once for
    both surfaces.
-3. **Freeform has no design yet** beyond appearing in this list. The lasso interaction, how
+3. *Resolved by removing Freeform (#42).* **Freeform has no design yet** beyond appearing in this list. The lasso interaction, how
    the scrim inverts against a path, and how export crops to the bounding box are all
    unspecified.

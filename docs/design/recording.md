@@ -165,7 +165,8 @@ mode list and the "then" list both change meaning when it flips.
 **The mode list narrows.** Region and Full screen only. Window recording is
 possible on GNOME (`Screencast` vs `ScreencastArea`) but wasn't asked for;
 Freeform recording is close to meaningless — video is rectangular. Grey
-them out rather than hiding them, and let the hint say why.
+them out rather than hiding them, and let the hint say why. (Freeform has
+since been removed from snipux entirely, #42.)
 
 **"Then" changes.** There is no annotate-in-place for a video, so `edit`
 has no meaning on the recording side. Recording's two in v1 are **Instant**
@@ -238,7 +239,7 @@ following what's already there. Default export format waits for editing.
   silent and says so.
 - **Non-GNOME X11 and non-GNOME Wayland** — no route without ffmpeg or a
   PipeWire dependency respectively.
-- Window recording and freeform recording.
+- Window recording and freeform recording. (Freeform has since been removed, #42.)
 - Pause/resume mid-recording.
 - Annotating a video.
 
