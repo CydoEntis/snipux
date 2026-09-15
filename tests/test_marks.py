@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 from PyQt6.QtCore import QPointF
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication
 
 from snipux import shapes
@@ -270,3 +270,108 @@ class TestStrokeFactory:
         extend_stroke(shape, QPointF(10, 10))
 
         assert shape.end == QPointF(10, 10)
+
+    @pytest.mark.parametrize("tool", ["rect", "ellipse"])
+    def test_a_closed_shape_takes_a_fill_and_a_line_style(self, tool):
+        shape = begin_stroke(
+            tool, QPointF(1, 1), colour=QColor("#fff"), stroke_width=4, fill="both", dash="dotted"
+        )
+
+        assert (shape.fill, shape.dash) == ("both", "dotted")
+
+    @pytest.mark.parametrize("tool", ["line", "arrow"])
+    def test_a_line_takes_a_line_style_and_no_fill(self, tool):
+        shape = begin_stroke(
+            tool, QPointF(1, 1), colour=QColor("#fff"), stroke_width=4, fill="filled", dash="dashed"
+        )
+
+        assert shape.dash == "dashed"
+        assert not hasattr(shape, "fill")
+
+    @pytest.mark.parametrize("tool", ["pen", "highlighter", "crop", "blur"])
+    def test_a_tool_with_nothing_to_style_ignores_a_style(self, tool):
+        # A remembered per-tool style carries both keys whether the tool
+        # uses them or not, so being handed one must not break the tool.
+        shape = begin_stroke(
+            tool, QPointF(1, 1), colour=QColor("#fff"), stroke_width=4, fill="filled", dash="dashed"
+        )
+
+        assert shape is not None
+        assert not hasattr(shape, "fill") and not hasattr(shape, "dash")
+
+    @pytest.mark.parametrize("tool", ["rect", "ellipse", "line", "arrow"])
+    def test_no_style_given_is_todays_look(self, tool):
+        shape = begin_stroke(tool, QPointF(1, 1), colour=QColor("#fff"), stroke_width=4)
+
+        assert shape.dash == "solid"
+        assert getattr(shape, "fill", "outline") == "outline"
+
+
+class TestStyledMarks:
+    """#65: fill and line style belong to the mark -- through undo, redo and
+    erase, and whatever the tool is set to next."""
+
+    @staticmethod
+    def rect(**style) -> shapes.Rectangle:
+        return shapes.Rectangle(
+            colour=QColor("#ef4444"), stroke_width=3,
+            start=QPointF(10, 10), end=QPointF(80, 60), **style,
+        )
+
+    @staticmethod
+    def picture(store: MarkStore) -> QImage:
+        base = QImage(100, 100, QImage.Format.Format_RGB32)
+        base.fill(QColor("#ffffff"))
+        return shapes.render(base, list(store.marks))
+
+    def test_undo_then_redo_brings_a_mark_back_in_its_own_style(self):
+        store = MarkStore()
+        store.add(self.rect(fill="both", dash="dashed"))
+        before = self.picture(store)
+
+        store.undo()
+        assert self.picture(store) != before
+        store.redo()
+
+        assert (store.marks[0].fill, store.marks[0].dash) == ("both", "dashed")
+        assert self.picture(store) == before
+
+    def test_undoing_an_erase_brings_a_mark_back_in_its_own_style(self):
+        store = MarkStore()
+        store.add(self.rect(fill="filled", dash="dotted"))
+        before = self.picture(store)
+
+        assert store.erase(QPointF(40, 30)) is not None
+        store.undo()
+
+        assert self.picture(store) == before
+
+    def test_a_filled_mark_is_erased_ahead_of_the_mark_it_hides(self):
+        # Erase walks back to front so a click takes the mark you can see.
+        # A stroke under a filled box cannot be seen.
+        store = MarkStore()
+        hidden = shapes.Pen(
+            colour=QColor("#000000"), stroke_width=4, points=[QPointF(20, 30), QPointF(70, 30)]
+        )
+        box = self.rect(fill="filled")
+        store.add(hidden)
+        store.add(box)
+
+        assert store.erase(QPointF(40, 30)) is box
+        assert store.marks == (hidden,)
+
+    def test_the_next_mark_in_another_style_leaves_the_last_one_alone(self):
+        store = MarkStore()
+        first = begin_stroke(
+            "rect", QPointF(10, 10), colour=QColor("#fff"), stroke_width=4,
+            fill="filled", dash="dotted",
+        )
+        extend_stroke(first, QPointF(60, 60))
+        store.add(first)
+
+        second = begin_stroke("rect", QPointF(20, 20), colour=QColor("#fff"), stroke_width=4)
+        extend_stroke(second, QPointF(70, 70))
+        store.add(second)
+
+        assert (store.marks[0].fill, store.marks[0].dash) == ("filled", "dotted")
+        assert (store.marks[1].fill, store.marks[1].dash) == ("outline", "solid")

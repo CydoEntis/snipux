@@ -17,7 +17,7 @@ at them except to hit-test, which the shapes do themselves.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 from PyQt6.QtCore import QObject, QPointF, Qt, pyqtSignal
 from PyQt6.QtWidgets import QLineEdit
@@ -252,6 +252,8 @@ def begin_stroke(
     step_number: int = 1,
     blur_mode: str = "blur",
     blur_strength: int | None = None,
+    fill: str = "outline",
+    dash: str = "solid",
 ) -> Shape | None:
     """The shape a press with `tool` starts, or None if that tool has no
     drag gesture (`step` commits on the click; `text` opens an editor; the
@@ -260,14 +262,26 @@ def begin_stroke(
     `point` is in whatever space the caller draws in -- window coordinates
     for the overlay, image coordinates for the review window. The shape
     neither knows nor cares, which is what lets one factory serve both.
+
+    `fill` and `dash` are `FILL_CYCLE`/`DASH_CYCLE` names, and reach only a
+    shape that has them: a rectangle or ellipse takes both, a line or arrow
+    only `dash`, every other tool neither. The handoff remembers a style per
+    tool with both keys in it whether that tool uses them or not, so a
+    caller can pass one straight through. The defaults are the look every
+    mark had before either existed.
     """
     if tool in FREEHAND_TOOLS:
         return FREEHAND_TOOLS[tool](
             colour=colour, stroke_width=stroke_width, points=[point]
         )
     if tool in TWO_POINT_TOOLS:
-        return TWO_POINT_TOOLS[tool](
-            colour=colour, stroke_width=stroke_width, start=point, end=point
+        shape_class = TWO_POINT_TOOLS[tool]
+        taken = {each.name for each in fields(shape_class)}
+        style = {
+            name: value for name, value in (("fill", fill), ("dash", dash)) if name in taken
+        }
+        return shape_class(
+            colour=colour, stroke_width=stroke_width, start=point, end=point, **style
         )
     if tool == "blur":
         # Anything that is neither blur nor solid pixelates: the tray has

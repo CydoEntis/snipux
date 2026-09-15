@@ -927,6 +927,20 @@ TOOL_HINTS = {
     "crop":        "Drag to box off a dashed crop mark",
 }
 
+# Fill and line style for the shape marks, from the locked stills-bar handoff:
+# FILL_CYCLE, DASH_CYCLE and FILL_OPACITY in docs/design/bars/tokens_bars.py.
+# Each cycle is in the order its style-popover button advances through.
+FILL_CYCLE = [("outline", "Outline only"), ("filled", "Filled"), ("both", "Outline and filled")]
+
+# The handoff writes each pattern as an SVG dash array string ("9 7", "none").
+# Here it is the numbers, (on, off), the way ANTS_DASH is, and () for solid.
+# They are pixels, not the multiples of the pen width QPen counts a pattern
+# in -- shapes._line_pen converts.
+DASH_CYCLE = [("solid", (), "Solid"), ("dashed", (9, 7), "Dashed"), ("dotted", (2, 5), "Dotted")]
+
+# Of the STROKE colour, so a filled shape has no second colour to reconcile.
+FILL_OPACITY = {"outline": 0.0, "filled": 0.90, "both": 0.22}
+
 
 # ---------------------------------------------------------------------------
 # The capture flow's bars (docs/design/flow, LOCKED 2026-08-27)

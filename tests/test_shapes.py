@@ -1,12 +1,13 @@
+import itertools
 from dataclasses import dataclass, field
 
 import pytest
-from PyQt6.QtCore import Qt, QPointF, QRectF, QSizeF
+from PyQt6.QtCore import Qt, QPointF, QRect, QRectF, QSizeF
 from PyQt6.QtGui import QColor, QFontMetrics, QFontMetricsF, QImage, QPainter, qRgb
 from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
-from snipux.design.tokens import Color, Font, Metric
+from snipux.design.tokens import DASH_CYCLE, FILL_OPACITY, Color, Font, Metric
 from snipux.shapes import (
     Arrow,
     Blur,
@@ -27,11 +28,15 @@ from snipux.shapes import (
     next_step_number,
     render,
     render_selection,
+    _line_pen,
 )
 
 BACKGROUND = qRgb(255, 255, 255)
 RED = QColor(255, 0, 0)
 BLUE = QColor(0, 0, 255)
+# No channel at 0 or 255, so a tint of it can only be this colour's own.
+TEAL = QColor(20, 140, 160)
+DASH_PATTERNS = {name: pattern for name, pattern, _label in DASH_CYCLE}
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -62,6 +67,29 @@ def make_gradient_image(size=(80, 80)) -> QImage:
         for y in range(1, height):
             image.setPixelColor(x, y, image.pixelColor(x, 0))
     return image
+
+
+def ink_runs(image: QImage, y: int, x_from: int, x_to: int) -> list[tuple[bool, int]]:
+    """Each unbroken run of pixels along row `y`, as (inked, length) -- for a
+    dashed line, its dashes and gaps in order. Inked means the green channel
+    is nearer ink's 0 than the white background's 255, which holds for RED
+    and BLUE alike, so an antialiased edge pixel lands on one side or the
+    other rather than being a third thing.
+    """
+    runs: list[list] = []
+    for x in range(x_from, x_to):
+        inked = image.pixelColor(x, y).green() < 128
+        if runs and runs[-1][0] == inked:
+            runs[-1][1] += 1
+        else:
+            runs.append([inked, 1])
+    return [(inked, length) for inked, length in runs]
+
+
+def ink_edges(image: QImage, y: int, x_from: int, x_to: int) -> list[int]:
+    """The x positions along row `y` where ink starts or stops."""
+    lengths = (length for _inked, length in ink_runs(image, y, x_from, x_to))
+    return [x_from + edge for edge in itertools.accumulate(lengths)][:-1]
 
 
 class TestShapeFields:
@@ -737,15 +765,20 @@ class TestRedact:
 
 
 class TestRectangleGeometry:
-    def test_is_unfilled(self):
+    # #65 gave rectangles a fill. `outline` is the default, so a rectangle
+    # made the way every caller made one before is still unfilled -- and so
+    # is one that asks for `outline` by name.
+    @pytest.mark.parametrize("style", [{}, {"fill": "outline"}], ids=["default", "outline"])
+    def test_is_unfilled(self, style):
         base = make_image()
         rect = Rectangle(
-            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(70, 70)
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(70, 70), **style
         )
 
         result = render(base, [rect])
 
         assert result.pixelColor(40, 40) == QColor(BACKGROUND)  # interior: untouched
+        assert result.pixelColor(10, 40) == RED  # the outline is still there
 
     def test_corners_are_rounded(self):
         base = make_image()
@@ -813,6 +846,17 @@ class TestFinalizeMark:
 
         assert result.start == QPointF(10, 10)
         assert result.end == QPointF(50, 50)
+
+    def test_normalising_a_rectangle_keeps_its_style(self):
+        # Normalising builds a new Rectangle; the style must come with it.
+        dragged_up_left = Rectangle(
+            colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10),
+            fill="both", dash="dotted",
+        )
+
+        result = finalize_mark(dragged_up_left)
+
+        assert (result.fill, result.dash) == ("both", "dotted")
 
     def test_arrow_direction_is_preserved_not_normalised(self):
         # Unlike Rectangle, an Arrow dragged "backwards" (tail bottom-right,
@@ -1154,3 +1198,203 @@ class TestShapeHitTest:
         shape = _UnhandledShape(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(100, 100))
 
         assert shape.hit_test(QPointF(50, 50)) is False
+
+    def test_a_dashed_line_is_hit_in_its_gaps(self):
+        # The eraser aims at the line, not at its ink: a click between two
+        # dashes still takes it.
+        line = Line(
+            colour=RED, stroke_width=2, start=QPointF(10, 50), end=QPointF(190, 50), dash="dashed"
+        )
+
+        assert line.hit_test(QPointF(22, 50)) is True  # 10 + a 9px dash: inside the first gap
+
+    @pytest.mark.parametrize("shape_class", [Rectangle, Ellipse])
+    def test_only_a_filled_shape_counts_its_interior_as_a_hit(self, shape_class):
+        # `filled` hides what is under it, so its interior is the mark.
+        # `both`'s faint tint does not, and keeps the outline-only rule.
+        corners = dict(start=QPointF(10, 10), end=QPointF(90, 90))
+        centre = QPointF(50, 50)
+
+        assert shape_class(colour=RED, stroke_width=4, fill="filled", **corners).hit_test(centre) is True
+        assert shape_class(colour=RED, stroke_width=4, fill="both", **corners).hit_test(centre) is False
+        assert shape_class(colour=RED, stroke_width=4, **corners).hit_test(centre) is False
+
+
+class TestFill:
+    """#65: rectangles and ellipses outlined, filled or both. The fill is
+    always the stroke colour, at the handoff's FILL_OPACITY."""
+
+    CORNERS = dict(start=QPointF(10, 10), end=QPointF(90, 90))
+
+    @pytest.mark.parametrize("fill", ["filled", "both"])
+    @pytest.mark.parametrize("shape_class", [Rectangle, Ellipse])
+    def test_the_interior_is_the_stroke_colour_at_the_handoffs_opacity(self, shape_class, fill):
+        shape = shape_class(colour=TEAL, stroke_width=4, fill=fill, **self.CORNERS)
+
+        result = render(make_image(), [shape])
+
+        alpha = FILL_OPACITY[fill]
+        centre = result.pixelColor(50, 50)
+        for painted, ink in ((centre.red(), TEAL.red()), (centre.green(), TEAL.green()),
+                             (centre.blue(), TEAL.blue())):
+            assert painted == pytest.approx(ink * alpha + 255 * (1 - alpha), abs=2)
+
+    @pytest.mark.parametrize("shape_class", [Rectangle, Ellipse])
+    def test_both_keeps_its_outline_at_full_strength(self, shape_class):
+        shape = shape_class(colour=RED, stroke_width=6, fill="both", **self.CORNERS)
+
+        result = render(make_image(), [shape])
+
+        assert result.pixelColor(10, 50) == RED  # the left edge, halfway down
+
+    @pytest.mark.parametrize("shape_class", [Rectangle, Ellipse])
+    def test_filled_has_no_outline(self, shape_class):
+        # An outline straddles the edge, so half of it lands outside the
+        # shape's bounds. A `filled` shape paints nothing there, and its
+        # own edge is the tint rather than the full stroke colour.
+        shape = shape_class(colour=RED, stroke_width=8, fill="filled", **self.CORNERS)
+
+        result = render(make_image(), [shape])
+
+        assert result.pixelColor(7, 50) == QColor(BACKGROUND)
+        assert result.pixelColor(11, 50) != RED
+
+    @pytest.mark.parametrize("style", [{"fill": "solid"}, {"dash": "dashes"}])
+    def test_an_unknown_style_is_refused_when_the_mark_is_made(self, style):
+        # Not left for draw() to find, inside a paintEvent, on every repaint.
+        with pytest.raises(ValueError):
+            Rectangle(colour=RED, stroke_width=4, **style)
+
+
+class TestLineStyle:
+    """#65: lines, arrows and shape outlines solid, dashed or dotted. The
+    handoff's patterns are pixel lengths; QPen counts in pen widths."""
+
+    @pytest.mark.parametrize("shape_class", [Rectangle, Ellipse, Line, Arrow])
+    def test_the_default_is_todays_solid_pen(self, shape_class):
+        shape = shape_class(colour=RED, stroke_width=4)
+
+        pen = _line_pen(shape)
+
+        assert shape.dash == "solid"
+        assert getattr(shape, "fill", "outline") == "outline"
+        assert pen.style() == Qt.PenStyle.SolidLine
+        assert pen.capStyle() == Qt.PenCapStyle.RoundCap
+
+    @pytest.mark.parametrize("dash", ["dashed", "dotted"])
+    def test_a_gap_is_the_handoffs_length_at_any_stroke_width(self, dash):
+        # Handed to QPen unconverted, a 7px gap would be 14px at a 2px
+        # stroke and 84px at 12px. Measured along the centre of the line,
+        # both widths must draw the handoff's own on and off lengths.
+        on, off = DASH_PATTERNS[dash]
+        measured = {}
+        for width in (2, 12):
+            line = Line(
+                colour=RED, stroke_width=width, start=QPointF(10, 50), end=QPointF(190, 50), dash=dash
+            )
+            runs = ink_runs(render(make_image(size=(200, 100)), [line]), 50, 10, 190)
+            measured[width] = runs[:-1]  # the last can be cut short by the line's end
+
+        assert measured[2] == measured[12]
+        assert set(measured[2]) == {(True, on), (False, off)}
+
+    def test_solid_is_one_unbroken_run(self):
+        line = Line(colour=RED, stroke_width=4, start=QPointF(10, 50), end=QPointF(190, 50))
+
+        runs = ink_runs(render(make_image(size=(200, 100)), [line]), 50, 10, 190)
+
+        assert runs == [(True, 180)]
+
+    def test_a_rectangles_outline_takes_the_pattern(self):
+        rect = Rectangle(
+            colour=RED, stroke_width=2, start=QPointF(10, 20), end=QPointF(190, 80), dash="dashed"
+        )
+
+        runs = ink_runs(render(make_image(size=(200, 100)), [rect]), 20, 20, 180)
+
+        on, off = DASH_PATTERNS["dashed"]
+        assert set(runs[1:-1]) == {(True, on), (False, off)}  # both ends fall mid-dash
+
+    def test_an_arrows_head_is_solid_under_a_dotted_shaft(self):
+        start, end = QPointF(10, 50), QPointF(190, 50)
+        dotted = render(
+            make_image(size=(200, 100)),
+            [Arrow(colour=RED, stroke_width=4, start=start, end=end, dash="dotted")],
+        )
+        solid = render(
+            make_image(size=(200, 100)), [Arrow(colour=RED, stroke_width=4, start=start, end=end)]
+        )
+
+        # The shaft is broken...
+        assert (False, DASH_PATTERNS["dotted"][1]) in ink_runs(dotted, 50, 10, 150)
+        # ...and the head, from where it covers the shaft to its tip, is the
+        # same filled triangle either way.
+        head = QRect(180, 38, 12, 25)
+        assert dotted.copy(head) == solid.copy(head)
+
+
+class TestStyledExport:
+    """#65: a mark's fill and line style export exactly as they paint."""
+
+    def styled_marks(self):
+        return [
+            Rectangle(colour=RED, stroke_width=3, start=QPointF(30, 30), end=QPointF(110, 90),
+                      fill="both", dash="dashed"),
+            Ellipse(colour=BLUE, stroke_width=5, start=QPointF(60, 60), end=QPointF(170, 150),
+                    fill="filled"),
+            Line(colour=RED, stroke_width=2, start=QPointF(20, 170), end=QPointF(180, 170),
+                 dash="dotted"),
+            Arrow(colour=BLUE, stroke_width=4, start=QPointF(40, 120), end=QPointF(160, 40),
+                  dash="dashed"),
+        ]
+
+    def test_export_matches_the_on_screen_render(self):
+        # The overlay paints marks straight over the frame, in window
+        # coordinates; the export maps them into the crop first. At 1:1 the
+        # two must agree to the pixel, which holds only if that mapping
+        # carries every mark's style across with its points.
+        frame = Frame(
+            image=make_image(size=(200, 200)), logical_origin=QPointF(0, 0),
+            logical_size=QSizeF(200, 200),
+        )
+        selection = QRectF(10, 20, 180, 170)
+        marks = self.styled_marks()
+
+        on_screen = QImage(frame.image)
+        painter = QPainter(on_screen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for mark in marks:
+            mark.draw(painter)
+        painter.end()
+
+        exported = render_selection(frame, marks, selection)
+
+        expected = on_screen.copy(selection.toRect())
+        assert exported.convertToFormat(expected.format()) == expected
+
+    def test_an_export_from_a_scaled_monitor_lays_its_dashes_where_the_screen_did(self):
+        # On a 1.5x monitor the overlay paints in logical pixels and the
+        # window's device makes them physical, so a 9px dash covers 13.5 of
+        # the frame's pixels. The export must lay each dash over that same
+        # stretch of the picture. Only where ink starts and stops along the
+        # line is compared: an export has never scaled stroke widths.
+        image = make_image(size=(300, 150))
+        frame = Frame(image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(200, 100))
+        line = Line(
+            colour=RED, stroke_width=2, start=QPointF(10, 50), end=QPointF(190, 50), dash="dashed"
+        )
+
+        on_screen = QImage(image)
+        on_screen.setDevicePixelRatio(1.5)
+        painter = QPainter(on_screen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        line.draw(painter)
+        painter.end()
+
+        exported = render_selection(frame, [line], QRectF(0, 0, 200, 100))
+
+        row = 75  # logical y=50, read in the frame's own pixels
+        screen_edges = ink_edges(on_screen, row, 15, 285)
+        export_edges = ink_edges(exported, row, 15, 285)
+        assert len(screen_edges) == len(export_edges) > 10
+        assert all(abs(seen - saved) <= 1 for seen, saved in zip(screen_edges, export_edges))

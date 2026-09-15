@@ -147,6 +147,81 @@ def _polyline_path(points: list[QPointF]) -> QPainterPath | None:
     return path
 
 
+# Line style name -> (on, off) in pixels, () for solid -- see `_line_pen`.
+_DASH_PATTERNS = {name: pattern for name, pattern, _label in design.tokens.DASH_CYCLE}
+
+
+def _check_style(shape: Shape) -> None:
+    """Refuse a fill or line style the handoff does not name.
+
+    Checked when the mark is made rather than when it is painted: an unknown
+    name found by `draw()` raises from inside a paintEvent, and goes on
+    raising on every repaint after it.
+    """
+    fill = getattr(shape, "fill", "outline")
+    if fill not in design.tokens.FILL_OPACITY:
+        raise ValueError(f"unknown fill {fill!r}")
+    if shape.dash not in _DASH_PATTERNS:
+        raise ValueError(f"unknown line style {shape.dash!r}")
+
+
+def _line_pen(shape: Shape) -> QPen:
+    """`shape._pen()` in the shape's own line style, `dash`.
+
+    The handoff's patterns are SVG dash arrays -- lengths in pixels -- and
+    `QPen.setDashPattern` counts in multiples of the pen's width instead.
+    Handed over as they stand, `9 7` at a 5px stroke is a 45px dash and a
+    35px gap, growing with every step thicker. Dividing by the width keeps
+    the handoff's lengths at every stroke width.
+
+    The cap goes flat for the same reason. Qt caps both ends of every dash,
+    so under `_pen()`'s round cap each gap loses a whole stroke width: `9 7`
+    has a 5px gap at a 2px stroke and none at all from 8px up. A flat cap
+    adds nothing, and is what the handoff's own SVG draws its rectangles and
+    ellipses with. Solid returns `_pen()` untouched, round cap and all, which
+    is what leaves every mark made before line styles existed exactly as it
+    was.
+
+    Coordinates: the lengths are in the mark's own space, like its points
+    and stroke width -- logical pixels on the overlay, which the window's
+    device turns physical, and image pixels once `render_selection` has
+    mapped the mark into an export. There `dash_scale` is the crop's
+    image-pixels-per-logical-pixel ratio, so a dash exported from a 1.5x
+    monitor spans 1.5 times the pixels, the same stretch of the picture it
+    covered on that monitor.
+    """
+    pen = shape._pen()
+    pattern = _DASH_PATTERNS[shape.dash]
+    if not pattern:
+        return pen
+    # Qt paints a zero-width pen one pixel wide and counts its pattern in
+    # those pixels.
+    width = pen.widthF() or 1.0
+    pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+    pen.setDashPattern([length * shape.dash_scale / width for length in pattern])
+    return pen
+
+
+def _set_fill_and_outline(painter: QPainter, shape: Shape) -> None:
+    """Load `painter` with a closed shape's brush and pen, for the one draw
+    call that paints both. QPainter fills before it strokes, which is what
+    puts `both`'s tint under its outline rather than over it.
+
+    The tint is the stroke colour at `FILL_OPACITY`, never a colour of its
+    own: the handoff's rule that a shape has no second colour to reconcile.
+    `filled` has no outline at all, as in the handoff -- the tint is the
+    whole mark.
+    """
+    opacity = design.tokens.FILL_OPACITY[shape.fill]
+    if opacity:
+        tint = QColor(shape.colour)
+        tint.setAlphaF(tint.alphaF() * opacity)
+        painter.setBrush(tint)
+    else:
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(Qt.PenStyle.NoPen if shape.fill == "filled" else _line_pen(shape))
+
+
 @dataclass
 class Pen(Shape):
     """Freehand stroke, fully opaque. An ordered list of image-pixel points."""
@@ -204,13 +279,19 @@ class Highlighter(Shape):
 
 @dataclass
 class Line(Shape):
-    """A straight stroke between two image-pixel points."""
+    """A straight stroke between two image-pixel points, in any
+    `DASH_CYCLE` line style (`dash`; see `_line_pen`)."""
 
     start: QPointF = field(default_factory=QPointF)
     end: QPointF = field(default_factory=QPointF)
+    dash: str = "solid"
+    dash_scale: float = 1.0  # set by render_selection, never by a caller: see _line_pen
+
+    def __post_init__(self) -> None:
+        _check_style(self)
 
     def draw(self, painter: QPainter) -> None:
-        painter.setPen(self._pen())
+        painter.setPen(_line_pen(self))
         painter.drawLine(self.start, self.end)
 
     def hit_test(self, point: QPointF) -> bool:
@@ -229,6 +310,10 @@ class Arrow(Shape):
     stays visible at any width but never dwarfs a thin stroke), and the
     shaft stops short of the tip by a fraction of the head's own length so
     a thick shaft's round cap never shows through the filled head.
+
+    `dash` styles the shaft alone. The head is a fill rather than a stroke,
+    so it stays solid whatever the shaft is -- as in the handoff, which
+    draws it as a polygon beside the dashed line.
     """
 
     HEAD_LENGTH_MIN = 10.0
@@ -239,14 +324,21 @@ class Arrow(Shape):
 
     start: QPointF = field(default_factory=QPointF)
     end: QPointF = field(default_factory=QPointF)
+    dash: str = "solid"
+    dash_scale: float = 1.0  # set by render_selection, never by a caller: see _line_pen
+
+    def __post_init__(self) -> None:
+        _check_style(self)
 
     def draw(self, painter: QPainter) -> None:
         dx = self.end.x() - self.start.x()
         dy = self.end.y() - self.start.y()
         shaft_length = math.hypot(dx, dy)
 
-        painter.setPen(self._pen())
         if shaft_length == 0:
+            # Solid whatever `dash` says: a pattern laid along no length at
+            # all draws nothing.
+            painter.setPen(self._pen())
             painter.drawLine(self.start, self.end)  # degenerate arrow: a dot
             return
 
@@ -271,6 +363,7 @@ class Arrow(Shape):
         # length -- the design doc's "so it does not poke through the tip".
         shaft_stop = head_length * self.SHAFT_STOP_FRACTION
         shaft_end = QPointF(self.end.x() - ux * shaft_stop, self.end.y() - uy * shaft_stop)
+        painter.setPen(_line_pen(self))
         painter.drawLine(self.start, shaft_end)
 
         head = QPainterPath()
@@ -294,30 +387,45 @@ class Arrow(Shape):
 
 @dataclass
 class Rectangle(Shape):
-    """An unfilled, stroke-only rounded rectangle spanning two image-pixel
-    corners, per docs/design/overlay-redesign.md's "Drawing" (3px corner
-    radius). `finalize_mark()` below is what normalises a negative
-    width/height on release; draw() itself already tolerates either corner
-    order via `_rect_from_corners`, for the live in-progress preview.
+    """A rounded rectangle spanning two image-pixel corners, per
+    docs/design/overlay-redesign.md's "Drawing" (3px corner radius).
+    `finalize_mark()` below is what normalises a negative width/height on
+    release; draw() itself already tolerates either corner order via
+    `_rect_from_corners`, for the live in-progress preview.
+
+    `fill` is a `FILL_CYCLE` name: `outline`, the default and the only look
+    there was before fills; `filled`, a tint with no outline; or `both`, a
+    fainter tint under the outline. `dash` is the outline's `DASH_CYCLE`
+    style. See `_set_fill_and_outline` and `_line_pen`.
     """
 
     CORNER_RADIUS = 3.0
 
     start: QPointF = field(default_factory=QPointF)
     end: QPointF = field(default_factory=QPointF)
+    fill: str = "outline"
+    dash: str = "solid"
+    dash_scale: float = 1.0  # set by render_selection, never by a caller: see _line_pen
+
+    def __post_init__(self) -> None:
+        _check_style(self)
 
     def draw(self, painter: QPainter) -> None:
-        painter.setPen(self._pen())
-        painter.setBrush(Qt.BrushStyle.NoBrush)
+        _set_fill_and_outline(painter, self)
         painter.drawRoundedRect(
             _rect_from_corners(self.start, self.end), self.CORNER_RADIUS, self.CORNER_RADIUS
         )
 
     def hit_test(self, point: QPointF) -> bool:
-        # The stroked outline only -- clicking the empty, unfilled
-        # interior is clicking whatever is behind the rectangle, not the
-        # rectangle itself, same reasoning editor.py's own hit-testing
-        # gives for the analogous case.
+        # The stroked outline, plus the interior only when `filled`.
+        # Clicking an outline's empty interior is clicking whatever is
+        # behind the rectangle, not the rectangle itself, same reasoning
+        # editor.py's own hit-testing gives for the analogous case -- and
+        # `both`'s faint tint still shows what is behind it. `filled` hides
+        # it, and a click must not reach a mark nobody can see ahead of the
+        # box covering it: the eraser's first pass runs top to bottom.
+        if self.fill == "filled" and self.interior_hit_test(point):
+            return True
         path = QPainterPath()
         path.addRect(_rect_from_corners(self.start, self.end))
         return self._stroke_hit_test(path, point)
@@ -386,19 +494,27 @@ def finalize_mark(shape: Shape) -> Shape | None:
 
 @dataclass
 class Ellipse(Shape):
-    """An unfilled, stroke-only ellipse bounded by two image-pixel corners."""
+    """An ellipse bounded by two image-pixel corners, taking `fill` and
+    `dash` exactly as `Rectangle` does."""
 
     start: QPointF = field(default_factory=QPointF)
     end: QPointF = field(default_factory=QPointF)
+    fill: str = "outline"
+    dash: str = "solid"
+    dash_scale: float = 1.0  # set by render_selection, never by a caller: see _line_pen
+
+    def __post_init__(self) -> None:
+        _check_style(self)
 
     def draw(self, painter: QPainter) -> None:
-        painter.setPen(self._pen())
-        painter.setBrush(Qt.BrushStyle.NoBrush)
+        _set_fill_and_outline(painter, self)
         painter.drawEllipse(_rect_from_corners(self.start, self.end))
 
     def hit_test(self, point: QPointF) -> bool:
-        # Stroked outline only -- same "interior isn't the shape" reasoning
-        # as Rectangle.hit_test above.
+        # Stroked outline, plus the interior only when `filled` -- same
+        # reasoning as Rectangle.hit_test above.
+        if self.fill == "filled" and self.interior_hit_test(point):
+            return True
         path = QPainterPath()
         path.addEllipse(_rect_from_corners(self.start, self.end))
         return self._stroke_hit_test(path, point)
@@ -914,17 +1030,22 @@ def apply_crop(frame: Frame, shapes: list[Shape], crop_rect: QRectF) -> Frame:
     )
 
 
-def _transformed(shape: Shape, map_point) -> Shape:
+def _transformed(shape: Shape, map_point, length_scale: float = 1.0) -> Shape:
     """Return a copy of `shape` with every point passed through `map_point`
-    (a `QPointF -> QPointF` callable). `shape` itself is left untouched.
+    (a `QPointF -> QPointF` callable), and its dash lengths multiplied by
+    `length_scale`, the factor `map_point` stretches distances by. `shape`
+    itself is left untouched.
 
     Dispatches on field name rather than shape type: every shape class ink
     can be made of stores its geometry under one of exactly three names —
     `points` (Pen/Highlighter), `start`/`end` (Line/Arrow/Rectangle/Ellipse/
     ObscuringShape/Crop) or `point` (Text/StepMarker) — so a future shape
     class needs no matching update here as long as it reuses one of those
-    names, which every existing one already does.
+    names, which every existing one already does. The same goes for
+    `dash_scale`, on every shape that takes a line style.
     """
+    if hasattr(shape, "dash_scale"):
+        shape = replace(shape, dash_scale=shape.dash_scale * length_scale)
     if hasattr(shape, "points"):
         return replace(shape, points=[map_point(point) for point in shape.points])
     if hasattr(shape, "start") and hasattr(shape, "end"):
@@ -954,7 +1075,8 @@ def render_selection(
     is offset back onto `frame.logical_origin` for `Frame.crop()`'s sake,
     then every mark is shifted by `-selection`'s own origin and scaled by
     the crop's own image-pixels-per-logical-unit ratio — the same ratio
-    `Frame.crop()` derives internally — before `render()` flattens them onto
+    `Frame.crop()` derives internally, and its dash lengths with it, though
+    not its stroke width — before `render()` flattens them onto
     the cropped pixels. A mark whose points land outside the cropped image's
     bounds is simply never painted there, which is what keeps this
     consistent with the live ink layer's clip-rect behaviour without this
@@ -972,5 +1094,12 @@ def render_selection(
         local = point - origin
         return QPointF(local.x() * scale_x, local.y() * scale_y)
 
-    mapped_shapes = [_transformed(shape, to_cropped_pixel) for shape in shapes]
+    # A dash runs in any direction, so it takes one ratio for both axes; the
+    # two differ only by the crop's rounding. Stroke widths are not scaled
+    # here, and never have been, so an export's lines are thinner than the
+    # screen's by this ratio. A dash left unscaled would not just be thinner:
+    # it would repeat more often along every edge, a different pattern from
+    # the one on screen. See `_line_pen`.
+    length_scale = (scale_x + scale_y) / 2
+    mapped_shapes = [_transformed(shape, to_cropped_pixel, length_scale) for shape in shapes]
     return render(cropped.image, mapped_shapes)
