@@ -351,9 +351,11 @@ class Win:
     SCROLL_THUMB    = "#2f333b"   # scrollbar handle, idle -- same weight as a control border
     SCROLL_THUMB_HOVER = "#3a3f49"
     SCROLL_THUMB_ACTIVE = "#454b56"
-    TOGGLE_KNOB     = "#e9f1dd"   # off-white, a hint of the accent in it: a
-                                  # pure white knob on the softened green
-                                  # read as two unrelated colours meeting
+    TOGGLE_KNOB     = "#14161a"   # the window's own dark, so the knob reads
+                                  # as a hole punched through the switch
+                                  # rather than a second colour laid on it.
+                                  # Off is still legible: TOGGLE_OFF above is
+                                  # a lighter grey than this.
 
     # Text
     TEXT_PRIMARY    = "#e7eaf1"
