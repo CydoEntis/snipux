@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 0.8.1 — 2026-09-15
+
 ### Fixed
 
 - **Highlights on tightly packed lines no longer overlap each other.** On a
