@@ -24,6 +24,12 @@ Three kinds of rule, run in this order:
    a line of its own and the value sits in a box beside or beneath it.
    Rects are what connect the two.
 
+On top of all three, a user can supply their own **words**, **labels** and
+**patterns** -- the things only they know are sensitive: an employer, an
+address, their company's own `Employee ID` field. They are matched the same
+tolerant way, and a word entry survives OCR misreading a character or two of
+it.
+
 Labels match the words *inside* a name -- `OPENAI_API_KEY`, `MY_APP_SECRET`
 and `stripe-token` all carry one -- because nobody can know what a variable
 will be called. What no rule can do is find a short password with no label
@@ -190,13 +196,70 @@ _BELOW_LEFT_REACH = 15.0    # ...or indented this far right of it
 _SAME_VALUE_GAP = 3.0       # a wider gap inside a line ends a text value
 
 
-def find_sensitive(lines: list[list[RecognizedWord]]) -> list[Finding]:
+@dataclass(frozen=True)
+class CustomList:
+    """A user's own entries, ready to match with.
+
+    Built once per capture by `custom_list`, never per line: compiling a
+    pattern and normalising a phrase are the expensive parts, and a
+    screenshot has hundreds of lines.
+    """
+
+    words: tuple[tuple[str, ...], ...] = ()
+    labels: tuple[tuple[str, ...], ...] = ()
+    patterns: tuple[re.Pattern, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.words or self.labels or self.patterns)
+
+
+def custom_list(entries: dict | None) -> CustomList:
+    """Prepare a user's stored list (`setup_desktop.load_hide_list`'s three
+    lists) for matching.
+
+    A pattern that cannot compile is dropped here rather than raising: the
+    Settings page is what tells the user their line is wrong, and a capture
+    must never fail because of a line in a text file.
+    """
+    entries = entries or {}
+    patterns = []
+    for source in entries.get("patterns", ()):
+        try:
+            patterns.append(re.compile(source, re.IGNORECASE))
+        except re.error:
+            continue
+    return CustomList(
+        words=tuple(
+            tuple(parts) for parts in
+            ([_normalise(word) for word in entry.split() if _normalise(word)]
+             for entry in entries.get("words", ()))
+            if parts
+        ),
+        labels=tuple(
+            tuple(parts) for parts in
+            ([_normalise(word) for word in entry.split() if _normalise(word)]
+             for entry in entries.get("labels", ()))
+            if parts
+        ),
+        patterns=tuple(patterns),
+    )
+
+
+def find_sensitive(
+    lines: list[list[RecognizedWord]], custom: CustomList | dict | None = None
+) -> list[Finding]:
     """Every sensitive value in `lines`.
 
     `lines` is OCR's own grouping: each inner list is one line of text in
     reading order. Lines may come from more than one reading of the same
     image; nothing here assumes they are unique or sorted.
+
+    `custom` is the user's own list, either prepared by `custom_list` or the
+    raw three lists to prepare here.
     """
+    if not isinstance(custom, CustomList):
+        custom = custom_list(custom)
+    labels = _LABELS if not custom.labels else {**_LABELS, **{label: "text" for label in custom.labels}}
     lines = [list(line) for line in lines if line]
     taken: set[tuple[int, int]] = set()
     findings: list[Finding] = []
@@ -213,16 +276,122 @@ def find_sensitive(lines: list[list[RecognizedWord]]) -> list[Finding]:
 
     for line_index, line in enumerate(lines):
         local: set[int] = set()
+        # The user's own entries first: they say outright that this text is
+        # sensitive, which no rule here should get to reinterpret.
+        for kind, indexes in _custom_in_line(line, local, custom):
+            local.update(indexes)
+            claim(kind, line_index, indexes)
         for rule in (_tied_values_in_line, _shapes_in_line, _labels_in_line):
-            for kind, indexes in rule(line, local):
+            for kind, indexes in rule(line, local, labels):
                 local.update(indexes)
                 claim(kind, line_index, indexes)
 
     for kind, line_index, indexes in _private_key_blocks(lines, taken):
         claim(kind, line_index, indexes)
-    for kind, line_index, indexes in _form_fields(lines, taken):
+    for kind, line_index, indexes in _form_fields(lines, taken, labels):
         claim(kind, line_index, indexes)
     return findings
+
+
+# ------------------------------------------------- the user's own list
+
+# How many characters of a word entry may be wrong before it stops counting
+# as that entry: one per eight or so, rounded up, because OCR misreads
+# roughly a character per word on small text (`Acme` as `Acrne`) and a
+# phrase the user typed themselves should survive that.
+_CUSTOM_WORD_ERRORS_PER = 8
+# OCR splits and joins words unpredictably, so an entry of N words is looked
+# for across N-1 to N+1 of them.
+_CUSTOM_WORD_SLACK = 1
+
+
+def _custom_in_line(words: list[RecognizedWord], taken: set[int], custom: "CustomList"):
+    """The user's own words and patterns in this line. Their labels are not
+    here -- those join the built-in label table, so they behave exactly like
+    `Password` on a form."""
+    if not custom:
+        return
+    texts = [word.text for word in words]
+    local = set(taken)
+
+    for pattern in custom.patterns:
+        for indexes in _pattern_words(texts, pattern):
+            if not any(index in local for index in indexes):
+                local.update(indexes)
+                yield "custom", indexes
+
+    normalised = [_normalise(text) for text in texts]
+    for entry in custom.words:
+        for indexes in _entry_runs(normalised, entry, local):
+            local.update(indexes)
+            yield "custom", indexes
+
+
+# Pairs OCR swaps for each other in screen fonts. Folded on both sides
+# before comparing, because `m` read as `rn` is two edits by character count
+# and one mistake in practice -- and raising the error budget to cover it
+# would let genuinely different words through.
+_CONFUSIONS = (("rn", "m"), ("cl", "d"), ("vv", "w"), ("nn", "m"),
+               ("0", "o"), ("1", "l"), ("5", "s"), ("8", "b"), ("2", "z"))
+
+
+def _fold_confusions(text: str) -> str:
+    for pair, folded in _CONFUSIONS:
+        text = text.replace(pair, folded)
+    return text
+
+
+def _entry_runs(normalised: list[str], entry: tuple[str, ...], taken: set[int]):
+    """Every stretch of words matching one word entry, misreads allowed."""
+    wanted = _fold_confusions("".join(entry))
+    budget = max(1, len(wanted) // _CUSTOM_WORD_ERRORS_PER)
+    lengths = sorted(
+        {n for n in range(len(entry) - _CUSTOM_WORD_SLACK, len(entry) + _CUSTOM_WORD_SLACK + 1) if n >= 1},
+        reverse=True,
+    )
+    index = 0
+    while index < len(normalised):
+        matched = None
+        for length in lengths:
+            run = list(range(index, min(index + length, len(normalised))))
+            if len(run) < length or any(i in taken for i in run):
+                continue
+            candidate = _fold_confusions("".join(normalised[i] for i in run))
+            if _close_enough(candidate, wanted, budget):
+                matched = run
+                break
+        if matched:
+            yield matched
+            index = matched[-1] + 1
+        else:
+            index += 1
+
+
+def _close_enough(candidate: str, wanted: str, budget: int) -> bool:
+    """Whether `candidate` is `wanted` with at most `budget` characters
+    wrong -- the edit distance, stopped as soon as it cannot be met.
+
+    Written out rather than imported: the standard library has no edit
+    distance, and a screenshot tool has no business growing a dependency
+    for twenty lines of loop (CLAUDE.md).
+    """
+    if candidate == wanted:
+        return True
+    if abs(len(candidate) - len(wanted)) > budget:
+        return False
+    previous = list(range(len(wanted) + 1))
+    for i, letter in enumerate(candidate, start=1):
+        current = [i]
+        for j, other in enumerate(wanted, start=1):
+            current.append(min(
+                previous[j] + 1,
+                current[j - 1] + 1,
+                previous[j - 1] + (letter != other),
+            ))
+        if min(current) > budget:
+            return False
+        previous = current
+    return previous[-1] <= budget
 
 
 # ------------------------------------------------------- tied values
@@ -237,7 +406,7 @@ _SPLIT_VALUE_MAX_GAP = 1.5
 _SPLIT_VALUE_MAX_WORDS = 3
 
 
-def _tied_values_in_line(words: list[RecognizedWord], taken: set[int]):
+def _tied_values_in_line(words: list[RecognizedWord], taken: set[int], labels=None):
     """Values a `:` or `=` ties to a credential name -- `API_KEY=...`,
     `password: ...`, `DB_PASS = ...` -- taken whole, before any shape rule
     can claim a fragment of one.
@@ -266,12 +435,12 @@ def _tied_values_in_line(words: list[RecognizedWord], taken: set[int]):
             continue
         if start >= len(texts) or start in local:
             continue
-        indexes = _rest_of_value(words, [start], local, normalised)
+        indexes = _rest_of_value(words, [start], local, normalised, labels)
         local.update(indexes)
         yield "labelled", indexes
 
 
-def _rest_of_value(words: list[RecognizedWord], indexes: list[int], taken: set[int], normalised: list[str]) -> list[int]:
+def _rest_of_value(words: list[RecognizedWord], indexes: list[int], taken: set[int], normalised: list[str], labels=None) -> list[int]:
     run = list(indexes)
     while True:
         last, following = run[-1], run[-1] + 1
@@ -280,7 +449,7 @@ def _rest_of_value(words: list[RecognizedWord], indexes: list[int], taken: set[i
         gap = words[following].image_rect.left() - words[last].image_rect.right()
         if gap > _TIED_VALUE_MAX_GAP * _char_width(words[last]):
             break
-        if _starts_new_pair(words[following].text) or _label_at(normalised, following):
+        if _starts_new_pair(words[following].text) or _label_at(normalised, following, labels):
             break
         run.append(following)
     return run
@@ -317,7 +486,7 @@ def _char_width(word: RecognizedWord) -> float:
 
 # ------------------------------------------------------------ shape rules
 
-def _shapes_in_line(words: list[RecognizedWord], taken: set[int]):
+def _shapes_in_line(words: list[RecognizedWord], taken: set[int], labels=None):
     texts = [word.text for word in words]
     local = set(taken)
 
@@ -536,7 +705,7 @@ def _luhn(digits: str) -> bool:
 
 # ------------------------------------------------------ same-line labels
 
-def _labels_in_line(words: list[RecognizedWord], taken: set[int]):
+def _labels_in_line(words: list[RecognizedWord], taken: set[int], labels=None):
     texts = [word.text for word in words]
     local = set(taken)
 
@@ -550,7 +719,7 @@ def _labels_in_line(words: list[RecognizedWord], taken: set[int]):
     height = max(word.image_rect.height() for word in words)
     index = 0
     while index < len(texts):
-        match = _label_at(normalised, index)
+        match = _label_at(normalised, index, labels)
         if not match or index in local:
             index += 1
             continue
@@ -565,7 +734,7 @@ def _labels_in_line(words: list[RecognizedWord], taken: set[int]):
             continue
         if category == "token":
             indexes = (
-                _rest_of_value(words, [value], local, normalised) if explicit
+                _rest_of_value(words, [value], local, normalised, labels) if explicit
                 else _shortest_credential_run(words, value, local)
             )
             if indexes:
@@ -576,7 +745,7 @@ def _labels_in_line(words: list[RecognizedWord], taken: set[int]):
             while (
                 end + 1 < len(texts)
                 and end + 1 not in local
-                and not _label_at(normalised, end + 1)
+                and not _label_at(normalised, end + 1, labels)
                 and words[end + 1].image_rect.left() - words[end].image_rect.right() <= _SAME_VALUE_GAP * height
             ):
                 end += 1
@@ -623,11 +792,13 @@ def _normalise(text: str) -> str:
     return re.sub(r"[^a-z0-9'-]", "", text.lower().replace("’", "'"))
 
 
-def _label_at(normalised: list[str], index: int) -> tuple[int, str] | None:
+def _label_at(normalised: list[str], index: int, labels=None) -> tuple[int, str] | None:
     """(word count, category) of the longest field label starting at
-    `index`, or None."""
-    for length in _LABEL_LENGTHS:
-        category = _LABELS.get(tuple(normalised[index:index + length]))
+    `index`, or None. `labels` carries the user's own labels alongside the
+    built-in ones; None means the built-in table."""
+    labels = _LABELS if labels is None else labels
+    for length in sorted({len(label) for label in labels}, reverse=True):
+        category = labels.get(tuple(normalised[index:index + length]))
         if category and index + length <= len(normalised):
             return length, category
     return None
@@ -736,11 +907,11 @@ def _private_key_blocks(lines: list[list[RecognizedWord]], taken):
                     yield "private_key", line_index, indexes
 
 
-def _form_fields(lines: list[list[RecognizedWord]], taken):
+def _form_fields(lines: list[list[RecognizedWord]], taken, labels=None):
     """Values in boxes beside or beneath a field label that OCR returned
     as a line of its own -- the shape of nearly every web form."""
     normalised = [[_normalise(word.text) for word in line] for line in lines]
-    is_label = [_is_label_line(words) for words in normalised]
+    is_label = [_is_label_line(words, labels) for words in normalised]
     rects = [_line_rect(line) for line in lines]
 
     for label_index, line in enumerate(lines):
@@ -752,7 +923,7 @@ def _form_fields(lines: list[list[RecognizedWord]], taken):
         for index, rect in enumerate(rects):
             if index == label_index or is_label[index] or not _free_indexes(lines, index, taken):
                 continue
-            if _label_at([w for w in normalised[index] if w], 0):
+            if _label_at([w for w in normalised[index] if w], 0, labels):
                 continue
             if abs(rect.center().y() - label.center().y()) <= _BESIDE_ROW_SLOP * height:
                 gap = rect.left() - label.right()
@@ -771,12 +942,13 @@ def _form_fields(lines: list[list[RecognizedWord]], taken):
             yield "labelled", value_index, _free_indexes(lines, value_index, taken)
 
 
-def _is_label_line(normalised: list[str]) -> bool:
+def _is_label_line(normalised: list[str], labels=None) -> bool:
     """Whether a whole line is a field label and nothing else:
     `Password`, `Confirm password *`, `Date of birth (required)`."""
+    labels = _LABELS if labels is None else labels
     words = [word for word in normalised if word]
     while words and words[-1] in _LABEL_TRAILERS:
         words.pop()
-    while len(words) > 1 and words[0] in _LABEL_QUALIFIERS and tuple(words) not in _LABELS:
+    while len(words) > 1 and words[0] in _LABEL_QUALIFIERS and tuple(words) not in labels:
         words.pop(0)
-    return bool(words) and tuple(words) in _LABELS
+    return bool(words) and tuple(words) in labels

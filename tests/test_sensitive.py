@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from PyQt6.QtCore import QRectF
 
-from snipux.sensitive import Finding, RecognizedWord, find_sensitive
+from snipux.sensitive import Finding, RecognizedWord, custom_list, find_sensitive
 
 # Fake credentials in this file are written in two joined pieces so that
 # no complete token-shaped string appears in the source: GitHub's push
@@ -560,6 +560,153 @@ class TestValuesOcrSplitApart:
 
     def test_a_bare_label_before_plain_words_still_hides_nothing(self):
         assert hidden_texts([line("password", "is", "incorrect")]) == set()
+
+
+def mine(words=(), labels=(), patterns=()):
+    return {"words": list(words), "labels": list(labels), "patterns": list(patterns)}
+
+
+def hidden_with(lines, custom) -> set[str]:
+    findings = find_sensitive(lines, custom)
+    return {
+        word.text
+        for line in lines
+        for word in line
+        if any(f.image_rect.contains(word.image_rect.center()) for f in findings)
+    }
+
+
+class TestTheUsersOwnWords:
+    """Things only this user knows are sensitive: an employer, an address,
+    a codename. Matched the same tolerant way as everything else, because
+    OCR misreads a character or so per word on small text."""
+
+    def test_a_word_entry_is_hidden_wherever_it_appears(self):
+        lines = [line("Employer:", "Acme"), line("about", "Acme", "today", y=30)]
+
+        assert hidden_with(lines, mine(words=["Acme"])) == {"Acme"}
+        assert len(find_sensitive(lines, mine(words=["Acme"]))) == 2
+
+    def test_a_phrase_spanning_two_words(self):
+        words = line("Sold", "by", "Acme", "Corporation", "today")
+
+        assert hidden_with([words], mine(words=["Acme Corporation"])) == {"Acme", "Corporation"}
+
+    @pytest.mark.parametrize("read_as", [
+        ("Acrne", "Corporation"),      # rn read as m
+        ("Acme", "Corporatlon"),       # i read as l
+        ("ACME", "CORPORATION"),       # different case
+        ("Acme", "Corporation,"),      # trailing punctuation
+    ])
+    def test_misreads_of_the_entry_still_match(self, read_as):
+        words = line("Sold", "by", *read_as)
+
+        assert hidden_with([words], mine(words=["Acme Corporation"])) == set(read_as)
+
+    def test_a_phrase_ocr_joined_into_one_word(self):
+        words = line("Sold", "by", "AcmeCorporation")
+
+        assert hidden_with([words], mine(words=["Acme Corporation"])) == {"AcmeCorporation"}
+
+    def test_a_phrase_ocr_split_into_three(self):
+        words = line("Acme", "Corp", "oration", "sells")
+
+        assert hidden_with([words], mine(words=["Acme Corporation"])) == {"Acme", "Corp", "oration"}
+
+    def test_an_unrelated_word_is_not_hidden(self):
+        words = line("Acne", "treatment", "advice")
+
+        assert hidden_with([words], mine(words=["Acme Corporation"])) == set()
+
+    def test_each_occurrence_is_its_own_finding(self):
+        words = line("Acme", "and", "Acme")
+
+        findings = find_sensitive([words], mine(words=["Acme"]))
+
+        assert len(findings) == 2
+
+    def test_the_kind_says_it_came_from_the_users_list(self):
+        [finding] = find_sensitive([line("Acme", "sells")], mine(words=["Acme"]))
+
+        assert finding.kind == "custom"
+
+
+class TestTheUsersOwnLabels:
+    def test_a_value_after_the_users_label(self):
+        words = line("Employee", "ID:", "44821")
+
+        assert hidden_with([words], mine(labels=["Employee ID"])) == {"44821"}
+
+    def test_a_value_in_the_box_beneath_the_users_label(self):
+        lines = [[at("Employee", 40, 40), at("ID", 120, 40)], [at("E-44821", 52, 70)]]
+
+        assert hidden_with(lines, mine(labels=["Employee ID"])) == {"E-44821"}
+
+    def test_the_label_itself_stays_readable(self):
+        words = line("Employee", "ID:", "44821")
+
+        assert "Employee" not in hidden_with([words], mine(labels=["Employee ID"]))
+
+    def test_without_the_entry_nothing_is_hidden(self):
+        words = line("Employee", "ID:", "44821")
+
+        assert hidden_with([words], mine()) == set()
+
+
+class TestTheUsersOwnPatterns:
+    def test_a_pattern_hides_what_it_matches(self):
+        words = line("Badge", "ACME-123456", "issued")
+
+        assert hidden_with([words], mine(patterns=[r"ACME-\d{6}"])) == {"ACME-123456"}
+
+    def test_a_pattern_covers_every_word_it_touches(self):
+        words = line("Badge", "ACME", "123456")
+
+        assert hidden_with([words], mine(patterns=[r"ACME \d{6}"])) == {"ACME", "123456"}
+
+    def test_a_pattern_that_cannot_compile_is_skipped_not_raised(self):
+        words = line("Badge", "ACME-123456")
+
+        assert hidden_with([words], mine(patterns=["ACME-[0-9", r"ACME-\d{6}"])) == {"ACME-123456"}
+
+    def test_patterns_ignore_case(self):
+        words = line("badge", "acme-123456")
+
+        assert hidden_with([words], mine(patterns=[r"ACME-\d{6}"])) == {"acme-123456"}
+
+
+class TestTheUsersListAlongsideTheBuiltInRules:
+    def test_no_custom_list_behaves_exactly_as_before(self):
+        words = line("Deploy", "finished", "in", "42s")
+
+        assert find_sensitive([words]) == find_sensitive([words], mine())
+
+    def test_a_built_in_finding_is_not_doubled_by_a_users_word(self):
+        words = line("bob.smith@gmail.com")
+
+        findings = find_sensitive([words], mine(words=["bob.smith@gmail.com"]))
+
+        assert len(findings) == 1
+
+    def test_the_users_entries_and_the_built_in_rules_both_apply(self):
+        words = line("Acme", "Corporation", "bob.smith@gmail.com")
+
+        assert hidden_with([words], mine(words=["Acme Corporation"])) == {
+            "Acme", "Corporation", "bob.smith@gmail.com"
+        }
+
+    def test_a_prepared_list_can_be_reused_across_lines(self):
+        prepared = custom_list(mine(words=["Acme Corporation"]))
+
+        first = find_sensitive([line("Acme", "Corporation")], prepared)
+        second = find_sensitive([line("Acme", "Corporation")], prepared)
+
+        assert len(first) == len(second) == 1
+
+    def test_an_empty_or_missing_list_is_harmless(self):
+        words = line("Acme", "Corporation")
+
+        assert find_sensitive([words], None) == find_sensitive([words], custom_list(None)) == []
 
 
 class TestShape:
