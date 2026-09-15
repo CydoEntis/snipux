@@ -9,7 +9,9 @@ same widget, the same tools, the same `MarkStore`. It is not a second
 editor and must not become one; the only differences the design allows are
 that there is no capture-mode chip (nothing left to capture) and the
 trailing action is `Done` rather than Save (the footer already owns the
-exports).
+exports). The watermark slot goes with `Done`: the snip this window opens
+was exported by the overlay, stamped already if the watermark was on, so its
+exports stamp nothing more.
 
 The one real divergence from the overlay is coordinates: marks live in
 **image** space here, not screen space, because the image is the document.

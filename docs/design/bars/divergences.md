@@ -233,11 +233,22 @@ monitor (#49, and §18 for the tab).
 **The handoff** leaves what the mark is ("logo, text, colour") to Settings
 (`WATERMARK["content_lives_in"]`), and no Settings design covers it.
 
-**Ours is text or an image**, and Settings will edit both (#69).
+**Ours is text or an image**, and Settings edits both on a Watermark page of
+its own (#69). A text mark is the handoff's placeholder chip: light type on
+a dark plate, in a colour the user does not pick. An image is drawn as it
+is. Either is sized to the snip -- 5% of its shorter side, between 20 and 64
+logical pixels tall -- and an image never past its own pixels. An image is
+copied into the config folder rather than remembered by path. The review
+window's bar has no watermark slot.
 
 ### Why
 
-The owner's decision on #69, which closes #63's open question 2.
+The owner's decision on #69, which closes #63's open question 2. The plate
+is there because a watermark lands on whatever the capture holds in its
+corner, light or dark. A copy survives the original being moved or tidied
+away, where a path does not. And the snip a review window opens was already
+exported by the overlay, stamped if the watermark was on, so a slot there
+could only stamp it twice.
 
 ---
 

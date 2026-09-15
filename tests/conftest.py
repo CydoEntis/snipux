@@ -151,6 +151,24 @@ def _restore_excepthook():
         sys.excepthook = hook
 
 
+@pytest.fixture(autouse=True)
+def _fresh_watermark_session():
+    """Start every test with a fresh launch's watermark: off, bottom right,
+    70%.
+
+    The stills bar's watermark lasts a session (#69), and in a test run the
+    session is every test in the process, so a test that switched it on
+    would stamp the exports of every test after it. Looked up rather than
+    imported: this module must not be what first imports the overlay.
+    """
+    try:
+        yield
+    finally:
+        overlay = sys.modules.get("snipux.overlay")
+        if overlay is not None:
+            overlay.watermark_session = overlay.WatermarkChoice()
+
+
 # The suite runs under a single shared QApplication per process (each test
 # module's own autouse fixture reuses whatever instance already exists), so
 # window-activation state leaks across files the same way it would in a real

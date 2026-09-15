@@ -17,7 +17,15 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QApplication
 
 from snipux.capture import Frame
-from snipux.design.tokens import DASH_CYCLE, FILL_OPACITY, Color, Font, Metric
+from snipux.design.tokens import (
+    DASH_CYCLE,
+    FILL_OPACITY,
+    WATERMARK,
+    Color,
+    Font,
+    Metric,
+    WatermarkMetric,
+)
 from snipux.shapes import (
     Arrow,
     Blur,
@@ -33,6 +41,7 @@ from snipux.shapes import (
     Shape,
     StepMarker,
     Text,
+    Watermark,
     apply_crop,
     finalize_mark,
     next_step_number,
@@ -1620,3 +1629,224 @@ class TestExportedLengths:
             expected = self.on_screen(mark, ratio=1.0, size=(200, 120)).copy(selection.toRect())
             exported = render_selection(frame, [mark], selection)
             assert exported.convertToFormat(expected.format()) == expected, type(mark).__name__
+
+
+# -- the watermark (#69) -------------------------------------------------------
+
+MAGENTA = QColor(255, 0, 255)
+
+
+def solid_image(width: int, height: int, colour: QColor = MAGENTA) -> QImage:
+    image = QImage(width, height, QImage.Format.Format_ARGB32)
+    image.fill(colour)
+    return image
+
+
+def colour_bounds(image: QImage, colour: QColor) -> QRect:
+    """The smallest rect holding every pixel of `image` that is exactly
+    `colour` -- a solid mark's extent, less whatever its edges blended --
+    in the image's own pixels."""
+    target = colour.rgb()
+    xs, ys = [], []
+    for y in range(image.height()):
+        for x in range(image.width()):
+            if image.pixel(x, y) == target:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return QRect()
+    return QRect(min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
+
+
+def assert_edges_near(found: QRect, expected: QRect, tolerance: int = 1) -> None:
+    assert abs(found.left() - expected.left()) <= tolerance, (found, expected)
+    assert abs(found.top() - expected.top()) <= tolerance, (found, expected)
+    assert abs(found.right() - expected.right()) <= tolerance, (found, expected)
+    assert abs(found.bottom() - expected.bottom()) <= tolerance, (found, expected)
+
+
+class TestWatermark:
+    """#69: a mark stamped once over a whole capture. Laid out by one rule,
+    in logical pixels against the capture, for the preview and the export
+    alike."""
+
+    AREA = QRectF(0, 0, 400, 300)
+
+    @pytest.mark.parametrize(
+        "corner,left,top",
+        [
+            ("tl", 14, 14),
+            ("tr", 400 - 14 - 40, 14),
+            ("bl", 14, 300 - 14 - 20),
+            ("br", 400 - 14 - 40, 300 - 14 - 20),
+        ],
+    )
+    def test_each_corner_sits_the_inset_in_from_that_corner(self, corner, left, top):
+        # A 400x300 capture's shorter side is 300, and 5% of it is under the
+        # floor: the mark is 20 high, and a 2:1 image 40 wide.
+        mark = Watermark(corner=corner, opacity=100, image=solid_image(200, 100))
+
+        assert WATERMARK["inset"] == 14
+        assert mark.rect(self.AREA) == QRectF(left, top, 40, 20)
+
+    @pytest.mark.parametrize(
+        "size,height",
+        [((200, 200), WatermarkMetric.MARK_H_MIN), ((2000, 1000), 50), ((4000, 3000), WatermarkMetric.MARK_H_MAX)],
+    )
+    def test_its_height_follows_the_capture_between_a_floor_and_a_ceiling(self, size, height):
+        mark = Watermark(corner="br", opacity=70, image=solid_image(1000, 1000))
+
+        assert mark.rect(QRectF(0, 0, *size)).height() == pytest.approx(height)
+
+    def test_an_image_is_never_stretched_past_its_own_pixels(self):
+        mark = Watermark(corner="br", opacity=70, image=solid_image(30, 15))
+
+        # 5% of a 1000px side is 50, and the image has 15 rows to give.
+        assert mark.rect(QRectF(0, 0, 2000, 1000)).size() == QSizeF(30, 15)
+        # On a 1.5x frame those 15 rows are 10 logical pixels, whichever space
+        # the mark is painted in: the overlay's logical one...
+        assert mark.rect(QRectF(0, 0, 2000, 1000), 1.0, 1.5).size() == QSizeF(20, 10)
+        # ...or the export's physical one, where they are 15 again.
+        assert mark.rect(QRectF(0, 0, 3000, 1500), 1.5).size() == QSizeF(30, 15)
+
+    def test_a_wide_image_is_held_to_a_share_of_the_capture(self):
+        mark = Watermark(corner="br", opacity=70, image=solid_image(2000, 100))
+
+        rect = mark.rect(QRectF(0, 0, 800, 600))
+
+        assert rect.width() == pytest.approx(800 * WatermarkMetric.MARK_W_SHARE)
+        assert rect.width() / rect.height() == pytest.approx(20)
+
+    def test_it_always_fits_inside_a_small_captures_insets(self):
+        mark = Watermark(corner="tl", opacity=70, image=solid_image(100, 100))
+
+        # 60x40 leaves 32x12 inside the insets, and the square shrinks to fit.
+        assert mark.rect(QRectF(0, 0, 60, 40)) == QRectF(14, 14, 12, 12)
+
+    def test_a_capture_with_no_room_inside_its_insets_gets_no_mark(self):
+        mark = Watermark(corner="br", opacity=70, text="acme")
+
+        assert mark.rect(QRectF(0, 0, 28, 200)) is None
+
+    def test_the_inset_and_the_size_scale_into_physical_pixels(self):
+        mark = Watermark(corner="br", opacity=70, image=solid_image(400, 200))
+
+        logical = mark.rect(QRectF(0, 0, 400, 300))
+        physical = mark.rect(QRectF(0, 0, 600, 450), 1.5)
+
+        assert logical == QRectF(346, 266, 40, 20)
+        assert physical == QRectF(519, 399, 60, 30)
+
+    def test_a_text_mark_grows_with_its_height(self):
+        text = "acme · internal"
+
+        small = Watermark(corner="br", opacity=70, text=text).rect(self.AREA)
+        large = Watermark(corner="br", opacity=70, text=text).rect(QRectF(0, 0, 2000, 1000))
+
+        assert small.height() == WatermarkMetric.MARK_H_MIN
+        assert large.height() == 50
+        assert small.width() > small.height()
+        assert large.width() / small.width() == pytest.approx(50 / 20, rel=0.15)
+
+    def test_text_too_long_for_the_capture_is_elided_to_fit(self):
+        mark = Watermark(corner="bl", opacity=70, text="an extremely long watermark " * 10)
+
+        rect = mark.rect(QRectF(0, 0, 300, 200))
+
+        assert rect.left() == 14
+        assert rect.right() <= 300 - 14
+
+    def test_a_text_mark_paints_its_plate_in_the_corner(self):
+        image = make_image(size=(400, 300))
+        mark = Watermark(corner="br", opacity=100, text="acme · internal")
+        rect = mark.rect(self.AREA)
+
+        painter = QPainter(image)
+        mark.paint(painter, self.AREA)
+        painter.end()
+
+        # The plate's left end, clear of any glyph, is darker than the white
+        # capture; outside the chip nothing changed.
+        plate = image.pixelColor(round(rect.left()) + 2, round(rect.center().y()))
+        assert plate.red() < 200
+        assert image.pixelColor(round(rect.left()) - 4, round(rect.center().y())) == QColor(BACKGROUND)
+
+    def test_a_corner_it_does_not_know_is_refused(self):
+        with pytest.raises(ValueError):
+            Watermark(corner="middle", opacity=70, text="acme")
+
+    def test_an_opacity_outside_the_menus_range_is_refused(self):
+        low, _high = WATERMARK["opacity_range"]
+
+        with pytest.raises(ValueError):
+            Watermark(corner="br", opacity=low - 1, text="acme")
+
+
+class TestRenderSelectionWatermark:
+    """#69: `render_selection` stamps the watermark once, above every mark."""
+
+    MARK_CENTRE = (366, 276)  # of a 40x20 mark in a 400x300 capture's bottom right
+
+    @staticmethod
+    def _frame(image_size, logical_size) -> Frame:
+        return Frame(
+            image=make_image(size=image_size),
+            logical_origin=QPointF(0, 0),
+            logical_size=QSizeF(*logical_size),
+        )
+
+    def test_it_is_stamped_above_every_mark(self):
+        frame = self._frame((400, 300), (400, 300))
+        # A thick line straight through where the mark lands.
+        line = Line(colour=BLUE, stroke_width=60, start=QPointF(300, 276), end=QPointF(400, 276))
+        mark = Watermark(corner="br", opacity=100, image=solid_image(400, 200))
+
+        exported = render_selection(frame, [line], QRectF(0, 0, 400, 300), watermark=mark)
+
+        assert exported.pixelColor(*self.MARK_CENTRE) == MAGENTA
+        assert exported.pixelColor(320, 276) == BLUE
+
+    def test_without_one_nothing_is_stamped(self):
+        frame = self._frame((400, 300), (400, 300))
+        line = Line(colour=BLUE, stroke_width=6, start=QPointF(20, 20), end=QPointF(380, 280))
+        selection = QRectF(0, 0, 400, 300)
+
+        assert render_selection(frame, [line], selection, watermark=None) == render_selection(
+            frame, [line], selection
+        )
+
+    def test_its_opacity_lets_the_capture_show_through(self):
+        frame = self._frame((400, 300), (400, 300))
+        mark = Watermark(corner="br", opacity=50, image=solid_image(400, 200))
+
+        exported = render_selection(frame, [], QRectF(0, 0, 400, 300), watermark=mark)
+
+        colour = exported.pixelColor(*self.MARK_CENTRE)
+        assert (colour.red(), colour.blue()) == (255, 255)
+        assert colour.green() == pytest.approx(128, abs=3)
+
+    def test_it_sits_in_the_selections_corner_not_the_frames(self):
+        frame = self._frame((600, 500), (600, 500))
+        mark = Watermark(corner="tl", opacity=100, image=solid_image(400, 200))
+
+        exported = render_selection(frame, [], QRectF(100, 150, 400, 300), watermark=mark)
+
+        assert_edges_near(colour_bounds(exported, MAGENTA), QRect(14, 14, 40, 20))
+
+    def test_a_scaled_export_stamps_it_where_the_screen_showed_it(self):
+        # A 1.5x monitor: the frame holds one and a half pixels to a logical
+        # one. The overlay paints in logical pixels on a device that makes
+        # them physical; the export paints the crop's physical pixels.
+        frame = self._frame((600, 450), (400, 300))
+        mark = Watermark(corner="br", opacity=100, image=solid_image(400, 200))
+
+        on_screen = make_image(size=(600, 450))
+        on_screen.setDevicePixelRatio(1.5)
+        painter = QPainter(on_screen)
+        mark.paint(painter, QRectF(0, 0, 400, 300), 1.0, 1.5)
+        painter.end()
+        exported = render_selection(frame, [], QRectF(0, 0, 400, 300), watermark=mark)
+
+        expected = QRect(519, 399, 60, 30)
+        assert_edges_near(colour_bounds(on_screen, MAGENTA), expected)
+        assert_edges_near(colour_bounds(exported, MAGENTA), expected)

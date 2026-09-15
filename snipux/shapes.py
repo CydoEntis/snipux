@@ -1108,10 +1108,184 @@ def _transformed(shape: Shape, map_point, length_scale: float = 1.0) -> Shape:
     raise TypeError(f"don't know how to translate a {type(shape).__name__}")
 
 
+# The watermark (#69) is not a mark. Nobody draws it, the undo stack and
+# the eraser never see it, and it is in no list of shapes: it is laid over
+# the whole capture once, above every mark, by whatever paints the capture --
+# the overlay's live preview, and `render_selection`'s export.
+_WATERMARK_CORNERS = frozenset(corner for corner, _name in design.tokens.WATERMARK_CORNERS)
+
+# Resolved on first use rather than per paint: the overlay repaints at the
+# marching ants' rate, and asking the font database for every family it has
+# thirty times a second would be most of the cost of a preview.
+_watermark_family: str | None = None
+
+
+def _watermark_font(logical_px: float, scale: float) -> QFont:
+    """The text mark's type at `logical_px`, drawn `scale` painter pixels to
+    a logical one.
+
+    Whole logical pixels first, and only then scaled, as `Text._font` does:
+    rounding once in each space keeps the export's type the screen's at the
+    crop's ratio, rather than two sizes rounded apart.
+    """
+    global _watermark_family
+    if _watermark_family is None:
+        _watermark_family = design.font_families().ui
+    metric = design.tokens.WatermarkMetric
+    font = QFont(_watermark_family)
+    font.setPixelSize(max(1, round(max(1, round(logical_px)) * scale)))
+    font.setWeight(QFont.Weight(design.tokens.WatermarkFont.MARK_WEIGHT))
+    font.setLetterSpacing(
+        QFont.SpacingType.AbsoluteSpacing, metric.TEXT_TRACKING * font.pixelSize()
+    )
+    return font
+
+
+@dataclass(frozen=True)
+class Watermark:
+    """A mark stamped once on a whole capture: a line of `text`, or an
+    `image`, in one `corner`, at `opacity` percent.
+
+    One rule places it for both of the things that paint it, so a preview
+    and an export cannot disagree. The layout is worked out in logical
+    pixels against the capture, and only then mapped into the space the
+    painter is in: `scale` is the painter's pixels per logical pixel -- 1.0
+    on the overlay, whose window coordinates are logical, and the crop's
+    ratio on export, whose pixels are physical. The inset and every size go
+    through it, so a mark exported from a 1.5x monitor covers one and a half
+    times the pixels, exactly as its preview did on that monitor.
+
+    Its height follows the capture (`WatermarkMetric.MARK_H_SHARE`, held
+    between `MARK_H_MIN` and `MARK_H_MAX`) and it always fits inside the
+    capture's insets. An image is drawn as it is, never stretched past its
+    own pixels: that cap is counted in the frame's pixels, `pixel_ratio` of
+    them to a logical pixel, whichever space the painter is in. On export
+    that is `scale` again; the overlay passes its frame's ratio. Text is the
+    spec's placeholder chip grown to the mark's height, elided if the
+    capture is too narrow for it.
+    """
+
+    corner: str
+    opacity: int
+    text: str = ""
+    image: QImage | None = None
+
+    def __post_init__(self) -> None:
+        if self.corner not in _WATERMARK_CORNERS:
+            raise ValueError(f"not a watermark corner: {self.corner!r}")
+        low, high = design.tokens.WATERMARK["opacity_range"]
+        if not low <= self.opacity <= high:
+            raise ValueError(f"watermark opacity {self.opacity} is outside {low}-{high}")
+
+    def rect(
+        self, area: QRectF, scale: float = 1.0, pixel_ratio: float | None = None
+    ) -> QRectF | None:
+        """Where the mark lands on a capture covering `area`, in `area`'s own
+        space -- or None where there is nothing to stamp, or no room inside
+        the capture's insets to stamp it."""
+        layout = self._layout(area, scale, pixel_ratio)
+        return None if layout is None else layout[0]
+
+    def paint(
+        self,
+        painter: QPainter,
+        area: QRectF,
+        scale: float = 1.0,
+        pixel_ratio: float | None = None,
+    ) -> None:
+        """Paint the mark on a capture covering `area` -- see `rect`."""
+        layout = self._layout(area, scale, pixel_ratio)
+        if layout is None:
+            return
+        rect, text, grow = layout
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setOpacity(painter.opacity() * self.opacity / 100)
+        if self.image is not None:
+            painter.drawImage(rect, self.image)
+        else:
+            metric = design.tokens.WatermarkMetric
+            radius = metric.TEXT_RADIUS * grow * scale
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(design.watermark_color("MARK_PLATE"))
+            painter.drawRoundedRect(rect, radius, radius)
+            pad_h = metric.TEXT_PAD[1] * grow * scale
+            painter.setFont(_watermark_font(metric.TEXT_PX * grow, scale))
+            painter.setPen(design.watermark_color("MARK_TEXT"))
+            # Not clipped to the chip: the text was measured at the logical
+            # size, and whole-pixel type at another scale can run a pixel
+            # wider than the chip scaled from it.
+            painter.drawText(
+                rect.adjusted(pad_h, 0, -pad_h, 0),
+                int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextDontClip),
+                text,
+            )
+        painter.restore()
+
+    def _layout(
+        self, area: QRectF, scale: float, pixel_ratio: float | None
+    ) -> tuple[QRectF, str, float] | None:
+        """`(rect in area's space, the text as it fits, how far the text
+        chip grew)`, or None -- see `rect`."""
+        if scale <= 0:
+            return None
+        tokens = design.tokens
+        metric = tokens.WatermarkMetric
+        inset = tokens.WATERMARK["inset"]
+
+        # The capture, and the room inside its insets: logical pixels.
+        capture_w = area.width() / scale
+        capture_h = area.height() / scale
+        room_w = capture_w - 2 * inset
+        room_h = capture_h - 2 * inset
+        if room_w <= 0 or room_h <= 0:
+            return None
+        height = max(
+            metric.MARK_H_MIN,
+            min(min(capture_w, capture_h) * metric.MARK_H_SHARE, metric.MARK_H_MAX),
+        )
+
+        text, grow = "", 1.0
+        if self.image is not None:
+            if self.image.isNull():
+                return None
+            natural_w, natural_h = self.image.width(), self.image.height()
+            height = min(height, natural_h / (pixel_ratio or scale))
+            width = height * natural_w / natural_h
+            widest = min(capture_w * metric.MARK_W_SHARE, room_w)
+            if width > widest:
+                height *= widest / width
+                width = widest
+            if height > room_h:
+                width *= room_h / height
+                height = room_h
+        else:
+            if not self.text:
+                return None
+            height = min(height, room_h)
+            pad_v, pad_h = metric.TEXT_PAD
+            grow = height / (metric.TEXT_PX + 2 * pad_v)
+            metrics = QFontMetricsF(_watermark_font(metric.TEXT_PX * grow, 1.0))
+            pad = pad_h * grow
+            text = metrics.elidedText(self.text, Qt.TextElideMode.ElideRight, room_w - 2 * pad)
+            if not text:
+                return None
+            width = min(metrics.horizontalAdvance(text) + 2 * pad, room_w)
+
+        left = inset if self.corner in ("tl", "bl") else capture_w - inset - width
+        top = inset if self.corner in ("tl", "tr") else capture_h - inset - height
+        rect = QRectF(
+            area.x() + left * scale, area.y() + top * scale, width * scale, height * scale
+        )
+        return rect, text, grow
+
+
 def render_selection(
     frame: Frame,
     shapes: list[Shape],
     selection: QRectF,
+    watermark: Watermark | None = None,
 ) -> QImage:
     """Export the annotated selection as a flattened `QImage`.
 
@@ -1134,6 +1308,11 @@ def render_selection(
     image's bounds is simply never painted there, which is what keeps this
     consistent with the live ink layer's clip-rect behaviour without this
     function needing its own explicit clip.
+
+    `watermark`, when there is one, is stamped last, once, above every mark
+    and over the whole crop, at the same ratio as every mark's lengths --
+    its inset and size are logical pixels too. It never joins `shapes`, so
+    nothing that edits marks can reach it.
     """
     cropped = frame.crop(selection.translated(frame.logical_origin))
 
@@ -1157,4 +1336,9 @@ def render_selection(
     # many image pixels and this is exactly 1.0: nothing painted there moves.
     length_scale = (scale_x + scale_y) / 2
     mapped_shapes = [_transformed(shape, to_cropped_pixel, length_scale) for shape in shapes]
-    return render(cropped.image, mapped_shapes)
+    result = render(cropped.image, mapped_shapes)
+    if watermark is not None:
+        painter = QPainter(result)
+        watermark.paint(painter, QRectF(result.rect()), length_scale)
+        painter.end()
+    return result

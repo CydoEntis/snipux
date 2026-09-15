@@ -32,6 +32,7 @@ import snipux.overlay as overlay_module
 from snipux.sensitive import RecognizedWord
 from conftest import skip_on_windows
 from snipux import capture as capture_module
+from snipux import design
 from snipux import setup_desktop
 from snipux.capture import (
     BackendRegistry,
@@ -2605,12 +2606,13 @@ class TestFloatingBarComposition:
 
         buttons = bar.findChildren(QPushButton)
 
-        # 7 slots + undo + clear == 9 on the overlay's bar. The destinations
-        # are one split action and the style dot is a widget of its own,
-        # neither a QPushButton; the mode chip and redo are built but not
-        # placed, since the handoff's post-selection bar carries neither.
+        # 7 slots + the watermark + undo + clear == 10 on the overlay's bar.
+        # The destinations are one split action and the style dot is a
+        # widget of its own, neither a QPushButton; the mode chip and redo
+        # are built but not placed, since the handoff's post-selection bar
+        # carries neither.
         visible = [button for button in buttons if not button.isHidden()]
-        assert len(visible) == 9
+        assert len(visible) == 10
         assert bar._action is not None
         assert bar._chip.isHidden()
         assert bar._redo_button.isHidden()
@@ -2642,6 +2644,7 @@ class TestFloatingBarComposition:
             *bar._tool_buttons.values(),
             dividers[1],
             bar._style_dot,
+            bar._watermark,
             dividers[2],
             bar._undo_button,
             bar._clear_button,
@@ -2694,13 +2697,16 @@ class TestFloatingBarComposition:
 
             assert bar._action.geometry() == before, tool
 
-    def test_a_notch_is_on_the_family_slots_and_nowhere_else(self):
+    def test_a_notch_is_on_the_family_slots_and_the_watermark_and_nowhere_else(self):
+        # A notch means this slot has more: a family's other siblings, or
+        # where the watermark goes and how strongly.
         bar = FloatingBar()
 
         notched = [slot for slot, button in bar._tool_buttons.items() if button.notch is not None]
 
         assert notched == ["shapes", "redact"]
-        assert len(bar.findChildren(overlay_module._Notch)) == 2
+        assert bar._watermark.notch is not None
+        assert len(bar.findChildren(overlay_module._Notch)) == 3
 
     def test_undo_redo_clear_and_the_action_are_all_present(self):
         bar = FloatingBar()
@@ -3262,6 +3268,8 @@ class TestTheBarDrags:
             *bar._tool_buttons.values(),
             *(button.notch for button in bar._tool_buttons.values() if button.notch),
             bar._style_dot,
+            bar._watermark,
+            bar._watermark.notch,
             bar._action,
             bar._undo_button,
             bar._clear_button,
@@ -3612,6 +3620,18 @@ class TestTheBarWithNoRoomAnywhere:
         overlay = self._whole(self._overlay(monkeypatch))
         overlay._toggle_family_menu("shapes")
         menu = overlay._family_menus["shapes"]
+        assert not menu.isHidden()
+
+        _drag_bar(overlay._bar, QPointF(0, -400))
+
+        assert menu.isHidden()
+
+    def test_a_drag_closes_an_open_watermark_menu(self, monkeypatch):
+        # #69's menu is anchored to its slot, as a family's is, so a bar on
+        # the move takes it down the same way.
+        overlay = self._whole(self._overlay(monkeypatch))
+        overlay._toggle_watermark_menu()
+        menu = overlay._watermark_menu
         assert not menu.isHidden()
 
         _drag_bar(overlay._bar, QPointF(0, -400))
@@ -11107,6 +11127,8 @@ class TestTheBarGoesToAnotherMonitor:
             assert_inside(f"{family} menu", overlay._family_menus[family])
         overlay._toggle_style()
         assert_inside("style popover", overlay._style_popover)
+        overlay._toggle_watermark_menu()
+        assert_inside("watermark menu", overlay._watermark_menu)
         overlay._toggle_capture_popover()
         assert_inside("capture popover", overlay._popover)
 
@@ -12040,3 +12062,837 @@ class TestTheChooserFoldsToATabOnceSomethingIsSelected:
 
         assert overlay._armed_for_recording
         assert self._showing(overlay) == {"row": False, "hint": False, "tab": False}
+
+
+# ---------------------------------------------------------------------------
+# The watermark (#69)
+# ---------------------------------------------------------------------------
+
+WATERMARK_MAGENTA = QColor(255, 0, 255)
+
+
+def _keep_watermark_image(tmp_path, size=(400, 200), data: bytes | None = None) -> None:
+    """Settings' Image, kept the way Save keeps it, in this test's own config:
+    a solid magenta picture of `size` pixels, or `data` as the file."""
+    source = tmp_path / "pictures" / "logo.png"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    if data is None:
+        image = QImage(*size, QImage.Format.Format_ARGB32)
+        image.fill(WATERMARK_MAGENTA)
+        assert image.save(str(source))
+    else:
+        source.write_bytes(data)
+    assert setup_desktop.save_watermark_image(source)
+    setup_desktop.save_watermark_kind("image")
+
+
+def _switch_watermark_on(corner: str = "br", opacity: int = 100) -> None:
+    """What a user leaves behind on an earlier snip this session."""
+    session = overlay_module.watermark_session
+    session.enabled, session.corner, session.opacity = True, corner, opacity
+
+
+def _exact_bounds(image: QImage, colour: QColor, region: QRect | None = None) -> QRect:
+    """The smallest rect holding every pixel exactly `colour` -- a solid mark's
+    extent, less whatever its edges blended -- in `image`'s own pixels."""
+    region = region if region is not None else image.rect()
+    target = colour.rgb()
+    xs, ys = [], []
+    for y in range(region.top(), region.bottom() + 1):
+        for x in range(region.left(), region.right() + 1):
+            if image.pixel(x, y) == target:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return QRect()
+    return QRect(min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
+
+
+def _physical(logical: QRectF, ratio: float, origin: QPointF = QPointF(0, 0)) -> QRect:
+    """`logical`, less `origin`, in pixels `ratio` to a logical pixel."""
+    return QRect(
+        round((logical.x() - origin.x()) * ratio),
+        round((logical.y() - origin.y()) * ratio),
+        round(logical.width() * ratio),
+        round(logical.height() * ratio),
+    )
+
+
+def _assert_edges_near(found: QRect, expected: QRect, tolerance: int = 1) -> None:
+    assert not found.isNull(), f"no mark found where {expected} was expected"
+    for edge in ("left", "top", "right", "bottom"):
+        assert abs(getattr(found, edge)() - getattr(expected, edge)()) <= tolerance, (
+            edge, found, expected
+        )
+
+
+class TestWatermarkSlot:
+    """The watermark is a toggle beside the style dot, with a notch -- not a
+    tool: docs/design/bars/README.md, "Watermark is not a tool"."""
+
+    @staticmethod
+    def _bar(**kwargs) -> FloatingBar:
+        bar = FloatingBar(**kwargs)
+        bar.resize(bar.sizeHint())
+        bar.show()
+        QTest.qWaitForWindowExposed(bar)
+        return bar
+
+    def test_it_sits_after_the_style_dot_with_the_layers_glyph(self):
+        bar = self._bar()
+
+        assert bar._watermark._icon_name == tokens.WATERMARK["glyph"] == "layers"
+        assert (
+            bar._style_dot.geometry().right()
+            < bar._watermark.geometry().left()
+            < bar._undo_button.geometry().left()
+        )
+
+    def test_its_notch_says_what_it_opens(self):
+        assert FloatingBar()._watermark.notch.toolTip() == "Watermark options"
+
+    def test_pressing_it_asks_for_the_toggle_and_arms_no_tool(self):
+        bar = self._bar()
+        bar.select_tool("pen")
+        toggled = Mock()
+        bar.watermarkToggled.connect(toggled)
+
+        QTest.mouseClick(bar._watermark, Qt.MouseButton.LeftButton)
+
+        toggled.assert_called_once()
+        assert bar.active_tool == "pen"
+        assert not bar._watermark.is_active
+
+    def test_its_notch_asks_for_the_menu_and_toggles_nothing(self):
+        bar = self._bar()
+        toggled, opened = Mock(), Mock()
+        bar.watermarkToggled.connect(toggled)
+        bar.watermarkMenuRequested.connect(opened)
+
+        QTest.mouseClick(bar._watermark.notch, Qt.MouseButton.LeftButton)
+
+        opened.assert_called_once()
+        toggled.assert_not_called()
+
+    def test_its_tooltip_says_whether_it_is_on(self):
+        bar = FloatingBar()
+        assert bar._watermark.toolTip() == "Watermark is off"
+
+        bar.set_watermark_on(True)
+
+        assert bar._watermark.toolTip() == "Watermark is on — applied on export"
+
+    def test_on_it_wears_the_accent_wash_not_an_armed_tools_white(self):
+        bar = FloatingBar()
+
+        bar.set_watermark_on(True)
+
+        background, glyph = bar._watermark._colours(hovered=False)
+        assert background == design.watermark_color("ON_BG")
+        assert glyph == design.watermark_color("ON_FG")
+        assert background != design.bar_color("TOOL_ACTIVE_BG")
+
+    def test_greyed_it_says_why_and_neither_it_nor_its_notch_does_anything(self):
+        bar = self._bar()
+        bar.set_watermark_unavailable(tokens.WATERMARK_UNSET)
+        toggled, opened = Mock(), Mock()
+        bar.watermarkToggled.connect(toggled)
+        bar.watermarkMenuRequested.connect(opened)
+
+        QTest.mouseClick(bar._watermark, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(bar._watermark.notch, Qt.MouseButton.LeftButton)
+
+        toggled.assert_not_called()
+        opened.assert_not_called()
+        assert bar._watermark.isVisible(), "greyed, not hidden"
+        assert bar._watermark.toolTip() == tokens.WATERMARK_UNSET
+        assert bar._watermark._colours(hovered=True) == (None, design.bar_color("TOOL_DISABLED_FG"))
+
+    def test_the_review_windows_bar_has_none(self):
+        # The snip it opens was already exported by the overlay, watermark
+        # and all -- see FloatingBar.__init__.
+        assert FloatingBar(trailing="done")._watermark.isHidden()
+
+
+class TestWatermarkMenuComposition:
+    """The watermark slot's menu, per the spec's markup: four corners, an
+    opacity slider, and a note that the mark itself is Settings'."""
+
+    def test_its_width_is_the_whole_menu_border_included(self):
+        menu = overlay_module.WatermarkMenu()
+        menu.resize(menu.sizeHint())
+
+        assert menu.grab().deviceIndependentSize().width() == tokens.WatermarkMetric.MENU_W == 238
+
+    def test_it_offers_the_four_corners_with_bottom_right_chosen(self):
+        menu = overlay_module.WatermarkMenu()
+
+        assert list(menu._corner_buttons) == ["tl", "tr", "bl", "br"]
+        assert [button.toolTip() for button in menu._corner_buttons.values()] == [
+            "Top left", "Top right", "Bottom left", "Bottom right"
+        ]
+        assert menu.corner == "br"
+        assert [c for c, button in menu._corner_buttons.items() if button.is_selected] == ["br"]
+
+    def test_opacity_runs_from_twenty_to_a_hundred_and_starts_at_seventy(self):
+        menu = overlay_module.WatermarkMenu()
+
+        assert (menu._slider.minimum(), menu._slider.maximum()) == (20, 100)
+        assert menu.opacity == 70
+        assert menu._readout.text() == "70%"
+
+    def test_picking_a_corner_reports_it_and_the_menu_stays_open(self):
+        menu = overlay_module.WatermarkMenu()
+        menu.show()
+        picked = Mock()
+        menu.cornerPicked.connect(picked)
+
+        QTest.mouseClick(menu._corner_buttons["tl"], Qt.MouseButton.LeftButton)
+
+        picked.assert_called_once_with("tl")
+        assert menu.corner == "tl"
+        assert menu.isVisible()
+
+    def test_moving_the_slider_reports_the_opacity_and_reads_it_out(self):
+        menu = overlay_module.WatermarkMenu()
+        changed = Mock()
+        menu.opacityChanged.connect(changed)
+
+        menu._slider.setValue(40)
+
+        changed.assert_called_once_with(40)
+        assert menu._readout.text() == "40%"
+
+    def test_seeding_it_reports_nothing(self):
+        menu = overlay_module.WatermarkMenu()
+        picked, changed = Mock(), Mock()
+        menu.cornerPicked.connect(picked)
+        menu.opacityChanged.connect(changed)
+
+        menu.set_corner("tr")
+        menu.set_opacity(55)
+
+        picked.assert_not_called()
+        changed.assert_not_called()
+        assert menu._readout.text() == "55%"
+
+    def test_the_note_says_where_the_mark_itself_is_set(self):
+        menu = overlay_module.WatermarkMenu()
+
+        assert menu._note.text() == tokens.WATERMARK_MENU_NOTE
+        assert "Settings" in menu._note.text()
+
+    def test_its_wrapped_note_is_not_clipped(self):
+        menu = overlay_module.WatermarkMenu()
+        menu.resize(menu.sizeHint())
+        menu.show()
+        QTest.qWaitForWindowExposed(menu)
+
+        note = menu._note
+        assert note.height() >= note.heightForWidth(note.width())
+        assert note.geometry().bottom() < menu.height()
+
+
+class TestWatermarkOverlayIntegration:
+    """The watermark slot and its menu, wired into `OverlayWindow`."""
+
+    SELECTION = QRect(400, 200, 400, 300)
+
+    def _overlay(self, selection=None) -> OverlayWindow:
+        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
+        overlay = OverlayWindow(frame)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(selection or self.SELECTION)
+        return overlay
+
+    @staticmethod
+    def _notch(overlay):
+        QTest.mouseClick(overlay._bar._watermark.notch, Qt.MouseButton.LeftButton)
+        return overlay._watermark_menu
+
+    def test_with_nothing_in_settings_the_slot_is_greyed_with_why(self):
+        overlay = self._overlay()
+        slot = overlay._bar._watermark
+
+        QTest.mouseClick(slot, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(slot.notch, Qt.MouseButton.LeftButton)
+
+        assert slot.isVisible()
+        assert slot.toolTip() == tokens.WATERMARK_UNSET
+        assert not overlay_module.watermark_session.enabled
+        assert not overlay._watermark_menu.isVisible()
+        assert overlay._active_watermark() is None
+
+    def test_image_chosen_with_none_kept_is_greyed_as_unset(self):
+        setup_desktop.save_watermark_kind("image")
+        setup_desktop.save_watermark_text("acme")
+
+        overlay = self._overlay()
+
+        assert overlay._bar._watermark.toolTip() == tokens.WATERMARK_UNSET
+
+    def test_a_kept_image_that_went_missing_greys_it_with_that_reason(self, tmp_path):
+        _keep_watermark_image(tmp_path)
+        setup_desktop.load_watermark_image().unlink()
+
+        overlay = self._overlay()
+
+        assert overlay._bar._watermark.toolTip() == tokens.WATERMARK_IMAGE_MISSING
+
+    def test_a_kept_image_that_cannot_be_read_greys_it_with_that_reason(self, tmp_path):
+        _keep_watermark_image(tmp_path, data=b"not a picture at all")
+
+        overlay = self._overlay()
+
+        assert overlay._bar._watermark.toolTip() == tokens.WATERMARK_IMAGE_UNREADABLE
+
+    def test_a_greyed_slot_never_stops_the_capture(self, tmp_path):
+        _keep_watermark_image(tmp_path, data=b"not a picture at all")
+        _switch_watermark_on()
+        overlay = self._overlay()
+
+        exported = overlay.rendered_image()
+
+        assert exported.size() == self.SELECTION.size()
+
+    def test_text_in_settings_makes_it_live(self):
+        setup_desktop.save_watermark_text("acme · internal")
+        overlay = self._overlay()
+
+        QTest.mouseClick(overlay._bar._watermark, Qt.MouseButton.LeftButton)
+
+        assert overlay._bar._watermark.is_on
+        assert overlay._bar._watermark.toolTip() == tokens.WATERMARK_TOOLTIP_ON
+        assert overlay._active_watermark().text == "acme · internal"
+
+    def test_pressing_it_again_switches_it_off(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        QTest.mouseClick(overlay._bar._watermark, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._bar._watermark, Qt.MouseButton.LeftButton)
+
+        assert not overlay._bar._watermark.is_on
+        assert overlay._active_watermark() is None
+
+    def test_the_notch_opens_its_menu_and_again_closes_it(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+
+        assert self._notch(overlay).isVisible()
+        assert not self._notch(overlay).isVisible()
+
+    def test_it_opens_above_the_bar_against_its_slots_right_edge(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+
+        menu = self._notch(overlay)
+
+        bar = QRectF(overlay._bar.geometry())
+        slot = QRectF(overlay._bar.watermark_rect(overlay))
+        geometry = QRectF(menu.geometry())
+        assert geometry.bottom() == bar.top() - tokens.BarMetric.MENU_OFFSET
+        assert geometry.right() == pytest.approx(
+            slot.right() + tokens.WatermarkMetric.MENU_OVERHANG, abs=1
+        )
+
+    def test_it_opens_below_the_bar_when_there_is_no_room_above(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay(selection=QRect(400, 10, 400, 40))
+
+        menu = self._notch(overlay)
+
+        bar = QRectF(overlay._bar.geometry())
+        assert QRectF(menu.geometry()).top() == bar.bottom() + tokens.BarMetric.MENU_OFFSET
+        assert overlay._chrome_bounds().contains(QRectF(menu.geometry()))
+
+    def test_one_menu_is_open_at_a_time(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        menu = self._notch(overlay)
+
+        QTest.mouseClick(overlay._bar._tool_buttons["shapes"].notch, Qt.MouseButton.LeftButton)
+        assert overlay._family_menus["shapes"].isVisible()
+        assert not menu.isVisible()
+
+        self._notch(overlay)
+        assert menu.isVisible()
+        assert not overlay._family_menus["shapes"].isVisible()
+
+    def test_opening_it_closes_the_style_popover(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+        assert overlay._style_popover.isVisible()
+
+        menu = self._notch(overlay)
+
+        assert menu.isVisible()
+        assert not overlay._style_popover.isVisible()
+
+    def test_opening_the_style_popover_closes_it(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        QTest.mouseClick(overlay._bar._tool_buttons["pen"], Qt.MouseButton.LeftButton)
+        menu = self._notch(overlay)
+
+        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
+
+        assert overlay._style_popover.isVisible()
+        assert not menu.isVisible()
+
+    def test_switching_it_closes_an_open_menu(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        QTest.mouseClick(overlay._bar._tool_buttons["redact"].notch, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(overlay._bar._watermark, Qt.MouseButton.LeftButton)
+
+        assert not overlay._family_menus["redact"].isVisible()
+
+    def test_a_press_outside_closes_it_and_does_nothing_else(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        menu = self._notch(overlay)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(2, 2))
+
+        assert not menu.isVisible()
+        assert overlay._selection == self.SELECTION
+
+    def test_a_press_on_it_stays_in_it(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        menu = self._notch(overlay)
+
+        QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=QPoint(4, 4))
+
+        assert menu.isVisible()
+        assert overlay._selection == self.SELECTION
+
+    def test_esc_closes_it_and_nothing_else(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        overlay.add_mark(
+            Rectangle(
+                colour=QColor(255, 0, 0), stroke_width=4,
+                start=QPointF(450, 250), end=QPointF(500, 300),
+            )
+        )
+        menu = self._notch(overlay)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not menu.isVisible()
+        assert len(overlay.marks) == 1
+        assert overlay._selection == self.SELECTION
+
+    def test_its_corner_and_opacity_move_the_mark(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        QTest.mouseClick(overlay._bar._watermark, Qt.MouseButton.LeftButton)
+        menu = self._notch(overlay)
+
+        QTest.mouseClick(menu._corner_buttons["tl"], Qt.MouseButton.LeftButton)
+        menu._slider.setValue(35)
+
+        mark = overlay._active_watermark()
+        assert (mark.corner, mark.opacity) == ("tl", 35)
+        assert menu.isVisible()
+
+    def test_it_hides_with_the_overlay_and_with_the_selection(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = self._overlay()
+        menu = self._notch(overlay)
+
+        overlay.set_selection(None)
+        assert not menu.isVisible()
+
+        overlay.set_selection(self.SELECTION)
+        self._notch(overlay)
+        overlay.hide()
+        assert not menu.isVisible()
+
+
+class TestWatermarkPreview:
+    """While it is on, the mark previews inside the selection, at the corner
+    and opacity the menu set."""
+
+    SELECTION = QRect(400, 200, 400, 300)
+
+    def _grab(self, tmp_path, corner: str) -> tuple[QImage, float]:
+        _keep_watermark_image(tmp_path)
+        _switch_watermark_on(corner)
+        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
+        # Never shown, so no chrome is laid over what is sampled.
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SELECTION)
+        image = overlay.grab().toImage()
+        return image, image.devicePixelRatio()
+
+    @pytest.mark.parametrize(
+        "corner,left,top",
+        [
+            # A 400x300 selection: 5% of its shorter side is under the floor,
+            # so the 2:1 image is a 40x20 mark, 14 in from its corner.
+            ("tl", 400 + 14, 200 + 14),
+            ("tr", 800 - 14 - 40, 200 + 14),
+            ("bl", 400 + 14, 500 - 14 - 20),
+            ("br", 800 - 14 - 40, 500 - 14 - 20),
+        ],
+    )
+    def test_it_previews_in_the_selections_corner(self, tmp_path, corner, left, top):
+        image, ratio = self._grab(tmp_path, corner)
+
+        found = _exact_bounds(image, WATERMARK_MAGENTA, _physical(QRectF(self.SELECTION), ratio))
+
+        _assert_edges_near(found, _physical(QRectF(left, top, 40, 20), ratio))
+
+    def test_it_previews_at_its_opacity(self, tmp_path):
+        _keep_watermark_image(tmp_path)
+        _switch_watermark_on("br", opacity=50)
+        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SELECTION)
+
+        colour = pixel(overlay.grab().toImage(), 800 - 14 - 20, 500 - 14 - 10)
+
+        assert colour.red() == pytest.approx((10 + 255) / 2, abs=3)
+        assert colour.green() == pytest.approx(20 / 2, abs=3)
+
+    def test_nothing_previews_while_it_is_off(self, tmp_path):
+        _keep_watermark_image(tmp_path)
+        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SELECTION)
+
+        assert _exact_bounds(overlay.grab().toImage(), WATERMARK_MAGENTA).isNull()
+
+    def test_nothing_previews_while_a_recording_is_framed(self, tmp_path):
+        _keep_watermark_image(tmp_path)
+        _switch_watermark_on()
+        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
+        overlay = OverlayWindow(frame)
+        overlay._chooser.set_kind("record")
+        overlay.set_selection(self.SELECTION)
+
+        assert _exact_bounds(overlay.grab().toImage(), WATERMARK_MAGENTA).isNull()
+
+
+class TestWatermarkExport:
+    """The export carries the mark exactly where the preview put it.
+
+    Runs at whatever scale the suite does -- it is kept green at
+    QT_SCALE_FACTOR=1 and 1.5 -- over a frame the size a capture at that
+    scale really is, as `TestExportedStrokeWidth` does. The inset and the
+    mark's size are logical pixels; the preview is read in the window's
+    physical pixels and the export in the crop's, and both must show the
+    same mark: not one two-thirds the size of the other.
+    """
+
+    LOGICAL = (400, 300)
+    SELECTION = QRect(40, 60, 320, 200)
+
+    def _overlay(self, tmp_path, corner: str) -> tuple[OverlayWindow, float]:
+        ratio = QGuiApplication.primaryScreen().devicePixelRatio()
+        _keep_watermark_image(tmp_path)
+        _switch_watermark_on(corner)
+        width, height = self.LOGICAL
+        frame = make_frame(
+            image_size=(round(width * ratio), round(height * ratio)),
+            logical_size=self.LOGICAL,
+        )
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SELECTION)
+        return overlay, ratio
+
+    @pytest.mark.parametrize(
+        "corner,left,top",
+        [
+            # A 320x200 selection gives a 40x20 mark, 14 in.
+            ("tl", 40 + 14, 60 + 14),
+            ("tr", 360 - 14 - 40, 60 + 14),
+            ("bl", 40 + 14, 260 - 14 - 20),
+            ("br", 360 - 14 - 40, 260 - 14 - 20),
+        ],
+    )
+    def test_the_export_carries_the_mark_where_the_preview_put_it(self, tmp_path, corner, left, top):
+        overlay, ratio = self._overlay(tmp_path, corner)
+        logical = QRectF(left, top, 40, 20)
+
+        on_screen = overlay.grab().toImage()
+        exported = overlay.rendered_image()
+
+        seen = _exact_bounds(on_screen, WATERMARK_MAGENTA)
+        saved = _exact_bounds(exported, WATERMARK_MAGENTA)
+        assert on_screen.devicePixelRatio() == ratio  # the grab really is physical
+        _assert_edges_near(seen, _physical(logical, ratio))
+        _assert_edges_near(saved, _physical(logical, ratio, QPointF(self.SELECTION.topLeft())))
+        assert abs(saved.width() - seen.width()) <= 1
+        assert abs(saved.height() - seen.height()) <= 1
+
+    def test_nothing_is_stamped_while_it_is_off(self, tmp_path):
+        overlay, _ratio = self._overlay(tmp_path, "br")
+        overlay_module.watermark_session.enabled = False
+
+        assert _exact_bounds(overlay.rendered_image(), WATERMARK_MAGENTA).isNull()
+
+
+class TestWatermarkIsNotAMark:
+    """Applied once, on export, above every annotation -- never a mark in the
+    undo stack, and out of the eraser's reach."""
+
+    SELECTION = QRect(0, 0, 400, 300)
+    MARK_CENTRE = QPointF(366, 276)  # of a 40x20 mark in a 400x300 selection's bottom right
+
+    def _overlay(self, tmp_path) -> OverlayWindow:
+        _keep_watermark_image(tmp_path)
+        _switch_watermark_on("br")
+        overlay = OverlayWindow(make_frame(image_size=(400, 300), logical_size=(400, 300)))
+        overlay.set_selection(self.SELECTION)
+        return overlay
+
+    def _stamped(self, overlay) -> bool:
+        return overlay.rendered_image().pixelColor(366, 276) == WATERMARK_MAGENTA
+
+    def test_switching_it_on_leaves_nothing_to_undo(self):
+        setup_desktop.save_watermark_text("acme")
+        overlay = OverlayWindow(make_frame(image_size=(1600, 1000), logical_size=(1600, 1000)))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(400, 200, 400, 300))
+
+        QTest.mouseClick(overlay._bar._watermark, Qt.MouseButton.LeftButton)
+
+        assert overlay._bar._watermark.is_on
+        assert overlay.marks == ()
+        assert not overlay.can_undo
+        assert not overlay._bar._undo_button.isEnabled()
+
+    def test_undo_and_clear_leave_it_on_the_export(self, tmp_path):
+        overlay = self._overlay(tmp_path)
+        line = Line(
+            colour=QColor(0, 0, 255), stroke_width=6,
+            start=QPointF(20, 20), end=QPointF(200, 200),
+        )
+
+        overlay.add_mark(line)
+        overlay.undo()
+        assert self._stamped(overlay)
+        assert not overlay.can_undo
+
+        overlay.add_mark(line)
+        overlay.clear()
+        assert self._stamped(overlay)
+        overlay.undo()
+        assert overlay.marks == (line,)
+        assert self._stamped(overlay)
+
+    def test_it_is_stamped_above_every_annotation(self, tmp_path):
+        overlay = self._overlay(tmp_path)
+        blue = QColor(0, 0, 255)
+
+        overlay.add_mark(
+            Line(colour=blue, stroke_width=60, start=QPointF(300, 276), end=QPointF(400, 276))
+        )
+
+        exported = overlay.rendered_image()
+        assert exported.pixelColor(366, 276) == WATERMARK_MAGENTA
+        assert exported.pixelColor(320, 276) == blue
+
+    def test_the_eraser_cannot_take_it(self, tmp_path):
+        overlay = self._overlay(tmp_path)
+
+        assert overlay.erase_at(self.MARK_CENTRE) is None
+
+        assert overlay.marks == ()
+        assert self._stamped(overlay)
+
+
+class TestWatermarkCarriesAcrossSnips:
+    """The toggle, corner and opacity last the session; the content comes
+    from Settings, fresh for every snip."""
+
+    SELECTION = QRect(400, 200, 400, 300)
+
+    def _overlay(self) -> OverlayWindow:
+        overlay = OverlayWindow(make_frame(image_size=(1600, 1000), logical_size=(1600, 1000)))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(self.SELECTION)
+        return overlay
+
+    def test_a_fresh_session_starts_off_in_the_bottom_right_at_seventy(self):
+        choice = overlay_module.WatermarkChoice()
+
+        assert (choice.enabled, choice.corner, choice.opacity) == (False, "br", 70)
+
+    def test_on_corner_and_opacity_carry_to_the_next_snip(self):
+        setup_desktop.save_watermark_text("acme")
+        first = self._overlay()
+        QTest.mouseClick(first._bar._watermark, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(first._bar._watermark.notch, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(first._watermark_menu._corner_buttons["tl"], Qt.MouseButton.LeftButton)
+        first._watermark_menu._slider.setValue(40)
+        first.close()
+
+        second = self._overlay()
+
+        assert second._bar._watermark.is_on
+        mark = second._active_watermark()
+        assert (mark.corner, mark.opacity) == ("tl", 40)
+        assert (second._watermark_menu.corner, second._watermark_menu.opacity) == ("tl", 40)
+
+    def test_the_content_is_read_fresh_for_each_snip(self):
+        setup_desktop.save_watermark_text("first")
+        _switch_watermark_on()
+        first = self._overlay()
+        first.close()
+
+        setup_desktop.save_watermark_text("second")
+        second = self._overlay()
+
+        assert second._active_watermark().text == "second"
+
+    def test_content_removed_in_settings_greys_the_next_snip_without_losing_the_toggle(self):
+        setup_desktop.save_watermark_text("acme")
+        _switch_watermark_on()
+        setup_desktop.save_watermark_text("")
+
+        overlay = self._overlay()
+
+        assert overlay._bar._watermark.toolTip() == tokens.WATERMARK_UNSET
+        assert not overlay._bar._watermark.is_on
+        assert overlay_module.watermark_session.enabled
+
+
+class TestWatermarkMenuStaysClickable:
+    """#74's rule holds for the watermark menu: the tool hint strip gives way
+    to it. On the strip's side of the bar the strip would otherwise sit over
+    a corner or the slider and take the click meant for it. Driven through
+    the window, hover first, the way `TestFamilyMenuRowsStayClickable` drives
+    the family menus.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    # The same pointer, the same way: a hover-only move through the window's
+    # own handle, then a click at the same point.
+    _move_to = staticmethod(TestFamilyMenuRowsStayClickable._move_to)
+    _click = TestFamilyMenuRowsStayClickable._click
+
+    def _overlay(self, placement):
+        setup_desktop.save_watermark_text("acme")
+        # The whole offscreen screen, so every point is on a real widget at
+        # any scale factor.
+        screen = QGuiApplication.primaryScreen().geometry()
+        width, height = screen.width(), screen.height()
+        overlay = OverlayWindow(make_frame(image_size=(width, height), logical_size=(width, height)))
+        overlay.setGeometry(0, 0, width, height)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        margin = height // 10
+        if placement == "below":
+            overlay.set_selection(QRect(margin, margin, width - 2 * margin, height // 3))
+        else:
+            top = height // 3
+            overlay.set_selection(QRect(margin, top, width - 2 * margin, height - top - 4))
+        QApplication.processEvents()
+        bar, selection = overlay._bar.geometry(), overlay._selection
+        if placement == "below":
+            assert bar.top() > selection.bottom()
+        else:
+            assert bar.bottom() < selection.top()
+        return overlay
+
+    def _open(self, overlay):
+        bar = overlay._bar
+        # Hovering a slot is what brings the strip up in the first place.
+        self._move_to(overlay, bar._tool_buttons["pen"])
+        self._move_to(overlay, bar._watermark)
+        self._click(overlay, bar._watermark.notch)
+        menu = overlay._watermark_menu
+        assert not menu.isHidden()
+        return menu
+
+    @pytest.mark.parametrize("placement", ["below", "above"])
+    def test_every_control_is_what_the_pointer_finds_after_hovering_the_slot(self, placement):
+        overlay = self._overlay(placement)
+        menu = self._open(overlay)
+
+        assert overlay._tool_hint.isHidden()
+        for control in (*menu._corner_buttons.values(), menu._slider):
+            hit = overlay.childAt(control.mapTo(overlay, control.rect().center()))
+            assert hit is control or control.isAncestorOf(hit), (
+                f"{control!r} is under {type(hit).__name__}"
+            )
+
+    @pytest.mark.parametrize("placement", ["below", "above"])
+    def test_each_corner_can_be_picked_through_the_window(self, placement):
+        overlay = self._overlay(placement)
+        menu = self._open(overlay)
+
+        for corner in ("tl", "tr", "bl", "br"):
+            self._click(overlay, menu._corner_buttons[corner])
+
+            assert overlay_module.watermark_session.corner == corner
+            assert not menu.isHidden()
+            assert overlay._tool_hint.isHidden()
+
+    def test_hovering_the_slots_with_it_open_keeps_the_hint_away(self):
+        overlay = self._overlay("above")
+        bar = overlay._bar
+        self._open(overlay)
+
+        for slot in (*bar._tool_buttons.values(), bar._style_dot, bar._watermark):
+            self._move_to(overlay, slot)
+            assert overlay._tool_hint.isHidden()
+
+    def test_closing_it_brings_the_hint_back(self):
+        overlay = self._overlay("above")
+        self._open(overlay)
+
+        self._click(overlay, overlay._bar._watermark.notch)
+
+        assert overlay._watermark_menu.isHidden()
+        assert overlay._tool_hint.isVisible()
+
+    @pytest.mark.parametrize("where", ["top-left", "bottom-right"])
+    def test_it_and_the_style_popover_close_each_other_and_fit_the_monitor(self, where):
+        # Against the roomier style popover (#75): a small selection in a
+        # corner pushes the bar against two monitor edges, where each has the
+        # least room to open into.
+        setup_desktop.save_watermark_text("acme")
+        screen = QGuiApplication.primaryScreen().geometry()
+        width, height = screen.width(), screen.height()
+        overlay = OverlayWindow(make_frame(image_size=(width, height), logical_size=(width, height)))
+        overlay.setGeometry(0, 0, width, height)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        if where == "top-left":
+            overlay.set_selection(QRect(4, 4, 120, 60))
+        else:
+            overlay.set_selection(QRect(width - 124, height - 64, 120, 60))
+        QApplication.processEvents()
+        bar = overlay._bar
+        menu, popover = overlay._watermark_menu, overlay._style_popover
+        bounds = overlay._bar_bounds()
+        assert bar.active_tool == "pen"
+
+        self._click(overlay, bar._style_dot)
+        assert not popover.isHidden()
+        assert bounds.contains(QRectF(popover.geometry())), (popover.geometry(), bounds)
+
+        self._click(overlay, bar._watermark.notch)
+        assert popover.isHidden()
+        assert not menu.isHidden()
+        assert bounds.contains(QRectF(menu.geometry())), (menu.geometry(), bounds)
+
+        self._click(overlay, bar._style_dot)
+        assert menu.isHidden()
+        assert not popover.isHidden()
+        assert bounds.contains(QRectF(popover.geometry())), (popover.geometry(), bounds)

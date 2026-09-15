@@ -1321,3 +1321,26 @@ class TestBlackoutExportsItsFill:
 
         assert type(window._store.marks[0]) is shapes.Blackout
         assert rendered.pixelColor(inside) == QColor(tokens.BLACKOUT_FILL)
+
+
+class TestNoSecondWatermark:
+    """#69: the review window's bar has no watermark slot, and its exports
+    stamp nothing. The snip it opens was exported by the overlay, stamped
+    already if the watermark was on, so a second stamp could only double it.
+    """
+
+    def test_its_bar_has_no_watermark_slot(self):
+        window = ReviewWindow(make_image())
+
+        window._set_annotating(True)
+
+        assert window._bar._watermark.isHidden()
+
+    def test_its_export_is_not_stamped_even_with_the_watermark_on(self):
+        from snipux import overlay, setup_desktop
+
+        setup_desktop.save_watermark_text("acme")
+        overlay.watermark_session.enabled = True
+        window = ReviewWindow(make_image())
+
+        assert window._canvas.rendered_image() == make_image()

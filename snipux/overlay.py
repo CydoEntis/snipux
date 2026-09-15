@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QApplication,
     QColorDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -78,6 +79,7 @@ from snipux.shapes import (
     Shape,
     StepMarker,
     Text,
+    Watermark,
     finalize_mark,
     next_step_number,
     render_selection,
@@ -678,12 +680,13 @@ def _bar_keys() -> list[str]:
 
 
 class _Notch(QWidget):
-    """The corner of a family slot that opens the family's menu.
+    """The corner of a slot that opens that slot's menu.
 
-    It means one thing -- this slot has more -- so nothing but a family slot
-    ever carries one. A child of the slot rather than a hit test inside it:
-    a press on the notch is delivered here, so it opens the menu and never
-    also arms the tool underneath.
+    It means one thing -- this slot has more -- so only a slot with more
+    carries one: the two families, and the watermark, whose more is where
+    the mark goes and how strongly. A child of the slot rather than a hit
+    test inside it: a press on the notch is delivered here, so it opens the
+    menu and never also presses the slot underneath.
     """
 
     clicked = pyqtSignal()
@@ -730,10 +733,11 @@ class _Notch(QWidget):
         path.lineTo(right, bottom)
         path.lineTo(right - leg, bottom)
         path.closeSubpath()
-        painter.fillPath(
-            path, design.bar_color("NOTCH_ACTIVE" if self._lit else "NOTCH_IDLE")
-        )
+        painter.fillPath(path, self._fill())
         painter.end()
+
+    def _fill(self) -> QColor:
+        return design.bar_color("NOTCH_ACTIVE" if self._lit else "NOTCH_IDLE")
 
 
 class _IconButton(QPushButton):
@@ -842,24 +846,27 @@ class _IconButton(QPushButton):
         self.unhovered.emit()
         super().leaveEvent(event)
 
-    def _refresh(self, hovered: bool | None = None) -> None:
-        if hovered is None:
-            hovered = self.underMouse()
-        metric = design.tokens.BarMetric
-
+    def _colours(self, hovered: bool) -> "tuple[QColor | None, QColor]":
+        """(background, or None for none, and glyph) for the state the
+        button is in."""
         if not self.isEnabled():
             # Disabled is the preferred way to show an empty stack, over
             # just recolouring a still-live button -- so this is a real
             # QWidget.setEnabled(False), not a cosmetic-only state.
-            bg, glyph = None, design.bar_color("TOOL_DISABLED_FG")
-        elif hovered and self._hover_color is not None:
-            bg, glyph = self._hover_bg, self._hover_color
-        elif self._active:
-            bg, glyph = design.bar_color("TOOL_ACTIVE_BG"), design.bar_color("TOOL_ACTIVE_FG")
-        elif hovered:
-            bg, glyph = self._hover_bg, self._idle_color
-        else:
-            bg, glyph = None, self._idle_color
+            return None, design.bar_color("TOOL_DISABLED_FG")
+        if hovered and self._hover_color is not None:
+            return self._hover_bg, self._hover_color
+        if self._active:
+            return design.bar_color("TOOL_ACTIVE_BG"), design.bar_color("TOOL_ACTIVE_FG")
+        if hovered:
+            return self._hover_bg, self._idle_color
+        return None, self._idle_color
+
+    def _refresh(self, hovered: bool | None = None) -> None:
+        if hovered is None:
+            hovered = self.underMouse()
+        metric = design.tokens.BarMetric
+        bg, glyph = self._colours(hovered)
 
         if bg is not None:
             self.setStyleSheet(
@@ -1298,11 +1305,107 @@ class _StyleDot(QWidget):
         painter.end()
 
 
+class _WatermarkNotch(_Notch):
+    """The watermark slot's notch, lit in the slot's own colours: it
+    follows the watermark being on, where a family's follows a tool being
+    armed."""
+
+    _available = True
+
+    def set_available(self, available: bool) -> None:
+        self._available = available
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor if available else Qt.CursorShape.ArrowCursor
+        )
+        self.update()
+
+    def _fill(self) -> QColor:
+        if not self._available:
+            return design.bar_color("TOOL_DISABLED_FG")
+        return design.watermark_color("NOTCH_ON" if self._lit else "NOTCH_OFF")
+
+
+class _WatermarkSlot(_IconButton):
+    """The watermark toggle, beside the style dot.
+
+    Not a tool: nobody draws a watermark, so pressing it arms nothing. It
+    switches the mark on or off, and its notch opens where the mark goes and
+    how strongly. On, it wears the accent wash the handoff gives it rather
+    than the white of an armed tool, so the bar never reads as having two
+    tools armed at once.
+
+    With nothing in Settings to stamp it stays on the bar, greyed, and its
+    tooltip gives the reason. Greyed by its own state rather than by
+    `setEnabled(False)`, the way the style dot dims for a tool with nothing
+    to style, so the bar's two controls that can have nothing to do behave
+    alike.
+    """
+
+    # Class defaults: `_IconButton.__init__` paints the slot before this
+    # class's own `__init__` has had a chance to set them.
+    _on = False
+    _reason = ""
+
+    def __init__(self, parent=None):
+        super().__init__(
+            design.tokens.WATERMARK["glyph"],
+            design.tokens.WATERMARK_TOOLTIP_OFF,
+            name="watermark",
+            idle_color=design.watermark_color("OFF_FG"),
+            parent=parent,
+        )
+        self._notch = _WatermarkNotch(design.tokens.WATERMARK_NOTCH_TOOLTIP, self)
+        self._sync()
+
+    @property
+    def is_on(self) -> bool:
+        return self._on
+
+    @property
+    def unavailable_reason(self) -> str:
+        """Why there is nothing to stamp, or "" when there is."""
+        return self._reason
+
+    def set_on(self, on: bool) -> None:
+        self._on = on
+        self._sync()
+
+    def set_unavailable_reason(self, reason: str) -> None:
+        self._reason = reason
+        self._sync()
+
+    def _sync(self) -> None:
+        available = not self._reason
+        if not available:
+            tooltip = self._reason
+        elif self._on:
+            tooltip = design.tokens.WATERMARK_TOOLTIP_ON
+        else:
+            tooltip = design.tokens.WATERMARK_TOOLTIP_OFF
+        self.setToolTip(tooltip)
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor if available else Qt.CursorShape.ArrowCursor
+        )
+        self._notch.set_lit(self._on and available)
+        self._notch.set_available(available)
+        self._refresh()
+
+    def _colours(self, hovered: bool) -> "tuple[QColor | None, QColor]":
+        if self._reason:
+            return None, design.bar_color("TOOL_DISABLED_FG")
+        if self._on:
+            # The glyph keeps the accent under the pointer, so hovering a
+            # slot that is on never reads as it having switched off.
+            bg = self._hover_bg if hovered else design.watermark_color("ON_BG")
+            return bg, design.watermark_color("ON_FG")
+        return (self._hover_bg if hovered else None), self._idle_color
+
+
 class FloatingBar(_Chrome):
     """The stills bar: one row under the selection, per
     docs/design/bars/README.md section 2 -- the destination at the left end,
-    seven tool slots in a fixed order of consequence, the style dot, then
-    undo and clear.
+    seven tool slots in a fixed order of consequence, the style dot and the
+    watermark, then undo and clear.
 
     Two of the slots hold families (`tokens.FAMILIES`): shapes and
     redaction. A family slot shows whichever sibling was used last, a notch
@@ -1351,6 +1454,10 @@ class FloatingBar(_Chrome):
     # "shapes" or "redact": the notch was pressed, or the slot right-clicked.
     familyMenuRequested = pyqtSignal(str)
     styleRequested = pyqtSignal()
+    # The watermark slot pressed, or its notch -- only while there is a mark
+    # to stamp. Whether the watermark is on is the hosting window's to say.
+    watermarkToggled = pyqtSignal()
+    watermarkMenuRequested = pyqtSignal()
     undoRequested = pyqtSignal()
     redoRequested = pyqtSignal()
     clearRequested = pyqtSignal()
@@ -1381,6 +1488,10 @@ class FloatingBar(_Chrome):
         its trailing action is `Done` instead. Those are the only two
         differences the design allows, which is why they are the only two
         parameters.
+
+        The watermark slot goes with `Done`. The snip a review window opens
+        is one the overlay has already exported, stamped with the watermark
+        if it was on, so a slot there could only stamp it a second time.
         """
         super().__init__(parent)
         self._has_capture_chip = capture_chip
@@ -1495,10 +1606,21 @@ class FloatingBar(_Chrome):
             layout.addWidget(button)
         self._add_divider(layout)
 
-        # The watermark joins the style dot here, as a slot of its own.
         self._style_dot = _StyleDot(self)
         self._style_dot.clicked.connect(self.styleRequested)
         layout.addWidget(self._style_dot)
+
+        # The watermark shares the style dot's group, where the handoff puts
+        # it: the two slots that set how the snip looks, rather than what is
+        # drawn on it. The window it sits over decides what a press means.
+        self._watermark = _WatermarkSlot(self)
+        self._watermark.clicked.connect(self._on_watermark_pressed)
+        self._watermark.notch.clicked.connect(self._on_watermark_menu_pressed)
+        self._watermark.rightClicked.connect(self._on_watermark_menu_pressed)
+        if self._trailing == "done":
+            self._watermark.hide()
+        else:
+            layout.addWidget(self._watermark)
         self._add_divider(layout)
 
         self._undo_button = _IconButton("undo", f"Undo — {self.UNDO_SHORTCUT}")
@@ -1718,6 +1840,29 @@ class FloatingBar(_Chrome):
         anchored.
         """
         return QRect(self._style_dot.mapTo(host, QPoint(0, 0)), self._style_dot.size())
+
+    # -- watermark ---------------------------------------------------------
+
+    def set_watermark_on(self, on: bool) -> None:
+        self._watermark.set_on(on)
+
+    def set_watermark_unavailable(self, reason: str) -> None:
+        """Grey the watermark slot with `reason` for why, or pass "" when
+        there is a mark to stamp."""
+        self._watermark.set_unavailable_reason(reason)
+
+    def watermark_rect(self, host: QWidget) -> QRect:
+        """The watermark slot, in `host`'s coordinates -- where its menu is
+        anchored."""
+        return QRect(self._watermark.mapTo(host, QPoint(0, 0)), self._watermark.size())
+
+    def _on_watermark_pressed(self) -> None:
+        if not self._watermark.unavailable_reason:
+            self.watermarkToggled.emit()
+
+    def _on_watermark_menu_pressed(self) -> None:
+        if not self._watermark.unavailable_reason:
+            self.watermarkMenuRequested.emit()
 
     # -- undo / redo -------------------------------------------------------
 
@@ -3551,6 +3696,322 @@ class FamilyMenu(_Chrome):
 
 
 # ---------------------------------------------------------------------------
+# The watermark (#69)
+# ---------------------------------------------------------------------------
+# docs/design/bars/README.md, "Watermark is not a tool": a toggle on the
+# stills bar, a notch for where the mark goes and how strongly, and what the
+# mark is in Settings. The mark itself is `shapes.Watermark`, which the live
+# preview and the export both paint.
+
+
+@dataclass
+class WatermarkChoice:
+    """The stills bar's watermark: on or off, which corner, what opacity.
+
+    A session's, not a preference's. It carries from one snip to the next
+    for as long as snipux runs, and a fresh launch starts it off, in the
+    bottom-right corner at 70% (#69). What the mark is lives in Settings --
+    see `watermark_content`.
+    """
+
+    enabled: bool = False
+    corner: str = design.tokens.WATERMARK["default_corner"]
+    opacity: int = design.tokens.WATERMARK["default_opacity"]
+
+
+# The running session's choice. The module's rather than a window's:
+# every snip builds a new `OverlayWindow`, and this is what outlives them.
+watermark_session = WatermarkChoice()
+
+
+def watermark_content(config_dir: Path | None = None) -> "tuple[str | QImage | None, str]":
+    """What Settings says the watermark stamps: `(text or image, "")`, or
+    `(None, reason)` when there is nothing it can stamp.
+
+    Read at the start of every snip, so a change in Settings reaches the
+    very next one. Nothing here raises: a value that cannot be used is a
+    reason for the slot to grey with, never a capture that fails.
+    """
+    tokens = design.tokens
+    if setup_desktop.load_watermark_kind(config_dir) == "image":
+        if setup_desktop.load_watermark_image_name(config_dir) is None:
+            return None, tokens.WATERMARK_UNSET
+        path = setup_desktop.load_watermark_image(config_dir)
+        if path is None:
+            return None, tokens.WATERMARK_IMAGE_MISSING
+        image = QImage(str(path))
+        if image.isNull():
+            return None, tokens.WATERMARK_IMAGE_UNREADABLE
+        return image, ""
+    text = setup_desktop.load_watermark_text(config_dir)
+    return (text, "") if text else (None, tokens.WATERMARK_UNSET)
+
+
+def _watermark_menu_font(spec: tuple[float, int], mono: bool = False) -> QFont:
+    families = design.font_families()
+    font = QFont(families.mono if mono else families.ui)
+    size, weight = spec
+    font.setPixelSize(round(size))
+    font.setWeight(QFont.Weight(weight))
+    return font
+
+
+class _CornerButton(QPushButton):
+    """One of the watermark menu's four corners: a small capture with the
+    mark drawn in that corner, so the choice is shown rather than spelled
+    out. Its name is the tooltip.
+    """
+
+    def __init__(self, corner: str, name: str, parent=None):
+        super().__init__(parent)
+        self.corner = corner
+        self._selected = False
+        self._hovered = False
+        self.setFlat(True)
+        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setToolTip(name)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(design.tokens.WatermarkMetric.CORNER_H)
+
+    def sizeHint(self) -> QSize:
+        # `QPushButton`'s own hint measures a text and an icon this button
+        # never sets. The grid shares the menu's width between the two.
+        metric = design.tokens.WatermarkMetric
+        return QSize(metric.CORNER_FRAME[0] + 2 * metric.CORNER_DOT_INSET, metric.CORNER_H)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    @property
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.WatermarkMetric
+        colour = design.watermark_color
+
+        if self._selected:
+            fill = colour("CORNER_ON_BG")
+        elif self._hovered:
+            fill = colour("CORNER_HOVER_BG")
+        else:
+            fill = None
+        painter.setPen(QPen(colour("CORNER_ON_BORDER" if self._selected else "CORNER_BORDER"), 1))
+        painter.setBrush(fill if fill is not None else Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(
+            QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+            metric.CORNER_RADIUS,
+            metric.CORNER_RADIUS,
+        )
+
+        frame_w, frame_h = metric.CORNER_FRAME
+        frame = QRectF(
+            (self.width() - frame_w) / 2, (self.height() - frame_h) / 2, frame_w, frame_h
+        )
+        painter.setPen(QPen(colour("CORNER_FRAME"), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(
+            frame.adjusted(0.5, 0.5, -0.5, -0.5),
+            metric.CORNER_FRAME_RADIUS,
+            metric.CORNER_FRAME_RADIUS,
+        )
+
+        dot_w, dot_h = metric.CORNER_DOT
+        # Measured inside the frame's 1px edge, where the spec's markup
+        # positions it.
+        inset = metric.CORNER_DOT_INSET + 1
+        left = frame.left() + inset if self.corner in ("tl", "bl") else frame.right() - inset - dot_w
+        top = frame.top() + inset if self.corner in ("tl", "tr") else frame.bottom() - inset - dot_h
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour("CORNER_DOT_ON" if self._selected else "CORNER_DOT"))
+        painter.drawRoundedRect(
+            QRectF(left, top, dot_w, dot_h), metric.CORNER_DOT_RADIUS, metric.CORNER_DOT_RADIUS
+        )
+        painter.end()
+
+
+class WatermarkMenu(_Chrome):
+    """The watermark slot's menu: which corner the mark goes in, and how
+    strongly it shows.
+
+    It stays open while either changes -- watching the preview move behind
+    it is the point of changing them -- and closes the way the family menus
+    do: a press outside it, Esc, or another of the bar's menus opening. A
+    child of the window the bar sits over, for the reasons `FamilyMenu`
+    gives.
+    """
+
+    cornerPicked = pyqtSignal(str)
+    opacityChanged = pyqtSignal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        tokens = design.tokens
+        metric = tokens.WatermarkMetric
+        fonts = tokens.WatermarkFont
+        pad_v, pad_h = metric.MENU_PAD
+        border = tokens.BarMetric.BORDER
+        # Border-box, as the handoff insists: the width is the menu's whole
+        # outside edge, padding and border included.
+        self.setFixedWidth(metric.MENU_W)
+        content_w = metric.MENU_W - 2 * (pad_h + border)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(pad_h + border, pad_v + border, pad_h + border, pad_v + border)
+        layout.setSpacing(metric.MENU_SECTION_GAP)
+
+        corners = QVBoxLayout()
+        corners.setContentsMargins(0, 0, 0, 0)
+        corners.setSpacing(metric.MENU_LABEL_GAP)
+        heading = QLabel("Corner".upper(), self)
+        heading_font = _watermark_menu_font(fonts.SECTION)
+        heading_font.setLetterSpacing(
+            QFont.SpacingType.AbsoluteSpacing, fonts.SECTION_TRACKING * fonts.SECTION[0]
+        )
+        heading.setFont(heading_font)
+        heading.setStyleSheet(f"color: {design.watermark_color('SECTION_FG').name()};")
+        corners.addWidget(heading)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(metric.CORNER_GAP)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        self._corner_buttons: dict[str, _CornerButton] = {}
+        for index, (corner, name) in enumerate(tokens.WATERMARK_CORNERS):
+            button = _CornerButton(corner, name, self)
+            button.clicked.connect(lambda checked=False, c=corner: self._on_corner_clicked(c))
+            self._corner_buttons[corner] = button
+            grid.addWidget(button, index // 2, index % 2)
+        corners.addLayout(grid)
+        layout.addLayout(corners)
+
+        opacity = QHBoxLayout()
+        opacity.setContentsMargins(0, 0, 0, 0)
+        opacity.setSpacing(metric.OPACITY_GAP)
+        label = QLabel("Opacity", self)
+        label.setFont(_watermark_menu_font(fonts.LABEL))
+        label.setStyleSheet(f"color: {design.watermark_color('LABEL_FG').name()};")
+        opacity.addWidget(label)
+        self._slider = QSlider(Qt.Orientation.Horizontal, self)
+        low, high = tokens.WATERMARK["opacity_range"]
+        self._slider.setRange(low, high)
+        self._slider.setValue(tokens.WATERMARK["default_opacity"])
+        self._slider.setToolTip("Watermark opacity")
+        self._slider.valueChanged.connect(self._on_slider_moved)
+        opacity.addWidget(self._slider, 1)
+        self._readout = QLabel(self)
+        self._readout.setFont(_watermark_menu_font(fonts.READOUT, mono=True))
+        self._readout.setStyleSheet(f"color: {design.watermark_color('READOUT_FG').name()};")
+        self._readout.setMinimumWidth(metric.READOUT_MIN_W)
+        self._readout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        opacity.addWidget(self._readout)
+        layout.addLayout(opacity)
+
+        self._note = QLabel(tokens.WATERMARK_MENU_NOTE, self)
+        self._note.setWordWrap(True)
+        self._note.setFont(_watermark_menu_font(fonts.NOTE))
+        self._note.setStyleSheet(f"color: {design.watermark_color('NOTE_FG').name()};")
+        # Fixed at the height its wrapped lines take at the menu's own width:
+        # a wrapping label reports one line's height to a layout that has not
+        # given it a width yet, and the menu would come out a line short.
+        self._note.setFixedWidth(content_w)
+        self._note.setFixedHeight(self._note.heightForWidth(content_w))
+        layout.addWidget(self._note)
+
+        self._corner = tokens.WATERMARK["default_corner"]
+        self.set_corner(self._corner)
+        self._refresh_readout()
+        self.resize(self.sizeHint())
+
+    @property
+    def corner(self) -> str:
+        return self._corner
+
+    @property
+    def opacity(self) -> int:
+        return self._slider.value()
+
+    def set_corner(self, corner: str) -> None:
+        """Mark `corner` chosen without reporting it -- for seeding the menu
+        from the session before it opens."""
+        self._corner = corner
+        for name, button in self._corner_buttons.items():
+            button.set_selected(name == corner)
+
+    def set_opacity(self, opacity: int) -> None:
+        """Set the slider without reporting it, as `set_corner` does."""
+        self._slider.blockSignals(True)
+        self._slider.setValue(opacity)
+        self._slider.blockSignals(False)
+        self._refresh_readout()
+
+    def _on_corner_clicked(self, corner: str) -> None:
+        self.set_corner(corner)
+        self.cornerPicked.emit(corner)
+
+    def _on_slider_moved(self, value: int) -> None:
+        self._refresh_readout()
+        self.opacityChanged.emit(value)
+
+    def _refresh_readout(self) -> None:
+        self._readout.setText(f"{self._slider.value()}%")
+
+    def reposition(self, slot: QRect, bar: QRect, bounds: QRectF) -> None:
+        """Right-aligned to `slot`, `MENU_OVERHANG` past its right edge, and
+        above `bar`, `MENU_OFFSET` clear of it -- below the bar instead when
+        there is no room above inside `bounds`. All three are in the
+        parent's coordinates.
+
+        Right-aligned where the family menus centre, because the spec
+        anchors this one to its slot's right edge.
+        """
+        metric = design.tokens.WatermarkMetric
+        offset = design.tokens.BarMetric.MENU_OFFSET
+        height = self.sizeHint().height()
+        width = self.width()
+        left = QRectF(slot).right() + metric.MENU_OVERHANG - width
+        left = max(bounds.left(), min(left, bounds.right() - width))
+        bar_rect = QRectF(bar)
+        top = bar_rect.top() - offset - height
+        if top < bounds.top():
+            top = min(bar_rect.bottom() + offset, bounds.bottom() - height)
+        self.setGeometry(round(left), round(top), width, height)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        radius = design.tokens.WatermarkMetric.MENU_RADIUS
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.bar_color("MENU_BG"))
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(design.bar_color("MENU_BORDER"))
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
 # Top hint HUD (SNX-46)
 # ---------------------------------------------------------------------------
 # docs/design/overlay-redesign.md's "Top hint HUD" section is the authority
@@ -3965,9 +4426,11 @@ class OverlayWindow(QWidget):
     - Chrome must never reach the export. `rendered_image()` flattens
       `_marks` onto the selection's crop of the frozen frame; it never
       touches `_bar`, `_style_popover`, `_toast`, `_hud`, `_popover`,
-      `_family_menus`, `_close_button` or any other widget painted over
-      the overlay, so none of that chrome can ever leak into a copy or a
-      save.
+      `_family_menus`, `_watermark_menu`, `_close_button` or any other
+      widget painted over the overlay, so none of that chrome can ever leak
+      into a copy or a save. The watermark's preview is the one thing laid
+      over the ink that is not chrome: `rendered_image` stamps the very
+      mark the preview shows (`_active_watermark`).
 
     Everything else here is chrome and mode-handling built around those
     three constraints. `FloatingBar` (`_bar`) is the real child widget
@@ -4469,6 +4932,20 @@ class OverlayWindow(QWidget):
         for menu in self._family_menus.values():
             menu.hide()
             menu.siblingPicked.connect(self._on_family_sibling_picked)
+        # The watermark slot's menu: one more of the bar's menus, and still
+        # one open at a time, the style popover included
+        # (`_close_bar_menus`). What the mark is comes
+        # from Settings, read once per snip; a value that cannot be used
+        # greys the slot with the reason and never stops the capture.
+        self._watermark_menu = WatermarkMenu(self)
+        self._watermark_menu.hide()
+        self._watermark_menu.cornerPicked.connect(self._on_watermark_corner)
+        self._watermark_menu.opacityChanged.connect(self._on_watermark_opacity)
+        self._bar.watermarkToggled.connect(self._toggle_watermark)
+        self._bar.watermarkMenuRequested.connect(self._toggle_watermark_menu)
+        self._watermark_content, unavailable = watermark_content()
+        self._bar.set_watermark_unavailable(unavailable)
+        self._sync_watermark()
         # Hovering a tool names it -- see `ToolHintStrip`. Not Qt's tooltip,
         # which on an always-on-top frameless window is a coin toss.
         self._bar.toolHovered.connect(self._preview_tool)
@@ -4617,6 +5094,7 @@ class OverlayWindow(QWidget):
         self.set_eraser_active(tool == "eraser")
         for menu in self._family_menus.values():
             menu.hide()
+        self._watermark_menu.hide()
         self._follow_tool_with_style(tool)
         self._sync_tool_hint()
 
@@ -4701,21 +5179,26 @@ class OverlayWindow(QWidget):
         self._close_bar_menus()
 
     def _bar_menu_open(self) -> bool:
-        """Whether anything hangs open off the bar: the style popover or a
-        family menu. A menu added to the bar belongs here too, because the
-        tool hint strip has to give way to every one of them.
+        """Whether anything hangs open off the bar: the style popover, a
+        family menu or the watermark menu. A menu added to the bar belongs
+        here too, because the tool hint strip has to give way to every one
+        of them.
         """
-        return not self._style_popover.isHidden() or any(
-            not menu.isHidden() for menu in self._family_menus.values()
+        return (
+            not self._style_popover.isHidden()
+            or not self._watermark_menu.isHidden()
+            or any(not menu.isHidden() for menu in self._family_menus.values())
         )
 
     def _close_bar_menus(self) -> bool:
-        """Close the family menus and the style popover, and say whether any
-        of them was open. The tool hint strip comes back once none is.
+        """Close the family menus, the watermark menu and the style popover,
+        and say whether any of them was open. The tool hint strip comes back
+        once none is.
         """
         was_open = self._bar_menu_open()
         for menu in self._family_menus.values():
             menu.hide()
+        self._watermark_menu.hide()
         self._style_popover.hide()
         self._sync_tool_hint()
         return was_open
@@ -4772,6 +5255,93 @@ class OverlayWindow(QWidget):
         still means somewhere on a monitor of another size.
         """
         setup_desktop.save_bar_position(setup_desktop.BarPosition(monitor, (x, y)))
+
+    # -- the watermark (#69) ---------------------------------------------------
+
+    def _watermark_on(self) -> bool:
+        """Whether this snip is stamped: switched on for the session, with
+        something in Settings to stamp."""
+        return watermark_session.enabled and self._watermark_content is not None
+
+    def _sync_watermark(self) -> None:
+        """Put the session's watermark on the slot and in its menu, and
+        repaint the preview."""
+        self._bar.set_watermark_on(self._watermark_on())
+        self._watermark_menu.set_corner(watermark_session.corner)
+        self._watermark_menu.set_opacity(watermark_session.opacity)
+        self.update()
+
+    def _toggle_watermark(self) -> None:
+        """The watermark slot: switch the mark on or off, for this snip and
+        every one after it this session. An open menu closes, as it does for
+        a tool clicked on the bar."""
+        self._close_bar_menus()
+        watermark_session.enabled = not watermark_session.enabled
+        self._sync_watermark()
+
+    def _toggle_watermark_menu(self) -> None:
+        """The watermark slot's notch: open its menu, or close it if it is
+        the one open. The tool hint strip gives way while it is open, as it
+        does for a family menu: on the strip's side of the bar it would sit
+        over a corner or the slider and take the click (#74)."""
+        menu = self._watermark_menu
+        # Hidden, not visible: see `_toggle_family_menu`.
+        if not menu.isHidden():
+            menu.hide()
+            self._sync_tool_hint()
+            return
+        self._close_bar_menus()
+        self._sync_watermark()
+        menu.reposition(
+            self._bar.watermark_rect(self), self._bar.geometry(), self._bar_bounds()
+        )
+        menu.show()
+        menu.raise_()
+        self._sync_tool_hint()
+
+    def _on_watermark_corner(self, corner: str) -> None:
+        watermark_session.corner = corner
+        self.update()
+
+    def _on_watermark_opacity(self, opacity: int) -> None:
+        watermark_session.opacity = opacity
+        self.update()
+
+    def _active_watermark(self) -> Watermark | None:
+        """The mark this snip is stamped with, or None while the watermark
+        is off or there is nothing to stamp."""
+        if not self._watermark_on():
+            return None
+        content = self._watermark_content
+        return Watermark(
+            corner=watermark_session.corner,
+            opacity=watermark_session.opacity,
+            text=content if isinstance(content, str) else "",
+            image=content if isinstance(content, QImage) else None,
+        )
+
+    def _paint_watermark(self, painter: QPainter) -> None:
+        """The watermark's live preview: inside the selection, above every
+        mark, exactly where `rendered_image` will stamp it.
+
+        The same `Watermark.paint` the export runs, in this window's own
+        coordinates. Those are logical pixels, so its lengths go on at 1:1
+        and the window's device makes them physical, as it does for every
+        mark; the frame's ratio is passed only for an image's cap at its own
+        pixels, which the export counts in the same frame pixels. Not while
+        a recording is being framed: the watermark belongs to stills.
+        """
+        if self._chooser.kind == "record" or self._armed_for_recording:
+            return
+        mark = self._active_watermark()
+        if mark is None:
+            return
+        selection = QRectF(self._selection)
+        scale_x, scale_y = self._window_to_frame_scale()
+        painter.save()
+        painter.setClipRect(selection)
+        mark.paint(painter, selection, 1.0, (scale_x + scale_y) / 2)
+        painter.restore()
 
     _CHOOSER_TOP_MARGIN = 28
 
@@ -5873,6 +6443,7 @@ class OverlayWindow(QWidget):
             self._tool_hint.hide()
             for menu in self._family_menus.values():
                 menu.hide()
+            self._watermark_menu.hide()
         elif self._selection is not None and self.isVisible():
             self._sync_bar_destination()
             self._arm_default_tool()
@@ -5886,11 +6457,13 @@ class OverlayWindow(QWidget):
             self._tool_hint.hide()
             for menu in self._family_menus.values():
                 menu.hide()
+            self._watermark_menu.hide()
 
     def _preview_tool(self, tool: str) -> None:
         """Name the tool under the cursor without arming it. Reverts on
-        leave, so hovering only ever reads. Not while the style popover or a
-        family menu is open: the strip gives way to them (`_sync_tool_hint`).
+        leave, so hovering only ever reads. Not while the style popover, a
+        family menu or the watermark menu is open: the strip gives way to
+        them (`_sync_tool_hint`).
         """
         if (
             not self.isVisible()
@@ -5954,8 +6527,9 @@ class OverlayWindow(QWidget):
         with what it does -- the one part of a tray that was always worth
         having up.
 
-        It gives way to the style popover and to the family menus rather
-        than sharing the screen with them (`_bar_menu_open`). Where the bar
+        It gives way to the style popover, the family menus and the
+        watermark menu rather than sharing the screen with them
+        (`_bar_menu_open`). Where the bar
         has no room below it, the strip and the popover would both open above
         it, one on top of the other. And where a family menu opens on the
         strip's side of the bar, the strip sat on the menu's first row and
@@ -6306,10 +6880,18 @@ class OverlayWindow(QWidget):
         coordinates to the cropped image's own origin exactly once -- see
         `shapes.render_selection` and docs/design/overlay-redesign.md's
         "Ink lives in screen coordinates".
+
+        While the watermark is on, the mark the preview shows is stamped
+        over them, once -- see `_paint_watermark`.
         """
         if self._selection is None:
             raise ValueError("no selection to export")
-        return render_selection(self._frame, self._marks, QRectF(self._selection))
+        return render_selection(
+            self._frame,
+            self._marks,
+            QRectF(self._selection),
+            watermark=self._active_watermark(),
+        )
 
     # -- copy / save (SNX-39) ----------------------------------------------
     # Both render fresh from `rendered_image()` at the moment they're
@@ -6528,6 +7110,7 @@ class OverlayWindow(QWidget):
         self._popover.hide()
         for menu in self._family_menus.values():
             menu.hide()
+        self._watermark_menu.hide()
         self._toast.hide()
         self._hud.hide()
         self._close_button.hide()
@@ -7350,6 +7933,8 @@ class OverlayWindow(QWidget):
             # order within the selection: "undimmed pixmap, ink layer,
             # frame stroke, handles, chips".
             self._paint_marks(painter)
+            # Above every mark, and under the frame's own chrome.
+            self._paint_watermark(painter)
             # Smooths the dashed diagonal-adjacent stroke and the rounded
             # bracket/handle corners; the scrim above is a flat axis-aligned
             # fill and doesn't need it.
