@@ -6607,14 +6607,8 @@ class TestCommitToRecord:
     @pytest.fixture(autouse=True)
     def _clean_slate(self, monkeypatch):
         _close_stray_toplevel_windows()
-        # `Chooser.kindChanged` is wired straight to `setup_desktop.save_kind`
-        # (SNX-122's own `_chooser.set_kind("record")` below fires it), which
-        # would otherwise write to this machine's real config file the same
-        # way a real session does. `load_kind` is pinned the same way so a
-        # write a previous, unrelated test left behind can't change which
-        # side a fresh `OverlayWindow` opens on here.
-        monkeypatch.setattr(overlay_module.setup_desktop, "save_kind", lambda *a, **k: True)
-        monkeypatch.setattr(overlay_module.setup_desktop, "load_kind", lambda *a, **k: "stills")
+        # The stills/record side is not remembered at all, so a
+        # `set_kind("record")` below reaches nothing outside this overlay.
 
     def _overlay(
         self,
@@ -9131,11 +9125,8 @@ class TestActiveWindowTakesTheWindowTheUserWasIn:
     @pytest.fixture(autouse=True)
     def _clean_slate(self, monkeypatch):
         _close_stray_toplevel_windows()
-        # `set_kind("record")` below would otherwise write this machine's
-        # real config, and a stale write could open a fresh overlay on the
-        # record side.
-        monkeypatch.setattr(overlay_module.setup_desktop, "save_kind", lambda *a, **k: True)
-        monkeypatch.setattr(overlay_module.setup_desktop, "load_kind", lambda *a, **k: "stills")
+        # Nothing to pin: the side `set_kind("record")` picks below lasts
+        # for this overlay alone and is never written anywhere.
 
     # A desktop whose origin is not (0, 0), so a local-for-absolute mix-up
     # is a whole monitor's error rather than an invisible one.
@@ -9641,16 +9632,19 @@ class TestReuseLastRegionPreselectsIt:
         assert overlay._recalled_selection is False
         assert overlay._selection != QRect(200, 300, 640, 480)
 
-    def test_the_record_side_is_left_alone(self):
+    def test_a_recalled_region_arms_no_recording_when_the_side_is_flipped(self):
         # Committing is what arms a recording, and arming one as a side
-        # effect of opening the overlay is not something anyone asked for.
+        # effect of opening the overlay -- or of reaching for the record
+        # side afterwards -- is not something anyone asked for. Every
+        # overlay opens on stills now (bars/divergences.md 25), so this is
+        # the only way the recalled rectangle and the record side meet.
         setup_desktop.save_last_region((-1720, 300, 640, 480))
         setup_desktop.save_reuse_last_region(True)
-        setup_desktop.save_kind("record")
-
         overlay = self._overlay()
 
-        assert overlay._selection is None
+        overlay._chooser.set_kind("record")
+
+        assert overlay._selection == QRect(200, 300, 640, 480)
         assert overlay._armed_for_recording is False
 
     # -- recalling onto a desktop that has changed -----------------------
@@ -13071,3 +13065,91 @@ class TestWatermarkMenuStaysClickable:
         assert menu.isHidden()
         assert not popover.isHidden()
         assert bounds.contains(QRectF(popover.geometry())), (popover.geometry(), bounds)
+
+
+class TestTheHighlighterSnapsToText:
+    """A highlighter sweep over text commits as bands fitted to the lines
+    (`snipux.textsnap`), read off the frozen frame itself; the style popover's
+    snap button switches the tool back to freehand."""
+
+    @staticmethod
+    def _text_overlay(scale: int = 1) -> OverlayWindow:
+        image = QImage(400 * scale, 120 * scale, QImage.Format.Format_RGB32)
+        image.fill(QColor("#ffffff"))
+        painter = QPainter(image)
+        painter.scale(scale, scale)
+        font = QFont()
+        font.setPixelSize(18)
+        painter.setFont(font)
+        painter.setPen(QColor("#202020"))
+        painter.drawText(QPointF(20, 40), "several words of text")
+        painter.end()
+        frame = Frame(image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(400, 120))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 400, 120)
+        overlay.set_selection(QRect(0, 0, 400, 120))
+        overlay._bar.select_tool("highlighter")
+        return overlay
+
+    @staticmethod
+    def _sweep(overlay: OverlayWindow) -> None:
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(40, 38))
+        QTest.mouseMove(overlay, QPoint(90, 31))
+        QTest.mouseMove(overlay, QPoint(140, 37))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(140, 37))
+
+    def test_a_sweep_over_text_commits_as_a_band_on_the_line(self):
+        overlay = self._text_overlay()
+
+        self._sweep(overlay)
+
+        (mark,) = overlay.marks
+        assert isinstance(mark, Highlighter)
+        (band,) = mark.bands
+        # On the line of text, which sits between y=26 and y=45 or so --
+        # not wherever the wandering sweep happened to go.
+        assert 20 <= band.top() <= 30 and 40 <= band.bottom() <= 50
+        assert band.left() <= 22
+
+    def test_the_band_is_in_window_coordinates_on_a_scaled_frame(self):
+        # The frame carries twice the pixels; the mark must still be where
+        # the text is on screen, not twice as far along.
+        at_one = self._text_overlay()
+        at_two = self._text_overlay(scale=2)
+
+        self._sweep(at_one)
+        self._sweep(at_two)
+
+        (one,) = at_one.marks[0].bands
+        (two,) = at_two.marks[0].bands
+        assert abs(one.left() - two.left()) <= 2 and abs(one.top() - two.top()) <= 2
+        assert abs(one.right() - two.right()) <= 2 and abs(one.bottom() - two.bottom()) <= 2
+
+    def test_freehand_keeps_the_sweep_as_drawn(self):
+        overlay = self._text_overlay()
+        overlay._styles.update("highlighter", snap="free")
+
+        self._sweep(overlay)
+
+        (mark,) = overlay.marks
+        assert mark.bands == []
+        assert len(mark.points) >= 3
+
+    def test_the_popover_snap_button_switches_the_tool_to_freehand_and_back(self):
+        styles = ToolStyles()
+        popover = StylePopover(styles)
+        popover.set_tool("highlighter")
+
+        QTest.mouseClick(popover._snap_button, Qt.MouseButton.LeftButton)
+        freehand = styles.of("highlighter").snap
+        QTest.mouseClick(popover._snap_button, Qt.MouseButton.LeftButton)
+
+        assert (freehand, styles.of("highlighter").snap) == ("free", "text")
+        assert popover._snap_button.toolTip() == "Snap to text → click for Freehand"
+
+    def test_only_the_highlighter_offers_the_snap_button(self):
+        popover = StylePopover(ToolStyles())
+
+        popover.set_tool("pen")
+
+        assert "snap" not in popover.sections()

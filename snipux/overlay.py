@@ -63,6 +63,7 @@ from snipux.marks import (
     begin_stroke,
     extend_stroke,
     session_styles,
+    snap_to_text,
 )
 from snipux.shapes import (
     Arrow,
@@ -2570,8 +2571,17 @@ def _fit_to_the_colour_row(button: QPushButton) -> None:
     button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
 
+def _cycle_of(kind: str) -> list[tuple]:
+    """The click-through cycle a `_CycleButton` of `kind` steps through."""
+    return {
+        "fill": design.tokens.FILL_CYCLE,
+        "dash": design.tokens.DASH_CYCLE,
+        "snap": design.tokens.SNAP_CYCLE,
+    }[kind]
+
+
 class _CycleButton(QPushButton):
-    """Fill or line: one click-through button that shows the state it is in.
+    """Fill, line or snap: one click-through button that shows the state it is in.
 
     A click moves on to the next state, the way the chooser's destination and
     delay do -- one behaviour to learn, and what took the popover from three
@@ -2583,9 +2593,7 @@ class _CycleButton(QPushButton):
         super().__init__(parent)
         metric = design.tokens.BarMetric
         self.kind = kind
-        self._state = (
-            design.tokens.FILL_CYCLE if kind == "fill" else design.tokens.DASH_CYCLE
-        )[0][0]
+        self._state = _cycle_of(kind)[0][0]
         self._hovered = False
         self.setFixedSize(metric.CYCLE_W, metric.CYCLE_H)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -2623,9 +2631,46 @@ class _CycleButton(QPushButton):
         painter.drawRoundedRect(rect, metric.CYCLE_RADIUS, metric.CYCLE_RADIUS)
         if self.kind == "fill":
             self._paint_fill_glyph(painter, rect.center())
+        elif self.kind == "snap":
+            self._paint_snap_glyph(painter, rect.center())
         else:
             self._paint_dash_glyph(painter, rect.center())
         painter.end()
+
+    def _paint_snap_glyph(self, painter: QPainter, centre: QPointF) -> None:
+        """Two lines of type with a highlight fitted over the top one, or a
+        loose freehand swash over them when the sweep is left as drawn.
+        """
+        metric = design.tokens.BarMetric
+        glyph = design.bar_color("CYCLE_GLYPH")
+        half = metric.SNAP_GLYPH_W / 2
+        top_y = centre.y() - metric.SNAP_GLYPH_LINE_GAP / 2
+        bottom_y = centre.y() + metric.SNAP_GLYPH_LINE_GAP / 2
+        if self._state == "text":
+            band = QRectF(0, 0, metric.SNAP_GLYPH_W + 2, metric.SNAP_GLYPH_BAND_H)
+            band.moveCenter(QPointF(centre.x(), top_y))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(design.bar_color("CYCLE_GLYPH_WASH"))
+            painter.drawRoundedRect(band, 2, 2)
+        pen = QPen(glyph, metric.DASH_GLYPH_STROKE)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(QPointF(centre.x() - half, top_y), QPointF(centre.x() + half, top_y))
+        painter.drawLine(
+            QPointF(centre.x() - half, bottom_y), QPointF(centre.x() + half * 0.4, bottom_y)
+        )
+        if self._state != "text":
+            swash = QPainterPath(QPointF(centre.x() - half, top_y + 2))
+            swash.cubicTo(
+                QPointF(centre.x() - half * 0.3, top_y - 5),
+                QPointF(centre.x() + half * 0.3, bottom_y + 3),
+                QPointF(centre.x() + half, top_y - 1),
+            )
+            wash = QPen(design.bar_color("CYCLE_GLYPH_WASH"), metric.SNAP_GLYPH_BAND_H - 2)
+            wash.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(wash)
+            painter.drawPath(swash)
 
     def _paint_fill_glyph(self, painter: QPainter, centre: QPointF) -> None:
         """A small box drawn the way the state fills a shape: an outline, a
@@ -2742,7 +2787,7 @@ class StylePopover(_Chrome):
     # Shown or hidden -- the style dot reads as pressed while it is open.
     openChanged = pyqtSignal(bool)
 
-    SECTIONS = ("color", "fill", "dash", "strength", "size")
+    SECTIONS = ("color", "fill", "dash", "snap", "strength", "size")
 
     def __init__(self, styles: ToolStyles, parent=None):
         super().__init__(parent)
@@ -2785,6 +2830,8 @@ class StylePopover(_Chrome):
         self._fill_button.clicked.connect(lambda: self._cycle("fill"))
         self._dash_button = _CycleButton("dash", self._controls_row)
         self._dash_button.clicked.connect(lambda: self._cycle("dash"))
+        self._snap_button = _CycleButton("snap", self._controls_row)
+        self._snap_button.clicked.connect(lambda: self._cycle("snap"))
         self._strength_slider = _style_slider(tokens.STRENGTH_RANGE, self._controls_row)
         self._strength_slider.setToolTip(f"Redaction strength — {_STEP_KEYS}")
         self._strength_slider.valueChanged.connect(lambda value: self._apply(strength=value))
@@ -2795,6 +2842,7 @@ class StylePopover(_Chrome):
         for widget in (
             self._fill_button,
             self._dash_button,
+            self._snap_button,
             self._strength_slider,
             self._strength_readout,
             self._size_slider,
@@ -2807,6 +2855,7 @@ class StylePopover(_Chrome):
             "color": (self._colour_row,),
             "fill": (self._fill_button,),
             "dash": (self._dash_button,),
+            "snap": (self._snap_button,),
             "strength": (self._strength_slider, self._strength_readout),
             "size": (self._size_slider, self._size_readout),
         }
@@ -2852,6 +2901,7 @@ class StylePopover(_Chrome):
             button.set_selected(hex_colour.lower() == style.colour.lower())
         self._fill_button.set_state(style.fill, self._cycle_tooltip("fill", style.fill))
         self._dash_button.set_state(style.dash, self._cycle_tooltip("dash", style.dash))
+        self._snap_button.set_state(style.snap, self._cycle_tooltip("snap", style.snap))
         for slider, value in (
             (self._strength_slider, style.strength),
             (self._size_slider, style.size),
@@ -2883,6 +2933,9 @@ class StylePopover(_Chrome):
         if kind == "fill":
             (_name, label), (_next, next_label) = _cycle_step(design.tokens.FILL_CYCLE, state)
             return f"Fill · {label} → click for {next_label}"
+        if kind == "snap":
+            (_name, label), (_next, next_label) = _cycle_step(design.tokens.SNAP_CYCLE, state)
+            return f"{label} → click for {next_label}"
         (_name, _pattern, label), (_next, _next_pattern, next_label) = _cycle_step(
             design.tokens.DASH_CYCLE, state
         )
@@ -2896,8 +2949,7 @@ class StylePopover(_Chrome):
         self.styleChanged.emit(self._tool)
 
     def _cycle(self, kind: str) -> None:
-        cycle = design.tokens.FILL_CYCLE if kind == "fill" else design.tokens.DASH_CYCLE
-        _now, then = _cycle_step(cycle, getattr(self._styles.of(self._tool), kind))
+        _now, then = _cycle_step(_cycle_of(kind), getattr(self._styles.of(self._tool), kind))
         self._apply(**{kind: then[0]})
 
     def _pick_custom_colour(self) -> None:
@@ -4890,12 +4942,12 @@ class OverlayWindow(QWidget):
             platform.current.text_recognition_unavailable_reason(),
         )
         self._chooser.hideSensitiveChanged.connect(setup_desktop.save_hide_sensitive)
-        # `kind` (the stills/record switch) has no Settings surface the way
-        # `after` does -- the chooser itself is the only place it is ever
-        # set, so it is loaded the same way but persisted on every change
-        # rather than only read here. See `setup_desktop.load_kind`.
-        self._chooser.set_kind(setup_desktop.load_kind())
-        self._chooser.kindChanged.connect(setup_desktop.save_kind)
+        # `kind` (the stills/record switch) is deliberately not remembered:
+        # every snip opens on stills, and recording is chosen on purpose or
+        # not at all. It used to persist, and the cost of that was a snip
+        # that started filming because the session before had been a
+        # recording (bars/divergences.md 25). The chooser's own default is
+        # `tokens.KIND_DEFAULT`, so there is nothing to set here.
         # Last region is a mode (#66). What it would restore is worked out
         # against this frame. The stored reuse-last-region preference was a
         # toggle meaning "open on the last region", and is now that mode
@@ -5989,10 +6041,14 @@ class OverlayWindow(QWidget):
         `mousePressEvent` already supports), or nudge an edge to adjust it.
         Nothing is captured until they say so.
 
-        Stills only. On the record side the equivalent would have to commit
-        -- that is what puts the record bar up and arms the region -- and
+        Stills only, and that needs no check of its own any more: every
+        overlay opens on stills (bars/divergences.md 25), and this runs as
+        one opens. On the record side the equivalent would have to commit --
+        that is what puts the record bar up and arms the region -- and
         arming a recording as a side effect of opening the overlay is not
-        something anyone asked for.
+        something anyone asked for. Flipping to record after this has run
+        leaves the rectangle framed and armed for nothing, which is the same
+        thing a drag on the record side leaves.
 
         The stored rectangle is absolute, and the desktop it was stored
         against may not be the desktop it is being recalled onto -- a
@@ -6022,8 +6078,6 @@ class OverlayWindow(QWidget):
         is `_select_last_region`, which commits: that is the user choosing
         the rectangle, where this is the overlay offering it.
         """
-        if self._chooser.kind == "record":
-            return
         # Read off the chooser, not straight from config: it is seeded from
         # the same value, and it opens on Last region only when there is a
         # rectangle here to restore.
@@ -7846,6 +7900,10 @@ class OverlayWindow(QWidget):
         if shape is None:
             return
         committed = finalize_mark(shape)
+        if isinstance(committed, Highlighter) and self._styles.of("highlighter").snap == "text":
+            # Against the frozen frame, never the live screen: the pixels
+            # under the sweep are the ones the user was looking at.
+            committed = snap_to_text(committed, self._frame.image, *self._window_to_frame_scale())
         if committed is not None:
             self.add_mark(committed)
         else:

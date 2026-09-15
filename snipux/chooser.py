@@ -194,9 +194,10 @@ class _KindButton(_Surface):
     """One side of the stills/record pair.
 
     The two are a pair of buttons in a well rather than a switch, because a
-    switch's knob says on/off and not on/off *what*. Record is a filled
-    circle, drawn rather than loaded: the handoff says "a filled 10px circle,
-    not a glyph", and a stroked circle reads as a radio button.
+    switch's knob says on/off and not on/off *what*. Both are glyphs of the
+    thing they make -- a camera and a camcorder -- rather than the handoff's
+    filled circle for record: a dot beside a camera says "on", not "a video"
+    (bars/divergences.md 25).
     """
 
     picked = pyqtSignal(str)
@@ -235,13 +236,15 @@ class _KindButton(_Surface):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(fill)
             painter.drawRoundedRect(rect, metric.WELL_BTN_RADIUS, metric.WELL_BTN_RADIUS)
-        if recording:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(foreground)
-            painter.drawEllipse(rect.center(), metric.REC_DOT / 2, metric.REC_DOT / 2)
-        else:
-            offset = (metric.BTN - metric.ICON) / 2
-            _draw_icon(painter, "camera", foreground, offset, offset, metric.ICON)
+        offset = (metric.BTN - metric.ICON) / 2
+        _draw_icon(
+            painter,
+            "camcorder" if recording else "camera",
+            foreground,
+            offset,
+            offset,
+            metric.ICON,
+        )
         painter.end()
 
 

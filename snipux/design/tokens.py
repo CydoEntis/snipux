@@ -219,6 +219,7 @@ class Metric:
     TEXT_LABEL_RING_W = 1
     HIGHLIGHT_MULT   = 3.5        # stroke width multiplier for the highlighter
     HIGHLIGHT_ALPHA  = 0.34
+    HIGHLIGHT_BAND_RADIUS = 3     # corners of a highlight snapped to text
     STROKE_MIN       = 1
     STROKE_MAX       = 26
     STROKE_DEFAULT   = 5
@@ -836,6 +837,10 @@ DASH_CYCLE = [("solid", (), "Solid"), ("dashed", (9, 7), "Dashed"), ("dotted", (
 # Of the STROKE colour, so a filled shape has no second colour to reconcile.
 FILL_OPACITY = {"outline": 0.0, "filled": 0.90, "both": 0.22}
 
+# The highlighter's own click-through: fit the sweep to the lines of text
+# under it, or leave it as drawn. Not in the handoff -- bars/divergences.md 24.
+SNAP_CYCLE = [("text", "Snap to text"), ("free", "Freehand")]
+
 
 # ---------------------------------------------------------------------------
 # The capture flow's bars (docs/design/flow, LOCKED 2026-08-27)
@@ -1268,6 +1273,9 @@ class BarMetric:
     FILL_GLYPH_BORDER = 1.5
     DASH_GLYPH_W     = 22          # a 24px line, 1px in from each end
     DASH_GLYPH_STROKE = 2
+    SNAP_GLYPH_W     = 20          # snap to text: two lines of "type"
+    SNAP_GLYPH_LINE_GAP = 7        # between the two lines' centres
+    SNAP_GLYPH_BAND_H = 7          # the highlight washed over the top line
     SLIDER_TRACK     = 4
     SLIDER_THUMB     = 15
     READOUT_W_SIZE   = 32          # "26px" without the row reflowing
@@ -1299,7 +1307,6 @@ class BarMetric:
     CHIP_PAD_R       = 7
     CHIP_GAP         = 6
     CHIP_ICON        = 14
-    REC_DOT          = 10          # record is a filled circle, not a glyph
     FLAG_PAD_H       = 8           # spec markup: Delay's horizontal padding
     FLAG_GAP         = 5           # spec markup: Delay's glyph to its value
     MENU_RULE_MARGIN = 4           # spec markup: the rule above Last region
@@ -1546,7 +1553,7 @@ REDACTION_KEY = "B"
 # Anything absent is not rendered -- never rendered-but-inert.
 STYLE_SECTIONS = {
     "pen":         ["color", "size"],
-    "highlighter": ["color", "size"],
+    "highlighter": ["color", "snap", "size"],
     "rect":        ["color", "fill", "dash", "size"],
     "ellipse":     ["color", "fill", "dash", "size"],
     "line":        ["color", "dash", "size"],
@@ -1567,7 +1574,10 @@ UNSTYLED_TOOLS = [tool for tool, sections in STYLE_SECTIONS.items() if not secti
 # turns the pen red. The handoff's first-run seed, as it wrote it.
 DEFAULT_STYLE = {
     "pen":         {"color": "#e3ff4f", "size": 5, "dash": "solid", "fill": "outline"},
-    "highlighter": {"color": "#f59e0b", "size": 5, "dash": "solid", "fill": "outline"},
+    # Yellow, not the handoff's amber: a highlighter is expected to be yellow,
+    # and amber at HIGHLIGHT_ALPHA read as orange (bars/divergences.md 24).
+    "highlighter": {"color": "#facc15", "size": 5, "dash": "solid", "fill": "outline",
+                    "snap": "text"},
     "rect":        {"color": "#ef4444", "size": 3, "dash": "dashed", "fill": "both"},
     "ellipse":     {"color": "#38bdf8", "size": 3, "dash": "solid", "fill": "outline"},
     "line":        {"color": "#e3ff4f", "size": 3, "dash": "solid", "fill": "outline"},

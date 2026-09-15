@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QEvent, QPointF, Qt
-from PyQt6.QtGui import QColor, QImage, QMouseEvent
+from PyQt6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
@@ -1356,3 +1356,45 @@ class TestNoSecondWatermark:
         window = ReviewWindow(make_image())
 
         assert window._canvas.rendered_image() == make_image()
+
+
+class TestTheHighlighterSnapsToTextHere:
+    """The review window snaps a highlighter sweep the way the overlay does,
+    against the snip itself -- its marks are already in the image's pixels."""
+
+    @staticmethod
+    def _text_image() -> QImage:
+        image = QImage(600, 400, QImage.Format.Format_RGB32)
+        image.fill(QColor("#ffffff"))
+        painter = QPainter(image)
+        font = QFont()
+        font.setPixelSize(18)
+        painter.setFont(font)
+        painter.setPen(QColor("#202020"))
+        painter.drawText(QPointF(40, 200), "several words of text")
+        painter.end()
+        return image
+
+    def test_a_sweep_over_text_commits_as_a_band_on_the_line(self):
+        window = ReviewWindow(self._text_image())
+        window.resize(1020, 700)
+        window._set_annotating(True)
+        canvas = window._canvas
+        canvas.resize(1020, 600)
+        window._bar.select_tool("highlighter")
+        rect = canvas.image_rect()
+        scale = rect.width() / 600
+
+        def on_screen(x, y):
+            return rect.x() + x * scale, rect.y() + y * scale
+
+        canvas.mousePressEvent(_press(canvas, *on_screen(60, 197)))
+        canvas.mouseMoveEvent(_move(canvas, *on_screen(110, 190)))
+        canvas.mouseMoveEvent(_move(canvas, *on_screen(160, 196)))
+        canvas.mouseReleaseEvent(_release(canvas, *on_screen(160, 196)))
+
+        (mark,) = window._store.marks
+        (band,) = mark.bands
+        # Image pixels: the line of text sits at roughly y=186 to y=205.
+        assert 178 <= band.top() <= 190 and 200 <= band.bottom() <= 212
+        assert band.left() <= 42

@@ -1855,3 +1855,59 @@ class TestRenderSelectionWatermark:
         expected = QRect(519, 399, 60, 30)
         assert_edges_near(colour_bounds(on_screen, MAGENTA), expected)
         assert_edges_near(colour_bounds(exported, MAGENTA), expected)
+
+
+class TestSnappedHighlighter:
+    """A highlighter that snapped to text (`snipux.textsnap`) is its bands:
+    they are what paints, what exports and what the eraser finds."""
+
+    BAND = QRectF(20, 20, 60, 14)
+
+    def _snapped(self, **changes) -> Highlighter:
+        # Its points wander well outside the band, as a hand-drawn sweep does.
+        shape = Highlighter(
+            colour=RED,
+            stroke_width=4,
+            points=[QPointF(10, 60), QPointF(90, 5)],
+            bands=[QRectF(self.BAND)],
+        )
+        return replace(shape, **changes)
+
+    def test_it_paints_its_bands_and_not_its_sweep(self):
+        image = QImage(100, 80, QImage.Format.Format_RGB32)
+        image.fill(BACKGROUND)
+
+        result = render(image, [self._snapped()])
+
+        assert result.pixel(50, 27) != BACKGROUND
+        # On the sweep's line, but outside the band.
+        assert result.pixel(12, 58) == BACKGROUND
+
+    def test_two_touching_bands_are_filled_once_where_they_meet(self):
+        image = QImage(100, 80, QImage.Format.Format_RGB32)
+        image.fill(BACKGROUND)
+        overlapping = [QRectF(20, 20, 60, 14), QRectF(20, 30, 60, 14)]
+
+        result = render(image, [self._snapped(bands=overlapping)])
+
+        assert result.pixel(50, 32) == result.pixel(50, 24)
+
+    def test_the_eraser_finds_it_on_its_band_and_not_on_its_sweep(self):
+        shape = self._snapped()
+
+        assert shape.hit_test(QPointF(50, 27))
+        assert not shape.hit_test(QPointF(12, 58))
+
+    def test_an_export_moves_its_bands_with_the_selection(self):
+        # A 2x frame: the selection's origin comes off and every length
+        # doubles, bands included.
+        image = QImage(200, 160, QImage.Format.Format_RGB32)
+        image.fill(BACKGROUND)
+        frame = Frame(image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(100, 80))
+        selection = QRectF(10, 10, 80, 60)
+
+        result = render_selection(frame, [self._snapped()], selection)
+
+        # The band's middle, (50, 27) on screen, is (80, 34) in the export.
+        assert result.pixel(80, 34) != BACKGROUND
+        assert result.pixel(4, 4) == BACKGROUND

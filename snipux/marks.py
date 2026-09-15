@@ -19,10 +19,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 
-from PyQt6.QtCore import QObject, QPointF, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QLineEdit
 
 from . import shapes as shapes_module
+from . import textsnap
 from .design import tokens
 from .shapes import Shape
 
@@ -246,6 +248,9 @@ class ToolStyle:
     dash: str = "solid"
     fill: str = "outline"
     strength: int = tokens.Metric.BLUR_DEFAULT
+    # A `SNAP_CYCLE` name: whether a highlighter sweep fits itself to the
+    # text under it on release (`snap_to_text`).
+    snap: str = "text"
 
 
 def _clamped(value: int, bounds: tuple[int, int]) -> int:
@@ -278,7 +283,11 @@ class ToolStyles:
     def _seed(tool: str | None) -> ToolStyle:
         seed = tokens.DEFAULT_STYLE.get(tool, tokens.DEFAULT_STYLE_OTHER)
         return ToolStyle(
-            colour=seed["color"], size=seed["size"], dash=seed["dash"], fill=seed["fill"]
+            colour=seed["color"],
+            size=seed["size"],
+            dash=seed["dash"],
+            fill=seed["fill"],
+            snap=seed.get("snap", "text"),
         )
 
     def of(self, tool: str | None) -> ToolStyle:
@@ -385,6 +394,38 @@ def extend_stroke(shape: Shape, point: QPointF) -> None:
         shape.points.append(point)
     else:
         shape.end = point
+
+
+def snap_to_text(
+    shape: Shape, image: QImage, scale_x: float = 1.0, scale_y: float = 1.0
+) -> Shape:
+    """`shape` fitted to the lines of text it swept in `image`, when it is a
+    highlighter that swept any; otherwise `shape` itself.
+
+    Shared by the overlay and the review window for the reason the tool
+    tables above are: one mark model, two places it is drawn.
+
+    Coordinates: `shape` is in its caller's space, and `scale_x`/`scale_y`
+    are `image`'s pixels per unit of that space along each axis -- the
+    frozen frame's pixels per logical pixel on the overlay, above 1 on a
+    scaled display, and exactly 1 in the review window, whose marks are
+    already image pixels. `textsnap` works wholly in `image`'s pixels, and
+    the bands come back here converted into `shape`'s space.
+    """
+    if not isinstance(shape, shapes_module.Highlighter) or image.isNull():
+        return shape
+    if scale_x <= 0 or scale_y <= 0:
+        return shape
+    in_pixels = [QPointF(point.x() * scale_x, point.y() * scale_y) for point in shape.points]
+    # The width the sweep was painted at, which is how far it reached.
+    width = shape.stroke_width * tokens.Metric.HIGHLIGHT_MULT * (scale_x + scale_y) / 2
+    bands = textsnap.text_bands(image, in_pixels, width)
+    if not bands:
+        return shape
+    return replace(shape, bands=[
+        QRectF(band.x() / scale_x, band.y() / scale_y, band.width() / scale_x, band.height() / scale_y)
+        for band in bands
+    ])
 
 
 class LabelLineEdit(QLineEdit):

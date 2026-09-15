@@ -561,6 +561,63 @@ where the handoff puts it, but the notch answers to a 12px corner around it
 
 ---
 
+## 24 · The highlighter snaps to text
+
+**The handoff's** highlighter is a wide, see-through freehand stroke, and its
+`STYLE_SECTIONS` give it colour and stroke.
+
+**We** fit a highlighter sweep to the lines of text under it when it is
+released: one clean band per line, from the first word the sweep touched to
+the last. It is on by default, and a third click-through in the style popover,
+between colour and stroke, switches the tool back to freehand for the session.
+A sweep over no text, or over a photo, stays as drawn either way.
+
+Its first-run colour is yellow, `#facc15`, not the handoff's amber `#f59e0b`.
+
+### Why
+
+- **A hand-drawn highlight never sits on the line.** It starts a letter late,
+  rides up into the line above and stops short of the last word -- reported
+  with a screenshot of exactly that.
+- **Pixels, not text recognition.** The frame is already in memory, so finding
+  ink on a flat background runs the same on Linux and Windows and needs
+  nothing from the OS. Windows' text recognition would have made it a
+  Windows-only feature (`snipux/textsnap.py`).
+- **Several lines, both ways people draw them.** A swipe per line keeps each
+  line's own words; one diagonal drag reads as an editor's drag selection.
+- **Yellow, because it is a highlighter.** Amber at the highlighter's
+  see-through alpha was reported as orange. Yellow is a default, not a
+  swatch: an eighth swatch would widen the popover and take a number key the
+  row does not have.
+- **A click-through, not a key held while drawing.** It is a choice about the
+  tool, like fill and line, and lives with them, in the same session-long
+  style that is never written to disk.
+
+---
+
+## 25 · Record is a camcorder, and the side is never remembered
+
+**The handoff** draws the record side of the kind well as "a filled 10px
+circle, not a glyph" (`README.md`, "Kind"), and its state table carries
+`kind: 'stills' | 'record'` as remembered between snips, which is how we
+built it.
+
+**We** draw a camcorder glyph beside the camera, and open every snip on
+stills. Flipping to record lasts for that snip alone.
+
+### Why
+
+- **A dot beside a camera says "on", not "a video".** The pair reads as one
+  choice between two things, so both sides say what they make.
+- **A remembered side films by accident.** The next snip after a recording
+  opened armed to record, a hotkey and a drag away from filming when a
+  screenshot was wanted -- reported exactly that way. Recording is the rarer
+  and the more surprising of the two, so it is the one chosen on purpose.
+- **Nothing else about the row is lost.** The destination, the delay and
+  Hide sensitive are still remembered; only which side of the well is not.
+
+---
+
 ## Still open
 
 Not decided. Today's behaviour stands for each until it is, and each is

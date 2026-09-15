@@ -514,7 +514,7 @@ hidden from you either way.
 | Key | Tool | What it does |
 |-----|------|--------------|
 | `P` | Pen | Drag to draw freehand |
-| `H` | Highlighter | Sweep over the line that matters |
+| `H` | Highlighter | Sweep over the text that matters and it snaps to the lines, one band per line. Its style button switches it to freehand |
 | `A` | Arrow | Drag from tail to head |
 | `R` | Rectangle | Drag to box something in. Its button also holds Ellipse (`O`) and Straight line (`L`): click it again once it is picked to open that menu |
 | `S` | Step | Click to drop the next numbered marker |

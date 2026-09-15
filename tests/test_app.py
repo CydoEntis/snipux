@@ -4300,41 +4300,16 @@ class TestChooserKindIntegration:
             monitor_geometries=[QRectF(0, 0, 400, 300)],
         )
 
-    def test_a_fresh_snip_opens_on_the_stored_side(self, make_controller, monkeypatch):
-        monkeypatch.setattr(overlay_module.setup_desktop, "load_kind", lambda cd=None: "record")
+    def test_a_fresh_snip_opens_on_stills(self, make_controller):
         controller = self._controller(make_controller)
 
         controller.start_capture()
 
-        assert controller._overlay._chooser.kind == "record"
+        assert controller._overlay._chooser.kind == "stills"
 
-    def test_flipping_the_switch_saves_the_new_side(self, make_controller, monkeypatch):
-        saved = []
-        monkeypatch.setattr(overlay_module.setup_desktop, "load_kind", lambda cd=None: "stills")
-        monkeypatch.setattr(
-            overlay_module.setup_desktop, "save_kind",
-            lambda value, cd=None: saved.append(value),
-        )
-        controller = self._controller(make_controller)
-        controller.start_capture()
-
-        controller._overlay._chooser.set_kind("record")
-
-        assert saved == ["record"]
-
-    def test_the_next_snip_picks_up_what_the_last_one_left(self, make_controller, monkeypatch):
-        # No mock destinations here: round-trips through the real
-        # load_kind/save_kind, backed by a stand-in for the module-level
-        # dict a bare monkeypatch would otherwise need to fake persistence.
-        store = {}
-        monkeypatch.setattr(
-            overlay_module.setup_desktop, "load_kind",
-            lambda cd=None: store.get("kind", "stills"),
-        )
-        monkeypatch.setattr(
-            overlay_module.setup_desktop, "save_kind",
-            lambda value, cd=None: store.__setitem__("kind", value),
-        )
+    def test_the_snip_after_a_recording_one_opens_on_stills_again(self, make_controller):
+        # The side is deliberately not remembered: a snip that starts filming
+        # because the session before was a recording is the bug this stops.
         controller = self._controller(make_controller)
         controller.start_capture()
         controller._overlay._chooser.set_kind("record")
@@ -4342,7 +4317,7 @@ class TestChooserKindIntegration:
 
         controller.start_capture()
 
-        assert controller._overlay._chooser.kind == "record"
+        assert controller._overlay._chooser.kind == "stills"
 
 
 class TestQApplicationLifetime:

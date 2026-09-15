@@ -9,13 +9,21 @@ rather than only through one of its two owners.
 from __future__ import annotations
 
 import pytest
-from PyQt6.QtCore import QPointF
-from PyQt6.QtGui import QColor, QImage
+from PyQt6.QtCore import QPointF, QRectF
+from PyQt6.QtGui import QColor, QFont, QImage, QPainter
 from PyQt6.QtWidgets import QApplication
 
 from snipux import shapes
 from snipux.design import tokens
-from snipux.marks import MarkStore, ToolStyle, ToolStyles, begin_stroke, extend_stroke, session_styles
+from snipux.marks import (
+    MarkStore,
+    ToolStyle,
+    ToolStyles,
+    begin_stroke,
+    extend_stroke,
+    session_styles,
+    snap_to_text,
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -433,3 +441,82 @@ class TestToolStyles:
         # set on one snip is still set on the next.
         assert isinstance(session_styles, ToolStyles)
         assert isinstance(session_styles.of("pen"), ToolStyle)
+
+
+class TestSnapToText:
+    """The one place a highlighter's sweep meets `textsnap`, for the overlay
+    and the review window alike -- and the only code here that converts
+    between a mark's space and an image's pixels."""
+
+    @staticmethod
+    def _page(scale: int = 1) -> QImage:
+        image = QImage(400 * scale, 60 * scale, QImage.Format.Format_RGB32)
+        image.fill(QColor("#ffffff"))
+        painter = QPainter(image)
+        painter.scale(scale, scale)
+        font = QFont()
+        font.setPixelSize(18)
+        painter.setFont(font)
+        painter.setPen(QColor("#202020"))
+        painter.drawText(QPointF(20, 36), "several words of text")
+        painter.end()
+        return image
+
+    @staticmethod
+    def _sweep() -> shapes.Highlighter:
+        return shapes.Highlighter(
+            colour=QColor("#f59e0b"),
+            stroke_width=5,
+            points=[QPointF(x, 31 + (x % 3)) for x in range(30, 200, 6)],
+        )
+
+    def test_a_sweep_over_text_comes_back_with_bands_and_its_points_kept(self):
+        sweep = self._sweep()
+
+        snapped = snap_to_text(sweep, self._page())
+
+        assert len(snapped.bands) == 1
+        assert snapped.points == sweep.points
+        assert snapped.colour == sweep.colour
+
+    def test_a_sweep_over_nothing_comes_back_as_it_was(self):
+        blank = QImage(400, 60, QImage.Format.Format_RGB32)
+        blank.fill(QColor("#ffffff"))
+        sweep = self._sweep()
+
+        assert snap_to_text(sweep, blank) is sweep
+
+    def test_anything_but_a_highlighter_comes_back_as_it_was(self):
+        stroke = pen(30, 31)
+        stroke.points.append(QPointF(200, 31))
+
+        assert snap_to_text(stroke, self._page()) is stroke
+
+    def test_bands_come_back_in_the_marks_space_not_the_images(self):
+        # The overlay on a 2x display: marks in logical pixels over a frame
+        # with twice as many. The band is where it is at 1x, not twice as far.
+        (at_one,) = snap_to_text(self._sweep(), self._page()).bands
+        (at_two,) = snap_to_text(self._sweep(), self._page(scale=2), 2.0, 2.0).bands
+
+        for single, double in (
+            (at_one.left(), at_two.left()),
+            (at_one.top(), at_two.top()),
+            (at_one.right(), at_two.right()),
+            (at_one.bottom(), at_two.bottom()),
+        ):
+            assert abs(single - double) <= 2
+
+
+class TestSnapStyle:
+    def test_the_highlighter_starts_snapping(self):
+        assert ToolStyles().of("highlighter").snap == "text"
+
+    def test_switching_the_highlighter_to_freehand_leaves_its_colour(self):
+        styles = ToolStyles()
+        before = styles.of("highlighter")
+
+        styles.update("highlighter", snap="free")
+
+        assert styles.of("highlighter") == ToolStyle(
+            colour=before.colour, size=before.size, dash=before.dash, fill=before.fill, snap="free"
+        )

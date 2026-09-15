@@ -5,6 +5,23 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **The highlighter snaps to text.** Sweep roughly over a line and it becomes
+  a clean band over the words you covered. Across several lines, swipe each
+  one or drag diagonally from the first word to the last, the way you would
+  select text. Switch it back to freehand from the highlighter's style
+  button.
+
+### Changed
+
+- **The highlighter is yellow.** It started out orange.
+- **Snipping and recording: a camcorder icon, and a fresh start every time.**
+  The record side of the capture row now shows a camcorder rather than a dot,
+  and every snip opens on stills. Recording is chosen for the snip you are
+  taking, so the one after a recording can no longer start filming by
+  accident.
+
 ## 0.7.2 — 2026-09-15
 
 The toolbar stays on the monitor you are snipping.

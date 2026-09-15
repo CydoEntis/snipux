@@ -279,13 +279,35 @@ class Highlighter(Shape):
     """
 
     points: list[QPointF] = field(default_factory=list)
+    # The lines of text the sweep snapped to (`snipux.textsnap`), in the same
+    # space as `points`. When there are any they are the mark, and `points`
+    # is only the gesture that found them.
+    bands: list[QRectF] = field(default_factory=list)
 
     def _pen(self) -> QPen:
         pen = super()._pen()
         pen.setWidthF(self._scaled(self.stroke_width * design.tokens.Metric.HIGHLIGHT_MULT))
         return pen
 
+    def _band_path(self) -> QPainterPath:
+        radius = self._scaled(design.tokens.Metric.HIGHLIGHT_BAND_RADIUS)
+        path = QPainterPath()
+        # Winding, not the default odd-even: under odd-even the part where two
+        # bands overlap counts as outside both, and is left unpainted.
+        path.setFillRule(Qt.FillRule.WindingFill)
+        for band in self.bands:
+            path.addRoundedRect(band, radius, radius)
+        # One outline round every band, so two that touch are filled once
+        # and do not double-darken where they meet, as the polyline's single
+        # stroke does not.
+        return path.simplified()
+
     def draw(self, painter: QPainter) -> None:
+        if self.bands:
+            painter.setOpacity(design.tokens.Metric.HIGHLIGHT_ALPHA)
+            painter.fillPath(self._band_path(), self.colour)
+            painter.setOpacity(1.0)
+            return
         if len(self.points) < 2:
             return
         painter.setPen(self._pen())
@@ -294,6 +316,13 @@ class Highlighter(Shape):
         painter.setOpacity(1.0)
 
     def hit_test(self, point: QPointF) -> bool:
+        if self.bands:
+            return self._band_path().contains(point) or any(
+                band.adjusted(
+                    -self.HIT_TOLERANCE, -self.HIT_TOLERANCE, self.HIT_TOLERANCE, self.HIT_TOLERANCE
+                ).contains(point)
+                for band in self.bands
+            )
         # Reuses this class's own _pen() override (stroke x HIGHLIGHT_MULT)
         # via _stroke_hit_test, so the hit region matches the wider stroke
         # actually painted, not the narrower Pen-sized one.
@@ -1095,11 +1124,19 @@ def _transformed(shape: Shape, map_point, length_scale: float = 1.0) -> Shape:
     ObscuringShape/Crop) or `point` (Text/StepMarker) — so a future shape
     class needs no matching update here as long as it reuses one of those
     names, which every existing one already does. Lengths need no such
-    convention: `length_scale` lives on `Shape` itself.
+    convention: `length_scale` lives on `Shape` itself. A snapped
+    highlighter's `bands` are the one geometry beside `points`, and move
+    corner by corner with them.
     """
     shape = replace(shape, length_scale=shape.length_scale * length_scale)
     if hasattr(shape, "points"):
-        return replace(shape, points=[map_point(point) for point in shape.points])
+        moved = replace(shape, points=[map_point(point) for point in shape.points])
+        if getattr(moved, "bands", None):
+            moved = replace(moved, bands=[
+                QRectF(map_point(band.topLeft()), map_point(band.bottomRight()))
+                for band in moved.bands
+            ])
+        return moved
     if hasattr(shape, "start") and hasattr(shape, "end"):
         return replace(shape, start=map_point(shape.start), end=map_point(shape.end))
     if hasattr(shape, "point"):

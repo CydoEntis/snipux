@@ -55,6 +55,7 @@ from .marks import (
     begin_stroke,
     extend_stroke,
     session_styles,
+    snap_to_text,
 )
 from .overlay import (
     FamilyMenu,
@@ -309,6 +310,9 @@ class ImageCanvas(QWidget):
         # `finalize_mark` is the overlay's own commit rule -- a stroke too
         # small to be deliberate is dropped rather than committed.
         finished = shapes.finalize_mark(shape)
+        if isinstance(finished, shapes.Highlighter) and self._styles.of("highlighter").snap == "text":
+            # Marks here are already in the image's pixels: nothing to scale.
+            finished = snap_to_text(finished, self._image)
         if finished is not None:
             self._store.add(finished)
             self.marksChanged.emit()

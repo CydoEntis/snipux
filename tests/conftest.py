@@ -98,12 +98,11 @@ def _isolated_config(tmp_path):
     meaning "the real location" -- so patching it here, autouse, isolates
     the whole suite in one place rather than requiring every test that
     happens to build an `OverlayWindow`/`Chooser`/`AppController` to
-    remember to mock `load_kind`/`save_kind`/etc. itself. Before this, a
-    real `~/.config/snipux/config.json` left over from actually running
-    snipux (e.g. with `"kind": "record"` recorded by a prior session) was
-    read straight into fresh test overlays, so the suite's result depended
-    on how this machine last used the app -- the same class of bug SNX-109
-    fixed for the global hotkey.
+    remember to mock `load_after_capture`/`save_last_region`/etc. itself.
+    Before this, a real `~/.config/snipux/config.json` left over from
+    actually running snipux was read straight into fresh test overlays, so
+    the suite's result depended on how this machine last used the app -- the
+    same class of bug SNX-109 fixed for the global hotkey.
 
     An explicit `config_dir` (test_setup_desktop.py's own `run_setup`/
     `run_remove` calls, or anything passing `tmp_path` directly) is left

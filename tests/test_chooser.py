@@ -196,10 +196,10 @@ class TestKindPersistsAcrossReopen:
 
 
 class TestKindChangedSignal:
-    """`kindChanged` is what lets something outside the chooser persist the
-    kind across separate snips (see `overlay.py`'s wiring to
-    `setup_desktop.save_kind`) -- it has no Settings surface, so the chooser
-    itself has to announce every real flip.
+    """`kindChanged` is how the row tells the window outside it which side
+    is showing -- the stills bar and the recording pill are not the same
+    furniture. The side itself is never persisted (bars/divergences.md 25),
+    so every real flip still has to be announced.
     """
 
     def test_flipping_the_kind_emits_the_new_kind(self):
@@ -643,8 +643,10 @@ class TestEachControlRendersItsState:
 
         assert chooser.row.record.grab().toImage() != idle
 
-    def test_record_is_a_filled_circle_in_its_lit_colour(self):
-        # "A filled 10px circle, not a glyph": its centre is solid.
+    def test_record_is_a_camcorder_glyph_in_its_lit_colour(self):
+        # A camcorder, not the handoff's filled circle (bars/divergences.md
+        # 25): the glyph is stroked in the lit colour over the lit fill, so
+        # the centre of the button is inside its hollow body.
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
 
@@ -652,7 +654,10 @@ class TestEachControlRendersItsState:
 
         ratio = image.devicePixelRatio()
         centre = round(METRIC.BTN / 2 * ratio)
-        assert image.pixelColor(centre, centre).name() == tokens.BarColor.REC_ON_FG
+        assert _near(image, tokens.BarColor.REC_ON_FG)
+        # Hollow where the handoff's dot was solid: the middle of the body
+        # is nowhere near the glyph's own colour.
+        assert not _near(image.copy(centre - 1, centre - 1, 3, 3), tokens.BarColor.REC_ON_FG)
 
     def test_an_armed_flag_is_the_soft_accent_on_an_accent_wash(self):
         chooser = Chooser(parent=None)
@@ -1511,9 +1516,19 @@ class TestTheRowIsAFillNotAnOpacity:
             METRIC.ROW_H / 2,
         )
         assert at(gap).alphaF() == pytest.approx(tokens.BarColor.FALLBACK_BG_ALPHA, abs=0.01)
-        dot = QPointF(chooser.row.record.mapTo(chooser.row, QPoint(METRIC.BTN // 2, METRIC.BTN // 2)))
-        assert at(dot).alphaF() == pytest.approx(1.0)
-        assert at(dot).name() == tokens.BarColor.REC_ON_FG
+        # The camcorder is hollow (bars/divergences.md 25), so the control's
+        # opacity is its glyph's, not one pixel in the middle of it: the
+        # stroke is fully opaque where it covers a pixel outright, over a
+        # ground that never is.
+        button = chooser.row.record
+        corner = button.mapTo(chooser.row, QPoint(0, 0))
+        alphas = [
+            at(QPointF(corner.x() + x, corner.y() + y)).alphaF()
+            for y in range(METRIC.BTN)
+            for x in range(METRIC.BTN)
+        ]
+        assert max(alphas) == pytest.approx(1.0)
+        assert _near(button.grab().toImage(), tokens.BarColor.REC_ON_FG)
 
 
 class TestPlacement:
