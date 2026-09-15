@@ -214,6 +214,36 @@ class TestTightlyPackedLines:
     def _mid(self, line) -> float:
         return FIRST_BASELINE + line * self.TIGHT - TEXT_PX * 0.28
 
+    def _line_ink(self, line, scale=1) -> QRectF:
+        """Every word of a line's ink, as one rectangle."""
+        whole = QRectF()
+        for word in range(len(LINES[line].split(" "))):
+            whole = whole.united(self._ink(line, word, scale=scale))
+        return whole
+
+    def _in_its_own_slot(self, band: QRectF, line: int, scale=1) -> bool:
+        """Whether `band` stays between the line above and the line below.
+
+        Not "touches no other line's ink": a band is the height of the type,
+        ascender to descender, and at this pitch the type of one line and
+        the next all but meet -- on some fonts they do meet, and a pixel of
+        overlap there is what the lines themselves look like. What must not
+        happen is a band reaching into a neighbour's half, which is what a
+        band that swallowed the whole block does.
+        """
+        mine = self._line_ink(line, scale)
+        top = (self._line_ink(line - 1, scale).bottom() + mine.top()) / 2 if line else 0.0
+        bottom = (
+            (mine.bottom() + self._line_ink(line + 1, scale).top()) / 2
+            if line + 1 < len(LINES)
+            else HEIGHT * scale
+        )
+        # A fraction of a line of slack: the band's own edge is rounded and
+        # padded, and at 2x it landed 0.15px past a boundary it is nowhere
+        # near in the terms this is written in.
+        slack = max(1.0, mine.height() * 0.06)
+        return band.top() >= top - slack and band.bottom() <= bottom + slack
+
     @pytest.mark.parametrize("display", [1.0, 1.25, 1.5, 2.0])
     def test_a_swipe_along_the_middle_line_takes_that_line_alone(self, display):
         # The stroke is as wide in frame pixels as a scaled display makes it;
@@ -224,9 +254,7 @@ class TestTightlyPackedLines:
 
         assert len(bands) == 1
         assert _covers(bands[0], self._ink(1, 0)) and _covers(bands[0], self._ink(1, 2))
-        for word in range(4):
-            assert not _touches(bands[0], self._ink(0, word))
-            assert not _touches(bands[0], self._ink(2, word))
+        assert self._in_its_own_slot(bands[0], 1)
 
     def test_on_a_2x_frame_a_swipe_takes_one_line(self):
         stroke = [
@@ -237,8 +265,8 @@ class TestTightlyPackedLines:
         bands = text_bands(self._tight_page(scale=2), stroke, STROKE * 2)
 
         assert len(bands) == 1
-        for word in range(4):
-            assert not _touches(bands[0], self._ink(1, word, scale=2))
+        assert _covers(bands[0], self._ink(0, 0, scale=2))
+        assert self._in_its_own_slot(bands[0], 0, scale=2)
 
     def test_a_swipe_that_drifts_onto_the_next_line_at_its_end_takes_one_line(self):
         # A hand coming off the mouse: the last stretch sags onto the line
@@ -250,7 +278,7 @@ class TestTightlyPackedLines:
 
         assert len(bands) == 1
         assert _covers(bands[0], self._ink(1, 0))
-        assert not _touches(bands[0], self._ink(2, 0))
+        assert self._in_its_own_slot(bands[0], 1)
 
 
 class TestSeveralLines:
