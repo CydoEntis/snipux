@@ -20,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QMargins, QMarginsF, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QMargins, QMarginsF, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QCursor,
@@ -586,27 +586,28 @@ def _l_bracket_local_path(length: float, thickness: float, radius: float) -> QPa
 
 
 # ---------------------------------------------------------------------------
-# Floating bar (SNX-40)
+# The stills bar
 # ---------------------------------------------------------------------------
-# docs/design/overlay-redesign.md's "Floating bar" section is the authority
-# for every metric below; tokens.py is where each one actually lives. Two
-# things that section calls out because they are easy to get wrong: the
-# bar's fill is a 93%-alpha *paint*, never a 93%-*opacity* widget -- that
-# would wash every glyph out along with the background; and the bar's own
-# position must clamp so it can never leave the screen once the selection is
-# dragged down to the bottom edge.
+# docs/design/bars/README.md, section 2, is the authority, and
+# docs/design/bars/divergences.md overrides it wherever the two differ. Every
+# size and colour comes from `tokens.BarMetric`/`BarColor`. Two things that
+# section calls out because they are easy to get wrong: the bar's fill is a
+# 94%-alpha *paint*, never a 94%-*opacity* widget -- that would wash every
+# glyph out along with the background; and the bar's position is clamped so
+# it can never leave the selection's monitor.
 
 # Reverse of tokens.SHORTCUTS ("P" -> "pen"), so a button can look up its own
 # key by tool name instead of every button re-scanning the forward mapping.
 _TOOL_SHORTCUT_KEYS = {tool: key for key, tool in design.tokens.SHORTCUTS.items()}
 
-# tokens.SHORTCUTS keyed by Qt.Key code rather than letter (SNX-47), so
-# OverlayWindow.keyPressEvent can look a QKeyEvent.key() up directly instead
-# of going through event.text() -- which depends on locale/shift state in a
-# way a letter's key code never does.
+# tokens.SHORTCUTS keyed by Qt.Key code rather than letter (SNX-47), so a
+# QKeyEvent.key() is looked up directly instead of going through
+# event.text() -- which depends on locale/shift state in a way a letter's key
+# code never does.
 _SHORTCUT_KEY_CODES = {
     getattr(Qt.Key, f"Key_{letter}"): tool for letter, tool in design.tokens.SHORTCUTS.items()
 }
+_REDACTION_KEY_CODE = getattr(Qt.Key, f"Key_{design.tokens.REDACTION_KEY}")
 
 
 def _tool_label(tool: str) -> str:
@@ -619,20 +620,126 @@ def _tool_label(tool: str) -> str:
     return tool.replace("_", " ").title()
 
 
+def _tool_glyph(tool: str) -> str:
+    """The glyph `tool` is drawn with: its own name, unless the handoff gave
+    it another -- Pixelate is the `mask` glyph, and has no icon of its own.
+    """
+    return design.tokens.TOOL_GLYPHS.get(tool, tool)
+
+
+def _family_of(tool: str | None) -> str | None:
+    """The family slot `tool` is a sibling in, or None for a tool that has a
+    slot to itself.
+    """
+    for family, siblings in design.tokens.FAMILIES.items():
+        if tool in siblings:
+            return family
+    return None
+
+
+def _tool_tooltip(tool: str) -> str:
+    """The tool's name and the key that reaches it: "Pen — P".
+
+    A redaction sibling names the key its family shares, since that is the
+    key that gets there; Crop, which has none, is named alone rather than
+    beside a dash leading nowhere.
+    """
+    name = design.tokens.TOOL_NAMES.get(tool, _tool_label(tool))
+    if _family_of(tool) == "redact":
+        key = design.tokens.REDACTION_KEY
+    else:
+        key = _TOOL_SHORTCUT_KEYS.get(tool, "")
+    return f"{name} — {key}" if key else name
+
+
+def _bar_keys() -> list[str]:
+    """Every tool key, in the order the bar's slots run -- the shapes
+    family's letters where its slot is, and the redaction family's one key
+    where that slot is.
+    """
+    keys = []
+    for slot in design.tokens.STILLS_SLOTS:
+        if slot == "redact":
+            keys.append(design.tokens.REDACTION_KEY)
+            continue
+        for tool in design.tokens.FAMILIES.get(slot, [slot]):
+            if tool in _TOOL_SHORTCUT_KEYS:
+                keys.append(_TOOL_SHORTCUT_KEYS[tool])
+    return keys
+
+
+class _Notch(QWidget):
+    """The corner of a family slot that opens the family's menu.
+
+    It means one thing -- this slot has more -- so nothing but a family slot
+    ever carries one. A child of the slot rather than a hit test inside it:
+    a press on the notch is delivered here, so it opens the menu and never
+    also arms the tool underneath.
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, tooltip: str, parent: QWidget):
+        super().__init__(parent)
+        metric = design.tokens.BarMetric
+        self.setFixedSize(metric.NOTCH, metric.NOTCH)
+        corner = metric.BTN - metric.NOTCH_INSET - metric.NOTCH
+        self.move(corner, corner)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Qt's tooltip wake-up timer is driven by mouse moves over the
+        # widget, not by the enter event alone.
+        self.setMouseTracking(True)
+        self.setToolTip(tooltip)
+        self._lit = False
+
+    def set_lit(self, lit: bool) -> None:
+        """Follow the slot's own state: a lit slot's notch is lit with it."""
+        self._lit = lit
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        # Pressing and sliding off is how a user says no.
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+            event.position().toPoint()
+        ):
+            self.clicked.emit()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        leg = design.tokens.BarMetric.NOTCH_TRIANGLE
+        right = float(self.width())
+        # Flush right and centred top to bottom in the hit area, which is
+        # where the spec's markup lands its triangle: the right angle points
+        # into the slot's corner.
+        bottom = (self.height() + leg) / 2
+        path = QPainterPath()
+        path.moveTo(right, bottom - leg)
+        path.lineTo(right, bottom)
+        path.lineTo(right - leg, bottom)
+        path.closeSubpath()
+        painter.fillPath(
+            path, design.bar_color("NOTCH_ACTIVE" if self._lit else "NOTCH_IDLE")
+        )
+        painter.end()
+
+
 class _IconButton(QPushButton):
     rightClicked = pyqtSignal()
     hovered = pyqtSignal(str)
     unhovered = pyqtSignal()
 
-    """One 34px icon button in the floating bar: a tool, undo, redo, clear
-    or copy. A real `QPushButton`, not a rectangle painted by some
+    """One 28px icon button in the stills bar: a tool slot, undo, redo,
+    clear or copy. A real `QPushButton`, not a rectangle painted by some
     ancestor's paintEvent, so its tooltip and click handling come for free.
 
     Idle/hover/active/disabled/danger-hover each recolour the glyph itself,
-    not just the background -- per the spec's button-state table, "active
-    tool... with an #f8faf0 glyph" -- so a state change regenerates the icon
-    pixmap via `design.icon()` rather than leaning on a stylesheet, which has
-    no way to reach into an SVG's `currentColor` stroke.
+    not just the background, so a state change regenerates the icon pixmap
+    via `design.icon()` rather than leaning on a stylesheet, which has no way
+    to reach into an SVG's `currentColor` stroke.
     """
 
     def __init__(
@@ -640,21 +747,26 @@ class _IconButton(QPushButton):
         icon_name: str,
         tooltip: str,
         *,
+        name: str | None = None,
         idle_color: QColor | None = None,
         hover_bg: QColor | None = None,
         hover_color: QColor | None = None,
         parent=None,
     ):
         super().__init__(parent)
-        metric = design.tokens.Metric
+        metric = design.tokens.BarMetric
         self._icon_name = icon_name
-        self._idle_color = idle_color or design.color("ICON_IDLE")
-        self._hover_bg = hover_bg or design.color("ICON_HOVER_BG")
+        # What hovering reports. For a family slot that is the sibling it
+        # would arm, which is not always its glyph's name.
+        self._name = name or icon_name
+        self._idle_color = idle_color or design.bar_color("TOOL_IDLE_FG")
+        self._hover_bg = hover_bg or design.bar_color("TOOL_HOVER_BG")
         # None (every button but Clear) means hovering leaves the glyph's
         # own colour alone -- only Clear's danger hover recolours the icon
         # as well as the background.
         self._hover_color = hover_color
         self._active = False
+        self._notch: _Notch | None = None
 
         self.setFixedSize(metric.BTN, metric.BTN)
         self.setIconSize(QSize(metric.ICON, metric.ICON))
@@ -671,27 +783,39 @@ class _IconButton(QPushButton):
     def is_active(self) -> bool:
         return self._active
 
+    @property
+    def notch(self) -> "_Notch | None":
+        return self._notch
+
     def set_active(self, active: bool) -> None:
         self._active = active
+        if self._notch is not None:
+            self._notch.set_lit(active)
         self._refresh()
 
     def setEnabled(self, enabled: bool) -> None:
         super().setEnabled(enabled)
         self._refresh()
 
-    def set_icon_name(self, icon_name: str) -> None:
-        """Swap the glyph. The rect button uses this so its icon always
-        shows which of the shape group a drag will draw.
+    def set_glyph(self, name: str, icon_name: str) -> None:
+        """Show `name`'s glyph -- a family slot follows its last-used
+        sibling, so it always shows what a drag will draw.
         """
+        self._name = name
         self._icon_name = icon_name
         self._refresh()
+
+    def add_notch(self, tooltip: str) -> "_Notch":
+        self._notch = _Notch(tooltip, self)
+        self._notch.set_lit(self._active)
+        return self._notch
 
     def mousePressEvent(self, event) -> None:
         """A right-click is its own signal.
 
-        The shape group needs two gestures -- use it, and choose within it
-        -- and a plain click is spent on the first, so the menu needs the
-        other. `QPushButton` reports only left presses, hence this.
+        A family slot opens its menu from the notch, and from a right-click
+        anywhere on it -- the way that menu was reached before the notch
+        existed. `QPushButton` reports only left presses, hence this.
         """
         if event.button() == Qt.MouseButton.RightButton:
             self.rightClicked.emit()
@@ -701,7 +825,7 @@ class _IconButton(QPushButton):
 
     def enterEvent(self, event) -> None:
         self._refresh(hovered=True)
-        self.hovered.emit(self._icon_name)
+        self.hovered.emit(self._name)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
@@ -712,18 +836,17 @@ class _IconButton(QPushButton):
     def _refresh(self, hovered: bool | None = None) -> None:
         if hovered is None:
             hovered = self.underMouse()
-        metric = design.tokens.Metric
+        metric = design.tokens.BarMetric
 
         if not self.isEnabled():
-            # Per the README's "Undo / redo": disabled is the preferred way
-            # to show an empty stack, over just recolouring a still-live
-            # button -- so this is a real QWidget.setEnabled(False), not a
-            # cosmetic-only state.
-            bg, glyph = None, design.color("ICON_DISABLED")
+            # Disabled is the preferred way to show an empty stack, over
+            # just recolouring a still-live button -- so this is a real
+            # QWidget.setEnabled(False), not a cosmetic-only state.
+            bg, glyph = None, design.bar_color("TOOL_DISABLED_FG")
         elif hovered and self._hover_color is not None:
             bg, glyph = self._hover_bg, self._hover_color
         elif self._active:
-            bg, glyph = design.color("ICON_ACTIVE_BG"), design.color("ICON_ACTIVE")
+            bg, glyph = design.bar_color("TOOL_ACTIVE_BG"), design.bar_color("TOOL_ACTIVE_FG")
         elif hovered:
             bg, glyph = self._hover_bg, self._idle_color
         else:
@@ -740,10 +863,10 @@ class _IconButton(QPushButton):
 
         # design.icon() only ever fills QIcon.Mode.Normal; left at that,
         # Qt's style would auto-generate its own faded Disabled variant the
-        # moment setEnabled(False) runs above, undoing the exact
-        # ICON_DISABLED colour just chosen. Registering the same pixmap for
-        # both modes makes the disabled state use precisely what was asked
-        # for instead of a second, uncontrolled recolouring on top of it.
+        # moment setEnabled(False) runs above, undoing the exact disabled
+        # colour just chosen. Registering the same pixmap for both modes
+        # makes the disabled state use precisely what was asked for instead
+        # of a second, uncontrolled recolouring on top of it.
         pixmap = design.icon(self._icon_name, glyph).pixmap(metric.ICON, metric.ICON)
         icon = QIcon()
         icon.addPixmap(pixmap, QIcon.Mode.Normal)
@@ -753,7 +876,7 @@ class _IconButton(QPushButton):
 
 class _PillButton(QPushButton):
     """The two bar controls that pair an icon with a text label inside a
-    solid pill: the capture-mode chip (row 1) and Save (row 17).
+    solid pill: the capture-mode chip and the review window's Done.
 
     Built from a child layout of two `QLabel`s rather than
     `QPushButton.setIcon`/`setText`, which always places the icon first --
@@ -788,7 +911,7 @@ class _PillButton(QPushButton):
             "QPushButton { border: none; border-radius: %dpx;"
             " background: rgba(%d, %d, %d, %s); }"
             % (
-                metric.BTN_RADIUS,
+                design.tokens.BarMetric.BTN_RADIUS,
                 bg_color.red(),
                 bg_color.green(),
                 bg_color.blue(),
@@ -821,9 +944,8 @@ class _PillButton(QPushButton):
 
     def set_text(self, text: str) -> None:
         """Update the pill's own label -- used by the capture chip (SNX-44)
-        to name whichever mode the popover has selected, per the
-        reference's `{{ mode }}` binding on the chip button itself. Save's
-        own `_PillButton` never calls this; its label is fixed.
+        to name whichever mode the popover has selected. Done's own
+        `_PillButton` never calls this; its label is fixed.
         """
         self._text_label.setText(text)
         self.updateGeometry()
@@ -848,12 +970,12 @@ class _PillButton(QPushButton):
 
 
 class _Divider(QWidget):
-    """1px vertical divider between the bar's button groups."""
+    """1px vertical divider between a bar's or a tray's control groups."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, height: int | None = None, colour: QColor | None = None):
         super().__init__(parent)
-        self.setFixedSize(1, design.tokens.Metric.DIVIDER_H)
-        colour = design.color("DIVIDER")
+        self.setFixedSize(1, design.tokens.Metric.DIVIDER_H if height is None else height)
+        colour = colour or design.color("DIVIDER")
         self.setStyleSheet(
             "background: rgba(%d, %d, %d, %s);"
             % (colour.red(), colour.green(), colour.blue(), colour.alphaF())
@@ -866,10 +988,12 @@ class _Chrome(QWidget):
     A Qt widget that leaves a mouse press unaccepted hands it to its
     parent, and every class below is a child of `OverlayWindow` -- whose
     press handler reads a press as ink, a resize, or the start of a fresh
-    region drag, depending on where it lands. A click that missed a tool
-    button by a pixel and hit the bar's own background therefore threw away
-    the selection the user had just dragged out and started a new one under
-    the bar. Chrome is opaque: a press that lands on it stops there.
+    region drag, depending on where it lands, and closes any menu that is
+    open. A click that missed a tool button by a pixel and hit the bar's own
+    background therefore threw away the selection the user had just dragged
+    out and started a new one under the bar; a press reaching it from a menu
+    row would tear the menu down before the row's click landed, so every row
+    would look dead. Chrome is opaque: a press that lands on it stops there.
 
     Only the containers need this. The dividers, pills and separators they
     hold are children of a container that consumes, so their presses stop
@@ -886,12 +1010,9 @@ class _Chrome(QWidget):
 
 
 def _bar_font() -> QFont:
-    """The bar's own label font -- the same `Font.CHIP_LABEL` pair the
-    pill buttons use, so a split button's label sits on the same line as
-    the chip beside it rather than nearly on it.
-    """
+    """The split action's label font."""
     font = QFont(design.font_families().ui)
-    size, weight = design.tokens.Font.CHIP_LABEL
+    size, weight = design.tokens.BarFont.SPLIT
     font.setPixelSize(round(size))
     font.setWeight(QFont.Weight(weight))
     return font
@@ -901,11 +1022,11 @@ class _SplitAction(QWidget):
     """The bar's primary action: a destination on the face, and a caret
     that offers the other two.
 
-    The capture-flow handoff's stills bar leads with one of these rather
-    than a row of equal icon buttons -- "the chooser sets the split
-    button's face; the chevron always offers the other two", so the
-    destination picked before the snip is the one already under the
-    cursor, and changing your mind costs a menu rather than a hunt.
+    The handoff's stills bar leads with one of these rather than a row of
+    equal icon buttons -- "the chooser sets the split button's face; the
+    chevron always offers the other two", so the destination picked before
+    the snip is the one already under the cursor, and changing your mind
+    costs a menu rather than a hunt.
 
     Two hit areas, one control: pressing the face fires the destination,
     pressing the caret opens the menu. The seam between them is drawn, so
@@ -915,9 +1036,6 @@ class _SplitAction(QWidget):
     activated = pyqtSignal(str)
     menuRequested = pyqtSignal()
 
-    _CARET_W = 22
-    _PAD_H = 11
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self._destination = "Copy"
@@ -925,7 +1043,7 @@ class _SplitAction(QWidget):
         self._hovered_half = None
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(design.tokens.Metric.CHIP_H)
+        self.setFixedHeight(design.tokens.BarMetric.BTN)
         self._relayout()
 
     def destination(self) -> str:
@@ -937,10 +1055,17 @@ class _SplitAction(QWidget):
         self._relayout()
 
     def _relayout(self) -> None:
-        metric = design.tokens.Metric
+        metric = design.tokens.BarMetric
         text = QFontMetricsF(_bar_font()).horizontalAdvance(self._destination)
-        self._face_w = round(self._PAD_H + metric.ICON + 7 + text + self._PAD_H)
-        self.setFixedWidth(self._face_w + self._CARET_W)
+        # Rounded up: a face a fraction of a pixel narrow clips the label's
+        # last glyph, and the fallback faces this runs in are measured, not
+        # the Plex the handoff's widths assume.
+        self._face_w = math.ceil(
+            metric.SPLIT_PAD_H + metric.SPLIT_ICON + metric.SPLIT_GAP + text + metric.SPLIT_PAD_H
+        )
+        # The seam is a pixel of its own between the halves, as the spec
+        # draws it, rather than a line painted over the face's edge.
+        self.setFixedWidth(self._face_w + 1 + metric.SPLIT_CARET_W)
         self.updateGeometry()
         self.update()
 
@@ -973,20 +1098,32 @@ class _SplitAction(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.Metric
-        radius = self.height() / 2
+        metric = design.tokens.BarMetric
+        radius = metric.BTN_RADIUS
+        caret_left = self._face_w + 1
 
-        fill = design.color("ACCENT")
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(fill.lighter(106) if self._hovered_half else fill)
-        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+        shape = QPainterPath()
+        shape.addRoundedRect(QRectF(self.rect()), radius, radius)
+        fill = design.bar_color("ACCENT")
+        painter.fillPath(shape, fill)
+        if self._hovered_half is not None:
+            # Only the half under the pointer brightens: the two halves do
+            # different things, so hover has to say which one is live.
+            half = (
+                QRectF(0, 0, self._face_w, self.height())
+                if self._hovered_half == "face"
+                else QRectF(caret_left, 0, self.width() - caret_left, self.height())
+            )
+            clip = QPainterPath()
+            clip.addRect(half)
+            painter.fillPath(shape.intersected(clip), fill.lighter(106))
 
-        text_colour = design.color("ACCENT_FG")
-        x = float(self._PAD_H)
-        size = metric.ICON
+        text_colour = design.bar_color("ACCENT_FG")
+        x = float(metric.SPLIT_PAD_H)
+        size = metric.SPLIT_ICON
         pixmap = design.icon(self._icon_name, text_colour).pixmap(size, size)
-        painter.drawPixmap(round(x), (self.height() - size) // 2, pixmap)
-        x += size + 7
+        painter.drawPixmap(round(x), round((self.height() - size) / 2), pixmap)
+        x += size + metric.SPLIT_GAP
 
         painter.setFont(_bar_font())
         painter.setPen(text_colour)
@@ -999,38 +1136,158 @@ class _SplitAction(QWidget):
         # The seam: which half a click lands in has to be visible before
         # the click, or a split button is just a button that sometimes does
         # something else.
-        painter.setPen(design.flow_color("SPLIT_SEAM"))
-        painter.drawLine(
-            QPointF(self._face_w, 6), QPointF(self._face_w, self.height() - 6)
+        painter.fillRect(
+            QRectF(self._face_w, 0, 1, self.height()), design.bar_color("SPLIT_SEAM")
         )
 
-        caret = 12
+        caret = metric.CHEVRON
         pixmap = design.icon("chevron", text_colour).pixmap(caret, caret)
         painter.drawPixmap(
-            round(self._face_w + (self._CARET_W - caret) / 2),
-            (self.height() - caret) // 2,
+            round(caret_left + (metric.SPLIT_CARET_W - caret) / 2),
+            round((self.height() - caret) / 2),
             pixmap,
         )
         painter.end()
 
 
-class FloatingBar(_Chrome):
-    """The overlay redesign's floating bar: capture chip, eight tool
-    buttons, undo/redo/clear, copy and save, per
-    docs/design/overlay-redesign.md's "Floating bar" section -- eleven
-    groups in place of the twenty-plus controls the old editor.py toolbar
-    had, and per the ticket that reduction is not meant to grow back.
+class _StyleDot(QWidget):
+    """The style slot: one button that is its own preview -- a dot in the
+    ink colour at the stroke's diameter -- so colour and stroke read without
+    opening anything.
 
-    A real child widget of `OverlayWindow`, built from real `QPushButton`s
-    -- never painted inside `OverlayWindow.paintEvent` -- which is what
-    gives every control a tooltip and hover state for free instead of
-    hand-rolled hit-testing. `paintEvent` below paints the glass fill as a
-    translucent *brush*, not a reduced-*opacity* widget: `setWindowOpacity`
-    would dim every child glyph along with the background, exactly the
-    mistake the README calls out.
+    It opens the tray the active tool is styled with. A tool nothing on it
+    can change (`tokens.UNSTYLED_TOOLS`) dims it and it stops opening,
+    because a control that can do nothing should not look live. That dim is
+    real opacity -- one of the two places the handoff allows it -- painted
+    here rather than put on the widget as an effect.
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        metric = design.tokens.BarMetric
+        self.setFixedSize(metric.BTN, metric.BTN)
+        self.setMouseTracking(True)
+        self._colour = QColor(design.tokens.INK_SWATCHES[0][1])
+        self._stroke = design.tokens.Metric.STROKE_DEFAULT
+        self._tool: str | None = None
+        self._open = False
+        self._refresh()
+
+    @property
+    def is_stylable(self) -> bool:
+        return self._tool is not None and self._tool not in design.tokens.UNSTYLED_TOOLS
+
+    @property
+    def is_open(self) -> bool:
+        return self._open
+
+    @property
+    def diameter(self) -> float:
+        metric = design.tokens.BarMetric
+        scale = (
+            metric.STYLE_DOT_SCALE_HIGHLIGHTER
+            if self._tool == "highlighter"
+            else metric.STYLE_DOT_SCALE
+        )
+        return max(metric.STYLE_DOT_MIN, min(self._stroke * scale, metric.STYLE_DOT_MAX))
+
+    def set_preview(self, colour: str, stroke: int) -> None:
+        self._colour = QColor(colour)
+        self._stroke = stroke
+        self._refresh()
+
+    def set_tool(self, tool: str | None) -> None:
+        self._tool = tool
+        self._refresh()
+
+    def set_open(self, open_: bool) -> None:
+        self._open = open_
+        self.update()
+
+    def _refresh(self) -> None:
+        tool = self._tool
+        name = design.tokens.TOOL_NAMES.get(tool, _tool_label(tool)) if tool else ""
+        if tool is None:
+            tooltip = "Style — pick a tool first"
+        elif not self.is_stylable:
+            tooltip = f"{name} has nothing to style"
+        elif _family_of(tool) == "redact":
+            tooltip = f"{name} — click for style"
+        else:
+            tooltip = f"{name} · {self._colour.name()} · {self._stroke}px — click for style"
+        self.setToolTip(tooltip)
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor if self.is_stylable else Qt.CursorShape.ArrowCursor
+        )
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        # Accepted even when it will not open: the frame under the bar reads
+        # an unhandled press as the start of a drag.
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.is_stylable
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.clicked.emit()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.BarMetric
+        if not self.is_stylable:
+            painter.setOpacity(design.tokens.BarColor.DISABLED_OPACITY)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.bar_color("STYLE_DOT_BG_OPEN" if self._open else "STYLE_DOT_BG"))
+        painter.drawRoundedRect(QRectF(self.rect()), metric.BTN_RADIUS, metric.BTN_RADIUS)
+
+        centre = QRectF(self.rect()).center()
+        radius = self.diameter / 2
+        # The ring sits outside the dot, so a dot in a colour close to the
+        # bar's own still has an edge.
+        ring = radius + metric.STYLE_DOT_RING
+        painter.setBrush(design.bar_color("STYLE_DOT_RING"))
+        painter.drawEllipse(centre, ring, ring)
+        painter.setBrush(self._colour)
+        painter.drawEllipse(centre, radius, radius)
+        painter.end()
+
+
+class FloatingBar(_Chrome):
+    """The stills bar: one row under the selection, per
+    docs/design/bars/README.md section 2 -- the destination at the left end,
+    seven tool slots in a fixed order of consequence, the style dot, then
+    undo and clear.
+
+    Two of the slots hold families (`tokens.FAMILIES`): shapes and
+    redaction. A family slot shows whichever sibling was used last, a notch
+    in its corner asks for the family's menu, and each sibling keeps its own
+    shortcut. The menu itself is the hosting window's, as are the trays the
+    style dot opens: they are chrome over that window, not part of this row
+    (see `FamilyMenu`).
+
+    A real child widget of the window it sits over, built from real buttons
+    -- never painted inside that window's paintEvent -- which is what gives
+    every control a tooltip and hover state for free. `paintEvent` paints the
+    glass as a translucent *brush*, not a reduced-*opacity* widget:
+    `setWindowOpacity` would dim every glyph along with the background.
     """
 
     toolSelected = pyqtSignal(str)
+    # A tool picked with the pointer on this row, emitted just before the
+    # `toolSelected` it causes. Clicking a tool closes whatever menu is open;
+    # a key that changes the tool does not have to, and only this tells the
+    # two apart.
+    toolPicked = pyqtSignal(str)
+    # "shapes" or "redact": the notch was pressed, or the slot right-clicked.
+    familyMenuRequested = pyqtSignal(str)
+    styleRequested = pyqtSignal()
     undoRequested = pyqtSignal()
     redoRequested = pyqtSignal()
     clearRequested = pyqtSignal()
@@ -1039,11 +1296,6 @@ class FloatingBar(_Chrome):
     openRequested = pyqtSignal()
     destinationMenuRequested = pyqtSignal()
     captureChipClicked = pyqtSignal()
-    # SNX-64: rect's own button is the group's entry point for
-    # Ellipse/Line/Crop -- emitted instead of `toolSelected` when its
-    # button is clicked, the same "click opens a popover" shape
-    # `captureChipClicked` already gives the capture chip.
-    shapeMenuRequested = pyqtSignal()
     # Which tool the cursor is over, so a window can name it without relying
     # on Qt's tooltip timer -- see `ToolHintStrip`.
     toolHovered = pyqtSignal(str)
@@ -1052,10 +1304,9 @@ class FloatingBar(_Chrome):
     UNDO_SHORTCUT = "Ctrl+Z"
     REDO_SHORTCUT = "Ctrl+Shift+Z"
 
-    # The README gives the top clamp as this literal pixel value, not a
-    # tokens.Metric entry -- same convention OverlayWindow's own
-    # _TOP_CLEARANCE/_BAR_ROOM already follow for prose-only constants.
-    _TOP_MAX_FROM_BOTTOM = 118
+    # The spec's own wording for each family's two ways in.
+    _NOTCH_TOOLTIPS = {"shapes": "Choose a shape", "redact": "Redaction mode"}
+    _FAMILY_TOOLTIP_TAILS = {"shapes": "notch for more shapes", "redact": "notch to switch"}
 
     def __init__(self, parent=None, *, capture_chip: bool = True, trailing: str = "save"):
         """`capture_chip` and `trailing` exist for the review window, which
@@ -1074,34 +1325,36 @@ class FloatingBar(_Chrome):
         # The widget's own backdrop is transparent so paintEvent's alpha
         # fill is the only thing establishing a background colour --
         # without this attribute Qt composites the widget as opaque and the
-        # "93% alpha, not 93% opacity" distinction has nothing to paint
+        # "94% alpha, not 94% opacity" distinction has nothing to paint
         # against.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
-        metric = design.tokens.Metric
+        metric = design.tokens.BarMetric
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(
-            metric.BAR_PAD_H, metric.BAR_PAD_V, metric.BAR_PAD_H, metric.BAR_PAD_V
-        )
-        layout.setSpacing(metric.BAR_GAP)
+        inset = metric.PAD + metric.BORDER
+        layout.setContentsMargins(inset, inset, inset, inset)
+        layout.setSpacing(metric.GAP)
 
         self._active_tool: str | None = None
+        # The sibling each family slot shows, and arms when clicked: the one
+        # used last, starting from the first.
+        self._family_choice = {
+            family: siblings[0] for family, siblings in design.tokens.FAMILIES.items()
+        }
         self._tool_buttons: dict[str, _IconButton] = {}
-        # SNX-68: the last (selection, bounds) pair handed to
-        # `reposition` -- `set_capture_mode` replays them through it
-        # whenever the chip's label changes width, so the bar re-centres
-        # itself instead of just growing/shrinking from its own top-left
-        # corner. `None` until the first `reposition` call, which is what
-        # lets a bare `FloatingBar()` (no `OverlayWindow` around it, as in
-        # most of this module's own tests) fall back to a plain resize.
+        # SNX-68: the last (selection, bounds) pair handed to `reposition`
+        # -- `set_capture_mode` replays them through it whenever the chip's
+        # label changes width, so the bar re-centres itself instead of just
+        # growing from its own top-left corner. `None` until the first
+        # `reposition` call, which is what lets a bare `FloatingBar()` fall
+        # back to a plain resize.
         self._last_selection: QRect | None = None
         self._last_bounds: QRectF | None = None
 
-        # Rule 3 of the capture-flow handoff: the primary action sits at
-        # the LEFT end, before a divider, and picking a tool never changes
-        # anything to its left. It used to trail the bar, so the one control
-        # that finishes the snip was the last thing read and moved every
-        # time the tool group changed width.
+        # The primary action sits at the LEFT end, before a divider, and
+        # picking a tool never changes anything to its left. It used to
+        # trail the bar, so the one control that finishes the snip was the
+        # last thing read and moved every time the tool group changed width.
         #
         # The overlay leads with a split button -- "the chooser sets the
         # split button's face; the chevron always offers the other two" --
@@ -1130,12 +1383,9 @@ class FloatingBar(_Chrome):
         self._add_divider(layout)
 
         # The chip is built but not placed on the overlay's bar: the
-        # handoff's post-selection bars carry no mode control, and the way
+        # handoff's post-selection bar carries no mode control, and the way
         # back to one is Space, which reopens the chooser with the mode
-        # still on it. Keeping it here made the bar the second place to
-        # change mode and the widest thing between the action and the
-        # tools. The review window still shows it -- it has no chooser
-        # behind it to go back to.
+        # still on it.
         self._chip = self._build_capture_chip()
         self._chip.clicked.connect(self.captureChipClicked)
         if capture_chip and self._trailing == "done":
@@ -1144,27 +1394,24 @@ class FloatingBar(_Chrome):
         else:
             self._chip.hide()
 
-        for tool in design.tokens.TOOLS:
-            key = _TOOL_SHORTCUT_KEYS[tool]
-            button = _IconButton(tool, f"{_tool_label(tool)} — {key}")
-            if tool == "rect":
-                # A click *uses* the shape group, it does not ask which one.
-                # Picking a tool should arm it, and making every rectangle
-                # cost a menu round-trip had the most-used shape behaving
-                # like the least-used. The first click arms whichever shape
-                # is current; each further click while it is already armed
-                # advances through `tokens.RECT_GROUP`, so the whole group
-                # is reachable by clicking alone and the glyph always shows
-                # what a drag will draw. The menu is still there for going
-                # straight to one: right-click.
-                button.clicked.connect(self._on_shape_group_clicked)
-                button.rightClicked.connect(self.shapeMenuRequested)
-            else:
-                button.clicked.connect(lambda checked=False, t=tool: self._on_tool_clicked(t))
+        for slot in design.tokens.STILLS_SLOTS:
+            tool = self._family_choice.get(slot, slot)
+            button = _IconButton(_tool_glyph(tool), self._slot_tooltip(slot, tool), name=tool)
+            button.clicked.connect(lambda checked=False, s=slot: self._on_slot_clicked(s))
+            if slot in design.tokens.FAMILIES:
+                notch = button.add_notch(self._NOTCH_TOOLTIPS[slot])
+                notch.clicked.connect(lambda s=slot: self.familyMenuRequested.emit(s))
+                button.rightClicked.connect(lambda s=slot: self.familyMenuRequested.emit(s))
             button.hovered.connect(self.toolHovered)
             button.unhovered.connect(self.toolUnhovered)
-            self._tool_buttons[tool] = button
+            self._tool_buttons[slot] = button
             layout.addWidget(button)
+        self._add_divider(layout)
+
+        # The watermark joins the style dot here, as a slot of its own.
+        self._style_dot = _StyleDot(self)
+        self._style_dot.clicked.connect(self.styleRequested)
+        layout.addWidget(self._style_dot)
         self._add_divider(layout)
 
         self._undo_button = _IconButton("undo", f"Undo — {self.UNDO_SHORTCUT}")
@@ -1187,8 +1434,8 @@ class FloatingBar(_Chrome):
         self._clear_button = _IconButton(
             "trash",
             "Clear ink",
-            hover_bg=design.color("DANGER_BG"),
-            hover_color=design.color("DANGER_FG"),
+            hover_bg=design.bar_color("DANGER_BG"),
+            hover_color=design.bar_color("DANGER_FG"),
         )
         self._clear_button.clicked.connect(self.clearRequested)
         layout.addWidget(self._clear_button)
@@ -1217,23 +1464,26 @@ class FloatingBar(_Chrome):
     # -- construction helpers ------------------------------------------------
 
     def _add_divider(self, layout: QHBoxLayout) -> None:
-        metric = design.tokens.Metric
-        layout.addSpacing(metric.BAR_DIVIDER_GAP)
-        layout.addWidget(_Divider(self))
-        layout.addSpacing(metric.BAR_DIVIDER_GAP)
+        metric = design.tokens.BarMetric
+        layout.addSpacing(metric.DIVIDER_MARGIN)
+        layout.addWidget(
+            _Divider(self, height=metric.DIVIDER_H, colour=design.bar_color("DIVIDER"))
+        )
+        layout.addSpacing(metric.DIVIDER_MARGIN)
+
+    def _slot_tooltip(self, slot: str, tool: str) -> str:
+        tail = self._FAMILY_TOOLTIP_TAILS.get(slot)
+        return f"{_tool_tooltip(tool)} · {tail}" if tail else _tool_tooltip(tool)
 
     def _build_capture_chip(self) -> _PillButton:
         label, _icon, _note = design.tokens.CAPTURE_MODES[0]  # "Region", the bar's default
         metric = design.tokens.Metric
-        return _PillButton(
+        chip = _PillButton(
             "chevron",
             label,
             icon_size=14,
-            # Neutral, not accent. Rule 3 of the capture-flow handoff is
-            # that the primary action is the *only* accent-filled control
-            # in the bar -- with the mode chip wearing it too, the brightest
-            # thing on the bar was a mode switch rather than the control
-            # that finishes the snip.
+            # Neutral, not accent: the primary action is the *only*
+            # accent-filled control in the bar.
             text_color=design.color("TEXT_PRIMARY"),
             bg_color=design.color("BAR_BORDER"),
             icon_after=True,
@@ -1241,48 +1491,45 @@ class FloatingBar(_Chrome):
             pad_right=metric.CHIP_PAD_R,
             tooltip="Capture mode",
         )
+        chip.setFixedHeight(design.tokens.BarMetric.BTN)
+        return chip
 
     def _build_save_button(self) -> _PillButton:
-        """The bar's primary action: `Save` in the overlay, `Done` in the
-        review window, whose footer already owns the exports.
+        """The review window's primary action, `Done`: its footer already
+        owns the exports.
 
-        It leads the bar rather than trailing it (capture-flow handoff,
-        rule 3), and carries the accent -- the one control in the bar that
-        may. The mode chip used to wear it, which made the brightest thing
-        on the bar a mode switch rather than the control that finishes the
-        snip.
+        It leads the bar rather than trailing it, and carries the accent --
+        the one control in the bar that may.
         """
-        metric = design.tokens.Metric
+        metric = design.tokens.BarMetric
         done = self._trailing == "done"
-        return _PillButton(
+        button = _PillButton(
             "check" if done else "save",
             "Done" if done else "Save",
-            icon_size=metric.ICON,
-            text_color=design.color("ACCENT_FG"),
-            bg_color=design.color("ACCENT"),
+            icon_size=metric.SPLIT_ICON,
+            text_color=design.bar_color("ACCENT_FG"),
+            bg_color=design.bar_color("ACCENT"),
             icon_after=False,
-            pad_left=13,
-            pad_right=13,
+            pad_left=metric.SPLIT_PAD_H,
+            pad_right=metric.SPLIT_PAD_H,
             tooltip="Done" if done else "Save",
         )
+        button.setFixedHeight(metric.BTN)
+        return button
 
     # -- capture mode (SNX-44) --------------------------------------------
 
     def set_capture_mode(self, label: str) -> None:
-        """Update the chip's own label to `label`, per the reference's
-        `{{ mode }}` binding on the chip button itself -- the chip always
-        names whichever capture mode is current, not just its own "Region"
-        default from `_build_capture_chip`.
+        """Update the chip's own label to `label`, and re-centre the bar for
+        its new width.
 
         SNX-68: `_PillButton.sizeHint` (SNX-59) already measures the new
         label correctly, but nothing re-read it after construction, so the
         bar itself stayed at its old width and clipped whichever label
-        didn't fit in it -- "Region"'s width, the only one ever measured.
-        Replaying the last `reposition` call redoes both the sizing *and*
-        the centring in one place, the same call `_sync_bar_visibility`
-        already uses for a selection change; a label change deserves no
-        less. Falls back to a plain resize when `reposition` was never
-        called at all -- a bare `FloatingBar()` with no selection yet.
+        didn't fit in it. Replaying the last `reposition` call redoes both
+        the sizing *and* the centring in one place. Falls back to a plain
+        resize when `reposition` was never called at all -- a bare
+        `FloatingBar()` with no selection yet.
         """
         self._chip.set_text(label)
         if self._last_selection is not None and self._last_bounds is not None:
@@ -1290,77 +1537,93 @@ class FloatingBar(_Chrome):
         else:
             self.resize(self.sizeHint())
 
-    # -- tool selection --------------------------------------------------
+    # -- tools -------------------------------------------------------------
 
-    def _on_shape_group_clicked(self) -> None:
-        """The rect button: arm the shape group, or advance within it.
+    def _on_slot_clicked(self, slot: str) -> None:
+        """Arm the slot's tool: for a family, the sibling it is showing.
 
-        Not a menu. The first click arms whichever of `tokens.RECT_GROUP`
-        is current; clicking again while it is already armed moves to the
-        next, wrapping, and the button's glyph follows so it always shows
-        what a drag will draw. Right-click opens the menu for jumping
-        straight to one.
+        A click never moves on to the next sibling. The notch is how to
+        reach another, and each has its key; a click that sometimes changed
+        what the slot draws would make the one gesture used most the one
+        that cannot be trusted.
         """
-        group = design.tokens.RECT_GROUP
-        if self.active_tool in group:
-            current = group.index(self.active_tool)
-            self.select_tool(group[(current + 1) % len(group)])
-        else:
-            self.select_tool(self._shape_group_tool)
-
-    @property
-    def _shape_group_tool(self) -> str:
-        """Whichever of the group the button is currently showing."""
-        return getattr(self, "_shape_tool", design.tokens.RECT_GROUP[0])
-
-    def set_shape_group_tool(self, tool: str) -> None:
-        """Point the rect button's glyph at `tool` and remember it as the
-        group's current member, so the next plain click arms that one.
-        """
-        if tool not in design.tokens.RECT_GROUP:
-            return
-        self._shape_tool = tool
-        button = self._tool_buttons["rect"]
-        button.set_icon_name(tool)
-        button.setToolTip(f"{_tool_label(tool)} — {_TOOL_SHORTCUT_KEYS['rect']}")
-
-    def _on_tool_clicked(self, tool: str) -> None:
+        tool = self._family_choice.get(slot, slot)
+        self.toolPicked.emit(tool)
         self.select_tool(tool)
 
     def select_tool(self, tool: str) -> None:
-        """Public equivalent of clicking `tool`'s own button: the same
-        active-tool bookkeeping and `toolSelected` emission a click
-        produces. `OverlayWindow.keyPressEvent`'s tool-letter shortcuts
-        (SNX-47) call this rather than reaching for the private
-        `_on_tool_clicked` -- a shortcut and a click are two ways to reach
-        the same state change, not two copies of it that could drift apart.
+        """Make `tool` the active tool, the one place that happens -- a
+        click, a family menu pick and a shortcut key all arrive here, so
+        none of them is a copy of the others that could drift.
+
+        A family sibling also becomes the one its slot shows, and so the
+        one a plain click on that slot arms next.
         """
-        # A group member arms the rect button and takes over its glyph, so
-        # the bar shows what a drag will draw rather than a generic rect.
-        if tool in design.tokens.RECT_GROUP:
-            self.set_shape_group_tool(tool)
+        family = _family_of(tool)
+        if family is not None:
+            self._family_choice[family] = tool
+            button = self._tool_buttons[family]
+            button.set_glyph(tool, _tool_glyph(tool))
+            button.setToolTip(self._slot_tooltip(family, tool))
         self.set_active_tool(tool)
         self.toolSelected.emit(tool)
 
-    def set_active_tool(self, tool: str | None) -> None:
-        """Mark `tool`'s button active and every other tool button idle.
+    def handle_tool_key(self, key: int) -> bool:
+        """Arm whatever `key` reaches, as `select_tool` would, and say
+        whether it was a tool key at all. The redaction family's one key
+        cycles its siblings.
+        """
+        tool = _SHORTCUT_KEY_CODES.get(key)
+        if tool is not None:
+            self.select_tool(tool)
+            return True
+        if key == _REDACTION_KEY_CODE:
+            self.cycle_redaction()
+            return True
+        return False
 
-        The single place this is enforced, whether the change came from a
-        click above or a caller driving the bar directly -- per the spec,
-        exactly one tool reads as active at a time. SNX-64: `tool` being
-        one of `tokens.RECT_GROUP`'s Ellipse/Line/Crop -- which have no
-        button of their own -- reads as the rect button itself being
-        active, the same way picking any of them from its popover ought to
-        leave *something* in the bar showing the group is in use.
+    def cycle_redaction(self) -> None:
+        """The redaction key: arm the sibling the slot shows, or, when a
+        redaction tool is already armed, the next one after it.
+        """
+        siblings = design.tokens.FAMILIES["redact"]
+        tool = self._family_choice["redact"]
+        if self._active_tool in siblings:
+            tool = siblings[(siblings.index(self._active_tool) + 1) % len(siblings)]
+        self.select_tool(tool)
+
+    def family_choice(self, family: str) -> str:
+        """The sibling `family`'s slot shows."""
+        return self._family_choice[family]
+
+    def set_active_tool(self, tool: str | None) -> None:
+        """Mark `tool`'s slot active and every other slot idle -- a family
+        slot reads active for any of its siblings.
         """
         self._active_tool = tool
-        for name, button in self._tool_buttons.items():
-            is_rect_group_member = name == "rect" and tool in design.tokens.RECT_GROUP
-            button.set_active(name == tool or is_rect_group_member)
+        family = _family_of(tool)
+        for slot, button in self._tool_buttons.items():
+            button.set_active(slot in (tool, family))
+        self._style_dot.set_tool(tool)
 
     @property
     def active_tool(self) -> str | None:
         return self._active_tool
+
+    def slot_rect(self, slot: str, host: QWidget) -> QRect:
+        """`slot`'s button, in `host`'s coordinates -- where a menu for it is
+        anchored.
+        """
+        button = self._tool_buttons[slot]
+        return QRect(button.mapTo(host, QPoint(0, 0)), button.size())
+
+    # -- style -------------------------------------------------------------
+
+    def set_style_preview(self, colour: str, stroke: int) -> None:
+        self._style_dot.set_preview(colour, stroke)
+
+    def set_style_open(self, open_: bool) -> None:
+        self._style_dot.set_open(open_)
 
     # -- undo / redo -------------------------------------------------------
 
@@ -1375,103 +1638,79 @@ class FloatingBar(_Chrome):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.Metric
+        metric = design.tokens.BarMetric
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
 
-        # design.color("BAR_BG") already carries BAR_BG_ALPHA (93%) --
+        # design.bar_color("BAR_BG") already carries its 94% alpha --
         # painted here as a translucent *fill*, never as reduced *widget*
-        # opacity, so every child painted after this (each button's own
-        # glyph) stays fully opaque.
+        # opacity, so every child painted after this stays fully opaque.
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.color("BAR_BG"))
-        painter.drawRoundedRect(rect, metric.BAR_RADIUS, metric.BAR_RADIUS)
+        painter.setBrush(design.bar_color("BAR_BG"))
+        painter.drawRoundedRect(rect, metric.RADIUS, metric.RADIUS)
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.color("BAR_BORDER"))
-        painter.drawRoundedRect(rect, metric.BAR_RADIUS, metric.BAR_RADIUS)
+        painter.setPen(design.bar_color("BAR_BORDER"))
+        painter.drawRoundedRect(rect, metric.RADIUS, metric.RADIUS)
         painter.end()
 
     # -- positioning -----------------------------------------------------
 
     def reposition(self, selection: QRect, bounds: QRectF) -> None:
-        """Centre the bar under `selection`, clamped so it can never leave
-        `bounds` -- even with the selection dragged to the very bottom edge
-        -- per the spec's "Floating bar" clamp rule.
+        """Put the bar where `placement` says it belongs for `selection`.
 
-        `bounds` is a *rect*, in this widget's parent's coordinate space,
-        not the parent's own size: on a multi-monitor virtual desktop the
-        two are different things, and the spec's clamp rule is about the
-        screen the user is looking at, not the union of every screen. The
-        caller (`OverlayWindow._chrome_bounds`) passes the monitor the
-        selection is actually on. Clamping to the window instead put the
-        bar wherever the *bounding box* allowed: on a layout whose monitors
-        are staggered vertically (1440px-tall centre, 1080px-tall sides
-        mounted lower) the bar for a selection near a short monitor's
-        bottom edge landed in the gap below it -- inside the window, on no
-        monitor at all, so the whole bar was simply invisible. Bounds that
-        are an actual screen's rect cannot express that position.
+        Kept apart from `placement` so the rule and applying it stay two
+        things: a position the user chose would replace the one, not the
+        other.
         """
-        metric = design.tokens.Metric
         # SNX-68: remembered so `set_capture_mode` can replay this same
-        # call -- selection and bounds don't change just because the chip's
-        # label did, but the bar's width does, and only this method knows
-        # how to turn a width change back into a centred position.
+        # call when the chip's width changes.
         self._last_selection = selection
         self._last_bounds = bounds
         size = self.sizeHint()
-        # QRectF, not the raw QRect `selection`: QRect.bottom() is
-        # inclusive (top + height - 1), which would put the bar a pixel
-        # higher than intended -- same fix OverlayWindow's own
-        # `_bracket_path` already applies for the same reason.
-        sel = QRectF(selection)
+        self.setGeometry(QRect(self.placement(QRectF(selection), bounds, size), size))
 
-        desired_center_x = sel.center().x()
-        # Falls back to the bounds' own centre, rather than inverting, when
-        # the monitor is narrower than twice BAR_MIN_EDGE -- a case the
-        # README's "at least 400px from either screen edge" doesn't
-        # anticipate (a real screen is always wider than 800px) but a small
-        # test/embedded window can hit.
-        center = bounds.center().x()
-        min_center = min(bounds.left() + metric.BAR_MIN_EDGE, center)
-        max_center = max(bounds.right() - metric.BAR_MIN_EDGE, center)
-        center_x = max(min_center, min(desired_center_x, max_center))
+    @staticmethod
+    def placement(selection: QRectF, bounds: QRectF, size: QSize) -> QPoint:
+        """Where a bar of `size` belongs for `selection`: its top-left, in the
+        space `selection` and `bounds` share.
 
-        # Below the selection is the spec's placement. Above it is the
-        # fallback, and it is the one this used to lack: a selection with
-        # less than a bar's height beneath it left no room below, and the
-        # clamp then pulled the bar *up over the selection* -- covering the
-        # very pixels the user had just framed in order to annotate them.
-        # Reported as "when u select a small region the controls are in the
-        # region so u cant edit anything", on a 1123x74 strip.
-        #
-        # A short selection is the common way to hit this, but height is
-        # not what decides it -- distance from the monitor's bottom edge
-        # is. A tall selection ending at the same place has exactly the
-        # same problem, and gets the same answer.
-        below_top = sel.bottom() + metric.BAR_OFFSET_Y
-        above_top = sel.top() - metric.BAR_OFFSET_Y - size.height()
-        if below_top + size.height() <= bounds.bottom():
-            top = below_top
-        elif above_top >= bounds.top():
-            top = above_top
+        `bounds` is the selection's own monitor, less whatever the desktop
+        reserves on it (`OverlayWindow._chrome_bounds`) -- never the window.
+        On a desk whose monitors are staggered vertically, clamping to the
+        window put the bar for a selection low on a short monitor into the
+        gap below it: inside the window, on no monitor at all.
+
+        Centred on the selection, `BAR_OFFSET_Y` below it, and at least
+        `BAR_EDGE_MARGIN` inside `bounds` on every side.
+
+        Where there is no room below, the bar goes above the selection
+        rather than being clamped back up over it, as the handoff's
+        `BAR_BOTTOM_ROOM` would put it (divergences.md 8). That clamp covers
+        the very pixels the user framed in order to mark them up -- reported
+        as "when u select a small region the controls are in the region so
+        u cant edit anything", on a 1123x74 strip. Height is not what
+        decides it; distance from the monitor's bottom edge is.
+
+        With room on neither side the selection is essentially the whole
+        monitor, anywhere covers some of it, and the bar is held inside
+        `bounds` against its bottom margin.
+        """
+        metric = design.tokens.BarMetric
+        margin = metric.BAR_EDGE_MARGIN
+        left = selection.center().x() - size.width() / 2
+        left = max(bounds.left() + margin, min(left, bounds.right() - margin - size.width()))
+
+        highest = bounds.top() + margin
+        lowest = bounds.bottom() - margin - size.height()
+        below = selection.bottom() + metric.BAR_OFFSET_Y
+        above = selection.top() - metric.BAR_OFFSET_Y - size.height()
+        if below <= lowest:
+            top = below
+        elif above >= highest:
+            top = above
         else:
-            # Neither side has room, so the selection is within a bar's
-            # height of both edges -- it is essentially the whole monitor,
-            # and some overlap is unavoidable. Clamped at both ends, not
-            # just the bottom: a monitor mounted below the virtual
-            # desktop's origin has a non-zero top, and a selection near its
-            # upper edge would otherwise push the bar off that monitor into
-            # the same never-displayed gap the bottom clamp exists to
-            # avoid.
-            highest_top = min(bounds.top(), bounds.bottom() - self._TOP_MAX_FROM_BOTTOM)
-            top = max(
-                highest_top,
-                min(below_top, bounds.bottom() - self._TOP_MAX_FROM_BOTTOM),
-            )
-
-        self.setGeometry(
-            round(center_x - size.width() / 2), round(top), size.width(), size.height()
-        )
+            top = max(highest, lowest)
+        return QPoint(round(left), round(top))
 
 
 # ---------------------------------------------------------------------------
@@ -1526,7 +1765,7 @@ class _ToolPill(QWidget):
         layout.addWidget(self._text_label)
 
     def set_tool(self, tool: str) -> None:
-        pixmap = design.icon(tool, design.color("TEXT_PRIMARY")).pixmap(
+        pixmap = design.icon(_tool_glyph(tool), design.color("TEXT_PRIMARY")).pixmap(
             self._ICON_SIZE, self._ICON_SIZE
         )
         self._icon_label.setPixmap(pixmap)
@@ -2074,6 +2313,14 @@ class BlurTray(_Chrome):
     blurModeChanged = pyqtSignal(str)
     strengthChanged = pyqtSignal(int)
 
+    # Each segment as the redaction tool it arms. The segments were a mode
+    # the one blur tool read; the redaction family made each its own tool,
+    # and these keep the tray in step with it for as long as the style dot
+    # opens this tray. The tray has always spelled Pixelate "pix" and
+    # callers have passed "pixelate", so both mean the same tool.
+    MODE_TOOLS = {"blur": "blur", "pix": "pixelate", "pixelate": "pixelate", "solid": "blackout"}
+    TOOL_MODES = {"blur": "blur", "pixelate": "pix", "blackout": "solid"}
+
     # The reference's strength readout is a narrower `min-width:20px` than
     # SettingsTray's own 34px -- a plain number ("8") never runs as wide as
     # a stroke's "26px" -- so this is its own literal, not
@@ -2194,6 +2441,20 @@ class BlurTray(_Chrome):
         for control in (self._strength_label, self._slider, self._readout):
             control.setEnabled(has_strength)
         self.blurModeChanged.emit(mode)
+
+    def show_tool(self, tool: str | None) -> None:
+        """Light the segment for redaction tool `tool`, without announcing
+        it: the change came from the tool, and echoing it back would arm
+        that tool a second time.
+        """
+        mode = self.TOOL_MODES.get(tool)
+        if mode is None or mode == self._blur_mode:
+            return
+        blocked = self.blockSignals(True)
+        try:
+            self.set_blur_mode(mode)
+        finally:
+            self.blockSignals(blocked)
 
     def set_strength(self, strength: int) -> None:
         """Set the current blur strength, clamped to `tokens.Metric`'s
@@ -2682,115 +2943,268 @@ class CaptureModePopover(_Chrome):
 
 
 # ---------------------------------------------------------------------------
-# Shape submenu (SNX-64)
+# Family menus
 # ---------------------------------------------------------------------------
-# Restores Ellipse, Line and Crop -- shapes.py has always fully implemented
-# all three, but nothing in the redesigned chrome ever named them, so the
-# bar only ever offered eight of the eleven tools the owner asked to keep
-# (see tokens.RECT_GROUP's own comment for the full rationale). The design
-# handoff's own guidance for a tool that doesn't fit the eight is a submenu
-# off an existing button, not a bar button of its own -- rect is that
-# button, since all four (Rectangle included) are two-point box/line marks.
+# A family slot's notch opens one of these: every sibling in the family, the
+# one the slot shows ticked. Shapes carry each sibling's key, since the menu
+# is for discovering a shape rather than for reaching it; redaction rows
+# carry what each one guarantees instead, because blur on small text is
+# famously recoverable and a user choosing between the three needs to know.
 
 
-class ShapeToolPopover(_Chrome):
-    """Rect's own submenu: `tokens.RECT_GROUP` as a short list of rows,
-    reusing `_CaptureModeRow` (glyph, label, note, check mark for whichever
-    is the bar's current tool) the same way `CaptureModePopover` does for
-    capture modes -- opened by `OverlayWindow._toggle_shape_popover` off
-    `FloatingBar.shapeMenuRequested`, positioned against the rect button
-    itself rather than the whole bar.
+class _FamilyRow(QPushButton):
+    """One sibling in a family menu: glyph, label, then its key or its note,
+    and a tick for the sibling the slot is showing.
+
+    Painted rather than laid out from child labels, and sized from the fonts
+    it actually draws in -- so it cannot collapse to `QPushButton`'s
+    placeholder height the way `_CaptureModeRow.sizeHint` documents.
     """
 
-    toolSelected = pyqtSignal(str)
+    def __init__(
+        self,
+        tool: str,
+        glyph: str,
+        label: str,
+        shortcut: str,
+        note: str,
+        width: int,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.tool = tool
+        self._glyph = glyph
+        self._label = label
+        self._shortcut = shortcut
+        self._note = note
+        self._selected = False
+        self._hovered = False
+        self.setFlat(True)
+        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(width, self._height())
 
-    # Same #1a1c18 BAR_BG at 97% CaptureModePopover's own _BG_ALPHA already
-    # names -- reused rather than re-derived for this second, smaller popover.
-    _BG_ALPHA = 0.97
+    def sizeHint(self) -> QSize:
+        # The size it is fixed at. `QPushButton`'s own hint measures a text
+        # and an icon this row never sets.
+        return QSize(self.minimumWidth(), self.minimumHeight())
 
-    def __init__(self, parent=None):
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    @staticmethod
+    def _font(spec: tuple[float, int], mono: bool = False) -> QFont:
+        families = design.font_families()
+        font = QFont(families.mono if mono else families.ui)
+        size, weight = spec
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight(weight))
+        return font
+
+    def _height(self) -> int:
+        metric = design.tokens.BarMetric
+        pad_v, _pad_h = metric.MENU_ROW_PAD
+        content = QFontMetricsF(self._font(design.tokens.BarFont.MENU_LABEL)).height()
+        if self._note:
+            content += metric.MENU_NOTE_GAP + QFontMetricsF(
+                self._font(design.tokens.BarFont.MENU_NOTE)
+            ).height()
+        return math.ceil(pad_v * 2 + max(metric.MENU_ROW_ICON, content))
+
+    @property
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = design.tokens.BarMetric
+        fonts = design.tokens.BarFont
+        rect = QRectF(self.rect())
+        pad_v, pad_h = metric.MENU_ROW_PAD
+
+        # Hover wins over the selected fill, so the ticked row still reads as
+        # something that can be pressed.
+        if self._hovered or self._selected:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(
+                design.bar_color("ROW_HOVER_BG" if self._hovered else "ROW_SELECTED_BG")
+            )
+            painter.drawRoundedRect(rect, metric.MENU_ROW_RADIUS, metric.MENU_ROW_RADIUS)
+
+        fg = design.bar_color("ROW_SELECTED_FG" if self._selected else "ROW_IDLE_FG")
+        icon = metric.MENU_ROW_ICON
+        left = float(pad_h)
+        design.icon(self._glyph, fg).paint(
+            painter, round(left), round((rect.height() - icon) / 2), icon, icon
+        )
+        left += icon + metric.MENU_ROW_GAP
+
+        tick = metric.MENU_TICK
+        right = rect.width() - pad_h - tick
+        if self._selected:
+            design.icon("check", design.bar_color("ACCENT")).paint(
+                painter, round(right), round((rect.height() - tick) / 2), tick, tick
+            )
+        right -= metric.MENU_ROW_GAP
+
+        if self._shortcut:
+            font = self._font(fonts.MENU_SHORTCUT, mono=True)
+            painter.setFont(font)
+            painter.setPen(design.bar_color("SHORTCUT_FG"))
+            width = QFontMetricsF(font).horizontalAdvance(self._shortcut)
+            painter.drawText(
+                QRectF(right - width, 0, width, rect.height()),
+                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                self._shortcut,
+            )
+            right -= width + metric.MENU_ROW_GAP
+
+        label_font = self._font(fonts.MENU_LABEL)
+        painter.setFont(label_font)
+        painter.setPen(fg)
+        if not self._note:
+            painter.drawText(
+                QRectF(left, 0, right - left, rect.height()),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                self._label,
+            )
+            painter.end()
+            return
+
+        label_h = QFontMetricsF(label_font).height()
+        painter.drawText(
+            QRectF(left, pad_v, right - left, label_h),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self._label,
+        )
+        note_font = self._font(fonts.MENU_NOTE)
+        painter.setFont(note_font)
+        painter.setPen(design.bar_color("ROW_NOTE_FG"))
+        painter.drawText(
+            QRectF(
+                left,
+                pad_v + label_h + metric.MENU_NOTE_GAP,
+                right - left,
+                QFontMetricsF(note_font).height(),
+            ),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self._note,
+        )
+        painter.end()
+
+
+class FamilyMenu(_Chrome):
+    """A family slot's menu: every sibling, the one the slot shows ticked,
+    and a pick that arms the sibling picked.
+
+    A child of the window the bar sits over -- not of the bar, and not a
+    top-level popup either, though the handoff draws one. Not the bar's,
+    because a menu paints outside the bar's rect and above the strip that
+    hangs under it. Not a popup, because a popup takes the keyboard while it
+    is open, so a sibling's key and Esc would stop reaching the window, and
+    a press outside a popup is replayed underneath or swallowed depending on
+    the platform. As a child, the window's own press handler decides what a
+    press outside the menu means -- close it, and nothing else -- and
+    `_Chrome` keeps a press on the menu from ever reaching that handler.
+    """
+
+    siblingPicked = pyqtSignal(str)
+
+    def __init__(self, family: str, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        metric = design.tokens.Metric
-        self.setFixedWidth(metric.MENU_W)
+        self.family = family
+        metric = design.tokens.BarMetric
+        tokens = design.tokens
+        if family == "shapes":
+            width = metric.MENU_W_SHAPES
+            entries = [(tool, tool, label, key, "") for tool, label, key in tokens.SHAPES]
+        else:
+            width = metric.MENU_W_REDACT
+            entries = [
+                (tool, glyph, label, "", note) for tool, glyph, label, note in tokens.REDACTIONS
+            ]
+        # Border-box, as the handoff insists: the width is the menu's whole
+        # outside edge, padding and border included.
+        self.setFixedWidth(width)
+        inset = metric.MENU_PAD + metric.BORDER
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(
-            metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD
-        )
+        layout.setContentsMargins(inset, inset, inset, inset)
         layout.setSpacing(0)
 
-        self._tool: str = design.tokens.RECT_GROUP[0]
-
-        self._rows: dict[str, _CaptureModeRow] = {}
-        for tool in design.tokens.RECT_GROUP:
-            row = _CaptureModeRow(
-                _tool_label(tool), tool, design.tokens.TOOL_HINTS[tool], self
-            )
+        self._rows: dict[str, _FamilyRow] = {}
+        for tool, glyph, label, key, note in entries:
+            row = _FamilyRow(tool, glyph, label, key, note, width - 2 * inset, self)
             row.clicked.connect(lambda checked=False, t=tool: self._on_row_clicked(t))
             self._rows[tool] = row
             layout.addWidget(row)
 
-        self._select_row(self._tool)
+        self._current = entries[0][0]
+        self.set_current(self._current)
+        self.resize(self.sizeHint())
 
     @property
-    def tool(self) -> str:
-        return self._tool
+    def current(self) -> str:
+        return self._current
 
-    def set_tool(self, tool: str) -> None:
-        """Mark `tool`'s row checked without emitting `toolSelected` or
-        closing the popover -- for `_toggle_shape_popover` to seed the
-        popover with whichever group member is already active, mirroring
-        `CaptureModePopover.set_mode`'s own split from `_on_row_clicked`.
+    def set_current(self, tool: str) -> None:
+        """Tick `tool` without arming anything -- for seeding the menu with
+        the sibling its slot shows before it opens.
         """
-        self._tool = tool
-        self._select_row(tool)
-
-    def _select_row(self, tool: str) -> None:
+        self._current = tool
         for name, row in self._rows.items():
             row.set_selected(name == tool)
 
     def _on_row_clicked(self, tool: str) -> None:
-        self.set_tool(tool)
-        self.toolSelected.emit(tool)
+        self.set_current(tool)
         self.hide()
+        self.siblingPicked.emit(tool)
 
-    def reposition(self, button_geometry: QRect, bounds: QRectF) -> None:
-        """Position the popover above `button_geometry` (the rect button's
-        own geometry, already mapped into this widget's parent's
-        coordinate space by the caller), horizontally centred on it and
-        clamped inside `bounds` -- mirroring
-        `CaptureModePopover.reposition`'s own centring/clamping, including
-        its reason for taking the selection's monitor rather than the whole
-        window.
+    def reposition(self, slot: QRect, bar: QRect, bounds: QRectF) -> None:
+        """Centre over `slot` and open above `bar`, `MENU_OFFSET` clear of
+        it -- below the bar instead when there is no room above inside
+        `bounds`. All three are in the parent's coordinates.
+
+        Above first, as the spec opens every menu: the bar sits below the
+        selection whenever it can, so a menu opening downward would hang off
+        the bottom of the monitor more often than not.
         """
-        metric = design.tokens.Metric
-        width = metric.MENU_W
+        metric = design.tokens.BarMetric
         height = self.sizeHint().height()
-
-        center_x = button_geometry.center().x()
-        left = center_x - width / 2
+        width = self.width()
+        left = slot.center().x() - width / 2
         left = max(bounds.left(), min(left, bounds.right() - width))
-
-        top = max(bounds.top(), button_geometry.top() - height - metric.MENU_OFFSET)
-        top = min(top, bounds.bottom() - height)
-
+        bar_rect = QRectF(bar)
+        top = bar_rect.top() - metric.MENU_OFFSET - height
+        if top < bounds.top():
+            top = min(bar_rect.bottom() + metric.MENU_OFFSET, bounds.bottom() - height)
         self.setGeometry(round(left), round(top), width, height)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.Metric
+        metric = design.tokens.BarMetric
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-
-        bg = QColor(design.tokens.Color.BAR_BG)
-        bg.setAlphaF(self._BG_ALPHA)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
+        painter.setBrush(design.bar_color("MENU_BG"))
         painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
-
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.color("DIVIDER"))
+        painter.setPen(design.bar_color("MENU_BORDER"))
         painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
         painter.end()
 
@@ -2819,7 +3233,7 @@ class ShapeToolPopover(_Chrome):
 class HintHUD(_Chrome):
     """The overlay's full-width top hint bar, per docs/design/overlay-
     redesign.md's "Top hint HUD" section: `Esc discard ink · Enter copy &
-    dismiss · P H A R S T B E pick a tool · drag any edge to re-frame -- the
+    dismiss · P H R O L A S T B E pick a tool · drag any edge to re-frame -- the
     ink stays where you put it`.
 
     A real child widget of `OverlayWindow` -- built from real `QLabel`
@@ -2838,12 +3252,12 @@ class HintHUD(_Chrome):
     """
 
     # (text, is_key) in reading order. The key segment for the tool
-    # shortcuts is built from `_TOOL_SHORTCUT_KEYS`/`tokens.TOOLS` rather
-    # than typed out as "P H A R S T B E" -- if a shortcut or tool order
-    # ever changes, this line follows it instead of silently drifting out
-    # of sync the way a hand-typed copy of the same letters could.
+    # shortcuts is built from the bar's own slots (`_bar_keys`) rather than
+    # typed out -- if a shortcut or the slot order ever changes, this line
+    # follows it instead of silently drifting out of sync the way a
+    # hand-typed copy of the same letters could.
     def _segments(self) -> list[tuple[str, bool]]:
-        keys = " ".join(_TOOL_SHORTCUT_KEYS[tool] for tool in design.tokens.TOOLS)
+        keys = " ".join(_bar_keys())
         return [
             ("Esc", True),
             (" discard ink · ", False),
@@ -3153,31 +3567,6 @@ class DelayCountdown(QWidget):
         painter.end()
 
 
-# Tool name -> Shape subclass for a freehand (points-list) stroke, keyed
-# by the same string ids tokens.TOOLS/FloatingBar use -- mirrors editor.py's
-# _FREEHAND_SHAPE_CLASSES, just keyed by these strings instead of the old
-# Tool enum, since OverlayWindow (unlike Canvas) never had one.
-_FREEHAND_MARK_CLASSES = {"pen": Pen, "highlighter": Highlighter}
-
-# Tool name -> Shape subclass for a press-to-release two-point stroke.
-# 'blur' is deliberately absent: which of Blur/Pixelate it commits depends
-# on `_blur_mode`, decided in `OverlayWindow._start_stroke` at press time
-# rather than looked up here. Ellipse/Line/Crop (SNX-64) are keyed in
-# alongside Arrow/Rectangle rather than needing any dispatch logic of their
-# own: `_start_stroke`/`_extend_stroke`/`mouseReleaseEvent` already only
-# ever read this dict by the bar's active tool name, so restoring the
-# three tools the redesign dropped is exactly this one addition -- see
-# `tokens.RECT_GROUP` for how a user actually reaches "ellipse"/"line"/
-# "crop" as `self._bar.active_tool` in the first place.
-_TWO_POINT_MARK_CLASSES = {
-    "arrow": Arrow,
-    "rect": Rectangle,
-    "ellipse": Ellipse,
-    "line": Line,
-    "crop": Crop,
-}
-
-
 @dataclass(frozen=True)
 class _MarkAction:
     """One entry in `OverlayWindow`'s undo/redo history (SNX-39; SNX-70
@@ -3235,20 +3624,20 @@ class OverlayWindow(QWidget):
     - Chrome must never reach the export. `rendered_image()` flattens
       `_marks` onto the selection's crop of the frozen frame; it never
       touches `_bar`, `_tray`/`_blur_tray`, `_toast`, `_hud`, `_popover`,
-      `_shape_popover`, `_close_button` or any other widget painted over
+      `_family_menus`, `_close_button` or any other widget painted over
       the overlay, so none of that chrome can ever leak into a copy or a
       save.
 
     Everything else here is chrome and mode-handling built around those
     three constraints. `FloatingBar` (`_bar`) is the real child widget
     driving undo/redo/clear/copy/save and the active tool; `SettingsTray`/
-    `BlurTray` show colour-and-stroke or blur controls under it depending on
-    which draw tool is active, with the eraser getting neither. A press
+    `BlurTray` hang under it when its style dot opens them, for whichever
+    tool is active, with the eraser getting neither. A press
     that misses every resize handle and lands inside the selection starts a
     stroke (`_start_stroke`), drag extends it, and release commits it as a
     mark -- taking its colour/stroke from `_ink_colour`/`_stroke_width` or,
-    for blur, its shape class and strength from `_blur_mode`/
-    `_blur_strength` -- through the same undo/redo/clear history every
+    for a redaction tool, its strength from `_blur_strength` -- through the
+    same undo/redo/clear history every
     other mutation of `_marks` goes through (`_MarkAction`, folding `add`,
     `erase` and `clear` into one stack so any of them can be undone and
     redone in the order they happened). `CaptureModePopover` picks among
@@ -3257,10 +3646,10 @@ class OverlayWindow(QWidget):
     downstream needs to know how a selection was produced, and an optional
     countdown delay re-grabs through the same `BackendRegistry` and
     re-opens over the fresh frame in place rather than building a second
-    `OverlayWindow`. `ShapeToolPopover` (`_shape_popover`) makes Ellipse,
-    Line and Crop reachable off the rect button's own click instead of a
-    twelfth bar button. `keyPressEvent` wires tool-letter shortcuts from
-    `tokens.SHORTCUTS`, Ctrl+Z/Ctrl+Shift+Z for undo/redo, Enter to
+    `OverlayWindow`. The two `FamilyMenu`s (`_family_menus`) open from the
+    bar's notched slots. `keyPressEvent` wires tool-letter shortcuts from
+    `tokens.SHORTCUTS` and the redaction family's key, Ctrl+Z/Ctrl+Shift+Z
+    for undo/redo, Enter to
     copy-and-dismiss, `?` to reveal the hint HUD, and the two-stage Esc
     (`_handle_escape`) the spec leaves for us to decide -- all of it
     suppressed while a slider or a text-editing widget has focus
@@ -3591,6 +3980,12 @@ class OverlayWindow(QWidget):
         self._bar.openRequested.connect(self._on_bar_open)
         self._bar.destinationMenuRequested.connect(self._open_destination_menu)
         self._bar.toolSelected.connect(self._on_tool_selected)
+        # Bound, not a lambda: a lambda holding this window, kept by a bar
+        # this window owns, is a cycle Python cannot see into, and the
+        # window -- frozen frame and all -- would never be freed.
+        self._bar.toolPicked.connect(self._on_tool_picked)
+        self._bar.familyMenuRequested.connect(self._toggle_family_menu)
+        self._bar.styleRequested.connect(self._toggle_style)
 
         # The settings tray (SNX-41): shown only while the bar's active
         # tool is one of tokens.DRAW_TOOLS -- see `_sync_tray_visibility`,
@@ -3604,14 +3999,13 @@ class OverlayWindow(QWidget):
         self._tray.hide()
         self._tray.colourChanged.connect(self._on_ink_colour_changed)
         self._tray.strokeChanged.connect(self._on_stroke_width_changed)
+        self._bar.set_style_preview(self._ink_colour, self._stroke_width)
 
-        # The blur tray: `_tray`'s replacement, not its companion, while
-        # the active tool is 'blur' -- see `_sync_tray_visibility`, which
-        # shows at most one of the two. `_blur_mode`/`_blur_strength` are
-        # tracked the same way `_ink_colour`/`_stroke_width` are above --
-        # `_start_stroke` reads them to decide which of shapes.py's
-        # Blur/Pixelate a blur drag commits.
-        self._blur_mode: str = "blur"
+        # The blur tray: `_tray`'s replacement, not its companion, for a
+        # redaction tool -- see `_sync_tray_visibility`, which shows at most
+        # one of the two. `_blur_strength` is tracked the way
+        # `_ink_colour`/`_stroke_width` are above, for `_start_stroke`;
+        # which redaction a drag commits is the tool itself.
         self._blur_strength: int = design.tokens.Metric.BLUR_DEFAULT
         self._blur_tray = BlurTray(self)
         self._blur_tray.hide()
@@ -3716,13 +4110,18 @@ class OverlayWindow(QWidget):
         self._popover.delayChanged.connect(self._on_delay_changed)
         self._bar.captureChipClicked.connect(self._toggle_capture_popover)
 
-        # SNX-64: rect's own shape submenu -- Ellipse/Line/Crop, restored
-        # alongside Rectangle -- opened off the rect button rather than the
-        # capture chip, see `ShapeToolPopover`'s own docstring.
-        self._shape_popover = ShapeToolPopover(self)
-        self._shape_popover.hide()
-        self._shape_popover.toolSelected.connect(self._on_shape_tool_selected)
-        self._bar.shapeMenuRequested.connect(self._toggle_shape_popover)
+        # The notched slots' menus, one per family -- see `FamilyMenu` for
+        # why they belong to this window rather than to the bar. One is open
+        # at a time, and the style dot's tray counts as one.
+        self._family_menus = {
+            family: FamilyMenu(family, self) for family in design.tokens.FAMILIES
+        }
+        for menu in self._family_menus.values():
+            menu.hide()
+            menu.siblingPicked.connect(self._on_family_sibling_picked)
+        # Whether the style dot has the active tool's tray open. The trays
+        # no longer come up by themselves -- see `_sync_tray_visibility`.
+        self._style_open = False
         # Hovering a tool names it -- see `ToolHintStrip`. Not Qt's tooltip,
         # which on an always-on-top frameless window is a coin toss.
         self._bar.toolHovered.connect(self._preview_tool)
@@ -3865,6 +4264,9 @@ class OverlayWindow(QWidget):
         # which is the whole point of having picked one.
         self._recalled_selection = False
         self.set_eraser_active(tool == "eraser")
+        for menu in self._family_menus.values():
+            menu.hide()
+        self._blur_tray.show_tool(tool)
         self._sync_tray_visibility()
 
     def _on_ink_colour_changed(self, hex_colour: str) -> None:
@@ -3872,16 +4274,18 @@ class OverlayWindow(QWidget):
         drawn in" -- which `_start_stroke` reads when a stroke starts.
         """
         self._ink_colour = hex_colour
+        self._bar.set_style_preview(self._ink_colour, self._stroke_width)
 
     def _on_stroke_width_changed(self, stroke: int) -> None:
         self._stroke_width = stroke
+        self._bar.set_style_preview(self._ink_colour, self._stroke_width)
 
     def _on_blur_mode_changed(self, mode: str) -> None:
-        """Track the blur tray's active segment -- 'blur' or 'pix' -- which
-        `_start_stroke` reads when deciding which of shapes.py's
-        Blur/Pixelate/Redact a blur drag commits.
+        """A segment in the blur tray arms the redaction tool it names, so
+        the tray and the redaction slot can never disagree about what a drag
+        will commit.
         """
-        self._blur_mode = mode
+        self._bar.select_tool(BlurTray.MODE_TOOLS.get(mode, "pixelate"))
 
     def _on_blur_strength_changed(self, strength: int) -> None:
         self._blur_strength = strength
@@ -3904,42 +4308,63 @@ class OverlayWindow(QWidget):
         self._popover.show()
         self._popover.raise_()
 
-    # -- shape submenu (SNX-64) ----------------------------------------------
+    # -- the bar's menus -----------------------------------------------------
 
-    def _toggle_shape_popover(self) -> None:
-        """Open/close rect's own shape submenu from its button click.
+    def _toggle_family_menu(self, family: str) -> None:
+        """Open `family`'s menu from its slot's notch, or close it if it is
+        the one already open.
 
-        Mirrors `_toggle_capture_popover` exactly -- a second click while
-        it's already open closes it again -- except the popover is
-        positioned against the rect *button*'s own geometry rather than the
-        whole bar's, and is seeded with whichever of `tokens.RECT_GROUP` is
-        currently active so reopening it shows the right row checked.
-        `_bar._tool_buttons["rect"].geometry()` is in the button's own
-        parent's (the bar's) coordinate space, not this window's -- `mapTo`
-        is what puts it in the same space `_shape_popover`, a direct child
-        of this window, needs for its own `setGeometry`.
+        Seeded with the sibling the slot shows, and anchored to that slot in
+        this window's coordinates -- the slot's own geometry is the bar's.
         """
-        if self._shape_popover.isVisible():
-            self._shape_popover.hide()
+        menu = self._family_menus[family]
+        # Hidden, not visible: a window not yet on screen has no visible
+        # children, and its menu would reopen on every toggle.
+        if not menu.isHidden():
+            menu.hide()
             return
-        active = self._bar.active_tool
-        self._shape_popover.set_tool(
-            active if active in design.tokens.RECT_GROUP else design.tokens.RECT_GROUP[0]
+        self._close_bar_menus()
+        menu.set_current(self._bar.family_choice(family))
+        menu.reposition(
+            self._bar.slot_rect(family, self), self._bar.geometry(), self._chrome_bounds()
         )
-        button = self._bar._tool_buttons["rect"]
-        origin = button.mapTo(self, QPoint(0, 0))
-        self._shape_popover.reposition(QRect(origin, button.size()), self._chrome_bounds())
-        self._shape_popover.show()
-        self._shape_popover.raise_()
+        menu.show()
+        menu.raise_()
 
-    def _on_shape_tool_selected(self, tool: str) -> None:
-        """Wire a popover row pick to the same tool-selection path a bar
-        button click or a keyboard shortcut already goes through --
-        `FloatingBar.select_tool` is the one place a tool becomes active
-        (see its own docstring), so a submenu pick is a third way to reach
-        it, not a fourth copy of what picking a tool does.
+    def _on_family_sibling_picked(self, tool: str) -> None:
+        """A row picked in a family menu: the same path a click on a slot
+        takes -- whatever else is open closes -- then the sibling is armed.
         """
+        self._close_bar_menus()
         self._bar.select_tool(tool)
+
+    def _on_tool_picked(self, _tool: str) -> None:
+        """A tool clicked on the bar closes whatever menu is open."""
+        self._close_bar_menus()
+
+    def _close_bar_menus(self) -> bool:
+        """Close the family menus and the style dot's tray, and say whether
+        any of them was open.
+        """
+        was_open = self._style_open or any(
+            not menu.isHidden() for menu in self._family_menus.values()
+        )
+        for menu in self._family_menus.values():
+            menu.hide()
+        if self._style_open:
+            self._style_open = False
+            self._sync_tray_visibility()
+        return was_open
+
+    def _toggle_style(self) -> None:
+        """The style dot: open the active tool's tray, or close it."""
+        if not self._style_open and self._style_tray_for(self._bar.active_tool) is None:
+            return
+        opening = not self._style_open
+        for menu in self._family_menus.values():
+            menu.hide()
+        self._style_open = opening
+        self._sync_tray_visibility()
 
     _CHOOSER_TOP_MARGIN = 28
 
@@ -4929,7 +5354,9 @@ class OverlayWindow(QWidget):
             self._tray.hide()
             self._blur_tray.hide()
             self._popover.hide()
-            self._shape_popover.hide()
+            self._tool_hint.hide()
+            for menu in self._family_menus.values():
+                menu.hide()
         elif self._selection is not None and self.isVisible():
             self._sync_bar_destination()
             self._arm_default_tool()
@@ -4941,7 +5368,9 @@ class OverlayWindow(QWidget):
             self._tray.hide()
             self._blur_tray.hide()
             self._popover.hide()
-            self._shape_popover.hide()
+            self._tool_hint.hide()
+            for menu in self._family_menus.values():
+                menu.hide()
 
     def _preview_tool(self, tool: str) -> None:
         """Name the tool under the cursor without arming it. Reverts on
@@ -4998,47 +5427,58 @@ class OverlayWindow(QWidget):
         if self._bar.active_tool is None and not self._eraser_active:
             self._bar.select_tool(design.tokens.TOOLS[0])
 
+    def _style_tray_for(self, tool: str | None) -> "QWidget | None":
+        """The tray `tool` is styled with -- colour and stroke for a tool
+        that draws, strength for a redaction -- or None for the eraser.
+        """
+        if tool in design.tokens.DRAW_TOOLS:
+            return self._tray
+        if tool in BlurTray.TOOL_MODES:
+            return self._blur_tray
+        return None
+
     def _sync_tray_visibility(self) -> None:
-        """Show/hide and reposition whichever settings tray -- draw or
-        blur -- matches the bar's active tool, keeping the other hidden.
+        """Show what hangs under the bar for the active tool: its tray while
+        the style dot has it open, and otherwise the strip naming the tool.
 
-        At most one of `_tray`/`_blur_tray` is ever visible at once, per
-        the spec's "It replaces the colour and stroke tray rather than
-        sitting alongside it" -- neither colour nor stroke means anything
-        to an obscuring shape, so blur gets `_blur_tray` in `_tray`'s place
-        rather than a row added to it.
+        The trays used to come up by themselves for every tool that had
+        one, so the bar and the tray under it stood about 110px tall. The
+        style dot opening them is what makes the bar one row; the strip
+        holds their place, so the active tool is still named on screen with
+        what it does -- the one part of a tray that was always worth
+        having up.
 
-        Gated on the bar's own visibility rather than re-checking
-        `_selection`/`self.isVisible()` directly -- the bar is already the
-        single source of truth for "is this window's chrome allowed to be
-        on screen right now," and the trays sit directly below it, so
-        piggybacking on that check is what keeps the two from being able to
-        disagree.
+        At most one of the three is visible. Gated on the bar's own
+        visibility rather than re-checking `_selection`/`self.isVisible()`
+        directly -- the bar is already the single source of truth for "is
+        this window's chrome allowed to be on screen right now", and
+        everything here hangs off it.
         """
         tool = self._bar.active_tool
-        self._tool_hint.hide()
-        if not self._bar.isVisible():
-            self._tray.hide()
-            self._blur_tray.hide()
-            return
+        tray = self._style_tray_for(tool)
+        if tray is None:
+            self._style_open = False
+        self._bar.set_style_open(self._style_open)
 
-        if tool in design.tokens.DRAW_TOOLS:
-            self._blur_tray.hide()
+        shown = None
+        if self._bar.isVisible():
+            if self._style_open:
+                shown = tray
+            elif tool:
+                shown = self._tool_hint
+        for widget in (self._tray, self._blur_tray, self._tool_hint):
+            if widget is not shown:
+                widget.hide()
+        if shown is None:
+            return
+        # Told the tool each time, so neither names whichever it showed last.
+        if shown is self._tray:
             self._tray.set_tool(tool)
-            self._reposition_tray(self._tray)
-        elif tool == "blur":
-            self._tray.hide()
-            self._blur_tray.show()
-            self._reposition_tray(self._blur_tray)
-        else:
-            self._tray.hide()
-            self._blur_tray.hide()
-            if tool:
-                # No tray for this tool (the eraser), so the strip carries
-                # its name instead of leaving nothing on screen at all.
-                self._tool_hint.set_tool(tool)
-                self._tool_hint.show()
-                self._reposition_tray(self._tool_hint)
+        elif shown is self._tool_hint:
+            self._tool_hint.set_tool(tool)
+        shown.show()
+        shown.raise_()
+        self._reposition_tray(shown)
 
     def _reserved_margins(self, monitor: QRectF) -> QMargins:
         """Logical pixels along each edge of `monitor` that the desktop's
@@ -5583,8 +6023,12 @@ class OverlayWindow(QWidget):
         self._ants_timer.stop()
         self._bar.hide()
         self._tray.hide()
+        self._blur_tray.hide()
+        self._tool_hint.hide()
         self._popover.hide()
-        self._shape_popover.hide()
+        for menu in self._family_menus.values():
+            menu.hide()
+        self._style_open = False
         self._toast.hide()
         self._hud.hide()
         self._close_button.hide()
@@ -5811,7 +6255,9 @@ class OverlayWindow(QWidget):
             focus = self.focusWidget()
             if isinstance(focus, QLineEdit):
                 self._abandon_text_entry(focus)
-            else:
+            # A menu that is open is what Esc closes first, and closing it
+            # costs nothing else.
+            elif not self._close_bar_menus():
                 self._handle_escape()
             return
 
@@ -5856,9 +6302,7 @@ class OverlayWindow(QWidget):
                 self.close()
             return
 
-        tool = _SHORTCUT_KEY_CODES.get(key)
-        if tool is not None:
-            self._bar.select_tool(tool)
+        if self._bar.handle_tool_key(key):
             return
 
         if key == Qt.Key.Key_Question:
@@ -5888,6 +6332,10 @@ class OverlayWindow(QWidget):
         self.update()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        # A press while a drag is still open means that drag's release never
+        # arrived. It ends here, as it stands, before this press can start
+        # anything of its own.
+        self._end_drags()
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if self._popover.isVisible() and not self._popover.geometry().contains(
@@ -5900,12 +6348,11 @@ class OverlayWindow(QWidget):
             # resize or an erase underneath the popover in the same press.
             self._popover.hide()
             return
-        if self._shape_popover.isVisible() and not self._shape_popover.geometry().contains(
-            event.position().toPoint()
-        ):
-            # Same "click outside closes it" rule as the capture popover
-            # above, applied to rect's own shape submenu.
-            self._shape_popover.hide()
+        if self._close_bar_menus():
+            # A press outside the bar's open menu or tray closes it and does
+            # nothing more. A press *on* one never gets this far -- see
+            # `_Chrome` -- or this line would close the menu before the row
+            # under the pointer could take the click.
             return
         if self._picking_window:
             # A press while armed is always a pick, never a resize or a
@@ -6010,7 +6457,6 @@ class OverlayWindow(QWidget):
             pos,
             colour=colour,
             stroke_width=self._stroke_width,
-            blur_mode=self._blur_mode,
             blur_strength=self._blur_strength,
         )
         if started is not None:
@@ -6090,6 +6536,11 @@ class OverlayWindow(QWidget):
         self._text_editor.begin(pos, colour, self._stroke_width)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._dragging() and not event.buttons() & Qt.MouseButton.LeftButton:
+            # Nothing is held, so the drag lost its release somewhere --
+            # outside the window, to a grab, to anything. Without this,
+            # ordinary movement would go on stretching the mark.
+            self._end_drags()
         if self._erasing:
             self.erase_at(event.position())
             return
@@ -6174,35 +6625,67 @@ class OverlayWindow(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        self._erasing = False
         if event.button() != Qt.MouseButton.LeftButton:
+            self._erasing = False
             return
-        if self._region_drag_anchor is not None:
-            # SNX-57: a release with a Region drag-to-create in progress always
-            # commits or discards it, never falls through to the resize/
-            # stroke logic below.
-            self._confirm_region_drag(event.position())
-            return
+        self._end_drags(event.position())
+
+    def event(self, event) -> bool:
+        # Focus leaving the window takes any release with it.
+        if event.type() == QEvent.Type.WindowDeactivate:
+            self._end_drags()
+        return super().event(event)
+
+    def _dragging(self) -> bool:
+        return (
+            self._in_progress_shape is not None
+            or self._erasing
+            or self._active_handle is not None
+            or self._region_drag_anchor is not None
+        )
+
+    def _end_drags(self, pos: QPointF | None = None) -> None:
+        """End whatever pointer drag is open: commit the mark being drawn,
+        stop a sweep or a reframe, or confirm the region being dragged out.
+
+        A release is only one way a drag ends. A release can be lost -- to a
+        grab, to the pointer leaving the window, to focus going elsewhere --
+        and a drag left open turns ordinary movement into stretching the
+        mark until it covers the selection, which looks like a rendering
+        fault and is not one. So this also runs for a move with no button
+        held, for a press while a drag is still open, and for the window
+        losing focus.
+
+        Everything is read from the drag as it stands now, never from what
+        it was when its press began: a mark keeps the end its last move gave
+        it. `pos` is where a release landed, when there was one.
+        """
+        self._erasing = False
         self._active_handle = None
         self._resize_anchor = None
-        if self._in_progress_shape is not None:
-            shape = self._in_progress_shape
-            self._in_progress_shape = None
-            committed = finalize_mark(shape)
-            if committed is not None:
-                self.add_mark(committed)
-            else:
-                # Below the spec's minimum size -- discarded, not
-                # committed (shapes.finalize_mark's own docstring is the
-                # authority for which shapes/thresholds that covers). Still
-                # needs a repaint: `_paint_marks` was showing this shape's
-                # live preview up to the instant of release.
-                self.update()
+        if self._region_drag_anchor is not None:
+            # SNX-57: a Region drag-to-create always commits or discards,
+            # and never falls through to the stroke below.
+            self._confirm_region_drag(pos)
+            return
+        shape, self._in_progress_shape = self._in_progress_shape, None
+        if shape is None:
+            return
+        committed = finalize_mark(shape)
+        if committed is not None:
+            self.add_mark(committed)
+        else:
+            # Below the spec's minimum size -- discarded, not committed
+            # (shapes.finalize_mark's own docstring is the authority for
+            # which shapes/thresholds that covers). Still needs a repaint:
+            # `_paint_marks` was showing this shape's live preview up to the
+            # instant it ended.
+            self.update()
 
-    def _confirm_region_drag(self, pos: QPointF) -> None:
+    def _confirm_region_drag(self, pos: QPointF | None) -> None:
         """End a Region-mode drag-to-create at `pos` (window coordinates)
         and either commit or discard it. Only ever reached from
-        `mouseReleaseEvent` while `_region_drag_anchor` is set.
+        `_end_drags` while `_region_drag_anchor` is set.
 
         Discards below `tokens.Metric.SEL_MIN_W/H` -- the same floor
         `_resize_selection` already clamps re-framing to -- rather than
@@ -6213,10 +6696,17 @@ class OverlayWindow(QWidget):
         """
         anchor = self._region_drag_anchor
         self._region_drag_anchor = None
-        # QRectF's two-point constructor, not QRect's -- see
-        # `mouseMoveEvent`'s own comment above on why the inclusive-corner
-        # one would over-report by a pixel on each axis.
-        rect = QRectF(anchor, pos).normalized().toRect()
+        if pos is None:
+            # The release was lost, so there is no point to end at: the
+            # rectangle the last move drew is the drag as it stands.
+            if self._selection is None:
+                return
+            rect = QRect(self._selection)
+        else:
+            # QRectF's two-point constructor, not QRect's -- see
+            # `mouseMoveEvent`'s own comment above on why the inclusive-corner
+            # one would over-report by a pixel on each axis.
+            rect = QRectF(anchor, pos).normalized().toRect()
         metric = design.tokens.Metric
         if rect.width() < metric.SEL_MIN_W or rect.height() < metric.SEL_MIN_H:
             self.set_selection(None)

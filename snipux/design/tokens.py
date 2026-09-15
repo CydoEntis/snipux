@@ -246,31 +246,13 @@ class Shadow:
     TOAST = dict(blur=44, dy=20, color="#000000", alpha=0.55)
 
 # ---------------------------------------------------------------- behaviour
-TOOLS = ["pen", "highlighter", "arrow", "rect", "step", "text", "blur", "eraser"]
+# The stills bar's tools, its slots and their shortcuts live with the rest of
+# the stills bar's tokens at the end of this file (`STILLS_SLOTS`, `SHAPES`,
+# `REDACTIONS`, `TOOLS`, `SHORTCUTS`).
 
-# SNX-64: shapes.py has always fully implemented Ellipse, Line and Crop, but
-# nothing reachable from the redesigned chrome ever named them, so the bar
-# only ever offered eight of the eleven tools the owner asked -- before the
-# redesign started -- to keep, because he had tried all eleven and they
-# worked. That instruction outranks the design handoff's own "eight tools,
-# no more bar buttons" rule, the same way the 16x16 minimum selection
-# (TODO.md) already outranks it: this is the second deliberate deviation.
-# The handoff's own guidance for a tool that doesn't fit the eight is a
-# submenu off an existing button rather than a bar button of its own, so
-# these three are reachable only through the rect button's own popover
-# (`ShapeToolPopover` in overlay.py) -- `rect` itself is first so the
-# popover's default selection matches the button's own glyph.
-RECT_GROUP = ["rect", "ellipse", "line", "crop"]
-
-# Tools whose settings tray is the colour + stroke tray. Ellipse/Line/Crop
-# take their ink colour and stroke width from it exactly the way Rectangle
-# already does -- see RECT_GROUP above.
+# Tools whose settings tray is the colour + stroke tray: every tool that puts
+# ink down, which is every shape sibling, Crop included.
 DRAW_TOOLS = ["pen", "highlighter", "arrow", "rect", "step", "text", "ellipse", "line", "crop"]
-
-SHORTCUTS = {
-    "P": "pen", "H": "highlighter", "A": "arrow", "R": "rect",
-    "S": "step", "T": "text", "B": "blur", "E": "eraser",
-}
 
 # The third field is the note under each row in the mode menu. It says
 # *what gets captured*, because Window and Full screen are the two that
@@ -972,6 +954,8 @@ TOOL_HINTS = {
     "step":        "Click to drop the next number",
     "text":        "Click, then type into the label",
     "blur":        "Drag over anything private",
+    "pixelate":    "Drag over anything private",
+    "blackout":    "Drag to black it out completely",
     "eraser":      "Click a mark to remove it",
     "ellipse":     "Drag to draw an oval",
     "line":        "Drag for a straight line",
@@ -1345,3 +1329,207 @@ PLAYER_SHORTCUTS = {
     "L": "loop the trimmed range",
     "Esc": "close an open menu",
 }
+
+
+# ---------------------------------------------------------------------------
+# The stills bar (docs/design/bars, LOCKED 2026-09-15)
+# ---------------------------------------------------------------------------
+# Ported from docs/design/bars/tokens_bars.py -- its `BarMetric`, `BarColor`
+# and stills-bar structures, only as far as the one row under a selection
+# reads them. docs/design/bars/divergences.md overrides that file wherever
+# the two differ, and the values below already follow it.
+#
+# A few figures the handoff's spec (reference/Snipux Handoff Preview.dc.html)
+# writes into its markup rather than into tokens_bars.py -- the split
+# action's glyph, the menu rows' gaps and type, the notch's colours, the
+# style dot's scale -- are here too, each marked as coming from there, so the
+# bar has no literal of its own.
+
+class BarMetric:
+    """The stills bar and its menus. Logical pixels."""
+
+    ROW_H            = 42          # 6 pad + 28 control + 6 pad + 2x1px border
+    PAD              = 6
+    BORDER           = 1
+    GAP              = 3
+    RADIUS           = 12
+    BTN              = 28
+    BTN_RADIUS       = 8
+    ICON             = 15
+    CHEVRON          = 12
+    DIVIDER_H        = 20
+    DIVIDER_MARGIN   = 4
+
+    NOTCH            = 9           # corner hit area on a family slot
+    NOTCH_TRIANGLE   = 5           # visible triangle leg
+    NOTCH_INSET      = 1           # spec markup: right:1px; bottom:1px
+
+    SPLIT_PAD_H      = 10
+    SPLIT_CARET_W    = 18
+    SPLIT_ICON       = 14          # spec markup
+    SPLIT_GAP        = 6           # spec markup: glyph to label
+
+    MENU_PAD         = 4
+    MENU_RADIUS      = 11
+    MENU_OFFSET      = 6
+    MENU_ROW_PAD     = (7, 8)
+    MENU_ROW_RADIUS  = 7
+    MENU_ROW_GAP     = 9           # spec markup
+    MENU_ROW_ICON    = 15          # spec markup
+    MENU_TICK        = 13          # spec markup
+    MENU_NOTE_GAP    = 2           # spec markup: label to note
+    MENU_W_SHAPES    = 186
+    MENU_W_REDACT    = 244         # widest: rows carry a security note
+
+    # The style dot's diameter is the stroke at this scale, clamped -- spec
+    # markup. The highlighter's own stroke paints wider, so its dot does too.
+    STYLE_DOT_SCALE  = 1.6
+    STYLE_DOT_SCALE_HIGHLIGHTER = 2.4
+    STYLE_DOT_MIN    = 6
+    STYLE_DOT_MAX    = 20
+    STYLE_DOT_RING   = 1
+
+    # Placement: centred on the selection, BAR_OFFSET_Y below it, and at
+    # least BAR_EDGE_MARGIN inside the selection's monitor. The handoff's
+    # BAR_BOTTOM_ROOM clamp is deliberately absent -- see divergences.md 8.
+    BAR_OFFSET_Y     = 16
+    BAR_EDGE_MARGIN  = 12
+
+
+class BarFont:
+    """(px, weight). tokens_bars.py has no type scale; these are the spec's
+    markup."""
+
+    SPLIT            = (12.0, 600)
+    MENU_LABEL       = (12.0, 500)
+    MENU_NOTE        = (10.5, 400)
+    MENU_SHORTCUT    = (10.0, 400)  # mono
+
+
+class BarColor:
+    """Alphas ride as `<TOKEN>_ALPHA` siblings, so `design.bar_color()` hands
+    back one fully-specified QColor, the pairing rule every other palette in
+    this file follows.
+    """
+
+    BAR_BG               = "#1a1c18"
+    BAR_BG_ALPHA         = 0.94
+    BAR_BORDER           = "#ffffff"
+    BAR_BORDER_ALPHA     = 0.10
+    DIVIDER              = "#ffffff"
+    DIVIDER_ALPHA        = 0.12
+    MENU_BG              = "#1a1c18"
+    MENU_BG_ALPHA        = 0.98
+    MENU_BORDER          = "#ffffff"
+    MENU_BORDER_ALPHA    = 0.12
+    ROW_SELECTED_BG      = "#ffffff"
+    ROW_SELECTED_BG_ALPHA = 0.08
+    ROW_SELECTED_FG      = "#f8faf0"
+    ROW_IDLE_FG          = "#a8afa0"
+    ROW_HOVER_BG         = "#ffffff"
+    ROW_HOVER_BG_ALPHA   = 0.09
+    ROW_NOTE_FG          = "#8f9689"
+    SHORTCUT_FG          = "#6f766a"
+
+    TOOL_ACTIVE_BG       = "#ffffff"
+    TOOL_ACTIVE_BG_ALPHA = 0.16
+    TOOL_ACTIVE_FG       = "#f8faf0"
+    TOOL_IDLE_FG         = "#a8afa0"
+    TOOL_HOVER_BG        = "#ffffff"   # spec markup: every slot's hover wash
+    TOOL_HOVER_BG_ALPHA  = 0.09
+    TOOL_DISABLED_FG     = "#5d6157"   # undo, empty stack
+    DANGER_BG            = "#c85050"
+    DANGER_BG_ALPHA      = 0.22
+    DANGER_FG            = "#f5a3a3"
+
+    # Not the handoff's #e3ff4f. `Color.ACCENT` says why: the full-saturation
+    # yellow-green read as neon on the dark chrome and was reported as such,
+    # and the split action is the one place the bar spends an accent.
+    ACCENT               = "#a8e05f"
+    ACCENT_FG            = "#15170e"
+    SPLIT_SEAM           = "#15170e"
+    SPLIT_SEAM_ALPHA     = 0.22
+
+    # Spec markup: the notch takes its slot's glyph colour, faded, so it
+    # lights with the slot rather than competing with it.
+    NOTCH_ACTIVE         = "#f8faf0"
+    NOTCH_ACTIVE_ALPHA   = 0.70
+    NOTCH_IDLE           = "#a8afa0"
+    NOTCH_IDLE_ALPHA     = 0.55
+
+    STYLE_DOT_BG         = "#ffffff"
+    STYLE_DOT_BG_ALPHA   = 0.06
+    STYLE_DOT_BG_OPEN    = "#ffffff"   # while what it opens is open
+    STYLE_DOT_BG_OPEN_ALPHA = 0.14
+    STYLE_DOT_RING       = "#ffffff"   # spec markup
+    STYLE_DOT_RING_ALPHA = 0.22
+    DISABLED_OPACITY     = 0.34        # the style dot, for a tool with nothing to style
+
+
+# The bar's slots, left to right. The order is a gradient of consequence --
+# draw on top, frame, add content, destroy pixels, remove marks -- and is
+# never sorted by use or reordered at runtime: muscle memory is the feature.
+# `shapes` and `redact` are families, and show whichever sibling was used
+# last.
+STILLS_SLOTS = ["pen", "highlighter", "shapes", "step", "text", "redact", "eraser"]
+
+# (tool, label, shortcut). Crop is a fifth sibling with no letter
+# (divergences.md 7): the owner kept all eleven tools reachable, and a
+# sibling is the handoff's own answer for a tool without a slot.
+SHAPES = [
+    ("rect",    "Rectangle",     "R"),
+    ("ellipse", "Ellipse",       "O"),
+    ("line",    "Straight line", "L"),
+    ("arrow",   "Arrow",         "A"),
+    ("crop",    "Crop",          ""),
+]
+
+# (tool, glyph, label, note). The note is not decoration: blur on small text
+# is famously recoverable, so each row has to say what it actually
+# guarantees.
+REDACTIONS = [
+    ("blur",     "blur",     "Blur",     "Softens it — shapes still readable"),
+    ("pixelate", "mask",     "Pixelate", "Blocky, obviously deliberate"),
+    ("blackout", "blackout", "Blackout", "Solid bar. Nothing to reconstruct"),
+]
+BLACKOUT_FILL = "#0b0c09"
+
+FAMILIES = {
+    "shapes": [tool for tool, _label, _key in SHAPES],
+    "redact": [tool for tool, _glyph, _label, _note in REDACTIONS],
+}
+
+# Every tool the bar can arm, in bar order.
+TOOLS = [
+    tool
+    for slot in STILLS_SLOTS
+    for tool in FAMILIES.get(slot, [slot])
+]
+
+# A tool is drawn with the glyph of the same name, except where the handoff
+# gave it another.
+TOOL_GLYPHS = {tool: glyph for tool, glyph, _label, _note in REDACTIONS}
+
+# The spec's names, which tooltips use. Crop keeps its own.
+TOOL_NAMES = {
+    "pen": "Pen", "highlighter": "Highlighter", "rect": "Rectangle",
+    "ellipse": "Ellipse", "line": "Straight line", "arrow": "Arrow",
+    "crop": "Crop", "step": "Numbered step", "text": "Text",
+    "blur": "Blur", "pixelate": "Pixelate", "blackout": "Blackout",
+    "eraser": "Eraser",
+}
+
+# One letter, one tool. Every shape sibling but Crop keeps its own letter, so
+# its menu is for discovery rather than for use.
+SHORTCUTS = {
+    "P": "pen", "H": "highlighter",
+    **{key: tool for tool, _label, key in SHAPES if key},
+    "S": "step", "T": "text", "E": "eraser",
+}
+
+# The redaction family has one key between three siblings, and it cycles.
+REDACTION_KEY = "B"
+
+# Nothing on the style dot can change what these draw, so it dims and does
+# not open for them.
+UNSTYLED_TOOLS = ["blackout", "eraser"]

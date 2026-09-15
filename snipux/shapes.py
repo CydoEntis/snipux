@@ -724,6 +724,19 @@ class Redact(ObscuringShape):
 
 
 @dataclass
+class Blackout(Redact):
+    """The stills bar's Blackout: a `Redact` in the bar's own near-black.
+
+    A subclass rather than a colour on `Redact` itself, so Hide sensitive's
+    boxes keep exactly the fill they have always exported, while
+    `_hide_sensitive_text` still counts a region the user blacked out by
+    hand as already covered.
+    """
+
+    _FILL = QColor(design.tokens.BLACKOUT_FILL)
+
+
+@dataclass
 class Crop(Shape):
     """A dashed, unfilled rectangle -- the visual style shared by the crop
     marquee and, since SNX-64, the restored Crop *annotation* tool in

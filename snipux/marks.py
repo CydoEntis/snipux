@@ -241,6 +241,13 @@ TWO_POINT_TOOLS = {
     "line": shapes_module.Line,
     "crop": shapes_module.Crop,
 }
+# The redaction family: one tool per sibling, so which one a drag commits is
+# the tool itself rather than a mode read off a tray.
+REDACTION_TOOLS = {
+    "blur": shapes_module.Blur,
+    "pixelate": shapes_module.Pixelate,
+    "blackout": shapes_module.Blackout,
+}
 
 
 def begin_stroke(
@@ -250,7 +257,6 @@ def begin_stroke(
     colour,
     stroke_width: int,
     step_number: int = 1,
-    blur_mode: str = "blur",
     blur_strength: int | None = None,
     fill: str = "outline",
     dash: str = "solid",
@@ -283,16 +289,9 @@ def begin_stroke(
         return shape_class(
             colour=colour, stroke_width=stroke_width, start=point, end=point, **style
         )
-    if tool == "blur":
-        # Anything that is neither blur nor solid pixelates: the tray has
-        # always spelled that segment "pix" and callers have passed
-        # "pixelate", and both must keep meaning the same thing.
-        shape_class = {
-            "blur": shapes_module.Blur,
-            "solid": shapes_module.Redact,
-        }.get(blur_mode, shapes_module.Pixelate)
+    if tool in REDACTION_TOOLS:
         extra = {} if blur_strength is None else {"strength": blur_strength}
-        return shape_class(
+        return REDACTION_TOOLS[tool](
             colour=colour, stroke_width=stroke_width, start=point, end=point, **extra
         )
     return None

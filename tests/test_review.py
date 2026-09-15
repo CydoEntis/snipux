@@ -13,8 +13,8 @@ import os
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QColor, QImage
+from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtGui import QColor, QImage, QMouseEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
@@ -480,7 +480,7 @@ class TestTraysAreReachable:
     """The other half of the report: the tools were selectable but not
     configurable -- no pen size, no brush size, no colour -- because the
     trays that set those live on the overlay window, and the review window
-    had none.
+    had none. The bar's style dot is what opens them now.
     """
 
     def _editing(self) -> ReviewWindow:
@@ -489,29 +489,36 @@ class TestTraysAreReachable:
         window._set_annotating(True)
         return window
 
-    def test_a_draw_tool_shows_the_colour_and_stroke_tray(self):
+    def test_the_trays_stay_down_until_the_style_dot_opens_them(self):
         window = self._editing()
 
         window._bar.select_tool("pen")
-        window._sync_tray()
+
+        assert not window._tray.isVisibleTo(window._canvas)
+
+    def test_the_style_dot_opens_the_colour_and_stroke_tray(self):
+        window = self._editing()
+        window._bar.select_tool("pen")
+
+        QTest.mouseClick(window._bar._style_dot, Qt.MouseButton.LeftButton)
 
         assert window._tray.isVisibleTo(window._canvas)
 
-    def test_blur_replaces_it_with_the_blur_tray(self):
+    def test_for_a_redaction_it_opens_the_blur_tray_instead(self):
         # At most one is ever up: it replaces the tray rather than joining it.
         window = self._editing()
-
         window._bar.select_tool("blur")
-        window._sync_tray()
+
+        QTest.mouseClick(window._bar._style_dot, Qt.MouseButton.LeftButton)
 
         assert window._blur_tray.isVisibleTo(window._canvas)
         assert not window._tray.isVisibleTo(window._canvas)
 
     def test_the_eraser_gets_neither(self):
         window = self._editing()
-
         window._bar.select_tool("eraser")
-        window._sync_tray()
+
+        QTest.mouseClick(window._bar._style_dot, Qt.MouseButton.LeftButton)
 
         assert not window._tray.isVisibleTo(window._canvas)
         assert not window._blur_tray.isVisibleTo(window._canvas)
@@ -530,19 +537,29 @@ class TestTraysAreReachable:
 
         assert window._canvas._ink_colour == "#ff0000"
 
-    def test_blur_strength_and_mode_reach_the_canvas(self):
+    def test_the_style_dot_previews_what_the_tray_set(self):
+        window = self._editing()
+
+        window._tray.colourChanged.emit("#ff0000")
+        window._tray.strokeChanged.emit(11)
+
+        assert window._bar._style_dot._colour == QColor("#ff0000")
+        assert window._bar._style_dot._stroke == 11
+
+    def test_blur_strength_reaches_the_canvas_and_a_segment_arms_its_tool(self):
         window = self._editing()
 
         window._blur_tray.strengthChanged.emit(14)
         window._blur_tray.blurModeChanged.emit("pixelate")
 
         assert window._canvas._blur_strength == 14
-        assert window._canvas._blur_mode == "pixelate"
+        assert window._bar.active_tool == "pixelate"
+        assert window._canvas._tool == "pixelate"
 
     def test_leaving_edit_mode_puts_the_trays_away(self):
         window = self._editing()
         window._bar.select_tool("pen")
-        window._sync_tray()
+        window._toggle_style()
 
         window._set_annotating(False)
 
@@ -679,7 +696,7 @@ class TestTrayNamesTheActiveTool:
         window._set_annotating(True)
 
         window._bar.select_tool("text")
-        window._sync_tray()
+        window._toggle_style()
 
         assert window._tray._tool == "text"
 
@@ -714,13 +731,16 @@ class TestEveryToolIsNamedOnScreen:
 
         assert window._tool_hint._hint.text() == tokens.TOOL_HINTS["eraser"]
 
-    def test_a_draw_tool_uses_the_tray_instead_of_the_strip(self):
-        # The strip is the fallback, not a second name for tools already
-        # named by the tray.
+    def test_a_draw_tool_is_named_too_until_its_tray_opens(self):
+        # The trays no longer come up by themselves, so the strip names every
+        # tool -- and gives way to the tray, rather than naming it twice.
         window = self._editing()
-
         window._bar.select_tool("pen")
-        window._sync_tray()
+
+        assert window._tool_hint.isVisibleTo(window._canvas)
+        assert window._tool_hint._pill._text_label.text() == "Pen"
+
+        window._toggle_style()
 
         assert not window._tool_hint.isVisibleTo(window._canvas)
         assert window._tray.isVisibleTo(window._canvas)
@@ -819,52 +839,106 @@ class TestEraserReachesEveryMark:
         assert store.erase(near_miss, slack=12.0) is not None
 
 
-class TestShapeGroupButton:
-    """Picking a tool should use it, not ask which one. A menu round-trip
-    for every rectangle had the most-used shape behaving like the least.
+class TestFamilySlots:
+    """The review window's bar is the overlay's, families and all. Picking a
+    tool uses it: a click arms the sibling the slot shows, and never cycles.
     """
 
-    def test_the_first_click_arms_the_current_shape(self):
+    def _editing(self) -> ReviewWindow:
         window = ReviewWindow(make_image())
+        window.resize(1020, 700)
+        window._set_annotating(True)
+        return window
 
-        window._bar._on_shape_group_clicked()
+    def test_the_first_click_arms_the_current_shape(self):
+        window = self._editing()
+
+        QTest.mouseClick(window._bar._tool_buttons["shapes"], Qt.MouseButton.LeftButton)
 
         assert window._bar.active_tool == "rect"
 
-    def test_clicking_again_advances_through_the_group(self):
-        window = ReviewWindow(make_image())
+    def test_clicking_again_keeps_the_same_shape(self):
+        window = self._editing()
+        button = window._bar._tool_buttons["shapes"]
 
-        seen = []
-        for _ in range(len(tokens.RECT_GROUP)):
-            window._bar._on_shape_group_clicked()
-            seen.append(window._bar.active_tool)
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
 
-        assert seen == list(tokens.RECT_GROUP)
+        assert window._bar.active_tool == "rect"
 
-    def test_it_wraps_back_round(self):
-        window = ReviewWindow(make_image())
+    def test_the_notch_opens_the_family_menu(self):
+        window = self._editing()
+        notch = window._bar._tool_buttons["redact"].notch
 
-        for _ in range(len(tokens.RECT_GROUP) + 1):
-            window._bar._on_shape_group_clicked()
+        QTest.mouseClick(notch, Qt.MouseButton.LeftButton)
 
-        assert window._bar.active_tool == tokens.RECT_GROUP[0]
+        assert window._family_menus["redact"].isVisibleTo(window._canvas)
+        assert window._bar.active_tool != "blur", "the notch opens, it does not arm"
 
-    def test_the_glyph_shows_what_a_drag_will_draw(self):
-        window = ReviewWindow(make_image())
-        button = window._bar._tool_buttons["rect"]
+    def test_a_row_arms_its_sibling_and_the_slot_shows_it(self):
+        window = self._editing()
+        QTest.mouseClick(window._bar._tool_buttons["shapes"].notch, Qt.MouseButton.LeftButton)
+        menu = window._family_menus["shapes"]
 
-        window._bar._on_shape_group_clicked()
-        window._bar._on_shape_group_clicked()
+        QTest.mouseClick(menu._rows["ellipse"], Qt.MouseButton.LeftButton)
 
         assert window._bar.active_tool == "ellipse"
-        assert button._icon_name == "ellipse"
+        assert window._canvas._tool == "ellipse"
+        assert window._bar._tool_buttons["shapes"]._icon_name == "ellipse"
+        assert not menu.isVisibleTo(window._canvas)
 
     def test_choosing_from_the_menu_also_moves_the_glyph(self):
         window = ReviewWindow(make_image())
 
         window._bar.select_tool("line")
 
-        assert window._bar._tool_buttons["rect"]._icon_name == "line"
+        assert window._bar._tool_buttons["shapes"]._icon_name == "line"
+
+    def test_a_press_on_the_image_closes_the_menu_and_draws_nothing(self):
+        window = self._editing()
+        window._bar.select_tool("pen")
+        QTest.mouseClick(window._bar._tool_buttons["shapes"].notch, Qt.MouseButton.LeftButton)
+        canvas = window._canvas
+        canvas.resize(1020, 600)
+
+        QApplication.sendEvent(canvas, _press(canvas, 400, 300))
+
+        assert not window._family_menus["shapes"].isVisibleTo(canvas)
+        assert canvas._in_progress is None
+
+    @pytest.mark.parametrize(
+        "key,tool",
+        [
+            (Qt.Key.Key_R, "rect"),
+            (Qt.Key.Key_O, "ellipse"),
+            (Qt.Key.Key_L, "line"),
+            (Qt.Key.Key_A, "arrow"),
+            (Qt.Key.Key_E, "eraser"),
+        ],
+    )
+    def test_each_key_reaches_its_tool_while_editing(self, key, tool):
+        window = self._editing()
+
+        QTest.keyClick(window, key)
+
+        assert window._bar.active_tool == tool
+
+    def test_b_cycles_the_redaction_family(self):
+        window = self._editing()
+
+        seen = []
+        for _ in range(4):
+            QTest.keyClick(window, Qt.Key.Key_B)
+            seen.append(window._bar.active_tool)
+
+        assert seen == ["blur", "pixelate", "blackout", "blur"]
+
+    def test_the_keys_do_nothing_while_not_editing(self):
+        window = ReviewWindow(make_image())
+
+        QTest.keyClick(window, Qt.Key.Key_R)
+
+        assert window._bar.active_tool is None
 
 
 class TestHoverNamesTheTool:
@@ -885,7 +959,7 @@ class TestHoverNamesTheTool:
         window.resize(1020, 700)
         window._set_annotating(True)
         window._bar.select_tool("pen")
-        window._sync_tray()
+        window._toggle_style()
         window._bar._tool_buttons["eraser"].hovered.emit("eraser")
 
         window._bar._tool_buttons["eraser"].unhovered.emit()
@@ -1056,9 +1130,93 @@ class TestToastClearsTheBar:
         window = self._window()
         window._set_annotating(True)
         window._bar.select_tool("pen")
-        window._sync_tray()
+        window._toggle_style()
 
         window.copy()
 
         assert not window._toast.geometry().intersects(window._tray.geometry())
         assert window._toast.geometry().bottom() <= window._tray.geometry().top()
+
+
+def _hover(widget, x, y):
+    """A move with no button held -- what arrives after a release was lost."""
+    return QMouseEvent(
+        QEvent.Type.MouseMove, QPointF(x, y), QPointF(x, y),
+        Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+class TestADragEndsWithoutItsRelease:
+    """The review canvas keeps the overlay's guards: a release that never
+    arrives must not leave a mark stretching after the pointer.
+    """
+
+    def _dragging(self, tool: str = "rect") -> ReviewWindow:
+        window = ReviewWindow(make_image(600, 400))
+        window.resize(1020, 700)
+        window._set_annotating(True)
+        window._canvas.resize(1020, 600)
+        window._bar.select_tool(tool)
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 400, 300))
+        canvas.mouseMoveEvent(_move(canvas, 500, 380))
+        return window
+
+    def test_a_move_with_no_button_held_commits_the_mark(self):
+        window = self._dragging()
+        canvas = window._canvas
+
+        canvas.mouseMoveEvent(_hover(canvas, 700, 500))
+
+        assert canvas._in_progress is None
+        assert len(window._store) == 1
+        # As the drag stood at its last move, not where the pointer went on to.
+        assert window._store.marks[0].end == canvas.to_image(QPointF(500, 380))
+
+    def test_later_movement_no_longer_stretches_it(self):
+        window = self._dragging()
+        canvas = window._canvas
+        canvas.mouseMoveEvent(_hover(canvas, 700, 500))
+
+        canvas.mouseMoveEvent(_move(canvas, 900, 580))
+
+        assert window._store.marks[0].end == canvas.to_image(QPointF(500, 380))
+
+    def test_a_new_press_commits_the_open_drag_first(self):
+        window = self._dragging()
+        canvas = window._canvas
+
+        canvas.mousePressEvent(_press(canvas, 200, 150))
+
+        assert len(window._store) == 1
+        assert window._store.marks[0].end == canvas.to_image(QPointF(500, 380))
+
+    def test_focus_leaving_the_window_commits_it(self):
+        window = self._dragging()
+        canvas = window._canvas
+
+        QApplication.sendEvent(canvas, QEvent(QEvent.Type.WindowDeactivate))
+
+        assert canvas._in_progress is None
+        assert len(window._store) == 1
+
+
+class TestBlackoutExportsItsFill:
+    def test_the_blacked_out_pixels_are_the_blackout_fill(self):
+        window = ReviewWindow(make_image(600, 400))
+        window.resize(1020, 700)
+        window._set_annotating(True)
+        canvas = window._canvas
+        canvas.resize(1020, 600)
+        window._bar.select_tool("blackout")
+
+        canvas.mousePressEvent(_press(canvas, 400, 300))
+        canvas.mouseMoveEvent(_move(canvas, 500, 380))
+        canvas.mouseReleaseEvent(_release(canvas, 500, 380))
+        inside = canvas.to_image(QPointF(450, 340)).toPoint()
+
+        rendered = window._canvas.rendered_image()
+
+        assert type(window._store.marks[0]) is shapes.Blackout
+        assert rendered.pixelColor(inside) == QColor(tokens.BLACKOUT_FILL)

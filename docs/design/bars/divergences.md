@@ -124,8 +124,8 @@ arrow (`SHAPES`, `R O L A`). Crop is not in `ANNOTATION_TOOLS` at all.
 
 ### Why
 
-The owner asked for all eleven tools to stay reachable (`tokens.RECT_GROUP`,
-SNX-64), which already outranks the eight-slot rule once
+The owner asked for all eleven tools to stay reachable (SNX-64; the
+siblings are `tokens.SHAPES`), which already outranks the eight-slot rule once
 (`../flow/divergences.md` §7). The handoff's own answer for a tool that does
 not fit is a sibling, so that is where it goes, and the slot count does not
 move.

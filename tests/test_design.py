@@ -455,7 +455,11 @@ class TestIconsAreOpticallyCentred:
         cy = (min(ys) + max(ys) + 1) / 2 / size * 100 - 50
         return cx, cy
 
-    @pytest.mark.parametrize("name", sorted(tokens.TOOLS))
+    # Glyphs, not tool ids: Pixelate is drawn with `mask` and has no icon of
+    # its own.
+    @pytest.mark.parametrize(
+        "name", sorted({tokens.TOOL_GLYPHS.get(tool, tool) for tool in tokens.TOOLS})
+    )
     def test_every_tool_glyph_is_centred(self, name):
         cx, cy = self._ink_centre(name)
 

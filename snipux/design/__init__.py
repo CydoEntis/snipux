@@ -149,6 +149,20 @@ def flow_color(token_name: str) -> QColor:
     return qcolour
 
 
+def bar_color(token_name: str) -> QColor:
+    """`tokens.BarColor.<token_name>` -> QColor, alpha included.
+
+    The stills bar's palette, on the same pairing rule as `color()` and
+    `flow_color()`: the `<TOKEN>_ALPHA` sibling is resolved here so a colour
+    and its alpha are never applied separately.
+    """
+    if not hasattr(tokens.BarColor, token_name):
+        raise ValueError(f"no such bar colour: {token_name!r}")
+    qcolour = QColor(getattr(tokens.BarColor, token_name))
+    qcolour.setAlphaF(getattr(tokens.BarColor, f"{token_name}_ALPHA", 1.0))
+    return qcolour
+
+
 def color(token_name: str) -> QColor:
     """Resolve `tokens.Color.<token_name>` to a QColor, alpha included.
 

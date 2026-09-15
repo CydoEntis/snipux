@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QDesktopServices,
@@ -49,9 +49,9 @@ from .design import tokens
 from .marks import MarkStore, TextLabelEditor, begin_stroke, extend_stroke
 from .overlay import (
     BlurTray,
+    FamilyMenu,
     FloatingBar,
     SettingsTray,
-    ShapeToolPopover,
     Toast,
     ToolHintStrip,
 )
@@ -85,7 +85,6 @@ class ImageCanvas(QWidget):
         self._tool: str | None = None
         self._ink_colour = tokens.INK_SWATCHES[0][1]
         self._stroke_width = tokens.Metric.STROKE_DEFAULT
-        self._blur_mode = "blur"
         self._blur_strength = tokens.Metric.BLUR_DEFAULT
         self._in_progress: shapes.Shape | None = None
         # True for the duration of an eraser press, so a drag rubs out
@@ -174,11 +173,16 @@ class ImageCanvas(QWidget):
     def set_ink_colour(self, colour: str) -> None:
         self._ink_colour = colour
 
+    @property
+    def ink_colour(self) -> str:
+        return self._ink_colour
+
     def set_stroke_width(self, stroke: int) -> None:
         self._stroke_width = stroke
 
-    def set_blur_mode(self, mode: str) -> None:
-        self._blur_mode = mode
+    @property
+    def stroke_width(self) -> int:
+        return self._stroke_width
 
     def set_blur_strength(self, strength: int) -> None:
         self._blur_strength = strength
@@ -193,6 +197,10 @@ class ImageCanvas(QWidget):
         return shapes.render(self._image, list(self._store.marks))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        # A press while a drag is still open means that drag's release never
+        # arrived. It ends here, as it stands, before this press starts
+        # anything.
+        self.end_drag()
         if not self._annotating or event.button() != Qt.MouseButton.LeftButton:
             return
         position = self.to_image(event.position())
@@ -232,7 +240,6 @@ class ImageCanvas(QWidget):
             position,
             colour=QColor(self._ink_colour),
             stroke_width=self._stroke_width,
-            blur_mode=self._blur_mode,
             blur_strength=self._blur_strength,
         )
         self.update()
@@ -249,6 +256,11 @@ class ImageCanvas(QWidget):
             self.marksChanged.emit()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if not event.buttons() & Qt.MouseButton.LeftButton:
+            # Nothing is held, so a drag still open lost its release. Ending
+            # it here stops ordinary movement stretching the mark.
+            self.end_drag()
+            return
         if self._erasing:
             self._erase_at(self.to_image(event.position()))
             return
@@ -258,10 +270,27 @@ class ImageCanvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self.end_drag()
+
+    def event(self, event) -> bool:
+        # Focus leaving the window takes any release with it.
+        if event.type() == QEvent.Type.WindowDeactivate:
+            self.end_drag()
+        return super().event(event)
+
+    def end_drag(self) -> None:
+        """End the eraser sweep or the mark being drawn, whichever is open.
+
+        On a release, and on everything that means a release was lost -- a
+        move with no button held, a new press, focus leaving the window --
+        the same guards the overlay keeps. The mark is committed as it
+        stands now, with the end its last move gave it, never as it was when
+        its press began.
+        """
         self._erasing = False
-        if self._in_progress is None:
-            return
         shape, self._in_progress = self._in_progress, None
+        if shape is None:
+            return
         # `finalize_mark` is the overlay's own commit rule -- a stroke too
         # small to be deliberate is dropped rather than committed.
         finished = shapes.finalize_mark(shape)
@@ -552,12 +581,17 @@ class ReviewWindow(WinWindow):
         self._bar = FloatingBar(self._canvas, capture_chip=False, trailing="done")
         self._bar.hide()
         self._bar.toolSelected.connect(self._on_tool_selected)
+        # Bound, not a lambda: a lambda holding this window, kept by a bar
+        # this window owns, is a cycle Python cannot see into, and the
+        # window -- frozen frame and all -- would never be freed.
+        self._bar.toolPicked.connect(self._on_tool_picked)
+        self._bar.familyMenuRequested.connect(self._toggle_family_menu)
+        self._bar.styleRequested.connect(self._toggle_style)
         self._bar.undoRequested.connect(self._store.undo)
         self._bar.redoRequested.connect(self._store.redo)
         self._bar.clearRequested.connect(self._store.clear)
         self._bar.copyRequested.connect(self.copy)
         self._bar.saveRequested.connect(lambda: self._set_annotating(False))
-        self._bar.shapeMenuRequested.connect(self._toggle_shape_popover)
         # Hovering a tool names it. Not Qt's tooltip: that depends on a
         # wake-up timer this bar's buttons were not feeding, and on a
         # translucent frameless parent it is unreliable anyway. The strip is
@@ -566,25 +600,24 @@ class ReviewWindow(WinWindow):
         self._bar.toolUnhovered.connect(self._sync_tray)
 
         # The same trays the overlay shows, instantiated here rather than
-        # reimplemented: they are where colour, stroke width, blur mode and
-        # blur strength are actually set, and without them the bar's tools
-        # were selectable but unconfigurable -- no pen size, no brush size,
-        # no colour. `_sync_tray` shows at most one, exactly as the overlay
-        # does.
+        # reimplemented: they are where colour, stroke width and blur
+        # strength are actually set, and without them the bar's tools were
+        # selectable but unconfigurable -- no pen size, no brush size, no
+        # colour. The style dot opens them, and `_sync_tray` shows at most
+        # one, exactly as the overlay does.
         self._tray = SettingsTray(self._canvas)
         self._tray.hide()
-        self._tray.colourChanged.connect(self._canvas.set_ink_colour)
-        self._tray.strokeChanged.connect(self._canvas.set_stroke_width)
+        self._tray.colourChanged.connect(self._on_ink_colour_changed)
+        self._tray.strokeChanged.connect(self._on_stroke_width_changed)
+        self._bar.set_style_preview(self._canvas.ink_colour, self._canvas.stroke_width)
 
         self._blur_tray = BlurTray(self._canvas)
         self._blur_tray.hide()
-        self._blur_tray.blurModeChanged.connect(self._canvas.set_blur_mode)
+        self._blur_tray.blurModeChanged.connect(self._on_blur_mode_changed)
         self._blur_tray.strengthChanged.connect(self._canvas.set_blur_strength)
 
-        # The rect button's Ellipse/Line/Crop submenu, for the same reason:
-        # three of the tools were unreachable without it.
-        # Names whichever tool has no tray of its own -- the eraser -- so
-        # there is never an active tool the user cannot identify.
+        # Names the active tool, and what it does, whenever no tray is open,
+        # so there is never an active tool the user cannot identify.
         self._tool_hint = ToolHintStrip(self._canvas)
         self._tool_hint.hide()
 
@@ -594,9 +627,18 @@ class ReviewWindow(WinWindow):
         self._toast = Toast(self._canvas)
         self._toast.hide()
 
-        self._shape_popover = ShapeToolPopover(self._canvas)
-        self._shape_popover.hide()
-        self._shape_popover.toolSelected.connect(self._on_shape_selected)
+        # The notched slots' menus, as the overlay has them.
+        self._family_menus = {
+            family: FamilyMenu(family, self._canvas) for family in tokens.FAMILIES
+        }
+        for menu in self._family_menus.values():
+            menu.hide()
+            menu.siblingPicked.connect(self._on_family_sibling_picked)
+        self._style_open = False
+        # A press on the image while a menu is open closes the menu and does
+        # nothing else, as on the overlay. The canvas knows nothing of the
+        # bar's menus, so this window watches its presses for it.
+        self._canvas.installEventFilter(self)
 
         self._store.changed.connect(self._on_edited)
 
@@ -605,28 +647,85 @@ class ReviewWindow(WinWindow):
 
     def _on_tool_selected(self, tool: str) -> None:
         self._canvas.set_tool(tool)
-        self._shape_popover.hide()
+        for menu in self._family_menus.values():
+            menu.hide()
+        self._blur_tray.show_tool(tool)
         self._sync_tray()
 
-    def _on_shape_selected(self, shape: str) -> None:
-        self._shape_popover.hide()
-        self._bar.select_tool(shape)
+    def _on_ink_colour_changed(self, colour: str) -> None:
+        self._canvas.set_ink_colour(colour)
+        self._bar.set_style_preview(colour, self._canvas.stroke_width)
 
-    def _toggle_shape_popover(self) -> None:
-        if self._shape_popover.isVisible():
-            self._shape_popover.hide()
+    def _on_stroke_width_changed(self, stroke: int) -> None:
+        self._canvas.set_stroke_width(stroke)
+        self._bar.set_style_preview(self._canvas.ink_colour, stroke)
+
+    def _on_blur_mode_changed(self, mode: str) -> None:
+        """A segment in the blur tray arms the redaction tool it names, so
+        the tray and the redaction slot never disagree.
+        """
+        self._bar.select_tool(BlurTray.MODE_TOOLS.get(mode, "pixelate"))
+
+    def _toggle_family_menu(self, family: str) -> None:
+        menu = self._family_menus[family]
+        # Hidden, not visible: a window not yet on screen has no visible
+        # children, and its menu would reopen on every toggle.
+        if not menu.isHidden():
+            menu.hide()
             return
-        active = self._bar.active_tool
-        self._shape_popover.set_tool(
-            active if active in tokens.RECT_GROUP else tokens.RECT_GROUP[0]
+        self._close_bar_menus()
+        menu.set_current(self._bar.family_choice(family))
+        menu.reposition(
+            self._bar.slot_rect(family, self._canvas),
+            self._bar.geometry(),
+            QRectF(self._canvas.rect()),
         )
-        button = self._bar._tool_buttons["rect"]
-        origin = button.mapTo(self._canvas, QPoint(0, 0))
-        self._shape_popover.reposition(
-            QRect(origin, button.size()), QRectF(self._canvas.rect())
+        menu.show()
+        menu.raise_()
+
+    def _on_family_sibling_picked(self, tool: str) -> None:
+        self._close_bar_menus()
+        self._bar.select_tool(tool)
+
+    def _on_tool_picked(self, _tool: str) -> None:
+        """A tool clicked on the bar closes whatever menu is open."""
+        self._close_bar_menus()
+
+    def _close_bar_menus(self) -> bool:
+        """Close the family menus and the style dot's tray, and say whether
+        any of them was open.
+        """
+        was_open = self._style_open or any(
+            not menu.isHidden() for menu in self._family_menus.values()
         )
-        self._shape_popover.show()
-        self._shape_popover.raise_()
+        for menu in self._family_menus.values():
+            menu.hide()
+        if self._style_open:
+            self._style_open = False
+            self._sync_tray()
+        return was_open
+
+    def _toggle_style(self) -> None:
+        """The style dot: open the active tool's tray, or close it."""
+        if not self._style_open and self._style_tray_for(self._bar.active_tool) is None:
+            return
+        opening = not self._style_open
+        for menu in self._family_menus.values():
+            menu.hide()
+        self._style_open = opening
+        self._sync_tray()
+
+    def eventFilter(self, watched, event) -> bool:
+        # The type first: the window's own chrome installs filters before
+        # this window has a canvas to compare against.
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and watched is getattr(self, "_canvas", None)
+            and self._close_bar_menus()
+        ):
+            self._canvas.end_drag()
+            return True
+        return super().eventFilter(watched, event)
 
     def _preview_tool(self, tool: str) -> None:
         """Name the tool under the cursor, without arming it.
@@ -652,51 +751,58 @@ class ReviewWindow(WinWindow):
             size.width(), size.height(),
         )
 
-    def _sync_tray(self) -> None:
-        """Show whichever tray matches the active tool, or neither.
+    def _style_tray_for(self, tool: str | None) -> "QWidget | None":
+        if tool in tokens.DRAW_TOOLS:
+            return self._tray
+        if tool in BlurTray.TOOL_MODES:
+            return self._blur_tray
+        return None
 
-        At most one is ever visible, per the spec's "it replaces the colour
-        and stroke tray rather than sitting alongside it".
+    def _sync_tray(self) -> None:
+        """Show what hangs off the bar for the active tool: its tray while
+        the style dot has it open, and otherwise the strip naming the tool
+        -- the overlay's `_sync_tray_visibility`, at most one of the three.
         """
         tool = self._bar.active_tool
-        for tray in (self._tray, self._blur_tray, self._tool_hint):
-            tray.hide()
+        tray = self._style_tray_for(tool)
+        if tray is None:
+            self._style_open = False
+        self._bar.set_style_open(self._style_open)
+
+        shown = None
         # Gated on whether we are editing, not on whether the widget is
         # mapped: `isVisible()` is false for a window that has not been
         # shown yet, which would leave the trays down in every test and on
         # the first paint of a window opened programmatically.
-        if not self._canvas.is_annotating():
+        if self._canvas.is_annotating():
+            if self._style_open:
+                shown = tray
+            elif tool:
+                shown = self._tool_hint
+        for widget in (self._tray, self._blur_tray, self._tool_hint):
+            if widget is not shown:
+                widget.hide()
+        if shown is None:
             return
-        tray = None
-        if tool in tokens.DRAW_TOOLS:
-            # The tray names the active tool and carries its hint, so it has
-            # to be told which one -- otherwise it keeps whichever it was
-            # last showing and reads as the wrong tool entirely.
+        # Told the tool each time, so neither names whichever it showed last.
+        if shown is self._tray:
             self._tray.set_tool(tool)
-            tray = self._tray
-        elif tool == "blur":
-            tray = self._blur_tray
-        if tray is None:
-            if tool:
-                # No tray for this tool, so the strip carries its name.
-                self._tool_hint.set_tool(tool)
-                tray = self._tool_hint
-            else:
-                return
-        size = tray.sizeHint()
+        elif shown is self._tool_hint:
+            self._tool_hint.set_tool(tool)
+        size = shown.sizeHint()
         bar = self._bar.geometry()
-        tray.setGeometry(
+        shown.setGeometry(
             round(bar.center().x() - size.width() / 2),
             bar.bottom() + tokens.Metric.TRAY_OFFSET_Y,
             size.width(),
             size.height(),
         )
         # Below the bar would fall off the canvas floor here -- the bar
-        # already sits 18px from it -- so the tray goes above instead.
-        if tray.geometry().bottom() > self._canvas.height():
-            tray.move(tray.x(), bar.top() - tokens.Metric.TRAY_OFFSET_Y - size.height())
-        tray.show()
-        tray.raise_()
+        # already sits 18px from it -- so it goes above instead.
+        if shown.geometry().bottom() > self._canvas.height():
+            shown.move(shown.x(), bar.top() - tokens.Metric.TRAY_OFFSET_Y - size.height())
+        shown.show()
+        shown.raise_()
 
     # -- footer ----------------------------------------------------------
 
@@ -830,13 +936,28 @@ class ReviewWindow(WinWindow):
             if self._canvas.has_active_label():
                 self._canvas.abandon_text()
                 return
+            # An open menu is what Esc closes first.
+            if self._close_bar_menus():
+                return
             if self._canvas.is_annotating():
                 self._set_annotating(False)
                 return
+        # The bar's tool keys, while the bar is up, as on the overlay. A
+        # label being typed into keeps its own letters, and a letter held
+        # with a modifier is somebody else's shortcut.
+        elif (
+            self._canvas.is_annotating()
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+            and self._bar.handle_tool_key(event.key())
+        ):
+            return
         super().keyPressEvent(event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        # A menu is anchored to where its slot was, and the bar is moving.
+        for menu in getattr(self, "_family_menus", {}).values():
+            menu.hide()
         self._place_overlays()
 
     # -- actions ---------------------------------------------------------
@@ -846,7 +967,7 @@ class ReviewWindow(WinWindow):
         self._bar.setVisible(annotating)
         self._annotate_button.setText("Done editing" if annotating else "Edit")
         if not annotating:
-            self._shape_popover.hide()
+            self._close_bar_menus()
         self._place_overlays()
         self._sync_tray()
 

@@ -217,7 +217,10 @@ class TestStrokeFactory:
             ("rect", shapes.Rectangle),
             ("ellipse", shapes.Ellipse),
             ("line", shapes.Line),
+            ("crop", shapes.Crop),
             ("blur", shapes.Blur),
+            ("pixelate", shapes.Pixelate),
+            ("blackout", shapes.Blackout),
         ],
     )
     def test_each_drag_tool_starts_its_own_shape(self, tool, expected):
@@ -225,31 +228,15 @@ class TestStrokeFactory:
             tool, QPointF(1, 1), colour=QColor("#fff"), stroke_width=4
         )
 
-        assert isinstance(shape, expected)
+        assert type(shape) is expected
 
-    def test_pixelate_is_chosen_by_the_blur_mode(self):
+    def test_a_redaction_takes_the_strength_it_is_given(self):
         shape = begin_stroke(
-            "blur", QPointF(1, 1), colour=QColor("#fff"), stroke_width=4,
-            blur_mode="pixelate",
+            "pixelate", QPointF(1, 1), colour=QColor("#fff"), stroke_width=4,
+            blur_strength=13,
         )
 
-        assert isinstance(shape, shapes.Pixelate)
-
-    def test_solid_is_chosen_by_the_blur_mode(self):
-        shape = begin_stroke(
-            "blur", QPointF(1, 1), colour=QColor("#fff"), stroke_width=4,
-            blur_mode="solid",
-        )
-
-        assert isinstance(shape, shapes.Redact)
-
-    def test_the_trays_own_pix_spelling_still_pixelates(self):
-        shape = begin_stroke(
-            "blur", QPointF(1, 1), colour=QColor("#fff"), stroke_width=4,
-            blur_mode="pix",
-        )
-
-        assert isinstance(shape, shapes.Pixelate)
+        assert shape.strength == 13
 
     @pytest.mark.parametrize("tool", ["step", "text", "eraser", None])
     def test_tools_with_no_drag_gesture_start_nothing(self, tool):
