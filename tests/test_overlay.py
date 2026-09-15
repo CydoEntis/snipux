@@ -4425,6 +4425,35 @@ class TestStylePopoverSections:
         )
         assert blur.height() < rect.height() - metric.SWATCH_H
 
+    @pytest.mark.parametrize("before,after", [("pen", "rect"), ("rect", "pen"), ("blur", "arrow")])
+    def test_switching_tools_sizes_the_popover_for_the_new_tool_at_once(self, before, after):
+        # A popover already laid out for one tool, then handed another, kept
+        # the first tool's height until Qt's layout event arrived -- so the
+        # first open after switching from the pen to a rectangle cut the fill
+        # and line buttons off at the bottom.
+        styles = ToolStyles()
+        popover = StylePopover(styles)
+        popover.set_tool(before)
+        popover.grab()
+        QApplication.processEvents()
+
+        popover.set_tool(after)
+
+        settled = StylePopover(styles)
+        settled.set_tool(after)
+        settled.grab()
+        QApplication.processEvents()
+        settled.adjustSize()
+        assert popover.height() == settled.height()
+        if after == "rect":
+            metric = tokens.BarMetric
+            assert popover.height() == (
+                2 * (metric.BORDER + metric.STYLE_PAD_V)
+                + metric.SWATCH_H
+                + metric.STYLE_ROW_GAP
+                + metric.CYCLE_H
+            )
+
     def test_switching_tools_swaps_the_sections(self):
         popover = StylePopover(ToolStyles())
         popover.set_tool("blur")

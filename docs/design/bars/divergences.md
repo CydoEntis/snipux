@@ -446,6 +446,27 @@ frozen frame to read. A flag that could not do anything would look live.
 
 ---
 
+## 21 · The style popover is roomier than 216px
+
+**The handoff says**: 216px wide, 9px and 10px padding, 21px swatches 4px
+apart, 30x24 fill and line buttons, a 13px slider thumb, and a slider that
+takes whatever is left of the row.
+
+**We make it 264px wide**, with 12px padding, 24px swatches 6px apart, 36x28
+fill and line buttons, a 15px thumb and 12px between the two rows. Beside the
+fill and line buttons the stroke slider gets about 110px instead of 83. The
+sizes are `BarMetric`'s style-popover tokens.
+
+### Why
+
+Built to the handoff's sizes it was reported as squished: the swatches all
+but touched, the fill and line buttons were small targets, and a stroke of 1
+to 26 across 83px of slider is barely 3px a step. The structure stays the
+handoff's -- the colour row, then fill, line and the slider with its readout,
+and only the sections a tool supports -- and only the sizes grow.
+
+---
+
 ## Still open
 
 Not decided. Today's behaviour stands for each until it is, and each is

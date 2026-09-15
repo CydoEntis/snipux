@@ -1241,33 +1241,36 @@ class BarMetric:
     MENU_NOTE_GAP    = 2           # spec markup: label to note
     MENU_W_SHAPES    = 186
     MENU_W_REDACT    = 244         # widest: rows carry a security note
-    MENU_W_STYLE     = 216
+    MENU_W_STYLE     = 264         # the handoff's 216 read as squished (divergences.md 21)
 
-    # The style popover's two rows -- spec markup. Border-box, like every
-    # menu: MENU_W_STYLE is the outside edge, padding and border included.
-    STYLE_PAD_V      = 9
-    STYLE_PAD_H      = 10
-    STYLE_ROW_GAP    = 9           # colour row to controls row
-    STYLE_CONTROL_GAP = 7          # between the controls in the second row
-    SWATCH_H         = 21          # seven swatches and `+`, sharing the row's width
-    SWATCH_GAP       = 4
-    SWATCH_RADIUS    = 6
+    # The style popover's two rows. The handoff's structure, at roomier sizes
+    # than its markup (divergences.md 21): built to 216px with 21px swatches
+    # 4px apart and 30x24 buttons, it read as squished. Border-box, like
+    # every menu: MENU_W_STYLE is the outside edge, padding and border
+    # included.
+    STYLE_PAD_V      = 12
+    STYLE_PAD_H      = 12
+    STYLE_ROW_GAP    = 12          # colour row to controls row
+    STYLE_CONTROL_GAP = 8          # between the controls in the second row
+    SWATCH_H         = 24          # seven swatches and `+`, sharing the row's width
+    SWATCH_GAP       = 6
+    SWATCH_RADIUS    = 7
     SWATCH_RING      = 1.5         # the light ring round the picked swatch
     SWATCH_RING_GAP  = 2           # the dark gap between that ring and the colour
-    CUSTOM_ICON      = 11
-    CYCLE_W          = 30          # fill and line: click-through buttons
-    CYCLE_H          = 24
-    CYCLE_RADIUS     = 7
-    FILL_GLYPH_W     = 17
-    FILL_GLYPH_H     = 11
+    CUSTOM_ICON      = 12
+    CYCLE_W          = 36          # fill and line: click-through buttons
+    CYCLE_H          = 28
+    CYCLE_RADIUS     = 8
+    FILL_GLYPH_W     = 20
+    FILL_GLYPH_H     = 13
     FILL_GLYPH_RADIUS = 2
     FILL_GLYPH_BORDER = 1.5
-    DASH_GLYPH_W     = 18          # a 20px line, 1px in from each end
+    DASH_GLYPH_W     = 22          # a 24px line, 1px in from each end
     DASH_GLYPH_STROKE = 2
     SLIDER_TRACK     = 4
-    SLIDER_THUMB     = 13
-    READOUT_W_SIZE   = 30          # "26px" without the row reflowing
-    READOUT_W_STRENGTH = 18        # "20"
+    SLIDER_THUMB     = 15
+    READOUT_W_SIZE   = 32          # "26px" without the row reflowing
+    READOUT_W_STRENGTH = 20        # "20"
 
     # The style dot's diameter is the stroke at this scale, clamped -- spec
     # markup. The highlighter's own stroke paints wider, so its dot does too.

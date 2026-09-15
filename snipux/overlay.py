@@ -2702,9 +2702,16 @@ class StylePopover(_Chrome):
         size_name = "Text size" if tool == "text" else "Stroke"
         self._size_slider.setToolTip(f"{size_name} — {_STEP_KEYS}")
 
-        # Hiding a row changes the popover's height, and a layout only
-        # notices on its next pass.
-        self._layout.invalidate()
+        # Hiding a row, or a control inside one, changes the popover's
+        # height, and Qt only settles a layout around a child shown or hidden
+        # when it next gets round to it -- invalidating is not enough, the
+        # cached sizes are still the last tool's. Activated inside out here,
+        # so the height below is this tool's: the first open after switching
+        # from the pen to a rectangle came up sized for the pen, with the fill
+        # and line buttons cut off at the bottom.
+        for row in (self._colour_row, self._controls_row):
+            row.layout().activate()
+        self._layout.activate()
         self.resize(self.width(), self.sizeHint().height())
 
     @staticmethod
