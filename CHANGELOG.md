@@ -5,6 +5,10 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 0.7.2 — 2026-09-15
+
+The toolbar stays on the monitor you are snipping.
+
 ### Changed
 
 - **The toolbar stays on the monitor you are snipping.** When a selection
