@@ -4332,7 +4332,8 @@ class OverlayWindow(QWidget):
         Reads the selection's pixels out of the frozen frame -- never the
         live screen, per CLAUDE.md's one rule -- asks the platform for the
         words in them, and puts a solid `Redact` over each value
-        `sensitive.find_sensitive` flags. The boxes are ordinary marks,
+        `sensitive.find_sensitive` flags -- including whatever the user
+        added to their own hide list. The boxes are ordinary marks,
         added as one step of history: the user can erase any one of them,
         and a single undo takes the whole batch away.
 
@@ -4359,6 +4360,15 @@ class OverlayWindow(QWidget):
         scale_x = cropped.image.width() / logical_width
         scale_y = cropped.image.height() / logical_height
 
+        # Read per capture, not once at start-up: editing the list in
+        # Settings takes effect on the next capture, with no restart.
+        # Guarded because a capture must never fail over a settings file --
+        # the worst a broken list may cost is the boxes it would have added.
+        try:
+            mine = sensitive.custom_list(setup_desktop.load_hide_list())
+        except OSError:
+            mine = sensitive.custom_list(None)
+
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             lines = current.recognize_text(cropped.image)
@@ -4378,7 +4388,7 @@ class OverlayWindow(QWidget):
                 image_rect.width() / scale_x + 2 * pad,
                 image_rect.height() / scale_y + 2 * pad,
             )
-            for image_rect in (finding.image_rect for finding in sensitive.find_sensitive(lines))
+            for image_rect in (finding.image_rect for finding in sensitive.find_sensitive(lines, mine))
         ]
         boxes = []
         for window_rect in self._merge_same_values(found):

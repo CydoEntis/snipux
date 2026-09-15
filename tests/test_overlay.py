@@ -7587,6 +7587,66 @@ class TestHideSensitiveText:
         assert overlay._selection == self.SELECTION
         assert len(overlay._marks) == 1
 
+    def test_a_word_from_the_users_own_list_is_blacked_out(self, recognizer):
+        # Nothing about "Acme Corporation" looks sensitive; it is hidden
+        # because this user said it is.
+        setup_desktop.save_hide_list(["Acme Corporation"], [], [])
+        recognizer.words = [("Acme", 40, 20, 90, 30), ("Corporation", 140, 20, 200, 30)]
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert len(overlay._marks) == 1
+
+    def test_a_label_from_the_users_own_list_hides_its_value(self, recognizer):
+        setup_desktop.save_hide_list([], ["Employee ID"], [])
+        recognizer.words = [
+            ("Employee", 40, 20, 90, 30), ("ID:", 140, 20, 40, 30), ("44821", 190, 20, 70, 30),
+        ]
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        [box] = overlay._marks
+        # The value only: 190/2 + the selection's own x, less the padding.
+        assert QRectF(box.start, box.end).normalized().left() == pytest.approx(
+            self.SELECTION.x() + 95 - OverlayWindow._HIDE_PADDING
+        )
+
+    def test_an_edit_takes_effect_on_the_next_capture(self, recognizer):
+        recognizer.words = [("Acme", 40, 20, 90, 30)]
+        overlay = self._overlay()
+        overlay._commit_selection(self.SELECTION)
+        assert overlay._marks == ()
+
+        setup_desktop.save_hide_list(["Acme"], [], [])
+        again = self._overlay()
+        again._commit_selection(self.SELECTION)
+
+        assert len(again._marks) == 1
+
+    def test_an_empty_list_changes_nothing(self, recognizer):
+        setup_desktop.save_hide_list([], [], [])
+        overlay = self._overlay()
+
+        overlay._commit_selection(self.SELECTION)
+
+        # The fixture's own words: the built-in email rule, and nothing else.
+        assert len(overlay._marks) == 1
+
+    def test_an_unreadable_list_never_fails_the_capture(self, recognizer, monkeypatch):
+        monkeypatch.setattr(
+            setup_desktop, "load_hide_list",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("unreadable")),
+        )
+        overlay = self._overlay()
+
+        with pytest.raises(OSError):
+            setup_desktop.load_hide_list()
+        # The capture itself must still finish: the loader is the only thing
+        # allowed to know the file is broken.
+        overlay._commit_selection(self.SELECTION)
+
     def test_the_toggle_is_seeded_from_and_saved_to_config(self, recognizer):
         setup_desktop.save_hide_sensitive(True)
         overlay = OverlayWindow(make_frame())
