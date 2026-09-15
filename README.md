@@ -1,12 +1,50 @@
-# Snipux
+<h1 align="center">Snipux</h1>
 
-**Snip, annotate and record your screen — a Snipping Tool workalike for Linux
-and Windows.**
+<p align="center">
+  <strong>Snip, annotate and record your screen — a Snipping Tool workalike for Linux and Windows.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/CydoEntis/snipux/actions/workflows/ci.yml"><img alt="tests" src="https://github.com/CydoEntis/snipux/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://pypi.org/project/snipux/"><img alt="PyPI" src="https://img.shields.io/pypi/v/snipux"></a>
+  <a href="https://pypi.org/project/snipux/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue"></a>
+  <img alt="Linux and Windows" src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey">
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-green"></a>
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#using-snipux">Using Snipux</a> ·
+  <a href="#recording">Recording</a> ·
+  <a href="#the-player">The player</a> ·
+  <a href="#tools-and-shortcuts">Shortcuts</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/hero.png" width="900"
+       alt="Snipux's overlay: a region selected on a frozen desktop, marked up with a box, numbered steps, an arrow and a label, with an email address in the chat blacked out automatically">
+</p>
 
 Snip an area, a window, or the whole screen. Draw on it, blur out the parts
 that shouldn't be shared, and copy or save it. Or record the same
 region to a video file and trim it down. The workflow Windows gives you for
 free, on Linux too — and a slightly better one back on Windows.
+
+## Features
+
+- **Snip anything** — a region, a window, the whole monitor, the window you were
+  just using, just your browser's page, or the same rectangle as last time.
+- **Annotate in place** — pen, highlighter, arrows, boxes, numbered steps, text
+  and blur, drawn straight onto the frozen screen. No separate editor to open.
+- **Hide sensitive** — one switch blacks out passwords, API keys, card numbers
+  and email addresses before the snip leaves your screen *(Windows)*.
+- **Record the same selection** — to MP4 on Windows or WebM on GNOME, with an
+  optional countdown.
+- **Trim and export** — a player with a filmstrip and waveform, exporting MP4,
+  WebM, GIF or a single frame.
+- **Watermark** — stamp text or an image in a corner of every capture.
+- **One shortcut** — Ctrl+Alt+S, on both platforms.
 
 MIT licensed, and installed with `pip install snipux` — see
 [Install](#install). There is no Windows installer: that is deliberate, and
@@ -330,6 +368,11 @@ startup cost on every snip.
    clipped away.
 5. **Copy or save** from the bar that appears under the selection.
 
+<p align="center">
+  <img src="docs/screenshots/chooser.png" width="560"
+       alt="The chooser row at the top of the screen with its capture-mode menu open: Region, Window, Full screen, Active window, Browser and Last region">
+</p>
+
 ### Capture modes
 
 | Mode | What it captures |
@@ -346,7 +389,13 @@ Set per-capture from the chooser row, or as a default in Settings:
 |-------------|--------------|
 | **Capture and finish** | Straight to the clipboard the moment the selection is made — no overlay, no toolbar, nothing to dismiss |
 | **Capture and annotate** | The frozen frame stays up with the tools on it. Copy or save when you're done. *(default)* |
+| **Capture and save** | The same frozen frame and tools, with Save as the button already under the cursor instead of Copy |
 | **Capture and review** | Opens the review window afterwards, which annotates too |
+
+<p align="center">
+  <img src="docs/screenshots/settings.png" width="640"
+       alt="The Settings window on its Capture page: the shortcut recorder set to Control+Alt+S, and the after-capture choices">
+</p>
 
 ### The review window
 
@@ -355,7 +404,12 @@ place — or copied when you meant to save — means taking the capture again. T
 review window is the answer: the image, where it went, and Copy / Save As… /
 Show in Folder.
 
-Press **Annotate** and it reveals the overlay's *own* floating bar over the
+<p align="center">
+  <img src="docs/screenshots/review.png" width="760"
+       alt="The review window with Edit pressed: the annotated snip, the overlay's tool bar over it, and Copy, Save As and Show in Folder in the footer">
+</p>
+
+Press **Edit** and it reveals the overlay's *own* floating bar over the
 image — the same widget, the same tools, the same mark model, so there is no
 second tool set to drift. The only differences are that there's no capture-mode
 chip (nothing left to capture) and the bar's trailing action is `Done`, since
@@ -373,10 +427,16 @@ screen all record.
 
 Committing a selection **arms** a recording rather than starting one, so you can
 still reframe it with the handles. One pill carries the whole thing and its
-label always names what a click does — "Start recording", "Cancel · 3",
-"Stop · 0:12" — sitting top-centre of the monitor being recorded, moving out of
-the way only when the recording covers that strip. An optional 3s / 5s / 10s
-delay shows as a countdown numeral inside the region.
+button always names what a click does — **Record**, then "Starting in 3"
+during a delay, then the running clock and **Stop** — sitting top-centre of the
+monitor being recorded, moving out of the way only when the recording covers
+that strip. An optional 3s / 5s / 10s delay shows as a countdown numeral inside
+the region.
+
+<p align="center">
+  <img src="docs/screenshots/record.png" width="900"
+       alt="A recording armed over a code editor: the selection with its handles, and the pill above it with Record, the audio source, a delay and Cancel">
+</p>
 
 Window mode films **where the window is right now**. It does not follow a window
 that moves mid-recording; there's no window-following in the API to build it on.
@@ -409,6 +469,11 @@ Set the same way as a snip's destination:
 
 The `Open` destination's other half: playback, a rail with a decoded filmstrip
 and a real waveform, in/out handles with a plain-language readout, and export.
+
+<p align="center">
+  <img src="docs/screenshots/player.png" width="820"
+       alt="The player: a paused recording with its transport bar, and a trim rail below showing the filmstrip, waveform and the kept range">
+</p>
 
 | Key | What it does |
 |-----|--------------|
