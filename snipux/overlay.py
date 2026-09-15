@@ -1324,6 +1324,11 @@ class FloatingBar(_Chrome):
     click can never turn into a drag. The review window lays its bar out
     itself and never calls `reposition`, so its bar does not drag: a drag
     has nothing to be clamped to until then.
+
+    A selection that leaves the bar no room beside it, on a desk with
+    another monitor the host covers, sends the bar to that monitor, and a
+    drag can carry it between the two (#50). `current_bounds` says which
+    usable area it is in, so the host can keep what hangs off it there too.
     """
 
     # A drag of the bar itself crossed the drag threshold, and moved the
@@ -1332,8 +1337,10 @@ class FloatingBar(_Chrome):
     dragStarted = pyqtSignal()
     dragMoved = pyqtSignal()
     # A drag ended somewhere the bar should go again the next time a
-    # selection leaves it no room: the `spot` it ended on, as (x, y).
-    spotRemembered = pyqtSignal(float, float)
+    # selection leaves it no room: which monitor, relative to the
+    # selection's (`setup_desktop.BAR_ON_OWN_MONITOR` or
+    # `BAR_ON_OTHER_MONITOR`), and the `spot` it ended on there, as (x, y).
+    positionRemembered = pyqtSignal(str, float, float)
 
     toolSelected = pyqtSignal(str)
     # A tool picked with the pointer on this row, emitted just before the
@@ -1406,6 +1413,12 @@ class FloatingBar(_Chrome):
         # back to a plain resize.
         self._last_selection: QRect | None = None
         self._last_bounds: QRectF | None = None
+        # The usable area of the monitor the bar is sent to when the
+        # selection leaves it no room on its own (#50), in the parent's
+        # logical coordinates like `_last_bounds`, or None on a desk with no
+        # such monitor -- and which of the two the bar is on now.
+        self._last_elsewhere: QRectF | None = None
+        self._monitor = setup_desktop.BAR_ON_OWN_MONITOR
 
         # A press on the bar's own surface that may become a drag (#50):
         # where it landed and where the bar's top-left was then, both in the
@@ -1415,14 +1428,15 @@ class FloatingBar(_Chrome):
         self._drag_press: QPointF | None = None
         self._drag_origin: QPoint | None = None
         self._dragging = False
-        # Where a drag put the bar for the selection it was made over, as a
-        # `spot` -- kept until that selection changes, so a re-sync for the
-        # same selection does not snap the bar back.
-        self._dragged_spot: tuple[float, float] | None = None
+        # Where a drag put the bar for the selection it was made over --
+        # which monitor, and the `spot` on it -- kept until that selection
+        # changes, so a re-sync for the same selection does not snap the
+        # bar back.
+        self._dragged: setup_desktop.BarPosition | None = None
         self._dragged_for: QRect | None = None
-        # Where the bar goes when neither side of a selection has room, as
-        # a `spot`, or None for the automatic answer.
-        self._remembered_spot: tuple[float, float] | None = None
+        # Where the bar goes when neither side of a selection has room, or
+        # None for the automatic answer.
+        self._remembered: setup_desktop.BarPosition | None = None
 
         # The primary action sits at the LEFT end, before a divider, and
         # picking a tool never changes anything to its left. It used to
@@ -1606,7 +1620,7 @@ class FloatingBar(_Chrome):
         """
         self._chip.set_text(label)
         if self._last_selection is not None and self._last_bounds is not None:
-            self.reposition(self._last_selection, self._last_bounds)
+            self.reposition(self._last_selection, self._last_bounds, self._last_elsewhere)
         else:
             self.resize(self.sizeHint())
 
@@ -1742,11 +1756,71 @@ class FloatingBar(_Chrome):
         """
         return self._drag_press is not None
 
-    def set_remembered_spot(self, spot: "tuple[float, float] | None") -> None:
+    def set_remembered_position(self, position: "setup_desktop.BarPosition | None") -> None:
         """Where the bar goes when a selection leaves it no room on either
-        side, as a `spot`; None leaves that to `placement`.
+        side -- which monitor, and the `spot` on it -- or None to leave that
+        to `placement`.
         """
-        self._remembered_spot = spot
+        self._remembered = position
+
+    @property
+    def current_bounds(self) -> "QRectF | None":
+        """The usable area the bar is on now, in the parent's logical
+        coordinates: the selection's own monitor's, or the other monitor's
+        once the bar has been sent or dragged there. None until `reposition`
+        has placed it.
+
+        What hangs off the bar is clamped into this. Clamped into the
+        selection's monitor on behalf of a bar on the next one, a menu would
+        open across the gap between the two, where nothing is drawn.
+        """
+        return self._bounds_on(self._monitor)
+
+    def _bounds_on(self, monitor: str) -> "QRectF | None":
+        if monitor == setup_desktop.BAR_ON_OTHER_MONITOR and self._last_elsewhere is not None:
+            return self._last_elsewhere
+        return self._last_bounds
+
+    def _has_room(self) -> bool:
+        """Whether the selection leaves a bar of this one's size room beside
+        it on its own monitor. Only asked once `reposition` has run.
+        """
+        return (
+            self._beside(QRectF(self._last_selection), self._last_bounds, self.size())
+            is not None
+        )
+
+    def _monitor_under(self, pointer: QPointF) -> str:
+        """Which monitor a drag with the pointer at `pointer` (the parent's
+        logical coordinates) puts the bar on: the one whose usable area is
+        nearest the pointer, or the one it is already on when both are as
+        near.
+
+        Nearest, not "the one under the pointer": the pointer can be on
+        neither, in the gap beside a staggered monitor, over a dock, or on a
+        third monitor the bar is never sent to. The bar is then clamped into
+        whichever usable area is closest, so it is never drawn where no
+        monitor shows it.
+
+        The other monitor is a choice only while the selection leaves no
+        room on its own. Beside a selection with room a drag moves the bar
+        for that snip alone, and taking it to another monitor would send it
+        away from a selection it can sit beside.
+        """
+        own = setup_desktop.BAR_ON_OWN_MONITOR
+        if self._last_elsewhere is None or self._has_room():
+            return own
+
+        def distance(bounds: QRectF) -> float:
+            across = max(bounds.left() - pointer.x(), 0.0, pointer.x() - bounds.right())
+            down = max(bounds.top() - pointer.y(), 0.0, pointer.y() - bounds.bottom())
+            return math.hypot(across, down)
+
+        to_own = distance(self._last_bounds)
+        to_other = distance(self._last_elsewhere)
+        if to_own == to_other:
+            return self._monitor
+        return own if to_own < to_other else setup_desktop.BAR_ON_OTHER_MONITOR
 
     def _is_grip(self, pos: QPointF) -> bool:
         """Whether a press at `pos` (this bar's own coordinates) takes hold
@@ -1783,7 +1857,8 @@ class FloatingBar(_Chrome):
         if not event.buttons() & Qt.MouseButton.LeftButton:
             self.end_drag()
             return
-        travel = self.mapToParent(event.position()) - self._drag_press
+        pointer = self.mapToParent(event.position())
+        travel = pointer - self._drag_press
         if not self._dragging:
             # A press on the padding is usually a click that missed a
             # button by a pixel or two, and must leave the bar where it is.
@@ -1792,7 +1867,13 @@ class FloatingBar(_Chrome):
             self._dragging = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             self.dragStarted.emit()
-        self.move(self.clamped(QPointF(self._drag_origin) + travel, self._last_bounds, self.size()))
+        # The pointer picks the monitor and the bar is clamped inside it, so
+        # carrying it over a bezel moves it across in one step rather than
+        # letting it hang half over the gap.
+        self._monitor = self._monitor_under(pointer)
+        self.move(
+            self.clamped(QPointF(self._drag_origin) + travel, self.current_bounds, self.size())
+        )
         self.dragMoved.emit()
 
     def mouseReleaseEvent(self, event) -> None:
@@ -1809,10 +1890,13 @@ class FloatingBar(_Chrome):
         mark, so a lost release cannot leave the bar following the pointer.
 
         A drag made while the selection has no room beside it is
-        remembered (`spotRemembered`). One made beside a selection with room
-        is kept for that selection only: it moved the bar for this snip, and
-        remembering it would change where the bar goes for a whole-monitor
-        snip that it was never about.
+        remembered (`positionRemembered`): the monitor it ended on, relative
+        to the selection's, and the spot on it. From then on it is the
+        answer whenever a selection leaves no room, over the automatic move
+        to another monitor, so the two never take turns. One made beside a
+        selection with room is kept for that selection only: it moved the
+        bar for this snip, and remembering it would change where the bar
+        goes for a whole-monitor snip that it was never about.
         """
         dragged = self._dragging
         self._drag_press = None
@@ -1821,29 +1905,42 @@ class FloatingBar(_Chrome):
         if not dragged or self._last_bounds is None or self._last_selection is None:
             return
         self.setCursor(Qt.CursorShape.OpenHandCursor)
-        spot = self.spot(QPointF(self.pos()), self._last_bounds, self.size())
-        self._dragged_spot = spot
+        monitor = (
+            self._monitor if self._last_elsewhere is not None else setup_desktop.BAR_ON_OWN_MONITOR
+        )
+        position = setup_desktop.BarPosition(
+            monitor, self.spot(QPointF(self.pos()), self._bounds_on(monitor), self.size())
+        )
+        self._dragged = position
         self._dragged_for = QRect(self._last_selection)
-        if self._beside(QRectF(self._last_selection), self._last_bounds, self.size()) is None:
-            self._remembered_spot = spot
-            self.spotRemembered.emit(*spot)
+        if not self._has_room():
+            self._remembered = position
+            self.positionRemembered.emit(position.monitor, *position.spot)
 
     # -- positioning -----------------------------------------------------
 
-    def reposition(self, selection: QRect, bounds: QRectF) -> None:
+    def reposition(
+        self, selection: QRect, bounds: QRectF, elsewhere: "QRectF | None" = None
+    ) -> None:
         """Put the bar where it belongs for `selection`: where a drag put it
         for this same selection, and otherwise where `placement` says.
+
+        `bounds` is the usable area of the selection's own monitor.
+        `elsewhere` is the usable area of the monitor the bar goes to when
+        the selection leaves it no room there, or None on a desk with no
+        such monitor. All three are in the parent's logical coordinates.
 
         Kept apart from `placement` so the rule and applying it stay two
         things: a position the user chose replaces the one, not the other.
         """
         if self._dragged_for is not None and QRect(selection) != self._dragged_for:
-            self._dragged_spot = None
+            self._dragged = None
             self._dragged_for = None
         # SNX-68: remembered so `set_capture_mode` can replay this same
         # call when the chip's width changes.
         self._last_selection = selection
         self._last_bounds = bounds
+        self._last_elsewhere = elsewhere
         # Placed over a selection, the bar has bounds a drag can be clamped
         # to, and its surface says it can be taken hold of. The controls
         # keep their own pointing hand.
@@ -1854,10 +1951,12 @@ class FloatingBar(_Chrome):
             # Mid-drag the pointer owns the bar's position.
             return
         size = self.sizeHint()
-        if self._dragged_spot is not None:
-            top_left = self.from_spot(self._dragged_spot, bounds, size)
+        if self._dragged is not None:
+            self._monitor, top_left = self.resolve(self._dragged, bounds, elsewhere, size)
         else:
-            top_left = self.placement(QRectF(selection), bounds, size, self._remembered_spot)
+            self._monitor, top_left = self.placement(
+                QRectF(selection), bounds, size, self._remembered, elsewhere
+            )
         self.setGeometry(QRect(top_left, size))
 
     @staticmethod
@@ -1865,10 +1964,13 @@ class FloatingBar(_Chrome):
         selection: QRectF,
         bounds: QRectF,
         size: QSize,
-        remembered: "tuple[float, float] | None" = None,
-    ) -> QPoint:
-        """Where a bar of `size` belongs for `selection`: its top-left, in the
-        space `selection` and `bounds` share.
+        remembered: "setup_desktop.BarPosition | None" = None,
+        elsewhere: "QRectF | None" = None,
+    ) -> "tuple[str, QPoint]":
+        """Where a bar of `size` belongs for `selection`: the monitor it is
+        on (`setup_desktop.BAR_ON_OWN_MONITOR` or `BAR_ON_OTHER_MONITOR`)
+        and its top-left, in the space `selection`, `bounds` and `elsewhere`
+        share.
 
         `bounds` is the selection's own monitor, less whatever the desktop
         reserves on it (`OverlayWindow._chrome_bounds`) -- never the window.
@@ -1888,24 +1990,65 @@ class FloatingBar(_Chrome):
         decides it; distance from the monitor's bottom edge is.
 
         With room on neither side the selection is essentially the whole
-        monitor, and anywhere covers some of it (#50). The bar goes to the
-        `remembered` spot the user last dragged it to in that case, and
-        with none it is held inside `bounds` against its bottom margin.
-        The remembered spot is only ever the answer to that case: while
-        there is room beside the selection it is not consulted, so it can
-        never put the bar over a selection that had somewhere else to put
-        it.
+        monitor, and anywhere on it covers some of it (#50). Then, in turn:
+
+        - A `remembered` drag wins, on the monitor it names (`resolve`).
+          Were the automatic move below allowed to override it, the user's
+          correction and the rule would take turns on every snip.
+        - `elsewhere` -- the usable area of another monitor, which none of
+          the selection is on -- takes the bar, at the place on it nearest
+          to where the bar would otherwise have sat over the selection. That
+          is just across the bezel from the work, so each trip from the
+          selection to a tool is a short hop rather than a monitor's width.
+          Beside a monitor of the same height it keeps the bar at the
+          bottom, where it always sits. And it is one rule for a monitor
+          beside, above, below or offset, where a fixed place such as
+          bottom-centre would put the bar a whole monitor's height from a
+          selection on the monitor above it.
+        - Otherwise the bar is held inside `bounds` against its bottom
+          margin, centred on the selection.
+
+        None of that is consulted while there is room beside the selection,
+        so neither a remembered place nor another monitor can take the bar
+        away from a selection it could sit beside.
         """
         metric = design.tokens.BarMetric
         margin = metric.BAR_EDGE_MARGIN
-        top = FloatingBar._beside(selection, bounds, size)
-        if top is None:
-            if remembered is not None:
-                return FloatingBar.from_spot(remembered, bounds, size)
-            top = max(bounds.top() + margin, bounds.bottom() - margin - size.height())
+        own = setup_desktop.BAR_ON_OWN_MONITOR
         left = selection.center().x() - size.width() / 2
         left = max(bounds.left() + margin, min(left, bounds.right() - margin - size.width()))
-        return QPoint(round(left), round(top))
+        top = FloatingBar._beside(selection, bounds, size)
+        if top is not None:
+            return own, QPoint(round(left), round(top))
+        if remembered is not None:
+            return FloatingBar.resolve(remembered, bounds, elsewhere, size)
+        top = max(bounds.top() + margin, bounds.bottom() - margin - size.height())
+        if elsewhere is None:
+            return own, QPoint(round(left), round(top))
+        return (
+            setup_desktop.BAR_ON_OTHER_MONITOR,
+            FloatingBar.clamped(QPointF(left, top), elsewhere, size),
+        )
+
+    @staticmethod
+    def resolve(
+        position: "setup_desktop.BarPosition",
+        bounds: QRectF,
+        elsewhere: "QRectF | None",
+        size: QSize,
+    ) -> "tuple[str, QPoint]":
+        """The monitor and top-left that a remembered or dragged `position`
+        names for a bar of `size`, given the selection's own usable area
+        `bounds` and the other monitor's `elsewhere`. Same space in and out.
+
+        A position on the other monitor, on a desk that now has none, keeps
+        its spot on the selection's own monitor: it is still the last place
+        the user put the bar, and any place there covers something.
+        """
+        monitor, spot = position
+        if monitor == setup_desktop.BAR_ON_OTHER_MONITOR and elsewhere is not None:
+            return monitor, FloatingBar.from_spot(spot, elsewhere, size)
+        return setup_desktop.BAR_ON_OWN_MONITOR, FloatingBar.from_spot(spot, bounds, size)
 
     @staticmethod
     def _beside(selection: QRectF, bounds: QRectF, size: QSize) -> "float | None":
@@ -4182,12 +4325,13 @@ class OverlayWindow(QWidget):
         self._bar.familyMenuRequested.connect(self._toggle_family_menu)
         self._bar.styleRequested.connect(self._toggle_style)
         # #50: the bar can be dragged, and where it was dragged to when a
-        # selection left it no room is where it goes the next time one does.
-        # A bad stored value reads as None, and None is automatic placement.
-        self._bar.set_remembered_spot(setup_desktop.load_bar_position())
+        # selection left it no room -- which monitor, and where on it -- is
+        # where it goes the next time one does. A bad stored value reads as
+        # None, and None is automatic placement.
+        self._bar.set_remembered_position(setup_desktop.load_bar_position())
         self._bar.dragStarted.connect(self._on_bar_drag_started)
         self._bar.dragMoved.connect(self._on_bar_dragged)
-        self._bar.spotRemembered.connect(self._remember_bar_spot)
+        self._bar.positionRemembered.connect(self._remember_bar_position)
 
         # Each tool's style -- the session's, so what was set on the last
         # snip is still set on this one -- and the popover the style dot
@@ -4509,7 +4653,7 @@ class OverlayWindow(QWidget):
         if self._popover.isVisible():
             self._popover.hide()
             return
-        self._popover.reposition(self._bar.geometry(), self._chrome_bounds())
+        self._popover.reposition(self._bar.geometry(), self._bar_bounds())
         self._popover.show()
         self._popover.raise_()
 
@@ -4531,7 +4675,7 @@ class OverlayWindow(QWidget):
         self._close_bar_menus()
         menu.set_current(self._bar.family_choice(family))
         menu.reposition(
-            self._bar.slot_rect(family, self), self._bar.geometry(), self._chrome_bounds()
+            self._bar.slot_rect(family, self), self._bar.geometry(), self._bar_bounds()
         )
         menu.show()
         menu.raise_()
@@ -4579,7 +4723,7 @@ class OverlayWindow(QWidget):
 
     def _place_style_popover(self) -> None:
         self._style_popover.reposition(
-            self._bar.style_dot_rect(self), self._bar.geometry(), self._chrome_bounds()
+            self._bar.style_dot_rect(self), self._bar.geometry(), self._bar_bounds()
         )
 
     # -- dragging the bar (#50) ------------------------------------------------
@@ -4599,16 +4743,18 @@ class OverlayWindow(QWidget):
 
     def _on_bar_dragged(self) -> None:
         """What still hangs off the bar -- the strip naming the tool --
-        follows it, clamped into `_chrome_bounds` as always.
+        follows it, clamped into `_bar_bounds`: the usable area of whichever
+        monitor the drag has taken the bar to.
         """
         self._sync_tool_hint()
 
-    def _remember_bar_spot(self, x: float, y: float) -> None:
-        """Keep where the bar was dragged to for the next snip with no room,
-        as the fraction of its travel `FloatingBar.spot` describes -- not
-        pixels, so it still means somewhere on a monitor of another size.
+    def _remember_bar_position(self, monitor: str, x: float, y: float) -> None:
+        """Keep where the bar was dragged to for the next snip with no room:
+        the monitor, relative to the selection's, and the fraction of its
+        travel there that `FloatingBar.spot` describes -- not pixels, so it
+        still means somewhere on a monitor of another size.
         """
-        setup_desktop.save_bar_position((x, y))
+        setup_desktop.save_bar_position(setup_desktop.BarPosition(monitor, (x, y)))
 
     _CHOOSER_TOP_MARGIN = 28
 
@@ -5426,11 +5572,13 @@ class OverlayWindow(QWidget):
         full span.
 
         That monitor is then inset by whatever the desktop's own chrome
-        reserves on it (`_usable_area`). The bar, its menus and tool hint,
-        the popovers and the toast are all clamped into this rect, and a
-        dock paints over this window: before the inset, a selection reaching
-        the bottom of the monitor put the whole bar under a bottom dock,
-        where none of it could be clicked.
+        reserves on it (`_usable_area`). The close button and the toast are
+        clamped into this rect. So are the bar, its menus and tool hint and
+        the popovers, through `_bar_bounds` -- except while a selection with
+        no room beside it has sent the bar to another monitor (#50). A dock
+        paints over this window: before the inset, a selection reaching the
+        bottom of the monitor put the whole bar under a bottom dock, where
+        none of it could be clicked.
         """
         return self._to_local_rect(self._usable_area(self._chrome_monitor()))
 
@@ -5456,6 +5604,53 @@ class OverlayWindow(QWidget):
                 return best
             return self._monitor_at(self._to_absolute(selection.center()))
         return self._active_screen_rect()
+
+    def _bar_bounds(self) -> QRectF:
+        """The rect the stills bar and everything hung off it -- its family
+        menus, the style popover, the tool hint and the capture popover -- must
+        stay inside, in this window's own local logical coordinates.
+
+        `_chrome_bounds`, unless a selection with no room beside it has sent
+        the bar to another monitor, or a drag has carried it there (#50).
+        Then it is that monitor's usable area, `FloatingBar.current_bounds`:
+        a menu clamped into the selection's monitor on behalf of a bar on
+        the next one would open across the gap between the two, where
+        nothing is drawn.
+
+        Only what hangs off the bar follows it. The close button, the toast
+        and the chooser's tab belong to the capture rather than the bar, and
+        stay on the capture's monitor, where #49 and #66 put them.
+        """
+        bounds = self._bar.current_bounds
+        return QRectF(bounds) if bounds is not None else self._chrome_bounds()
+
+    def _bar_elsewhere(self) -> QRectF | None:
+        """The usable area of the monitor the stills bar goes to when the
+        selection leaves it no room on its own, in this window's own local
+        logical coordinates, or None when there is no such monitor.
+
+        The monitor nearest the selection's (`_chrome_monitor`) that none of
+        the selection reaches into, as `other_screens_nearest_first` already
+        picks one for the recording bar. Only monitors this window covers
+        are candidates, so on Wayland, where it covers the one interactive
+        output, there is never another. A monitor whose usable area cannot
+        hold the bar inside its margins is passed over: the bar would hang
+        off it into the gap beside it.
+        """
+        if self._selection is None or len(self._monitor_geometries) < 2:
+            return None
+        own = self._chrome_monitor()
+        selection = self._to_absolute_rect(QRectF(self._selection))
+        size = self._bar.sizeHint()
+        margin = design.tokens.BarMetric.BAR_EDGE_MARGIN
+        for other in other_screens_nearest_first(own, self._monitor_geometries, selection):
+            usable = self._usable_area(other)
+            if (
+                usable.width() >= size.width() + 2 * margin
+                and usable.height() >= size.height() + 2 * margin
+            ):
+                return self._to_local_rect(usable)
+        return None
 
     def _on_delay_changed(self, delay: str) -> None:
         """One delay, set from either surface: the chooser row or the
@@ -5664,7 +5859,7 @@ class OverlayWindow(QWidget):
         elif self._selection is not None and self.isVisible():
             self._sync_bar_destination()
             self._arm_default_tool()
-            self._bar.reposition(self._selection, self._chrome_bounds())
+            self._bar.reposition(self._selection, self._chrome_bounds(), self._bar_elsewhere())
             self._bar.show()
             self._sync_tool_hint()
         else:
@@ -5820,7 +6015,7 @@ class OverlayWindow(QWidget):
         it -- where the old tray spec put its tray: "Sits 8px below the bar,
         centred on it."
 
-        Clamped into `_chrome_bounds` afterwards, the same monitor rect the
+        Clamped into `_bar_bounds` afterwards, the same monitor rect the
         bar itself is clamped to: the bar can legitimately sit close enough
         to its monitor's bottom edge that a strip placed 8px below it would
         hang off that monitor -- on a multi-monitor desktop that means a gap
@@ -5831,7 +6026,7 @@ class OverlayWindow(QWidget):
         strip = self._tool_hint
         metric = design.tokens.Metric
         bar_geometry = self._bar.geometry()
-        bounds = self._chrome_bounds()
+        bounds = self._bar_bounds()
         size = strip.sizeHint()
         center_x = bar_geometry.center().x()
         top = bar_geometry.bottom() + metric.TRAY_OFFSET_Y
@@ -7813,6 +8008,36 @@ def _screen_for_geometry(geometry: QRectF) -> QScreen | None:
         if QRectF(screen.geometry()) == geometry:
             return screen
     return None
+
+
+def other_screens_nearest_first(
+    home: QRectF, geometries: list[QRectF], rect: QRectF | None
+) -> list[QRectF]:
+    """Every monitor in `geometries` except `home`, nearest to `home` first,
+    leaving out any that `rect` reaches into. All in absolute logical
+    virtual-desktop coordinates.
+
+    Where a bar goes when the monitor it belongs on leaves it nowhere to
+    sit: the recording bar when the whole of `home` is being recorded
+    (`app`), and the stills bar when a selection is essentially the whole
+    of `home` (`OverlayWindow._bar_elsewhere`, #50). Nearest, so the bar
+    turns up beside the work rather than three displays away, where it is a
+    control nobody looks at. A monitor `rect` reaches into is excluded
+    outright: a bar there would be in the recording, which is the one thing
+    placement may never do, or over the very pixels being marked up.
+
+    Near is measured between monitor centres, across plus down.
+    """
+    others = [
+        screen
+        for screen in geometries
+        if screen != home and not (rect is not None and screen.intersects(rect))
+    ]
+    return sorted(
+        others,
+        key=lambda screen: abs(screen.center().x() - home.center().x())
+        + abs(screen.center().y() - home.center().y()),
+    )
 
 
 def _interactive_geometry(monitor_geometries: list[QRectF]) -> QRectF:

@@ -3470,7 +3470,9 @@ class TestTheBarWithNoRoomAnywhere:
 
         bar = overlay._bar
         expected = FloatingBar.spot(QPointF(bar.pos()), overlay._chrome_bounds(), bar.size())
-        assert setup_desktop.load_bar_position() == pytest.approx(expected)
+        remembered = setup_desktop.load_bar_position()
+        assert remembered.monitor == setup_desktop.BAR_ON_OWN_MONITOR
+        assert remembered.spot == pytest.approx(expected)
 
     def test_the_next_snip_with_no_room_puts_it_there(self, monkeypatch):
         first = self._whole(self._overlay(monkeypatch))
@@ -3484,7 +3486,7 @@ class TestTheBarWithNoRoomAnywhere:
     def test_it_survives_a_monitor_of_another_size(self, monkeypatch):
         first = self._whole(self._overlay(monkeypatch, size=(2560, 1440)))
         _drag_bar(first._bar, QPointF(-700, -500))
-        spot = setup_desktop.load_bar_position()
+        spot = setup_desktop.load_bar_position().spot
 
         second = self._whole(self._overlay(monkeypatch, size=(1280, 800)))
 
@@ -3503,7 +3505,9 @@ class TestTheBarWithNoRoomAnywhere:
         assert QRectF(second._bar.geometry()).topRight() == self._inside(second).topRight()
 
     def test_a_remembered_place_is_not_used_while_there_is_room(self, monkeypatch):
-        setup_desktop.save_bar_position((0.5, 0.5))
+        setup_desktop.save_bar_position(
+            setup_desktop.BarPosition(setup_desktop.BAR_ON_OWN_MONITOR, (0.5, 0.5))
+        )
         overlay = self._overlay(monkeypatch)
         selection = QRect(700, 400, 200, 150)
         bar = overlay._bar
@@ -3694,7 +3698,9 @@ class TestADraggedBarClearsTheDock:
         assert overlay._bar.geometry().top() == self.DOCK.top() + self.MARGIN
 
     def test_a_remembered_corner_lands_above_the_dock(self, monkeypatch):
-        setup_desktop.save_bar_position((1.0, 1.0))
+        setup_desktop.save_bar_position(
+            setup_desktop.BarPosition(setup_desktop.BAR_ON_OWN_MONITOR, (1.0, 1.0))
+        )
 
         overlay = self._overlay(monkeypatch)
 
@@ -10578,6 +10584,12 @@ class TestControlsLandOnTheCapturesMonitor:
     Each capture mode, taken on the second monitor and on the one mounted
     above, must capture there and put every piece of chrome there too -- the
     bar, the draw tray, both popovers, the toast and the close button.
+
+    Except where a capture leaves the bar no room beside it, as Full screen
+    does: the bar and everything hung off it then go to the nearest other
+    monitor (#50), and only what belongs to the capture rather than the bar
+    -- the close button, the toast and the chooser's tab -- stays on the
+    capture's monitor.
     """
 
     @pytest.fixture(autouse=True)
@@ -10626,14 +10638,27 @@ class TestControlsLandOnTheCapturesMonitor:
             if child.isVisible() and not child.isWindow() and child is not overlay._chooser
         ]
 
-    def _off(self, overlay, monitor: QRectF) -> list[str]:
+    # What belongs to the capture rather than to the bar, and so stays on
+    # the capture's monitor wherever the bar goes (#50). The tab is the
+    # chooser row folded once there is a selection (#66): it names the
+    # capture's mode and destination and reopens the row over the capture.
+    _THE_CAPTURES_OWN = {"Toast", "_CloseButton", "_Tab"}
+
+    def _off(self, overlay, monitor: QRectF, bar_on: QRectF | None = None) -> list[str]:
+        """Every visible piece of chrome that is not where it belongs: the
+        capture's own on `monitor`, and the bar and what hangs off it on
+        `bar_on` (`monitor` too, unless given).
+        """
+        bar_on = monitor if bar_on is None else bar_on
         return [
             f"{name} at {rect}"
             for name, rect in self._chrome_on_screen(overlay)
-            if not monitor.contains(rect)
+            if not (monitor if name in self._THE_CAPTURES_OWN else bar_on).contains(rect)
         ]
 
-    def _assert_capture_and_chrome_on(self, overlay, monitor: QRectF) -> None:
+    def _assert_capture_and_chrome_on(
+        self, overlay, monitor: QRectF, bar_on: QRectF | None = None
+    ) -> None:
         capture = overlay.absolute_selection()
         assert capture is not None, "nothing was captured"
         assert monitor.contains(capture), f"captured {capture}, not on {monitor}"
@@ -10644,14 +10669,14 @@ class TestControlsLandOnTheCapturesMonitor:
         overlay._show_toast("save", "Saved")
         names = [name for name, _rect in self._chrome_on_screen(overlay)]
         assert {"FloatingBar", "StylePopover", "Toast", "_CloseButton"} <= set(names), names
-        assert self._off(overlay, monitor) == []
+        assert self._off(overlay, monitor, bar_on) == []
         # A family menu is placed by a path of its own too, and closes the
         # style popover as it opens -- one menu at a time -- so it is
         # checked apart.
         overlay._toggle_family_menu("shapes")
         names = [name for name, _rect in self._chrome_on_screen(overlay)]
         assert "FamilyMenu" in names, names
-        assert self._off(overlay, monitor) == []
+        assert self._off(overlay, monitor, bar_on) == []
 
     def _take_full_screen(self, overlay, monitor: QRectF) -> None:
         # Armed rather than taken on this desk (#53): the preview opens on
@@ -10698,7 +10723,9 @@ class TestControlsLandOnTheCapturesMonitor:
         self._take_full_screen(overlay, monitor)
 
         assert overlay.absolute_selection() == monitor
-        self._assert_capture_and_chrome_on(overlay, monitor)
+        # A whole monitor leaves the bar no room beside it. The main monitor
+        # is the nearest other one to both of these, centre to centre.
+        self._assert_capture_and_chrome_on(overlay, monitor, bar_on=ABOVE_MAIN)
 
     @ON_EACH_MONITOR
     def test_a_browser_page(self, monkeypatch, monitor):
@@ -10767,6 +10794,406 @@ class TestControlsLandOnTheCapturesMonitor:
         finally:
             overlay._delay_timer.stop()
             overlay._countdown.close()
+
+
+class TestTheBarGoesToAnotherMonitor:
+    """#50 on #49's desk: three monitors, one mounted above the other two and
+    offset, so the frame's origin is negative and every window-local y is
+    1440 more than its absolute one.
+
+    A selection that leaves the bar no room beside it sends the bar, and
+    everything hung off it, to the nearest other monitor -- inside that
+    monitor's usable area, clear of its dock. Room beside the selection still
+    wins, a desk the overlay covers only one monitor of keeps the bar where
+    it always was, and a drag in the no-room case is remembered and wins over
+    the automatic choice next time.
+    """
+
+    ORIGIN = QPointF(*MOUNTED_ABOVE_ORIGIN)
+    MARGIN = tokens.BarMetric.BAR_EDGE_MARGIN
+    OFFSET = tokens.BarMetric.BAR_OFFSET_Y
+    OWN = setup_desktop.BAR_ON_OWN_MONITOR
+    OTHER = setup_desktop.BAR_ON_OTHER_MONITOR
+    LEFT = Qt.MouseButton.LeftButton
+    # A top bar, and a dock down the left edge and along the bottom: the two
+    # edges of the second monitor a bar sent over from the main one lands
+    # against.
+    DOCK = QMargins(64, 32, 0, 71)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay(
+        self, monkeypatch, pointer_on: QRectF = ABOVE_MAIN, docks=None
+    ) -> OverlayWindow:
+        """The three-monitor overlay, with the pointer on `pointer_on` and
+        `docks` -- pairs of an absolute monitor rect and the margins its
+        desktop reserves -- defaulting to `DOCK` on the second monitor.
+        """
+        _point_the_os_at(monkeypatch, pointer_on)
+        docks = [(ABOVE_SECOND, self.DOCK)] if docks is None else docks
+        # Stubbed at the overlay's own seam rather than the platform's,
+        # which is asked about a QScreen: none of these monitors is one.
+        monkeypatch.setattr(
+            OverlayWindow,
+            "_reserved_margins",
+            lambda _self, monitor: next(
+                (margins for rect, margins in docks if rect == monitor), QMargins()
+            ),
+        )
+        frame = make_frame(
+            image_size=MOUNTED_ABOVE_SIZE,
+            logical_size=MOUNTED_ABOVE_SIZE,
+            logical_origin=MOUNTED_ABOVE_ORIGIN,
+        )
+        overlay = OverlayWindow(frame, monitor_geometries=list(MOUNTED_ABOVE))
+        overlay._chooser.set_after("edit")
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _single(self, monkeypatch) -> OverlayWindow:
+        """The overlay as Wayland opens it on this desk: over the monitor
+        mounted above and no other, its frame cropped to that monitor.
+        """
+        _point_the_os_at(monkeypatch, ABOVE_TOP)
+        monkeypatch.setattr(
+            OverlayWindow, "_reserved_margins", lambda _self, monitor: QMargins()
+        )
+        size = (round(ABOVE_TOP.width()), round(ABOVE_TOP.height()))
+        frame = make_frame(
+            image_size=size,
+            logical_size=size,
+            logical_origin=(ABOVE_TOP.x(), ABOVE_TOP.y()),
+        )
+        overlay = OverlayWindow(frame, monitor_geometries=[ABOVE_TOP])
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(0, 0, *size))
+        assert overlay._bar.isVisible()
+        return overlay
+
+    def _local(self, absolute: QRectF) -> QRect:
+        return absolute.translated(-self.ORIGIN).toRect()
+
+    def _absolute(self, widget: QWidget, origin: QPointF | None = None) -> QRectF:
+        """`widget`'s geometry, window-local in, absolute logical out."""
+        return QRectF(widget.geometry()).translated(self.ORIGIN if origin is None else origin)
+
+    def _inside(self, usable: QRectF) -> QRectF:
+        """Where a bar kept `BAR_EDGE_MARGIN` inside `usable` may be."""
+        return usable.adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN)
+
+    def _take_whole(self, overlay: OverlayWindow, monitor: QRectF) -> None:
+        overlay.set_selection(self._local(monitor))
+        assert overlay._bar.isVisible()
+
+    def _store(self, text: str) -> None:
+        path = setup_desktop.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    # -- where the automatic move sends it --------------------------------
+
+    @pytest.mark.parametrize(
+        "monitor, nearest",
+        [(ABOVE_MAIN, ABOVE_SECOND), (ABOVE_SECOND, ABOVE_MAIN), (ABOVE_TOP, ABOVE_MAIN)],
+        ids=["main", "second", "mounted-above"],
+    )
+    def test_a_whole_monitor_sends_the_bar_to_the_nearest_other_monitor(
+        self, monkeypatch, monitor, nearest
+    ):
+        overlay = self._overlay(monkeypatch, pointer_on=monitor)
+
+        self._take_whole(overlay, monitor)
+
+        bar = self._absolute(overlay._bar)
+        assert self._inside(overlay._usable_area(nearest)).contains(bar), f"bar at {bar}"
+        assert not bar.intersects(monitor)
+
+    def test_beside_a_monitor_it_sits_just_across_the_bezel_at_the_bottom(self, monkeypatch):
+        overlay = self._overlay(monkeypatch, docks=[])
+
+        self._take_whole(overlay, ABOVE_MAIN)
+
+        # The second monitor's left edge is the one facing the main monitor,
+        # and the bottom is where the bar sits on its own.
+        bar = self._absolute(overlay._bar)
+        assert bar.left() == ABOVE_SECOND.left() + self.MARGIN
+        assert bar.bottom() == ABOVE_SECOND.bottom() - self.MARGIN
+
+    def test_below_a_monitor_it_sits_along_the_edge_facing_it(self, monkeypatch):
+        overlay = self._overlay(monkeypatch, pointer_on=ABOVE_TOP, docks=[])
+
+        self._take_whole(overlay, ABOVE_TOP)
+
+        # The main monitor is below the one mounted above, and reaches under
+        # it only as far as x=2560. Bottom-centre would have been a whole
+        # monitor's height from the work.
+        bar = self._absolute(overlay._bar)
+        assert bar.top() == ABOVE_MAIN.top() + self.MARGIN
+        assert bar.right() == ABOVE_MAIN.right() - self.MARGIN
+        assert bar.left() >= ABOVE_TOP.left()
+
+    def test_never_to_a_monitor_the_selection_reaches_into(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        # All of the main monitor's height, and on into the second monitor,
+        # which would otherwise be the nearest.
+        selection = QRectF(0, 0, 3000, 1440)
+
+        overlay.set_selection(self._local(selection))
+
+        bar = self._absolute(overlay._bar)
+        assert self._inside(ABOVE_TOP).contains(bar), f"bar at {bar}"
+
+    def test_a_monitor_too_small_to_hold_the_bar_is_passed_over(self, monkeypatch):
+        # A dock leaving the second monitor narrower than the bar.
+        overlay = self._overlay(monkeypatch, docks=[(ABOVE_SECOND, QMargins(2300, 0, 0, 0))])
+
+        self._take_whole(overlay, ABOVE_MAIN)
+
+        bar = self._absolute(overlay._bar)
+        assert self._inside(ABOVE_TOP).contains(bar), f"bar at {bar}"
+
+    # -- what follows it, and what does not ---------------------------------
+
+    def test_everything_hung_off_the_bar_follows_it_inside_that_monitors_usable_area(
+        self, monkeypatch
+    ):
+        overlay = self._overlay(monkeypatch)
+        self._take_whole(overlay, ABOVE_MAIN)
+        usable = overlay._usable_area(ABOVE_SECOND)
+        assert usable == ABOVE_SECOND.marginsRemoved(QMarginsF(self.DOCK))
+
+        def assert_inside(name: str, widget: QWidget) -> None:
+            assert widget.isVisible(), f"{name} is not showing"
+            rect = self._absolute(widget)
+            assert usable.contains(rect), f"{name} at {rect}, outside {usable}"
+
+        bar = self._absolute(overlay._bar)
+        assert bar.left() == usable.left() + self.MARGIN
+        assert bar.bottom() == usable.bottom() - self.MARGIN
+
+        overlay._bar.select_tool("pen")
+        assert_inside("tool hint", overlay._tool_hint)
+        for family in ("shapes", "redact"):
+            overlay._toggle_family_menu(family)
+            assert_inside(f"{family} menu", overlay._family_menus[family])
+        overlay._toggle_style()
+        assert_inside("style popover", overlay._style_popover)
+        overlay._toggle_capture_popover()
+        assert_inside("capture popover", overlay._popover)
+
+        # And nothing else that is up is left behind in a gap, whatever the
+        # bar comes to carry. What stays with the capture is checked on the
+        # capture's monitor in the test below; the chooser itself draws
+        # nothing.
+        stays = {
+            overlay._close_button,
+            overlay._toast,
+            overlay._chooser,
+            overlay._chooser.tab,
+        }
+        for child in overlay.findChildren(
+            QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly
+        ):
+            if child.isVisible() and not child.isWindow() and child not in stays:
+                assert_inside(type(child).__name__, child)
+
+    def test_what_belongs_to_the_capture_stays_on_the_captures_monitor(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        self._take_whole(overlay, ABOVE_MAIN)
+
+        overlay._show_toast("save", "Saved")
+
+        for name, widget in (
+            ("close button", overlay._close_button),
+            ("toast", overlay._toast),
+            ("chooser tab", overlay._chooser.tab),
+        ):
+            assert widget.isVisible(), name
+            rect = self._absolute(widget)
+            assert ABOVE_MAIN.contains(rect), f"{name} at {rect}"
+
+    # -- room beside the selection, and a single monitor -----------------------
+
+    def test_room_beside_the_selection_still_wins(self, monkeypatch):
+        setup_desktop.save_bar_position(setup_desktop.BarPosition(self.OTHER, (0.5, 0.5)))
+        overlay = self._overlay(monkeypatch)
+        selection = QRectF(700, 400, 1200, 700)
+
+        overlay.set_selection(self._local(selection))
+
+        bar = self._absolute(overlay._bar)
+        assert ABOVE_MAIN.contains(bar)
+        assert bar.top() == selection.bottom() + self.OFFSET
+        assert overlay._bar_bounds() == overlay._chrome_bounds()
+
+    def test_a_drag_beside_a_selection_with_room_stays_on_its_monitor(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        overlay.set_selection(self._local(QRectF(700, 400, 1200, 700)))
+
+        _drag_bar(overlay._bar, QPointF(3000, 0))
+
+        assert self._inside(ABOVE_MAIN).contains(self._absolute(overlay._bar))
+        assert setup_desktop.load_bar_position() is None
+
+    def test_on_a_single_monitor_it_sits_where_it_always_has(self, monkeypatch):
+        overlay = self._single(monkeypatch)
+        origin = QPointF(ABOVE_TOP.topLeft())
+
+        bar = self._absolute(overlay._bar, origin)
+
+        assert overlay._bar_elsewhere() is None
+        assert bar.bottom() == ABOVE_TOP.bottom() - self.MARGIN
+        assert self._inside(ABOVE_TOP).contains(bar)
+
+    def test_on_a_single_monitor_a_drag_is_remembered_as_its_own(self, monkeypatch):
+        overlay = self._single(monkeypatch)
+
+        _drag_bar(overlay._bar, QPointF(-600, -900))
+
+        assert setup_desktop.load_bar_position().monitor == self.OWN
+
+    def test_on_a_single_monitor_a_place_remembered_on_the_other_keeps_its_spot(
+        self, monkeypatch
+    ):
+        setup_desktop.save_bar_position(setup_desktop.BarPosition(self.OTHER, (1.0, 0.0)))
+
+        overlay = self._single(monkeypatch)
+
+        bar = self._absolute(overlay._bar, QPointF(ABOVE_TOP.topLeft()))
+        assert bar.topRight() == self._inside(ABOVE_TOP).topRight()
+
+    # -- a drag is remembered, and wins next time ------------------------------
+
+    def test_a_drag_on_the_other_monitor_is_remembered_and_wins_next_time(self, monkeypatch):
+        first = self._overlay(monkeypatch)
+        self._take_whole(first, ABOVE_MAIN)
+
+        _drag_bar(first._bar, QPointF(900, -700))
+
+        dragged = self._absolute(first._bar)
+        assert self._inside(first._usable_area(ABOVE_SECOND)).contains(dragged)
+        assert setup_desktop.load_bar_position().monitor == self.OTHER
+        second = self._overlay(monkeypatch)
+        self._take_whole(second, ABOVE_MAIN)
+        assert self._absolute(second._bar) == dragged
+
+    def test_a_drag_back_onto_the_selections_monitor_is_remembered_and_wins_next_time(
+        self, monkeypatch
+    ):
+        first = self._overlay(monkeypatch)
+        self._take_whole(first, ABOVE_MAIN)
+        first._bar.select_tool("pen")
+        before = self._absolute(first._bar)
+
+        _drag_bar(first._bar, QPointF(-1500, -600))
+
+        dragged = self._absolute(first._bar)
+        assert dragged.topLeft() == before.topLeft() + QPointF(-1500, -600)
+        assert self._inside(ABOVE_MAIN).contains(dragged)
+        # The strip naming the tool crossed with it.
+        hint = self._absolute(first._tool_hint)
+        assert first._tool_hint.isVisible()
+        assert ABOVE_MAIN.contains(hint), f"hint at {hint}"
+        assert setup_desktop.load_bar_position().monitor == self.OWN
+
+        second = self._overlay(monkeypatch)
+        self._take_whole(second, ABOVE_MAIN)
+        assert self._absolute(second._bar) == dragged
+
+    def test_a_drag_from_a_remembered_place_onto_the_other_monitor_wins_next_time(
+        self, monkeypatch
+    ):
+        setup_desktop.save_bar_position(setup_desktop.BarPosition(self.OWN, (0.5, 0.5)))
+        first = self._overlay(monkeypatch)
+        self._take_whole(first, ABOVE_MAIN)
+        # The remembered place wins over the automatic move.
+        assert self._inside(ABOVE_MAIN).contains(self._absolute(first._bar))
+
+        _drag_bar(first._bar, QPointF(2000, 0))
+
+        dragged = self._absolute(first._bar)
+        assert self._inside(first._usable_area(ABOVE_SECOND)).contains(dragged)
+        assert setup_desktop.load_bar_position().monitor == self.OTHER
+        second = self._overlay(monkeypatch)
+        self._take_whole(second, ABOVE_MAIN)
+        assert self._absolute(second._bar) == dragged
+
+    def test_a_drag_is_never_left_in_a_gap_nor_on_a_third_monitor(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        self._take_whole(overlay, ABOVE_MAIN)
+        bar = overlay._bar
+        press = bar.mapToParent(_grip(bar))
+        _bar_pointer(bar, "press", _grip(bar), self.LEFT)
+
+        def carry_to(offset: QPointF) -> QRectF:
+            _bar_pointer(bar, "move", bar.mapFromParent(press + offset), self.LEFT)
+            return self._absolute(bar)
+
+        # Up past the second monitor's top, into the gap right of the monitor
+        # mounted above: the bar stops at the second monitor's top bar.
+        in_the_gap = carry_to(QPointF(1500, -2200))
+        assert self._inside(overlay._usable_area(ABOVE_SECOND)).contains(in_the_gap)
+        assert in_the_gap.top() == ABOVE_SECOND.top() + self.DOCK.top() + self.MARGIN
+
+        # On over the monitor mounted above, which the bar is never sent to:
+        # it lands on the nearer of its two, the main monitor, below it.
+        over_the_third = carry_to(QPointF(-400, -2200))
+        assert self._inside(ABOVE_MAIN).contains(over_the_third), f"bar at {over_the_third}"
+        assert not over_the_third.intersects(ABOVE_TOP)
+
+        _bar_pointer(
+            bar, "release", bar.mapFromParent(press + QPointF(-400, -2200)), Qt.MouseButton.NoButton
+        )
+        assert setup_desktop.load_bar_position().monitor == self.OWN
+
+    # -- the stored value -------------------------------------------------------
+
+    def test_a_place_saved_before_the_bar_could_change_monitor_keeps_it_on_its_own(
+        self, monkeypatch
+    ):
+        self._store('{"bar_position": [1.0, 0.0]}')
+        overlay = self._overlay(monkeypatch)
+
+        self._take_whole(overlay, ABOVE_MAIN)
+
+        bar = self._absolute(overlay._bar)
+        assert bar.topRight() == self._inside(ABOVE_MAIN).topRight()
+
+    def test_a_stored_place_it_cannot_read_leaves_the_move_automatic(self, monkeypatch):
+        self._store('{"bar_position": {"monitor": "beside", "spot": [1.0, 0.0]}}')
+        overlay = self._overlay(monkeypatch)
+
+        self._take_whole(overlay, ABOVE_MAIN)
+
+        bar = self._absolute(overlay._bar)
+        usable = overlay._usable_area(ABOVE_SECOND)
+        assert bar.left() == usable.left() + self.MARGIN
+        assert bar.bottom() == usable.bottom() - self.MARGIN
+
+    # -- the export -------------------------------------------------------------
+
+    def test_the_export_is_the_monitor_and_nothing_of_the_chrome(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        self._take_whole(overlay, ABOVE_MAIN)
+        overlay._bar.select_tool("pen")
+        overlay._toggle_style()
+        untouched = QImage(2560, 1440, QImage.Format.Format_RGB32)
+        untouched.fill(BASE_COLOR)
+
+        rendered = overlay.rendered_image()
+
+        assert rendered.size() == untouched.size()
+        assert rendered.convertToFormat(QImage.Format.Format_RGB32) == untouched
+
+        # Dragged back over the selection, still none of it.
+        _drag_bar(overlay._bar, QPointF(-1500, -600))
+        assert self._inside(ABOVE_MAIN).contains(self._absolute(overlay._bar))
+        rendered = overlay.rendered_image()
+        assert rendered.convertToFormat(QImage.Format.Format_RGB32) == untouched
 
 
 class TestFullScreenFollowsThePointerBeforeItCommits:

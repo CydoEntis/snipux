@@ -13,6 +13,7 @@ path that does not exist, and the shortcut then did nothing until the next
 install.sh put it back.
 """
 
+import json
 import shutil
 from types import SimpleNamespace
 from pathlib import Path
@@ -1435,50 +1436,94 @@ class TestLastRegionPersistence:
 
 
 class TestBarPositionPersistence:
-    """Where the stills bar goes when a selection leaves it no room (#50): two
-    fractions of the room it can travel, so the place means the same thing on
-    a monitor of another size, and anything unreadable is automatic placement.
+    """Where the stills bar goes when a selection leaves it no room (#50): the
+    monitor, named relative to the selection's, and two fractions of the room
+    the bar can travel there -- so the place means the same thing on a
+    monitor of another size -- and anything unreadable is automatic
+    placement.
     """
+
+    OWN = setup_desktop.BAR_ON_OWN_MONITOR
+    OTHER = setup_desktop.BAR_ON_OTHER_MONITOR
+
+    def _write(self, tmp_path, stored: str) -> None:
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text(stored)
+
+    def _save(self, tmp_path, monitor: str, spot) -> None:
+        setup_desktop.save_bar_position(setup_desktop.BarPosition(monitor, spot), tmp_path)
 
     def test_nothing_stored_means_automatic_placement(self, tmp_path):
         assert setup_desktop.load_bar_position(tmp_path) is None
 
-    def test_round_trips_through_save_and_load(self, tmp_path):
-        setup_desktop.save_bar_position((0.25, 0.8), tmp_path)
+    @pytest.mark.parametrize("monitor", [OWN, OTHER])
+    def test_round_trips_through_save_and_load(self, tmp_path, monitor):
+        self._save(tmp_path, monitor, (0.25, 0.8))
 
-        assert setup_desktop.load_bar_position(tmp_path) == (0.25, 0.8)
+        assert setup_desktop.load_bar_position(tmp_path) == (monitor, (0.25, 0.8))
 
-    @pytest.mark.parametrize("position", [(0.0, 0.0), (1.0, 1.0), (0, 1)])
-    def test_both_ends_of_the_range_are_places(self, tmp_path, position):
-        setup_desktop.save_bar_position(position, tmp_path)
+    def test_it_is_written_naming_its_monitor(self, tmp_path):
+        self._save(tmp_path, self.OTHER, (0.0, 0.5))
 
-        assert setup_desktop.load_bar_position(tmp_path) == tuple(map(float, position))
+        stored = json.loads(setup_desktop.config_path(tmp_path).read_text())
+
+        assert stored["bar_position"] == {"monitor": "other", "spot": [0.0, 0.5]}
+
+    @pytest.mark.parametrize("spot", [(0.0, 0.0), (1.0, 1.0), (0, 1)])
+    def test_both_ends_of_the_range_are_places(self, tmp_path, spot):
+        self._save(tmp_path, self.OTHER, spot)
+
+        assert setup_desktop.load_bar_position(tmp_path) == (
+            self.OTHER,
+            tuple(map(float, spot)),
+        )
 
     def test_a_save_out_of_range_is_clamped_so_it_still_reads_back(self, tmp_path):
-        setup_desktop.save_bar_position((1.4, -0.2), tmp_path)
+        self._save(tmp_path, self.OWN, (1.4, -0.2))
 
-        assert setup_desktop.load_bar_position(tmp_path) == (1.0, 0.0)
+        assert setup_desktop.load_bar_position(tmp_path) == (self.OWN, (1.0, 0.0))
+
+    def test_a_save_naming_a_monitor_it_does_not_know_is_refused(self, tmp_path):
+        # A caller's mistake, not a user's: written, it would only read back
+        # as automatic placement, and the drag that wrote it would be lost.
+        with pytest.raises(ValueError):
+            self._save(tmp_path, "left", (0.5, 0.5))
+
+        assert setup_desktop.load_bar_position(tmp_path) is None
 
     def test_the_newest_position_replaces_the_last_one(self, tmp_path):
-        setup_desktop.save_bar_position((0.1, 0.1), tmp_path)
-        setup_desktop.save_bar_position((0.9, 0.4), tmp_path)
+        self._save(tmp_path, self.OWN, (0.1, 0.1))
+        self._save(tmp_path, self.OTHER, (0.9, 0.4))
 
-        assert setup_desktop.load_bar_position(tmp_path) == (0.9, 0.4)
+        assert setup_desktop.load_bar_position(tmp_path) == (self.OTHER, (0.9, 0.4))
 
     def test_it_leaves_every_other_setting_alone(self, tmp_path):
         setup_desktop.save_last_region((1, 2, 3, 4), tmp_path)
 
-        setup_desktop.save_bar_position((0.5, 0.5), tmp_path)
+        self._save(tmp_path, self.OTHER, (0.5, 0.5))
 
         assert setup_desktop.load_last_region(tmp_path) == (1, 2, 3, 4)
+
+    @pytest.mark.parametrize("stored", ["[0.25, 1]", "[0.0, 0.0]"])
+    def test_the_first_form_reads_as_a_place_on_the_selections_own_monitor(
+        self, tmp_path, stored
+    ):
+        # A bare [x, y], written before the bar could go to another monitor,
+        # when the selection's own was the only one a drag could put it on.
+        self._write(tmp_path, f'{{"bar_position": {stored}}}')
+
+        position = setup_desktop.load_bar_position(tmp_path)
+
+        assert position == (self.OWN, tuple(float(value) for value in json.loads(stored)))
 
     @pytest.mark.parametrize(
         "stored",
         [
+            # The first form, [x, y].
             '{"bar_position": [0.5]}',                   # too few values
             '{"bar_position": [0.5, 0.5, 0.5]}',         # too many
-            '{"bar_position": "bottom right"}',          # not a list at all
-            '{"bar_position": {"x": 0.5, "y": 0.5}}',    # nor is this
+            '{"bar_position": "bottom right"}',          # not a list or an object
+            '{"bar_position": {"x": 0.5, "y": 0.5}}',    # an object with neither key
             '{"bar_position": null}',
             '{"bar_position": [0.5, "low"]}',            # a value that is not a number
             '{"bar_position": [true, false]}',           # bool is an int subclass
@@ -1487,6 +1532,20 @@ class TestBarPositionPersistence:
             '{"bar_position": [NaN, 0.5]}',              # json reads these happily
             '{"bar_position": [0.5, Infinity]}',
             '{"bar_position": [0.5, 0.5',                # truncated document
+            # The current form, {"monitor": ..., "spot": [x, y]}.
+            '{"bar_position": {"monitor": "other"}}',                        # no spot
+            '{"bar_position": {"spot": [0.5, 0.5]}}',                        # no monitor
+            '{"bar_position": {"monitor": "left", "spot": [0.5, 0.5]}}',     # not a monitor it names
+            '{"bar_position": {"monitor": 1, "spot": [0.5, 0.5]}}',
+            '{"bar_position": {"monitor": ["other"], "spot": [0.5, 0.5]}}',
+            '{"bar_position": {"monitor": null, "spot": [0.5, 0.5]}}',
+            '{"bar_position": {"monitor": "other", "spot": [0.5, 1.5]}}',    # past the far end
+            '{"bar_position": {"monitor": "other", "spot": [0.5, "low"]}}',
+            '{"bar_position": {"monitor": "other", "spot": [true, 0.5]}}',
+            '{"bar_position": {"monitor": "other", "spot": [NaN, 0.5]}}',
+            '{"bar_position": {"monitor": "other", "spot": [0.5]}}',
+            '{"bar_position": {"monitor": "own", "spot": {"x": 0.5, "y": 0.5}}}',
+            '{"bar_position": {"monitor": "own", "spot": null}}',
         ],
     )
     def test_an_entry_that_is_not_a_position_means_automatic_placement(
@@ -1494,8 +1553,7 @@ class TestBarPositionPersistence:
     ):
         # A hand-edited or truncated config must leave the bar placed as it
         # always was, never raise into the capture that reads it.
-        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
-        setup_desktop.config_path(tmp_path).write_text(stored)
+        self._write(tmp_path, stored)
 
         assert setup_desktop.load_bar_position(tmp_path) is None
 

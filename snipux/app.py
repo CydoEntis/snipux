@@ -80,6 +80,7 @@ from snipux.overlay import (
     OverlayWindow,
     UnsupportedGeometryProvider,
     open_overlay,
+    other_screens_nearest_first,
 )
 from snipux import __version__, design, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
@@ -476,7 +477,7 @@ def _place_recording_hud(
     # Without this a full-monitor recording had no Stop button at all, and
     # was reported exactly that way: "theres no way to stop the recording,
     # i dont even see the recording button".
-    for other in _other_screens_nearest_first(screen, geometries, rect):
+    for other in other_screens_nearest_first(screen, geometries, rect):
         other_usable = _usable_area_for(other)
         x = min(max(other_usable.center().x() - width / 2, other_usable.left()),
                 other_usable.right() - width)
@@ -506,28 +507,6 @@ def _usable_area_for(screen: QRectF) -> QRectF:
         return QRectF(screen)
     return screen.marginsRemoved(
         QMarginsF(margins.left(), margins.top(), margins.right(), margins.bottom())
-    )
-
-
-def _other_screens_nearest_first(
-    recorded: QRectF, geometries: list[QRectF], rect: QRectF | None
-) -> list[QRectF]:
-    """Every monitor except the one being recorded, nearest first.
-
-    Nearest so the bar turns up beside the recording rather than three
-    displays away, where it is a Stop button nobody looks at. Any monitor
-    the recorded area reaches into is excluded outright -- a bar there
-    would be in the file, which is the one thing placement may never do.
-    """
-    others = [
-        screen
-        for screen in geometries
-        if screen != recorded and not (rect is not None and screen.intersects(rect))
-    ]
-    return sorted(
-        others,
-        key=lambda screen: abs(screen.center().x() - recorded.center().x())
-        + abs(screen.center().y() - recorded.center().y()),
     )
 
 

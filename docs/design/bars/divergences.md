@@ -152,38 +152,77 @@ decides it.
 
 ---
 
-## 9 · A bar with no room anywhere can be dragged, and remembers where
+## 9 · A bar with no room goes to another monitor, and can be dragged
 
 **The handoff's** only answer for a bar that does not fit is the clamp in §8.
 
-**We make the bar draggable** (#50), and it remembers where it was put. It is
-not moved to another monitor, and there is no key to hold it out of the way.
+**We send the bar to another monitor when there is one, and make it
+draggable** (#50). Where it is dragged to in that case is remembered. There
+is no key to hold it out of the way.
 
 ### Why
 
 No room above or below means the selection is essentially the whole monitor,
-so any position the code picks covers something. The owner chose drag on #50,
-over another monitor or a hold-to-hide key. This supersedes #63's "another
-monitor, or wherever the user drags it": it is drag only.
+so any position on that monitor covers something. The owner decided on #50
+that both halves are needed, because they cover different cases. Another
+monitor handles the common case, with nothing to do by hand. A drag is the
+answer on a single monitor, where there is nowhere to send the bar, and the
+escape hatch when the automatic choice is wrong. That is #63's "another
+monitor, or wherever the user drags it", with the order between the two
+settled. The hold-to-hide key is dropped.
 
 #50 lands after the stills bar (#67), so its placement rules are written once,
 against the new bar.
 
 ### How it behaves
 
+In priority order:
+
+1. **Room beside the selection always wins.** Below it, then above it, as §8
+   says. A drag there moves the bar for that selection only, keeps it on the
+   selection's monitor and is not remembered. Neither a remembered place nor
+   another monitor can put the bar over a selection that had room.
+2. **With no room, on a desk where the overlay covers more than one
+   monitor,** the bar goes to the nearest other monitor that none of the
+   selection is on. Nearest is measured between monitor centres, the rule the
+   recording bar already uses. On that monitor the bar sits at the place
+   nearest to where it would otherwise have covered the selection. That is
+   just across the bezel, so a trip to a tool is a short hop, and beside a
+   monitor of the same height it is at the bottom, where the bar always sits.
+   A fixed place such as bottom-centre would be a whole monitor's height from
+   the work whenever that monitor is below the selection's.
+3. **With no room on a single monitor** -- including Wayland, where the
+   overlay covers only one output -- the bar sits inside that monitor against
+   its bottom margin, as before.
+4. **A drag with no room is remembered, and wins over 2 and 3 next time**, so
+   the automatic choice and the user's correction of it never take turns. The
+   drag can carry the bar between the selection's monitor and the other one.
+   What is remembered is which of the two, relative to the selection's, and
+   where on it. A place remembered on the other monitor, on a desk that now
+   has none, keeps its spot on the selection's own.
+
+Whichever monitor the bar is on, the bar and everything hung off it -- the
+family menus, the style popover, the tool hint, the capture popover -- stay
+inside that monitor's usable area, clear of its top bar and dock, and never in
+the gap between monitors. The close button, the toast and the chooser's tab
+belong to the capture rather than the bar, so they stay on the capture's
+monitor (#49, and §18 for the tab).
+
 - **It is taken hold of by its own surface**: the padding round the row, the
   gaps between controls and the dividers, under an open hand. A press on a
   control stays that control's, and a press that moves less than the
   platform's drag distance moves nothing.
-- **Room beside the selection still decides first.** Below it, then above
-  it, as §8 says. A drag there moves the bar for that selection only and is
-  not remembered, so a remembered place can never put the bar over a
-  selection that had room.
-- **With no room on either side** the bar goes where it was last dragged to
-  in that case. It is stored as a fraction of the room the bar can travel
-  inside the monitor's usable area, so it names the same place on a monitor
-  of any size and stays clear of the top bar and dock. Anything unreadable
-  in the config is today's placement.
+- **A remembered place is stored** as `{"monitor": "own" | "other", "spot":
+  [x, y]}`. The spot is a fraction of the room the bar can travel inside that
+  monitor's usable area, so it names the same place on a monitor of any size
+  and stays clear of the top bar and dock. A bare `[x, y]`, saved before the
+  bar could change monitor, reads as a place on the selection's own monitor,
+  the only one it could have been dragged on. Anything unreadable in the
+  config means automatic placement.
+- **A drag cannot take the bar to a third monitor.** What is remembered is
+  "the selection's monitor" or "the other one", so a drag toward any other
+  monitor stops at the nearer of those two.
+- **Chrome is never in the export**, whichever monitor it sits on.
 - **The review window's bar does not drag.** It sits at the canvas floor,
   which the fitted image keeps a margin from, and zooming out clears it.
 

@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from .design import PACKAGE_DIR, tokens
 
@@ -689,43 +690,89 @@ def save_last_region(
     return _write_config("last_region", [x, y, width, height], config_dir)
 
 
-def load_bar_position(config_dir: Path | None = None) -> tuple[float, float] | None:
+# Which monitor a remembered bar position is on, named relative to the
+# selection rather than by any monitor's own name or index: the selection's
+# own monitor, or the other one the bar is sent to when that one leaves it no
+# room (`overlay.other_screens_nearest_first`). Monitors are renumbered and
+# unplugged between snips; "the other one" still means something afterwards.
+BAR_ON_OWN_MONITOR = "own"
+BAR_ON_OTHER_MONITOR = "other"
+_BAR_MONITORS = (BAR_ON_OWN_MONITOR, BAR_ON_OTHER_MONITOR)
+
+
+class BarPosition(NamedTuple):
+    """Where the user last dragged the stills bar when a selection left it
+    no room (#50).
+
+    `monitor` is `BAR_ON_OWN_MONITOR` or `BAR_ON_OTHER_MONITOR`. `spot` is
+    two fractions, `(x, y)`, each from 0 to 1 (`overlay.FloatingBar.spot`):
+    how far along the room the bar can travel it sits, across and down,
+    inside that monitor's usable area. Not pixels in any space.
+    """
+
+    monitor: str
+    spot: tuple[float, float]
+
+
+def load_bar_position(config_dir: Path | None = None) -> BarPosition | None:
     """Where the stills bar goes when a selection leaves it no room above or
     below -- where the user last dragged it to in that case (#50) -- or None
     to place it automatically.
 
-    Two fractions, `(x, y)`, each from 0 to 1: how far along the room the
-    bar can travel it sits, across and down, inside the usable area of the
-    monitor the selection is on (`overlay.FloatingBar.spot`). Not pixels in
-    any space. A monitor unplugged, a resolution changed or a dock added
-    since leaves a pixel position off the screen or under the dock, where
-    a fraction of the room still names a place on any monitor: (1, 1) is
-    the bottom-right corner of every one of them.
+    Stored as `{"monitor": "own" | "other", "spot": [x, y]}`; see
+    `BarPosition`. The spot is a fraction of the room rather than pixels
+    because a monitor unplugged, a resolution changed or a dock added since
+    leaves a pixel position off the screen or under the dock, where a
+    fraction of the room still names a place on any monitor: (1, 1) is the
+    bottom-right corner of every one of them.
+
+    The first form was a bare `[x, y]`, written before the bar could be sent
+    to another monitor. It reads as a place on the selection's own monitor,
+    because that is the only monitor the drag that wrote it could have been
+    on.
 
     Anything the document cannot be trusted to mean is None, never an
     exception: a hand-edited or truncated entry must leave the bar placed
-    automatically, never fail the capture that reads it. A value outside
-    0..1 is one of those, since a save never writes one. So are NaN and
-    infinity, which Python's `json` reads without complaint and which fail
-    the range check, and `bool`, which is an `int` subclass.
+    automatically, never fail the capture that reads it. A monitor that is
+    neither name is one of those, and so is a fraction outside 0..1, since a
+    save never writes one. So are NaN and infinity, which Python's `json`
+    reads without complaint and which fail the range check, and `bool`,
+    which is an `int` subclass.
     """
     stored = _read_config(config_dir).get("bar_position")
-    if not isinstance(stored, list) or len(stored) != 2:
+    if isinstance(stored, list):
+        monitor, spot = BAR_ON_OWN_MONITOR, stored
+    elif isinstance(stored, dict):
+        monitor, spot = stored.get("monitor"), stored.get("spot")
+    else:
         return None
-    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in stored):
+    if not isinstance(monitor, str) or monitor not in _BAR_MONITORS:
         return None
-    x, y = (float(value) for value in stored)
+    if not isinstance(spot, list) or len(spot) != 2:
+        return None
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in spot):
+        return None
+    x, y = (float(value) for value in spot)
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
         return None
-    return x, y
+    return BarPosition(monitor, (x, y))
 
 
-def save_bar_position(position: tuple[float, float], config_dir: Path | None = None) -> bool:
-    """Remember `position`, the fractions `load_bar_position` describes,
-    clamped into 0..1 so what is written always reads back.
+def save_bar_position(position: BarPosition, config_dir: Path | None = None) -> bool:
+    """Remember `position`, as `load_bar_position` describes it, with its
+    spot clamped into 0..1 so what is written always reads back.
+
+    Always the current form, never the bare `[x, y]` an older build wrote.
+
+    Raises ValueError for a monitor that is neither name: that is a caller's
+    mistake rather than something a user could have typed, and writing it
+    would only be read back as automatic placement.
     """
-    x, y = (max(0.0, min(float(value), 1.0)) for value in position)
-    return _write_config("bar_position", [x, y], config_dir)
+    monitor, spot = position
+    if monitor not in _BAR_MONITORS:
+        raise ValueError(f"bar monitor must be one of {_BAR_MONITORS}, not {monitor!r}")
+    x, y = (max(0.0, min(float(value), 1.0)) for value in spot)
+    return _write_config("bar_position", {"monitor": monitor, "spot": [x, y]}, config_dir)
 
 
 def load_reuse_last_region(config_dir: Path | None = None) -> bool:
