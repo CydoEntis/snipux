@@ -4017,6 +4017,10 @@ class OverlayWindow(QWidget):
         # against, so `_follow_pointer_to_its_monitor` can tell a real
         # crossing from an ordinary move. None until first placed.
         self._chooser_monitor: QRectF | None = None
+        # Whether `_sync_chooser_visibility` last saw a selection, so the
+        # row collapses to its tab once, as one appears, rather than on every
+        # sync -- which would undo the tab or Space reopening it.
+        self._chooser_had_selection = False
         # SNX-48: last-known pointer position over the frozen desktop
         # itself (window-local logical coords, the same space `_selection`
         # lives in) -- tracked from ordinary mouse-move events the same
@@ -4220,10 +4224,12 @@ class OverlayWindow(QWidget):
         # first would answer it by writing the same value straight back.
         # Only a real change from here on is the user choosing something.
         self._chooser.afterChanged.connect(self._remember_destination)
-        # The reuse toggle lives on the row, not in Settings -- see
-        # `chooser._RowToggle`. Seeded here (which never emits) and
-        # persisted on every real click, the same shape `kind` uses below.
-        self._chooser.set_reuse_last_region(setup_desktop.load_reuse_last_region())
+        # The row can change the destination while the bar is up now -- it
+        # reopens over a selection -- so the split button's face follows.
+        # A bound method, never a lambda: PyQt holds a lambda slot as long as
+        # its sender lives, and one closing over this window keeps every
+        # closed overlay alive, and on screen, for the rest of the process.
+        self._chooser.afterChanged.connect(self._on_chooser_after_changed)
         # `Tab` is greyed unless a browser page can actually be found. Asked
         # once, here, rather than on every menu open: enumerating windows
         # walks the whole desktop, and the answer cannot change while a
@@ -4246,9 +4252,6 @@ class OverlayWindow(QWidget):
         # this window covers, which on Wayland with several is only the
         # interactive one -- the others cannot be offered from here.
         self._chooser.set_monitor_count(len(self._monitor_geometries))
-        self._chooser.reuseLastRegionChanged.connect(
-            setup_desktop.save_reuse_last_region
-        )
         # Hide sensitive: seeded and persisted the way the reuse toggle is,
         # and greyed on a machine that cannot read text out of an image.
         self._chooser.set_hide_sensitive(setup_desktop.load_hide_sensitive())
@@ -4263,6 +4266,14 @@ class OverlayWindow(QWidget):
         # rather than only read here. See `setup_desktop.load_kind`.
         self._chooser.set_kind(setup_desktop.load_kind())
         self._chooser.kindChanged.connect(setup_desktop.save_kind)
+        # Last region is a mode (#66). What it would restore is worked out
+        # against this frame. The stored reuse-last-region preference was a
+        # toggle meaning "open on the last region", and is now that mode
+        # chosen: seeded after the kind, because opening on a rectangle is
+        # stills-only, and written whenever a pick moves onto or off it.
+        self._seed_last_region()
+        self._chooser.set_reuse_last_region(setup_desktop.load_reuse_last_region())
+        self._chooser.reuseLastRegionChanged.connect(setup_desktop.save_reuse_last_region)
         self._chooser.hide_all()
 
         # The capture-mode popover: opened from the bar's chip click via
@@ -4448,6 +4459,10 @@ class OverlayWindow(QWidget):
         # a press inside a recalled region draws rather than reframing,
         # which is the whole point of having picked one.
         self._recalled_selection = False
+        if self._selection is not None and not self._picking_window:
+            # Reaching for a tool is back to work on the selection, so a row
+            # reopened over it steps aside.
+            self._chooser.collapse()
         self.set_eraser_active(tool == "eraser")
         for menu in self._family_menus.values():
             menu.hide()
@@ -4627,11 +4642,11 @@ class OverlayWindow(QWidget):
         self._region_drag_anchor = None
         self._capture_mode = mode
         self._bar.set_capture_mode(mode)
-        # `arm=False`: this is the two surfaces agreeing on one value, not
-        # a fresh choice. Arming here would re-emit `modeChosen` straight
+        # `announce=False`: this is the two surfaces agreeing on one value,
+        # not a fresh choice. Announcing would re-emit `modeChosen` straight
         # back into this method -- one piece of state, two surfaces, and
         # exactly one of them originating each change.
-        self._chooser.set_mode(mode, arm=False)
+        self._chooser.set_mode(mode, announce=False)
 
         if self._delay != design.tokens.DELAYS[0]:
             self._start_delayed_capture(mode)
@@ -4660,24 +4675,23 @@ class OverlayWindow(QWidget):
             self._select_browser_tab()
         elif mode == design.tokens.ACTIVE_WINDOW_MODE:
             self._select_active_window()
-        elif mode == "Region":  # design.tokens.CAPTURE_MODES[0][0]
-            self._preselect_last_region()
-        # handoff-chooser.md, Armed: "The cursor becomes a crosshair." The
-        # Window branch above repaints it on every move, but
-        # Region has nothing to preview and would otherwise sit under a
-        # plain arrow until the drag it is waiting for actually starts --
-        # which is the one moment the pointer most needs to say "drag me".
+        elif mode == design.tokens.LAST_REGION_MODE:
+            self._select_last_region()
+        # Region needs nothing: the row stays up and the frame already takes
+        # a drag. The Window branch repaints the cursor on every move, but
+        # Region has nothing to preview, so it is set here.
         self._apply_idle_cursor()
 
     def _apply_idle_cursor(self) -> None:
         """The pointer when nothing is being dragged, resized or hovered.
 
-        Armed with no selection yet means the chooser has stepped aside and
-        the whole monitor is the target, so the crosshair is the invitation.
-        While still choosing it stays an ordinary arrow: the panel is a
-        thing to click, not an area to drag across.
+        With nothing selected the frozen frame is the target whatever mode
+        is showing, so the crosshair is the invitation. Picking a mode no
+        longer arms it (#66): the row stays up and a drag works from the
+        moment the overlay opens, so there is no armed state to wait for.
+        The row keeps its own arrow (`ChooserRow`).
         """
-        if self._selection is None and self._chooser.phase == "armed":
+        if self._selection is None:
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.unsetCursor()
@@ -4783,6 +4797,8 @@ class OverlayWindow(QWidget):
             round(frame.logical_size.height()),
         )
         self._hud.setGeometry(0, 0, self.width(), design.tokens.Metric.HUD_H)
+        # Last region is measured against the frame, and this is a new one.
+        self._seed_last_region()
         self.set_selection(None)
         self.show()
         self._dispatch_capture_mode(mode)
@@ -4815,8 +4831,8 @@ class OverlayWindow(QWidget):
         The chooser is in that list because it is a third surface showing
         the same value: without it the tab read "Window" -- a mode that had
         just been refused -- while the chip beneath read "Region".
-        `arm=False` for the same reason `_on_capture_mode_selected` uses
-        it, one surface originating each change.
+        `announce=False` for the same reason `_on_capture_mode_selected`
+        uses it, one surface originating each change.
         """
         if not self._geometry_provider.is_available():
             self._show_toast("window", "Window capture isn't available on this session")
@@ -4824,7 +4840,7 @@ class OverlayWindow(QWidget):
             self._capture_mode = fallback
             self._bar.set_capture_mode(fallback)
             self._popover.set_mode(fallback)
-            self._chooser.set_mode(fallback, arm=False)
+            self._chooser.set_mode(fallback, announce=False)
             return
         self._picking_window = True
         # Whatever was selected before (if anything) is not a Window-mode
@@ -4894,6 +4910,7 @@ class OverlayWindow(QWidget):
 
             self._armed_for_recording = True
             self._sync_bar_visibility()
+            self._sync_chooser_visibility()
             if self._on_recording_requested is not None:
                 # `self.outcome` (== `self._chooser.after`) is "instant" or
                 # "save" here -- ticket 9's `_land_recording` is what
@@ -5251,30 +5268,19 @@ class OverlayWindow(QWidget):
         crop from. X11 and Windows both span the whole virtual desktop in
         one window and have no such limit.
 
-        Called when the overlay opens and when Region is re-dispatched,
-        never straight off the toggle: flipping the switch on would
-        otherwise pre-select immediately, and pre-selecting stands the
-        chooser down -- so the row would vanish from under the pointer that
-        just clicked it. The preference takes effect on the next overlay,
-        which is also the only place the word "opens" can mean anything.
+        Called only as the overlay opens. Choosing Last region during a snip
+        is `_select_last_region`, which commits: that is the user choosing
+        the rectangle, where this is the overlay offering it.
         """
         if self._chooser.kind == "record":
             return
-        # Read off the toggle, not straight from config: the two agree at
-        # construction (it is seeded from the same value), and within a
-        # session the control the user can actually see is the authority.
+        # Read off the chooser, not straight from config: it is seeded from
+        # the same value, and it opens on Last region only when there is a
+        # rectangle here to restore.
         if not self._chooser.reuse_last_region:
             return
-        stored = setup_desktop.load_last_region()
-        if stored is None:
-            return
-        absolute = QRectF(*stored)
-        usable = absolute.intersected(
-            QRectF(self._frame.logical_origin, self._frame.logical_size)
-        )
-        if usable.isEmpty():
-            return
-        if not any(usable.intersects(geometry) for geometry in self._monitor_geometries):
+        usable, _reason = self._usable_last_region()
+        if usable is None:
             return
         # No drag, so no anchor -- the recalled rectangle's own monitor is
         # what `_chrome_bounds` should resolve against, exactly as for
@@ -5286,6 +5292,50 @@ class OverlayWindow(QWidget):
         # caller for which the flag must survive.
         self._recalled_selection = True
         self._hide_sensitive_text()
+
+    def _usable_last_region(self) -> "tuple[QRectF | None, str]":
+        """The stored last region as it lands on this frame, in absolute
+        logical coordinates -- or None, and the chooser's reason why not.
+
+        Clipped to the frame, the only source of pixels there is; and it
+        must still touch a real monitor, because the frame's span is the
+        union of the monitors and a staggered desk leaves gaps inside it
+        that no display shows. `_preselect_last_region` describes the desks
+        this catches.
+        """
+        stored = setup_desktop.load_last_region()
+        if stored is None:
+            return None, design.tokens.LAST_REGION_NONE
+        usable = QRectF(*stored).intersected(
+            QRectF(self._frame.logical_origin, self._frame.logical_size)
+        )
+        if usable.isEmpty() or not any(
+            usable.intersects(geometry) for geometry in self._monitor_geometries
+        ):
+            return None, design.tokens.LAST_REGION_OFF_DESK
+        return usable, ""
+
+    def _seed_last_region(self) -> None:
+        """Tell the chooser what Last region would restore on this frame."""
+        usable, reason = self._usable_last_region()
+        self._chooser.set_last_region(None if usable is None else usable.size(), reason)
+
+    def _select_last_region(self) -> None:
+        """Last region chosen from the row, or with Shift+R: frame the
+        previous capture's rectangle.
+
+        A commit, unlike `_preselect_last_region`. Choosing the mode is the
+        user choosing that rectangle, so `instant` finishes on it and the
+        record side arms it, as for a window clicked; the overlay opening on
+        it is the overlay offering it, which commits nothing. A rectangle
+        that no longer lands on this desk takes nothing, and the chooser
+        greys the row then anyway.
+        """
+        self._selection_anchor = None
+        usable, _reason = self._usable_last_region()
+        if usable is None:
+            return
+        self._commit_selection(self._to_local_rect(usable).toRect())
 
     def _monitor_at(self, absolute_point: QPointF) -> QRectF:
         """The `_monitor_geometries` entry containing `absolute_point`
@@ -5434,22 +5484,33 @@ class OverlayWindow(QWidget):
         return self._chooser.after
 
     def _sync_chooser_visibility(self) -> None:
-        """The chooser is up whenever there is nothing selected yet.
+        """Put the chooser in the state the selection calls for (#66).
 
-        That is the whole of its rule: it answers "what am I capturing",
-        which stops being a question the moment something is. It never
-        shares the screen with the floating bar, which has the opposite
-        condition, so the two may safely share a widget stack.
+        Nothing selected: the row, on the monitor being worked on
+        (`_active_screen_rect`), because there is still a question to
+        answer. A Window-mode hover is not a selection -- nothing is chosen
+        until the click -- so the row stays up through it, as it does
+        through Full screen's monitor preview.
 
-        Unlike the placeholder this replaces, it does not vanish when a
-        picking mode is armed -- it collapses to a 26px tab against the same
-        edge, which is the handoff's answer to "how does it stay out of the
-        way of a mode that needs the whole screen". See `chooser.Chooser`.
+        Selected: the row collapses to its tab the moment a selection
+        appears, on the selection's own monitor (`_chrome_monitor`), since
+        every piece of chrome goes where the capture is (#49). The tab or
+        Space reopens the row over the selection without disturbing it.
+
+        Hidden outright while a recording is armed: `app.py` holds that
+        state, and a mode picked from a reopened row would pull the region
+        out from under it.
         """
-        if self._selection is not None or not self.isVisible():
+        selected = self._selection is not None and not self._picking_window
+        if selected and not self._chooser_had_selection:
+            self._chooser.collapse()
+        elif not selected and self._chooser.phase != "choosing":
+            self._chooser.reopen()
+        self._chooser_had_selection = selected
+        if not self.isVisible() or self._armed_for_recording:
             self._chooser.hide_all()
             return
-        screen_rect = self._active_screen_rect()
+        monitor = self._chrome_monitor() if selected else self._active_screen_rect()
         # The chooser hangs from the top edge, so it is the surface the
         # desktop's own bar hides -- give it the part of the monitor it can
         # actually use.
@@ -5459,7 +5520,7 @@ class OverlayWindow(QWidget):
         # Wayland a client is never told where its window is -- so a primary
         # monitor anywhere but the desktop's origin put the row off it.
         self._chooser.set_screen(
-            self._usable_area(screen_rect),
+            self._usable_area(monitor),
             QPoint(
                 round(self._frame.logical_origin.x()),
                 round(self._frame.logical_origin.y()),
@@ -5559,6 +5620,9 @@ class OverlayWindow(QWidget):
             "review": "Open",
         }.get(self._chooser.after, "Copy")
         self._bar.set_destination(face)
+
+    def _on_chooser_after_changed(self, _after: str) -> None:
+        self._sync_bar_destination()
 
     def _on_chooser_mode(self, mode: str) -> None:
         """A mode armed from the chooser. One piece of state, two surfaces:
@@ -6235,6 +6299,9 @@ class OverlayWindow(QWidget):
         self._reposition_close_button()
         self._close_button.show()
         self._sync_chooser_visibility()
+        # A crosshair from the first frame: a drag works before any mode is
+        # picked, and the move handler only takes over once the pointer moves.
+        self._apply_idle_cursor()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
@@ -6395,7 +6462,16 @@ class OverlayWindow(QWidget):
         closes the overlay without capturing -- `Overlay`'s own Escape
         above is unconditional cancel because it has no ink to lose first.
         """
-        if self._marks:
+        if (
+            self._selection is not None
+            and not self._picking_window
+            and not self._armed_for_recording
+            and self._chooser.phase == "choosing"
+        ):
+            # The row reopened over a selection: stepping back is folding it
+            # away again, before anything is discarded.
+            self._chooser.collapse()
+        elif self._marks:
             self.discard()
         elif self._selection is not None and not self._armed_for_recording:
             # Back a stage, not out. The handoff's post-selection bars carry
@@ -6411,6 +6487,7 @@ class OverlayWindow(QWidget):
             self.set_selection(None)
             self._chooser.reopen()
             self._sync_chooser_visibility()
+            self._apply_idle_cursor()
         else:
             self.close()
 
@@ -6451,15 +6528,31 @@ class OverlayWindow(QWidget):
             self._leave_monitor_mode()
             return
 
-        # The chooser's shortcuts are live for as long as it is -- R/W/F/L
-        # to switch mode, Space to reopen it, Esc to close a menu. It gets
-        # first refusal while there is no selection, and returns False for
-        # anything that is not its own.
+        # The chooser's shortcuts are live while nothing is selected -- the
+        # mode letters, Shift+R for Last region, Esc to close its menu. It
+        # gets first refusal then, and returns False for anything that is
+        # not its own.
         if (
             self._selection is None
             and not self._shortcuts_suppressed()
-            and self._chooser.handle_key(key, event.text())
+            and self._chooser.handle_key(key, event.text(), modifiers)
         ):
+            return
+
+        # With a selection the letters are the bar's tools, but Space is
+        # still the chooser's: it opens the row from its tab, and folds it
+        # back over the selection it left alone.
+        if (
+            key == Qt.Key.Key_Space
+            and self._selection is not None
+            and not self._picking_window
+            and not self._armed_for_recording
+            and not self._shortcuts_suppressed()
+        ):
+            if self._chooser.phase == "collapsed":
+                self._chooser.reopen()
+            else:
+                self._chooser.collapse()
             return
 
         # Escape is the way out of this modal, full-screen window and must
@@ -6577,6 +6670,16 @@ class OverlayWindow(QWidget):
             # `_Chrome` -- or this line would close the menu before the row
             # under the pointer could take the click.
             return
+        if (
+            self._selection is not None
+            and not self._picking_window
+            and self._chooser.phase == "choosing"
+        ):
+            # A press on the frame with the row reopened over a selection is
+            # getting back to work on it, so the row steps aside as it did
+            # when the selection first appeared. The press still does
+            # whatever it would have.
+            self._chooser.collapse()
         if self._picking_window:
             # A press while armed is always a pick, never a resize or a
             # stroke -- returns unconditionally, the same "stop event

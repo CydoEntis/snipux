@@ -276,6 +276,11 @@ window's own press handler decides what a press outside the menu means --
 close it, and nothing else -- and `_Chrome` keeps a press on the menu from
 ever reaching that handler.
 
+The chooser's mode menu is the exception, and is a top-level popup as
+the handoff says (#66): it has to paint over the hint pill under the row,
+and the only keys it keeps from the window while it is open are the mode
+letters its own rows offer.
+
 ---
 
 ## 15 · Six details of the style popover
@@ -304,6 +309,101 @@ the popover is open.
 - **The hidden hint:** where the bar has no room below, the hint and the
   popover would both open above it, one on top of the other, and the lit
   slot already says which tool the popover is styling.
+
+---
+
+## 16 · The chooser is not 382px wide
+
+**The handoff says** the chooser is "382 × 42" (`BarMetric.CHOOSER_W`),
+measured with Region chosen and set in IBM Plex Sans.
+
+**Ours is its metrics plus its measured label**: 246px plus the width of
+the mode's name, about 285 with Region in Plex. Tests compute that sum and
+never assert 382.
+
+### Why
+
+It is what the spec's own markup adds up to: 1px border and 6px padding
+either side, the kind well (62), the mode chip (56 plus its label), the
+divider (9), the destination (28) and the flag well (65), with 3px between
+the five. Nothing in the spec reaches 382. The README says an earlier draft
+ended the row with a `Pick a window` button, and a button that size makes up
+the difference, so the figure most likely predates its removal. Plex is also
+not bundled (see Still open, "Fonts"), so any fixed width would be wrong in
+the face that actually resolves.
+
+---
+
+## 17 · Last region opens a snip, and works on the record side
+
+**The handoff** makes Last region a row of the mode menu that restores the
+previous capture's rectangle. It says nothing of a stored preference, and
+its state model persists the mode only within a session.
+
+**Ours keep the stored preference.** Before #66 Last region was a toggle on
+the row meaning "open on the last region", saved as `reuse_last_region`.
+Choosing the mode is that choice now: picking Last region writes it on,
+picking any other mode writes it off, and a snip opens on the rectangle
+while it is on -- offered, not taken, as the toggle did. Choosing Last
+region during a snip takes the rectangle, so `instant` finishes on it, and
+on the record side it arms the ready stage the way a clicked window does.
+With nothing captured the row is greyed with "Nothing captured yet"; with a
+rectangle on a monitor that is not here, "Not on these monitors".
+
+### Why
+
+#66 keeps what persists across restarts as it was, and someone who had the
+toggle on must not lose their rectangle to the redesign. The record side
+takes it because it resolves to a rectangle before anything is filmed, the
+reason Window and Active window are offered there
+(`tokens.RECORD_DISABLED_MODES`). Opening on it stays stills-only, since
+opening a recording on a rectangle would arm the recording.
+
+---
+
+## 18 · The tab reopens the row over the selection
+
+**The spec's** `reopen` returns the snip to its choose stage: the stills
+bar goes, and the selection stays drawn until a new one replaces it.
+
+**Ours reopen the row over a live selection.** The bar, the marks and the
+selection stay as they are, and the row folds back to its tab on Space,
+Escape, a press on the frame or picking a tool. While a recording is armed
+the chooser is not shown at all.
+
+### Why
+
+In this build a mark lives in window coordinates and a selection can only be
+redrawn by hand, so a reopen that dropped the bar would leave no way back to
+the annotated selection short of dragging it again. A recording that is
+armed is state `app.py` holds, and a mode picked from the row would pull the
+region out from under it.
+
+---
+
+## 19 · Hide sensitive is not on the record side
+
+**The handoff** draws the flag well, Hide sensitive and Delay, on the row
+whichever kind is chosen.
+
+**Ours leave only Delay** on the record side.
+
+### Why
+
+Hide sensitive reads text out of a frozen frame, and a recording has no
+frozen frame to read. A flag that could not do anything would look live.
+
+---
+
+## 20 · Smaller departures in the row
+
+- **The wells are 32px, centred in a 42px row.** The spec pads a 28px
+  button 2px inside a well and the well 6px inside the row, which is 45px;
+  #66 fixes the row at `ROW_H`.
+- **A hovered control also explains itself in the hint pill.** Tooltips are
+  set as the spec's `title`s are, but Qt's tooltips are unreliable on an
+  always-on-top frameless window.
+- **The tab's opacity changes on hover without the 160ms ease.**
 
 ---
 

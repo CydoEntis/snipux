@@ -573,128 +573,6 @@ GNOME_KNOWN = {
 
 SHORTCUT_DEFAULT = "Control+Alt+S"
 
-# ---------------------------------------------------------------------------
-# The pre-snip chooser (design_handoff_snipux_chooser)
-# ---------------------------------------------------------------------------
-# Overlay furniture, not window chrome: warm glass on the 62% scrim, never the
-# opaque Win palette Settings and the review window use. Everything else the
-# chooser needs -- Color, Metric, Shadow, CAPTURE_MODES, AFTER_CAPTURE, DELAYS
-# -- is already above. See docs/design/handoff-chooser.md.
-
-# ---------------------------------------------------------------- geometry
-class ChooserMetric:
-    """The docked chooser row. Logical pixels."""
-
-    # Panel — hangs FLUSH from the active monitor's top edge.
-    # Square top corners, rounded bottom: it belongs to the edge, it does not float.
-    HEIGHT           = 54          # 10 pad + 34 control + 10 pad
-    WIDTH            = 420         # intrinsic; the row sizes to content
-    PAD              = 10
-    GAP              = 8           # between controls
-    RADIUS           = (0, 0, 14, 14)   # tl, tr, br, bl
-    BORDER_TOP       = 0           # no top border — it is against the edge
-
-    # Dropdown triggers
-    TRIGGER_H        = 34
-    TRIGGER_RADIUS   = 9
-    TRIGGER_PAD_L    = 11
-    TRIGGER_PAD_R    = 9           # tighter: the chevron owns that side
-    TRIGGER_ICON     = 15          # 16 for the mode trigger
-    CHEVRON          = 14
-
-    # Dropdown menus
-    MENU_MODE_W      = 250
-    MENU_AFTER_W     = 270         # widest — its rows carry a note line
-    MENU_DELAY_W     = 152
-    MENU_PAD         = 5
-    MENU_RADIUS      = 11
-    MENU_OFFSET_Y    = 41          # from the trigger's top; i.e. 7px below it
-    MENU_ROW_PAD     = (8, 9)
-    MENU_ROW_RADIUS  = 8
-    MENU_ROW_ICON    = 16
-    MENU_TICK        = 14
-
-    # Hint line under the panel
-    HINT_GAP         = 8
-    HINT_H           = 24
-    HINT_PAD         = (5, 11)
-    HINT_RADIUS      = 8
-
-    # Armed tab — what the panel collapses to
-    TAB_H            = 26
-    TAB_PAD_H        = 12
-    TAB_RADIUS       = (0, 0, 10, 10)
-    TAB_OPACITY      = 0.72        # → 1.0 on hover, 160ms ease
-    TAB_BG_ALPHA     = 0.86        # slightly lighter than the panel's 0.93
-
-    # Armed hint, centred under the tab
-    ARMED_HINT_TOP   = 52
-    ARMED_HINT_MS    = 180         # rise+fade in
-
-    # Keyboard legend, bottom centre of the active monitor
-    LEGEND_BOTTOM    = 26
-    LEGEND_H         = 30
-
-    # Stills/record switch: a two-segment pill with a sliding highlight
-    # behind whichever side is active, rather than a boolean track+knob --
-    # a switch that only shows an empty knob says on/off, not on/off *what*.
-    # `Win.SWITCH_W/H/KNOB/PAD` (tokens.py, Settings' opaque toggle) is the
-    # naming precedent for the shape, adapted to a content-sized highlight.
-    SWITCH_H         = TRIGGER_H
-    SWITCH_PAD       = 3           # inset between the track edge and the highlight
-    SWITCH_SEG_PAD_H = 12           # horizontal padding inside each segment
-
-
-class ChooserColor:
-    """Only what differs from Color. Everything else comes from the overlay
-    palette.
-
-    Every colour the handoff quotes with an alpha carries its `_ALPHA`
-    sibling, the same pairing rule `Color` and `Win` follow -- so
-    `design.chooser_color()` produces a fully-specified QColor and no caller
-    ever re-types a percentage that can then drift from this file.
-    """
-
-    TRIGGER_BORDER       = "#ffffff"   # at 10% alpha
-    TRIGGER_BORDER_ALPHA = 0.10
-    TRIGGER_BORDER_OPEN  = "#ffffff"   # at 20% alpha -- the open dropdown's trigger
-    TRIGGER_BORDER_OPEN_ALPHA = 0.20
-    TRIGGER_BG_OPEN      = "#ffffff"   # at 9% alpha
-    TRIGGER_BG_OPEN_ALPHA = 0.09
-    MENU_BG              = "#1a1c18"   # at 98% alpha -- denser than the panel; it must be readable
-    MENU_BG_ALPHA        = 0.98
-    MENU_BORDER          = "#ffffff"   # at 12% alpha
-    MENU_BORDER_ALPHA    = 0.12
-    ROW_SELECTED_BG      = "#ffffff"   # at 8% alpha
-    ROW_SELECTED_BG_ALPHA = 0.08
-    ROW_SELECTED_FG      = "#f8faf0"
-    ROW_IDLE_FG          = "#a8afa0"
-    ROW_HOVER_BG         = "#ffffff"   # at 9% alpha
-    ROW_HOVER_BG_ALPHA   = 0.09
-    SHORTCUT_FG          = "#6f766a"   # the R/W/F/L glyphs in the mode menu
-    MODE_ACCENT          = "#c3e399"   # active mode's icon + the tab's mode label
-    HINT_BG              = "#101210"   # at 72% alpha
-    HINT_BG_ALPHA        = 0.72
-    HINT_BORDER          = "#ffffff"   # at 7% alpha
-    HINT_BORDER_ALPHA    = 0.07
-    HINT_FG              = "#8f9689"
-    WINDOW_PREVIEW       = "#a8e05f"   # at 85% alpha
-    WINDOW_PREVIEW_ALPHA = 0.85
-    WINDOW_PREVIEW_FILL  = "#a8e05f"   # at 7% alpha
-    WINDOW_PREVIEW_FILL_ALPHA = 0.07
-    PANEL_BG_ALPHA       = 0.93        # the panel's own fill
-    LEGEND_KEY_FG        = "#d7dacb"
-
-    # Stills/record switch. The active segment's label reuses MODE_ACCENT
-    # and the idle one reuses ROW_IDLE_FG -- the same two colours the menu
-    # rows already use for selected vs idle -- so only the pill graphic
-    # itself needs new tokens.
-    SWITCH_TRACK         = "#ffffff"   # at 6% alpha -- the pill's resting fill
-    SWITCH_TRACK_ALPHA   = 0.06
-    SWITCH_HIGHLIGHT     = "#ffffff"   # at 10% alpha -- behind the active side
-    SWITCH_HIGHLIGHT_ALPHA = 0.10
-    ROW_DISABLED_FG      = "#5c6156"   # a disabled mode row's label + icon
-
 # Delay: the trigger's label when nothing is set, which is also the stored
 # value. It was "No delay" on the trigger and "Off" in `DELAYS`, so the
 # chooser carried a pair of functions whose only job was translating between
@@ -717,42 +595,28 @@ CHOOSER_AFTER_NOTE = {
 }
 
 
-# Mode → what the user does next once the mode is armed. This string is the
-# hint under the panel AND the armed hint under the tab. It replaces the
-# primary button that used to sit at the end of the row: picking the mode IS
-# the commit, so nothing should promise an action it cannot perform.
-# The reuse toggle's label. It carries one because the glyph alone did not
-# survive contact: "the icon makes no sense, i had to hover to tell what is
-# was doing". The handoff's "mode is the only labelled control" is a rule
-# about keeping the row from reading as a toolbar of equal-weight buttons --
-# it is not worth a control nobody can identify without hovering it, which
-# is the one thing a toggle must never be.
-REUSE_LABEL = "Last region"
-
-# The reuse toggle's own hint line, shown while it is hovered in place of
-# the armed mode's next step. Two of them, because the control's whole job
-# is to say which state it is in and a toggle with one caption cannot.
-REUSE_HINT = {
-    True: "Region opens on your last one -- click to turn off",
-    False: "Reuse your last region instead of dragging",
-}
-
-# The row's second toggle: black out sensitive text in every screenshot.
+# Hide sensitive's tooltip and hint: black out sensitive text in every
+# screenshot.
 # The hint names what gets covered rather than saying "sensitive info",
 # because someone deciding whether to trust it needs to know what it looks
 # for -- and, by omission, what it does not.
-HIDE_SENSITIVE_LABEL = "Hide sensitive"
 HIDE_SENSITIVE_HINT = {
     True: "Blacks out passwords, keys, cards and personal info -- click to turn off",
     False: "Black out passwords, keys, cards and personal info",
 }
 
+# Mode -> what the user does next once it is chosen: the hint pill under the
+# chooser row. There is no primary button at the end of the row, because
+# nothing there could perform what one would promise.
 MODE_NEXT_STEP = {
     "Region":        "Drag anywhere to frame a region",
     "Window":        "Hover a window, click to take it",
     "Full screen":   "Grabs this monitor the moment you choose it",
     "Active window": "Grabs your focused window the moment you choose it",
     "Browser":       "Grabs your browser's page the moment you choose it",
+    # LAST_REGION_MODE, below. Seen when the row is reopened over the
+    # region it restored, or opens on it.
+    "Last region":   "Your last capture's rectangle -- drag to frame another",
 }
 
 # Mode shortcuts. Live whenever the chooser is on screen, armed or not.
@@ -1073,7 +937,7 @@ class FlowMetric:
 
 
 class FlowColor:
-    """Only what differs from Color / ChooserColor.
+    """Only what differs from Color.
 
     Alphas ride as `<TOKEN>_ALPHA` siblings so `design.flow_color()` can hand
     back one fully-specified QColor, the same pairing rule the other three
@@ -1328,11 +1192,11 @@ PLAYER_SHORTCUTS = {
 
 
 # ---------------------------------------------------------------------------
-# The stills bar (docs/design/bars, LOCKED 2026-09-15)
+# The stills bar and the chooser row (docs/design/bars, LOCKED 2026-09-15)
 # ---------------------------------------------------------------------------
 # Ported from docs/design/bars/tokens_bars.py -- its `BarMetric`, `BarColor`
-# and stills-bar structures, only as far as the one row under a selection
-# reads them. docs/design/bars/divergences.md overrides that file wherever
+# and stills-bar structures, only as far as the chooser row and the one row
+# under a selection read them. docs/design/bars/divergences.md overrides that file wherever
 # the two differ, and the values below already follow it.
 #
 # A few figures the handoff's spec (reference/Snipux Handoff Preview.dc.html)
@@ -1349,6 +1213,7 @@ class BarMetric:
     BORDER           = 1
     GAP              = 3
     RADIUS           = 12
+    RADIUS_DOCKED    = (0, 0, 12, 12)   # tl, tr, br, bl: the chooser, flush to the monitor top
     BTN              = 28
     BTN_RADIUS       = 8
     ICON             = 15
@@ -1414,6 +1279,51 @@ class BarMetric:
     # An outline-only shape's dot is a ring this wide, inside its diameter.
     STYLE_DOT_OUTLINE = 2
 
+    # The chooser row (#66).
+    WELL_PAD         = 2           # recessed group: the kind pair, the flag pair
+    WELL_GAP         = 2           # spec markup
+    WELL_RADIUS      = 9
+    WELL_BTN_RADIUS  = 7
+
+    # The handoff's measurement of the chooser with Region chosen, in IBM
+    # Plex Sans. Nothing is sized to it: the row is the metrics below plus
+    # its label, which the spec's own markup sums to 246 + label -- about
+    # 285 in Plex. See divergences.md, "The chooser is not 382px wide".
+    CHOOSER_W        = 382
+
+    CHIP_PAD_L       = 9           # spec markup: the mode chip, the row's one label
+    CHIP_PAD_R       = 7
+    CHIP_GAP         = 6
+    CHIP_ICON        = 14
+    REC_DOT          = 10          # record is a filled circle, not a glyph
+    FLAG_PAD_H       = 8           # spec markup: Delay's horizontal padding
+    FLAG_GAP         = 5           # spec markup: Delay's glyph to its value
+    MENU_RULE_MARGIN = 4           # spec markup: the rule above Last region
+    MENU_W_MODE      = 240
+
+    # The chooser's tab, once a selection exists.
+    TAB_H            = 22
+    TAB_PAD_H        = 11
+    TAB_GAP          = 8           # spec markup
+    TAB_ICON         = 12          # spec markup
+    TAB_ICON_GAP     = 6           # spec markup
+    TAB_SEP_H        = 11          # spec markup
+    TAB_RADIUS       = (0, 0, 10, 10)
+    TAB_OPACITY      = 0.70        # 1.0 on hover
+
+    # The hint pill under the chooser row.
+    HINT_GAP         = 7
+    HINT_PAD         = (4, 10)     # v, h
+    HINT_RADIUS      = 7
+    HINT_ICON        = 12
+    HINT_ICON_GAP    = 6           # spec markup
+
+    # The spec's box-shadow is 0 18px 40px -14px. Qt's drop shadow has no
+    # spread, so the offset gives up the 14px the spread would have pulled
+    # it in by, or the shadow would sit well below the row.
+    SHADOW_BLUR      = 40
+    SHADOW_DY        = 4
+
     # Placement: centred on the selection, BAR_OFFSET_Y below it, and at
     # least BAR_EDGE_MARGIN inside the selection's monitor. The handoff's
     # BAR_BOTTOM_ROOM clamp is deliberately absent -- see divergences.md 8.
@@ -1430,6 +1340,12 @@ class BarFont:
     MENU_NOTE        = (10.5, 400)
     MENU_SHORTCUT    = (10.0, 400)  # mono
     READOUT          = (11.0, 500)  # mono: "5px", "8"
+    # The chooser row.
+    CHIP             = (12.0, 500)
+    DELAY            = (11.0, 500)  # mono
+    HINT             = (11.0, 400)
+    TAB_MODE         = (11.0, 500)
+    TAB_TAIL         = (11.0, 400)
 
 
 class BarColor:
@@ -1475,6 +1391,9 @@ class BarColor:
     ACCENT_FG            = "#15170e"
     SPLIT_SEAM           = "#15170e"
     SPLIT_SEAM_ALPHA     = 0.22
+    ACCENT_SOFT          = "#c3e399"   # accent as text or a small glyph
+    ACCENT_WASH          = "#a8e05f"   # an armed flag's fill
+    ACCENT_WASH_ALPHA    = 0.18
 
     # Spec markup: the notch takes its slot's glyph colour, faded, so it
     # lights with the slot rather than competing with it.
@@ -1513,6 +1432,40 @@ class BarColor:
     SLIDER_TRACK_ALPHA   = 0.20
     SLIDER_THUMB         = "#f1f3e8"
     READOUT_FG           = "#c6cab8"
+
+    # The chooser row (#66) -- spec markup where tokens_bars.py is silent.
+    WELL_BG              = "#000000"
+    WELL_BG_ALPHA        = 0.34
+    MENU_RULE            = "#ffffff"
+    MENU_RULE_ALPHA      = 0.10
+    FLAG_OFF_FG          = "#8f9689"   # an unlit flag inside a well
+    CONTROL_HOVER_BG     = "#ffffff"   # the destination and the flags
+    CONTROL_HOVER_BG_ALPHA = 0.07
+    CONTROL_HOVER_FG     = "#dfe4ec"
+    CHIP_FG              = "#f1f3e8"
+    CHIP_BORDER_OPEN     = "#ffffff"
+    CHIP_BORDER_OPEN_ALPHA = 0.20
+    # The kind pair. Record lights red -- the one place red means "this
+    # films" -- and stills lights neutral.
+    KIND_ON_BG           = "#ffffff"
+    KIND_ON_BG_ALPHA     = 0.14
+    KIND_ON_FG           = "#f1f3e8"
+    KIND_HOVER_BG        = "#ffffff"
+    KIND_HOVER_BG_ALPHA  = 0.08
+    REC_ON_BG            = "#ff5a52"
+    REC_ON_BG_ALPHA      = 0.20
+    REC_ON_FG            = "#ff8d86"
+    HINT_BG              = "#101210"
+    HINT_BG_ALPHA        = 0.78
+    HINT_BORDER          = "#ffffff"
+    HINT_BORDER_ALPHA    = 0.07
+    HINT_FG              = "#7d8478"
+    TAB_BG               = "#1a1c18"
+    TAB_BG_ALPHA         = 0.88
+    TAB_SEP              = "#ffffff"
+    TAB_SEP_ALPHA        = 0.16
+    SHADOW               = "#000000"   # the row's drop shadow
+    SHADOW_ALPHA         = 0.90
 
 
 # The bar's slots, left to right. The order is a gradient of consequence --
@@ -1620,3 +1573,30 @@ DEFAULT_STYLE_OTHER = {"color": "#e3ff4f", "size": 5, "dash": "solid", "fill": "
 
 STROKE_RANGE   = (1, 26)
 STRENGTH_RANGE = (2, 20)
+
+
+# ---------------------------------------------------------------- the chooser
+# Last region is a MODE, not a flag: it answers "what to capture". It sits
+# under a rule at the foot of the mode menu, subtitled with the dimensions it
+# restores. It was once a labelled toggle on the row, labelled because "the
+# icon makes no sense, i had to hover to tell what is was doing"; a menu row
+# carrying its name and its dimensions answers that without a label on the row.
+LAST_REGION_MODE = "Last region"
+LAST_REGION_GLYPH = "undo"
+LAST_REGION_SHORTCUT = "Shift+R"
+LAST_REGION_NOTE = "The rectangle your last capture came from"
+# Why the row is greyed. Two, because a capture remembered on a monitor that
+# is not here now is not "nothing captured".
+LAST_REGION_NONE = "Nothing captured yet"
+LAST_REGION_OFF_DESK = "Not on these monitors"
+
+HIDE_SENSITIVE_GLYPH = "eyeOff"
+
+# Tooltips. Qt's tooltips are unreliable on an always-on-top frameless
+# window, so the row also borrows the hint pill for these while hovered.
+MODE_CHIP_TOOLTIP = "What to capture"
+KIND_TOOLTIP = {"stills": "Still image", "record": "Screen recording"}
+DESTINATION_TOOLTIP = "After capture: {label} -- {note}"
+DELAY_TOOLTIP_OFF = "No delay -- click to add one"
+DELAY_TOOLTIP_ON = "{delay} countdown before the grab -- click for the next"
+TAB_TOOLTIP = "Reopen the chooser -- Space"

@@ -1,50 +1,42 @@
-"""The pre-snip chooser: the first thing a snip shows.
+"""The pre-snip chooser: the row a snip opens with.
 
-`docs/design/handoff-chooser.md` is the authority, and
-`docs/design/Snipux Chooser.dc.html` is the behavioural one where that
-document is ambiguous.
+`docs/design/bars/README.md` section 1 is the design; the spec,
+`docs/design/bars/reference/Snipux Handoff Preview.dc.html`, settles what it
+leaves ambiguous; and `docs/design/bars/divergences.md` overrides both
+wherever this build differs.
 
-A single 54px row hanging from the top edge of the monitor the snip opened
-on, asking the two questions that have to be answered before anything is
-captured -- what to capture, and what should happen to it -- plus the delay,
-which used to live in the floating bar's mode popover. That popover is gone;
-this replaces it.
+One 42px row hanging from the top edge of the monitor being worked on:
 
-A stills/record switch sits alongside those (docs/design/recording.md
-ticket 5): both the mode list and the "then" list change meaning when it
-flips, which is why it is a fourth axis rather than another mode. UI and
-state only -- nothing here is wired to a recorder.
+    [camera  dot]  [glyph Region v]  |  [destination]  [eyeOff  timer]
+         kind            mode                               flags
 
-It exists because capture mode used to live on the floating bar, and that
-bar only appears once a selection does. Choosing "window" therefore meant
-dragging out a region you did not want, clicking a chip, picking the mode
-you actually wanted, and watching the region be thrown away.
+Mode is the only label. Every other control is an icon that shows its state,
+and the explanation lives in its tooltip and in the hint pill under the row.
+Last region is a mode, at the foot of the mode menu.
 
-Kept out of `overlay.py` deliberately: that file is already over 5,000 lines
-and CLAUDE.md names splitting it as the obvious next cut. This is a whole
-surface with its own state machine, so it starts in its own module rather
-than making that worse.
+Picking a mode does not arm it. The row stays up until the user drags or
+clicks a window; the modes with nothing left to aim at capture on the pick.
+Once a selection exists the row collapses to a 22px tab on the same edge,
+and the tab or Space opens it again with everything as it was.
+
+UI and state only. `OverlayWindow` decides what a mode does, which monitor
+the row hangs from, and when a selection exists. Kept out of `overlay.py`
+because it is a whole surface with its own state machine, and that file is
+already several thousand lines.
 """
 
 from __future__ import annotations
 
-from typing import Callable
+import math
+from typing import NamedTuple
 
-from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import (
-    QColor,
-    QCursor,
-    QFont,
-    QFontMetricsF,
-    QGuiApplication,
-    QPainter,
-    QPainterPath,
-)
+from PyQt6.QtCore import QPoint, QRectF, QSizeF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath
 from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QHBoxLayout,
-    QLabel,
+    QLayout,
     QVBoxLayout,
     QWidget,
 )
@@ -53,7 +45,11 @@ from . import design
 from .design import tokens
 
 
-def _font(size: float, weight: int, mono: bool = False) -> QFont:
+def _font(spec, mono: bool = False) -> QFont:
+    """A QFont for a `tokens.BarFont` (px, weight) pair, in the face that
+    resolves on this machine -- IBM Plex where installed, a platform face
+    otherwise (docs/design/bars/divergences.md, "Fonts")."""
+    size, weight = spec
     families = design.font_families()
     font = QFont(families.mono if mono else families.ui)
     font.setPixelSize(round(size))
@@ -61,51 +57,77 @@ def _font(size: float, weight: int, mono: bool = False) -> QFont:
     return font
 
 
-def _alpha(hex_colour: str, alpha: float) -> QColor:
-    colour = QColor(hex_colour)
-    colour.setAlphaF(alpha)
-    return colour
+def _advance(text: str, spec, mono: bool = False) -> int:
+    """Logical width of `text`, rounded up so a label is never clipped.
+
+    Measured, never trusted to a token: every width here that holds text is
+    tuned to Plex, and a fallback face has different advances.
+    """
+    return math.ceil(QFontMetricsF(_font(spec, mono)).horizontalAdvance(text))
 
 
-def _rgba(hex_colour: str, alpha: float) -> str:
-    colour = QColor(hex_colour)
-    return f"rgba({colour.red()}, {colour.green()}, {colour.blue()}, {alpha:.2f})"
+def _colour(name: str) -> QColor:
+    return design.bar_color(name)
 
 
-def _glass(painter, rect, radii, fill_alpha=tokens.ChooserColor.PANEL_BG_ALPHA) -> None:
-    """The overlay's warm glass, with per-corner radii.
+def _docked_path(rect: QRectF, radii, *, closed: bool) -> QPainterPath:
+    """The outline of a surface hanging from the top edge of a monitor.
 
-    `backdrop-filter: blur(16px)` has no Qt equivalent and the design says
-    never to attempt a live one, so this is the documented fallback: a
-    denser fill, no blur. The desktop behind is a static grab, so nothing
-    moves under it to give the absence away.
-
-    Alpha, not opacity: the panel is a 93%-alpha *fill* whose children are
-    fully opaque. `setWindowOpacity(0.93)` would wash the icons out too.
+    `radii` is (top-left, top-right, bottom-right, bottom-left). Closed, the
+    path is the fill. Open, it is the border, which has no top edge: the row
+    hangs from the monitor's edge rather than floating near it, and a line
+    along that edge would draw exactly the gap the design closes.
     """
     top_left, top_right, bottom_right, bottom_left = radii
+    left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
     path = QPainterPath()
-    path.moveTo(rect.left() + top_left, rect.top())
-    path.lineTo(rect.right() - top_right, rect.top())
-    if top_right:
-        path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + top_right)
-    path.lineTo(rect.right(), rect.bottom() - bottom_right)
+    if closed:
+        path.moveTo(left + top_left, top)
+        path.lineTo(right - top_right, top)
+        if top_right:
+            path.arcTo(QRectF(right - 2 * top_right, top, 2 * top_right, 2 * top_right), 90, -90)
+    else:
+        path.moveTo(right, top + top_right)
+    path.lineTo(right, bottom - bottom_right)
     if bottom_right:
-        path.quadTo(rect.right(), rect.bottom(), rect.right() - bottom_right, rect.bottom())
-    path.lineTo(rect.left() + bottom_left, rect.bottom())
+        path.arcTo(
+            QRectF(right - 2 * bottom_right, bottom - 2 * bottom_right,
+                   2 * bottom_right, 2 * bottom_right),
+            0, -90,
+        )
+    path.lineTo(left + bottom_left, bottom)
     if bottom_left:
-        path.quadTo(rect.left(), rect.bottom(), rect.left(), rect.bottom() - bottom_left)
-    path.lineTo(rect.left(), rect.top() + top_left)
-    if top_left:
-        path.quadTo(rect.left(), rect.top(), rect.left() + top_left, rect.top())
-    path.closeSubpath()
+        path.arcTo(
+            QRectF(left, bottom - 2 * bottom_left, 2 * bottom_left, 2 * bottom_left), 270, -90
+        )
+    path.lineTo(left, top + top_left)
+    if closed:
+        if top_left:
+            path.arcTo(QRectF(left, top, 2 * top_left, 2 * top_left), 180, -90)
+        path.closeSubpath()
+    return path
 
+
+def _paint_docked(painter: QPainter, widget: QWidget, radii, fill: QColor, border: QColor) -> None:
+    """Fill and border a docked surface.
+
+    Alpha, never opacity: the fill is translucent and everything painted on
+    it afterwards is fully opaque. `windowOpacity` would wash the icons out
+    with the ground.
+    """
+    rect = QRectF(widget.rect())
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(_alpha(tokens.Color.BAR_BG, fill_alpha))
-    painter.drawPath(path)
+    painter.setBrush(fill)
+    painter.drawPath(_docked_path(rect, radii, closed=True))
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.setPen(design.chooser_color("TRIGGER_BORDER"))
-    painter.drawPath(path)
+    painter.setPen(border)
+    # Half a pixel in, so the 1px border lands on whole logical pixels.
+    painter.drawPath(_docked_path(rect.adjusted(0.5, 0, -0.5, -0.5), radii, closed=False))
+
+
+def _draw_icon(painter: QPainter, name: str, colour: QColor, x: float, y: float, size: int) -> None:
+    pixmap = design.icon(name, colour).pixmap(size, size)
+    painter.drawPixmap(round(x), round(y), pixmap)
 
 
 class _Surface(QWidget):
@@ -114,24 +136,45 @@ class _Surface(QWidget):
     Every widget on this surface is a child of the overlay, and a Qt widget
     that leaves a mouse press unaccepted lets it propagate to its parent.
     The overlay reads a press with no selection as the start of a region
-    drag -- right for the overlay, whose docstring says so, and wrong for
-    chrome sitting on top of it. Clicking `Region` therefore started a
-    region capture instead of opening its menu (SNX-108), and the same was
-    true of every other trigger, the tab, and the panel's own background.
+    drag -- right for the overlay, wrong for chrome sitting on top of it.
+    Clicking the mode control once started a region capture instead of
+    opening its menu (SNX-108). The handoff calls this the one that will
+    bite: "Chrome must stop pointer propagation."
 
-    The press stops here; the click still happens on release. Subclasses
-    that act on release must check `_released_inside` first: accepting the
-    press makes this widget Qt's implicit mouse grabber, so a release that
-    lands somewhere else entirely still arrives here, and pressing a
-    control then sliding away from it is how a user says "no".
+    The press stops here; the click happens on release. A release that
+    lands somewhere else still arrives here, because accepting the press
+    makes this widget Qt's implicit mouse grabber -- and pressing a control
+    then sliding away from it is how a user says "no", so subclasses check
+    `_released_inside` first.
 
-    The two passive pieces -- `_Pill` and `_Legend` -- deliberately stay out
-    of this: nothing there is clickable, and a press that lands on them
-    belongs to the drag underneath.
-
-    `overlay._Chrome` is the same fix for the floating bar, the trays, the
-    popovers, the toast and the HUD, which all had it too.
+    `hovered` is how the row borrows the hint pill to explain a control:
+    Qt's own tooltips are a coin toss on an always-on-top frameless window.
+    It carries the control, so one bound method can listen to them all -- a
+    lambda closing over the listener would keep it alive as long as the
+    control, which for a chooser without a parent is for ever.
     """
+
+    hovered = pyqtSignal(QWidget, bool)
+
+    def __init__(self, parent=None, *, clickable: bool = True):
+        super().__init__(parent)
+        self._hovered = False
+        self.setMouseTracking(True)
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor if clickable else Qt.CursorShape.ArrowCursor
+        )
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        self.hovered.emit(self, True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        self.hovered.emit(self, False)
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:
         event.accept()
@@ -143,690 +186,256 @@ class _Surface(QWidget):
         )
 
 
-class _MenuRow(_Surface):
-    """One row of a dropdown. Painted rather than styled because the
-    destination menu's rows are two lines and the mode menu's carry a
-    shortcut glyph and a tick -- more than a stylesheet can lay out.
-    """
+class _KindButton(_Surface):
+    """One side of the stills/record pair.
 
-    clicked = pyqtSignal(str)
-
-    def __init__(self, value, icon_name, label, note="", shortcut="", parent=None, disabled=False):
-        super().__init__(parent)
-        metric = tokens.ChooserMetric
-        self._value = value
-        self._icon_name = icon_name
-        self._label = label
-        self._note = note
-        self._shortcut = shortcut
-        self._selected = False
-        self._hovered = False
-        self._disabled = disabled
-        self.setMouseTracking(True)
-        if not disabled:
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-        pad_v, _pad_h = metric.MENU_ROW_PAD
-        self.setFixedHeight(pad_v * 2 + (34 if note else 18))
-
-    def value(self):
-        return self._value
-
-    def set_selected(self, selected: bool) -> None:
-        self._selected = selected
-        self.update()
-
-    def enterEvent(self, event) -> None:
-        if not self._disabled:
-            self._hovered = True
-            self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        # Inert, not just greyed: a disabled row swallows the press (via
-        # `_Surface`, so SNX-108 does not reopen) but never emits `clicked`.
-        if self._disabled:
-            return
-        if self._released_inside(event):
-            self.clicked.emit(self._value)
-
-    def paintEvent(self, event) -> None:
-        metric, colour = tokens.ChooserMetric, tokens.ChooserColor
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect())
-
-        if self._disabled:
-            fill = None
-        elif self._selected:
-            fill = design.chooser_color("ROW_SELECTED_BG")
-        elif self._hovered:
-            fill = design.chooser_color("ROW_HOVER_BG")
-        else:
-            fill = None
-        if fill is not None:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(fill)
-            painter.drawRoundedRect(rect, metric.MENU_ROW_RADIUS, metric.MENU_ROW_RADIUS)
-
-        pad_v, pad_h = metric.MENU_ROW_PAD
-        x = pad_h
-        label_fg = QColor(
-            colour.ROW_DISABLED_FG
-            if self._disabled
-            else (colour.ROW_SELECTED_FG if self._selected else colour.ROW_IDLE_FG)
-        )
-        if self._icon_name:
-            size = metric.MENU_ROW_ICON
-            pixmap = design.icon(self._icon_name, label_fg).pixmap(size, size)
-            painter.drawPixmap(x, (self.height() - size) // 2, pixmap)
-            x += size + 9
-
-        # The tick's slot is reserved whether or not this row is the selected
-        # one, so text does not reflow as the selection moves between rows.
-        text_w = self.width() - x - pad_h - (metric.MENU_TICK + 8)
-
-        painter.setFont(_font(12.5, 500))
-        painter.setPen(label_fg)
-        if self._note:
-            label = QFontMetricsF(painter.font()).elidedText(
-                self._label, Qt.TextElideMode.ElideRight, text_w
-            )
-            painter.drawText(x, pad_v + 13, label)
-            painter.setFont(_font(11, 400))
-            painter.setPen(QColor(colour.HINT_FG))
-            # Elide rather than trust the string: the menu is a fixed width
-            # and a note is prose, so a font substitution on someone else's
-            # machine must degrade to an ellipsis, not run off the panel.
-            note = QFontMetricsF(painter.font()).elidedText(
-                self._note, Qt.TextElideMode.ElideRight, text_w
-            )
-            painter.drawText(x, pad_v + 30, note)
-        else:
-            painter.drawText(
-                QRectF(x, 0, self.width() - x, self.height()),
-                Qt.AlignmentFlag.AlignVCenter,
-                self._label,
-            )
-
-        right = self.width() - pad_h
-        if self._selected and not self._disabled:
-            size = metric.MENU_TICK
-            pixmap = design.icon("check", tokens.Color.ACCENT).pixmap(size, size)
-            painter.drawPixmap(right - size, (self.height() - size) // 2, pixmap)
-            right -= size + 8
-        if self._shortcut:
-            painter.setFont(_font(10.5, 400, mono=True))
-            # A disabled row's shortcut letter is dimmed the same as its
-            # label/icon (`label_fg`, above) -- at full brightness it reads
-            # as if the key still does something, when `handle_key` now
-            # silently no-ops for it.
-            painter.setPen(QColor(colour.ROW_DISABLED_FG if self._disabled else colour.SHORTCUT_FG))
-            painter.drawText(
-                QRectF(right - 20, 0, 20, self.height()),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                self._shortcut,
-            )
-        painter.end()
-
-
-class _Menu(QWidget):
-    """A dropdown. A frameless `Qt.Popup`, not a `QMenu`.
-
-    `QMenu` will not take this styling cleanly, and the destination menu's
-    two-line rows need a size hint of their own -- so the rows are real
-    child widgets and this is the frame around them. Being a popup is also
-    what lets it paint outside the panel's bounds and close on a click
-    anywhere else.
+    The two are a pair of buttons in a well rather than a switch, because a
+    switch's knob says on/off and not on/off *what*. Record is a filled
+    circle, drawn rather than loaded: the handoff says "a filled 10px circle,
+    not a glyph", and a stroked circle reads as a radio button.
     """
 
     picked = pyqtSignal(str)
-    closed = pyqtSignal()
 
-    def __init__(self, width: int, rows, selected, parent=None):
-        super().__init__(parent, Qt.WindowType.Popup)
-        metric = tokens.ChooserMetric
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    def __init__(self, kind: str, parent=None):
+        super().__init__(parent)
+        self.kind = kind
+        self._active = False
+        self.setFixedSize(tokens.BarMetric.BTN, tokens.BarMetric.BTN)
+        self.setToolTip(tokens.KIND_TOOLTIP[kind])
 
-        column = QVBoxLayout(self)
-        column.setContentsMargins(
-            metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD
-        )
-        column.setSpacing(1)
-        self._rows: dict[str, _MenuRow] = {}
-        for value, icon_name, label, note, shortcut, disabled in rows:
-            row = _MenuRow(value, icon_name, label, note, shortcut, self, disabled=disabled)
-            row.set_selected(value == selected)
-            row.clicked.connect(self.picked)
-            self._rows[value] = row
-            column.addWidget(row)
-        self.setFixedWidth(width)
-        self.adjustSize()
+    def is_active(self) -> bool:
+        return self._active
 
-    def closeEvent(self, event) -> None:
-        self.closed.emit()
-        super().closeEvent(event)
+    def set_active(self, active: bool) -> None:
+        self._active = bool(active)
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._released_inside(event):
+            self.picked.emit(self.kind)
 
     def paintEvent(self, event) -> None:
-        metric, colour = tokens.ChooserMetric, tokens.ChooserColor
+        metric = tokens.BarMetric
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.chooser_color("MENU_BG"))
-        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.chooser_color("MENU_BORDER"))
-        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        recording = self.kind == "record"
+        if self._active:
+            fill = _colour("REC_ON_BG" if recording else "KIND_ON_BG")
+            foreground = _colour("REC_ON_FG" if recording else "KIND_ON_FG")
+        else:
+            fill = _colour("KIND_HOVER_BG") if self._hovered else None
+            foreground = _colour("FLAG_OFF_FG")
+        rect = QRectF(self.rect())
+        if fill is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect, metric.WELL_BTN_RADIUS, metric.WELL_BTN_RADIUS)
+        if recording:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(foreground)
+            painter.drawEllipse(rect.center(), metric.REC_DOT / 2, metric.REC_DOT / 2)
+        else:
+            offset = (metric.BTN - metric.ICON) / 2
+            _draw_icon(painter, "camera", foreground, offset, offset, metric.ICON)
         painter.end()
 
 
-class _Trigger(_Surface):
-    """One of the row's three dropdown triggers: icon, label, chevron.
+class _Well(QWidget):
+    """A recessed group: the kind pair, and the two flags.
 
-    An empty label makes it icon-only, which is what the capture-flow
-    handoff asks of two of the three: *"Mode -- the only labelled
-    control"*, destination *"icon only ... secondary decision, so no label
-    on the trigger"*, delay *"label appears only when set"*. Labelling all
-    three gave the row three equal-weight controls when only one of them
-    is the question being asked, and made it wide enough to read as a
-    toolbar rather than a sentence.
+    Deliberate, per the handoff: inside a well an unlit icon reads as off,
+    where a bare unlit icon reads as a button nobody has pressed yet.
+    Presses on its padding are not swallowed here; they reach the row, which
+    swallows them.
+    """
+
+    def __init__(self, *children: QWidget, parent=None):
+        super().__init__(parent)
+        metric = tokens.BarMetric
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(
+            metric.WELL_PAD, metric.WELL_PAD, metric.WELL_PAD, metric.WELL_PAD
+        )
+        layout.setSpacing(metric.WELL_GAP)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+        for child in children:
+            layout.addWidget(child)
+
+    def paintEvent(self, event) -> None:
+        radius = tokens.BarMetric.WELL_RADIUS
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_colour("WELL_BG"))
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+        painter.end()
+
+
+class _ModeChip(_Surface):
+    """Mode: the row's only labelled control, because it is the only
+    decision re-made every snip. The active mode's glyph in the soft
+    accent, its name, and a chevron for the menu it opens.
     """
 
     clicked = pyqtSignal()
 
-    def __init__(self, icon_name, label, icon_size, icon_colour, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        metric = tokens.ChooserMetric
-        self._icon_name = icon_name
-        self._label = label
-        self._icon_size = icon_size
-        self._icon_colour = icon_colour
+        self._glyph = "crop"
+        self._label = ""
         self._open = False
-        self._hovered = False
-        self._label_colour = tokens.Color.TEXT_PRIMARY
-        self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(metric.TRIGGER_H)
-        self._resize_to_fit()
+        self.setFixedHeight(tokens.BarMetric.BTN)
+        self.setToolTip(tokens.MODE_CHIP_TOOLTIP)
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    @property
+    def glyph(self) -> str:
+        return self._glyph
+
+    def set_content(self, glyph: str, label: str) -> None:
+        metric = tokens.BarMetric
+        self._glyph, self._label = glyph, label
+        self.setFixedWidth(
+            2 * metric.BORDER + metric.CHIP_PAD_L + metric.CHIP_ICON + metric.CHIP_GAP
+            + _advance(label, tokens.BarFont.CHIP)
+            + metric.CHIP_GAP + metric.CHEVRON + metric.CHIP_PAD_R
+        )
+        self.update()
+
+    def is_open(self) -> bool:
+        return self._open
 
     def set_open(self, is_open: bool) -> None:
-        self._open = is_open
+        self._open = bool(is_open)
         self.update()
-
-    def set_content(self, icon_name, label, icon_colour=None, label_colour=None) -> None:
-        self._icon_name = icon_name
-        self._label = label
-        if icon_colour is not None:
-            self._icon_colour = icon_colour
-        self._label_colour = label_colour or tokens.Color.TEXT_PRIMARY
-        self._resize_to_fit()
-        self.update()
-
-    def _resize_to_fit(self) -> None:
-        from PyQt6.QtGui import QFontMetricsF
-
-        metric = tokens.ChooserMetric
-        if not self._label:
-            # Icon and chevron only, padded evenly: a labelled trigger's
-            # left padding would look like a gap with nothing in it.
-            self.setFixedWidth(
-                round(
-                    metric.TRIGGER_PAD_R + self._icon_size + 4
-                    + metric.CHEVRON + metric.TRIGGER_PAD_R
-                )
-            )
-            return
-        text = QFontMetricsF(_font(12.5, 500)).horizontalAdvance(self._label)
-        self.setFixedWidth(
-            round(
-                metric.TRIGGER_PAD_L + self._icon_size + 8 + text + 6
-                + metric.CHEVRON + metric.TRIGGER_PAD_R
-            )
-        )
-
-    def enterEvent(self, event) -> None:
-        self._hovered = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self.update()
-        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if self._released_inside(event):
             self.clicked.emit()
 
     def paintEvent(self, event) -> None:
-        metric, colour = tokens.ChooserMetric, tokens.ChooserColor
+        metric = tokens.BarMetric
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-
-        # The open trigger is visibly the source of the menu.
-        if self._open:
+        if self._open or self._hovered:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(design.chooser_color("TRIGGER_BG_OPEN"))
-            painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
-        elif self._hovered:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(_alpha(colour.TRIGGER_BG_OPEN, 0.05))
-            painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
-
+            painter.setBrush(_colour("ROW_HOVER_BG"))
+            painter.drawRoundedRect(rect, metric.BTN_RADIUS, metric.BTN_RADIUS)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(
-            design.chooser_color(
-                "TRIGGER_BORDER_OPEN" if self._open else "TRIGGER_BORDER"
-            )
+        # The open chip is visibly the source of the menu under it.
+        painter.setPen(_colour("CHIP_BORDER_OPEN" if self._open else "BAR_BORDER"))
+        painter.drawRoundedRect(rect, metric.BTN_RADIUS, metric.BTN_RADIUS)
+
+        x = metric.BORDER + metric.CHIP_PAD_L
+        _draw_icon(
+            painter, self._glyph, _colour("ACCENT_SOFT"),
+            x, (self.height() - metric.CHIP_ICON) / 2, metric.CHIP_ICON,
         )
-        painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
-
-        size = self._icon_size
-        x = metric.TRIGGER_PAD_R if not self._label else metric.TRIGGER_PAD_L
-        pixmap = design.icon(self._icon_name, QColor(self._icon_colour)).pixmap(size, size)
-        painter.drawPixmap(x, (self.height() - size) // 2, pixmap)
-
-        if self._label:
-            x += size + 8
-            painter.setFont(_font(12.5, 500))
-            painter.setPen(QColor(self._label_colour))
-            painter.drawText(
-                QRectF(x, 0, self.width() - x, self.height()),
-                Qt.AlignmentFlag.AlignVCenter,
-                self._label,
-            )
-
-        chevron = metric.CHEVRON
-        pixmap = design.icon("chevron", QColor(colour.HINT_FG)).pixmap(chevron, chevron)
-        painter.drawPixmap(
-            self.width() - metric.TRIGGER_PAD_R - chevron,
-            (self.height() - chevron) // 2,
-            pixmap,
-        )
-        painter.end()
-
-
-class _KindSwitch(_Surface):
-    """The stills/record axis: docs/design/recording.md ticket 5.
-
-    The two sides are not symmetric -- the mode list and the "then" list
-    both change meaning when this flips -- which is why it is its own
-    control rather than another `_Trigger`/`_Menu` pair. It carries no
-    chevron and opens no menu: there are only two states, so any click
-    flips between them, the same as `Chooser.set_kind` documents.
-
-A two-segment pill with a sliding highlight, not a boolean track+knob:
-    an empty knob says on/off, not on/off *what*. Purely UI/state -- this
-    ticket wires nothing to a recorder.
-
-    The segments are glyphs, not words: the capture-flow handoff draws a
-    camera and a filled dot, and "Record is a filled 10px circle, not a
-    glyph" -- a red-adjacent dot is what every recorder in the world uses
-    and needs no label. Spelling both out made the leading control the
-    widest thing in the row, ahead of the mode it is only qualifying.
-    """
-
-    toggled = pyqtSignal()
-
-    # (value, icon) -- `None` means the filled circle, which is drawn
-    # rather than loaded: every icon set's "record" glyph is a circle
-    # anyway, and a stroked one reads as a radio button.
-    SEGMENTS = (("stills", "camera"), ("record", None))
-    SEG_W = 30
-    DOT = 10
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        metric = tokens.ChooserMetric
-        self._kind = "stills"
-        self._seg_widths = [0, 0]
-        self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(metric.SWITCH_H)
-        self._resize_to_fit()
-
-    def set_kind(self, kind: str) -> None:
-        self._kind = kind
-        self.update()
-
-    def _resize_to_fit(self) -> None:
-        metric = tokens.ChooserMetric
-        self._seg_widths = [self.SEG_W for _ in self.SEGMENTS]
-        self.setFixedWidth(metric.SWITCH_PAD * 2 + sum(self._seg_widths))
-
-    def mouseReleaseEvent(self, event) -> None:
-        if self._released_inside(event):
-            self.toggled.emit()
-
-    def paintEvent(self, event) -> None:
-        metric, colour = tokens.ChooserMetric, tokens.ChooserColor
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        radius = rect.height() / 2
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.chooser_color("SWITCH_TRACK"))
-        painter.drawRoundedRect(rect, radius, radius)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.chooser_color("TRIGGER_BORDER"))
-        painter.drawRoundedRect(rect, radius, radius)
-
-        active = 0 if self._kind == "stills" else 1
-        seg_x = [metric.SWITCH_PAD]
-        for width in self._seg_widths[:-1]:
-            seg_x.append(seg_x[-1] + width)
-
-        highlight = QRectF(
-            seg_x[active], metric.SWITCH_PAD,
-            self._seg_widths[active], self.height() - metric.SWITCH_PAD * 2,
-        )
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.chooser_color("SWITCH_HIGHLIGHT"))
-        painter.drawRoundedRect(highlight, highlight.height() / 2, highlight.height() / 2)
-
-        for index, (_value, icon_name) in enumerate(self.SEGMENTS):
-            tint = QColor(colour.MODE_ACCENT if index == active else colour.ROW_IDLE_FG)
-            centre = QRectF(
-                seg_x[index], 0, self._seg_widths[index], self.height()
-            ).center()
-            if icon_name is None:
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(tint)
-                painter.drawEllipse(centre, self.DOT / 2, self.DOT / 2)
-                continue
-            size = 16
-            pixmap = design.icon(icon_name, tint).pixmap(size, size)
-            painter.drawPixmap(
-                round(centre.x() - size / 2), round(centre.y() - size / 2), pixmap
-            )
-        painter.end()
-
-
-class _Pill(QWidget):
-    """The hint line: an icon and a sentence, on its own small glass pill."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        metric = tokens.ChooserMetric
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedHeight(metric.HINT_H)
-        self._icon_name = "crop"
-        self._text = ""
-
-    def set_content(self, icon_name: str, text: str) -> None:
-        from PyQt6.QtGui import QFontMetricsF
-
-        metric = tokens.ChooserMetric
-        self._icon_name, self._text = icon_name, text
-        pad_v, pad_h = metric.HINT_PAD
-        width = QFontMetricsF(_font(11.5, 400)).horizontalAdvance(text)
-        self.setFixedWidth(round(pad_h * 2 + 14 + 7 + width))
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        metric, colour = tokens.ChooserMetric, tokens.ChooserColor
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.chooser_color("HINT_BG"))
-        painter.drawRoundedRect(rect, metric.HINT_RADIUS, metric.HINT_RADIUS)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.chooser_color("HINT_BORDER"))
-        painter.drawRoundedRect(rect, metric.HINT_RADIUS, metric.HINT_RADIUS)
-
-        _pad_v, pad_h = metric.HINT_PAD
-        pixmap = design.icon(self._icon_name, QColor(colour.MODE_ACCENT)).pixmap(14, 14)
-        painter.drawPixmap(pad_h, (self.height() - 14) // 2, pixmap)
-        painter.setFont(_font(11.5, 400))
-        painter.setPen(QColor(colour.HINT_FG))
+        x += metric.CHIP_ICON + metric.CHIP_GAP
+        painter.setFont(_font(tokens.BarFont.CHIP))
+        painter.setPen(_colour("CHIP_FG"))
         painter.drawText(
-            QRectF(pad_h + 14 + 7, 0, self.width(), self.height()),
-            Qt.AlignmentFlag.AlignVCenter,
-            self._text,
+            QRectF(x, 0, self.width() - x, self.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self._label,
+        )
+        _draw_icon(
+            painter, "chevron", _colour("ROW_NOTE_FG"),
+            self.width() - metric.BORDER - metric.CHIP_PAD_R - metric.CHEVRON,
+            (self.height() - metric.CHEVRON) / 2, metric.CHEVRON,
         )
         painter.end()
 
 
-class _Legend(QWidget):
-    """`R W F L` mode · `Space` reopen · `Esc` cancel, bottom centre."""
-
-    PARTS = (
-        ("R W F L", " mode"),
-        ("Space", " reopen"),
-        ("Esc", " cancel"),
-    )
+class _Divider(QWidget):
+    """The rule between what to capture and what happens to it."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setFixedHeight(tokens.ChooserMetric.LEGEND_H)
-        self._measure()
-
-    def _measure(self) -> None:
-        from PyQt6.QtGui import QFontMetricsF
-
-        keys = QFontMetricsF(_font(11.5, 500, mono=True))
-        body = QFontMetricsF(_font(11.5, 400))
-        width = 26
-        for key, label in self.PARTS:
-            width += keys.horizontalAdvance(key) + body.horizontalAdvance(label) + 18
-        self.setFixedWidth(round(width))
+        metric = tokens.BarMetric
+        self.setFixedSize(2 * metric.DIVIDER_MARGIN + 1, metric.BTN)
 
     def paintEvent(self, event) -> None:
-        colour = tokens.ChooserColor
+        metric = tokens.BarMetric
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(_alpha(tokens.Color.BAR_BG, tokens.ChooserColor.PANEL_BG_ALPHA))
-        painter.drawRoundedRect(rect, 10, 10)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.chooser_color("TRIGGER_BORDER"))
-        painter.drawRoundedRect(rect, 10, 10)
-
-        from PyQt6.QtGui import QFontMetricsF
-
-        keys_font, body_font = _font(11.5, 500, mono=True), _font(11.5, 400)
-        keys, body = QFontMetricsF(keys_font), QFontMetricsF(body_font)
-        x = 13.0
-        for index, (key, label) in enumerate(self.PARTS):
-            painter.setFont(keys_font)
-            painter.setPen(QColor(colour.LEGEND_KEY_FG))
-            painter.drawText(
-                QRectF(x, 0, keys.horizontalAdvance(key), self.height()),
-                Qt.AlignmentFlag.AlignVCenter,
-                key,
-            )
-            x += keys.horizontalAdvance(key)
-            painter.setFont(body_font)
-            painter.setPen(QColor(colour.HINT_FG))
-            tail = label if index == len(self.PARTS) - 1 else f"{label}  ·"
-            painter.drawText(
-                QRectF(x, 0, body.horizontalAdvance(tail) + 8, self.height()),
-                Qt.AlignmentFlag.AlignVCenter,
-                tail,
-            )
-            x += body.horizontalAdvance(tail) + 10
+        painter.fillRect(
+            QRectF(metric.DIVIDER_MARGIN, (self.height() - metric.DIVIDER_H) / 2, 1, metric.DIVIDER_H),
+            _colour("DIVIDER"),
+        )
         painter.end()
 
 
-class _Tab(_Surface):
-    """What the panel collapses to once a mode is armed.
-
-    26px of the monitor's top edge -- which on GNOME is the top bar's
-    territory anyway, so in practice it costs nothing that was not already
-    spoken for. Window previews work everywhere below.
-
-    This is the one place `windowOpacity`-style translucency is genuinely
-    right: the whole widget really is see-through at rest, so an opacity
-    effect is correct here where it would be wrong on the panel.
+class _DestinationButton(_Surface):
+    """What happens after the capture: an icon, no label. A click cycles to
+    the next destination and the tooltip names the current one. The stills
+    bar's split button restates it a moment later, so the row need not.
     """
 
     clicked = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        metric = tokens.ChooserMetric
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(metric.TAB_H)
-        self._mode = ""
-        self._icon_name = "crop"
-        self._tail = ""
-        self._delay = ""
-        self._effect = QGraphicsOpacityEffect(self)
-        self._effect.setOpacity(metric.TAB_OPACITY)
-        self.setGraphicsEffect(self._effect)
+        self._glyph = "copy"
+        self.setFixedSize(tokens.BarMetric.BTN, tokens.BarMetric.BTN)
 
-    def set_content(self, icon_name, mode, tail, delay) -> None:
-        from PyQt6.QtGui import QFontMetricsF
+    @property
+    def glyph(self) -> str:
+        return self._glyph
 
-        metric = tokens.ChooserMetric
-        self._icon_name, self._mode, self._tail, self._delay = icon_name, mode, tail, delay
-        width = metric.TAB_PAD_H * 2 + 15 + 7
-        width += QFontMetricsF(_font(12, 500)).horizontalAdvance(mode) + 6
-        width += QFontMetricsF(_font(11.5, 400)).horizontalAdvance(tail) + 6
-        if delay:
-            width += QFontMetricsF(_font(11, 400, mono=True)).horizontalAdvance(delay) + 8
-        width += metric.CHEVRON + 4
-        self.setFixedWidth(round(width))
+    def set_glyph(self, glyph: str) -> None:
+        self._glyph = glyph
         self.update()
-
-    def enterEvent(self, event) -> None:
-        self._effect.setOpacity(1.0)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._effect.setOpacity(tokens.ChooserMetric.TAB_OPACITY)
-        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if self._released_inside(event):
             self.clicked.emit()
 
     def paintEvent(self, event) -> None:
-        from PyQt6.QtGui import QFontMetricsF
-
-        metric, colour = tokens.ChooserMetric, tokens.ChooserColor
+        metric = tokens.BarMetric
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        _glass(painter, QRectF(self.rect()), metric.TAB_RADIUS, metric.TAB_BG_ALPHA)
-
-        x = float(metric.TAB_PAD_H)
-        pixmap = design.icon(self._icon_name, QColor(colour.MODE_ACCENT)).pixmap(15, 15)
-        painter.drawPixmap(round(x), (self.height() - 15) // 2, pixmap)
-        x += 15 + 7
-
-        painter.setFont(_font(12, 500))
-        painter.setPen(QColor(colour.MODE_ACCENT))
-        painter.drawText(
-            QRectF(x, 0, self.width(), self.height()),
-            Qt.AlignmentFlag.AlignVCenter,
-            self._mode,
-        )
-        x += QFontMetricsF(_font(12, 500)).horizontalAdvance(self._mode) + 6
-
-        painter.setFont(_font(11.5, 400))
-        painter.setPen(QColor(colour.HINT_FG))
-        painter.drawText(
-            QRectF(x, 0, self.width(), self.height()),
-            Qt.AlignmentFlag.AlignVCenter,
-            self._tail,
-        )
-        x += QFontMetricsF(_font(11.5, 400)).horizontalAdvance(self._tail) + 6
-
-        if self._delay:
-            painter.setFont(_font(11, 400, mono=True))
-            painter.setPen(QColor(colour.MODE_ACCENT))
-            painter.drawText(
-                QRectF(x, 0, self.width(), self.height()),
-                Qt.AlignmentFlag.AlignVCenter,
-                self._delay,
-            )
-
-        chevron = metric.CHEVRON
-        pixmap = design.icon("chevron", QColor(colour.HINT_FG)).pixmap(chevron, chevron)
-        painter.drawPixmap(
-            self.width() - metric.TAB_PAD_H - chevron,
-            (self.height() - chevron) // 2,
-            pixmap,
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        if self._hovered:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_colour("CONTROL_HOVER_BG"))
+            painter.drawRoundedRect(rect, metric.BTN_RADIUS, metric.BTN_RADIUS)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(_colour("BAR_BORDER"))
+        painter.drawRoundedRect(rect, metric.BTN_RADIUS, metric.BTN_RADIUS)
+        offset = (metric.BTN - metric.ICON) / 2
+        _draw_icon(
+            painter, self._glyph,
+            _colour("CONTROL_HOVER_FG" if self._hovered else "TOOL_IDLE_FG"),
+            offset, offset, metric.ICON,
         )
         painter.end()
 
 
-class _RowToggle(_Surface):
-    """An on/off control on the row: a glyph and a label, no chevron.
+class _Flag(_Surface):
+    """A switch in the flag well.
 
-    There are two -- Last region (whether Region opens on the rectangle the
-    last snip came from) and Hide sensitive (whether screenshots black out
-    sensitive text). What follows was learned building the first.
-
-    A toggle can be unavailable: greyed, inert to clicks, and still
-    hoverable, so the reason it cannot be used has somewhere to be read.
-
-    Icon *and* label, with no chevron -- it opens no menu, and a chevron
-    would promise one. It sits immediately after the mode trigger since
-    that is the mode it modifies, and nowhere near the destination and
-    delay triggers, which answer a different question.
-
-    The label is not decoration. This shipped icon-only, on the reasoning
-    that the handoff makes mode the row's only labelled control, and that
-    was wrong: a `redo` glyph says "again" but not *what* again, and the
-    control could not be identified without hovering it. A toggle whose
-    state is legible but whose subject is not is worse than no toggle --
-    the user can see that something is on without being able to tell what.
-
-    On the row rather than in Settings because a preference nobody finds is
-    a preference nobody has: this one was in Settings first and went
-    unnoticed until it was pointed out. It stays reachable once it is on,
-    even though the chooser stands down the moment a region is
-    pre-selected -- Esc clears the selection and brings the row back, which
-    is already the design's documented way back to the mode.
-
-    `redo` for the glyph: the vendored set has no clock or history icon,
-    and "do that again" is exactly what the control means.
+    Armed is the soft accent on an 18% accent wash, so the row's one bright
+    thing is always a live state. Unavailable is greyed and inert, and still
+    hoverable, so why it cannot be used has somewhere to be read.
     """
 
-    toggled = pyqtSignal(bool)
-    hovered = pyqtSignal(bool)
-
-    def __init__(self, glyph: str, label: str, parent=None):
+    def __init__(self, glyph: str, parent=None):
         super().__init__(parent)
-        metric = tokens.ChooserMetric
         self._glyph = glyph
-        self._label = label
-        self._on = False
+        self._armed = False
         self._available = True
-        self._hovered = False
-        self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(metric.TRIGGER_H)
-        # Sized the way a labelled `_Trigger` is, minus the chevron it does
-        # not have -- so it sits in the row at the same rhythm as the
-        # controls either side of it.
-        text = QFontMetricsF(_font(12.5, 500)).horizontalAdvance(label)
-        self.setFixedWidth(
-            round(metric.TRIGGER_PAD_L + 16 + 8 + text + metric.TRIGGER_PAD_R)
-        )
+        self.setFixedHeight(tokens.BarMetric.BTN)
 
-    def is_on(self) -> bool:
-        return self._on
+    def is_armed(self) -> bool:
+        return self._armed
 
-    def set_on(self, on: bool) -> None:
-        """State only -- never emits. Seeding this from stored config and
-        the user clicking it are different events, and only the second is
-        worth writing back.
-        """
-        self._on = bool(on)
+    def set_armed(self, armed: bool) -> None:
+        self._armed = bool(armed)
         self.update()
 
     def is_available(self) -> bool:
@@ -840,158 +449,562 @@ class _RowToggle(_Surface):
         )
         self.update()
 
-    def enterEvent(self, event) -> None:
-        self._hovered = True
-        self.hovered.emit(True)
-        self.update()
-        super().enterEvent(event)
+    def _foreground(self) -> QColor:
+        if not self._available:
+            return _colour("TOOL_DISABLED_FG")
+        return _colour("ACCENT_SOFT" if self._armed else "FLAG_OFF_FG")
 
-    def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self.hovered.emit(False)
-        self.update()
-        super().leaveEvent(event)
+    def _paint_ground(self, painter: QPainter) -> None:
+        if not self._available:
+            return
+        if self._armed:
+            fill = _colour("ACCENT_WASH")
+        elif self._hovered:
+            fill = _colour("CONTROL_HOVER_BG")
+        else:
+            return
+        radius = tokens.BarMetric.WELL_BTN_RADIUS
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+
+
+class _HideFlag(_Flag):
+    """Hide sensitive: black out passwords, keys and card numbers.
+
+    The eye with a strike, never the droplet. The droplet is the blur tool's
+    glyph and says "I will smudge this by hand"; this says the app finds and
+    masks it.
+    """
+
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(tokens.HIDE_SENSITIVE_GLYPH, parent)
+        self.setFixedWidth(tokens.BarMetric.BTN)
 
     def mouseReleaseEvent(self, event) -> None:
         if self._available and self._released_inside(event):
-            self._on = not self._on
+            self._armed = not self._armed
             self.update()
-            self.toggled.emit(self._on)
+            self.toggled.emit(self._armed)
 
     def paintEvent(self, event) -> None:
-        metric, colour = tokens.ChooserMetric, tokens.ChooserColor
+        metric = tokens.BarMetric
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        self._paint_ground(painter)
+        offset = (metric.BTN - metric.ICON) / 2
+        _draw_icon(painter, self._glyph, self._foreground(), offset, offset, metric.ICON)
+        painter.end()
 
-        # On reads as filled, the same way an open trigger does -- an
-        # outline-only difference between on and off is exactly the
-        # distinction that disappears at a glance on a busy desktop.
-        lit = self._on and self._available
-        if lit:
+
+class _DelayFlag(_Flag):
+    """Delay: a click advances through `tokens.DELAYS`. It shows its value
+    only when one is set -- a countdown is the thing here that can surprise
+    you, so it earns width exactly when it is armed.
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__("timer", parent)
+        self._value = ""
+        self.set_value("")
+
+    @property
+    def value(self) -> str:
+        return self._value
+
+    def set_value(self, value: str) -> None:
+        metric = tokens.BarMetric
+        self._value = value
+        width = 2 * metric.FLAG_PAD_H + metric.ICON
+        if value:
+            width += metric.FLAG_GAP + _advance(value, tokens.BarFont.DELAY, mono=True)
+        self.setFixedWidth(width)
+        self.set_armed(bool(value))
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._released_inside(event):
+            self.clicked.emit()
+
+    def paintEvent(self, event) -> None:
+        metric = tokens.BarMetric
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._paint_ground(painter)
+        foreground = self._foreground()
+        _draw_icon(
+            painter, self._glyph, foreground,
+            metric.FLAG_PAD_H, (self.height() - metric.ICON) / 2, metric.ICON,
+        )
+        if self._value:
+            x = metric.FLAG_PAD_H + metric.ICON + metric.FLAG_GAP
+            painter.setFont(_font(tokens.BarFont.DELAY, mono=True))
+            painter.setPen(foreground)
+            painter.drawText(
+                QRectF(x, 0, self.width() - x, self.height()),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                self._value,
+            )
+        painter.end()
+
+
+_TEXT_LEFT = int(
+    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+) | int(Qt.TextFlag.TextDontClip)
+
+
+class _RowSpec(NamedTuple):
+    """One row of the mode menu.
+
+    `subtitle` is Last region's dimensions or, for a row that cannot be
+    picked, the reason -- one slot for both, so a greyed row explains itself
+    where Last region says what it would restore. No row carries a note:
+    what a mode does is its tooltip, and the hint pill once it is chosen.
+    """
+
+    value: str
+    glyph: str
+    label: str
+    shortcut: str
+    subtitle: str = ""
+    subtitle_mono: bool = False
+    tooltip: str = ""
+    disabled: bool = False
+
+
+class _MenuRow(_Surface):
+    """Glyph, label, shortcut, tick -- and a subtitle under the label when
+    the row has one. A disabled row is inert, not only greyed: it swallows
+    its press (so the overlay does not start a drag) and never clicks.
+    """
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, spec: _RowSpec, selected: bool = False, parent=None):
+        super().__init__(parent, clickable=not spec.disabled)
+        metric, font = tokens.BarMetric, tokens.BarFont
+        self.spec = spec
+        self._selected = bool(selected)
+        self.setToolTip(spec.tooltip)
+        pad_v, _pad_h = metric.MENU_ROW_PAD
+        inner = metric.MENU_ROW_ICON
+        if spec.subtitle:
+            inner = max(
+                inner,
+                math.ceil(font.MENU_LABEL[0] + metric.MENU_NOTE_GAP + font.MENU_NOTE[0]),
+            )
+        self.setFixedHeight(2 * pad_v + inner)
+
+    @property
+    def value(self) -> str:
+        return self.spec.value
+
+    @property
+    def selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = bool(selected)
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if not self.spec.disabled and self._released_inside(event):
+            self.clicked.emit(self.spec.value)
+
+    def paintEvent(self, event) -> None:
+        metric, font = tokens.BarMetric, tokens.BarFont
+        spec = self.spec
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        width, height = self.width(), self.height()
+
+        if not spec.disabled and (self._hovered or self._selected):
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(_alpha(colour.MODE_ACCENT, 0.16))
-            painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
-        elif self._hovered and self._available:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(_alpha(colour.TRIGGER_BG_OPEN, 0.05))
-            painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
+            painter.setBrush(_colour("ROW_HOVER_BG" if self._hovered else "ROW_SELECTED_BG"))
+            painter.drawRoundedRect(
+                QRectF(self.rect()), metric.MENU_ROW_RADIUS, metric.MENU_ROW_RADIUS
+            )
 
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(
-            QColor(colour.MODE_ACCENT) if lit
-            else design.chooser_color("TRIGGER_BORDER")
-        )
-        painter.drawRoundedRect(rect, metric.TRIGGER_RADIUS, metric.TRIGGER_RADIUS)
+        if spec.disabled:
+            foreground = _colour("TOOL_DISABLED_FG")
+        else:
+            foreground = _colour("ROW_SELECTED_FG" if self._selected else "ROW_IDLE_FG")
 
-        glyph = (
-            colour.MODE_ACCENT if lit
-            else colour.ROW_IDLE_FG if self._available
-            else colour.ROW_DISABLED_FG
+        _pad_v, pad_h = metric.MENU_ROW_PAD
+        x = pad_h
+        _draw_icon(
+            painter, spec.glyph, foreground,
+            x, (height - metric.MENU_ROW_ICON) / 2, metric.MENU_ROW_ICON,
         )
-        x = metric.TRIGGER_PAD_L
-        pixmap = design.icon(self._glyph, QColor(glyph)).pixmap(16, 16)
-        painter.drawPixmap(x, (self.height() - 16) // 2, pixmap)
+        x += metric.MENU_ROW_ICON + metric.MENU_ROW_GAP
 
-        # The label goes accent alongside the glyph rather than staying
-        # neutral: on and off have to be tellable apart at a glance from
-        # across a monitor, and one recoloured element is easier to miss
-        # than two.
-        x += 16 + 8
-        painter.setFont(_font(12.5, 500))
-        painter.setPen(
-            QColor(colour.MODE_ACCENT) if lit
-            else QColor(tokens.Color.TEXT_PRIMARY) if self._available
-            else QColor(colour.ROW_DISABLED_FG)
+        # The tick's slot is kept whether or not this row is the selected
+        # one, so the shortcuts line up down the menu.
+        right = width - pad_h - metric.MENU_TICK
+        if self._selected and not spec.disabled:
+            _draw_icon(
+                painter, "check", _colour("ACCENT"),
+                right, (height - metric.MENU_TICK) / 2, metric.MENU_TICK,
+            )
+        right -= metric.MENU_ROW_GAP
+        if spec.shortcut:
+            shortcut_w = _advance(spec.shortcut, font.MENU_SHORTCUT, mono=True)
+            painter.setFont(_font(font.MENU_SHORTCUT, mono=True))
+            # Dimmed with the rest of a disabled row: at full strength it
+            # reads as if the key still did something.
+            painter.setPen(_colour("TOOL_DISABLED_FG" if spec.disabled else "SHORTCUT_FG"))
+            painter.drawText(
+                QRectF(right - shortcut_w, 0, shortcut_w, height),
+                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                | int(Qt.TextFlag.TextDontClip),
+                spec.shortcut,
+            )
+            right -= shortcut_w + metric.MENU_ROW_GAP
+        column = max(0.0, right - x)
+
+        # Elided rather than trusted: the menu is a fixed width, and a
+        # fallback face can be wider than the one the width was tuned to.
+        label_font = _font(font.MENU_LABEL)
+        label = QFontMetricsF(label_font).elidedText(
+            spec.label, Qt.TextElideMode.ElideRight, column
         )
+        painter.setFont(label_font)
+        painter.setPen(foreground)
+        if not spec.subtitle:
+            painter.drawText(QRectF(x, 0, column, height), _TEXT_LEFT, label)
+            painter.end()
+            return
+
+        label_h, subtitle_h = font.MENU_LABEL[0], font.MENU_NOTE[0]
+        top = (height - (label_h + metric.MENU_NOTE_GAP + subtitle_h)) / 2
+        painter.drawText(QRectF(x, top, column, label_h), _TEXT_LEFT, label)
+        subtitle_font = _font(font.MENU_NOTE, mono=spec.subtitle_mono)
+        painter.setFont(subtitle_font)
+        painter.setPen(_colour("ROW_NOTE_FG"))
         painter.drawText(
-            QRectF(x, 0, self.width() - x, self.height()),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            self._label,
+            QRectF(x, top + label_h + metric.MENU_NOTE_GAP, column, subtitle_h),
+            _TEXT_LEFT,
+            QFontMetricsF(subtitle_font).elidedText(
+                spec.subtitle, Qt.TextElideMode.ElideRight, column
+            ),
         )
         painter.end()
 
 
-class ChooserPanel(_Surface):
-    """The 54px row itself: mode, "then", destination, delay.
-
-    Square top corners and 14px bottom corners, with no top border, so it
-    reads as hanging from the monitor's edge rather than floating near it.
-    That is the visual claim that this bar belongs to this monitor.
-    """
-
-    triggerClicked = pyqtSignal(str)
+class _MenuRule(QWidget):
+    """The rule between the capture modes and Last region."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        metric = tokens.ChooserMetric
-        colour = tokens.ChooserColor
+        self.setFixedHeight(1 + 2 * tokens.BarMetric.MENU_RULE_MARGIN)
+
+    def paintEvent(self, event) -> None:
+        margin = tokens.BarMetric.MENU_RULE_MARGIN
+        painter = QPainter(self)
+        painter.fillRect(QRectF(margin, margin, self.width() - 2 * margin, 1), _colour("MENU_RULE"))
+        painter.end()
+
+
+class _Menu(QWidget):
+    """The mode menu: a frameless top-level `Qt.Popup`, never a child
+    widget of the row.
+
+    Top-level because an open menu has to paint over the hint pill beneath
+    the row, which a child of the row cannot do; and a popup closes itself
+    on a click anywhere else, which is the dismissal the handoff asks for.
+    """
+
+    picked = pyqtSignal(str)
+    closed = pyqtSignal()
+
+    def __init__(self, rows, last_region: _RowSpec, selected: str, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        metric = tokens.BarMetric
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedHeight(metric.HEIGHT)
-
-        row = QHBoxLayout(self)
-        row.setContentsMargins(metric.PAD, metric.PAD, metric.PAD, metric.PAD)
-        row.setSpacing(metric.GAP)
-
-        self.kind_switch = _KindSwitch(self)
-        row.addWidget(self.kind_switch)
-
-        self.mode_trigger = _Trigger(
-            "crop", "Region", 16, colour.MODE_ACCENT, self
+        column = QVBoxLayout(self)
+        column.setContentsMargins(
+            metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD
         )
-        self.mode_trigger.clicked.connect(lambda: self.triggerClicked.emit("mode"))
-        row.addWidget(self.mode_trigger)
-
-        # Immediately after the mode it modifies, before the destination
-        # and delay triggers, which answer a different question entirely.
-        self.reuse_toggle = _RowToggle("redo", tokens.REUSE_LABEL, self)
-        row.addWidget(self.reuse_toggle)
-        # Next to Last region: both change what a screenshot does, and
-        # neither is part of the "then" sentence the triggers after them
-        # spell out.
-        self.hide_toggle = _RowToggle("blur", tokens.HIDE_SENSITIVE_LABEL, self)
-        row.addWidget(self.hide_toggle)
-
-        # No "then" text node, and no label on this trigger. The
-        # capture-flow handoff makes mode the only labelled control and
-        # calls the destination a "secondary decision, so no label on the
-        # trigger" -- and "then Review" reads as the sentence's main clause
-        # when it is the part most users set once and never touch.
-        self.after_trigger = _Trigger("eye", "", 15, colour.ROW_IDLE_FG, self)
-        self.after_trigger.clicked.connect(lambda: self.triggerClicked.emit("after"))
-        row.addWidget(self.after_trigger)
-
-        self.delay_trigger = _Trigger("timer", "", 15, colour.ROW_IDLE_FG, self)
-        self.delay_trigger.clicked.connect(lambda: self.triggerClicked.emit("delay"))
-        row.addWidget(self.delay_trigger)
-
+        column.setSpacing(0)
+        self._rows: dict[str, _MenuRow] = {}
+        for spec in rows:
+            self._add(column, spec, selected)
+        self.rule = _MenuRule(self)
+        column.addWidget(self.rule)
+        self._add(column, last_region, selected)
+        self.setFixedWidth(metric.MENU_W_MODE)
         self.adjustSize()
+
+    def _add(self, column: QVBoxLayout, spec: _RowSpec, selected: str) -> None:
+        row = _MenuRow(spec, spec.value == selected, self)
+        row.clicked.connect(self.picked)
+        self._rows[spec.value] = row
+        column.addWidget(row)
+
+    def closeEvent(self, event) -> None:
+        self.closed.emit()
+        super().closeEvent(event)
+
+    def paintEvent(self, event) -> None:
+        metric = tokens.BarMetric
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setBrush(_colour("MENU_BG"))
+        painter.setPen(_colour("MENU_BORDER"))
+        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
+        painter.end()
+
+
+class ChooserRow(_Surface):
+    """The row: kind, mode, a divider, destination, flags.
+
+    Square top corners, 12px bottom corners and no top border, so it hangs
+    from the monitor's edge -- the visual claim that it belongs to this
+    monitor. The fill is 94% alpha and every control on it is opaque.
+
+    A press anywhere on it, gaps included, is still a press on the row
+    (`_Surface`), and its background keeps an ordinary arrow while the
+    frozen frame around it is a crosshair.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent, clickable=False)
+        metric = tokens.BarMetric
+        # Only matters where the row is a window of its own -- a test's, with
+        # no host -- so that what is under its translucent fill shows.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        layout = QHBoxLayout(self)
+        edge = metric.BORDER + metric.PAD
+        # Height is ROW_H and the controls centre in it. The wells are 32px,
+        # which the handoff's 6 + 28 + 6 does not leave room for; centring
+        # keeps the row at ROW_H and the 28px controls at its 6px padding.
+        layout.setContentsMargins(edge, 0, edge, metric.BORDER)
+        layout.setSpacing(metric.GAP)
+
+        self.stills = _KindButton("stills")
+        self.record = _KindButton("record")
+        self.kind_well = _Well(self.stills, self.record, parent=self)
+        self.mode_chip = _ModeChip(self)
+        self.divider = _Divider(self)
+        self.destination = _DestinationButton(self)
+        self.hide_flag = _HideFlag()
+        self.delay_flag = _DelayFlag()
+        self.flag_well = _Well(self.hide_flag, self.delay_flag, parent=self)
+        for widget in (
+            self.kind_well, self.mode_chip, self.divider, self.destination, self.flag_well
+        ):
+            layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(metric.SHADOW_BLUR)
+        shadow.setOffset(0, metric.SHADOW_DY)
+        shadow.setColor(_colour("SHADOW"))
+        self.setGraphicsEffect(shadow)
+        self.refit()
+
+    def refit(self) -> None:
+        """Size the row to its controls, now.
+
+        Synchronous on purpose: a control that changes width (the chip's
+        label, Delay's value, Hide sensitive leaving on the record side)
+        would otherwise resize the row only on Qt's next layout pass, and the
+        row would be centred on its old width until then.
+        """
+        for well in (self.kind_well, self.flag_well):
+            well.layout().activate()
+        layout = self.layout()
+        layout.invalidate()
+        self.setFixedSize(layout.sizeHint().width(), tokens.BarMetric.ROW_H)
+        layout.activate()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        _glass(painter, QRectF(self.rect()), tokens.ChooserMetric.RADIUS)
+        _paint_docked(
+            painter, self, tokens.BarMetric.RADIUS_DOCKED,
+            _colour("BAR_BG"), _colour("BAR_BORDER"),
+        )
         painter.end()
+
+
+class _HintPill(QWidget):
+    """The hint line under the row: the active mode's glyph and its next
+    step, or what the hovered control does.
+
+    Passive: nothing on it clicks, so a press on it is left to the drag
+    underneath rather than swallowed.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        metric = tokens.BarMetric
+        pad_v, _pad_h = metric.HINT_PAD
+        self._glyph = "crop"
+        self._text = ""
+        self.setFixedHeight(2 * metric.BORDER + 2 * pad_v + metric.HINT_ICON)
+
+    @property
+    def glyph(self) -> str:
+        return self._glyph
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+    def set_content(self, glyph: str, text: str) -> None:
+        metric = tokens.BarMetric
+        _pad_v, pad_h = metric.HINT_PAD
+        self._glyph, self._text = glyph, text
+        self.setFixedWidth(
+            2 * metric.BORDER + 2 * pad_h + metric.HINT_ICON + metric.HINT_ICON_GAP
+            + _advance(text, tokens.BarFont.HINT)
+        )
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        metric = tokens.BarMetric
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setBrush(_colour("HINT_BG"))
+        painter.setPen(_colour("HINT_BORDER"))
+        painter.drawRoundedRect(rect, metric.HINT_RADIUS, metric.HINT_RADIUS)
+        _pad_v, pad_h = metric.HINT_PAD
+        x = metric.BORDER + pad_h
+        _draw_icon(
+            painter, self._glyph, _colour("ACCENT_SOFT"),
+            x, (self.height() - metric.HINT_ICON) / 2, metric.HINT_ICON,
+        )
+        x += metric.HINT_ICON + metric.HINT_ICON_GAP
+        painter.setFont(_font(tokens.BarFont.HINT))
+        painter.setPen(_colour("HINT_FG"))
+        painter.drawText(QRectF(x, 0, self.width() - x, self.height()), _TEXT_LEFT, self._text)
+        painter.end()
+
+
+class _Tab(_Surface):
+    """What the row collapses to once a selection exists.
+
+    22px on the same edge, carrying the mode, `then <destination>` and --
+    when Hide sensitive is on -- the eye with a strike: flags carry through
+    the change of stage, and keeping them visible is the point of the tab.
+
+    Its 70% is the one real opacity on this surface, and correct here where
+    it would be wrong on the row: the whole tab is meant to recede until the
+    pointer is on it.
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._glyph = "crop"
+        self._mode = ""
+        self._tail = ""
+        self._hide = False
+        self.setFixedHeight(tokens.BarMetric.TAB_H)
+        self.setToolTip(tokens.TAB_TOOLTIP)
+        self._effect = QGraphicsOpacityEffect(self)
+        self._effect.setOpacity(tokens.BarMetric.TAB_OPACITY)
+        self.setGraphicsEffect(self._effect)
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def tail(self) -> str:
+        return self._tail
+
+    @property
+    def carries_hide_sensitive(self) -> bool:
+        return self._hide
+
+    def opacity(self) -> float:
+        return self._effect.opacity()
+
+    def set_content(self, glyph: str, mode: str, tail: str, hide: bool) -> None:
+        metric, font = tokens.BarMetric, tokens.BarFont
+        self._glyph, self._mode, self._tail, self._hide = glyph, mode, tail, bool(hide)
+        width = (
+            2 * metric.BORDER + 2 * metric.TAB_PAD_H
+            + metric.TAB_ICON + metric.TAB_ICON_GAP + _advance(mode, font.TAB_MODE)
+            + 2 * metric.TAB_GAP + 1 + _advance(tail, font.TAB_TAIL)
+        )
+        if self._hide:
+            width += 2 * metric.TAB_GAP + 1 + metric.TAB_ICON
+        self.setFixedWidth(width)
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._effect.setOpacity(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._effect.setOpacity(tokens.BarMetric.TAB_OPACITY)
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._released_inside(event):
+            self.clicked.emit()
+
+    def paintEvent(self, event) -> None:
+        metric, font = tokens.BarMetric, tokens.BarFont
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        _paint_docked(painter, self, metric.TAB_RADIUS, _colour("TAB_BG"), _colour("BAR_BORDER"))
+        height = self.height()
+        accent = _colour("ACCENT_SOFT")
+
+        def separator(at: float) -> float:
+            at += metric.TAB_GAP
+            painter.fillRect(
+                QRectF(at, (height - metric.TAB_SEP_H) / 2, 1, metric.TAB_SEP_H),
+                _colour("TAB_SEP"),
+            )
+            return at + 1 + metric.TAB_GAP
+
+        x = metric.BORDER + metric.TAB_PAD_H
+        _draw_icon(painter, self._glyph, accent, x, (height - metric.TAB_ICON) / 2, metric.TAB_ICON)
+        x += metric.TAB_ICON + metric.TAB_ICON_GAP
+        painter.setFont(_font(font.TAB_MODE))
+        painter.setPen(accent)
+        painter.drawText(QRectF(x, 0, self.width() - x, height), _TEXT_LEFT, self._mode)
+        x = separator(x + _advance(self._mode, font.TAB_MODE))
+        painter.setFont(_font(font.TAB_TAIL))
+        painter.setPen(_colour("ROW_NOTE_FG"))
+        painter.drawText(QRectF(x, 0, self.width() - x, height), _TEXT_LEFT, self._tail)
+        if self._hide:
+            x = separator(x + _advance(self._tail, font.TAB_TAIL))
+            _draw_icon(
+                painter, tokens.HIDE_SENSITIVE_GLYPH, accent,
+                x, (height - metric.TAB_ICON) / 2, metric.TAB_ICON,
+            )
+        painter.end()
+
+
+_MODE_GLYPHS = {
+    **{label: glyph for label, glyph, _note in tokens.CAPTURE_MODES},
+    tokens.LAST_REGION_MODE: tokens.LAST_REGION_GLYPH,
+}
 
 
 class Chooser(QWidget):
     """The whole surface and its state machine.
 
-    Two phases, and the second is the design problem the handoff is mostly
-    about. **Choosing**: the full row, the hint, the legend. **Armed**: the
-    row collapses to a 26px tab still hanging from the same edge, because
-    Region and Window both need the screen back -- one to drag on, the
-    other to hover over.
+    Two phases. **choosing**: the row and its hint pill. **collapsed**: the
+    tab, once a selection exists. `OverlayWindow` moves between them
+    (`collapse`, `reopen`), because only it knows when a selection exists;
+    picking a mode never changes the phase, because picking a mode does not
+    arm it.
 
-    Full screen is the exception and does not arm at all: it has nothing
-    left to aim at, so choosing it fires the grab. `IMMEDIATE_MODES` carries
-    that rather than a branch on the mode's name -- and `MONITOR_MODES` the
-    exception to it: with more than one monitor, which one is still a
-    choice, so Full screen arms there after all (`_fires_immediately`).
-
-    Everything positions against `screen`, the monitor the snip opened on --
-    never the virtual desktop, which on a staggered multi-monitor setup puts
-    the panel in a gap between screens.
+    Everything positions against `set_screen`'s rect, the monitor the
+    overlay hands over -- never the virtual desktop, which on a staggered
+    desk puts the row in a gap between screens.
     """
 
     modeChosen = pyqtSignal(str)
@@ -1010,61 +1023,51 @@ class Chooser(QWidget):
 
         self._mode = tokens.CAPTURE_MODES[0][0]
         self._after = tokens.AFTER_DEFAULT
-        # What the record side falls back to when this chooser switches to
-        # it. A constant until recording's destination gained a Settings
-        # row -- it could only ever be changed per-capture, on this
-        # surface, with no way to say what it should open on. Seeded by
-        # `OverlayWindow` from `setup_desktop.load_recording_after()`;
-        # kept as a plain attribute with a token default so a Chooser built
-        # without one (every test that does) behaves exactly as before.
+        # What the record side falls back to when the chooser switches to
+        # it. Seeded by `OverlayWindow` from Settings; a token default keeps a
+        # Chooser built without one (every test that does) as it was.
         self._record_after_default = tokens.RECORD_AFTER_DEFAULT
         self._delay = tokens.DELAY_DEFAULT
         self._kind = "stills"
-        # Whether there is a browser page for `Tab` to capture. False until
-        # told otherwise, so a Chooser built without a seed (every test that
-        # does) greys the row rather than promising a window nothing has
-        # found -- `OverlayWindow` is what asks the geometry provider.
+        # Whether there is a browser page to capture. False until told
+        # otherwise, so a Chooser built without a seed greys the row rather
+        # than promising a window nothing has found.
         self._browser_available = False
         # Why Active window cannot be picked, or None once `OverlayWindow`
-        # has found the window the user was in. Greyed until then, for the
-        # reason `_browser_available` starts False.
+        # has found the window the user was in.
         self._active_window_reason: str | None = tokens.ACTIVE_WINDOW_UNAVAILABLE
         # How many monitors the host window covers. One until told
-        # otherwise, so a Chooser built without a seed (every test that does)
-        # keeps Full screen firing on the pick -- `OverlayWindow` is what
-        # knows the desk.
+        # otherwise, so Full screen fires on the pick (#53).
         self._monitor_count = 1
-        # Each side's own destination, remembered across flips of the
-        # switch. Only populated when a side is left, so a value that is
-        # legal on both (`instant`, `save`) is never treated as displaced.
+        # What Last region would restore, or why it cannot. Nothing until
+        # `OverlayWindow` says what was captured last.
+        self._last_region_size: QSizeF | None = None
+        self._last_region_reason: str | None = tokens.LAST_REGION_NONE
+        self._hide_sensitive_reason = ""
+        # Each side's own destination, remembered across flips of the kind.
         self._after_by_kind: dict[str, str] = {}
         self._phase = "choosing"
         self._menu: _Menu | None = None
-        self._menu_kind: str | None = None
+        # The control whose explanation the hint pill is borrowed for.
+        self._explaining: QWidget | None = None
 
-        self.panel = ChooserPanel(parent)
-        self.panel.triggerClicked.connect(self._toggle_menu)
-        self.panel.kind_switch.toggled.connect(self._toggle_kind)
-        self.hint = _Pill(parent)
-        self.panel.reuse_toggle.toggled.connect(self.reuseLastRegionChanged)
-        self.panel.reuse_toggle.hovered.connect(self._on_reuse_hovered)
-        self.panel.hide_toggle.toggled.connect(self.hideSensitiveChanged)
-        self.panel.hide_toggle.hovered.connect(self._on_hide_hovered)
-        # Why Hide sensitive is greyed, when it is. Empty while it is usable.
-        self._hide_sensitive_reason = ""
+        self.row = ChooserRow(parent)
+        self.hint = _HintPill(parent)
         self.tab = _Tab(parent)
+        row = self.row
+        row.stills.picked.connect(self.set_kind)
+        row.record.picked.connect(self.set_kind)
+        row.mode_chip.clicked.connect(self._toggle_menu)
+        row.destination.clicked.connect(self.cycle_after)
+        row.hide_flag.toggled.connect(self._on_hide_toggled)
+        row.delay_flag.clicked.connect(self.cycle_delay)
         self.tab.clicked.connect(self.reopen)
-        self.legend = _Legend(parent)
-
-        shadow = QGraphicsDropShadowEffect(self.panel)
-        shadow.setBlurRadius(48)
-        shadow.setOffset(0, 22)
-        shadow.setColor(_alpha("#000000", 0.62))
-        self.panel.setGraphicsEffect(shadow)
+        for control in (row.stills, row.record, row.destination, row.hide_flag, row.delay_flag):
+            control.hovered.connect(self._on_control_hovered)
 
         self._screen_rect = screen_rect
         self._origin = origin or QPoint(0, 0)
-        self._refresh_triggers()
+        self._refresh()
 
     # -- state -----------------------------------------------------------
 
@@ -1088,98 +1091,138 @@ class Chooser(QWidget):
     def kind(self) -> str:
         return self._kind
 
-    def set_mode(self, mode: str, *, arm: bool = True) -> None:
-        """Adopt `mode`, and by default arm it.
-
-        `arm=False` is for the floating bar handing its own chip's value
-        back: one piece of state across two surfaces, so a mode changed
-        there and a chooser reopened afterwards agree -- without that change
-        also collapsing a panel the user is looking at.
-        """
-        if mode not in dict((m[0], m) for m in tokens.CAPTURE_MODES):
-            return
-        if self._unavailable_reason(mode) is not None:
-            # A mode the record side does not offer: a click on its
-            # disabled row is inert (`_MenuRow` already
-            # swallows it), and a stray shortcut key must leave the current
-            # mode alone the same way.
-            return
-        self._mode = mode
-        self._refresh_triggers()
-        if not arm:
-            return
-        if self._fires_immediately(mode):
-            self.fireImmediately.emit(mode)
-            return
-        self._phase = "armed"
-        self.modeChosen.emit(mode)
-        self._layout()
-
     @property
     def reuse_last_region(self) -> bool:
-        return self.panel.reuse_toggle.is_on()
+        """Whether this snip is on Last region -- what the stored
+        reuse-last-region preference means now it is a mode."""
+        return self._mode == tokens.LAST_REGION_MODE
+
+    @property
+    def hide_sensitive(self) -> bool:
+        return self.row.hide_flag.is_armed()
+
+    @property
+    def hide_sensitive_available(self) -> bool:
+        return self.row.hide_flag.is_available()
+
+    def set_mode(self, mode: str, *, announce: bool = True) -> None:
+        """Adopt `mode`, and by default announce it. Never arms it.
+
+        Announcing is how the overlay hears a pick: `fireImmediately` for a
+        mode with nothing left to aim at, `modeChosen` for the rest. Neither
+        collapses the row. It stays up until the user drags or clicks a
+        window, and the overlay collapses it once a selection exists.
+
+        `announce=False` adopts a value another surface already acted on --
+        the floating bar's mode popover -- without sending it straight back.
+
+        A pick onto or off Last region is also `reuseLastRegionChanged`,
+        because that is what the next snip opens on (`set_reuse_last_region`).
+        """
+        if mode not in _MODE_GLYPHS:
+            return
+        if self._unavailable_reason(mode) is not None:
+            # A greyed row already ignores its click; a stray shortcut key
+            # has to leave the mode alone the same way.
+            return
+        was_last_region = self._mode == tokens.LAST_REGION_MODE
+        self._mode = mode
+        self._refresh()
+        if not announce:
+            return
+        is_last_region = mode == tokens.LAST_REGION_MODE
+        if is_last_region != was_last_region:
+            self.reuseLastRegionChanged.emit(is_last_region)
+        if self._fires_immediately(mode):
+            self.fireImmediately.emit(mode)
+        else:
+            self.modeChosen.emit(mode)
 
     def set_browser_available(self, available: bool) -> None:
-        """Say whether `Tab` has a browser page to capture.
+        """Say whether Browser has a page to capture.
 
         Set from outside rather than looked up here: this widget is Qt and
-        `tokens` only -- no platform calls, no window enumeration -- which
-        is what lets its tests decide the answer instead of inheriting
-        whatever happens to be open on the machine running them.
+        `tokens` only -- no platform calls -- which is what lets its tests
+        decide the answer instead of inheriting whatever is open.
         """
         self._browser_available = bool(available)
-        self._refresh_triggers()
+        self._refresh()
 
     def set_active_window_available(
         self, available: bool, reason: str = tokens.ACTIVE_WINDOW_UNAVAILABLE
     ) -> None:
         """Say whether Active window has a window to take, and if not, why.
-
-        Set from outside for `set_browser_available`'s reason. It carries a
-        reason where that one does not because only the caller knows which
-        is true: the platform cannot name a focused window at all, or it
-        can and found nothing.
+        Only the caller knows which reason is true: the platform cannot name
+        a focused window at all, or it can and found nothing.
         """
         self._active_window_reason = None if available else reason
-        self._refresh_triggers()
+        self._refresh()
 
     def set_monitor_count(self, count: int) -> None:
-        """Say how many monitors the host window covers.
-
-        Set from outside, like `set_browser_available`: this widget knows
-        nothing of screens. It decides whether a monitor mode fires on the
-        pick (`_fires_immediately`), and what the hint says about it.
-        """
+        """Say how many monitors the host window covers, which decides
+        whether a monitor mode fires on the pick and what the hint says."""
         self._monitor_count = max(1, int(count))
-        self._refresh_triggers()
+        self._refresh()
+
+    def set_last_region(
+        self, size: QSizeF | None, reason: str = tokens.LAST_REGION_NONE
+    ) -> None:
+        """Say what Last region would restore: the logical size of the
+        previous capture's rectangle as it lands on this desk, or None and
+        why not.
+
+        Set from outside, like `set_browser_available`: the overlay knows
+        what was stored and which monitors the frame covers. A Last region
+        that stops being possible while chosen falls back to Region.
+        """
+        self._last_region_size = None if size is None else QSizeF(size)
+        self._last_region_reason = None if size is not None else reason
+        if size is None and self._mode == tokens.LAST_REGION_MODE:
+            self._mode = tokens.CAPTURE_MODES[0][0]
+        self._refresh()
+
+    def set_reuse_last_region(self, on: bool) -> None:
+        """Seed whether this snip opens on Last region. Never emits.
+
+        The stored preference predates Last region being a mode: it was a
+        toggle on the row meaning "open on the last region". Picking the mode
+        is that same choice now, so someone who had it on still opens on
+        their region, and picking another mode turns it off.
+
+        Stills only, as the toggle was: opening a recording on a rectangle
+        would arm the recording. Seed the kind and `set_last_region` first;
+        with nothing to restore the row is greyed and Region stands.
+        """
+        if on:
+            if self._kind == "stills" and self._unavailable_reason(tokens.LAST_REGION_MODE) is None:
+                self._mode = tokens.LAST_REGION_MODE
+        elif self._mode == tokens.LAST_REGION_MODE:
+            self._mode = tokens.CAPTURE_MODES[0][0]
+        self._refresh()
 
     def _fires_immediately(self, mode: str) -> bool:
-        """Whether choosing `mode` *is* the capture, rather than arming it.
+        """Whether choosing `mode` *is* the capture.
 
-        `IMMEDIATE_MODES` have nothing left to aim at -- but only on the
-        stills side. Nothing downstream knows how to record from a fire, so
-        on the record side they arm and wait like Region does, rather than
-        silently taking a screenshot.
-
-        A monitor mode has nothing left to aim at only while there is one
-        monitor. With more, which one is still the choice, and capturing on
-        the pick took whichever monitor the row happened to open on -- so it
-        arms and follows the pointer, as Window mode does (#53).
+        Only on the stills side: on the record side every mode announces as
+        `modeChosen` and arms the ready stage, where nothing is filmed until
+        Record. Last region always has its rectangle. A monitor mode has
+        nothing left to aim at only while there is one monitor; with more,
+        which one is still the choice, so it arms and follows the pointer
+        (#53).
         """
-        if self._kind != "stills" or mode not in tokens.IMMEDIATE_MODES:
+        if self._kind != "stills":
+            return False
+        if mode == tokens.LAST_REGION_MODE:
+            return True
+        if mode not in tokens.IMMEDIATE_MODES:
             return False
         return not (mode in tokens.MONITOR_MODES and self._monitor_count > 1)
 
     def _unavailable_reason(self, mode: str) -> "str | None":
         """Why `mode` cannot be picked right now, or None if it can.
 
-        Three independent reasons -- the record side does not offer every
-        mode, `Tab` needs a browser to be open, and Active window needs a
-        focused window to take -- resolved in one place so the menu's
-        greyed rows and `set_mode`'s shortcut guard can never disagree
-        about which modes are live. A disabled row already swallows its own
-        click (`_MenuRow`); a stray shortcut key has to be just as inert,
-        and that only stays true if both ask the same question.
+        One place, so the menu's greyed rows and `set_mode`'s shortcut guard
+        can never disagree about which modes are live.
         """
         if self._kind == "record" and mode in tokens.RECORD_DISABLED_MODES:
             return tokens.RECORD_DISABLED_MODES[mode]
@@ -1187,105 +1230,56 @@ class Chooser(QWidget):
             return tokens.BROWSER_UNAVAILABLE
         if mode == tokens.ACTIVE_WINDOW_MODE:
             return self._active_window_reason
+        if mode == tokens.LAST_REGION_MODE:
+            return self._last_region_reason
         return None
-
-    def set_reuse_last_region(self, on: bool) -> None:
-        """Seed the toggle from stored config. Never emits -- see
-        `_RowToggle.set_on`.
-        """
-        self.panel.reuse_toggle.set_on(on)
-
-    @property
-    def hide_sensitive(self) -> bool:
-        return self.panel.hide_toggle.is_on()
 
     def set_hide_sensitive(self, on: bool) -> None:
         """Seed Hide sensitive from stored config. Never emits."""
-        self.panel.hide_toggle.set_on(on)
-
-    @property
-    def hide_sensitive_available(self) -> bool:
-        return self.panel.hide_toggle.is_available()
+        self.row.hide_flag.set_armed(on)
+        self._refresh()
 
     def set_hide_sensitive_available(self, available: bool, reason: str = "") -> None:
-        """Say whether this machine can read text out of a capture.
-
-        Set from outside, like `set_browser_available`, so this widget
-        makes no platform calls and its tests decide the answer. Greyed
-        with a reason rather than hidden: an option that cannot work is
-        shown with why, so a missing feature is not mistaken for a broken
-        one.
-        """
+        """Say whether this machine can read text out of a capture. Greyed
+        with a reason rather than hidden, so a missing feature is not taken
+        for a broken one."""
         self._hide_sensitive_reason = "" if available else reason
-        self.panel.hide_toggle.set_available(available)
+        self.row.hide_flag.set_available(available)
+        self._refresh()
 
-    def _on_hide_hovered(self, hovered: bool) -> None:
-        """Explain Hide sensitive in the hint pill -- or, when it is
-        greyed, why. The same borrowing of the pill `_on_reuse_hovered`
-        does."""
-        if not hovered:
-            self._refresh_triggers()
-            return
-        toggle = self.panel.hide_toggle
-        text = (
-            tokens.HIDE_SENSITIVE_HINT[toggle.is_on()] if toggle.is_available()
-            else self._hide_sensitive_reason
-        )
-        self.hint.set_content("blur", text)
-        self._layout()
-
-    def _on_reuse_hovered(self, hovered: bool) -> None:
-        """Borrow the hint pill to say what the toggle does.
-
-        The pill is the row's one line of prose and is otherwise showing
-        the armed mode's next step, which is not urgent while the pointer
-        is somewhere else entirely. Qt's own tooltips are not an option
-        here: on an always-on-top frameless window they are a coin toss,
-        which is why `FloatingBar` grew `toolHovered` rather than using
-        them.
-        """
-        if hovered:
-            self.hint.set_content(
-                "redo", tokens.REUSE_HINT[self.panel.reuse_toggle.is_on()]
-            )
-            self._layout()
-        else:
-            self._refresh_triggers()
+    def _on_hide_toggled(self, on: bool) -> None:
+        self._refresh()
+        self.hideSensitiveChanged.emit(on)
 
     def set_record_after_default(self, after: str) -> None:
-        """Seed what the record side opens on, from Settings.
-
-        Applied on the next switch *to* the record side rather than
-        immediately: this is the default a record capture starts from, not
-        an override of a choice already made on the surface -- the same
-        distinction `set_after(arm=False)` draws for the stills side.
-        """
-        if after not in dict.fromkeys(value for value, *_ in _RECORD_AFTER_ROWS):
+        """Seed what the record side opens on, from Settings. Applied on the
+        next switch to the record side, or now if already on it."""
+        if after not in {value for value, *_rest in _RECORD_AFTER_ROWS}:
             return
         self._record_after_default = after
         if self._kind == "record":
             self._after = after
-            self._refresh_triggers()
+            self._refresh()
 
     def set_after(self, after: str) -> None:
         """Adopt `after` as this snip's destination.
 
         Emits `afterChanged` on a real change only, which is what
-        `OverlayWindow` persists from -- see its `_remember_destination`.
-        Guarding on "actually different" is what keeps this widget's own
-        seeding (`set_after(load_after_capture())`, run once per overlay)
-        from being mistaken for the user choosing something.
-
-        `set_kind`'s snap assigns `_after` directly rather than calling
-        this, deliberately: flipping to the record side because the current
-        destination has no meaning there is the widget tidying up after
-        itself, not a choice worth remembering.
+        `OverlayWindow` persists from; seeding with the stored value is then
+        never mistaken for the user choosing something.
         """
         if after == self._after:
             return
         self._after = after
-        self._refresh_triggers()
+        self._refresh()
         self.afterChanged.emit(after)
+
+    def cycle_after(self) -> None:
+        """The destination icon's click: the next of this side's
+        destinations, wrapping."""
+        values = [value for value, *_rest in self._destinations()]
+        index = values.index(self._after) if self._after in values else -1
+        self.set_after(values[(index + 1) % len(values)])
 
     def set_delay(self, delay: str) -> None:
         """Adopt `delay` as the countdown before this snip's grab.
@@ -1300,35 +1294,27 @@ class Chooser(QWidget):
         if delay not in tokens.DELAYS or delay == self._delay:
             return
         self._delay = delay
-        self._refresh_triggers()
+        self._refresh()
         self.delayChanged.emit(delay)
 
-    def _toggle_kind(self) -> None:
-        self.set_kind("record" if self._kind == "stills" else "stills")
+    def cycle_delay(self) -> None:
+        """Delay's click: the next of `tokens.DELAYS`, wrapping to none."""
+        delays = tokens.DELAYS
+        self.set_delay(delays[(delays.index(self._delay) + 1) % len(delays)])
 
     def set_kind(self, kind: str) -> None:
-        """Flip stills/record. UI and state only -- nothing here starts a
-        capture or a recording, per docs/design/recording.md ticket 5.
+        """Stills or record. Only `kind` changes, unless the current mode or
+        destination means nothing on the new side, in which case it snaps
+        to one that does -- assigned directly, so the snap never announces.
 
-        Only `kind` changes, unless the current mode or destination has no
-        meaning on the new side, in which case it snaps to one that does --
-        assigned directly rather than through `set_mode`/`set_after`, so the
-        snap itself never fires `modeChosen`/`fireImmediately`.
+        Coming back to stills restores the destination that side had. The
+        vocabularies overlap on `instant` and `save`, so a stills `edit`
+        displaced on the way out used to stay displaced on the way back:
+        flip twice and screenshots were silently Instant, which finishes the
+        snip on the release of the drag. Reported as "sometimes it just
+        instant captures when i drag the region".
 
-        Coming *back* to stills restores the destination this side had
-        before, which it used not to do. The two vocabularies overlap on
-        `instant` and `save`, so a stills destination of `edit` that snapped
-        to the record default on the way out stayed on the way back: flip
-        the switch twice and your screenshots were silently set to Instant
-        -- which takes the shot the moment the drag ends, with no overlay
-        and no toolbar, so the next capture just happened at you with no
-        visible cause. Reported as "sometimes it just instant captures when
-        i drag the region".
-
-        Emits `kindChanged` on every real flip -- unlike `after`/`delay`,
-        there is no Settings surface for this axis, so the chooser itself is
-        where "remembers which side was last used" has to be wired from;
-        see `setup_desktop.save_kind`.
+        Emits `kindChanged` on every real flip, which is what persists it.
         """
         if kind not in ("stills", "record") or kind == self._kind:
             return
@@ -1336,256 +1322,260 @@ class Chooser(QWidget):
         self._kind = kind
         if kind == "record" and self._mode in tokens.RECORD_DISABLED_MODES:
             self._mode = tokens.CAPTURE_MODES[0][0]
-        # Remembered unconditionally, and restored unconditionally --
-        # never gated on the *current* value being illegal on the new side.
-        # That was the trap: `instant` and `save` are legal on both, so a
-        # record destination of `instant` looked perfectly valid arriving
-        # on the stills side and the stills value it displaced was never
-        # put back.
+        # Remembered and restored unconditionally, never gated on the
+        # current value being illegal on the new side -- see the docstring.
         self._after_by_kind[leaving] = self._after
         remembered = self._after_by_kind.get(kind)
         if remembered is not None and self._valid_after(kind, remembered):
             self._after = remembered
         elif not self._valid_after(kind, self._after):
             self._after = (
-                self._record_after_default if kind == "record"
-                else tokens.AFTER_DEFAULT
+                self._record_after_default if kind == "record" else tokens.AFTER_DEFAULT
             )
-        self._refresh_triggers()
+        self._refresh()
         self.kindChanged.emit(kind)
 
     @staticmethod
     def _valid_after(kind: str, after: str) -> bool:
-        """Whether `after` is a destination `kind` can actually offer.
-
-        The two lists overlap on `instant` and `save` and mean the same
-        thing by both, which is exactly why this is asked rather than
-        assumed: a shared id needs no snap at all, and snapping it anyway
-        is what silently moved screenshots to Instant.
-        """
         rows = _RECORD_AFTER_ROWS if kind == "record" else _AFTER_ROWS
         return after in {value for value, *_rest in rows}
 
+    def _destinations(self):
+        return _RECORD_AFTER_ROWS if self._kind == "record" else _AFTER_ROWS
+
+    def collapse(self) -> None:
+        """Down to the tab. The overlay's call, once a selection exists."""
+        self._close_menu()
+        self._phase = "collapsed"
+        self._layout()
+
     def reopen(self) -> None:
-        """Back to choosing, with every selection intact."""
+        """Back to the row, with every choice as it was."""
         self._phase = "choosing"
         self._layout()
 
     # -- keyboard --------------------------------------------------------
 
-    def handle_key(self, key: int, text: str) -> bool:
+    def handle_key(
+        self, key: int, text: str, modifiers=Qt.KeyboardModifier.NoModifier
+    ) -> bool:
         """Returns True if the key was the chooser's.
 
-        Live in both phases, per the handoff -- the shortcuts are how you
-        change mode without reopening anything.
+        The mode letters, Shift+R for Last region, Space to reopen the row
+        from the tab, and Escape -- which closes the menu when one is open
+        and otherwise cancels the snip.
         """
         if key == Qt.Key.Key_Escape:
             if self._close_menu():
                 return True
             self.cancelled.emit()
             return True
-        if key == Qt.Key.Key_Space and self._phase == "armed":
+        if key == Qt.Key.Key_Space and self._phase == "collapsed":
             self.reopen()
             return True
-        mode = tokens.MODE_KEYS.get((text or "").upper())
+        letter = (text or "").upper()
+        if letter == "R" and bool(modifiers & Qt.KeyboardModifier.ShiftModifier):
+            self._close_menu()
+            self.set_mode(tokens.LAST_REGION_MODE)
+            return True
+        mode = tokens.MODE_KEYS.get(letter)
         if mode is not None:
             self._close_menu()
             self.set_mode(mode)
             return True
         return False
 
-    # -- menus -----------------------------------------------------------
+    # -- the mode menu ---------------------------------------------------
 
-    def _rows_for(self, kind: str):
-        if kind == "mode":
-            keys = {mode: key for key, mode in tokens.MODE_KEYS.items()}
-            recording = self._kind == "record"
-            rows = []
-            for label, icon, note in tokens.CAPTURE_MODES:
-                unavailable = self._unavailable_reason(label)
-                if unavailable is not None:
-                    # Why it cannot be picked outranks what it would do.
-                    note = unavailable
-                elif recording:
-                    note = tokens.RECORD_MODE_NOTE.get(label, note)
-                rows.append(
-                    (label, icon, label, note, keys.get(label, ""), unavailable is not None)
+    def _mode_rows(self) -> "tuple[list[_RowSpec], _RowSpec]":
+        """The menu's capture modes, and Last region for under the rule."""
+        keys = {mode: key for key, mode in tokens.MODE_KEYS.items()}
+        recording = self._kind == "record"
+        rows = []
+        for label, glyph, note in tokens.CAPTURE_MODES:
+            if recording:
+                note = tokens.RECORD_MODE_NOTE.get(label, note)
+            reason = self._unavailable_reason(label)
+            rows.append(
+                _RowSpec(
+                    label, glyph, label, keys.get(label, ""),
+                    subtitle=reason or "", tooltip=note, disabled=reason is not None,
                 )
-            return rows, self._mode, tokens.ChooserMetric.MENU_MODE_W
-        if kind == "after":
-            after_rows = _RECORD_AFTER_ROWS if self._kind == "record" else _AFTER_ROWS
-            return [
-                (identifier, icon, label, note, "", False)
-                for identifier, icon, label, note in after_rows
-            ], self._after, tokens.ChooserMetric.MENU_AFTER_W
-        return [
-            (value, "", value, "", "", False) for value in tokens.DELAYS
-        ], self._delay, tokens.ChooserMetric.MENU_DELAY_W
+            )
+        reason = self._unavailable_reason(tokens.LAST_REGION_MODE)
+        subtitle = reason or ""
+        if reason is None and self._last_region_size is not None:
+            size = self._last_region_size
+            subtitle = f"{round(size.width())} × {round(size.height())}"
+        last_region = _RowSpec(
+            tokens.LAST_REGION_MODE, tokens.LAST_REGION_GLYPH, tokens.LAST_REGION_MODE,
+            tokens.LAST_REGION_SHORTCUT,
+            subtitle=subtitle, subtitle_mono=reason is None,
+            tooltip=tokens.LAST_REGION_NOTE, disabled=reason is not None,
+        )
+        return rows, last_region
 
-    def _toggle_menu(self, kind: str) -> None:
-        # One at a time: opening one closes the others.
-        if self._menu_kind == kind:
-            self._close_menu()
+    def _toggle_menu(self) -> None:
+        if self._close_menu():
             return
-        self._close_menu()
-        rows, selected, width = self._rows_for(kind)
-        menu = _Menu(width, rows, selected, self.panel)
-        menu.picked.connect(lambda value, k=kind: self._on_picked(k, value))
-        self._menu, self._menu_kind = menu, kind
-        trigger = self._trigger_for(kind)
-        trigger.set_open(True)
-        origin = trigger.mapToGlobal(QPoint(0, tokens.ChooserMetric.MENU_OFFSET_Y - 34 + 34))
-        menu.move(origin.x(), origin.y() + 7)
+        rows, last_region = self._mode_rows()
+        menu = _Menu(rows, last_region, self._mode, self.row)
+        # The press that closes the menu does nothing else, as in the spec:
+        # replayed, a click on the chip would reopen the menu it just closed,
+        # and a press on the frame would start a drag nobody meant.
+        menu.setAttribute(Qt.WidgetAttribute.WA_NoMouseReplay, True)
+        menu.picked.connect(self._on_picked)
+        menu.closed.connect(self._on_menu_closed)
+        self._menu = menu
+        chip = self.row.mode_chip
+        chip.set_open(True)
+        menu.move(chip.mapToGlobal(QPoint(0, chip.height() + tokens.BarMetric.MENU_OFFSET)))
         menu.show()
 
-    def _on_picked(self, kind: str, value: str) -> None:
+    def _on_picked(self, value: str) -> None:
         self._close_menu()
-        if kind == "mode":
-            self.set_mode(value)
-        elif kind == "after":
-            self.set_after(value)
-        else:
-            self.set_delay(value)
+        self.set_mode(value)
+
+    def _on_menu_closed(self) -> None:
+        # A popup also closes itself -- a click elsewhere, Escape -- and the
+        # chip has to stop showing it as open when it does.
+        self._menu = None
+        self.row.mode_chip.set_open(False)
 
     def _close_menu(self) -> bool:
         if self._menu is None:
             return False
-        self._trigger_for(self._menu_kind).set_open(False)
-        self._menu.close()
-        self._menu = self._menu_kind = None
+        menu, self._menu = self._menu, None
+        menu.close()
+        self.row.mode_chip.set_open(False)
         return True
 
-    def _trigger_for(self, kind: str) -> _Trigger:
-        return {
-            "mode": self.panel.mode_trigger,
-            "after": self.panel.after_trigger,
-            "delay": self.panel.delay_trigger,
-        }[kind]
+    # -- what the row shows ----------------------------------------------
 
-    # -- painting the row's contents -------------------------------------
-
-    def _refresh_triggers(self) -> None:
-        colour = tokens.ChooserColor
-        self.panel.kind_switch.set_kind(self._kind)
-        icon = dict((m[0], m[1]) for m in tokens.CAPTURE_MODES)[self._mode]
-        self.panel.mode_trigger.set_content(icon, self._mode, colour.MODE_ACCENT)
-
-        after_icon, after_label = _after_display(self._after, self._kind)
-        # Labelled, against the handoff's "secondary decision, so no label
-        # on the trigger". That rule assumed the icon would carry it, and
-        # it does not: this control decides whether a snip ends with a
-        # toolbar, a window, or nothing at all, and the difference between
-        # a pen glyph and an eye glyph does not say so. Icon-only, it was
-        # the reason a destination of `instant` could not be got out of --
-        # that one ends the snip on the release of the drag, so there is no
-        # toolbar left to notice it from, and the only control that could
-        # have changed it was an unlabelled icon two pills along. Reported
-        # as "i didnt click copy or anything as soon as i released the
-        # region it capped".
-        #
-        # `instant` additionally goes accent, for exactly the reason the
-        # delay below does: it is the one destination that can surprise
-        # you, and it should be visible before it does rather than
-        # afterwards.
-        surprising = self._after == "instant"
-        self.panel.after_trigger.set_content(
-            after_icon,
-            after_label,
-            colour.MODE_ACCENT if surprising else colour.ROW_IDLE_FG,
-            colour.MODE_ACCENT if surprising else tokens.Color.TEXT_PRIMARY,
-        )
-
-        # A delay that is about to surprise you should be visible before it
-        # does, so the label goes accent the moment one is set.
-        armed_delay = self._delay != tokens.DELAY_DEFAULT
-        # "Label appears only when set", per the handoff -- a countdown is
-        # the one thing here that can surprise you, so it earns width
-        # exactly when it is armed and none when it is not.
-        self.panel.delay_trigger.set_content(
-            "timer",
-            self._delay if armed_delay else "",
-            colour.MODE_ACCENT if armed_delay else colour.ROW_IDLE_FG,
-            colour.MODE_ACCENT if armed_delay else tokens.Color.TEXT_PRIMARY,
-        )
-
+    def _next_step(self) -> str:
         next_step = tokens.MODE_NEXT_STEP.get(self._mode, "")
         if self._monitor_count > 1:
             next_step = tokens.MULTI_MONITOR_NEXT_STEP.get(self._mode, next_step)
         if self._kind == "record":
             next_step = tokens.RECORD_MODE_NEXT_STEP.get(self._mode, next_step)
-        self.hint.set_content(icon, next_step)
+        return next_step
+
+    def _destination_tooltip(self) -> str:
+        _glyph, label, note = _after_display(self._after, self._kind)
+        return tokens.DESTINATION_TOOLTIP.format(label=label, note=note)
+
+    def _hide_tooltip(self) -> str:
+        if not self.hide_sensitive_available:
+            return self._hide_sensitive_reason
+        return tokens.HIDE_SENSITIVE_HINT[self.hide_sensitive]
+
+    def _delay_tooltip(self) -> str:
+        if self._delay == tokens.DELAY_DEFAULT:
+            return tokens.DELAY_TOOLTIP_OFF
+        return tokens.DELAY_TOOLTIP_ON.format(delay=self._delay)
+
+    def _explanation(self, control: QWidget) -> "tuple[str, str]":
+        """The hint pill's glyph and text while `control` is hovered."""
+        row = self.row
+        if control is row.stills or control is row.record:
+            return ("camera" if control is row.stills else "record"), tokens.KIND_TOOLTIP[control.kind]
+        if control is row.destination:
+            return row.destination.glyph, self._destination_tooltip()
+        if control is row.hide_flag:
+            return tokens.HIDE_SENSITIVE_GLYPH, self._hide_tooltip()
+        return "timer", self._delay_tooltip()
+
+    def _on_control_hovered(self, control: QWidget, hovered: bool) -> None:
+        """Borrow the hint pill to say what a control does.
+
+        The pill is the row's one line of prose, and the mode's next step
+        is not urgent while the pointer is on something else. Tooltips are
+        set too, but on an always-on-top frameless window they are a coin
+        toss.
+        """
+        if hovered:
+            self._explaining = control
+        elif self._explaining is control:
+            self._explaining = None
+        self._refresh()
+
+    def _refresh(self) -> None:
+        row = self.row
+        stills = self._kind == "stills"
+        glyph = _MODE_GLYPHS[self._mode]
+        row.stills.set_active(stills)
+        row.record.set_active(not stills)
+        row.mode_chip.set_content(glyph, self._mode)
+        after_glyph, after_label, _note = _after_display(self._after, self._kind)
+        row.destination.set_glyph(after_glyph)
+        row.destination.setToolTip(self._destination_tooltip())
+        # Stills only: recognition reads a frozen frame, and a recording has
+        # no frozen frame to read.
+        row.hide_flag.setVisible(stills)
+        row.hide_flag.setToolTip(self._hide_tooltip())
+        armed_delay = self._delay != tokens.DELAY_DEFAULT
+        row.delay_flag.set_value(self._delay if armed_delay else "")
+        row.delay_flag.setToolTip(self._delay_tooltip())
+        row.refit()
+
+        if self._explaining is not None:
+            self.hint.set_content(*self._explanation(self._explaining))
+        else:
+            self.hint.set_content(glyph, self._next_step())
         self.tab.set_content(
-            icon, self._mode, f"then {after_label}",
-            "" if not armed_delay else self._delay,
+            glyph, self._mode, f"then {after_label}",
+            stills and self.hide_sensitive and self.hide_sensitive_available,
         )
-        # Stills-only: `_preselect_last_region` refuses on the record side
-        # (committing there arms a recording), so offering the control
-        # would promise something that side does not do.
-        self.panel.reuse_toggle.setVisible(self._kind != "record")
-        # Stills-only too: recognition reads a frozen frame, and a
-        # recording has no frozen frame to read.
-        self.panel.hide_toggle.setVisible(self._kind != "record")
-        self.panel.adjustSize()
         self._layout()
 
     # -- geometry --------------------------------------------------------
 
     def set_screen(self, screen_rect: QRectF, origin: QPoint) -> None:
-        """`screen_rect` is the active monitor in absolute coordinates;
-        `origin` is the host window's own top-left, so everything can be
-        placed in window-local space.
+        """`screen_rect` is the monitor to hang from, in absolute logical
+        coordinates, already less whatever the desktop reserves on it;
+        `origin` is the host window's top-left in the same space. A negative
+        origin is ordinary -- a monitor left of or above the primary.
         """
-        self._screen_rect, self._origin = screen_rect, origin
+        self._screen_rect, self._origin = QRectF(screen_rect), QPoint(origin)
         self._layout()
 
     def _layout(self) -> None:
         if self._screen_rect is None:
             return
-        metric = tokens.ChooserMetric
-        rect = self._screen_rect
-        left = rect.x() - self._origin.x()
-        top = rect.y() - self._origin.y()
-        centre = left + rect.width() / 2
-
+        metric = tokens.BarMetric
+        # Window-local logical: the monitor's absolute rect less the host
+        # window's absolute origin.
+        local = self._screen_rect.translated(-self._origin.x(), -self._origin.y())
+        centre = local.x() + local.width() / 2
+        top = local.y()
         choosing = self._phase == "choosing"
 
-        panel_size = self.panel.sizeHint()
-        self.panel.setGeometry(
-            round(centre - panel_size.width() / 2), round(top),
-            panel_size.width(), metric.HEIGHT,
-        )
-        self.panel.setVisible(choosing)
-
+        self.row.move(round(centre - self.row.width() / 2), round(top))
         self.hint.move(
-            round(centre - self.hint.width() / 2),
-            round(top + (metric.HEIGHT + metric.HINT_GAP if choosing else metric.ARMED_HINT_TOP)),
+            round(centre - self.hint.width() / 2), round(top + metric.ROW_H + metric.HINT_GAP)
         )
-        self.hint.show()
-        self.hint.raise_()
-
         self.tab.move(round(centre - self.tab.width() / 2), round(top))
+        self.row.setVisible(choosing)
+        self.hint.setVisible(choosing)
         self.tab.setVisible(not choosing)
-        self.tab.raise_()
-
-        self.legend.move(
-            round(centre - self.legend.width() / 2),
-            round(top + rect.height() - metric.LEGEND_BOTTOM - metric.LEGEND_H),
-        )
-        self.legend.show()
-        self.legend.raise_()
         if choosing:
-            self.panel.raise_()
+            # The pill sits under the row; an open menu is its own window
+            # and paints over both.
+            self.hint.raise_()
+            self.row.raise_()
+        else:
+            self.tab.raise_()
 
     def hide_all(self) -> None:
         self._close_menu()
-        for widget in (self.panel, self.hint, self.tab, self.legend):
+        for widget in (self.row, self.hint, self.tab):
             widget.hide()
 
 
-# `AFTER_CAPTURE` carries the ids and the Settings pane's long prose; this
-# binds each id to the glyph and short label the chooser draws, with the note
-# coming from `CHOOSER_AFTER_NOTE`. The ids stay the shared spine, so a
-# destination cannot exist on one surface and not the other.
+# `AFTER_CAPTURE` carries the ids and Settings' long prose; this binds each id
+# to the glyph and short label the chooser draws, and the note its tooltip
+# reads. The ids stay the shared spine, so a destination cannot exist on one
+# surface and not the other.
 _AFTER_ROWS = [
     ("instant", "copy", "Instant", tokens.CHOOSER_AFTER_NOTE["instant"]),
     ("edit", "pen", "Edit", tokens.CHOOSER_AFTER_NOTE["edit"]),
@@ -1593,12 +1583,9 @@ _AFTER_ROWS = [
     ("review", "eye", "Review", tokens.CHOOSER_AFTER_NOTE["review"]),
 ]
 
-# The record side's own "then" vocabulary -- Copy, Save and Open, never
-# Edit or Review. Kept out of `AFTER_CAPTURE`/`_AFTER_ROWS`, which are
-# stills-only. The two lists overlap on `instant` and `save` and mean the
-# same thing by both; `open` stays record-only (a recording opens in the
-# player, not the review window), and `edit`/`review` stay stills-only
-# because there is no annotate-in-place for a video.
+# The record side's own vocabulary: Copy, Save and Open, never Edit or Review,
+# because there is no annotate-in-place for a video. `instant` and `save` mean
+# the same on both sides; `open` is the player, not the review window.
 _RECORD_AFTER_ROWS = [
     ("instant", "copy", "Copy", tokens.CHOOSER_RECORD_AFTER_NOTE["instant"]),
     ("save", "save", "Save", tokens.CHOOSER_RECORD_AFTER_NOTE["save"]),
@@ -1606,13 +1593,12 @@ _RECORD_AFTER_ROWS = [
 ]
 
 
-def _after_display(identifier: str, kind: str = "stills") -> tuple[str, str]:
+def _after_display(identifier: str, kind: str = "stills") -> "tuple[str, str, str]":
+    """(glyph, label, note) for a destination, or for this side's default
+    when `identifier` is not one of its destinations."""
     rows = _RECORD_AFTER_ROWS if kind == "record" else _AFTER_ROWS
-    for value, icon, label, _note in rows:
+    for value, glyph, label, note in rows:
         if value == identifier:
-            return icon, label
+            return glyph, label, note
     default = tokens.RECORD_AFTER_DEFAULT if kind == "record" else tokens.AFTER_DEFAULT
     return _after_display(default, kind)
-
-
-

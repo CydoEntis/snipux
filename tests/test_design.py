@@ -162,23 +162,36 @@ class TestTokenAlphaComments:
     rendered button.
     """
 
-    def test_every_alpha_named_in_a_comment_has_a_matching_alpha_constant(self):
-        source = inspect.getsource(tokens)
-        matches = _ALPHA_COMMENT_RE.findall(source)
-        assert matches, "expected to find at least one alpha-in-comment colour token"
+    # Every palette, each resolved by its own helper: Color for the overlay,
+    # Win for the Settings/review chrome, FlowColor for the capture-flow
+    # bars, BarColor for the locked bars handoff.
+    PALETTES = (tokens.Color, tokens.Win, tokens.FlowColor, tokens.BarColor)
 
-        # The rule applies to every palette, each resolved by its own
-        # helper: Color for the overlay, Win for the Settings/review chrome,
-        # ChooserColor for the docked row, FlowColor for the capture-flow
-        # bars. A palette left out here is one that can reintroduce the
-        # silently-opaque bug this test exists for.
+    def _alpha_comments(self):
+        """(palette, name, percent) for each colour whose comment names an
+        alpha, read against the class that defines it. Two palettes can share
+        a name at different alphas -- BAR_BG is 93% in Color and 94% in
+        BarColor -- so a lookup by name alone checks the wrong one.
+        """
+        return [
+            (palette, name, percent)
+            for palette in self.PALETTES
+            for name, percent in _ALPHA_COMMENT_RE.findall(inspect.getsource(palette))
+        ]
+
+    def test_every_alpha_comment_is_in_a_palette_checked_here(self):
+        # A palette missing from PALETTES is one that can reintroduce the
+        # silently-opaque bug this class exists for.
+        in_module = _ALPHA_COMMENT_RE.findall(inspect.getsource(tokens))
+        assert in_module, "expected to find at least one alpha-in-comment colour token"
+
+        assert len(in_module) == len(self._alpha_comments())
+
+    def test_every_alpha_named_in_a_comment_has_a_matching_alpha_constant(self):
         missing = [
-            name
-            for name, _ in matches
-            if not hasattr(tokens.Color, f"{name}_ALPHA")
-            and not hasattr(tokens.Win, f"{name}_ALPHA")
-            and not hasattr(tokens.ChooserColor, f"{name}_ALPHA")
-            and not hasattr(tokens.FlowColor, f"{name}_ALPHA")
+            f"{palette.__name__}.{name}"
+            for palette, name, _percent in self._alpha_comments()
+            if not hasattr(palette, f"{name}_ALPHA")
         ]
         assert not missing, (
             f"{missing} name an alpha in a comment but have no matching "
@@ -186,19 +199,11 @@ class TestTokenAlphaComments:
         )
 
     def test_every_alpha_constant_matches_the_percentage_its_comment_names(self):
-        source = inspect.getsource(tokens)
-        matches = _ALPHA_COMMENT_RE.findall(source)
-
-        for name, percent in matches:
-            expected = float(percent) / 100
-            actual = (
-                getattr(tokens.Color, f"{name}_ALPHA", None)
-                or getattr(tokens.Win, f"{name}_ALPHA", None)
-                or getattr(tokens.ChooserColor, f"{name}_ALPHA", None)
-                or getattr(tokens.FlowColor, f"{name}_ALPHA")
-            )
-            assert actual == pytest.approx(expected), (
-                f"{name}_ALPHA is {actual}, but its comment names {percent}%"
+        for palette, name, percent in self._alpha_comments():
+            actual = getattr(palette, f"{name}_ALPHA")
+            assert actual == pytest.approx(float(percent) / 100), (
+                f"{palette.__name__}.{name}_ALPHA is {actual}, but its comment "
+                f"names {percent}%"
             )
 
 

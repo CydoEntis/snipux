@@ -1,24 +1,36 @@
-"""The stills/record switch, SNX-120 / docs/design/recording.md ticket 5.
+"""The chooser row, headless (#66): its state machine, and what each of its
+controls renders.
 
-UI and state only -- nothing here is wired to a recorder, and nothing in
-this file should call into `recording.py` or any platform registry. What it
-covers: the switch itself, `Chooser.kind` and the mode/after snapping that
-follows it, the record side's narrowed mode list and "then" vocabulary, and
-that a disabled mode row is inert rather than merely greyed.
+UI and state only -- nothing here calls into `recording.py` or a platform.
+What needs a hosting `OverlayWindow` -- presses kept off the frame, placement
+against real monitors, the collapse once a selection exists -- is in
+test_overlay.py. This file builds `Chooser(parent=None)` directly.
 
-Everything that needs a hosting `OverlayWindow` (press-swallowing via
-`TestTheChooserTakesItsOwnClicks`) stays in test_overlay.py, per that
-class's own fixture -- this file constructs `Chooser(parent=None)` directly,
-since none of the above needs the overlay underneath it.
+Every size here is logical. `grab()` returns physical pixels, so a correct
+42px row grabs 63px tall at a scale factor of 1.5: compare
+`grab().deviceIndependentSize()`, never `grab().height()`.
 """
 
-import pytest
-from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+import math
 
-from snipux.chooser import _AFTER_ROWS, _MenuRow, _RECORD_AFTER_ROWS, Chooser
+import pytest
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRectF, QSizeF, Qt
+from PyQt6.QtGui import QColor, QEnterEvent, QFontMetricsF, QImage, QPainter, QRegion
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
+
+from snipux.chooser import (
+    _AFTER_ROWS,
+    _MenuRow,
+    _RECORD_AFTER_ROWS,
+    _RowSpec,
+    Chooser,
+    _font,
+)
 from snipux.design import tokens
+
+METRIC = tokens.BarMetric
+FONT = tokens.BarFont
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -31,6 +43,18 @@ def qapp():
     return app
 
 
+@pytest.fixture(autouse=True)
+def _no_windows_left_behind():
+    # A chooser built without a parent puts its row, pill and tab up as
+    # windows of their own, and an open menu is a popup, which takes every
+    # mouse event in the process. Left open, either one swallows the
+    # synthetic input of whichever test runs next.
+    yield
+    for widget in QApplication.topLevelWidgets():
+        if widget.isVisible():
+            widget.close()
+
+
 def _centre(widget):
     return QPoint(widget.width() // 2, widget.height() // 2)
 
@@ -39,14 +63,51 @@ def _click(widget):
     QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=_centre(widget))
 
 
+def _hover(widget, hovered=True):
+    # Sent straight to the widget: a synthesised hover goes to whatever the
+    # platform thinks is under the pointer, which offscreen is nothing here.
+    if hovered:
+        point = QPointF(1, 1)
+        QApplication.sendEvent(widget, QEnterEvent(point, point, point))
+    else:
+        QApplication.sendEvent(widget, QEvent(QEvent.Type.Leave))
+
+
+def _near(image, hex_colour, tolerance=28):
+    """Whether any pixel of `image` is within `tolerance` of `hex_colour` on
+    every channel. A glyph's antialiased stroke seldom lands exactly on it."""
+    target = QColor(hex_colour)
+    for y in range(image.height()):
+        for x in range(image.width()):
+            pixel = image.pixelColor(x, y)
+            if (
+                abs(pixel.red() - target.red()) <= tolerance
+                and abs(pixel.green() - target.green()) <= tolerance
+                and abs(pixel.blue() - target.blue()) <= tolerance
+            ):
+                return True
+    return False
+
+
+def _every_mode_available(chooser):
+    chooser.set_browser_available(True)
+    chooser.set_active_window_available(True)
+    chooser.set_last_region(QSizeF(640, 480))
+
+
 class TestTheKindDefaultsToStills:
     def test_a_fresh_chooser_starts_on_stills(self):
         chooser = Chooser(parent=None)
 
         assert chooser.kind == "stills"
+        assert chooser.row.stills.is_active()
+        assert not chooser.row.record.is_active()
 
 
-class TestClickingTheSwitchTogglesKind:
+class TestPickingTheKind:
+    """Camera and record are a pair of buttons in one well. A click on either
+    picks that side, rather than flipping whichever side is current."""
+
     def test_the_record_side_opens_on_the_configured_destination(self):
         # Recording's destination is a Settings row now. The chooser used
         # to reset to tokens.RECORD_AFTER_DEFAULT on every switch to the
@@ -76,32 +137,43 @@ class TestClickingTheSwitchTogglesKind:
 
         assert chooser.after == tokens.RECORD_AFTER_DEFAULT
 
-    def test_it_flips_to_record(self):
+    def test_clicking_record_picks_record(self):
         chooser = Chooser(parent=None)
 
-        _click(chooser.panel.kind_switch)
+        _click(chooser.row.record)
 
         assert chooser.kind == "record"
+        assert chooser.row.record.is_active()
+        assert not chooser.row.stills.is_active()
 
-    def test_it_flips_back_to_stills(self):
+    def test_clicking_stills_picks_stills(self):
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
 
-        _click(chooser.panel.kind_switch)
+        _click(chooser.row.stills)
 
         assert chooser.kind == "stills"
 
+    def test_clicking_the_side_already_picked_changes_nothing(self):
+        chooser = Chooser(parent=None)
+        emitted = []
+        chooser.kindChanged.connect(emitted.append)
+
+        _click(chooser.row.stills)
+
+        assert chooser.kind == "stills"
+        assert emitted == []
+
     def test_it_changes_only_kind_when_the_current_selection_still_fits(self):
-        # Region/instant are valid on both sides, so flipping the switch
-        # with them already selected must not touch phase, mode or after --
-        # only the axis that was actually clicked.
+        # Region is valid on both sides, so picking record with it already
+        # chosen must not touch phase or mode, and must not announce a mode.
         chooser = Chooser(parent=None)
         mode_chosen = []
         fired = []
         chooser.modeChosen.connect(mode_chosen.append)
         chooser.fireImmediately.connect(fired.append)
 
-        _click(chooser.panel.kind_switch)
+        _click(chooser.row.record)
 
         assert chooser.kind == "record"
         assert chooser.phase == "choosing"
@@ -115,7 +187,7 @@ class TestKindPersistsAcrossReopen:
     def test_reopen_leaves_kind_alone(self):
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
-        chooser.set_mode("Region")  # arms it, same as any other mode pick
+        chooser.collapse()
 
         chooser.reopen()
 
@@ -125,13 +197,12 @@ class TestKindPersistsAcrossReopen:
 
 class TestKindChangedSignal:
     """`kindChanged` is what lets something outside the chooser persist the
-    switch across separate snips (see `overlay.py`'s wiring to
-    `setup_desktop.save_kind`) -- unlike `after`/`delay`, `kind` has no
-    Settings surface, so the chooser itself has to announce every real
-    flip.
+    kind across separate snips (see `overlay.py`'s wiring to
+    `setup_desktop.save_kind`) -- it has no Settings surface, so the chooser
+    itself has to announce every real flip.
     """
 
-    def test_flipping_the_switch_emits_the_new_kind(self):
+    def test_flipping_the_kind_emits_the_new_kind(self):
         chooser = Chooser(parent=None)
         emitted = []
         chooser.kindChanged.connect(emitted.append)
@@ -141,9 +212,6 @@ class TestKindChangedSignal:
         assert emitted == ["record"]
 
     def test_setting_the_same_kind_again_emits_nothing(self):
-        # `set_kind` already no-ops on a same-value call (see its early
-        # return above); a signal here would make overlay.py re-save a
-        # value that never changed.
         chooser = Chooser(parent=None)
         emitted = []
         chooser.kindChanged.connect(emitted.append)
@@ -198,17 +266,24 @@ class TestDelayChangedSignal:
         assert chooser.delay == tokens.DELAY_DEFAULT
         assert emitted == []
 
+    def test_clicking_the_flag_cycles_every_delay_and_back_to_none(self):
+        chooser = Chooser(parent=None)
+        emitted = []
+        chooser.delayChanged.connect(emitted.append)
+
+        for _ in tokens.DELAYS:
+            _click(chooser.row.delay_flag)
+
+        assert emitted == tokens.DELAYS[1:] + [tokens.DELAYS[0]]
+
 
 class TestSwitchingToRecordSnapsAnUnavailableMode:
-    # Window came off this list once recording gained it -- it was only
-    # ever disabled because nobody had asked, and it resolves to a rect
-    # like any region. Browser stays: nothing has driven it end to end on
-    # the record side.
+    # Browser stays off the record side: nothing has driven it end to end.
     @pytest.mark.parametrize("mode", ["Browser"])
     def test_it_snaps_to_region(self, mode):
         chooser = Chooser(parent=None)
         chooser.set_browser_available(True)
-        chooser.set_mode(mode, arm=False)
+        chooser.set_mode(mode, announce=False)
         assert chooser.mode == mode
 
         chooser.set_kind("record")
@@ -217,18 +292,16 @@ class TestSwitchingToRecordSnapsAnUnavailableMode:
 
     def test_a_mode_already_valid_on_the_record_side_is_left_alone(self):
         chooser = Chooser(parent=None)
-        chooser.set_mode("Full screen", arm=False)
+        chooser.set_mode("Full screen", announce=False)
 
         chooser.set_kind("record")
 
         assert chooser.mode == "Full screen"
 
     def test_switching_back_to_stills_needs_no_snap(self):
-        # The stills side's mode/after lists are the original, unrestricted
-        # ones, so nothing there can ever be invalid.
         chooser = Chooser(parent=None)
         chooser.set_browser_available(True)
-        chooser.set_mode("Browser", arm=False)
+        chooser.set_mode("Browser", announce=False)
         chooser.set_kind("record")
         assert chooser.mode == "Region"
 
@@ -264,31 +337,32 @@ class TestFullScreenBehavesDifferentlyPerKind:
 
         chooser.set_mode("Full screen")
 
-        assert fired == ["Full screen"]
+        assert fired == [tokens.MONITOR_MODES[0]]
         assert chooser.phase == "choosing"
 
-    def test_record_arms_instead(self):
-        # Nothing downstream of the chooser knows about `kind` yet, so
-        # firing here would silently run the existing stills-capture path
-        # instead of doing nothing -- it must arm and wait like Region does.
+    def test_record_announces_it_as_chosen_instead(self):
+        # Nothing is filmed from a pick: the record side arms the ready
+        # stage, where Record is pressed.
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
-        fired = []
+        fired, chosen = [], []
         chooser.fireImmediately.connect(fired.append)
+        chooser.modeChosen.connect(chosen.append)
 
         chooser.set_mode("Full screen")
 
         assert fired == []
-        assert chooser.phase == "armed"
+        assert chosen == ["Full screen"]
+        assert chooser.phase == "choosing"
 
 
 class TestFullScreenArmsWithMoreThanOneMonitor:
     """#53: which monitor is still a choice when there is more than one, so
-    Full screen arms there instead of firing on the pick
+    Full screen does not capture on the pick there
     (docs/design/bars/divergences.md 3).
     """
 
-    def test_it_arms_on_a_desk_with_more_than_one(self):
+    def test_it_is_announced_as_chosen_on_a_desk_with_more_than_one(self):
         chooser = Chooser(parent=None)
         chooser.set_monitor_count(3)
         fired, chosen = [], []
@@ -299,7 +373,7 @@ class TestFullScreenArmsWithMoreThanOneMonitor:
 
         assert fired == []
         assert chosen == ["Full screen"]
-        assert chooser.phase == "armed"
+        assert chooser.phase == "choosing"
 
     def test_one_monitor_still_fires_on_the_pick(self):
         chooser = Chooser(parent=None)
@@ -316,8 +390,7 @@ class TestFullScreenArmsWithMoreThanOneMonitor:
         # A page or a window is one rectangle wherever it is; there is no
         # monitor to choose.
         chooser = Chooser(parent=None)
-        chooser.set_browser_available(True)
-        chooser.set_active_window_available(True)
+        _every_mode_available(chooser)
         chooser.set_monitor_count(3)
         fired = []
         chooser.fireImmediately.connect(fired.append)
@@ -331,16 +404,54 @@ class TestFullScreenArmsWithMoreThanOneMonitor:
         chooser = Chooser(parent=None)
         chooser.set_monitor_count(2)
 
-        chooser.set_mode("Full screen", arm=False)
+        chooser.set_mode("Full screen", announce=False)
 
-        assert chooser.hint._text == tokens.MULTI_MONITOR_NEXT_STEP["Full screen"]
+        assert chooser.hint.text == tokens.MULTI_MONITOR_NEXT_STEP["Full screen"]
 
     def test_with_one_monitor_the_hint_is_unchanged(self):
         chooser = Chooser(parent=None)
 
-        chooser.set_mode("Full screen", arm=False)
+        chooser.set_mode("Full screen", announce=False)
 
-        assert chooser.hint._text == tokens.MODE_NEXT_STEP["Full screen"]
+        assert chooser.hint.text == tokens.MODE_NEXT_STEP["Full screen"]
+
+
+class TestPickingAModeDoesNotArmIt:
+    """#66: the row stays up until the user drags or clicks a window. A pick
+    only says what the next drag or click takes; the overlay folds the row
+    to its tab once a selection exists, and nothing in here can.
+    """
+
+    @pytest.mark.parametrize("mode", ["Region", "Window"])
+    def test_the_row_stays_open(self, mode):
+        chooser = Chooser(parent=None)
+        chosen = []
+        chooser.modeChosen.connect(chosen.append)
+
+        chooser.set_mode(mode)
+
+        assert chosen == [mode]
+        assert chooser.phase == "choosing"
+
+    def test_collapse_and_reopen_are_the_only_ways_between_row_and_tab(self):
+        chooser = Chooser(parent=None)
+
+        chooser.collapse()
+        chooser.set_mode("Window")
+        assert chooser.phase == "collapsed"
+
+        chooser.reopen()
+        assert chooser.phase == "choosing"
+
+    def test_collapsing_closes_an_open_menu(self):
+        chooser = Chooser(parent=None)
+        _click(chooser.row.mode_chip)
+        assert chooser._menu is not None
+
+        chooser.collapse()
+
+        assert chooser._menu is None
+        assert not chooser.row.mode_chip.is_open()
 
 
 class TestRecordSideModeSelectionIsInert:
@@ -363,9 +474,8 @@ class TestRecordSideModeSelectionIsInert:
 
         assert chooser.mode == "Region"
 
-    def test_window_is_live_on_the_record_side_now(self):
-        # It was disabled for one reason -- nobody had asked -- and it
-        # resolves to a rect exactly like a dragged region does, which is
+    def test_window_is_live_on_the_record_side(self):
+        # It resolves to a rect exactly like a dragged region does, which is
         # all the recorder ever wanted.
         chooser = Chooser(parent=None)
         chooser.set_kind("record")
@@ -375,285 +485,427 @@ class TestRecordSideModeSelectionIsInert:
         assert chooser.mode == "Window"
 
 
-class TestTheRowsTriggersAreReadable:
-    """The handoff made mode the only labelled trigger -- destination "icon
-    only ... secondary decision", delay's "label appears only when set".
+class TestEachControlShowsItsState:
+    """Mode is the row's one label. Everything else is an icon that shows its
+    state, with the explanation in its tooltip and the hint pill."""
 
-    Destination no longer follows that. The rule assumed the glyph would
-    carry the meaning and it does not: this control decides whether a snip
-    ends with a toolbar, a window, or nothing at all, and a pen glyph
-    versus an eye glyph does not say which. Icon-only, it was why a
-    destination of `instant` could not be got out of -- that one ends the
-    snip on the release of the drag, leaving no toolbar to notice it from.
-
-    Delay keeps the handoff's rule, because a delay of Off is genuinely
-    nothing to say.
-    """
-
-    def test_mode_keeps_its_label(self):
+    def test_the_mode_chip_names_and_draws_the_mode(self):
         chooser = Chooser(parent=None)
+        _every_mode_available(chooser)
 
-        assert chooser.panel.mode_trigger._label == "Region"
+        for label, glyph, _note in tokens.CAPTURE_MODES:
+            chooser.set_mode(label, announce=False)
+            chip = chooser.row.mode_chip
+            assert (chip.label, chip.glyph) == (label, glyph)
 
-    def test_the_destination_trigger_says_which_destination(self):
-        chooser = Chooser(parent=None)
-
-        chooser.set_after("review")
-
-        assert chooser.panel.after_trigger._label == "Review"
-        assert chooser.after == "review"
-
-    def test_every_destination_names_itself_on_both_sides(self):
-        # Whatever is showing, the row has to be able to say what it is --
-        # including the record side, whose vocabulary is different.
+    def test_the_destination_is_an_icon_its_tooltip_names_on_both_sides(self):
         for kind, rows in (("stills", _AFTER_ROWS), ("record", _RECORD_AFTER_ROWS)):
             chooser = Chooser(parent=None)
             chooser.set_kind(kind)
-            for value, _icon, label, _note in rows:
+            for value, glyph, label, note in rows:
                 chooser.set_after(value)
-                assert chooser.panel.after_trigger._label == label, (
-                    f"{value} on the {kind} side"
-                )
+                destination = chooser.row.destination
+                assert destination.glyph == glyph, f"{value} on the {kind} side"
+                assert label in destination.toolTip()
+                assert note in destination.toolTip()
+                assert destination.width() == METRIC.BTN
 
-    def test_instant_is_flagged_the_way_an_armed_delay_is(self):
-        # It is the one destination that can surprise you -- it ends the
-        # snip the moment the drag is released -- so it is visible before
-        # it does that rather than afterwards.
+    @pytest.mark.parametrize(
+        "kind, expected",
+        [
+            ("stills", ["save", "review", "instant", "edit"]),
+            ("record", ["save", "open", "instant"]),
+        ],
+    )
+    def test_a_click_cycles_todays_destinations(self, kind, expected):
+        # docs/design/bars/divergences.md 4: the destinations do not change.
         chooser = Chooser(parent=None)
+        chooser.set_kind(kind)
+        seen = []
 
-        chooser.set_after("instant")
-        flagged = chooser.panel.after_trigger._label_colour
+        for _ in expected:
+            _click(chooser.row.destination)
+            seen.append(chooser.after)
 
-        chooser.set_after("edit")
+        assert seen == expected
 
-        assert flagged == tokens.ChooserColor.MODE_ACCENT
-        assert chooser.panel.after_trigger._label_colour != flagged
-
-    def test_delay_is_bare_until_one_is_set(self):
+    def test_a_click_is_remembered_like_a_pick(self):
         chooser = Chooser(parent=None)
-        assert chooser.panel.delay_trigger._label == ""
+        emitted = []
+        chooser.afterChanged.connect(emitted.append)
+
+        _click(chooser.row.destination)
+
+        assert emitted == ["save"]
+
+    def test_delay_shows_its_value_only_once_one_is_set(self):
+        chooser = Chooser(parent=None)
+        flag = chooser.row.delay_flag
+        assert (flag.value, flag.is_armed()) == ("", False)
 
         chooser.set_delay("5s")
-        assert chooser.panel.delay_trigger._label == "5s"
+        assert (flag.value, flag.is_armed()) == ("5s", True)
 
         chooser.set_delay(tokens.DELAY_DEFAULT)
-        assert chooser.panel.delay_trigger._label == ""
+        assert (flag.value, flag.is_armed()) == ("", False)
 
-    def test_an_unlabelled_trigger_is_narrower_than_a_labelled_one(self):
-        # The point of the change: the row was wide enough to read as a
-        # toolbar rather than a sentence.
+    def test_a_set_delay_widens_its_flag_by_its_measured_value(self):
         chooser = Chooser(parent=None)
-        bare = chooser.panel.delay_trigger.width()
+        flag = chooser.row.delay_flag
+        bare = flag.width()
 
         chooser.set_delay("10s")
 
-        assert chooser.panel.delay_trigger.width() > bare
+        measured = QFontMetricsF(_font(FONT.DELAY, mono=True)).horizontalAdvance("10s")
+        assert 0 <= flag.width() - bare - METRIC.FLAG_GAP - measured < 1
 
-
-class TestEveryModeRowSaysWhatItCaptures:
-    """Window and Full screen read as the same thing until you have used
-    both -- "if you're capturing a window, you're capturing a full screen?"
-    One is an application's window, the other a whole monitor, and the note
-    is the only thing that distinguishes them at the moment of choosing.
-    The menu used to show a note only for *disabled* rows, so every mode a
-    user could actually pick explained nothing.
-    """
-
-    def _notes(self, kind, found=False):
-        # `found` seeds both modes that grey themselves when there is
-        # nothing to take -- Browser and Active window -- so their real
-        # notes are read, not just their reasons.
+    def test_the_delay_tooltip_says_what_is_set(self):
         chooser = Chooser(parent=None)
-        chooser.set_browser_available(found)
-        chooser.set_active_window_available(found)
+        assert chooser.row.delay_flag.toolTip() == tokens.DELAY_TOOLTIP_OFF
+
+        chooser.set_delay("3s")
+
+        assert chooser.row.delay_flag.toolTip() == tokens.DELAY_TOOLTIP_ON.format(delay="3s")
+
+
+def _expected_row_width(label, delay="", hide=True):
+    """The row's width from its tokens and its measured text, worked out
+    apart from the widget's own arithmetic. The label is measured in the
+    face that resolves here, since IBM Plex is not bundled (#63)."""
+    chip = (
+        2 * METRIC.BORDER + METRIC.CHIP_PAD_L + METRIC.CHIP_ICON + METRIC.CHIP_GAP
+        + QFontMetricsF(_font(FONT.CHIP)).horizontalAdvance(label)
+        + METRIC.CHIP_GAP + METRIC.CHEVRON + METRIC.CHIP_PAD_R
+    )
+    delay_flag = 2 * METRIC.FLAG_PAD_H + METRIC.ICON
+    if delay:
+        delay_flag += METRIC.FLAG_GAP + QFontMetricsF(
+            _font(FONT.DELAY, mono=True)
+        ).horizontalAdvance(delay)
+    flags = 2 * METRIC.WELL_PAD + delay_flag
+    if hide:
+        flags += METRIC.BTN + METRIC.WELL_GAP
+    kinds = 2 * METRIC.WELL_PAD + 2 * METRIC.BTN + METRIC.WELL_GAP
+    divider = 2 * METRIC.DIVIDER_MARGIN + 1
+    return (
+        2 * (METRIC.BORDER + METRIC.PAD)
+        + kinds + chip + divider + METRIC.BTN + flags
+        + 4 * METRIC.GAP
+    )
+
+
+class TestTheRowsSize:
+    """ROW_H tall, and as wide as its tokens plus its measured text. The
+    handoff's 382 is measured in IBM Plex Sans, which is not bundled, so it
+    is never asserted here (docs/design/bars/divergences.md)."""
+
+    def test_it_is_row_h_tall(self):
+        chooser = Chooser(parent=None)
+
+        assert chooser.row.grab().deviceIndependentSize().height() == METRIC.ROW_H
+
+    @pytest.mark.parametrize(
+        "mode", [m[0] for m in tokens.CAPTURE_MODES] + [tokens.LAST_REGION_MODE]
+    )
+    def test_its_width_is_its_tokens_plus_the_measured_mode_label(self, mode):
+        chooser = Chooser(parent=None)
+        _every_mode_available(chooser)
+
+        chooser.set_mode(mode, announce=False)
+
+        width = chooser.row.grab().deviceIndependentSize().width()
+        # Text widths are rounded up, so a label is never clipped.
+        assert 0 <= width - _expected_row_width(mode) < 2
+
+    def test_a_set_delay_widens_it_by_its_measured_value(self):
+        chooser = Chooser(parent=None)
+
+        chooser.set_delay("10s")
+
+        width = chooser.row.grab().deviceIndependentSize().width()
+        assert 0 <= width - _expected_row_width("Region", delay="10s") < 2
+
+    def test_the_record_side_has_no_hide_flag_to_make_room_for(self):
+        chooser = Chooser(parent=None)
+
+        chooser.set_kind("record")
+
+        width = chooser.row.grab().deviceIndependentSize().width()
+        assert 0 <= width - _expected_row_width("Region", hide=False) < 2
+
+
+class TestEachControlRendersItsState:
+    def test_the_picked_kind_is_lit(self):
+        chooser = Chooser(parent=None)
+        idle = chooser.row.record.grab().toImage()
+
+        chooser.set_kind("record")
+
+        assert chooser.row.record.grab().toImage() != idle
+
+    def test_record_is_a_filled_circle_in_its_lit_colour(self):
+        # "A filled 10px circle, not a glyph": its centre is solid.
+        chooser = Chooser(parent=None)
+        chooser.set_kind("record")
+
+        image = chooser.row.record.grab().toImage()
+
+        ratio = image.devicePixelRatio()
+        centre = round(METRIC.BTN / 2 * ratio)
+        assert image.pixelColor(centre, centre).name() == tokens.BarColor.REC_ON_FG
+
+    def test_an_armed_flag_is_the_soft_accent_on_an_accent_wash(self):
+        chooser = Chooser(parent=None)
+        flag = chooser.row.hide_flag
+        idle = flag.grab().toImage()
+        assert _near(idle, tokens.BarColor.FLAG_OFF_FG)
+        assert not _near(idle, tokens.BarColor.ACCENT_SOFT)
+
+        chooser.set_hide_sensitive(True)
+
+        armed = flag.grab().toImage()
+        assert _near(armed, tokens.BarColor.ACCENT_SOFT)
+        # The wash, away from the glyph at the flag's left edge.
+        ratio = armed.devicePixelRatio()
+        at = (round(3 * ratio), round(METRIC.BTN / 2 * ratio))
+        assert armed.pixelColor(*at) != idle.pixelColor(*at)
+
+    def test_an_unavailable_flag_is_greyed(self):
+        chooser = Chooser(parent=None)
+        usable = chooser.row.hide_flag.grab().toImage()
+
+        chooser.set_hide_sensitive_available(False, "nope")
+
+        greyed = chooser.row.hide_flag.grab().toImage()
+        assert greyed != usable
+        assert _near(greyed, tokens.BarColor.TOOL_DISABLED_FG)
+
+    def test_the_mode_glyph_is_the_soft_accent(self):
+        chooser = Chooser(parent=None)
+
+        assert _near(chooser.row.mode_chip.grab().toImage(), tokens.BarColor.ACCENT_SOFT)
+
+    def test_the_open_chip_shows_it(self):
+        chooser = Chooser(parent=None)
+        closed = chooser.row.mode_chip.grab().toImage()
+
+        chooser.row.mode_chip.set_open(True)
+
+        assert chooser.row.mode_chip.grab().toImage() != closed
+
+    def test_each_destination_draws_its_own_glyph(self):
+        chooser = Chooser(parent=None)
+        chooser.set_after("instant")
+        instant = chooser.row.destination.grab().toImage()
+
+        chooser.set_after("review")
+
+        assert chooser.row.destination.grab().toImage() != instant
+
+
+class TestTheModeMenu:
+    @staticmethod
+    def _open(chooser):
+        _click(chooser.row.mode_chip)
+        return chooser._menu
+
+    @staticmethod
+    def _tooltips(kind):
+        chooser = Chooser(parent=None)
+        _every_mode_available(chooser)
         chooser.set_kind(kind)
-        rows, _selected, _width = chooser._rows_for("mode")
-        return {row[0]: row[3] for row in rows}
+        rows, _last_region = chooser._mode_rows()
+        return {spec.value: spec.tooltip for spec in rows}
 
-    def test_every_enabled_mode_carries_a_note(self):
-        for kind in ("stills", "record"):
-            for mode, note in self._notes(kind).items():
-                assert note, f"{mode} on the {kind} side has no note"
+    def test_one_row_per_mode_then_a_rule_then_last_region(self):
+        chooser = Chooser(parent=None)
 
-    def test_window_and_full_screen_do_not_describe_the_same_thing(self):
-        notes = self._notes("stills")
+        menu = self._open(chooser)
 
-        assert "window" in notes["Window"].lower()
-        assert "monitor" in notes["Full screen"].lower()
-        assert notes["Window"] != notes["Full screen"]
+        layout = menu.layout()
+        widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+        values = [widget.value for widget in widgets if isinstance(widget, _MenuRow)]
+        assert values == [m[0] for m in tokens.CAPTURE_MODES] + [tokens.LAST_REGION_MODE]
+        assert widgets.index(menu.rule) == len(tokens.CAPTURE_MODES)
+        assert menu.width() == METRIC.MENU_W_MODE
 
-    def test_the_record_side_says_a_window_is_filmed_where_it_is(self):
+    def test_it_is_a_top_level_popup_so_it_paints_over_the_hint_pill(self):
+        # Held, or the chooser -- and the menu, a child of its row -- is
+        # collected before the assertions run.
+        chooser = Chooser(parent=None)
+        menu = self._open(chooser)
+
+        assert menu.isWindow()
+        assert menu.windowType() == Qt.WindowType.Popup
+
+    def test_each_row_is_glyph_label_and_shortcut_with_no_note(self):
+        chooser = Chooser(parent=None)
+        _every_mode_available(chooser)
+        keys = {mode: key for key, mode in tokens.MODE_KEYS.items()}
+
+        rows, _last_region = chooser._mode_rows()
+
+        for spec, (label, glyph, _note) in zip(rows, tokens.CAPTURE_MODES):
+            assert (spec.label, spec.glyph, spec.shortcut) == (label, glyph, keys[label])
+            assert spec.subtitle == ""
+
+    def test_the_notes_are_the_tooltips_now(self):
+        tooltips = self._tooltips("stills")
+
+        assert list(tooltips.values()) == [note for _l, _g, note in tokens.CAPTURE_MODES]
+
+    def test_the_record_side_tooltip_says_a_window_is_filmed_where_it_is(self):
         # The recorder is handed a rectangle once and does not follow the
         # window afterwards, which is the surprise worth naming up front.
-        assert "where it is" in self._notes("record")["Window"].lower()
+        tooltip = self._tooltips("record")["Window"]
+
+        assert tooltip == tokens.RECORD_MODE_NOTE["Window"]
+        assert "where it is" in tooltip.lower()
+
+    def test_window_and_full_screen_do_not_describe_the_same_thing(self):
+        # "if you're capturing a window, you're capturing a full screen?"
+        tooltips = self._tooltips("stills")
+
+        assert "window" in tooltips["Window"].lower()
+        assert "monitor" in tooltips["Full screen"].lower()
 
     def test_window_says_what_it_asks_of_you_on_both_sides(self):
-        # "One application's window" said what Window takes, which is also
-        # what Active window takes. What sets Window apart is that you aim
-        # it, so that is what its note says.
         for kind in ("stills", "record"):
-            assert "click" in self._notes(kind, found=True)["Window"].lower()
+            assert "click" in self._tooltips(kind)["Window"].lower()
 
     def test_window_and_active_window_cannot_be_confused_at_a_glance(self):
         for kind in ("stills", "record"):
-            notes = self._notes(kind, found=True)
-            assert notes["Window"] != notes[tokens.ACTIVE_WINDOW_MODE]
-            assert "click" not in notes[tokens.ACTIVE_WINDOW_MODE].lower()
+            tooltips = self._tooltips(kind)
+            assert tooltips["Window"] != tooltips[tokens.ACTIVE_WINDOW_MODE]
+            assert "click" not in tooltips[tokens.ACTIVE_WINDOW_MODE].lower()
 
-    def test_a_disabled_rows_reason_outranks_its_description(self):
-        notes = self._notes("record")
-
-        assert notes["Browser"] == tokens.RECORD_DISABLED_MODES["Browser"]
-
-    def test_no_note_is_long_enough_to_be_elided(self):
-        # A note cut off mid-sentence is worse than none at all, and the
-        # menu is a fixed width -- so this is measured, not eyeballed.
-        from PyQt6.QtGui import QFontMetricsF
-        from snipux.chooser import _font
-
-        # The width `_MenuRow.paintEvent` actually elides against, computed
-        # the same way it does rather than guessed at. An earlier version
-        # used `MENU_MODE_W - 84`, which was too generous.
-        metric = tokens.ChooserMetric
-        _pad_v, pad_h = metric.MENU_ROW_PAD
-        text_x = pad_h + metric.MENU_ROW_ICON + 9
-        budget = metric.MENU_MODE_W - 10 - text_x - pad_h - (metric.MENU_TICK + 8)
-        metrics = QFontMetricsF(_font(11, 400))
-        # Both found states, because the notes differ between them: with
-        # nothing found, Browser and Active window show their short
-        # "unavailable" reasons and their real notes are never measured at
-        # all. That gap let a 32-character note ship unchecked.
-        for kind in ("stills", "record"):
-            for found in (False, True):
-                for mode, note in self._notes(kind, found).items():
-                    assert metrics.horizontalAdvance(note) <= budget, (
-                        f"{mode} on the {kind} side would elide: {note!r}"
-                    )
-                    # A second, cruder guard -- and the one that would
-                    # actually have caught the bug this test missed. The
-                    # measurement above is only as good as the font behind
-                    # it, and the offscreen platform this suite runs on
-                    # does not resolve the font the app uses: measured, the
-                    # real Segoe UI is ~50% wider than whatever offscreen
-                    # supplies, so a note needing 197px on screen measured
-                    # 131px here and passed while eliding for the user.
-                    # Characters are not proportional to pixels, but they
-                    # do not depend on which font got loaded -- and 30 is
-                    # the length of the longest note confirmed to fit on a
-                    # real screen.
-                    assert len(note) <= 30, (
-                        f"{mode} on the {kind} side is {len(note)} characters; "
-                        f"over 30 risks eliding in the real font whatever this "
-                        f"platform measures: {note!r}"
-                    )
-
-
-class TestTheModeMenuNarrowsOnTheRecordSide:
-    def test_stills_offers_every_mode_and_disables_none_of_them(self):
+    def test_picking_a_row_adopts_the_mode_and_closes_the_menu(self):
         chooser = Chooser(parent=None)
-        # Seeded, or `Tab` and Active window are the rows the stills side
-        # does grey out -- see TestTheTabModeNeedsABrowser and
-        # TestActiveWindowNeedsAWindowToTake, which are about those rules.
+        chosen = []
+        chooser.modeChosen.connect(chosen.append)
+        menu = self._open(chooser)
+
+        _click(menu._rows["Window"])
+
+        assert chooser.mode == "Window"
+        assert chosen == ["Window"]
+        assert chooser._menu is None
+        assert not chooser.row.mode_chip.is_open()
+
+    def test_the_chosen_row_is_ticked(self):
+        chooser = Chooser(parent=None)
+        menu = self._open(chooser)
+
+        assert menu._rows["Region"].selected
+        assert not menu._rows["Window"].selected
+
+    def test_clicking_the_chip_again_closes_it(self):
+        chooser = Chooser(parent=None)
+        self._open(chooser)
+
+        _click(chooser.row.mode_chip)
+
+        assert chooser._menu is None
+
+    def test_a_menu_that_closes_itself_leaves_the_chip_closed(self):
+        # A popup closes on a click anywhere else, and on Escape.
+        chooser = Chooser(parent=None)
+        menu = self._open(chooser)
+
+        menu.close()
+
+        assert chooser._menu is None
+        assert not chooser.row.mode_chip.is_open()
+
+
+def _brightest(image, x0, x1):
+    return max(
+        image.pixelColor(x, y).lightness()
+        for x in range(max(0, x0), min(image.width(), x1))
+        for y in range(image.height())
+    )
+
+
+class TestAGreyedModeRowCarriesItsReason:
+    """A mode that cannot work stays in the menu, greyed, with its reason in
+    the subtitle slot Last region uses for its dimensions."""
+
+    @staticmethod
+    def _spec(chooser, value):
+        rows, last_region = chooser._mode_rows()
+        return {spec.value: spec for spec in rows + [last_region]}[value]
+
+    def test_browser_is_greyed_with_its_reason_by_default(self):
+        spec = self._spec(Chooser(parent=None), tokens.BROWSER_MODE)
+
+        assert (spec.disabled, spec.subtitle) == (True, tokens.BROWSER_UNAVAILABLE)
+
+    def test_browser_is_greyed_on_the_record_side_even_with_a_browser(self):
+        chooser = Chooser(parent=None)
         chooser.set_browser_available(True)
-        chooser.set_active_window_available(True)
-
-        rows, _selected, _width = chooser._rows_for("mode")
-
-        assert [row[0] for row in rows] == [m[0] for m in tokens.CAPTURE_MODES]
-        assert all(row[5] is False for row in rows)
-
-    def test_record_disables_its_unavailable_modes_with_a_note(self):
-        chooser = Chooser(parent=None)
         chooser.set_kind("record")
 
-        rows, _selected, _width = chooser._rows_for("mode")
-        by_value = {value: (note, disabled) for value, _i, _l, note, _s, disabled in rows}
+        spec = self._spec(chooser, tokens.BROWSER_MODE)
 
-        for mode, reason in tokens.RECORD_DISABLED_MODES.items():
-            note, disabled = by_value[mode]
-            assert disabled is True
-            assert note == reason
-
-    def test_record_leaves_region_and_full_screen_enabled(self):
-        chooser = Chooser(parent=None)
-        chooser.set_kind("record")
-
-        rows, _selected, _width = chooser._rows_for("mode")
-        by_value = {value: disabled for value, _i, _l, _n, _s, disabled in rows}
-
-        assert by_value["Region"] is False
-        assert by_value["Full screen"] is False
-
-
-class TestTheAfterMenuSwapsVocabularyOnTheRecordSide:
-    def test_stills_offers_instant_edit_save_and_review(self):
-        chooser = Chooser(parent=None)
-
-        rows, _selected, _width = chooser._rows_for("after")
-
-        assert [row[0] for row in rows] == ["instant", "edit", "save", "review"]
-        assert all(row[5] is False for row in rows)
-
-    def test_record_offers_copy_save_and_open(self):
-        chooser = Chooser(parent=None)
-        chooser.set_kind("record")
-
-        rows, _selected, _width = chooser._rows_for("after")
-
-        assert [row[0] for row in rows] == ["instant", "save", "open"]
-        assert all(row[5] is False for row in rows)
-
-    def test_edit_and_review_never_appear_on_the_record_side(self):
-        # "open" is the record side's third destination and means the trim
-        # editor, not the stills review window -- the two are different
-        # windows and the ids stay separate.
-        record_ids = {value for value, *_rest in _RECORD_AFTER_ROWS}
-
-        assert "edit" not in record_ids
-        assert "review" not in record_ids
-
-    def test_save_is_a_stills_destination_too_now(self):
-        # It did not used to be, and the split action was the thing that
-        # made that untenable: its caret has always offered Copy/Save/Open
-        # and `_sync_bar_destination` has always mapped `save` to a Save
-        # face, so with no stills id to record it in, picking Save from the
-        # caret was the one choice that could not be remembered.
-        stills_ids = {value for value, *_rest in _AFTER_ROWS}
-
-        assert "save" in stills_ids
-        assert "save" in {v for v, *_r in tokens.AFTER_CAPTURE}
-
-    def test_the_two_lists_agree_on_what_the_shared_ids_mean(self):
-        # `instant` and `save` appear on both sides and mean the same
-        # thing by both; a divergence here would make `set_kind`'s snap
-        # (which keeps `_after` when the new side also has it) silently
-        # change what the user asked for.
-        stills = {value for value, *_rest in _AFTER_ROWS}
-        record = {value for value, *_rest in _RECORD_AFTER_ROWS}
-
-        assert stills & record == {"instant", "save"}
-
-    def test_stills_ids_still_round_trip_through_storage(self):
-        # `load_after_capture` validates against `tokens.AFTER_CAPTURE`, so
-        # a row the menu offers but storage rejects would silently fall
-        # back to the default the moment it was read back.
-        from snipux import setup_desktop
-
-        for identifier, *_rest in _AFTER_ROWS:
-            setup_desktop.save_after_capture(identifier)
-            assert setup_desktop.load_after_capture() == identifier
-
-
-class TestADisabledModeRowIsInertNotJustGreyed:
-    def test_it_swallows_its_press_but_never_clicks(self):
-        # SNX-108's fix (`_Surface`) still applies to a disabled row -- the
-        # press must not reach whatever is behind the menu -- but the
-        # release must not emit either, unlike an enabled row's.
-        row = _MenuRow(
-            "Window", "window", "Window", "Not offered for recording yet", "W",
-            disabled=True,
+        assert (spec.disabled, spec.subtitle) == (
+            True, tokens.RECORD_DISABLED_MODES[tokens.BROWSER_MODE]
         )
-        row.resize(250, 40)
+
+    def test_active_window_is_greyed_with_its_reason_by_default(self):
+        spec = self._spec(Chooser(parent=None), tokens.ACTIVE_WINDOW_MODE)
+
+        assert (spec.disabled, spec.subtitle) == (True, tokens.ACTIVE_WINDOW_UNAVAILABLE)
+
+    def test_active_window_says_when_the_platform_cannot_name_a_window(self):
+        chooser = Chooser(parent=None)
+
+        chooser.set_active_window_available(False, tokens.ACTIVE_WINDOW_UNSUPPORTED)
+
+        assert self._spec(chooser, tokens.ACTIVE_WINDOW_MODE).subtitle == (
+            tokens.ACTIVE_WINDOW_UNSUPPORTED
+        )
+
+    def test_stills_offers_every_mode_once_each_is_possible(self):
+        chooser = Chooser(parent=None)
+        _every_mode_available(chooser)
+
+        rows, last_region = chooser._mode_rows()
+
+        assert not any(spec.disabled for spec in rows + [last_region])
+
+    def test_record_leaves_region_full_screen_and_the_windows_enabled(self):
+        chooser = Chooser(parent=None)
+        _every_mode_available(chooser)
+        chooser.set_kind("record")
+
+        for mode in ("Region", "Full screen", "Window", tokens.ACTIVE_WINDOW_MODE):
+            assert self._spec(chooser, mode).disabled is False, mode
+
+    def test_a_greyed_row_paints_its_reason_under_its_label(self):
+        spec = _RowSpec(
+            "Browser", "panel", "Browser", "B",
+            subtitle=tokens.BROWSER_UNAVAILABLE, disabled=True,
+        )
+        row, other = _MenuRow(spec), _MenuRow(spec._replace(subtitle="x"))
+        for each in (row, other):
+            each.resize(METRIC.MENU_W_MODE - 2 * METRIC.MENU_PAD, each.height())
+        pad_v, _pad_h = METRIC.MENU_ROW_PAD
+
+        size = row.grab().deviceIndependentSize()
+
+        # Within a physical pixel: 39 logical px is 58.5 physical at 1.5,
+        # which the grab rounds to 59 and reports back as 39.33.
+        expected = 2 * pad_v + math.ceil(
+            FONT.MENU_LABEL[0] + METRIC.MENU_NOTE_GAP + FONT.MENU_NOTE[0]
+        )
+        assert abs(size.height() - expected) < 1
+        assert row.grab().toImage() != other.grab().toImage()
+
+    def test_a_disabled_row_swallows_its_press_but_never_clicks(self):
+        # SNX-108's fix still applies to a disabled row -- the press must not
+        # reach the frame behind the menu -- but the release must not click.
+        row = _MenuRow(_RowSpec("Browser", "panel", "Browser", "B", subtitle="nope", disabled=True))
+        row.resize(METRIC.MENU_W_MODE, row.height())
         clicked = []
         row.clicked.connect(clicked.append)
 
@@ -662,8 +914,8 @@ class TestADisabledModeRowIsInertNotJustGreyed:
         assert clicked == []
 
     def test_an_enabled_row_still_clicks_for_comparison(self):
-        row = _MenuRow("Region", "crop", "Region", "", "R", disabled=False)
-        row.resize(250, 40)
+        row = _MenuRow(_RowSpec("Region", "crop", "Region", "R"))
+        row.resize(METRIC.MENU_W_MODE, row.height())
         clicked = []
         row.clicked.connect(clicked.append)
 
@@ -671,184 +923,205 @@ class TestADisabledModeRowIsInertNotJustGreyed:
 
         assert clicked == ["Region"]
 
-
-def _darkest_pixel(pixmap, x0, x1, y0, y1):
-    # `_MenuRow` is grabbed standalone here, with no hosting `_Menu` behind
-    # it to paint `ChooserColor.MENU_BG` -- so the untouched background is
-    # whatever plain Qt hands a fresh widget (a light grey), brighter than
-    # any foreground colour this row ever paints. Against that background,
-    # the shortcut glyph's own ink is what pulls a pixel's R+G+B *down* --
-    # the most-inked pixel is therefore the darkest one, not the brightest.
-    #
-    # The window is given in LOGICAL pixels -- the space `_MenuRow.paintEvent`
-    # draws in and the space its 9px/20px shortcut slot is expressed in -- but
-    # `grab()` hands back PHYSICAL ones, so on a 1.5x display this row's 250
-    # logical px are 375 in the image. Scaling the window here rather than at
-    # the call sites keeps every caller in the one space the layout constants
-    # are written in. Unscaled, the sample lands mid-row on a scaled machine
-    # and reads the same ink for both rows -- see 2e0838f, the same mistake in
-    # a different costume.
-    image = pixmap.toImage()
-    ratio = image.devicePixelRatio() or 1.0
-    px0, px1 = round(x0 * ratio), round(x1 * ratio)
-    py0, py1 = round(y0 * ratio), round(y1 * ratio)
-    return min(
-        image.pixelColor(x, y).red() + image.pixelColor(x, y).green() + image.pixelColor(x, y).blue()
-        for x in range(px0, px1)
-        for y in range(py0, py1)
-    )
-
-
-class TestADisabledModeRowDimsItsShortcutToo:
-    """SNX-120 review: `_rows_for("mode")` still handed a disabled row its
-    shortcut letter, and `_MenuRow.paintEvent` drew it in `SHORTCUT_FG`
-    regardless -- full brightness, as if the key still did something, when
-    `handle_key` now silently no-ops for it on the record side
-    (`TestRecordSideModeSelectionIsInert`). It must still be visible --
-    "grey out with a hint", not hide -- just dimmed like the label/icon.
-    """
-
     def test_a_disabled_rows_shortcut_is_dimmer_than_an_enabled_ones(self):
-        # Both rows carry a note, so both land on the same fixed height
-        # (`_MenuRow.__init__`'s `34 if note else 18`) -- resize() cannot
-        # widen it past that, since setFixedHeight caps it even for a
-        # parentless widget.
-        enabled = _MenuRow("Full screen", "monitor", "Full screen", "note", "F", disabled=False)
-        disabled = _MenuRow(
-            "Window", "window", "Window", "Not offered for recording yet", "W",
-            disabled=True,
+        # At full strength a disabled row's letter reads as if the key still
+        # did something. Painted on the menu's own dark ground, where dimmer
+        # means darker.
+        width = METRIC.MENU_W_MODE - 2 * METRIC.MENU_PAD
+        _pad_v, pad_h = METRIC.MENU_ROW_PAD
+        right = width - pad_h - METRIC.MENU_TICK - METRIC.MENU_ROW_GAP
+        left = right - math.ceil(
+            QFontMetricsF(_font(FONT.MENU_SHORTCUT, mono=True)).horizontalAdvance("W")
         )
-        enabled.resize(250, enabled.height())
-        disabled.resize(250, disabled.height())
-        assert enabled.height() == disabled.height()
-        # The shortcut is drawn right-aligned in a 20px-wide slot inset by
-        # MENU_ROW_PAD_H (9) from the row's right edge -- see `paintEvent`.
-        x0, x1 = 250 - 9 - 20, 250 - 9
 
-        enabled_ink = _darkest_pixel(enabled.grab(), x0, x1, 0, enabled.height())
-        disabled_ink = _darkest_pixel(disabled.grab(), x0, x1, 0, disabled.height())
+        def ink(disabled):
+            row = _MenuRow(_RowSpec("Window", "window", "Window", "W", disabled=disabled))
+            row.resize(width, row.height())
+            image = QImage(row.size(), QImage.Format.Format_ARGB32)
+            image.fill(QColor(tokens.BarColor.MENU_BG))
+            painter = QPainter(image)
+            row.render(painter, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
+            painter.end()
+            return _brightest(image, left, right)
 
-        assert disabled_ink < enabled_ink
+        assert ink(disabled=True) < ink(disabled=False)
+
+    def test_every_reason_fits_its_subtitle_slot(self):
+        # The column a row gives its label and subtitle is what is left of
+        # the menu's width after the glyph, the tick and that row's own
+        # shortcut. Measured, and capped in characters as well: the
+        # offscreen face this suite measures is narrower than some a user
+        # has -- Segoe UI measured about half as wide again.
+        _pad_v, pad_h = METRIC.MENU_ROW_PAD
+        shortcut_font = QFontMetricsF(_font(FONT.MENU_SHORTCUT, mono=True))
+        reason_font = QFontMetricsF(_font(FONT.MENU_NOTE))
+        full = (
+            METRIC.MENU_W_MODE - 2 * METRIC.MENU_PAD - 2 * pad_h - METRIC.MENU_ROW_ICON
+            - METRIC.MENU_TICK - 3 * METRIC.MENU_ROW_GAP
+        )
+        keys = {mode: key for key, mode in tokens.MODE_KEYS.items()}
+        cases = [
+            (tokens.BROWSER_UNAVAILABLE, keys[tokens.BROWSER_MODE]),
+            (tokens.ACTIVE_WINDOW_UNAVAILABLE, keys[tokens.ACTIVE_WINDOW_MODE]),
+            (tokens.ACTIVE_WINDOW_UNSUPPORTED, keys[tokens.ACTIVE_WINDOW_MODE]),
+            (tokens.LAST_REGION_NONE, tokens.LAST_REGION_SHORTCUT),
+            (tokens.LAST_REGION_OFF_DESK, tokens.LAST_REGION_SHORTCUT),
+        ] + [(reason, keys[mode]) for mode, reason in tokens.RECORD_DISABLED_MODES.items()]
+
+        for reason, shortcut in cases:
+            budget = full - math.ceil(shortcut_font.horizontalAdvance(shortcut))
+            assert reason_font.horizontalAdvance(reason) <= budget, reason
+            # 30 characters fit beside a one-letter shortcut on a real
+            # screen; the cap shrinks with the room.
+            assert len(reason) <= 30 * budget / (full - shortcut_font.horizontalAdvance("W")), reason
 
 
-class TestTheReuseLastRegionToggle:
-    """The row's one on/off control. It is on the row rather than in
-    Settings because a preference nobody finds is a preference nobody has:
-    this one shipped in Settings first and went unnoticed.
-    """
+class TestLastRegionIsAMode:
+    """#66: Last region answers "what to capture", so it is a mode -- a row
+    under the rule, subtitled with the dimensions it restores -- rather than
+    a toggle beside the mode."""
 
-    def test_it_is_off_by_default(self):
-        assert Chooser(parent=None).reuse_last_region is False
-
-    def test_seeding_it_does_not_emit(self):
-        # Adopting stored config and the user clicking are different
-        # events, and only the second is worth writing back -- the same
-        # rule `set_after` follows.
+    def test_it_is_greyed_until_something_was_captured(self):
         chooser = Chooser(parent=None)
+
+        _rows, spec = chooser._mode_rows()
+
+        assert (spec.disabled, spec.subtitle) == (True, tokens.LAST_REGION_NONE)
+
+    def test_its_subtitle_is_the_dimensions_it_restores_in_mono(self):
+        chooser = Chooser(parent=None)
+
+        chooser.set_last_region(QSizeF(1017, 562))
+
+        _rows, spec = chooser._mode_rows()
+        assert (spec.disabled, spec.subtitle, spec.subtitle_mono) == (
+            False, "1017 × 562", True
+        )
+        assert (spec.label, spec.glyph, spec.shortcut) == (
+            tokens.LAST_REGION_MODE, tokens.LAST_REGION_GLYPH, tokens.LAST_REGION_SHORTCUT
+        )
+
+    def test_a_region_off_these_monitors_says_so(self):
+        chooser = Chooser(parent=None)
+
+        chooser.set_last_region(None, tokens.LAST_REGION_OFF_DESK)
+
+        _rows, spec = chooser._mode_rows()
+        assert (spec.disabled, spec.subtitle) == (True, tokens.LAST_REGION_OFF_DESK)
+
+    def test_greyed_it_cannot_be_chosen(self):
+        chooser = Chooser(parent=None)
+
+        chooser.set_mode(tokens.LAST_REGION_MODE)
+        chooser.handle_key(Qt.Key.Key_R, "R", Qt.KeyboardModifier.ShiftModifier)
+
+        assert chooser.mode == "Region"
+
+    def test_choosing_it_restores_at_once_on_the_stills_side(self):
+        chooser = Chooser(parent=None)
+        chooser.set_last_region(QSizeF(640, 480))
         fired = []
-        chooser.reuseLastRegionChanged.connect(fired.append)
+        chooser.fireImmediately.connect(fired.append)
+
+        chooser.set_mode(tokens.LAST_REGION_MODE)
+
+        assert fired == [tokens.LAST_REGION_MODE]
+        assert chooser.phase == "choosing"
+
+    def test_on_the_record_side_it_is_announced_as_chosen(self):
+        chooser = Chooser(parent=None)
+        chooser.set_last_region(QSizeF(640, 480))
+        chooser.set_kind("record")
+        fired, chosen = [], []
+        chooser.fireImmediately.connect(fired.append)
+        chooser.modeChosen.connect(chosen.append)
+
+        chooser.set_mode(tokens.LAST_REGION_MODE)
+
+        assert (fired, chosen) == ([], [tokens.LAST_REGION_MODE])
+
+    def test_shift_r_chooses_it(self):
+        chooser = Chooser(parent=None)
+        chooser.set_last_region(QSizeF(640, 480))
+
+        handled = chooser.handle_key(Qt.Key.Key_R, "R", Qt.KeyboardModifier.ShiftModifier)
+
+        assert handled
+        assert chooser.mode == tokens.LAST_REGION_MODE
+
+    def test_plain_r_is_still_region(self):
+        chooser = Chooser(parent=None)
+        chooser.set_last_region(QSizeF(640, 480))
+        chooser.set_mode("Window", announce=False)
+
+        chooser.handle_key(Qt.Key.Key_R, "r")
+
+        assert chooser.mode == "Region"
+
+    def test_picking_it_and_picking_away_are_what_the_next_snip_opens_on(self):
+        chooser = Chooser(parent=None)
+        chooser.set_last_region(QSizeF(640, 480))
+        emitted = []
+        chooser.reuseLastRegionChanged.connect(emitted.append)
+
+        chooser.set_mode(tokens.LAST_REGION_MODE)
+        chooser.set_mode(tokens.LAST_REGION_MODE)
+        chooser.set_mode("Window")
+        chooser.set_mode("Region")
+
+        assert emitted == [True, False]
+
+    def test_seeding_it_opens_on_it_without_a_signal(self):
+        chooser = Chooser(parent=None)
+        chooser.set_last_region(QSizeF(640, 480))
+        emitted = []
+        for signal in (chooser.reuseLastRegionChanged, chooser.modeChosen, chooser.fireImmediately):
+            signal.connect(emitted.append)
 
         chooser.set_reuse_last_region(True)
 
+        assert chooser.mode == tokens.LAST_REGION_MODE
         assert chooser.reuse_last_region is True
-        assert fired == []
+        assert emitted == []
 
-    def test_clicking_it_flips_and_announces(self):
+    def test_seeding_it_with_nothing_to_restore_leaves_region(self):
         chooser = Chooser(parent=None)
-        fired = []
-        chooser.reuseLastRegionChanged.connect(fired.append)
 
-        QTest.mouseClick(chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton)
-
-        assert fired == [True]
-        assert chooser.reuse_last_region is True
-
-    def test_clicking_it_again_turns_it_back_off(self):
-        chooser = Chooser(parent=None)
         chooser.set_reuse_last_region(True)
-        fired = []
-        chooser.reuseLastRegionChanged.connect(fired.append)
 
-        QTest.mouseClick(chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton)
+        assert chooser.mode == "Region"
 
-        assert fired == [False]
-        assert chooser.reuse_last_region is False
-
-    def test_it_sits_next_to_the_mode_it_modifies(self):
-        # Before the destination and delay triggers, which answer a
-        # different question entirely.
+    def test_seeding_it_on_the_record_side_leaves_region(self):
+        # Opening a recording on a rectangle would arm the recording.
         chooser = Chooser(parent=None)
-        panel = chooser.panel
-        order = [panel.layout().itemAt(i).widget() for i in range(panel.layout().count())]
-
-        assert order.index(panel.reuse_toggle) == order.index(panel.mode_trigger) + 1
-        assert order.index(panel.reuse_toggle) < order.index(panel.after_trigger)
-
-    def test_it_is_hidden_on_the_record_side(self):
-        # Recording never pre-selects -- committing there arms a recording
-        # -- so offering the control would promise something that side
-        # does not do.
-        chooser = Chooser(parent=None)
-        chooser.panel.show()
-
+        chooser.set_last_region(QSizeF(640, 480))
         chooser.set_kind("record")
 
-        assert chooser.panel.reuse_toggle.isVisibleTo(chooser.panel) is False
-
-    def test_it_comes_back_on_the_stills_side(self):
-        chooser = Chooser(parent=None)
-        chooser.panel.show()
-        chooser.set_kind("record")
-
-        chooser.set_kind("stills")
-
-        assert chooser.panel.reuse_toggle.isVisibleTo(chooser.panel) is True
-
-    def test_hovering_it_explains_what_it_does(self):
-        # Qt tooltips are a coin toss on an always-on-top frameless window,
-        # so the row's own hint pill is what carries the explanation.
-        chooser = Chooser(parent=None)
-
-        chooser._on_reuse_hovered(True)
-
-        assert chooser.hint._text == tokens.REUSE_HINT[False]
-
-    def test_the_hint_says_how_to_turn_it_off_once_it_is_on(self):
-        chooser = Chooser(parent=None)
         chooser.set_reuse_last_region(True)
 
-        chooser._on_reuse_hovered(True)
+        assert chooser.mode == "Region"
 
-        assert chooser.hint._text == tokens.REUSE_HINT[True]
-
-    def test_leaving_it_restores_the_modes_own_hint(self):
+    def test_losing_what_it_restores_falls_back_to_region(self):
         chooser = Chooser(parent=None)
-        chooser._on_reuse_hovered(True)
+        chooser.set_last_region(QSizeF(640, 480))
+        chooser.set_mode(tokens.LAST_REGION_MODE, announce=False)
 
-        chooser._on_reuse_hovered(False)
+        chooser.set_last_region(None, tokens.LAST_REGION_OFF_DESK)
 
-        assert chooser.hint._text == tokens.MODE_NEXT_STEP["Region"]
+        assert chooser.mode == "Region"
 
-    def test_both_hints_fit_the_pill_without_eliding(self):
-        # The pill sizes itself to its text, and the row is centred on one
-        # monitor -- a hint wider than the narrowest sane screen would hang
-        # off it.
-        from PyQt6.QtGui import QFontMetricsF
+    def test_its_hint_is_its_own(self):
+        chooser = Chooser(parent=None)
+        chooser.set_last_region(QSizeF(640, 480))
 
-        from snipux.chooser import _font
+        chooser.set_mode(tokens.LAST_REGION_MODE, announce=False)
 
-        metrics = QFontMetricsF(_font(11.5, 400))
-        for state, text in tokens.REUSE_HINT.items():
-            width = metrics.horizontalAdvance(text)
-            assert width <= 420, f"reuse hint for {state} is {width:.0f}px: {text!r}"
-        for state, text in tokens.HIDE_SENSITIVE_HINT.items():
-            width = metrics.horizontalAdvance(text)
-            assert width <= 420, f"hide-sensitive hint for {state} is {width:.0f}px: {text!r}"
+        assert (chooser.hint.glyph, chooser.hint.text) == (
+            tokens.LAST_REGION_GLYPH, tokens.MODE_NEXT_STEP[tokens.LAST_REGION_MODE]
+        )
 
 
-class TestTheHideSensitiveToggle:
-    """The row's second toggle: black out sensitive text in screenshots."""
-
+class TestTheHideSensitiveFlag:
     def test_it_is_off_by_default(self):
         assert Chooser(parent=None).hide_sensitive is False
 
@@ -867,54 +1140,70 @@ class TestTheHideSensitiveToggle:
         fired = []
         chooser.hideSensitiveChanged.connect(fired.append)
 
-        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
-        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+        _click(chooser.row.hide_flag)
+        _click(chooser.row.hide_flag)
 
         assert fired == [True, False]
         assert chooser.hide_sensitive is False
 
-    def test_it_does_not_change_last_region(self):
+    def test_it_does_not_change_the_mode(self):
         chooser = Chooser(parent=None)
 
-        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+        _click(chooser.row.hide_flag)
 
-        assert chooser.reuse_last_region is False
+        assert chooser.mode == "Region"
 
-    def test_it_sits_right_after_last_region(self):
-        chooser = Chooser(parent=None)
-        panel = chooser.panel
-        order = [panel.layout().itemAt(i).widget() for i in range(panel.layout().count())]
+    def test_it_is_the_eye_with_a_strike_never_the_blur_droplet(self):
+        glyph = Chooser(parent=None).row.hide_flag._glyph
 
-        assert order.index(panel.hide_toggle) == order.index(panel.reuse_toggle) + 1
-        assert order.index(panel.hide_toggle) < order.index(panel.after_trigger)
+        assert glyph == "eyeOff"
+        assert glyph != "blur"
+
+    def test_it_shares_a_well_with_delay_as_the_kinds_share_theirs(self):
+        row = Chooser(parent=None).row
+
+        assert row.hide_flag.parent() is row.flag_well
+        assert row.delay_flag.parent() is row.flag_well
+        assert row.stills.parent() is row.kind_well
+        assert row.record.parent() is row.kind_well
 
     def test_it_is_hidden_on_the_record_side_and_comes_back(self):
+        # Recognition reads a frozen frame, and a recording has none.
         chooser = Chooser(parent=None)
-        chooser.panel.show()
 
         chooser.set_kind("record")
-        assert chooser.panel.hide_toggle.isVisibleTo(chooser.panel) is False
+        assert chooser.row.hide_flag.isHidden()
 
         chooser.set_kind("stills")
-        assert chooser.panel.hide_toggle.isVisibleTo(chooser.panel) is True
+        assert not chooser.row.hide_flag.isHidden()
 
-    def test_hovering_it_explains_what_it_covers(self):
+    def test_its_tooltip_and_hint_say_what_it_covers(self):
         chooser = Chooser(parent=None)
-
-        chooser._on_hide_hovered(True)
-        assert chooser.hint._text == tokens.HIDE_SENSITIVE_HINT[False]
+        _hover(chooser.row.hide_flag)
+        assert chooser.hint.text == tokens.HIDE_SENSITIVE_HINT[False]
+        assert chooser.row.hide_flag.toolTip() == tokens.HIDE_SENSITIVE_HINT[False]
 
         chooser.set_hide_sensitive(True)
-        chooser._on_hide_hovered(True)
-        assert chooser.hint._text == tokens.HIDE_SENSITIVE_HINT[True]
+
+        assert chooser.hint.text == tokens.HIDE_SENSITIVE_HINT[True]
+        assert chooser.row.hide_flag.toolTip() == tokens.HIDE_SENSITIVE_HINT[True]
 
     def test_leaving_it_restores_the_modes_own_hint(self):
         chooser = Chooser(parent=None)
-        chooser._on_hide_hovered(True)
+        _hover(chooser.row.hide_flag)
 
-        chooser._on_hide_hovered(False)
+        _hover(chooser.row.hide_flag, hovered=False)
 
-        assert chooser.hint._text == tokens.MODE_NEXT_STEP["Region"]
+        assert chooser.hint.text == tokens.MODE_NEXT_STEP["Region"]
+
+    def test_both_hints_fit_the_pill_without_eliding(self):
+        # The pill sizes itself to its text, and the row is centred on one
+        # monitor -- a hint wider than the narrowest sane screen would hang
+        # off it.
+        metrics = QFontMetricsF(_font(FONT.HINT))
+        for state, text in tokens.HIDE_SENSITIVE_HINT.items():
+            width = metrics.horizontalAdvance(text)
+            assert width <= 420, f"hide-sensitive hint for {state} is {width:.0f}px: {text!r}"
 
 
 class TestHideSensitiveWhenTextCannotBeRead:
@@ -924,50 +1213,78 @@ class TestHideSensitiveWhenTextCannotBeRead:
     def test_available_until_told_otherwise(self):
         assert Chooser(parent=None).hide_sensitive_available is True
 
-    def test_an_unavailable_toggle_ignores_clicks(self):
+    def test_an_unavailable_flag_ignores_clicks(self):
         chooser = Chooser(parent=None)
         chooser.set_hide_sensitive_available(False, "Windows only for now")
         fired = []
         chooser.hideSensitiveChanged.connect(fired.append)
 
-        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+        _click(chooser.row.hide_flag)
 
         assert fired == []
         assert chooser.hide_sensitive is False
 
-    def test_hovering_an_unavailable_toggle_says_why(self):
+    def test_hovering_an_unavailable_flag_says_why(self):
         chooser = Chooser(parent=None)
         chooser.set_hide_sensitive_available(False, "Windows only for now")
 
-        chooser._on_hide_hovered(True)
+        _hover(chooser.row.hide_flag)
 
-        assert chooser.hint._text == "Windows only for now"
+        assert chooser.hint.text == "Windows only for now"
+        assert chooser.row.hide_flag.toolTip() == "Windows only for now"
 
     def test_it_stays_on_the_row(self):
         chooser = Chooser(parent=None)
-        chooser.panel.show()
 
         chooser.set_hide_sensitive_available(False, "Windows only for now")
 
-        assert chooser.panel.hide_toggle.isVisibleTo(chooser.panel) is True
+        assert not chooser.row.hide_flag.isHidden()
 
     def test_it_can_become_available_again(self):
         chooser = Chooser(parent=None)
         chooser.set_hide_sensitive_available(False, "nope")
 
         chooser.set_hide_sensitive_available(True)
-        QTest.mouseClick(chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+        _click(chooser.row.hide_flag)
 
         assert chooser.hide_sensitive is True
 
-    def test_it_paints_differently_when_unavailable(self):
+
+class TestHoveringAControlBorrowsTheHint:
+    """Qt's tooltips are a coin toss on an always-on-top frameless window,
+    so the row's one line of prose explains whatever is under the pointer."""
+
+    def test_the_destination_names_itself_there(self):
         chooser = Chooser(parent=None)
-        toggle = chooser.panel.hide_toggle
-        usable = toggle.grab().toImage()
 
-        chooser.set_hide_sensitive_available(False, "nope")
+        _hover(chooser.row.destination)
 
-        assert toggle.grab().toImage() != usable
+        assert chooser.hint.text == chooser.row.destination.toolTip()
+
+    def test_a_click_while_hovering_updates_what_it_says(self):
+        chooser = Chooser(parent=None)
+        _hover(chooser.row.delay_flag)
+        assert chooser.hint.text == tokens.DELAY_TOOLTIP_OFF
+
+        _click(chooser.row.delay_flag)
+
+        assert chooser.hint.text == tokens.DELAY_TOOLTIP_ON.format(delay=tokens.DELAYS[1])
+
+    @pytest.mark.parametrize("kind", ["stills", "record"])
+    def test_each_kind_names_itself(self, kind):
+        chooser = Chooser(parent=None)
+
+        _hover(getattr(chooser.row, kind))
+
+        assert chooser.hint.text == tokens.KIND_TOOLTIP[kind]
+
+    def test_leaving_gives_the_hint_back_to_the_mode(self):
+        chooser = Chooser(parent=None)
+        _hover(chooser.row.destination)
+
+        _hover(chooser.row.destination, hovered=False)
+
+        assert chooser.hint.text == tokens.MODE_NEXT_STEP["Region"]
 
 
 class TestFlippingKindDoesNotLeakTheDestination:
@@ -1016,9 +1333,6 @@ class TestFlippingKindDoesNotLeakTheDestination:
         assert chooser.after == "save"
 
     def test_a_shared_id_is_not_treated_as_displaced(self):
-        # `save` means the same thing on both sides, so it is never
-        # displaced and there is nothing to restore -- flipping back must
-        # leave it alone rather than resurrect something older.
         chooser = Chooser(parent=None)
         chooser.set_after("save")
 
@@ -1028,112 +1342,236 @@ class TestFlippingKindDoesNotLeakTheDestination:
         assert chooser.after == "save"
 
 
-class TestTheTabModeNeedsABrowser:
-    """`Tab` captures the frontmost browser's page area. With no browser to
-    find -- none open, or a platform that cannot see other applications'
-    windows at all -- the row says so rather than offering a capture that
-    would produce nothing.
-    """
+class TestTheDestinationVocabularies:
+    def test_stills_offers_instant_edit_save_and_review(self):
+        assert [value for value, *_rest in _AFTER_ROWS] == ["instant", "edit", "save", "review"]
 
-    def test_it_is_greyed_with_a_reason_by_default(self):
-        chooser = Chooser(parent=None)
+    def test_record_offers_copy_save_and_open(self):
+        assert [value for value, *_rest in _RECORD_AFTER_ROWS] == ["instant", "save", "open"]
 
-        rows, _selected, _width = chooser._rows_for("mode")
-        by_value = {value: (note, disabled) for value, _i, _l, note, _s, disabled in rows}
+    def test_the_two_lists_agree_on_what_the_shared_ids_mean(self):
+        stills = {value for value, *_rest in _AFTER_ROWS}
+        record = {value for value, *_rest in _RECORD_AFTER_ROWS}
 
-        note, disabled = by_value[tokens.BROWSER_MODE]
-        assert disabled is True
-        assert note == tokens.BROWSER_UNAVAILABLE
+        assert stills & record == {"instant", "save"}
 
+    def test_stills_ids_still_round_trip_through_storage(self):
+        # `load_after_capture` validates against `tokens.AFTER_CAPTURE`, so
+        # a destination the row offers but storage rejects would fall back to
+        # the default the moment it was read back.
+        from snipux import setup_desktop
+
+        for identifier, *_rest in _AFTER_ROWS:
+            setup_desktop.save_after_capture(identifier)
+            assert setup_desktop.load_after_capture() == identifier
+
+    def test_the_notes_cover_exactly_the_stills_destinations(self):
+        # Two surfaces, two lengths of prose, one list of destinations.
+        assert set(tokens.CHOOSER_AFTER_NOTE) == {
+            value for value, _label, _description in tokens.AFTER_CAPTURE
+        }
+
+
+class TestActiveWindowNeedsAWindowToTake:
     def test_the_shortcut_is_inert_while_the_row_is_disabled(self):
-        # A greyed row already swallows its own click; the shortcut key has
-        # to leave the current mode alone the same way, or the keyboard
-        # reaches a mode the menu says is unreachable.
         chooser = Chooser(parent=None)
-        before = chooser.mode
 
+        chooser.handle_key(ord("A"), "A")
+
+        assert chooser.mode == "Region"
+
+    def test_with_a_window_found_choosing_it_fires(self):
+        chooser = Chooser(parent=None)
+        chooser.set_active_window_available(True)
+        fired, chosen = [], []
+        chooser.fireImmediately.connect(fired.append)
+        chooser.modeChosen.connect(chosen.append)
+
+        chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert (fired, chosen) == ([tokens.ACTIVE_WINDOW_MODE], [])
+
+    def test_browser_needs_a_browser_to_be_picked(self):
+        chooser = Chooser(parent=None)
         chooser.set_mode(tokens.BROWSER_MODE)
+        assert chooser.mode == "Region"
 
-        assert chooser.mode == before
-
-    def test_seeding_a_browser_makes_it_pickable(self):
-        chooser = Chooser(parent=None)
         chooser.set_browser_available(True)
-
         chooser.set_mode(tokens.BROWSER_MODE)
 
         assert chooser.mode == tokens.BROWSER_MODE
 
-    def test_it_is_greyed_on_the_record_side_even_with_a_browser(self):
-        # Recording a browser page is sensible and the rect is the same
-        # one; it is off because nothing has driven it end to end there.
+
+class TestTheCollapsedTab:
+    """What the row folds to once a selection exists: 22px on the same edge,
+    at 70% until the pointer is on it."""
+
+    def test_it_is_tab_h_tall(self):
         chooser = Chooser(parent=None)
-        chooser.set_browser_available(True)
+
+        assert chooser.tab.grab().deviceIndependentSize().height() == METRIC.TAB_H
+
+    def test_it_carries_the_mode_and_then_the_destination(self):
+        chooser = Chooser(parent=None)
+        chooser.set_mode("Window", announce=False)
+        chooser.set_after("review")
+
+        assert (chooser.tab.mode, chooser.tab.tail) == ("Window", "then Review")
+
+    def test_it_carries_the_eye_strike_while_hide_sensitive_is_on(self):
+        chooser = Chooser(parent=None)
+        bare_width = chooser.tab.width()
+        bare = chooser.tab.grab().toImage()
+
+        chooser.set_hide_sensitive(True)
+
+        assert chooser.tab.carries_hide_sensitive
+        assert chooser.tab.width() == bare_width + 2 * METRIC.TAB_GAP + 1 + METRIC.TAB_ICON
+        assert chooser.tab.grab().toImage() != bare
+
+    def test_not_while_hide_sensitive_cannot_work(self):
+        chooser = Chooser(parent=None)
+        chooser.set_hide_sensitive(True)
+
+        chooser.set_hide_sensitive_available(False, "nope")
+
+        assert not chooser.tab.carries_hide_sensitive
+
+    def test_not_on_the_record_side(self):
+        chooser = Chooser(parent=None)
+        chooser.set_hide_sensitive(True)
+
         chooser.set_kind("record")
 
-        rows, _selected, _width = chooser._rows_for("mode")
-        by_value = {value: (note, disabled) for value, _i, _l, note, _s, disabled in rows}
+        assert not chooser.tab.carries_hide_sensitive
 
-        note, disabled = by_value[tokens.BROWSER_MODE]
-        assert disabled is True
-        assert note == tokens.RECORD_DISABLED_MODES[tokens.BROWSER_MODE]
-
-
-class TestActiveWindowNeedsAWindowToTake:
-    """Active window takes the window the user was in. Where there is none
-    to take -- the desktop had focus, or the platform cannot name another
-    application's window at all -- the row says why instead.
-    """
-
-    @staticmethod
-    def _row(chooser):
-        rows, _selected, _width = chooser._rows_for("mode")
-        by_value = {value: (note, disabled) for value, _i, _l, note, _s, disabled in rows}
-        return by_value[tokens.ACTIVE_WINDOW_MODE]
-
-    def test_it_is_greyed_with_a_reason_by_default(self):
-        assert self._row(Chooser(parent=None)) == (tokens.ACTIVE_WINDOW_UNAVAILABLE, True)
-
-    def test_it_says_when_the_platform_cannot_name_a_window(self):
+    def test_it_is_70_percent_until_the_pointer_is_on_it(self):
         chooser = Chooser(parent=None)
+        assert chooser.tab.opacity() == pytest.approx(METRIC.TAB_OPACITY)
 
-        chooser.set_active_window_available(False, tokens.ACTIVE_WINDOW_UNSUPPORTED)
+        _hover(chooser.tab)
+        assert chooser.tab.opacity() == pytest.approx(1.0)
 
-        assert self._row(chooser) == (tokens.ACTIVE_WINDOW_UNSUPPORTED, True)
+        _hover(chooser.tab, hovered=False)
+        assert chooser.tab.opacity() == pytest.approx(METRIC.TAB_OPACITY)
 
-    def test_the_shortcut_is_inert_while_the_row_is_disabled(self):
+    def test_clicking_it_reopens_the_row_as_it_was(self):
         chooser = Chooser(parent=None)
-        before = chooser.mode
+        chooser.set_mode("Window", announce=False)
+        chooser.set_delay("5s")
+        chooser.collapse()
 
-        chooser.handle_key(ord("A"), "A")
+        _click(chooser.tab)
 
-        assert chooser.mode == before
+        assert chooser.phase == "choosing"
+        assert (chooser.mode, chooser.delay) == ("Window", "5s")
 
-    def test_with_a_window_found_choosing_it_fires_rather_than_arms(self):
+    def test_space_reopens_it_and_is_not_the_rows_otherwise(self):
         chooser = Chooser(parent=None)
-        chooser.set_active_window_available(True)
-        fired, armed = [], []
-        chooser.fireImmediately.connect(fired.append)
-        chooser.modeChosen.connect(armed.append)
+        assert chooser.handle_key(Qt.Key.Key_Space, " ") is False
 
-        chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+        chooser.collapse()
 
-        assert fired == [tokens.ACTIVE_WINDOW_MODE]
-        assert armed == []
+        assert chooser.handle_key(Qt.Key.Key_Space, " ") is True
         assert chooser.phase == "choosing"
 
-    def test_it_is_offered_on_the_record_side_where_it_arms(self):
-        # Deliberately absent from RECORD_DISABLED_MODES; the comment there
-        # says why. Nothing fires immediately on the record side.
+
+class TestTheRowIsAFillNotAnOpacity:
+    """Alpha is not opacity: the row is a 94%-alpha fill with fully opaque
+    controls. `windowOpacity` would wash the icons out with the ground; the
+    tab's 70% is the one real opacity."""
+
+    def test_nothing_makes_the_row_translucent_as_a_whole(self):
         chooser = Chooser(parent=None)
-        chooser.set_active_window_available(True)
+
+        assert chooser.row.windowOpacity() == 1.0
+        assert not isinstance(chooser.row.graphicsEffect(), QGraphicsOpacityEffect)
+        assert isinstance(chooser.tab.graphicsEffect(), QGraphicsOpacityEffect)
+
+    def test_its_ground_is_94_percent_and_its_controls_opaque(self):
+        chooser = Chooser(parent=None)
         chooser.set_kind("record")
-        fired, armed = [], []
-        chooser.fireImmediately.connect(fired.append)
-        chooser.modeChosen.connect(armed.append)
+        # The shadow would darken the ground under it; the fill is the point.
+        chooser.row.graphicsEffect().setEnabled(False)
 
-        assert self._row(chooser)[1] is False
-        chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+        image = chooser.row.grab().toImage()
 
-        assert fired == []
-        assert armed == [tokens.ACTIVE_WINDOW_MODE]
+        ratio = image.devicePixelRatio()
+
+        def at(point):
+            return image.pixelColor(round(point.x() * ratio), round(point.y() * ratio))
+
+        # In the gap between the kind well and the mode chip.
+        gap = QPointF(
+            METRIC.BORDER + METRIC.PAD
+            + 2 * METRIC.WELL_PAD + 2 * METRIC.BTN + METRIC.WELL_GAP + METRIC.GAP / 2,
+            METRIC.ROW_H / 2,
+        )
+        assert at(gap).alphaF() == pytest.approx(tokens.BarColor.BAR_BG_ALPHA, abs=0.02)
+        dot = QPointF(chooser.row.record.mapTo(chooser.row, QPoint(METRIC.BTN // 2, METRIC.BTN // 2)))
+        assert at(dot).alphaF() == pytest.approx(1.0)
+        assert at(dot).name() == tokens.BarColor.REC_ON_FG
+
+
+class TestPlacement:
+    """Centred on the monitor it is handed and flush to its top, in the host
+    window's own coordinates. Which monitor is the overlay's call.
+
+    Hosted, as the overlay hosts it: without a parent the row is a window of
+    its own, and a platform may put a frame round a window's position.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _host(self):
+        self.host = QWidget()
+        self.host.resize(4480, 1440)
+        yield
+        self.host.deleteLater()
+
+    def test_the_row_hangs_centred_from_the_top_with_the_pill_under_it(self):
+        chooser = Chooser(self.host)
+
+        chooser.set_screen(QRectF(0, 0, 1920, 1080), QPoint(0, 0))
+
+        row = chooser.row.geometry()
+        assert row.top() == 0
+        assert abs(row.x() + row.width() / 2 - 960) <= 1
+        assert chooser.hint.y() == METRIC.ROW_H + METRIC.HINT_GAP
+        assert abs(chooser.hint.x() + chooser.hint.width() / 2 - 960) <= 1
+
+    def test_on_a_monitor_with_a_negative_origin(self):
+        # A monitor left of and above the primary: the host window's origin
+        # is that monitor's top-left, so everything is placed relative to it.
+        chooser = Chooser(self.host)
+        origin = QPoint(-1920, -300)
+
+        chooser.set_screen(QRectF(-1920, -300, 1920, 1080), origin)
+        row = chooser.row.geometry()
+        assert (row.top(), abs(row.x() + row.width() / 2 - 960) <= 1) == (0, True)
+
+        chooser.set_screen(QRectF(0, 0, 2560, 1440), origin)
+        row = chooser.row.geometry()
+        assert row.top() == 300
+        assert abs(row.x() + row.width() / 2 - (1920 + 1280)) <= 1
+
+    def test_the_tab_hangs_from_the_same_edge(self):
+        chooser = Chooser(self.host)
+        chooser.set_screen(QRectF(-1920, -300, 1920, 1080), QPoint(-1920, -300))
+
+        chooser.collapse()
+
+        tab = chooser.tab.geometry()
+        assert tab.top() == 0
+        assert abs(tab.x() + tab.width() / 2 - 960) <= 1
+        assert chooser.tab.isVisibleTo(self.host)
+        assert not chooser.row.isVisibleTo(self.host)
+        assert not chooser.hint.isVisibleTo(self.host)
+
+    def test_the_row_stays_centred_as_it_changes_width(self):
+        chooser = Chooser(self.host)
+        chooser.set_screen(QRectF(0, 0, 1920, 1080), QPoint(0, 0))
+
+        chooser.set_delay("10s")
+
+        row = chooser.row.geometry()
+        assert abs(row.x() + row.width() / 2 - 960) <= 1

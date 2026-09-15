@@ -5969,11 +5969,10 @@ class TestCaptureModeWindowIntegration:
     def _clean_slate(self):
         _close_stray_toplevel_windows()
 
-    # y=90, not 30: while `_picking_window` is armed the prior selection is
-    # None, which is also `Chooser`'s own "nothing chosen yet" condition
-    # (`_sync_chooser_visibility`), so its panel -- SNX-120's stills/record
-    # switch widened it -- is up too, spanning the full top ChooserMetric.
-    # HEIGHT (54px) band. A rect/point inside that band never reaches
+    # y=90, not 30: while `_picking_window` is armed the chooser row stays
+    # up (`_sync_chooser_visibility`), and it and its hint pill take the top
+    # BarMetric.ROW_H + HINT_GAP + the pill's 22px (71px) of the monitor's
+    # centre. A rect/point inside that band never reaches
     # `OverlayWindow.mouseMoveEvent` at all (Qt delivers a bare hover to
     # whichever child sits under the cursor instead), silently turning a
     # hit into a no-op. 90 clears it with margin.
@@ -6853,11 +6852,15 @@ class TestADelayPickedOnTheChooserRowDelaysTheCapture:
         )
 
     def _pick_delay_on_the_row(self, overlay, delay):
-        self._click(overlay._chooser.panel.delay_trigger)
-        self._click(overlay._chooser._menu._rows[delay])
+        # Delay is a flag on the row (#66): each click advances one delay.
+        for _ in tokens.DELAYS:
+            if overlay._chooser.delay == delay:
+                return
+            self._click(overlay._chooser.row.delay_flag)
+        raise AssertionError(f"the delay flag never reached {delay}")
 
     def _pick_mode_on_the_row(self, overlay, mode):
-        self._click(overlay._chooser.panel.mode_trigger)
+        self._click(overlay._chooser.row.mode_chip)
         self._click(overlay._chooser._menu._rows[mode])
 
     def test_picking_a_mode_hides_the_overlay_and_counts_down(self):
@@ -8585,7 +8588,7 @@ class TestHideSensitiveText:
         overlay = OverlayWindow(make_frame())
         assert overlay._chooser.hide_sensitive is True
 
-        QTest.mouseClick(overlay._chooser.panel.hide_toggle, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay._chooser.row.hide_flag, Qt.MouseButton.LeftButton)
 
         assert setup_desktop.load_hide_sensitive() is False
 
@@ -8597,8 +8600,8 @@ class TestHideSensitiveText:
         overlay = OverlayWindow(make_frame())
 
         assert overlay._chooser.hide_sensitive_available is False
-        overlay._chooser._on_hide_hovered(True)
-        assert overlay._chooser.hint._text == "Windows only for now"
+        overlay._chooser._on_control_hovered(overlay._chooser.row.hide_flag, True)
+        assert overlay._chooser.hint.text == "Windows only for now"
 
 
 class _FakeBrowserProvider(UnsupportedGeometryProvider):
@@ -8846,7 +8849,9 @@ class TestActiveWindowTakesTheWindowTheUserWasIn:
         overlay._chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
 
         assert overlay._selection == self.NOTES_LOCAL
-        assert overlay._chooser.phase == "choosing", "nothing to aim at, so it never arms"
+        # Nothing to aim at, so it takes the window on the pick -- and a
+        # selection is what folds the row down to its tab (#66).
+        assert overlay._chooser.phase == "collapsed"
 
     def test_its_shortcut_takes_it_too(self):
         overlay = self._overlay(_FakeFocusedWindowProvider(self.NOTES))
@@ -8996,12 +9001,13 @@ class TestActiveWindowTakesTheWindowTheUserWasIn:
 
 
 class TestReuseLastRegionPreselectsIt:
-    """The `reuse last region` preference: Region mode opens on the
-    rectangle the last snip came from instead of an empty overlay.
+    """Last region: the rectangle the last snip came from, as a mode (#66).
 
-    A preference, not a fifth mode. Picking a mode from a dropdown every
-    time costs the same interaction the drag did, so a mode would have
-    spent exactly what it was meant to save.
+    It was a toggle on the row meaning "open on the last region". It is a
+    row of the mode menu now, and choosing it both takes that rectangle and
+    is what the next snip opens on: the same stored `reuse_last_region`
+    preference, written by the pick where the toggle used to write it.
+    Opening on it still only offers the rectangle, committing nothing.
 
     Coordinates are the sharp edge here, per CLAUDE.md -- the rectangle is
     stored absolute and used window-local, and these frames deliberately
@@ -9053,57 +9059,97 @@ class TestReuseLastRegionPreselectsIt:
 
         assert setup_desktop.load_last_region() is None
 
-    # -- the preference --------------------------------------------------
+    # -- the mode --------------------------------------------------------
 
-    def test_the_row_toggle_is_seeded_from_storage(self):
-        # The control has to show the state it is actually in, or the user
-        # turns on a preference that was already on.
-        setup_desktop.save_reuse_last_region(True)
+    @staticmethod
+    def _pick(overlay, mode):
+        QTest.mouseClick(overlay._chooser.row.mode_chip, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay._chooser._menu._rows[mode], Qt.MouseButton.LeftButton)
 
-        assert self._overlay()._chooser.reuse_last_region is True
+    def test_its_row_offers_the_dimensions_it_restores(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
 
-    def test_clicking_the_row_toggle_persists_it(self):
-        # The gap this closes: the toggle was on the row, emitting its
-        # signal, with nothing on the other end -- so it looked like a
-        # working control and changed nothing at all.
+        _rows, spec = self._overlay()._chooser._mode_rows()
+
+        assert (spec.disabled, spec.subtitle) == (False, "640 × 480")
+
+    def test_with_nothing_captured_yet_it_is_greyed_with_the_reason(self):
+        _rows, spec = self._overlay()._chooser._mode_rows()
+
+        assert (spec.disabled, spec.subtitle) == (True, tokens.LAST_REGION_NONE)
+
+    def test_a_rectangle_off_these_monitors_greys_it_with_that_reason(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+
+        overlay = self._overlay(
+            monitors=[QRectF(self.PRIMARY)], origin=(0, 0), size=(1920, 1080)
+        )
+
+        _rows, spec = overlay._chooser._mode_rows()
+        assert (spec.disabled, spec.subtitle) == (True, tokens.LAST_REGION_OFF_DESK)
+
+    def test_choosing_it_frames_the_previous_capture(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
         overlay = self._overlay()
 
-        QTest.mouseClick(
-            overlay._chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton
-        )
+        self._pick(overlay, tokens.LAST_REGION_MODE)
+
+        # Absolute (-1720, 300) is window-local (200, 300) here.
+        assert overlay._selection == QRect(200, 300, 640, 480)
+        # Chosen, so taken -- not the offer the overlay makes as it opens.
+        assert overlay._recalled_selection is False
+        assert overlay._chooser.phase == "collapsed"
+
+    def test_shift_r_frames_it_too(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_R, Qt.KeyboardModifier.ShiftModifier)
+
+        assert overlay._selection == QRect(200, 300, 640, 480)
+
+    def test_choosing_it_with_instant_finishes_on_it(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        overlay = self._overlay()
+        overlay._chooser.set_after("instant")
+
+        self._pick(overlay, tokens.LAST_REGION_MODE)
+
+        assert len(copied) == 1
+        assert not overlay.isVisible()
+
+    def test_choosing_it_is_what_the_next_snip_opens_on(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
+        self._pick(self._overlay(), tokens.LAST_REGION_MODE)
 
         assert setup_desktop.load_reuse_last_region() is True
+        second = self._overlay()
+        assert second._chooser.mode == tokens.LAST_REGION_MODE
+        assert second._selection == QRect(200, 300, 640, 480)
 
-    def test_clicking_it_off_again_persists_that_too(self):
+    def test_choosing_another_mode_is_what_turns_that_off(self):
+        setup_desktop.save_last_region((-1720, 300, 640, 480))
         setup_desktop.save_reuse_last_region(True)
         overlay = self._overlay()
 
-        QTest.mouseClick(
-            overlay._chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton
-        )
+        # Opened on the region, so the row is a tab: Space brings it back.
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+        self._pick(overlay, "Region")
 
         assert setup_desktop.load_reuse_last_region() is False
 
-    def test_turning_it_on_does_not_pre_select_underneath_the_pointer(self):
-        # Pre-selecting stands the chooser down, so acting immediately
-        # would take the row -- and the toggle just clicked -- off screen.
+    def test_the_stored_preference_is_still_what_it_opens_on(self):
+        # Nobody who had the toggle on loses their rectangle to the change.
         setup_desktop.save_last_region((-1720, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+
         overlay = self._overlay()
 
-        QTest.mouseClick(
-            overlay._chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton
-        )
-
-        assert overlay._selection is None
-
-    def test_it_takes_effect_on_the_next_overlay(self):
-        setup_desktop.save_last_region((-1720, 300, 640, 480))
-        first = self._overlay()
-        QTest.mouseClick(
-            first._chooser.panel.reuse_toggle, Qt.MouseButton.LeftButton
-        )
-
-        assert self._overlay()._selection == QRect(200, 300, 640, 480)
+        assert overlay._chooser.mode == tokens.LAST_REGION_MODE
+        assert overlay._chooser.reuse_last_region is True
 
     def test_the_preference_is_off_unless_asked_for(self):
         # Pre-selecting an area the user did not ask for this time changes
@@ -9122,18 +9168,18 @@ class TestReuseLastRegionPreselectsIt:
         assert overlay._selection == QRect(200, 300, 640, 480)
 
     def test_it_needs_no_trip_through_the_mode_menu(self):
-        # The whole point of the redesign: nothing is picked, nothing is
-        # clicked, and the mode is still the plain Region it always was.
+        # Opening on it is the offer the toggle used to make: nothing is
+        # picked and nothing is clicked.
         setup_desktop.save_last_region((-1720, 300, 640, 480))
         setup_desktop.save_reuse_last_region(True)
 
         overlay = self._overlay()
 
-        assert overlay._chooser.mode == "Region"
-        # Reuse is a preference on the row, never a mode of its own -- the
-        # point of the redesign. `Tab` is a mode because it captures
-        # something different, not because it changes how Region behaves.
-        assert "Last region" not in [m[0] for m in tokens.CAPTURE_MODES]
+        assert overlay._chooser.mode == tokens.LAST_REGION_MODE
+        assert overlay._recalled_selection is True
+        # Under the rule rather than among the capture modes, which the
+        # bar's own mode popover lists.
+        assert tokens.LAST_REGION_MODE not in [m[0] for m in tokens.CAPTURE_MODES]
 
     def test_the_toolbar_is_up_on_the_rectangles_own_monitor(self):
         setup_desktop.save_last_region((-1720, 300, 640, 480))
@@ -9429,7 +9475,7 @@ class TestTheChooserRowFollowsThePointer:
 
     @staticmethod
     def _row(overlay: OverlayWindow) -> QRectF:
-        return QRectF(overlay._chooser.panel.geometry())
+        return QRectF(overlay._chooser.row.geometry())
 
     def _point_at(self, overlay: OverlayWindow, monitor: QRectF) -> None:
         overlay._cursor_pos = QPointF(monitor.center())
@@ -10248,22 +10294,22 @@ class TestCaptureChooser:
         QTest.qWaitForWindowExposed(overlay)
         return overlay
 
-    def test_it_starts_in_choosing_with_the_panel_up(self):
+    def test_it_starts_in_choosing_with_the_row_up(self):
         overlay = self._overlay()
 
         assert overlay._chooser.phase == "choosing"
-        assert overlay._chooser.panel.isVisibleTo(overlay)
+        assert overlay._chooser.row.isVisibleTo(overlay)
 
-    def test_picking_a_mode_arms_it_and_collapses_to_the_tab(self):
-        # Region and Window both need the screen back -- one to drag on, the
-        # other to hover over.
+    def test_picking_a_mode_leaves_the_row_up(self):
+        # #66: picking a mode does not arm it. The row stays until the user
+        # drags or clicks a window, and Window's preview works beneath it.
         overlay = self._overlay()
 
         overlay._chooser.set_mode("Window")
 
-        assert overlay._chooser.phase == "armed"
-        assert overlay._chooser.tab.isVisibleTo(overlay)
-        assert not overlay._chooser.panel.isVisibleTo(overlay)
+        assert overlay._chooser.phase == "choosing"
+        assert overlay._chooser.row.isVisibleTo(overlay)
+        assert not overlay._chooser.tab.isVisibleTo(overlay)
 
     def test_the_armed_mode_reaches_the_overlay(self):
         overlay = self._overlay()
@@ -10282,19 +10328,22 @@ class TestCaptureChooser:
         overlay._chooser.set_mode("Full screen")
 
         assert fired == ["Full screen"]
-        assert overlay._chooser.phase == "choosing", "it never arms"
+        # It takes the monitor on the pick, and a selection folds the row.
+        assert overlay._chooser.phase == "collapsed"
 
-    def test_the_tab_reopens_the_panel_with_selections_intact(self):
+    def test_the_tab_reopens_the_row_with_selections_intact(self):
         overlay = self._overlay()
-        overlay._chooser.set_after("clip")
-        overlay._chooser.set_mode("Window")
+        overlay._chooser.set_after("review")
+        overlay._chooser.set_mode("Window", announce=False)
+        overlay.set_selection(QRect(100, 200, 300, 200))
+        assert overlay._chooser.phase == "collapsed"
 
         overlay._chooser.reopen()
 
         assert overlay._chooser.phase == "choosing"
-        assert overlay._chooser.panel.isVisibleTo(overlay)
+        assert overlay._chooser.row.isVisibleTo(overlay)
         assert overlay._chooser.mode == "Window"
-        assert overlay._chooser.after == "clip"
+        assert overlay._chooser.after == "review"
 
     @pytest.mark.parametrize("key,mode", list(tokens.MODE_KEYS.items()))
     def test_each_shortcut_selects_its_mode(self, key, mode):
@@ -10312,11 +10361,12 @@ class TestCaptureChooser:
 
         assert overlay._chooser.mode == mode
 
-    def test_space_reopens_from_armed(self):
+    def test_space_reopens_from_the_tab(self):
         overlay = self._overlay()
-        overlay._chooser.set_mode("Window")
+        overlay.set_selection(QRect(100, 200, 300, 200))
+        assert overlay._chooser.phase == "collapsed"
 
-        overlay._chooser.handle_key(Qt.Key.Key_Space, " ")
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
 
         assert overlay._chooser.phase == "choosing"
 
@@ -10335,15 +10385,15 @@ class TestCaptureChooser:
 
         assert overlay._chooser.handle_key(Qt.Key.Key_Z, "z") is False
 
-    def test_it_stands_down_once_there_is_a_selection(self):
-        # Chooser up means no selection; bar up means one exists. They never
-        # coexist, so they may safely share a widget stack.
+    def test_it_folds_to_its_tab_once_there_is_a_selection(self):
+        # #66: the tab stays up beside the bar, carrying the mode, the
+        # destination and Hide sensitive through the change of stage.
         overlay = self._overlay()
 
         overlay.set_selection(QRect(100, 100, 300, 200))
 
-        assert not overlay._chooser.panel.isVisibleTo(overlay)
-        assert not overlay._chooser.tab.isVisibleTo(overlay)
+        assert not overlay._chooser.row.isVisibleTo(overlay)
+        assert overlay._chooser.tab.isVisibleTo(overlay)
         assert overlay._bar.isVisibleTo(overlay)
 
     def test_the_bars_chip_is_seeded_from_it(self):
@@ -10360,27 +10410,27 @@ class TestCaptureChooser:
         overlay = self._overlay()
         overlay._chooser.reopen()
 
-        overlay._chooser.set_mode("Window", arm=False)
+        overlay._chooser.set_mode("Window", announce=False)
 
         assert overlay._chooser.mode == "Window"
         assert overlay._chooser.phase == "choosing"
 
-    def test_the_panel_hangs_from_the_active_monitors_top_edge(self):
+    def test_the_row_hangs_from_the_active_monitors_top_edge(self):
         # Never the virtual desktop: on a staggered multi-monitor setup its
         # centre is a gap between screens.
         overlay = self._overlay()
 
-        panel = overlay._chooser.panel.geometry()
+        row = overlay._chooser.row.geometry()
         screen = overlay._active_screen_rect()
-        assert panel.top() == round(screen.y() - overlay.geometry().top())
-        assert abs(panel.center().x() - (screen.center().x() - overlay.geometry().left())) <= 2
+        assert row.top() == round(screen.y() - overlay.geometry().top())
+        assert abs(row.center().x() - (screen.center().x() - overlay.geometry().left())) <= 2
 
-    def test_the_panel_clears_whatever_the_desktop_reserves_up_there(
+    def test_the_row_clears_whatever_the_desktop_reserves_up_there(
         self, monkeypatch
     ):
-        # GNOME paints its top bar over an always-on-top window, so a panel
-        # hung flush against that edge is behind it -- 32px of a 54px panel
-        # on the measured desktop, and all 26px of the armed tab.
+        # GNOME paints its top bar over an always-on-top window, so a row
+        # hung flush against that edge is behind it -- 32px of the 42px row
+        # on the measured desktop, and all 22px of the tab.
         monkeypatch.setattr(
             overlay_module.platform.current,
             "reserved_margins",
@@ -10390,9 +10440,9 @@ class TestCaptureChooser:
 
         screen = overlay._active_screen_rect()
         top = round(screen.y() - overlay.geometry().top())
-        assert overlay._chooser.panel.geometry().top() == top + 32
+        assert overlay._chooser.row.geometry().top() == top + 32
 
-    def test_the_armed_tab_clears_it_too(self, monkeypatch):
+    def test_the_tab_clears_it_too(self, monkeypatch):
         monkeypatch.setattr(
             overlay_module.platform.current,
             "reserved_margins",
@@ -10400,7 +10450,7 @@ class TestCaptureChooser:
         )
         overlay = self._overlay()
 
-        overlay._chooser.set_mode("Window")
+        overlay.set_selection(QRect(100, 200, 300, 200))
 
         screen = overlay._active_screen_rect()
         top = round(screen.y() - overlay.geometry().top())
@@ -10564,8 +10614,9 @@ class TestControlsLandOnTheCapturesMonitor:
 
         Not `Chooser` itself: it is the state machine behind the row, a
         widget that draws nothing and takes no clicks, and it never moves
-        from the window's corner. Its panel, tab, hint and legend are the
-        row, and each is a child here in its own right.
+        from the window's corner. Its row, hint pill and tab are each a
+        child here in their own right -- and the tab is up once there is a
+        selection (#66), so it has to land on the capture's monitor too.
         """
         return [
             (type(child).__name__, QRectF(child.geometry()).translated(self.ORIGIN))
@@ -10690,7 +10741,7 @@ class TestControlsLandOnTheCapturesMonitor:
         overlay = self._overlay(monkeypatch, monitor)
 
         names = [name for name, _rect in self._chrome_on_screen(overlay)]
-        assert {"ChooserPanel", "_CloseButton"} <= set(names), names
+        assert {"ChooserRow", "_HintPill", "_CloseButton"} <= set(names), names
         assert self._off(overlay, monitor) == []
 
     @ON_EACH_MONITOR
@@ -10777,7 +10828,9 @@ class TestFullScreenFollowsThePointerBeforeItCommits:
 
         assert overlay._picking_monitor
         assert overlay._selection is None
-        assert overlay._chooser.phase == "armed"
+        # The row stays up while the monitor under the pointer is previewed:
+        # picking a mode never arms it (#66).
+        assert overlay._chooser.phase == "choosing"
         assert copied == []
         assert overlay.isVisible()
 
@@ -10868,15 +10921,16 @@ class TestFullScreenFollowsThePointerBeforeItCommits:
 
         assert not overlay.isVisible()
 
-    def test_the_chooser_tab_follows_the_pointer_while_it_is_armed(self, monkeypatch):
+    def test_the_chooser_row_follows_the_pointer_while_it_is_armed(self, monkeypatch):
         # Gated on there being no selection yet, which a snap never left.
         overlay = self._overlay(monkeypatch)
         overlay._chooser.set_mode("Full screen")
 
         self._hover(overlay, ABOVE_TOP.center())
 
-        tab = QRectF(overlay._chooser.tab.geometry()).translated(self.ORIGIN)
-        assert ABOVE_TOP.contains(tab), f"tab at {tab}"
+        row = QRectF(overlay._chooser.row.geometry()).translated(self.ORIGIN)
+        assert overlay._chooser.row.isVisible()
+        assert ABOVE_TOP.contains(row), f"row at {row}"
 
     def test_choosing_another_mode_disarms_it(self, monkeypatch):
         overlay = self._overlay(monkeypatch)
@@ -10990,84 +11044,93 @@ class TestTheChooserTakesItsOwnClicks:
     def _click(self, widget):
         QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=self._centre(widget))
 
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        # An open menu is a popup, which takes every mouse event in the
+        # process until it closes.
+        _close_stray_toplevel_windows()
+        yield
+        _close_stray_toplevel_windows()
+
     @pytest.mark.parametrize(
-        "trigger", ["mode_trigger", "after_trigger", "delay_trigger"]
+        "control", ["stills", "record", "mode_chip", "destination", "hide_flag", "delay_flag"]
     )
-    def test_a_press_on_a_trigger_starts_no_capture(self, trigger):
+    def test_a_press_on_a_control_starts_no_capture(self, control):
         overlay = self._overlay()
 
-        self._press(getattr(overlay._chooser.panel, trigger))
+        self._press(getattr(overlay._chooser.row, control))
 
         # A selection at all -- even the empty one a drag opens with -- is
-        # what stands the chooser down and puts the floating bar up.
+        # what folds the row and puts the floating bar up.
         assert overlay._selection is None
-        assert overlay._chooser.panel.isVisibleTo(overlay)
+        assert overlay._chooser.row.isVisibleTo(overlay)
 
-    def test_a_press_on_the_panel_itself_starts_no_capture(self):
-        # The gaps between the triggers and the word "then" are the panel's
+    def test_a_press_on_the_row_itself_starts_no_capture(self):
+        # The gaps between the controls and the wells' padding are the row's
         # own background, and a press that lands there is still a press on
         # the chooser.
         overlay = self._overlay()
 
-        self._press(overlay._chooser.panel)
+        self._press(overlay._chooser.row)
+        self._press(overlay._chooser.row.kind_well)
 
         assert overlay._selection is None
-        assert overlay._chooser.panel.isVisibleTo(overlay)
+        assert overlay._chooser.row.isVisibleTo(overlay)
 
-    def test_a_press_on_the_armed_tab_starts_no_capture(self):
+    def test_a_press_on_the_tab_starts_no_new_capture(self):
         overlay = self._overlay()
-        overlay._chooser.set_mode("Window")
+        overlay.set_selection(QRect(100, 200, 300, 200))
 
         self._press(overlay._chooser.tab)
 
-        assert overlay._selection is None
+        assert overlay._selection == QRect(100, 200, 300, 200)
         assert overlay._chooser.tab.isVisibleTo(overlay)
 
-    def test_clicking_a_trigger_opens_its_menu(self):
+    def test_clicking_the_mode_chip_opens_its_menu(self):
         overlay = self._overlay()
 
-        self._click(overlay._chooser.panel.mode_trigger)
+        self._click(overlay._chooser.row.mode_chip)
 
-        assert overlay._chooser._menu_kind == "mode"
+        assert overlay._chooser._menu is not None
 
-    def test_clicking_through_to_a_row_arms_that_mode(self):
-        # The whole gesture the video showed failing: click the trigger,
-        # then click a row in the menu it opened.
-        # Window, which this class's overlay has a provider for -- without
-        # one it would fall back to Region and prove nothing about the click
-        # that got there.
+    def test_clicking_through_to_a_row_picks_that_mode(self):
+        # The whole gesture the video showed failing: click the control,
+        # then click a row in the menu it opened. Window, which this class's
+        # overlay has a provider for -- without one it would fall back to
+        # Region and prove nothing about the click that got there.
         overlay = self._overlay()
 
-        self._click(overlay._chooser.panel.mode_trigger)
+        self._click(overlay._chooser.row.mode_chip)
         self._click(overlay._chooser._menu._rows["Window"])
 
         assert overlay._chooser.mode == "Window"
-        assert overlay._chooser.phase == "armed"
+        assert overlay._chooser.phase == "choosing"
         assert overlay._capture_mode == "Window"
+        assert overlay._picking_window
 
-    def test_clicking_the_tab_reopens_the_panel(self):
+    def test_clicking_the_tab_reopens_the_row(self):
         overlay = self._overlay()
-        overlay._chooser.set_mode("Window")
+        overlay.set_selection(QRect(100, 200, 300, 200))
 
         self._click(overlay._chooser.tab)
 
         assert overlay._chooser.phase == "choosing"
 
-    def test_sliding_off_a_trigger_before_releasing_is_not_a_click(self):
+    def test_sliding_off_a_control_before_releasing_is_not_a_click(self):
         # Consuming the press makes this widget Qt's implicit mouse
         # grabber, so the release comes back here wherever it happens.
         # Pressing a control and sliding away from it means "no".
         overlay = self._overlay()
-        trigger = overlay._chooser.panel.mode_trigger
+        chip = overlay._chooser.row.mode_chip
 
-        self._press(trigger)
-        QTest.mouseRelease(trigger, Qt.MouseButton.LeftButton, pos=QPoint(-200, 400))
+        self._press(chip)
+        QTest.mouseRelease(chip, Qt.MouseButton.LeftButton, pos=QPoint(-200, 400))
 
         assert overlay._chooser._menu is None
 
     def test_sliding_off_a_menu_row_before_releasing_picks_nothing(self):
         overlay = self._overlay()
-        self._click(overlay._chooser.panel.mode_trigger)
+        self._click(overlay._chooser.row.mode_chip)
         row = overlay._chooser._menu._rows["Window"]
 
         QTest.mousePress(row, Qt.MouseButton.LeftButton, pos=self._centre(row))
@@ -11077,20 +11140,18 @@ class TestTheChooserTakesItsOwnClicks:
         assert overlay._chooser.phase == "choosing"
         assert overlay._capture_mode == "Region"
 
-    def test_double_clicking_a_trigger_starts_no_capture(self):
+    def test_double_clicking_a_control_starts_no_capture(self):
         # Qt sends a second press as a `MouseButtonDblClick`, and a widget
         # that ignores that gets the press-propagating default back --
         # which is the same leak by another event type. Clicking twice
         # because nothing seemed to happen is exactly how the bug was hit.
         overlay = self._overlay()
-        trigger = overlay._chooser.panel.mode_trigger
+        chip = overlay._chooser.row.mode_chip
 
-        QTest.mouseDClick(
-            trigger, Qt.MouseButton.LeftButton, pos=self._centre(trigger)
-        )
+        QTest.mouseDClick(chip, Qt.MouseButton.LeftButton, pos=self._centre(chip))
 
         assert overlay._selection is None
-        assert overlay._chooser.panel.isVisibleTo(overlay)
+        assert overlay._chooser.row.isVisibleTo(overlay)
 
 
 class TestTheDestinationMenuChangesTheDestination:
@@ -11203,103 +11264,10 @@ class TestTheDestinationMenuChangesTheDestination:
         assert fired == ["open"]
 
 
-class TestTheDestinationMenuFitsItsWidth:
-    """The menu is a fixed 270px and its notes are prose.
-
-    A note that overruns is not a cosmetic problem: it prints over the tick
-    that says which destination is selected, so the row stops answering the
-    one question it exists to answer.
-    """
-
-    def _budget(self):
-        from PyQt6.QtGui import QFontMetricsF
-
-        from snipux.chooser import _font
-
-        metric = tokens.ChooserMetric
-        _pad_v, pad_h = metric.MENU_ROW_PAD
-        text_x = pad_h + metric.MENU_ROW_ICON + 9
-        width = (
-            metric.MENU_AFTER_W
-            - 2 * metric.MENU_PAD
-            - text_x
-            - pad_h
-            - (metric.MENU_TICK + 8)
-        )
-        return width, QFontMetricsF(_font(11, 400)), QFontMetricsF(_font(12.5, 500))
-
-    def test_every_note_fits_without_eliding(self):
-        # This budget is measured against the font `_font()` actually
-        # resolves (matching production's own paintEvent), not a hard-coded
-        # number -- but IBM Plex isn't vendored yet (design/fonts/ doesn't
-        # exist in this handoff), so the resolved substitute is whatever
-        # *this machine's* own GeneralFont fallback happens to be. That is a
-        # fact about the box the suite runs on, not the OS family: gating
-        # this on sys.platform (an earlier version of this test did) is
-        # exactly backwards, since a narrow-enough Linux fallback is not
-        # guaranteed either -- only that *some* machines have one. Skip only
-        # when the assertion would actually fail *and* the reason is the
-        # known one (no real Plex installed), rather than assuming a whole
-        # OS one way or the other; production already elides safely when a
-        # note doesn't fit (see chooser.py's `_MenuRow.paintEvent`), so this
-        # is a no-eliding-needed guarantee that only holds where a narrow
-        # enough font is actually available, not a regression.
-        width, note_fm, _label_fm = self._budget()
-
-        too_wide = {
-            value: note
-            for value, note in tokens.CHOOSER_AFTER_NOTE.items()
-            if note_fm.horizontalAdvance(note) > width
-        }
-
-        resolved_ui = font_families().ui
-        if too_wide and resolved_ui != tokens.Font.UI:
-            pytest.skip(
-                "IBM Plex Sans is not registered on this box (design/fonts/ "
-                f"isn't vendored yet), so this budget is measured against "
-                f"whatever fallback font ({resolved_ui!r}) this machine's "
-                "Qt install substitutes instead -- wide enough here to "
-                "overrun the panel, which production already elides safely "
-                "for (see chooser.py's `_MenuRow.paintEvent`)."
-            )
-
-        assert too_wide == {}, f"notes wider than {width}px: {too_wide}"
-
-    def test_every_label_fits_without_eliding(self):
-        width, _note_fm, label_fm = self._budget()
-
-        from snipux.chooser import _AFTER_ROWS
-
-        too_wide = {
-            label: label_fm.horizontalAdvance(label)
-            for _value, _icon, label, _note in _AFTER_ROWS
-            if label_fm.horizontalAdvance(label) > width
-        }
-
-        assert too_wide == {}
-
-    def test_the_notes_cover_exactly_the_destinations_offered(self):
-        # Two surfaces, two lengths of prose, one list of destinations.
-        assert set(tokens.CHOOSER_AFTER_NOTE) == {
-            value for value, _label, _description in tokens.AFTER_CAPTURE
-        }
-
-    def test_an_overlong_note_is_elided_rather_than_overrunning(self):
-        from snipux.chooser import _MenuRow
-
-        row = _MenuRow("review", "eye", "Review", "x" * 400)
-        row.resize(tokens.ChooserMetric.MENU_AFTER_W, 40)
-
-        row.grab()  # a full paintEvent; it must not paint past its own edge
-
-
-class TestTheArmedCursorInvitesTheDrag:
-    """handoff-chooser.md, Armed: "The cursor becomes a crosshair."
-
-    Region is the case that matters. Window repaints the cursor on every
-    mouse move as part of previewing, but Region has nothing to
-    preview -- so without this it sits under a plain arrow for exactly as
-    long as the user is deciding whether to drag.
+class TestTheCursorInvitesTheDrag:
+    """With nothing selected the frozen frame takes a drag whatever mode is
+    showing. Picking a mode no longer arms it (#66), so the crosshair is up
+    from the moment the overlay opens, and the row keeps its own arrow.
     """
 
     def _overlay(self, size=(1200, 800)):
@@ -11310,34 +11278,29 @@ class TestTheArmedCursorInvitesTheDrag:
         QTest.qWaitForWindowExposed(overlay)
         return overlay
 
-    def test_choosing_leaves_an_ordinary_arrow(self):
-        # The panel is a thing to click, not an area to drag across.
+    def test_an_overlay_opens_on_a_crosshair(self):
         overlay = self._overlay()
 
         assert overlay._chooser.phase == "choosing"
-        assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
-
-    def test_arming_region_turns_the_pointer_into_a_crosshair(self):
-        overlay = self._overlay()
-
-        overlay._chooser.set_mode("Region")
-
-        assert overlay._chooser.phase == "armed"
         assert overlay.cursor().shape() == Qt.CursorShape.CrossCursor
 
-    def test_reopening_the_chooser_gives_the_arrow_back(self):
+    def test_the_row_keeps_an_ordinary_arrow(self):
+        # The row is a thing to click, not an area to drag across.
         overlay = self._overlay()
+
+        assert overlay._chooser.row.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+    def test_picking_region_keeps_the_crosshair_and_the_row(self):
+        overlay = self._overlay()
+
         overlay._chooser.set_mode("Region")
 
-        overlay._chooser.reopen()
-        overlay._apply_idle_cursor()
-
         assert overlay._chooser.phase == "choosing"
-        assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
+        assert overlay.cursor().shape() == Qt.CursorShape.CrossCursor
 
     def test_a_selection_takes_the_cursor_back_over(self):
         # Once there is a rectangle, the handle and inside-the-selection
-        # rules own the pointer; the armed crosshair must not override them.
+        # rules own the pointer; the idle crosshair must not override them.
         overlay = self._overlay()
         overlay._chooser.set_mode("Region")
 
@@ -11345,3 +11308,183 @@ class TestTheArmedCursorInvitesTheDrag:
         overlay._apply_idle_cursor()
 
         assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+
+class TestTheChooserFoldsToATabOnceSomethingIsSelected:
+    """#66: the row stays up until a selection exists, then folds to a 22px
+    tab on the same edge. The tab or Space opens the row again over the
+    selection, with everything as it was.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    WINDOW = QRectF(400, 300, 200, 200)
+
+    def _overlay(self, size=(1200, 800), **kwargs):
+        frame = make_frame(image_size=size, logical_size=size)
+        kwargs.setdefault("geometry_provider", _FakeWindowProvider(self.WINDOW))
+        overlay = OverlayWindow(frame, **kwargs)
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    @staticmethod
+    def _drag(overlay, start=QPoint(700, 300), end=QPoint(1000, 600)):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        QTest.mouseMove(overlay, end)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+
+    @staticmethod
+    def _click(widget):
+        QTest.mouseClick(
+            widget, Qt.MouseButton.LeftButton,
+            pos=QPoint(widget.width() // 2, widget.height() // 2),
+        )
+
+    @staticmethod
+    def _showing(overlay):
+        chooser = overlay._chooser
+        return {
+            name: getattr(chooser, name).isVisibleTo(overlay)
+            for name in ("row", "hint", "tab")
+        }
+
+    def test_the_row_and_its_pill_are_up_while_nothing_is_selected(self):
+        overlay = self._overlay()
+
+        assert self._showing(overlay) == {"row": True, "hint": True, "tab": False}
+
+    def test_a_drag_folds_the_row_to_its_tab(self):
+        overlay = self._overlay()
+
+        self._drag(overlay)
+
+        assert overlay._chooser.phase == "collapsed"
+        assert self._showing(overlay) == {"row": False, "hint": False, "tab": True}
+
+    def test_the_tab_hangs_from_the_rows_own_edge(self):
+        overlay = self._overlay()
+        row = overlay._chooser.row.geometry()
+
+        overlay.set_selection(QRect(700, 300, 300, 300))
+
+        tab = overlay._chooser.tab.geometry()
+        assert tab.top() == row.top()
+        assert abs(tab.center().x() - row.center().x()) <= 1
+
+    def test_hovering_a_window_is_not_a_selection(self):
+        # Nothing is chosen until the click, so the row stays up through the
+        # preview even though the preview is drawn as a selection.
+        overlay = self._overlay()
+        overlay._chooser.set_mode("Window")
+
+        point = self.WINDOW.center()
+        QApplication.sendEvent(
+            overlay,
+            QMouseEvent(
+                QEvent.Type.MouseMove, point, point,
+                Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+
+        assert overlay._selection is not None
+        assert overlay._chooser.phase == "choosing"
+        assert self._showing(overlay)["row"]
+
+    def test_clicking_the_window_folds_it(self):
+        overlay = self._overlay()
+        overlay._chooser.set_mode("Window")
+
+        QTest.mouseClick(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            self.WINDOW.center().toPoint(),
+        )
+
+        assert overlay._selection == self.WINDOW.toRect()
+        assert overlay._chooser.phase == "collapsed"
+
+    def test_the_tab_reopens_the_row_over_the_selection_it_leaves_alone(self):
+        overlay = self._overlay()
+        self._drag(overlay)
+        selection = overlay._selection
+
+        self._click(overlay._chooser.tab)
+
+        assert overlay._chooser.phase == "choosing"
+        assert self._showing(overlay)["row"]
+        assert overlay._selection == selection
+        assert overlay._bar.isVisible()
+
+    def test_space_reopens_it_and_folds_it_again(self):
+        overlay = self._overlay()
+        self._drag(overlay)
+        selection = overlay._selection
+
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+        assert overlay._chooser.phase == "choosing"
+
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+        assert overlay._chooser.phase == "collapsed"
+        assert overlay._selection == selection
+
+    def test_escape_folds_a_reopened_row_before_anything_else(self):
+        overlay = self._overlay()
+        self._drag(overlay)
+        selection = overlay._selection
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._chooser.phase == "collapsed"
+        assert overlay._selection == selection
+        assert overlay.isVisible()
+
+    def test_a_press_on_the_frame_folds_a_reopened_row(self):
+        overlay = self._overlay()
+        self._drag(overlay)
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(150, 600)
+        )
+
+        assert overlay._chooser.phase == "collapsed"
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(150, 600)
+        )
+
+    def test_the_reopened_row_can_change_what_the_bar_does(self):
+        overlay = self._overlay()
+        self._drag(overlay)
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+        assert overlay._bar.destination() == "Copy"  # edit, the default
+
+        self._click(overlay._chooser.row.destination)
+
+        assert overlay._chooser.after == "save"
+        assert overlay._bar.destination() == "Save"
+
+    def test_clearing_the_selection_brings_the_row_back(self):
+        overlay = self._overlay()
+        self._drag(overlay)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._selection is None
+        assert overlay._chooser.phase == "choosing"
+        assert self._showing(overlay)["row"]
+
+    def test_it_is_out_of_the_way_while_a_recording_is_armed(self):
+        # app.py holds that state; a mode picked from a reopened row would
+        # pull the region out from under it.
+        overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
+        overlay._chooser.set_kind("record")
+
+        self._drag(overlay)
+
+        assert overlay._armed_for_recording
+        assert self._showing(overlay) == {"row": False, "hint": False, "tab": False}

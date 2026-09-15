@@ -121,25 +121,11 @@ def win_color(token_name: str) -> QColor:
     return qcolor
 
 
-def chooser_color(token_name: str) -> QColor:
-    """`tokens.ChooserColor.<token_name>` -> QColor, alpha included.
-
-    The same colour+alpha pairing `color()` and `win_color()` apply, for the
-    pre-snip chooser's palette. Resolving it in one place is what stops a
-    caller re-typing a percentage that then drifts from tokens.py.
-    """
-    if not hasattr(tokens.ChooserColor, token_name):
-        raise ValueError(f"no such chooser colour: {token_name!r}")
-    qcolour = QColor(getattr(tokens.ChooserColor, token_name))
-    qcolour.setAlphaF(getattr(tokens.ChooserColor, f"{token_name}_ALPHA", 1.0))
-    return qcolour
-
-
 def flow_color(token_name: str) -> QColor:
     """`tokens.FlowColor.<token_name>` -> QColor, alpha included.
 
     The capture flow's bars, on the same pairing rule as `color()`,
-    `win_color()` and `chooser_color()`: the `<TOKEN>_ALPHA` sibling is
+    `win_color()` and `bar_color()`: the `<TOKEN>_ALPHA` sibling is
     resolved here so a colour and its alpha are never applied separately.
     """
     if not hasattr(tokens.FlowColor, token_name):

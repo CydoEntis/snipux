@@ -1130,9 +1130,9 @@ class SettingsWindow(WinWindow):
 
         # "Start on the last region" deliberately has no row here. It lived
         # in this pane first and went unnoticed until it was pointed out --
-        # a preference nobody finds is a preference nobody has -- so it is a
-        # toggle on the chooser row itself now, next to the mode it
-        # modifies. See `chooser._RowToggle`.
+        # a preference nobody finds is a preference nobody has -- so it is
+        # the Last region row of the chooser's mode menu now, and choosing
+        # it is what the next snip opens on. See `Chooser.set_mode`.
 
         return _pane(
             SectionHeading("Shortcut"),
