@@ -194,24 +194,40 @@ def _load_bundled_fonts() -> None:
         QFontDatabase.addApplicationFont(str(font_path))
 
 
-def font_families() -> FontFamilies:
-    """Resolve the UI and mono font families named in `tokens.Font`.
+def _first_installed(names, installed, system_font) -> str:
+    """The first of `names` this machine actually has, or Qt's own choice.
 
-    Falls back to the platform's own general/fixed-pitch family when IBM
-    Plex isn't registered (either not bundled, or bundled but the file
-    turned out unreadable) — `QFontDatabase.families()` is checked, not the
-    filesystem, so a corrupt font file degrades the same way a missing one
-    does rather than raising.
+    Qt's choice is the last resort rather than the first, because it is a
+    *category* ("monospace") and not a face: on Windows it resolves to
+    Courier New, which is why every path and filename in Settings read like
+    a 1980s printout.
+    """
+    for name in names:
+        if name in installed:
+            return name
+    return QFontDatabase.systemFont(system_font).family()
+
+
+def font_families() -> FontFamilies:
+    """Resolve the UI and mono font families to use.
+
+    `tokens.Font.UI`/`MONO` (IBM Plex) first, then the per-platform faces in
+    `UI_FALLBACKS`/`MONO_FALLBACKS`, then whatever Qt nominates. The font
+    database is what is checked, not the filesystem, so a corrupt bundled
+    font degrades the same way a missing one does rather than raising.
     """
     _load_bundled_fonts()
     installed = set(QFontDatabase.families())
 
-    ui = tokens.Font.UI
-    if ui not in installed:
-        ui = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
-
-    mono = tokens.Font.MONO
-    if mono not in installed:
-        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
-
-    return FontFamilies(ui=ui, mono=mono)
+    return FontFamilies(
+        ui=_first_installed(
+            (tokens.Font.UI, *tokens.Font.UI_FALLBACKS),
+            installed,
+            QFontDatabase.SystemFont.GeneralFont,
+        ),
+        mono=_first_installed(
+            (tokens.Font.MONO, *tokens.Font.MONO_FALLBACKS),
+            installed,
+            QFontDatabase.SystemFont.FixedFont,
+        ),
+    )

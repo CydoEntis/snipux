@@ -106,6 +106,37 @@ class Font:
     UI    = "IBM Plex Sans"       # all chrome labels
     MONO  = "IBM Plex Mono"       # every numeral, dimension and hex readout
 
+    # What to use when Plex is not installed -- which is every machine, since
+    # the files are not bundled. Qt's own "general" and "fixed" families are
+    # the last resort, and on Windows the fixed one is Courier New: a 1980s
+    # printer face that made every path and filename in Settings hard to
+    # read. These are all faces that ship with their platform, so a name is
+    # only reached for where it actually exists.
+    UI_FALLBACKS = (
+        "Segoe UI Variable Text",   # Windows 11
+        "Segoe UI",                 # Windows 10
+        "SF Pro Text",              # macOS
+        "Helvetica Neue",
+        "Inter",
+        "Cantarell",                # GNOME
+        "Ubuntu",
+        "DejaVu Sans",
+        "Noto Sans",
+    )
+    MONO_FALLBACKS = (
+        "Cascadia Mono",            # Windows 11, and with Windows Terminal
+        "Cascadia Code",
+        "Consolas",                 # Windows, back to Vista
+        "SF Mono",                  # macOS
+        "Menlo",
+        "JetBrains Mono",
+        "Fira Mono",
+        "Ubuntu Mono",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+        "Noto Sans Mono",
+    )
+
     # (px, weight) — px are logical pixels at 1x
     CHIP_LABEL    = (12.5, 600)   # "Region", "Save"
     TRAY_LABEL    = (12.0, 500)   # "Pen" in the settings tray

@@ -262,6 +262,61 @@ class TestFontFamilies:
         assert result.ui == tokens.Font.UI
         assert result.mono == tokens.Font.MONO
 
+    def test_prefers_a_real_face_over_qts_own_category(self, monkeypatch):
+        # Qt's "fixed" family is a category, not a face: on Windows it is
+        # Courier New, which is what made every path in Settings hard to
+        # read. Anything on the list beats it.
+        monkeypatch.setattr(design, "_FONT_DIR", design._FONT_DIR.parent / "no-such-dir")
+        monkeypatch.setattr(
+            design,
+            "QFontDatabase",
+            _FakeFontDatabase(installed=["Segoe UI", "Cascadia Mono", "Courier New"]),
+        )
+
+        result = design.font_families()
+
+        assert result.ui == "Segoe UI"
+        assert result.mono == "Cascadia Mono"
+
+    def test_the_list_is_tried_in_order(self, monkeypatch):
+        monkeypatch.setattr(design, "_FONT_DIR", design._FONT_DIR.parent / "no-such-dir")
+        monkeypatch.setattr(
+            design,
+            "QFontDatabase",
+            _FakeFontDatabase(installed=["Consolas", "Cascadia Mono", "DejaVu Sans"]),
+        )
+
+        result = design.font_families()
+
+        assert result.mono == "Cascadia Mono"      # ahead of Consolas on the list
+        assert result.ui == "DejaVu Sans"
+
+    def test_plex_still_wins_when_it_is_there(self, monkeypatch):
+        monkeypatch.setattr(design, "_FONT_DIR", design._FONT_DIR.parent / "no-such-dir")
+        monkeypatch.setattr(
+            design,
+            "QFontDatabase",
+            _FakeFontDatabase(installed=[tokens.Font.UI, tokens.Font.MONO, "Segoe UI", "Consolas"]),
+        )
+
+        result = design.font_families()
+
+        assert result.ui == tokens.Font.UI
+        assert result.mono == tokens.Font.MONO
+
+    def test_qts_choice_is_the_last_resort_not_the_first(self, monkeypatch):
+        monkeypatch.setattr(design, "_FONT_DIR", design._FONT_DIR.parent / "no-such-dir")
+        monkeypatch.setattr(design, "QFontDatabase", _FakeFontDatabase(installed=["Comic Sans MS"]))
+
+        result = design.font_families()
+
+        assert result.ui == "Fallback Sans"
+        assert result.mono == "Fallback Mono"
+
+    def test_every_fallback_is_named_once(self):
+        for names in (tokens.Font.UI_FALLBACKS, tokens.Font.MONO_FALLBACKS):
+            assert len(set(names)) == len(names)
+
     def test_registers_bundled_font_files_before_checking(self, tmp_path, monkeypatch):
         # design/fonts/ doesn't exist in this handoff (the ticket says the
         # font files themselves weren't provided), but the loader still has
