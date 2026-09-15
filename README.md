@@ -3,14 +3,15 @@
 **Snip, annotate and record your screen — a Snipping Tool workalike for Linux
 and Windows.**
 
-Snip an area, a window, a freehand shape, or the whole screen. Draw on it, blur
-out the parts that shouldn't be shared, and copy or save it. Or record the same
+Snip an area, a window, or the whole screen. Draw on it, blur out the parts
+that shouldn't be shared, and copy or save it. Or record the same
 region to a video file and trim it down. The workflow Windows gives you for
 free, on Linux too — and a slightly better one back on Windows.
 
 MIT licensed, and installed with `pip install snipux` — see
 [Install](#install). There is no Windows installer: that is deliberate, and
-explained where it'd be missed.
+explained where it'd be missed. What changed in each release is in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Platform support
 

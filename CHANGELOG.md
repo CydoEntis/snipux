@@ -1,0 +1,201 @@
+# Changelog
+
+What changed in each release of Snipux, newest first. Written for people who
+use it; the commit history has the detail.
+
+## Unreleased
+
+### Changed
+
+- **The shapes and redaction buttons open their menu on a second click.** The
+  first click still picks the shape the button shows; click the same button
+  again to choose a different one, and once more to close the menu. The small
+  triangle in the corner still opens the menu too, and is easier to hit.
+
+## 0.7.0 — 2026-09-15
+
+A redesigned capture flow, and snips that open about four times faster.
+
+### New
+
+- **A one-row chooser.** The row across the top of a snip is slimmer: capture
+  or record, the mode, where the capture goes, Hide sensitive and a delay. Once
+  something is selected it folds into a small tab; click it or press Space to
+  open it again.
+- **Last region is a mode.** Pick it from the mode menu, or press Shift+R, to
+  reuse the rectangle from your previous capture. The menu shows its size.
+- **Active window** (A) captures the window you were using, with nothing to aim
+  at.
+- **Full screen on several monitors** highlights the monitor under the pointer;
+  click the one you want.
+- **A one-row toolbar.** Rectangle, ellipse, line, arrow and crop share one
+  button, and blur, pixelate and blackout share another. R, O, L, A and B still
+  pick them.
+- **A style for each tool.** The dot on the toolbar opens colour, fill, solid,
+  dashed or dotted lines, and size, and every tool remembers its own. 1–7 pick a
+  colour, [ and ] change the size, and D changes the line style.
+- **Filled rectangles and ellipses, and dashed or dotted lines** on any shape.
+- **Watermark.** Stamp a line of text or an image in a corner of your captures.
+  Set it up in Settings, then switch it on from the toolbar.
+- **Frosted bars.** The chooser, the toolbar and their menus sit on a blur of
+  the screenshot behind them.
+- **Move the toolbar.** Drag it by its edges when it is in the way, and it
+  remembers the spot. On a desk with several monitors, a snip that fills a
+  monitor puts the toolbar on the next one, where it covers nothing.
+- **Your hide list as rows.** The words, field names and patterns Hide sensitive
+  looks for are edited one per row in Settings, with Edit as text for pasting a
+  whole list.
+- **A one-line installer** for Windows and Linux.
+
+### Changed
+
+- The redaction tool called Solid is now called Blackout.
+
+### Faster
+
+- **Snips open in about 110ms instead of about 475ms**, measured on Linux (X11,
+  GNOME). The shortcut passes its request to the running Snipux without loading
+  the whole app first, and a snip no longer waits for GNOME's window animation.
+
+### Fixed
+
+- Window mode could crash Snipux as soon as the pointer moved.
+- The toolbar and its menus could sit under the dock or taskbar, where nothing
+  on them could be clicked.
+- Controls could open on a different monitor from the one you were working on.
+- A delay picked on the chooser row did not delay the capture.
+- On a display scaled above 100%, saved snips had thinner lines than you drew.
+- A shape menu's first row could not be clicked while a tool's name hint was
+  showing.
+- On Windows, Snipux ran behind a console window, and closing that window closed
+  Snipux. The Start Menu and Startup shortcuts now start it with no console.
+- If something unexpected goes wrong, Snipux keeps running and writes the
+  details to `~/.config/snipux/crash.log`.
+
+### Removed
+
+- Freeform (lasso) capture.
+
+## 0.6.0 — 2026-09-15
+
+The first release on PyPI.
+
+### New
+
+- **Install from PyPI** with `pip install snipux` (or `pipx install snipux` on
+  Linux), and update with `snipux --update`.
+- **Hide sensitive**, a switch on the capture row that blacks out passwords, API
+  keys, card numbers, IDs and personal details before a screenshot leaves your
+  screen, using the text recognition built into Windows. Add your own words,
+  field names and patterns in Settings.
+- **Solid**, a third way to obscure part of a snip beside blur and pixelate.
+  Blur can be reversed; a solid fill cannot.
+- Clicking the tray icon opens Settings.
+
+### Changed
+
+- A readable font when IBM Plex is not installed, a softer accent green, and
+  scrollbars that match the rest of the app.
+
+## 0.5.0 — 2026-09-05
+
+### Changed
+
+- **Browser** (B) captures just your browser's page — none of the tabs, address
+  bar or bookmarks — from whichever browser you were last in, on whichever
+  monitor it is on, every time.
+
+### Removed
+
+- Full-page capture. It failed on pages that change while they scroll — live
+  charts, animated ads, video — and a mode that only sometimes works is worse
+  than none.
+
+## 0.4.5 — 2026-09-05
+
+### Fixed
+
+- A capture indicator could be left on screen after a full-page capture.
+
+## 0.4.4 — 2026-09-05
+
+### Fixed
+
+- Full-page capture failed with "frames 0 and 1 do not overlap" on long pages,
+  because it started before the page had finished scrolling to the top.
+- On Windows, the browser sometimes would not come to the front for a
+  full-page capture.
+
+## 0.4.3 — 2026-09-05
+
+### Changed
+
+- Full-page capture keeps a green outline on the page while it scrolls, counts
+  the screens it has taken, and says how it ended — including when it stops on
+  an endless feed.
+
+## 0.4.2 — 2026-09-05
+
+### Fixed
+
+- In Browser mode the Visible / Full page switch, the toolbar and the colour
+  tray piled up on top of each other and over the browser's tab bar.
+
+## 0.4.1 — 2026-09-05
+
+### Fixed
+
+- Marks drawn before a full-page capture were silently dropped. The drawing
+  tools now step aside while Full page is chosen; annotate the result in the
+  review window instead.
+- With *Capture and finish*, choosing Browser captured straight away, before the
+  Visible / Full page switch could be used.
+
+### Changed
+
+- The overlay says "Scrolling the page…" before it steps aside.
+
+## 0.4.0 — 2026-09-05
+
+### Changed
+
+- **Tab and Full page are one Browser mode.** The page is outlined first, then a
+  Visible / Full page switch decides how much of it to take. Visible never
+  touches your browser.
+
+## 0.3.0 — 2026-09-05
+
+### New
+
+- **Tab** captures the page area of the browser in front, without its tab strip,
+  address bar or bookmarks bar.
+- **Full page** scrolls the browser to the end and joins the page into one tall
+  image, and stops with a message on an endless feed.
+- Both are greyed out, with the reason, when there is no browser to capture.
+
+### Fixed
+
+- On a scaled Windows display, window outlines were measured in the wrong units.
+
+## 0.2.1 — 2026-09-05
+
+### Fixed
+
+- The toolbar covered the selection when the selection was near the bottom of
+  the screen. It now moves above the selection instead.
+
+## 0.2.0 — 2026-09-04
+
+The first tagged release, for Windows and Linux, installed with pip.
+
+- Snip a region, a window, a whole monitor or a freeform shape from a frozen copy
+  of your screen, and annotate it in place: pen, highlighter, rectangle,
+  ellipse, line, arrow, numbered steps, text, blur, pixelate and crop.
+- Copy or save straight away, or open the review window afterwards.
+- Record the same kind of selection to video, and trim it in the built-in
+  player.
+- Last region, a chooser row that follows the pointer across monitors,
+  destinations that are remembered, and a tray notification when a capture is
+  taken.
+- Ctrl+Alt+S from anywhere, with Start Menu and Startup entries on Windows and a
+  desktop entry and shortcut on GNOME.

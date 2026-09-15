@@ -1,7 +1,7 @@
 # snipux — conventions
 
-A Windows Snipping Tool workalike, cross-platform. Snip an area, window,
-freehand shape or the whole screen; annotate it; copy or save it. Or record
+A Windows Snipping Tool workalike, cross-platform. Snip an area, a window
+or the whole screen; annotate it; copy or save it. Or record
 the same selection to video and trim it in the player.
 
 ## The one architectural rule
@@ -139,6 +139,14 @@ pass headless too, the same way `tests/test_platform.py` already runs against
 - **Never leave a QPainter open across a read of the pixmap it is painting.**
   Reading a pixmap mid-paint is not guaranteed to see pending strokes; the
   obscuring tools depend on this and it has already caused one bug.
+
+## Releases
+
+A change someone using snipux would notice adds a line to the Unreleased
+section of `CHANGELOG.md` in the commit that makes it. A release moves that
+section under the new version and date, next to the version bump in
+`pyproject.toml` and `snipux/__init__.py`. The changelog is for people who
+use the tool: say what they will see, not which module changed.
 
 ## Commits
 
