@@ -21,6 +21,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from PyQt6.QtCore import QMargins
 from PyQt6.QtGui import QGuiApplication
 
 from snipux import capture, recording, setup_desktop
@@ -62,39 +63,39 @@ class LinuxPlatform(Platform):
     def build_recording_registry(self) -> RecorderRegistry:
         return recording.build_linux_registry()
 
-    def reserved_top(self, screen) -> int:
-        """GNOME's top bar, which Qt does not report here.
+    def reserved_margins(self, screen) -> QMargins:
+        """GNOME's top bar and dock, which Qt does not report here.
 
         `QScreen.availableGeometry()` comes back equal to `geometry()` for
         every monitor on Ubuntu/GNOME under X11 -- measured on a three
-        monitor desktop where `_NET_WORKAREA` said `0, 32, 6400, 1337`, so
-        the shell had reserved 32px and Qt passed none of it on. The base
-        implementation's portable answer is therefore zero here, and the
-        chooser hung its 54px panel flush against an edge the shell was
-        already painting 32px of its own over. The armed tab is 26px, so
-        it vanished outright.
+        monitor desktop where `_NET_WORKAREA` said `0, 32, 6400, 1337`: the
+        shell had reserved 32px along the top and, with the Ubuntu Dock fixed
+        to the bottom, 71px along the bottom of the tallest monitor, and Qt
+        passed on none of it. The base implementation's portable answer is
+        therefore nothing at all here. The chooser hung its 54px panel flush
+        against an edge the shell was already painting 32px of its own over,
+        and the floating bar for a selection reaching the bottom of that
+        monitor sat under the dock, where none of it could be clicked.
 
         The property itself is the only source that knows. Wayland has no
-        `_NET_WORKAREA` equivalent to shell out for, and does not need one:
-        `show_on_screen` fullscreens the overlay onto a single output
-        there, and GNOME hides its top bar for a fullscreen window. That
-        is reasoning, not an observation: this codebase has still never
-        been launched on a Wayland session, so it remains unverified (see
-        TODO.md). Treat it as the expectation to check first if the
-        chooser ever turns up hidden on Wayland.
+        `_NET_WORKAREA` equivalent to shell out for, and does not need one
+        for the top bar: `show_on_screen` fullscreens the overlay onto a
+        single output there, and GNOME hides its top bar for a fullscreen
+        window. Whether the dock gets out of a fullscreen window's way too
+        has not been watched; it is the first thing to check if the bar ever
+        turns up under the dock on Wayland.
 
-        That is a reason to skip the X11-only `xprop` fallback below, not
-        a reason to stop asking Qt: `portable` above is still a real query
-        -- `QScreen.availableGeometry()`, read whatever the session type --
-        so a compositor that *did* reserve top-edge space on Wayland would
-        already have been returned by the line above this comment, before
-        session type is even consulted. Returning `portable` here again
-        (rather than a hardcoded `0`) is what keeps that true: zero comes
-        back because Wayland genuinely reserved nothing, never because
-        this function gave up asking.
+        That is a reason to skip the X11-only `xprop` fallback below, not a
+        reason to stop asking Qt: `portable` is still a real query --
+        `QScreen.availableGeometry()`, read whatever the session type -- so a
+        compositor that *did* reserve space on Wayland is returned before
+        session type is even consulted. Returning `portable` rather than
+        empty margins is what keeps that true: nothing comes back because
+        Wayland genuinely reserved nothing, never because this gave up
+        asking.
         """
-        portable = super().reserved_top(screen)
-        if portable or capture.detect_session_type() != "x11":
+        portable = super().reserved_margins(screen)
+        if not portable.isNull() or capture.detect_session_type() != "x11":
             return portable
         if QGuiApplication.platformName() != "xcb":
             # An offscreen or minimal Qt platform has no shell painting
@@ -104,7 +105,7 @@ class LinuxPlatform(Platform):
             # and inset chrome by a developer's own GNOME bar, which is a
             # test that passes or fails depending on whose desk it runs on.
             return portable
-        return _x11_reserved_top(screen)
+        return _x11_reserved_margins(screen)
 
     def records_audio(self) -> bool:
         """False. `org.gnome.Shell.Screencast` takes `draw-cursor` and
@@ -125,23 +126,23 @@ class LinuxPlatform(Platform):
         )
 
 
-def _x11_reserved_top(screen) -> int:
-    """`_NET_WORKAREA`'s top offset, as it applies to `screen`.
+def _x11_reserved_margins(screen) -> QMargins:
+    """`_NET_WORKAREA`'s insets, as they apply to `screen`.
 
     The property is a single rect for the whole virtual desktop, so it can
-    say how much of the desktop's top edge is spoken for but not which
-    monitor is showing the bar. A monitor whose own top edge sits at the
-    desktop's top gets the inset; one mounted lower is already clear of it
-    and gets nothing.
+    say how much of each of the desktop's edges is spoken for but not which
+    monitor shows the bar or the dock. A monitor whose own edge sits on the
+    desktop's edge gets that side's inset; one whose edge lies inside the
+    work area is already clear of it and gets nothing on that side.
 
-    Two monitors both flush with the desktop's top edge would both be
-    inset, even though only one carries the bar. That is the harmless
-    direction to be wrong in -- chrome drawn 32px low on one monitor,
-    against chrome that cannot be clicked at all -- and beats guessing
-    from which monitor is primary, since a bar can be moved.
+    Two monitors both flush with the desktop's bottom edge would both be
+    inset, even though only one carries the dock. That is the harmless
+    direction to be wrong in -- chrome drawn a dock's height higher on one
+    monitor, against chrome that cannot be clicked at all -- and beats
+    guessing from which monitor is primary, since a dock can be moved.
 
-    Shells out to `xprop` and returns 0 if anything at all goes wrong,
-    the same "degrade, never raise" rule `X11WindowGeometryProvider`
+    Shells out to `xprop` and reserves nothing if anything at all goes
+    wrong, the same "degrade, never raise" rule `X11WindowGeometryProvider`
     already follows around `wmctrl`.
     """
     try:
@@ -153,7 +154,7 @@ def _x11_reserved_top(screen) -> int:
             check=True,
         )
     except (OSError, subprocess.SubprocessError):
-        return 0
+        return QMargins()
 
     _, _, values = result.stdout.partition("=")
     numbers = []
@@ -161,9 +162,18 @@ def _x11_reserved_top(screen) -> int:
         try:
             numbers.append(int(field.strip()))
         except ValueError:
-            return 0
+            return QMargins()
     if len(numbers) < 4:
-        return 0
+        return QMargins()
 
-    workarea_top = numbers[1]
-    return max(0, workarea_top - screen.geometry().top())
+    # Right and bottom are compared as exclusive edges (x + width), on both
+    # sides, so a monitor that ends exactly where the work area ends is
+    # inset by nothing rather than by one pixel.
+    area_left, area_top, area_width, area_height = numbers
+    geometry = screen.geometry()
+    return QMargins(
+        max(0, area_left - geometry.x()),
+        max(0, area_top - geometry.y()),
+        max(0, (geometry.x() + geometry.width()) - (area_left + area_width)),
+        max(0, (geometry.y() + geometry.height()) - (area_top + area_height)),
+    )

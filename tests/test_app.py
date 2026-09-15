@@ -11,6 +11,7 @@ import pytest
 from PyQt6.QtCore import (
     QCoreApplication,
     QEvent,
+    QMargins,
     QMimeData,
     QObject,
     QPointF,
@@ -1700,6 +1701,23 @@ class TestPlaceRecordingHud:
             result = _place_recording_hud(rect, [self.SCREEN], self.HUD_SIZE)
             assert result is not None, rect
             assert not QRectF(result).intersects(rect), rect
+
+    def test_never_lands_under_a_dock_along_the_bottom(self, monkeypatch):
+        # Placed below a recorded area that covers the top-centre strip, the
+        # bar used to be checked against the screen's real bottom edge,
+        # which a fixed dock paints over. Small enough to sit on the
+        # offscreen test screen at any scale factor, so `screenAt` finds it
+        # and the platform is actually asked.
+        screen = QRectF(0, 0, 500, 500)
+        rect = QRectF(0, 0, 500, 420)
+        monkeypatch.setattr(app.platform.current, "reserved_margins", lambda found: QMargins())
+        assert _place_recording_hud(rect, [screen], self.HUD_SIZE) is not None
+
+        monkeypatch.setattr(
+            app.platform.current, "reserved_margins", lambda found: QMargins(0, 0, 0, 71)
+        )
+
+        assert _place_recording_hud(rect, [screen], self.HUD_SIZE) is None
 
     def test_a_whole_monitor_recording_puts_the_bar_on_another_monitor(self):
         # The bar is the only visible Stop. Recording a whole monitor

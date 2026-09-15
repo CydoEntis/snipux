@@ -20,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QMargins, QMarginsF, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QCursor,
@@ -3525,7 +3525,7 @@ class OverlayWindow(QWidget):
         # desktop's own chrome owns. Cached because `_chrome_bounds` runs at
         # mouse-move frequency and the Linux answer shells out; the desktop's
         # panels do not move mid-snip, and a snip is seconds long.
-        self._reserved_top_cache: dict[tuple[int, int], int] = {}
+        self._reserved_margins_cache: dict[tuple[int, int], QMargins] = {}
 
         # The text tool (SNX-52): a lazily-built QLineEdit that mirrors
         # editor.py's `Canvas._ensure_text_edit`/`_commit_text` -- a click
@@ -4559,6 +4559,19 @@ class OverlayWindow(QWidget):
         With no selection, or one that overlaps no monitor (it lies entirely
         inside a gap), this falls back to `_monitor_at`, whose own last
         resort is the frame's full span.
+
+        That monitor is then inset by whatever the desktop's own chrome
+        reserves on it (`_usable_area`). The bar, its trays and tool hint,
+        the popovers and the toast are all clamped into this rect, and a
+        dock paints over this window: before the inset, a selection reaching
+        the bottom of the monitor put the whole bar under a bottom dock,
+        where none of it could be clicked.
+        """
+        return self._to_local_rect(self._usable_area(self._chrome_monitor()))
+
+    def _chrome_monitor(self) -> QRectF:
+        """The monitor `_chrome_bounds` is carved from, in absolute
+        coordinates, chosen by the rules that method's docstring gives.
         """
         if self._selection is not None:
             selection = QRectF(self._selection)
@@ -4566,7 +4579,7 @@ class OverlayWindow(QWidget):
                 anchor = self._to_absolute(self._selection_anchor)
                 for geometry in self._monitor_geometries:
                     if geometry.contains(anchor):
-                        return self._to_local_rect(geometry)
+                        return geometry
             best: QRectF | None = None
             best_area = 0.0
             for geometry in self._monitor_geometries:
@@ -4575,11 +4588,11 @@ class OverlayWindow(QWidget):
                 if area > best_area:
                     best, best_area = geometry, area
             if best is not None:
-                return self._to_local_rect(best)
+                return best
             centre = self._to_absolute(selection.center())
         else:
             centre = self._to_absolute(QRectF(self.rect()).center())
-        return self._to_local_rect(self._monitor_at(centre))
+        return self._monitor_at(centre)
 
     def _on_delay_changed(self, delay: str) -> None:
         self._delay = delay
@@ -4613,9 +4626,10 @@ class OverlayWindow(QWidget):
             return
         screen_rect = self._active_screen_rect()
         # The chooser hangs from the top edge, so it is the surface the
-        # desktop's own bar hides -- give it the edge it can actually use.
+        # desktop's own bar hides -- give it the part of the monitor it can
+        # actually use.
         self._chooser.set_screen(
-            screen_rect.adjusted(0, self._reserved_top(screen_rect), 0, 0),
+            self._usable_area(screen_rect),
             self.geometry().topLeft(),
         )
 
@@ -4843,23 +4857,35 @@ class OverlayWindow(QWidget):
                 self._tool_hint.show()
                 self._reposition_tray(self._tool_hint)
 
-    def _reserved_top(self, monitor: QRectF) -> int:
-        """Logical pixels of `monitor`'s top edge that the desktop's own
-        chrome owns -- see `platform.Platform.reserved_top`. `monitor` is
-        absolute, the space `_monitor_geometries` is in.
+    def _reserved_margins(self, monitor: QRectF) -> QMargins:
+        """Logical pixels along each edge of `monitor` that the desktop's
+        own chrome owns -- see `platform.Platform.reserved_margins`.
+        `monitor` is absolute, the space `_monitor_geometries` is in.
 
-        Everything this window draws against a monitor's top edge has to
-        clear it: on GNOME the shell paints its bar over an always-on-top
-        window, so a chooser hung flush from that edge is behind it and a
-        close button in that corner cannot be clicked.
+        Everything this window draws against a monitor's edges has to clear
+        them: GNOME paints its top bar and its dock over an always-on-top
+        window, so a chooser hung flush from the top edge is behind the bar,
+        and a floating bar clamped to the bottom edge is behind the dock.
         """
         key = (round(monitor.x()), round(monitor.y()))
-        if key not in self._reserved_top_cache:
+        if key not in self._reserved_margins_cache:
             screen = QGuiApplication.screenAt(monitor.center().toPoint())
-            self._reserved_top_cache[key] = (
-                platform.current.reserved_top(screen) if screen is not None else 0
+            self._reserved_margins_cache[key] = (
+                platform.current.reserved_margins(screen)
+                if screen is not None
+                else QMargins()
             )
-        return self._reserved_top_cache[key]
+        return self._reserved_margins_cache[key]
+
+    def _usable_area(self, monitor: QRectF) -> QRectF:
+        """`monitor` minus what the desktop's own chrome reserves on it: the
+        part of that monitor chrome can be drawn on and still be clicked.
+        Absolute in, absolute out.
+        """
+        margins = self._reserved_margins(monitor)
+        return monitor.marginsRemoved(
+            QMarginsF(margins.left(), margins.top(), margins.right(), margins.bottom())
+        )
 
     def _reposition_close_button(self) -> None:
         """Put the close button in the top-right corner of `_chrome_bounds`
@@ -4876,11 +4902,12 @@ class OverlayWindow(QWidget):
         multi-monitor setups it matters most on. Esc still worked, which is
         why nothing caught it.
         """
+        # `_chrome_bounds` already stops short of whatever the desktop
+        # reserves along the monitor's top and right edges.
         bounds = self._chrome_bounds()
-        reserved = self._reserved_top(bounds.translated(QPointF(self.geometry().topLeft())))
         self._close_button.move(
             round(bounds.right() - self._CLOSE_BUTTON_MARGIN - _CloseButton._SIZE),
-            round(bounds.top() + reserved + self._CLOSE_BUTTON_MARGIN),
+            round(bounds.top() + self._CLOSE_BUTTON_MARGIN),
         )
 
     def _reposition_tray(self, tray: QWidget) -> None:

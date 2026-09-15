@@ -34,7 +34,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PyQt6.QtCore import QRect
+from PyQt6.QtCore import QMargins, QRect
 
 import snipux.platform as platform_pkg
 from snipux import recording, setup_desktop
@@ -330,6 +330,47 @@ class TestReservedTop:
         platform_impl = self._linux(monkeypatch)
 
         assert platform_impl.reserved_top(_FakeScreen(QRect(0, 0, 1920, 1080))) == 0
+
+
+class TestReservedMargins:
+    """Every edge, not only the top: a dock or taskbar can sit on any of
+    them, and a bar clamped against an edge the shell paints over cannot be
+    clicked.
+    """
+
+    MEASURED_WORKAREA = "_NET_WORKAREA(CARDINAL) = 0, 32, 6400, 1337\n"
+
+    _linux = TestReservedTop._linux
+
+    def test_the_portable_answer_reads_a_taskbar_on_any_edge(self):
+        # Windows and macOS inherit this: Qt is told the truth there.
+        screen = _FakeScreen(QRect(0, 0, 1920, 1080), QRect(48, 0, 1872, 1040))
+
+        assert windows.WindowsPlatform().reserved_margins(screen) == QMargins(48, 0, 0, 40)
+
+    def test_x11_reads_a_bottom_dock_on_the_monitor_it_sits_on(self, monkeypatch):
+        # The reporting desk: the dock is fixed to the bottom of the tall
+        # middle monitor, and both shorter monitors end above where it
+        # starts, so neither of them is inset at all.
+        platform_impl = self._linux(monkeypatch, xprop=self.MEASURED_WORKAREA)
+
+        middle = _FakeScreen(QRect(1920, 0, 2560, 1440))
+        left = _FakeScreen(QRect(0, 201, 1920, 1080))
+        right = _FakeScreen(QRect(4480, 188, 1920, 1080))
+        assert platform_impl.reserved_margins(middle) == QMargins(0, 32, 0, 71)
+        assert platform_impl.reserved_margins(left) == QMargins()
+        assert platform_impl.reserved_margins(right) == QMargins()
+
+    def test_x11_reads_a_left_dock_on_the_monitor_against_that_edge(self, monkeypatch):
+        # Ubuntu's own default puts the dock down the left edge.
+        platform_impl = self._linux(
+            monkeypatch, xprop="_NET_WORKAREA(CARDINAL) = 64, 32, 6336, 1408\n"
+        )
+
+        left = _FakeScreen(QRect(0, 201, 1920, 1080))
+        middle = _FakeScreen(QRect(1920, 0, 2560, 1440))
+        assert platform_impl.reserved_margins(left) == QMargins(64, 0, 0, 0)
+        assert platform_impl.reserved_margins(middle) == QMargins(0, 32, 0, 0)
 
 
 class TestStubPlatforms:

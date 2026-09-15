@@ -41,6 +41,7 @@ from PyQt6.QtCore import (
     QElapsedTimer,
     QEventLoop,
     QIODevice,
+    QMarginsF,
     QMimeData,
     QObject,
     QRect,
@@ -442,23 +443,25 @@ def _place_recording_hud(
     if screen is None:
         return None
 
+    # The desktop's own chrome -- a top bar, a dock, a taskbar -- paints
+    # over an always-on-top window regardless of what that window thinks it
+    # covers, the same thing `OverlayWindow._usable_area` insets its chrome
+    # for. Without it the bar sat at y=12 on a GNOME primary monitor,
+    # underneath a 32px shell bar: created, positioned, shown, and
+    # invisible. A bar put below the recorded area could land under a
+    # bottom dock the same way.
+    usable = _usable_area_for(screen)
     width, height = hud_size.width(), hud_size.height()
-    x = screen.center().x() - width / 2
-    x = min(max(x, screen.left()), screen.right() - width)
+    x = usable.center().x() - width / 2
+    x = min(max(x, usable.left()), usable.right() - width)
 
-    # The desktop's own chrome owns the top of the screen and paints over
-    # an always-on-top window regardless of what that window thinks it
-    # covers -- the same thing `OverlayWindow._reserved_top` insets the
-    # chooser and close button for. Without it the bar sits at y=12 on a
-    # GNOME primary monitor, which is underneath a 32px shell bar: created,
-    # positioned, shown, and invisible.
-    top = screen.top() + _reserved_top_for(screen) + margin
+    top = usable.top() + margin
     candidates = [QRectF(x, top, width, height)]
     if rect is not None:
         candidates.append(QRectF(x, rect.bottom() + margin, width, height))
 
     for candidate in candidates:
-        if not screen.contains(candidate):
+        if not usable.contains(candidate):
             continue
         if rect is not None and candidate.intersects(rect):
             continue
@@ -474,34 +477,36 @@ def _place_recording_hud(
     # was reported exactly that way: "theres no way to stop the recording,
     # i dont even see the recording button".
     for other in _other_screens_nearest_first(screen, geometries, rect):
-        x = min(max(other.center().x() - width / 2, other.left()),
-                other.right() - width)
-        candidate = QRectF(
-            x, other.top() + _reserved_top_for(other) + margin, width, height
-        )
-        if other.contains(candidate) and not (
+        other_usable = _usable_area_for(other)
+        x = min(max(other_usable.center().x() - width / 2, other_usable.left()),
+                other_usable.right() - width)
+        candidate = QRectF(x, other_usable.top() + margin, width, height)
+        if other_usable.contains(candidate) and not (
             rect is not None and candidate.intersects(rect)
         ):
             return QRect(round(candidate.x()), round(candidate.y()), width, height)
     return None
 
 
-def _reserved_top_for(screen: QRectF) -> int:
-    """Logical pixels of `screen`'s top edge the desktop's own chrome owns.
+def _usable_area_for(screen: QRectF) -> QRectF:
+    """`screen` minus what the desktop's own chrome reserves along its edges.
 
     Resolved through `QGuiApplication.screenAt` so the platform seam can
-    answer for the right monitor -- and zero whenever it cannot be
-    identified, which is the same safe direction `OverlayWindow` takes: the
-    cost of being wrong is a bar a few pixels high, never one drawn into a
-    recording.
+    answer for the right monitor -- and the whole of `screen` whenever it
+    cannot be identified, the same direction `OverlayWindow` takes: the cost
+    of being wrong is a bar placed where the shell may cover it, never one
+    drawn into a recording.
     """
     found = QGuiApplication.screenAt(screen.center().toPoint())
     if found is None:
-        return 0
+        return QRectF(screen)
     try:
-        return platform.current.reserved_top(found)
+        margins = platform.current.reserved_margins(found)
     except Exception:  # noqa: BLE001 - chrome placement, never worth raising for
-        return 0
+        return QRectF(screen)
+    return screen.marginsRemoved(
+        QMarginsF(margins.left(), margins.top(), margins.right(), margins.bottom())
+    )
 
 
 def _other_screens_nearest_first(

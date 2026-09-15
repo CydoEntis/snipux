@@ -21,8 +21,9 @@ three things the app asks for at its edges:
     the same seam as the line above, one operation later: nothing outside
     `platform/` should branch on `sys.platform` to pick a recorder either
 
-`reserved_top()` joins `ensure_stable_install()` as an operation with a
-portable default rather than a required one -- see its own docstring.
+`reserved_margins()` (and `reserved_top()`, its top edge) join
+`ensure_stable_install()` as operations with a portable default rather than
+required ones -- see their own docstrings.
 `relaunch_without_console()` (#52) is another: only Windows has a console
 that can take the tray app down with it.
 
@@ -53,6 +54,8 @@ import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from PyQt6.QtCore import QMargins
 
 if TYPE_CHECKING:
     from snipux.capture import BackendRegistry
@@ -177,26 +180,40 @@ class Platform(ABC):
         return False
 
 
-    def reserved_top(self, screen) -> int:
-        """Logical pixels of `screen`'s top edge that the desktop's own
-        chrome owns -- a GNOME top bar, a Windows taskbar docked to the
-        top -- and will paint over an always-on-top window regardless of
+    def reserved_margins(self, screen) -> QMargins:
+        """Logical pixels along each edge of `screen` that the desktop's own
+        chrome owns -- a GNOME top bar, a dock, a Windows taskbar on any
+        edge -- and will paint over an always-on-top window regardless of
         what that window thinks it covers.
 
         Chrome placement only. The capture still grabs the whole virtual
         desktop in one shot, per CLAUDE.md's one rule; this decides where
-        the pre-snip chooser and the close button may be *drawn*, which is
-        an entirely different question from what is in the frame.
+        the chooser, the floating bar and everything clamped alongside them
+        may be *drawn*, which is an entirely different question from what is
+        in the frame.
 
         Not one of the six required operations: `QScreen` answers it
         portably wherever the platform tells Qt the truth, so the default
         below is that portable answer and a platform overrides it only
-        where Qt is wrong (`LinuxPlatform`, under X11). Zero is always a
-        safe answer -- it is what every version before this returned, and
-        the cost of being wrong is chrome drawn slightly low, never a
-        capture that misses pixels.
+        where Qt is wrong (`LinuxPlatform`, under X11). Empty margins are
+        what a platform that cannot tell returns, and the cost of being
+        wrong is chrome drawn where the shell covers it, never a capture
+        that misses pixels.
         """
-        return max(0, screen.availableGeometry().top() - screen.geometry().top())
+        geometry = screen.geometry()
+        available = screen.availableGeometry()
+        return QMargins(
+            max(0, available.left() - geometry.left()),
+            max(0, available.top() - geometry.top()),
+            max(0, geometry.right() - available.right()),
+            max(0, geometry.bottom() - available.bottom()),
+        )
+
+    def reserved_top(self, screen) -> int:
+        """The top edge of `reserved_margins`, for the callers that hang
+        from it and need nothing else.
+        """
+        return self.reserved_margins(screen).top()
 
     def exclude_from_capture(self, widget) -> bool:
         """Ask the OS to leave `widget` out of screen captures while

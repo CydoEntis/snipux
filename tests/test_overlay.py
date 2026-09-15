@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QMargins, QMarginsF
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -8623,7 +8623,7 @@ class TestCaptureChooser:
     """
 
     def _overlay(self, size=(1200, 800)):
-        # Clamped to the screen this process actually has. `_reserved_top`
+        # Clamped to the screen this process actually has. `_reserved_margins`
         # resolves a monitor through `QGuiApplication.screenAt()`, so a
         # synthetic desktop bigger than the real (offscreen) screen puts
         # its own centre off-screen, that lookup misses, and the overlay
@@ -8778,7 +8778,9 @@ class TestCaptureChooser:
         # hung flush against that edge is behind it -- 32px of a 54px panel
         # on the measured desktop, and all 26px of the armed tab.
         monkeypatch.setattr(
-            overlay_module.platform.current, "reserved_top", lambda screen: 32
+            overlay_module.platform.current,
+            "reserved_margins",
+            lambda screen: QMargins(0, 32, 0, 0),
         )
         overlay = self._overlay()
 
@@ -8788,7 +8790,9 @@ class TestCaptureChooser:
 
     def test_the_armed_tab_clears_it_too(self, monkeypatch):
         monkeypatch.setattr(
-            overlay_module.platform.current, "reserved_top", lambda screen: 32
+            overlay_module.platform.current,
+            "reserved_margins",
+            lambda screen: QMargins(0, 32, 0, 0),
         )
         overlay = self._overlay()
 
@@ -8804,9 +8808,11 @@ class TestCaptureChooser:
         overlay = self._overlay()
         flush = overlay._close_button.geometry().top()
         monkeypatch.setattr(
-            overlay_module.platform.current, "reserved_top", lambda screen: 32
+            overlay_module.platform.current,
+            "reserved_margins",
+            lambda screen: QMargins(0, 32, 0, 0),
         )
-        overlay._reserved_top_cache.clear()
+        overlay._reserved_margins_cache.clear()
 
         overlay._reposition_close_button()
 
@@ -8819,6 +8825,60 @@ class TestCaptureChooser:
         overlay._chooser.set_delay("5s")
 
         assert overlay._chooser.delay == "5s"
+
+
+class TestChromeClearsTheDesktopsOwnDock:
+    """A dock or taskbar paints over this window, so every piece of floating
+    chrome is clamped inside its monitor minus what the desktop reserves.
+
+    Reported with the Ubuntu Dock fixed to the bottom: a selection reaching
+    the bottom of the monitor put the bar and its tool hint under the dock,
+    and none of the controls could be clicked.
+    """
+
+    DOCK = QMargins(0, 32, 0, 71)
+
+    def _overlay(self, monkeypatch, margins=DOCK):
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_margins", lambda screen: margins
+        )
+        # The whole offscreen screen, so `screenAt` finds it and the
+        # platform is actually asked, at any scale factor.
+        available = QGuiApplication.primaryScreen().geometry()
+        size = (available.width(), available.height())
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_a_whole_monitor_selection_keeps_the_bar_above_a_bottom_dock(
+        self, monkeypatch
+    ):
+        overlay = self._overlay(monkeypatch)
+
+        overlay.set_selection(overlay.rect())
+
+        assert overlay._bar.isVisible()
+        assert overlay._bar.geometry().bottom() <= overlay.rect().bottom() - self.DOCK.bottom()
+
+    def test_the_tool_hint_stays_above_it_too(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        overlay.set_selection(overlay.rect())
+
+        overlay._preview_tool("pen")
+
+        assert overlay._tool_hint.isVisible()
+        hint = overlay._tool_hint.geometry()
+        assert hint.bottom() <= overlay.rect().bottom() - self.DOCK.bottom()
+
+    def test_every_edge_the_desktop_reserves_is_left_out(self, monkeypatch):
+        overlay = self._overlay(monkeypatch, QMargins(64, 32, 0, 71))
+
+        assert overlay._chrome_bounds() == QRectF(overlay.rect()).marginsRemoved(
+            QMarginsF(64, 32, 0, 71)
+        )
 
 
 class TestTheChooserTakesItsOwnClicks:
