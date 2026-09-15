@@ -216,6 +216,50 @@ is the designer's, only its placement was wrong. The comment inside
 
 ---
 
+## 13 · The accent stays the softer green
+
+**The handoff says**: `ACCENT` is `#e3ff4f`, with `ACCENT_SOFT` `#eaff7a` for
+accent text and small glyphs.
+
+**We keep `tokens.Color.ACCENT` at `#a8e05f`**, with `#c3e399` as its lighter
+variant. The "Acid" ink swatch is untouched.
+
+### Why
+
+The full-saturation yellow-green read as neon against the dark chrome --
+"not so vibrant" was the report -- and on a switch or a Save pill it pulled
+the eye harder than the thing it was labelling. `#a8e05f` is sampled from the
+app icon's selection marquee, so the accent and the mark are the same green;
+the comment on `Color.ACCENT` gives the history. Acid is a drawing colour,
+not chrome: changing it would repaint what the pen puts on the image rather
+than what the interface looks like.
+
+---
+
+## 14 · Menus are children of the window the bar sits over
+
+**The handoff says**: menus are top-level popups, not children of a bar, so
+an open menu paints above the hint pill beneath it and no effect-bearing
+parent can trap it.
+
+**We make them children of the overlay, or of the review window** -- not of
+the bar, and not top-level popups (`FamilyMenu` in `snipux/overlay.py`). As
+children of the window they still paint above the bar and the strip under
+it, which is what the handoff was guarding against.
+
+### Why
+
+A top-level popup takes the keyboard while it is open. A sibling's key
+(`R O L A`, `B`) and Esc would stop reaching the window, and the handoff's
+own condition for a one-row bar -- `1`-`7`, `[`, `]` and `D` working while the
+style popover stays open -- could not be met. A press outside a popup is also
+replayed underneath or swallowed depending on the platform. As a child, the
+window's own press handler decides what a press outside the menu means --
+close it, and nothing else -- and `_Chrome` keeps a press on the menu from
+ever reaching that handler.
+
+---
+
 ## Still open
 
 Not decided. Today's behaviour stands for each until it is, and each is
