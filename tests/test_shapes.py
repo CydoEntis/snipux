@@ -1569,7 +1569,12 @@ class TestExportedLengths:
         # where an unscaled label comes out a third smaller.
         assert abs(saved_width - seen_width) <= 3
         assert abs(saved_height - seen_height) <= 3
-        assert abs(saved_pixels - seen_pixels) <= seen_pixels * 0.06
+        # Its ink too -- but glyphs rasterised through a scaled painter and at
+        # a larger pixel size are not the same pixels, and how far apart they
+        # land depends on the font and the platform's rasteriser: up to 8% in
+        # DejaVu Sans and 6.3% on Windows, where 6% had been allowed. A label
+        # exported unscaled is 55% short, so 15% still catches it.
+        assert abs(saved_pixels - seen_pixels) <= seen_pixels * 0.15
 
     @pytest.mark.parametrize("kind", [Blur, Pixelate])
     def test_blur_strength_stays_in_the_frames_own_pixels(self, kind):

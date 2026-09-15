@@ -4300,9 +4300,17 @@ class TestStyleDot:
         bar.select_tool("rect")
         bar.set_style_preview(ToolStyle(colour=self.RED, size=10, fill="outline"))
 
-        # A 16px dot with a 2px ring inside its edge: 7px out is the ring,
-        # the centre is the button showing through.
-        ring = self._dot_pixel(bar, 7)
+        # A 16px dot with a 2px ring inside its edge: 6 to 8px out is the
+        # ring, the centre is the button showing through. The ring is looked
+        # for across its width rather than at one pixel: at a fractional scale
+        # the dot's centre can fall between physical pixels, and which side it
+        # rounds to follows the bar's width -- so the UI font -- which put a
+        # single sample on the ring's antialiased edge in DejaVu Sans at 1.5x.
+        red = QColor(self.RED)
+        ring = min(
+            (self._dot_pixel(bar, dx) for dx in (6.5, 7.0, 7.5)),
+            key=lambda c: sum(abs(a - b) for a, b in zip(c.getRgb()[:3], red.getRgb()[:3])),
+        )
         hole = self._dot_pixel(bar)
 
         assert bar._style_dot.is_ring
@@ -6132,14 +6140,18 @@ class TestCaptureModeWindowIntegration:
     # hit into a no-op. 90 clears it with margin.
     WINDOW_RECT = QRectF(30, 90, 50, 50)
     HIT_POINT = QPoint(50, 110)
-    # Outside WINDOW_RECT, and -- as important -- outside the real child
-    # widgets `OverlayWindow` shows once it has a selection: `HintHUD`
-    # spans the full width for `tokens.Metric.HUD_H` (44px) from the top,
-    # and the floating bar sits well below the selection. A point inside
-    # either one would never reach `OverlayWindow.mouseMoveEvent` at all
-    # (Qt delivers it to that child instead), silently turning this into
-    # a no-op rather than an actual miss.
-    MISS_POINT = QPoint(200, 70)
+    # Outside WINDOW_RECT, and -- as important -- outside every child widget
+    # `OverlayWindow` shows while a window is being picked: the chooser row
+    # and its hint pill across the top centre, the floating bar and tool hint
+    # under the previewed window, and the close button in the corner. A point
+    # inside any of them never reaches `OverlayWindow.mouseMoveEvent` at all
+    # (Qt delivers it to that child instead), silently turning a miss into a
+    # no-op. The hint pill's width follows the UI font: (200, 70) was clear of
+    # it in Ubuntu's font and inside it in DejaVu Sans, which is what CI has,
+    # so the test checks the point is clear before relying on it. It also has
+    # to be on the screen: the offscreen platform's is 533px wide at 1.5x,
+    # and a move past its edge is never delivered.
+    MISS_POINT = QPoint(500, 300)
     WINDOW_LABEL = tokens.CAPTURE_MODES[1][0]
     REGION_LABEL = tokens.CAPTURE_MODES[0][0]
 
@@ -6190,6 +6202,7 @@ class TestCaptureModeWindowIntegration:
         self._pick_window_mode(overlay)
         QTest.mouseMove(overlay, self.HIT_POINT)
         assert overlay._selection is not None
+        assert overlay.childAt(self.MISS_POINT) is None, "the miss point is under chrome"
 
         QTest.mouseMove(overlay, self.MISS_POINT)
 
