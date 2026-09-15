@@ -82,7 +82,7 @@ from snipux.overlay import (
     open_overlay,
     other_screens_nearest_first,
 )
-from snipux import __version__, design, platform, setup_desktop
+from snipux import __version__, design, handoff, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
 from snipux.recording import RecorderRegistry, RecordingError
 from snipux.player import PlayerWindow
@@ -932,10 +932,10 @@ class QLocalSocketTransport(Transport):
     `start_capture` ignores a request while an overlay is already open.
     """
 
-    SERVER_NAME = "snipux-resident"
+    SERVER_NAME = handoff.SERVER_NAME
     _CONNECT_TIMEOUT_MS = 200
-    _REQUEST_BYTE = b"S"
-    _SETTINGS_REQUEST_BYTE = b"T"
+    _REQUEST_BYTE = handoff.SNIP_REQUEST
+    _SETTINGS_REQUEST_BYTE = handoff.SETTINGS_REQUEST
     # Long enough that a request is never lost to scheduling, short enough
     # that a probe (which sends nothing) doesn't hold the handler up.
     _READ_TIMEOUT_MS = 200
@@ -2924,9 +2924,9 @@ def run_resident_app(
 
 
 def cli() -> int:
-    """The `console_scripts` entry point (`pyproject.toml` points
-    `snipux` at this), and what `python -m snipux` and the windowed
-    PyInstaller build run too.
+    """The full CLI: what `snipux` and `python -m snipux` reach whenever
+    `snipux.handoff` cannot forward their request to a running snipux, and
+    what the windowed PyInstaller build runs directly.
 
     A `console_scripts` entry point calls `module:function()` directly, so
     it cannot execute an `if __name__ == "__main__":` block -- this
@@ -2946,9 +2946,9 @@ def cli() -> int:
 
 
 def gui() -> int:
-    """The `gui_scripts` entry point (`pyproject.toml` points `snipuxw` at
-    this): what the Windows Start Menu and Startup shortcuts run, and what
-    a bare `snipux` hands off to (#52).
+    """What `snipuxw` reaches through `snipux.handoff`: what the Windows
+    Start Menu and Startup shortcuts run, and what a bare `snipux` hands off
+    to (#52).
 
     `cli()`'s dispatch without the relaunch. This process already has no
     console for anything to close, and relaunching would only start

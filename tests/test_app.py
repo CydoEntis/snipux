@@ -1,6 +1,9 @@
 import ctypes
+import os
 import re
 import shutil
+import socket
+import subprocess
 import threading
 import time
 import sys
@@ -30,6 +33,7 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from conftest import skip_on_windows
 from snipux import app
+from snipux import handoff
 from snipux import overlay as overlay_module
 from snipux import __version__, setup_desktop
 from snipux.app import (
@@ -1211,8 +1215,8 @@ class TestEntryPoints:
     def test_the_console_and_windowless_launchers_are_both_declared(self):
         scripts, gui_scripts = self._entry_points()
 
-        assert scripts == {"snipux": "snipux.app:cli"}
-        assert gui_scripts == {"snipuxw": "snipux.app:gui"}
+        assert scripts == {"snipux": "snipux.handoff:cli"}
+        assert gui_scripts == {"snipuxw": "snipux.handoff:gui"}
 
     def test_every_entry_point_resolves_to_a_callable(self):
         import importlib
@@ -1222,6 +1226,112 @@ class TestEntryPoints:
         for target in [*scripts.values(), *gui_scripts.values()]:
             module_name, _, attribute = target.partition(":")
             assert callable(getattr(importlib.import_module(module_name), attribute)), target
+
+
+_NO_SOCKET_FILE = (
+    "QLocalServer is a named pipe on Windows, not a socket file the handoff can "
+    "reach -- a request there always takes the full path, which is tested elsewhere"
+)
+
+
+class TestHandoff:
+    """A request from `snipux --snip` or `--settings`, with a snipux already
+    running, is forwarded over the resident's own socket without Qt. The
+    shortcut's process used to import the whole app and build a
+    QApplication before sending one byte: a third of the time a snip took
+    to appear.
+    """
+
+    def _resident(self, tmp_path):
+        name = f"snipux-handoff-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        heard = []
+        server.listen(lambda: heard.append("snip"), lambda: heard.append("settings"))
+        return name, heard
+
+    @staticmethod
+    def _settle():
+        QApplication.processEvents()
+        QTest.qWait(50)
+        QApplication.processEvents()
+
+    @skip_on_windows(_NO_SOCKET_FILE)
+    @pytest.mark.parametrize("argument,expected", [("--snip", "snip"), ("--settings", "settings")])
+    def test_a_request_reaches_a_running_resident(self, tmp_path, argument, expected):
+        name, heard = self._resident(tmp_path)
+
+        assert handoff.forward([argument], server_name=name) is True
+        self._settle()
+
+        assert heard == [expected]
+
+    @skip_on_windows(_NO_SOCKET_FILE)
+    def test_forwarding_loads_neither_qt_nor_the_app(self, tmp_path):
+        name, heard = self._resident(tmp_path)
+        code = (
+            "import sys; from snipux import handoff; "
+            f"delivered = handoff.forward(['--snip'], server_name={name!r}); "
+            "loaded = sorted(m for m in sys.modules "
+            "if m.startswith(('PyQt6', 'snipux.app', 'snipux.overlay'))); "
+            "print(delivered, loaded)"
+        )
+        root = Path(__file__).resolve().parent.parent
+
+        result = subprocess.run(
+            [sys.executable, "-c", code], cwd=root, capture_output=True, text=True, timeout=30
+        )
+        self._settle()
+
+        assert result.stdout.strip() == "True []", result.stderr
+        assert heard == ["snip"]
+
+    def test_nothing_listening_is_not_delivered(self, tmp_path):
+        assert handoff.forward(["--snip"], server_name=f"snipux-nobody-{tmp_path.name}") is False
+
+    @skip_on_windows(_NO_SOCKET_FILE)
+    def test_a_socket_file_left_by_a_resident_that_died_is_not_delivered(self, tmp_path):
+        name = f"snipux-stale-{tmp_path.name}"
+        path = handoff.socket_path(name)
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(path)
+        stale.close()
+        try:
+            assert handoff.forward(["--snip"], server_name=name) is False
+        finally:
+            os.unlink(path)
+
+    @pytest.mark.parametrize(
+        "arguments", [[], ["--snip", "--settings"], ["--list-backends"], ["--update"]]
+    )
+    def test_only_a_lone_request_is_forwarded(self, monkeypatch, arguments):
+        def refuse(*args, **kwargs):
+            raise AssertionError("only a lone request may reach the socket")
+
+        monkeypatch.setattr(
+            handoff, "socket", SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=refuse)
+        )
+
+        assert handoff.forward(arguments) is False
+
+    @pytest.mark.parametrize("entry", ["cli", "gui"])
+    def test_an_undelivered_request_takes_the_full_path(self, monkeypatch, entry):
+        monkeypatch.setattr(handoff, "forward", lambda arguments: False)
+        monkeypatch.setattr(app, entry, lambda: 7)
+        monkeypatch.setattr(handoff.sys, "argv", ["snipux", "--snip"])
+
+        assert getattr(handoff, entry)() == 7
+
+    @pytest.mark.parametrize("entry", ["cli", "gui"])
+    def test_a_delivered_request_returns_without_the_full_path(self, monkeypatch, entry):
+        def must_not_run():
+            raise AssertionError("the full CLI must not run for a delivered request")
+
+        monkeypatch.setattr(handoff, "forward", lambda arguments: True)
+        monkeypatch.setattr(app, entry, must_not_run)
+        monkeypatch.setattr(handoff.sys, "argv", ["snipux", "--snip"])
+
+        assert getattr(handoff, entry)() == 0
 
 
 class TestCrashLog:

@@ -77,6 +77,8 @@ snipux/
   flowbars.py   the post-selection bars from the locked capture-flow handoff
                 (docs/design/flow/, and its divergences.md). Views only --
                 they report clicks and app.py decides what they mean.
+  glass.py      the cached blur of the frozen frame that the overlay's bars
+                and menus paint behind their fill
   shapes.py     annotation data model and the flattening renderer
   settings.py   the Settings window (Qt in front of setup_desktop.py)
   review.py     the optional post-capture review window; Annotate reuses the bar
@@ -87,6 +89,9 @@ snipux/
   winchrome.py  frameless title bar/footer/controls for the two ordinary windows
   setup_desktop.py  Linux desktop/autostart entries, icons, the GNOME
                 shortcut, config -- what platform/linux.py adapts
+  handoff.py    forwards `snipux --snip` / `--settings` to the running snipux
+                over its socket without loading Qt; anything else goes on to
+                app.py's CLI
   app.py        controller, tray, CLI
 tests/          pytest, mirroring the module names
 ```

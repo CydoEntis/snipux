@@ -78,7 +78,11 @@ Repository = "https://github.com/CydoEntis/snipux"
 Issues = "https://github.com/CydoEntis/snipux/issues"
 
 [project.scripts]
-snipux = "snipux.app:cli"
+# `snipux.handoff` forwards a lone `--snip` or `--settings` to a snipux that
+# is already running, over its socket and without loading Qt, and hands
+# everything else to `snipux.app` -- the shortcut's process used to import the
+# whole app first, a third of the time a snip took to appear (#76).
+snipux = "snipux.handoff:cli"
 
 # The same app on pip's GUI launcher stub rather than its console one. On
 # Windows a console-stub `snipux.exe` opens (or joins) a console and runs
@@ -91,7 +95,7 @@ snipux = "snipux.app:cli"
 # somewhere a person can read. On Linux and macOS pip writes the two as
 # identical scripts.
 [project.gui-scripts]
-snipuxw = "snipux.app:gui"
+snipuxw = "snipux.handoff:gui"
 
 [tool.pytest.ini_options]
 # "-ra" keeps skip reasons (and their count) in the summary on every run,
