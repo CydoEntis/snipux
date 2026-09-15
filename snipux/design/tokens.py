@@ -50,7 +50,7 @@ class Color:
     # one is a *drawing* colour, not chrome, and changing it would repaint
     # what the pen puts on the image rather than what the interface looks
     # like.
-    ACCENT          = "#b7fa4d"
+    ACCENT          = "#a8e05f"
     ACCENT_FG       = "#15170e"   # text on accent
 
     # Selection frame
@@ -650,15 +650,15 @@ class ChooserColor:
     ROW_HOVER_BG         = "#ffffff"   # at 9% alpha
     ROW_HOVER_BG_ALPHA   = 0.09
     SHORTCUT_FG          = "#6f766a"   # the R/W/F/L glyphs in the mode menu
-    MODE_ACCENT          = "#c8fb77"   # active mode's icon + the tab's mode label
+    MODE_ACCENT          = "#c3e399"   # active mode's icon + the tab's mode label
     HINT_BG              = "#101210"   # at 72% alpha
     HINT_BG_ALPHA        = 0.72
     HINT_BORDER          = "#ffffff"   # at 7% alpha
     HINT_BORDER_ALPHA    = 0.07
     HINT_FG              = "#8f9689"
-    WINDOW_PREVIEW       = "#b7fa4d"   # at 85% alpha
+    WINDOW_PREVIEW       = "#a8e05f"   # at 85% alpha
     WINDOW_PREVIEW_ALPHA = 0.85
-    WINDOW_PREVIEW_FILL  = "#b7fa4d"   # at 7% alpha
+    WINDOW_PREVIEW_FILL  = "#a8e05f"   # at 7% alpha
     WINDOW_PREVIEW_FILL_ALPHA = 0.07
     PANEL_BG_ALPHA       = 0.93        # the panel's own fill
     LEGEND_KEY_FG        = "#d7dacb"
@@ -1051,21 +1051,21 @@ class FlowColor:
     DANGER_BG_ALPHA      = 0.22
     DANGER_FG            = "#f5a3a3"
 
-    ACCENT               = "#b7fa4d"
+    ACCENT               = "#a8e05f"
     ACCENT_FG            = "#15170e"
     # The 1px line between a split button's face and its caret. Which half
     # a click lands in has to be visible before the click, or a split
     # button is just a button that sometimes does something else.
     SPLIT_SEAM           = "#15170e"
     SPLIT_SEAM_ALPHA     = 0.22
-    ACCENT_SOFT          = "#c8fb77"   # accent as TEXT or a small glyph
+    ACCENT_SOFT          = "#c3e399"   # accent as TEXT or a small glyph
     # The handoff gives this as "14-18% for an armed segment"; the prototype
     # spends the range on two different things, so it is two tokens here
     # rather than one that has to be right twice. .18 is the armed kind
     # segment; PAUSE_WASH is the paused button in the live bar.
-    ACCENT_WASH          = "#b7fa4d"
+    ACCENT_WASH          = "#a8e05f"
     ACCENT_WASH_ALPHA    = 0.18
-    PAUSE_WASH           = "#b7fa4d"
+    PAUSE_WASH           = "#a8e05f"
     PAUSE_WASH_ALPHA     = 0.14
 
     # Recording. The only place red appears in the product, which is what
@@ -1082,9 +1082,9 @@ class FlowColor:
 
     # Window-mode hover preview: two alphas on one colour, so they are two
     # tokens.
-    WINDOW_HOVER         = "#b7fa4d"
+    WINDOW_HOVER         = "#a8e05f"
     WINDOW_HOVER_ALPHA   = 0.85        # the 2px border
-    WINDOW_HOVER_FILL    = "#b7fa4d"
+    WINDOW_HOVER_FILL    = "#a8e05f"
     WINDOW_HOVER_FILL_ALPHA = 0.07
 
 
@@ -1190,8 +1190,8 @@ class PlayerColor:
     WAVE_MUTED_IN    = "#3a3f47"        # muted: the whole waveform greys
     WAVE_MUTED_OUT   = "#23262d"
 
-    TRIM             = "#b7fa4d"        # range edges + both handles
-    TRIM_INNER       = "#b7fa4d"        # at 18%, inset ring
+    TRIM             = "#a8e05f"        # range edges + both handles
+    TRIM_INNER       = "#a8e05f"        # at 18%, inset ring
     HANDLE_GRIP      = "#15170e"        # at 50%, the 2x14 line in the handle
     PLAYHEAD         = "#ff5a52"        # red = "now", matching the recording bar
     PLAYHEAD_FG      = "#2a0d0b"        # text in the playhead's time flag
@@ -1214,8 +1214,8 @@ class PlayerColor:
     BTN_ON_FG        = "#f1f3e8"
     TIME_FG          = "#f1f3e8"
     TIME_TOTAL_FG    = "#6f766a"
-    ACCENT_ON_BG     = "#b7fa4d"        # at 15%, loop/speed when engaged
-    ACCENT_ON_FG     = "#c8fb77"
+    ACCENT_ON_BG     = "#a8e05f"        # at 15%, loop/speed when engaged
+    ACCENT_ON_FG     = "#c3e399"
     MENU_BG          = "#1a1c18"        # at 98%
 
     PAUSE_SCRIM      = "#0c0d0a"        # at 28%, over the frame while paused
