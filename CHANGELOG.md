@@ -12,6 +12,12 @@ use it; the commit history has the detail.
   again to choose a different one, and once more to close the menu. The small
   triangle in the corner still opens the menu too, and is easier to hit.
 
+### Removed
+
+- **Crop**, which only drew a dashed box and cropped nothing. To crop a snip,
+  drag the handles on the selection; for a dashed box, draw a rectangle with a
+  dashed line.
+
 ## 0.7.0 — 2026-09-15
 
 A redesigned capture flow, and snips that open about four times faster.

@@ -738,9 +738,8 @@ class Blackout(Redact):
 
 @dataclass
 class Crop(Shape):
-    """A dashed, unfilled rectangle -- the visual style shared by the crop
-    marquee and, since SNX-64, the restored Crop *annotation* tool in
-    overlay.py's ink layer.
+    """A dashed, unfilled rectangle: the live marquee blur and pixelate show
+    while they are dragged.
 
     Historically this was only ever a transient in-progress shape: the old
     editor.py's Canvas built one live during a crop drag, purely so the
@@ -751,11 +750,11 @@ class Crop(Shape):
     still borrows this same dashed style for blur/pixelate's own live
     preview, for the same "cheap marquee, not the real effect" reason.
 
-    SNX-64 restores Crop as one of overlay.py's `_TWO_POINT_MARK_CLASSES`:
-    committed the same way Rectangle is, drawn/erased/undone the same way,
-    and included in an export the same way — a dashed box the user places
-    deliberately, not a re-crop of the capture. `hit_test` below is what
-    makes that new use erasable.
+    SNX-64 also made it a Crop tool on the bar, committed, erased and
+    exported the way Rectangle is, and `hit_test` below is what made those
+    marks erasable. #78 took the tool away again: it drew a box called Crop
+    that cropped nothing, Rectangle draws the same box with a dashed line,
+    and the selection's handles are what crop a snip.
     """
 
     start: QPointF = field(default_factory=QPointF)

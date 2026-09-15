@@ -671,9 +671,9 @@ MONITOR_MODES = ["Full screen"]
 #     verbatim. Folding them back into the tuple would give each of those
 #     two facts a second home to drift from.
 #   * `ANNOTATION_TOOLS` is (tool, letter, hint) for eight tools. Here that
-#     is `TOOLS` + `SHORTCUTS` + `TOOL_HINTS`, for *eleven* -- see the note
-#     on `TOOLS` for why the extra three outrank the handoff's own
-#     "eight tools" rule. Adopting the handoff's list would drop them.
+#     is `TOOLS` + `SHORTCUTS` + `TOOL_HINTS`, for more than eight -- see
+#     `docs/design/flow/divergences.md` §7 for why the extra tools outrank
+#     the handoff's own "eight tools" rule. Adopting its list would drop them.
 #   * `SHORTCUTS` is the stage-level key map there and the tool letters
 #     here. Both are wanted; the stage map arrives with the bars that read
 #     it, under a name that does not collide.
@@ -820,7 +820,6 @@ TOOL_HINTS = {
     "eraser":      "Click a mark to remove it",
     "ellipse":     "Drag to draw an oval",
     "line":        "Drag for a straight line",
-    "crop":        "Drag to box off a dashed crop mark",
 }
 
 # Fill and line style for the shape marks, from the locked stills-bar handoff:
@@ -1488,15 +1487,13 @@ class BarColor:
 # last.
 STILLS_SLOTS = ["pen", "highlighter", "shapes", "step", "text", "redact", "eraser"]
 
-# (tool, label, shortcut). Crop is a fifth sibling with no letter
-# (divergences.md 7): the owner kept all eleven tools reachable, and a
-# sibling is the handoff's own answer for a tool without a slot.
+# (tool, label, shortcut): the handoff's four. Crop was a fifth until it
+# turned out to draw a dashed box and crop nothing (divergences.md 7).
 SHAPES = [
     ("rect",    "Rectangle",     "R"),
     ("ellipse", "Ellipse",       "O"),
     ("line",    "Straight line", "L"),
     ("arrow",   "Arrow",         "A"),
-    ("crop",    "Crop",          ""),
 ]
 
 # (tool, glyph, label, note). The note is not decoration: blur on small text
@@ -1525,17 +1522,17 @@ TOOLS = [
 # gave it another.
 TOOL_GLYPHS = {tool: glyph for tool, glyph, _label, _note in REDACTIONS}
 
-# The spec's names, which tooltips use. Crop keeps its own.
+# The spec's names, which tooltips use.
 TOOL_NAMES = {
     "pen": "Pen", "highlighter": "Highlighter", "rect": "Rectangle",
     "ellipse": "Ellipse", "line": "Straight line", "arrow": "Arrow",
-    "crop": "Crop", "step": "Numbered step", "text": "Text",
+    "step": "Numbered step", "text": "Text",
     "blur": "Blur", "pixelate": "Pixelate", "blackout": "Blackout",
     "eraser": "Eraser",
 }
 
-# One letter, one tool. Every shape sibling but Crop keeps its own letter, so
-# its menu is for discovery rather than for use.
+# One letter, one tool. Every shape sibling keeps its own letter, so its menu
+# is for discovery rather than for use.
 SHORTCUTS = {
     "P": "pen", "H": "highlighter",
     **{key: tool for tool, _label, key in SHAPES if key},
@@ -1546,9 +1543,7 @@ SHORTCUTS = {
 REDACTION_KEY = "B"
 
 # Which style popover sections a tool shows, in the order they are laid out.
-# Anything absent is not rendered -- never rendered-but-inert. Crop is ours
-# (divergences.md 7): a dashed box whose dashes are its own, so it takes a
-# colour and a stroke and no line style.
+# Anything absent is not rendered -- never rendered-but-inert.
 STYLE_SECTIONS = {
     "pen":         ["color", "size"],
     "highlighter": ["color", "size"],
@@ -1556,7 +1551,6 @@ STYLE_SECTIONS = {
     "ellipse":     ["color", "fill", "dash", "size"],
     "line":        ["color", "dash", "size"],
     "arrow":       ["color", "dash", "size"],
-    "crop":        ["color", "size"],
     "step":        ["color", "size"],
     "text":        ["color", "size"],
     "blur":        ["strength"],
@@ -1581,7 +1575,7 @@ DEFAULT_STYLE = {
     "step":        {"color": "#ef4444", "size": 5, "dash": "solid", "fill": "filled"},
     "text":        {"color": "#ffffff", "size": 5, "dash": "solid", "fill": "outline"},
 }
-# What the spec seeds every tool DEFAULT_STYLE leaves out with -- Crop, here.
+# What the spec seeds every tool DEFAULT_STYLE leaves out with.
 DEFAULT_STYLE_OTHER = {"color": "#e3ff4f", "size": 5, "dash": "solid", "fill": "outline"}
 
 STROKE_RANGE   = (1, 26)

@@ -49,7 +49,6 @@ from snipux.shapes import (
     Redact,
     Arrow,
     Blur,
-    Crop,
     Ellipse,
     Highlighter,
     Line,
@@ -1284,7 +1283,7 @@ class TestEraserTool:
     @pytest.mark.parametrize(
         "mark, hit_point",
         [
-            # Ellipse/Crop: the bounding box's own left border, vertically
+            # Ellipse: the bounding box's own left border, vertically
             # centred -- same probe Rectangle's own hit-testing already
             # relies on elsewhere in this file.
             (
@@ -1297,17 +1296,11 @@ class TestEraserTool:
                 Line(colour=RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(80, 80)),
                 QPoint(50, 50),
             ),
-            (
-                Crop(colour=RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(80, 80)),
-                QPoint(20, 50),
-            ),
         ],
     )
     def test_click_with_eraser_active_removes_a_restored_tools_mark(self, mark, hit_point):
-        # SNX-64: Crop had no hit_test override at all before this ticket --
-        # unlike Ellipse/Line, which already had one -- so this is what
-        # proves the eraser can reach all three restored tools' marks, not
-        # just the two shapes.py already covered.
+        # SNX-64 restored Ellipse and Line: the eraser reaches their marks
+        # through the overlay, not only through shapes.py's own hit tests.
         overlay = self._overlay()
         overlay.add_mark(mark)
         overlay.set_eraser_active(True)
@@ -1456,21 +1449,7 @@ class TestDrawingTools:
         assert mark.start == QPointF(20, 20)
         assert mark.end == QPointF(80, 60)
 
-    def test_crop_press_move_release_commits_from_press_to_release(self):
-        overlay = self._overlay()
-        overlay._bar.select_tool("crop")
-
-        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
-        QTest.mouseMove(overlay, QPoint(80, 60))
-        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
-
-        assert len(overlay.marks) == 1
-        mark = overlay.marks[0]
-        assert isinstance(mark, Crop)
-        assert mark.start == QPointF(20, 20)
-        assert mark.end == QPointF(80, 60)
-
-    @pytest.mark.parametrize("tool", ["ellipse", "line", "crop"])
+    @pytest.mark.parametrize("tool", ["ellipse", "line"])
     def test_restored_shape_tools_take_colour_and_stroke_from_their_own_style(self, tool):
         overlay = self._overlay()
         overlay._bar.select_tool(tool)
@@ -2692,7 +2671,7 @@ class TestFloatingBarComposition:
         bar = self._laid_out(FloatingBar())
         before = bar._action.geometry()
 
-        for tool in ("crop", "blackout", "eraser"):
+        for tool in ("arrow", "blackout", "eraser"):
             bar.select_tool(tool)
             self._laid_out(bar)
 
@@ -3791,7 +3770,7 @@ class TestFloatingBarActiveTool:
     def test_a_family_slot_reads_active_for_any_of_its_siblings(self):
         bar = FloatingBar()
 
-        bar.select_tool("crop")
+        bar.select_tool("arrow")
 
         assert bar._tool_buttons["shapes"].is_active
         assert bar._tool_buttons["shapes"].notch._lit
@@ -3988,11 +3967,10 @@ class TestFloatingBarTooltips:
     def test_a_family_slots_tooltip_follows_its_sibling(self):
         bar = FloatingBar()
 
-        bar.select_tool("crop")
+        bar.select_tool("arrow")
         bar.select_tool("blackout")
 
-        # Crop has no key, so it is named alone.
-        assert bar._tool_buttons["shapes"].toolTip() == "Crop · click again for more shapes"
+        assert bar._tool_buttons["shapes"].toolTip() == "Arrow — A · click again for more shapes"
         assert bar._tool_buttons["redact"].toolTip() == "Blackout — B · click again to switch"
 
     def test_each_notch_says_what_it_opens(self):
@@ -5660,18 +5638,21 @@ class TestCaptureModePopoverOverlayIntegration:
 class TestFamilyMenuComposition:
     """A family's menu carries every sibling, in the family's own order."""
 
-    def test_the_shapes_menu_lists_every_shape_with_crop_last(self):
+    def test_the_shapes_menu_lists_the_handoffs_four_shapes_and_no_crop(self):
+        # #78: Crop was a fifth row, and it drew a dashed box that cropped
+        # nothing.
         menu = FamilyMenu("shapes")
 
-        assert list(menu._rows) == ["rect", "ellipse", "line", "arrow", "crop"]
+        assert list(menu._rows) == ["rect", "ellipse", "line", "arrow"]
+        assert "crop" not in tokens.TOOLS
         assert menu.width() == tokens.BarMetric.MENU_W_SHAPES
 
-    def test_each_shape_row_carries_its_key_and_crop_carries_none(self):
+    def test_each_shape_row_carries_its_key(self):
         menu = FamilyMenu("shapes")
 
         keys = {tool: row._shortcut for tool, row in menu._rows.items()}
 
-        assert keys == {"rect": "R", "ellipse": "O", "line": "L", "arrow": "A", "crop": ""}
+        assert keys == {"rect": "R", "ellipse": "O", "line": "L", "arrow": "A"}
 
     def test_the_redaction_menu_says_what_each_one_guarantees(self):
         menu = FamilyMenu("redact")
@@ -5793,15 +5774,6 @@ class TestFamilyMenuOverlayIntegration:
 
         assert overlay._bar.active_tool == "ellipse"
         assert not overlay._family_menus["shapes"].isVisible(), "a click uses the slot"
-
-    def test_picking_crop_offers_its_colour_and_stroke_when_styled(self):
-        overlay = self._overlay()
-        QTest.mouseClick(self._notch(overlay, "shapes")._rows["crop"], Qt.MouseButton.LeftButton)
-
-        QTest.mouseClick(overlay._bar._style_dot, Qt.MouseButton.LeftButton)
-
-        assert overlay._style_popover.isVisible()
-        assert overlay._style_popover.sections() == ["color", "size"]
 
     def test_reopening_ticks_the_sibling_the_slot_shows(self):
         overlay = self._overlay()
@@ -5946,7 +5918,7 @@ class TestFamilyMenuRowsStayClickable:
         slot = bar._tool_buttons["shapes"]
         menu = overlay._family_menus["shapes"]
 
-        for tool in ("ellipse", "rect", "line", "arrow", "crop", "rect"):
+        for tool in ("ellipse", "rect", "line", "arrow", "rect"):
             self._move_to(overlay, slot)
             self._click(overlay, slot._notch)
             assert not menu.isHidden()

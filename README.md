@@ -451,7 +451,7 @@ hidden from you either way.
 | `P` | Pen | Drag to draw freehand |
 | `H` | Highlighter | Sweep over the line that matters |
 | `A` | Arrow | Drag from tail to head |
-| `R` | Rectangle | Drag to box something in. Its button opens a popover with three more shapes that share its colour/stroke tray: Ellipse, Line, and Crop |
+| `R` | Rectangle | Drag to box something in. Its button also holds Ellipse (`O`) and Straight line (`L`): click it again once it is picked to open that menu |
 | `S` | Step | Click to drop the next numbered marker |
 | `T` | Text | Click, then type into the label |
 | `B` | Blur | Drag over anything private to obscure it |

@@ -218,7 +218,6 @@ class TestStrokeFactory:
             ("rect", shapes.Rectangle),
             ("ellipse", shapes.Ellipse),
             ("line", shapes.Line),
-            ("crop", shapes.Crop),
             ("blur", shapes.Blur),
             ("pixelate", shapes.Pixelate),
             ("blackout", shapes.Blackout),
@@ -276,7 +275,7 @@ class TestStrokeFactory:
         assert shape.dash == "dashed"
         assert not hasattr(shape, "fill")
 
-    @pytest.mark.parametrize("tool", ["pen", "highlighter", "crop", "blur"])
+    @pytest.mark.parametrize("tool", ["pen", "highlighter", "blur"])
     def test_a_tool_with_nothing_to_style_ignores_a_style(self, tool):
         # A remembered per-tool style carries both keys whether the tool
         # uses them or not, so being handed one must not break the tool.
@@ -379,7 +378,7 @@ class TestToolStyles:
             seed["color"], seed["size"], seed["dash"], seed["fill"]
         )
 
-    @pytest.mark.parametrize("tool", ["crop", "blur", "pixelate", "blackout", "eraser", None])
+    @pytest.mark.parametrize("tool", ["blur", "pixelate", "blackout", "eraser", None])
     def test_a_tool_the_seed_leaves_out_starts_where_the_spec_starts_it(self, tool):
         other = tokens.DEFAULT_STYLE_OTHER
 

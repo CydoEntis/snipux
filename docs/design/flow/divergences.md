@@ -271,7 +271,8 @@ tools it belongs to.
 **The handoff says** (§3a): *"split action button → divider → 8 tools →
 divider → undo, clear ink"*, and `ANNOTATION_TOOLS` lists exactly eight.
 
-**We ship eleven.** Ellipse, Line and Crop stay.
+**We ship eleven.** Ellipse, Line and Crop stay. (Crop has since gone: it drew
+a dashed box and cropped nothing -- #78, `../bars/divergences.md` §7.)
 
 ### Why
 

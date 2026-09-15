@@ -115,20 +115,31 @@ figure) is still in `tokens.py`, but nothing reads it: the overlay enforces
 
 ---
 
-## 7 · Crop stays, as a fifth shapes sibling
+## 7 · Crop was a fifth shapes sibling, until it went
 
 **The handoff's** shapes family is four: rectangle, ellipse, straight line and
 arrow (`SHAPES`, `R O L A`). Crop is not in `ANNOTATION_TOOLS` at all.
 
-**We keep Crop**, as a fifth sibling in the shapes family.
+**We** kept Crop as a fifth sibling when the bar was rebuilt, and have since
+taken it out (#78). The family is the handoff's four again, so this is no
+longer a divergence; the entry stays so the numbering does.
 
-### Why
+### Why it was kept
 
-The owner asked for all eleven tools to stay reachable (SNX-64; the
-siblings are `tokens.SHAPES`), which already outranks the eight-slot rule once
-(`../flow/divergences.md` §7). The handoff's own answer for a tool that does
-not fit is a sibling, so that is where it goes, and the slot count does not
-move.
+The owner asked for all eleven tools to stay reachable (SNX-64), which
+already outranks the eight-slot rule once (`../flow/divergences.md` §7). The
+handoff's own answer for a tool that does not fit is a sibling, so that is
+where it went, and the slot count did not move.
+
+### Why it went
+
+- **It cropped nothing.** Crop really cut the image in the retired editor
+  window. What stayed was only its dashed box, placed as a mark, so a tool
+  named Crop left the snip exactly as big as it was. Its owner found it in
+  the menu and reported it as feeling broken.
+- **Two things already do what it named or drew.** The selection's handles
+  are what crop a snip, and Rectangle with a dashed line (#65) draws the same
+  box.
 
 ---
 
@@ -333,16 +344,16 @@ letters its own rows offer.
 
 ---
 
-## 15 · Six details of the style popover
+## 15 · Five details of the style popover
 
 **The handoff** gives `STYLE_SECTIONS` and `DEFAULT_STYLE` for the tools it
 has, keeps one `strength` in its state model, steps only the stroke with `[`
 and `]`, and rings the picked swatch.
 
-**We** keep a strength per redaction tool and let `[` and `]` step it, give
-Crop a colour and a stroke, draw a redaction's style dot in the bar's grey,
-draw the picked swatch's ring inside the swatch, and hide the tool hint while
-the popover is open.
+**We** keep a strength per redaction tool and let `[` and `]` step it, draw
+a redaction's style dot in the bar's grey, draw the picked swatch's ring
+inside the swatch, and hide the tool hint while the popover is open. Crop had
+a colour and a stroke of its own too, until it was taken out (§7).
 
 ### Why
 
@@ -350,9 +361,6 @@ the popover is open.
   coarse blocks to pixelate (`marks.ToolStyles`).
 - **`[` and `]` on a redaction:** strength is the one length a redaction's
   popover offers, so the stepping keys step it.
-- **Crop:** it is ours, not the handoff's (§7). Its dashes are its own, so it
-  takes a colour and a stroke and no line style, seeded from what the spec
-  gives every tool `DEFAULT_STYLE` leaves out (`DEFAULT_STYLE_OTHER`).
 - **The grey dot:** a redaction has no colour for the dot to preview.
 - **The ring inside:** each swatch is its own widget, and a child widget
   cannot paint outside its own rect.

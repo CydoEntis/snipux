@@ -652,8 +652,8 @@ def _tool_tooltip(tool: str) -> str:
     """The tool's name and the key that reaches it: "Pen — P".
 
     A redaction sibling names the key its family shares, since that is the
-    key that gets there; Crop, which has none, is named alone rather than
-    beside a dash leading nowhere.
+    key that gets there. A tool with no key would be named alone rather
+    than beside a dash leading nowhere.
     """
     name = design.tokens.TOOL_NAMES.get(tool, _tool_label(tool))
     if _family_of(tool) == "redact":
@@ -7037,7 +7037,8 @@ class OverlayWindow(QWidget):
         same thing as having chosen Review in the chooser, decided one
         stage later. Saving first rather than copying is deliberate: the
         review window edits a file, and the handoff's own note for this
-        destination is "Review window -- annotate, crop, export".
+        destination is "Review window -- annotate, crop, export", less the
+        crop, which that window does not do (#78).
         """
         self._chooser.set_after("review")
         self.save()
@@ -7056,7 +7057,7 @@ class OverlayWindow(QWidget):
             for name, note, key in (
                 ("Copy", "Image on the clipboard, paste anywhere.", "C"),
                 ("Save", "Straight to your snips folder.", "S"),
-                ("Open", "Review window -- annotate, crop, export.", "O"),
+                ("Open", "Review window -- annotate, export.", "O"),
             )
         ]
         menu = FlowMenu(rows, current, design.tokens.FlowMetric.MENU_W_DEST, None)

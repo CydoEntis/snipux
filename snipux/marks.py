@@ -317,7 +317,6 @@ TWO_POINT_TOOLS = {
     "rect": shapes_module.Rectangle,
     "ellipse": shapes_module.Ellipse,
     "line": shapes_module.Line,
-    "crop": shapes_module.Crop,
 }
 # The redaction family: one tool per sibling, so which one a drag commits is
 # the tool itself rather than a mode read off a tray.
