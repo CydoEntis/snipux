@@ -5473,17 +5473,21 @@ class TestCaptureModeFullScreenIntegration:
 
         assert overlay._selection == left.toRect()
 
-    def test_falls_back_to_the_windows_own_centre_with_no_prior_cursor_move(self):
+    def test_with_no_prior_cursor_move_it_takes_the_monitor_the_os_has_the_pointer_on(
+        self, monkeypatch
+    ):
+        # No move has reached the overlay, so the OS's own pointer decides:
+        # the monitor the chooser row opened on. Deliberately the *left*
+        # one -- the window's centre (300, 300) is inside `right`, which is
+        # what this took before #49, wherever the pointer was.
         left = QRectF(0, 0, 250, 600)
         right = QRectF(250, 0, 350, 600)
+        _point_the_os_at(monkeypatch, left)
         overlay = self._overlay(monitor_geometries=[left, right])
-        # No QTest.mouseMove at all -- `_cursor_pos` is still None, so
-        # the window's own centre (300, 300), inside `right` only, is
-        # what decides the display.
 
         self._pick_full_screen(overlay)
 
-        assert overlay._selection == right.toRect()
+        assert overlay._selection == left.toRect()
 
     def test_selection_from_full_screen_is_reframable_like_a_dragged_one(self):
         overlay = self._overlay()
@@ -8253,6 +8257,26 @@ class TestTheChooserRowFollowsThePointer:
 
         assert overlay._active_screen_rect() == STAGGERED_RIGHT
 
+    def test_before_any_move_it_is_the_monitor_the_os_has_the_pointer_on(
+        self, monkeypatch
+    ):
+        _point_the_os_at(monkeypatch, STAGGERED_RIGHT)
+
+        assert self._overlay()._active_screen_rect() == STAGGERED_RIGHT
+
+    def test_a_pointer_on_no_monitor_this_window_covers_gets_one_it_does(
+        self, monkeypatch
+    ):
+        # A `QScreen` lookup answered with that screen's own geometry even
+        # when this window does not cover it -- on Wayland, where it covers
+        # only the interactive monitor -- so the row was placed off the
+        # window. Here the pointer is in the gap above the left monitor;
+        # the offscreen primary is not one of these monitors, so the first
+        # listed is the answer.
+        _point_the_os_at(monkeypatch, QRectF(290, 10, 20, 20))
+
+        assert self._overlay()._active_screen_rect() == STAGGERED_CENTRE
+
 
 class TestChromeStaysOnTheSelectionsMonitor:
     """Every piece of floating chrome is clamped to the monitor the
@@ -9121,6 +9145,225 @@ class TestChromeClearsTheDesktopsOwnDock:
         assert overlay._chrome_bounds() == QRectF(overlay.rect()).marginsRemoved(
             QMarginsF(64, 32, 0, 71)
         )
+
+
+# ---------------------------------------------------------------------------
+# A monitor mounted above the others, offset (#49)
+# ---------------------------------------------------------------------------
+# Read off the reporting machine: three 2560x1440 monitors, two side by side
+# and a third mounted above them 1164px in from the left. The frame's origin
+# is that third monitor's top edge, so every window-local y is 1440 more than
+# its absolute one, and a local-for-absolute slip is a whole monitor's error.
+#
+# The union has gaps -- x 0..1164 and 3724..5120 above y=0 are on no monitor
+# -- and its centre, absolute (2560, 0), is the one point all three monitors
+# touch.
+
+ABOVE_MAIN = QRectF(0, 0, 2560, 1440)
+ABOVE_SECOND = QRectF(2560, 0, 2560, 1440)
+ABOVE_TOP = QRectF(1164, -1440, 2560, 1440)
+MOUNTED_ABOVE = [ABOVE_MAIN, ABOVE_SECOND, ABOVE_TOP]
+MOUNTED_ABOVE_ORIGIN = (0, -1440)
+MOUNTED_ABOVE_SIZE = (5120, 2880)
+
+
+def _point_the_os_at(monkeypatch, monitor: QRectF) -> None:
+    """Put the pointer over `monitor` as far as the OS is concerned, without
+    a move event ever reaching the overlay.
+
+    That is the moment right after the shortcut: the OS knows where the
+    pointer is and the overlay has not yet seen it move. Stubbed rather than
+    driven because `QTest.mouseMove` moves the real global cursor, which every
+    later test in the process would then inherit.
+    """
+    monkeypatch.setattr(
+        overlay_module,
+        "QCursor",
+        SimpleNamespace(pos=lambda: monitor.center().toPoint()),
+    )
+
+
+class TestControlsLandOnTheCapturesMonitor:
+    """#49: "Capturing on the second monitor puts the toolbar on the main
+    monitor", on the desk above.
+
+    Each capture mode, taken on the second monitor and on the one mounted
+    above, must capture there and put every piece of chrome there too -- the
+    bar, the draw tray, both popovers, the toast and the close button.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    ORIGIN = QPointF(*MOUNTED_ABOVE_ORIGIN)
+    ON_EACH_MONITOR = pytest.mark.parametrize(
+        "monitor", [ABOVE_SECOND, ABOVE_TOP], ids=["second", "mounted-above"]
+    )
+
+    def _overlay(self, monkeypatch, pointer_on: QRectF, provider=None) -> OverlayWindow:
+        _point_the_os_at(monkeypatch, pointer_on)
+        frame = make_frame(
+            image_size=MOUNTED_ABOVE_SIZE,
+            logical_size=MOUNTED_ABOVE_SIZE,
+            logical_origin=MOUNTED_ABOVE_ORIGIN,
+        )
+        overlay = OverlayWindow(
+            frame, monitor_geometries=list(MOUNTED_ABOVE), geometry_provider=provider
+        )
+        # Keeps the snip open once something is committed, so the bar is
+        # still there to measure.
+        overlay._chooser.set_after("edit")
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _local(self, absolute: QPointF) -> QPoint:
+        return (absolute - self.ORIGIN).toPoint()
+
+    def _chrome_on_screen(self, overlay) -> list[tuple[str, QRectF]]:
+        """Every visible child widget of `overlay`, in absolute coordinates.
+
+        Not `Chooser` itself: it is the state machine behind the row, a
+        widget that draws nothing and takes no clicks, and it never moves
+        from the window's corner. Its panel, tab, hint and legend are the
+        row, and each is a child here in its own right.
+        """
+        return [
+            (type(child).__name__, QRectF(child.geometry()).translated(self.ORIGIN))
+            for child in overlay.findChildren(
+                QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly
+            )
+            if child.isVisible() and not child.isWindow() and child is not overlay._chooser
+        ]
+
+    def _off(self, overlay, monitor: QRectF) -> list[str]:
+        return [
+            f"{name} at {rect}"
+            for name, rect in self._chrome_on_screen(overlay)
+            if not monitor.contains(rect)
+        ]
+
+    def _assert_capture_and_chrome_on(self, overlay, monitor: QRectF) -> None:
+        capture = overlay.absolute_selection()
+        assert capture is not None, "nothing was captured"
+        assert monitor.contains(capture), f"captured {capture}, not on {monitor}"
+        # Each of these is placed by its own code path.
+        overlay._bar.select_tool("pen")
+        overlay._toggle_capture_popover()
+        overlay._toggle_shape_popover()
+        overlay._show_toast("save", "Saved")
+        names = [name for name, _rect in self._chrome_on_screen(overlay)]
+        assert {"FloatingBar", "SettingsTray", "Toast", "_CloseButton"} <= set(names), names
+        assert self._off(overlay, monitor) == []
+
+    def _take_full_screen(self, overlay, monitor: QRectF) -> None:
+        overlay._chooser.set_mode("Full screen")
+
+    @ON_EACH_MONITOR
+    def test_a_drag(self, monkeypatch, monitor):
+        overlay = self._overlay(monkeypatch, monitor)
+        start = self._local(monitor.topLeft() + QPointF(700, 400))
+        end = self._local(monitor.topLeft() + QPointF(1900, 1000))
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        QTest.mouseMove(overlay, end)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+
+        self._assert_capture_and_chrome_on(overlay, monitor)
+
+    @ON_EACH_MONITOR
+    def test_a_window(self, monkeypatch, monitor):
+        window = QRectF(monitor.x() + 400, monitor.y() + 300, 1400, 800)
+        overlay = self._overlay(monkeypatch, monitor, _FakeWindowProvider(window))
+
+        overlay._chooser.set_mode("Window")
+        QTest.mouseClick(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            self._local(window.center()),
+        )
+
+        self._assert_capture_and_chrome_on(overlay, monitor)
+
+    @ON_EACH_MONITOR
+    def test_full_screen(self, monkeypatch, monitor):
+        # The report's own words: the capture is on the second monitor. The
+        # pointer is there and nothing has moved over the overlay yet -- `F`
+        # pressed as it opens.
+        overlay = self._overlay(monkeypatch, monitor)
+
+        self._take_full_screen(overlay, monitor)
+
+        assert overlay.absolute_selection() == monitor
+        self._assert_capture_and_chrome_on(overlay, monitor)
+
+    @ON_EACH_MONITOR
+    def test_a_browser_page(self, monkeypatch, monitor):
+        page = QRectF(monitor.x() + 200, monitor.y() + 150, 2000, 1100)
+        overlay = self._overlay(monkeypatch, monitor, _FakeBrowserProvider(page))
+
+        overlay._chooser.set_mode(tokens.BROWSER_MODE)
+
+        self._assert_capture_and_chrome_on(overlay, monitor)
+
+    @ON_EACH_MONITOR
+    def test_the_active_window(self, monkeypatch, monitor):
+        # Not in the issue's list, which predates the mode; the same
+        # no-anchor path as Browser, and "every capture mode" covers it.
+        window = QRectF(monitor.x() + 300, monitor.y() + 200, 1600, 900)
+        overlay = self._overlay(
+            monkeypatch, monitor, _FakeFocusedWindowProvider(("editor", window))
+        )
+
+        overlay._chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        self._assert_capture_and_chrome_on(overlay, monitor)
+
+    @ON_EACH_MONITOR
+    def test_a_recalled_last_region(self, monkeypatch, monitor):
+        region = QRectF(monitor.x() + 500, monitor.y() + 250, 1200, 700)
+        setup_desktop.save_last_region(
+            (round(region.x()), round(region.y()), round(region.width()), round(region.height()))
+        )
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay(monkeypatch, monitor)
+
+        self._assert_capture_and_chrome_on(overlay, monitor)
+
+    @ON_EACH_MONITOR
+    def test_before_anything_is_selected_every_control_is_on_the_pointers_monitor(
+        self, monkeypatch, monitor
+    ):
+        overlay = self._overlay(monkeypatch, monitor)
+
+        names = [name for name, _rect in self._chrome_on_screen(overlay)]
+        assert {"ChooserPanel", "_CloseButton"} <= set(names), names
+        assert self._off(overlay, monitor) == []
+
+    @ON_EACH_MONITOR
+    def test_the_controls_cross_a_bezel_together(self, monkeypatch, monitor):
+        # The chooser row already followed the pointer; the close button
+        # stayed wherever the window's centre put it.
+        overlay = self._overlay(monkeypatch, ABOVE_MAIN)
+
+        overlay._cursor_pos = QPointF(self._local(monitor.center()))
+        overlay._follow_pointer_to_its_monitor()
+
+        assert self._off(overlay, monitor) == []
+
+    @ON_EACH_MONITOR
+    def test_a_delay_counts_down_on_the_pointers_monitor(self, monkeypatch, monitor):
+        overlay = self._overlay(monkeypatch, monitor)
+        overlay._delay = tokens.DELAYS[1]
+
+        overlay._chooser.set_mode("Region")
+        try:
+            countdown = QRectF(overlay._countdown.geometry())
+            assert monitor.contains(countdown), f"countdown at {countdown}"
+        finally:
+            overlay._delay_timer.stop()
+            overlay._countdown.close()
 
 
 class TestTheChooserTakesItsOwnClicks:

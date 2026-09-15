@@ -3133,8 +3133,9 @@ class DelayCountdown(QWidget):
         self._label.setText(str(seconds))
 
     def show_centered_on(self, geometry: QRect) -> None:
-        """Position centred over `geometry` -- the virtual-desktop rect the
-        hidden `OverlayWindow` itself spans -- and show.
+        """Position centred over `geometry` -- the monitor the hidden
+        `OverlayWindow` was being worked on, in absolute coordinates -- and
+        show.
         """
         center = QRectF(geometry).center()
         self.move(round(center.x() - self._SIZE / 2), round(center.y() - self._SIZE / 2))
@@ -3439,11 +3440,10 @@ class OverlayWindow(QWidget):
         # SNX-48: last-known pointer position over the frozen desktop
         # itself (window-local logical coords, the same space `_selection`
         # lives in) -- tracked from ordinary mouse-move events the same
-        # way `Overlay._cursor_pos` is, rather than ever calling
-        # `QCursor.pos()`, so `_select_full_screen` can answer "which
-        # display is the cursor on" without this widget reaching for
-        # global cursor state no test can control offscreen. None until
-        # the first move.
+        # way `Overlay._cursor_pos` is, so `_active_screen_rect` can answer
+        # "which display is the cursor on" from real moves, and reaches for
+        # `QCursor.pos()` -- global state no test can steer offscreen --
+        # only before the first one. None until the first move.
         self._cursor_pos: QPointF | None = None
         # True from the moment Window mode is armed (`_enter_window_mode`)
         # until a click lands on a window (`_confirm_window_pick`), per
@@ -4034,11 +4034,12 @@ class OverlayWindow(QWidget):
         if self._countdown is None:
             self._countdown = DelayCountdown()
         self._countdown.set_seconds_remaining(self._delay_remaining)
-        # `self.geometry()` is still the real virtual-desktop rect this
-        # window spans -- hiding a QWidget doesn't clear its geometry --
-        # so the countdown can centre on it without this window needing to
-        # stay visible to answer the question.
-        self._countdown.show_centered_on(self.geometry())
+        # On the monitor being worked on, not the middle of the virtual
+        # desktop this window spans: on a staggered desk that middle can be
+        # a gap, and with a monitor mounted above two others it is the one
+        # corner all three share, splitting the countdown across them.
+        # Absolute, because the countdown is a top-level window of its own.
+        self._countdown.show_centered_on(self._chrome_monitor().toRect())
 
         if self._delay_timer is None:
             self._delay_timer = QTimer(self)
@@ -4401,21 +4402,19 @@ class OverlayWindow(QWidget):
         this ticket's cursor-aware acceptance criterion. Snaps
         immediately -- no drag, no click needed past picking the row.
 
-        Falls back to this window's own centre when the cursor has never
-        moved over the frozen desktop yet (`_cursor_pos` is still
-        `None`) -- a real overlay is always shown full-screen under the
-        pointer, so this only matters for a caller (a test, or the very
-        first popover interaction) that never issued a prior move.
+        The display is `_active_screen_rect`'s: the monitor under the last
+        tracked move or, before any move has reached this window, the one
+        the OS has the pointer on -- the monitor the chooser row was just
+        picked from. It used to fall back to this window's own centre, which
+        is the centre of the virtual desktop and names no monitor anyone is
+        looking at. With a monitor mounted above two others that centre is
+        the one point all three share, so `F` pressed on the second monitor
+        captured the first, and put the toolbar there with it (#49).
         """
         # No drag, so no anchor: the picked display's own rect is what
         # `_chrome_bounds` should resolve against.
         self._selection_anchor = None
-        cursor = (
-            self._cursor_pos
-            if self._cursor_pos is not None
-            else QPointF(self.width() / 2, self.height() / 2)
-        )
-        rect = self._monitor_at(self._to_absolute(cursor))
+        rect = self._active_screen_rect()
         self._commit_selection(self._to_local_rect(rect).toRect())
 
     def _select_browser_tab(self) -> None:
@@ -4561,10 +4560,20 @@ class OverlayWindow(QWidget):
         accurately, and the whole capture is the only sane rect left to
         offer rather than raising.
         """
+        found = self._monitor_containing(absolute_point)
+        if found is not None:
+            return found
+        return QRectF(self._frame.logical_origin, self._frame.logical_size)
+
+    def _monitor_containing(self, absolute_point: QPointF) -> QRectF | None:
+        """The `_monitor_geometries` entry containing `absolute_point`
+        (absolute logical), or None when it is on no monitor -- in a gap of
+        a staggered desk, or off the desk entirely.
+        """
         for geometry in self._monitor_geometries:
             if geometry.contains(absolute_point):
                 return geometry
-        return QRectF(self._frame.logical_origin, self._frame.logical_size)
+        return None
 
     def _to_absolute(self, local_point: QPointF) -> QPointF:
         """This widget's own window-local logical point -> absolute
@@ -4621,9 +4630,15 @@ class OverlayWindow(QWidget):
         that never came from a drag at all -- Window and Full screen pick a
         rect outright -- and it beats "whichever monitor holds the centre"
         for those, since a rect can perfectly well have its centre in a gap.
-        With no selection, or one that overlaps no monitor (it lies entirely
-        inside a gap), this falls back to `_monitor_at`, whose own last
-        resort is the frame's full span.
+        With no selection it is the monitor being worked on
+        (`_active_screen_rect`), the one the chooser row is on. Never the
+        window's centre: that is the virtual desktop's centre, and with a
+        monitor mounted above two others it is the single point all three
+        share, which put the close button -- and Full screen's whole capture
+        -- on the first monitor listed wherever the user was (#49). A
+        selection that overlaps no monitor (it lies entirely inside a gap)
+        falls back to `_monitor_at`, whose own last resort is the frame's
+        full span.
 
         That monitor is then inset by whatever the desktop's own chrome
         reserves on it (`_usable_area`). The bar, its trays and tool hint,
@@ -4654,10 +4669,8 @@ class OverlayWindow(QWidget):
                     best, best_area = geometry, area
             if best is not None:
                 return best
-            centre = self._to_absolute(selection.center())
-        else:
-            centre = self._to_absolute(QRectF(self.rect()).center())
-        return self._monitor_at(centre)
+            return self._monitor_at(self._to_absolute(selection.center()))
+        return self._active_screen_rect()
 
     def _on_delay_changed(self, delay: str) -> None:
         self._delay = delay
@@ -4693,9 +4706,17 @@ class OverlayWindow(QWidget):
         # The chooser hangs from the top edge, so it is the surface the
         # desktop's own bar hides -- give it the part of the monitor it can
         # actually use.
+        # Converted by the frame's origin, like every other absolute rect
+        # this window places, rather than by `geometry().topLeft()`. The two
+        # agree only while the window is exactly where it was put, and on
+        # Wayland a client is never told where its window is -- so a primary
+        # monitor anywhere but the desktop's origin put the row off it.
         self._chooser.set_screen(
             self._usable_area(screen_rect),
-            self.geometry().topLeft(),
+            QPoint(
+                round(self._frame.logical_origin.x()),
+                round(self._frame.logical_origin.y()),
+            ),
         )
 
     def _active_screen_rect(self) -> QRectF:
@@ -4714,13 +4735,25 @@ class OverlayWindow(QWidget):
         having to drive a system-wide cursor. The global position remains
         the fallback for the one moment nothing has been tracked yet --
         the overlay opening, before any move has happened.
+
+        Both are resolved against `_monitor_geometries`, never answered with
+        a `QScreen`'s own geometry: this window covers only those monitors
+        -- on Wayland with several, just the interactive one -- and a
+        monitor it does not cover is nowhere its chrome can be drawn. A
+        pointer on none of them gets the primary, as `_interactive_geometry`
+        already decides it.
+
+        This is the one answer to "which monitor" while nothing is selected.
+        The close button, a toast, the delay countdown and Full screen's own
+        pick all take it through `_chrome_monitor`, so none of them can land
+        on a different monitor from the row (#49).
         """
         if self._cursor_pos is not None:
             return self._monitor_at(self._to_absolute(self._cursor_pos))
-        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
-        if screen is not None:
-            return QRectF(screen.geometry())
-        return self._chrome_bounds().translated(self.geometry().topLeft())
+        pointer = self._monitor_containing(QPointF(QCursor.pos()))
+        if pointer is not None:
+            return pointer
+        return _interactive_geometry(self._monitor_geometries)
 
     def _follow_pointer_to_its_monitor(self) -> None:
         """Move the chooser row to the monitor the pointer is now on.
@@ -4753,6 +4786,9 @@ class OverlayWindow(QWidget):
             return
         self._chooser_monitor = monitor
         self._sync_chooser_visibility()
+        # The close button answers the same question the row does
+        # (`_chrome_monitor`), so it crosses with it.
+        self._reposition_close_button()
 
     def _sync_bar_destination(self) -> None:
         """Put the chooser's destination on the split button's face.
@@ -4954,8 +4990,8 @@ class OverlayWindow(QWidget):
 
     def _reposition_close_button(self) -> None:
         """Put the close button in the top-right corner of `_chrome_bounds`
-        -- the monitor the selection is on, or the fallback monitor before
-        there is one.
+        -- the monitor the selection is on or, before there is one, the
+        monitor the chooser row is on.
 
         SNX-80 put it in the top-right corner of the *window*, which is the
         top-right corner of the whole virtual desktop once one window spans
@@ -5453,10 +5489,9 @@ class OverlayWindow(QWidget):
         # The close button (SNX-80): unconditional, unlike the two syncs
         # above -- it has no preference or selection state to check, it is
         # simply on for as long as this window is.
-        # Placed again here, not just in __init__: `_chrome_bounds` reads
-        # `self.rect()` when there is no selection yet, and a window shown
-        # before its real geometry was applied would have anchored the
-        # button to a stale size.
+        # Placed again here, not just in __init__: with nothing selected
+        # `_chrome_bounds` follows the pointer, which may have moved between
+        # building this window and showing it.
         self._reposition_close_button()
         self._close_button.show()
         self._sync_chooser_visibility()
