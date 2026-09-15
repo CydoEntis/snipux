@@ -114,6 +114,26 @@ def _isolated_config(tmp_path):
         setup_desktop.config_path = real_config_path
 
 
+@pytest.fixture(autouse=True)
+def _restore_excepthook():
+    """Put `sys.excepthook` back after any test that replaced it.
+
+    Several tests really run `app._become_resident`, which installs the
+    crash log as the hook. Left in place it would outlive that test, and
+    every later exception inside a Qt handler would become a line in a
+    temp-dir log instead of the abort that fails the run -- the suite would
+    pass over exactly the class of bug the hook exists to survive.
+
+    Restored by hand rather than through `monkeypatch`, for the teardown
+    ordering reason `_isolated_config` gives above.
+    """
+    hook = sys.excepthook
+    try:
+        yield
+    finally:
+        sys.excepthook = hook
+
+
 # The suite runs under a single shared QApplication per process (each test
 # module's own autouse fixture reuses whatever instance already exists), so
 # window-activation state leaks across files the same way it would in a real

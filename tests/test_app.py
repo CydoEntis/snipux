@@ -9,7 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 from PyQt6.QtCore import (
+    QCoreApplication,
+    QEvent,
     QMimeData,
+    QObject,
     QPointF,
     QRect,
     QRectF,
@@ -27,7 +30,7 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 from conftest import skip_on_windows
 from snipux import app
 from snipux import overlay as overlay_module
-from snipux import setup_desktop
+from snipux import __version__, setup_desktop
 from snipux.app import (
     AppController,
     QLocalSocketTransport,
@@ -37,6 +40,7 @@ from snipux.app import (
     build_default_registry,
     cli,
     copy_file_to_clipboard,
+    install_crash_log,
     copy_image_to_clipboard,
     finish_recording,
     main,
@@ -1131,6 +1135,98 @@ class TestCli:
         cli()
 
         assert calls == ["reattach", "run_resident_app"]
+
+
+class TestCrashLog:
+    """PyQt6 aborts the process when an exception escapes a Python override
+    of a Qt virtual, unless `sys.excepthook` has been replaced -- which is
+    how one missing provider method made Window mode kill snipux outright.
+    These pin that the crash log keeps the process alive, leaves something
+    a user can find, and cannot flood the disk doing it.
+    """
+
+    @staticmethod
+    def _raise_and_report(message):
+        try:
+            raise ValueError(message)
+        except ValueError as error:
+            sys.excepthook(type(error), error, error.__traceback__)
+
+    def test_an_exception_in_a_qt_handler_is_logged_and_the_process_lives(
+        self, tmp_path
+    ):
+        log = tmp_path / "crash.log"
+        install_crash_log(lambda: log)
+
+        class Exploding(QObject):
+            def event(self, event):
+                raise RuntimeError("raised inside a Qt handler")
+
+        # Getting past this line is half the test: under the default hook
+        # PyQt6 calls qFatal() here and the whole run aborts.
+        QCoreApplication.sendEvent(Exploding(), QEvent(QEvent.Type.User))
+
+        text = log.read_text()
+        assert "RuntimeError: raised inside a Qt handler" in text
+        assert f"snipux {__version__}" in text
+
+    def test_the_same_traceback_is_written_once(self, tmp_path):
+        # The crash this exists for raised on every mouse move.
+        log = tmp_path / "crash.log"
+        install_crash_log(lambda: log)
+        try:
+            raise ValueError("every mouse move")
+        except ValueError as error:
+            for _ in range(50):
+                sys.excepthook(type(error), error, error.__traceback__)
+
+        assert log.read_text().count("ValueError: every mouse move") == 1
+
+    def test_a_log_past_the_limit_keeps_only_whole_recent_entries(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(app, "_CRASH_LOG_LIMIT_BYTES", 4000)
+        log = tmp_path / "crash.log"
+        install_crash_log(lambda: log)
+
+        for n in range(100):
+            self._raise_and_report(f"distinct failure {n}")
+
+        text = log.read_text()
+        assert "distinct failure 99" in text
+        assert "distinct failure 0\n" not in text
+        assert text.startswith("--- ")
+        assert len(text.encode()) < 8000
+
+    def test_a_log_that_cannot_be_written_does_not_raise(self, tmp_path):
+        not_a_directory = tmp_path / "in-the-way"
+        not_a_directory.write_text("")
+        install_crash_log(lambda: not_a_directory / "crash.log")
+
+        self._raise_and_report("nowhere to write this")
+
+    def test_becoming_resident_installs_it(self, monkeypatch):
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        installed = []
+        monkeypatch.setattr(app, "install_crash_log", lambda: installed.append(True))
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+
+        try:
+            run_resident_app(
+                registry=BackendRegistry(),
+                transport=FakeTransport(make_transport_state()),
+            )
+
+            assert installed == [True]
+        finally:
+            created[0]._tray_icon.hide()
 
 
 class FakeCaptureBackend(CaptureBackend):

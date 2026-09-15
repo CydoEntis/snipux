@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
@@ -79,7 +80,7 @@ from snipux.overlay import (
     UnsupportedGeometryProvider,
     open_overlay,
 )
-from snipux import design, platform, setup_desktop
+from snipux import __version__, design, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
 from snipux.recording import RecorderRegistry, RecordingError
 from snipux.player import PlayerWindow
@@ -538,6 +539,24 @@ def build_default_registry() -> BackendRegistry:
     return platform.current.build_capture_registry()
 
 
+def geometry_provider_classes() -> tuple[type, ...]:
+    """The real providers `build_default_geometry_provider` tries, in order.
+
+    Its own function so the list has one home. `tests/test_capture.py`
+    checks that every class named here answers everything `overlay.py`
+    calls on a provider -- these duck-type `GeometryProvider`, so its
+    defaulted methods never reach them -- and a provider added here is
+    checked without anyone remembering to add it there too. Built on each
+    call rather than held as a module constant, so a test that monkeypatches
+    one of these names is still the class that gets tried.
+    """
+    return (
+        X11WindowGeometryProvider,
+        XwininfoWindowGeometryProvider,
+        WindowsWindowGeometryProvider,
+    )
+
+
 def build_default_geometry_provider() -> GeometryProvider:
     """Construct the `GeometryProvider` the real app uses for window mode.
 
@@ -556,11 +575,8 @@ def build_default_geometry_provider() -> GeometryProvider:
     app.py is already the place that picks between platform-specific
     implementations for `registry`.
     """
-    for provider in (
-        X11WindowGeometryProvider(),
-        XwininfoWindowGeometryProvider(),
-        WindowsWindowGeometryProvider(),
-    ):
+    for provider_class in geometry_provider_classes():
+        provider = provider_class()
         if provider.is_available():
             return provider
     return UnsupportedGeometryProvider()
@@ -2745,6 +2761,83 @@ def _ensure_qapplication() -> QApplication:
     return app
 
 
+# A handler that raises on every mouse move raises hundreds of times a
+# second, so each distinct traceback is written once per process, and the
+# file is cut back to its newest half once it passes this -- small enough to
+# attach to a bug report, however long the process ran.
+_CRASH_LOG_LIMIT_BYTES = 256 * 1024
+
+
+def crash_log_path() -> Path:
+    """Where an unhandled exception is written down: `crash.log`, beside
+    `config.json`, the one folder snipux already keeps its own files in on
+    every platform.
+    """
+    return setup_desktop.config_path().parent / "crash.log"
+
+
+def install_crash_log(log_path: Callable[[], Path] = crash_log_path) -> None:
+    """Make an unhandled exception a logged event, not the end of the process.
+
+    PyQt6 answers an exception escaping a Python override of a Qt virtual --
+    `mouseMoveEvent`, `paintEvent`, any slot -- by calling `qFatal()`, which
+    aborts, *unless* `sys.excepthook` has been replaced. A provider missing a
+    method `mouseMoveEvent` called was enough to make snipux vanish the
+    moment Window mode was armed, with nothing on screen and nothing on disk.
+    Replacing the hook keeps the process alive; writing the traceback to
+    `crash_log_path()` gives the user something to attach to a report, since
+    a tray app started from a shortcut has no terminal to print to.
+
+    Installed only by the process that becomes resident, never at import: a
+    test run or a one-shot `--list-backends` has no business changing how the
+    interpreter reports errors.
+
+    `log_path` is a callable rather than a path so the location is resolved
+    when an exception happens, not when the hook is installed.
+    """
+    already_logged: set[str] = set()
+
+    def log_unhandled(exc_type, exc, tb) -> None:
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        if text in already_logged:
+            return
+        already_logged.add(text)
+        # None under pythonw and the windowless launcher, which have no
+        # console to write to.
+        if sys.stderr is not None:
+            try:
+                sys.stderr.write(text)
+            except (OSError, ValueError):
+                pass
+        try:
+            path = log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _trim_crash_log(path)
+            stamp = datetime.datetime.now().isoformat(timespec="seconds")
+            with path.open("a", encoding="utf-8") as log:
+                log.write(f"--- {stamp} snipux {__version__}\n{text}\n")
+        except OSError:
+            # A log that cannot be written must not raise from the hook:
+            # that would put the error back in Qt's hands.
+            pass
+
+    sys.excepthook = log_unhandled
+
+
+def _trim_crash_log(path: Path) -> None:
+    """Cut `path` back to its newest half once it passes the limit, starting
+    at an entry boundary so the file never opens mid-traceback.
+    """
+    try:
+        if path.stat().st_size <= _CRASH_LOG_LIMIT_BYTES:
+            return
+    except FileNotFoundError:
+        return
+    tail = path.read_bytes()[-(_CRASH_LOG_LIMIT_BYTES // 2):]
+    boundary = tail.find(b"\n--- ")
+    path.write_bytes(tail[boundary + 1:] if boundary != -1 else tail)
+
+
 def _become_resident(
     registry: BackendRegistry,
     transport: Transport,
@@ -2805,6 +2898,9 @@ def _become_resident(
     # Already built by whoever called `try_claim()` -- see
     # `_ensure_qapplication`, which must run before the claim, not after.
     app = _ensure_qapplication()
+    # First, so nothing below -- and nothing in the event loop after it --
+    # can take the process down through an exception in a Qt handler.
+    install_crash_log()
 
     platform.current.ensure_stable_install()
 

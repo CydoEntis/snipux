@@ -479,6 +479,9 @@ Both directories are created if they don't exist yet, and a toast confirms the
 path each time. The folder and filename pattern are both configurable in
 Settings.
 
+If Snipux runs into an error it did not expect, it keeps running and writes the
+details to `~/.config/snipux/crash.log`, beside its settings.
+
 ## Command reference
 
 | Command | What it does |
@@ -573,6 +576,11 @@ Python installer and ticking *"Add python.exe to PATH"* fixes it properly.)
 run by hand from a terminal. On Windows, check Snipux is actually running: the
 hotkey is a registration the process holds, and Windows releases it the moment
 the process exits.
+
+**Something stopped working partway through a snip.** Look in
+`~/.config/snipux/crash.log` (on Windows, `%USERPROFILE%\.config\snipux\crash.log`).
+Each unexpected error is written there once, with the version it happened in —
+attach that file when you report the problem.
 
 ## What hasn't been tested yet
 

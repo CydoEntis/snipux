@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import QApplication
 import pytest
 
 import snipux.capture as capture
+from snipux import app
 from snipux.capture import (
     BackendRegistry,
     CaptureBackend,
@@ -1884,6 +1885,26 @@ class TestWindowsWindowGeometryProvider:
         assert provider.window_at(QPointF(150, 150)) == QRectF(0, 0, 200, 200)
         assert provider.window_at(QPointF(500, 500)) is None
 
+    def test_window_named_at_names_the_window_under_the_point(self, monkeypatch):
+        # overlay.py's Window-mode hover calls this on every mouse move to
+        # label what it is about to take. It is not defaulted in from the
+        # ABC -- this class duck-types it -- so its absence was an
+        # AttributeError per move, not a missing title.
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        user32 = _FakeUser32Windows([
+            {"hwnd": 1, "visible": True, "iconic": False,
+             "rect": (0, 0, 100, 100), "title": "Front"},
+        ])
+        dwmapi = _FakeDwmapi(frame_bounds={1: (0, 0, 100, 100)})
+        _patch_windows_geometry_dll(monkeypatch, user32, dwmapi)
+        provider = capture.WindowsWindowGeometryProvider()
+
+        assert provider.window_named_at(QPointF(50, 50)) == (
+            "Front",
+            QRectF(0, 0, 100, 100),
+        )
+        assert provider.window_named_at(QPointF(500, 500)) is None
+
     def test_list_windows_reuses_cached_list_within_the_cache_window(
         self, monkeypatch
     ):
@@ -2065,3 +2086,60 @@ class TestWin32RectsAreConvertedToLogicalCoordinates:
 
         if not provider.is_available():
             assert provider.monitor_map() == []
+
+
+class TestGeometryProviderSurface:
+    """Every concrete provider answers everything overlay.py calls on one.
+
+    These providers duck-type `overlay.GeometryProvider` rather than
+    subclass it -- overlay.py already imports `Frame` from this module, so
+    importing the ABC back would be a cycle (see each class docstring).
+    The cost is that the ABC's *defaulted* methods are not inherited:
+    adding one there gives every provider written as a subclass a working
+    default and every provider here nothing at all.
+
+    That is not hypothetical. `browser_viewport` shipped on
+    `WindowsWindowGeometryProvider` alone while
+    `OverlayWindow.__init__` called it on every capture, so on X11 every
+    snip raised AttributeError before the overlay was ever shown. The rest
+    of the suite missed it because its provider doubles either subclass the
+    ABC or stub the method, which is exactly what a real one does not do.
+    """
+
+    # The list the app really picks from, so a provider added there is held
+    # to this without anyone adding it here as well.
+    PROVIDERS = app.geometry_provider_classes()
+
+    @staticmethod
+    def _overlay_calls() -> list[str]:
+        # Taken from the ABC rather than hard-coded, so a method added to
+        # `GeometryProvider` later is one this test starts demanding on
+        # its own -- including from a macOS provider that does not exist
+        # yet.
+        from snipux.overlay import GeometryProvider
+
+        return [
+            name
+            for name, value in vars(GeometryProvider).items()
+            if not name.startswith("_") and callable(value)
+        ]
+
+    @pytest.mark.parametrize("provider_cls", PROVIDERS, ids=lambda c: c.__name__)
+    def test_implements_everything_the_overlay_calls(self, provider_cls):
+        missing = [
+            name for name in self._overlay_calls() if not hasattr(provider_cls, name)
+        ]
+
+        assert missing == []
+
+    @pytest.mark.parametrize(
+        "provider_cls",
+        (capture.X11WindowGeometryProvider, capture.XwininfoWindowGeometryProvider),
+        ids=lambda c: c.__name__,
+    )
+    def test_the_linux_providers_report_no_browser_viewport(self, provider_cls):
+        # None is the answer that greys Browser mode out. Neither `wmctrl`
+        # nor `xwininfo` reports where a browser's chrome stops and its
+        # page begins, so "cannot tell" is the truth here, and it has to be
+        # said out loud rather than left to the ABC's default.
+        assert provider_cls().browser_viewport() is None

@@ -603,6 +603,13 @@ class XwininfoWindowGeometryProvider:
                 return title, rect
         return None
 
+    def browser_viewport(self) -> "tuple[str, QRectF] | None":
+        """None, for `X11WindowGeometryProvider.browser_viewport`'s reasons:
+        `xwininfo` reports whole windows too, and this class duck-types the
+        ABC the same way, so that default is not inherited here either.
+        """
+        return None
+
 
 class X11WindowGeometryProvider:
     """Real per-window geometry source for X11's window-selection mode.
@@ -696,6 +703,26 @@ class X11WindowGeometryProvider:
         for title, rect in self.list_windows():
             if rect.contains(point):
                 return title, rect
+        return None
+
+    def browser_viewport(self) -> "tuple[str, QRectF] | None":
+        """No browser page an X11 window list can point at.
+
+        Spelled out rather than inherited, for the reason `window_named_at`
+        above is: this duck-types `overlay.GeometryProvider` instead of
+        subclassing it, so that ABC's None default never arrives. It is not
+        cosmetic -- `OverlayWindow.__init__` calls this unconditionally on
+        every capture, so without it every snip on X11 dies with
+        AttributeError before the overlay is ever shown.
+
+        None is the honest answer as well as the safe one. `wmctrl` reports
+        whole windows, and the viewport is a window minus its tab strip and
+        toolbars -- nothing in that output says where the chrome stops.
+        Only the Windows provider can answer this (SNX-1). Browser mode
+        greys itself out here, which is exactly what
+        `GeometryProvider.browser_viewport` documents for a provider that
+        cannot tell.
+        """
         return None
 
 
@@ -1723,6 +1750,20 @@ class WindowsWindowGeometryProvider:
         for _title, rect in self.list_windows():
             if rect.contains(point):
                 return rect
+        return None
+
+    def window_named_at(self, point: QPointF):
+        """`(title, rect)` for the window under `point` -- the hover
+        preview names what it is about to take.
+
+        The same body as the two X11 providers', needed here for the same
+        reason: overlay.py's `mouseMoveEvent` calls this on every move
+        while Window mode is armed, and duck-typing the ABC means its
+        default never arrives.
+        """
+        for title, rect in self.list_windows():
+            if rect.contains(point):
+                return title, rect
         return None
 
 
