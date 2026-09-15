@@ -720,6 +720,137 @@ def save_hide_sensitive(enabled: bool, config_dir: Path | None = None) -> bool:
     return _write_config("hide_sensitive", bool(enabled), config_dir)
 
 
+# The user's own hide list. A text file rather than keys in `config.json`,
+# because this is the one preference people edit at length, copy between
+# machines and keep in a dotfiles repo -- and because a list of phrases is
+# unreadable as a JSON array of escaped strings.
+#
+# Three kinds of entry, each with its own section and its own note in the
+# file, so the file explains itself to whoever opens it in an editor.
+HIDE_LIST_SECTIONS = ("words", "labels", "patterns")
+HIDE_LIST_MIN_LENGTH = 4
+_HIDE_LIST_PREAMBLE = (
+    "# Things Snipux should black out in your screenshots, beyond what it",
+    "# already finds on its own. One entry per line; lines starting with #",
+    "# are ignored. Edit this file here, or in Snipux Settings.",
+)
+_HIDE_LIST_NOTES = {
+    "words": "# Text to hide wherever it appears: an address, an employer, a codename.",
+    "labels": (
+        "# Field names whose value is hidden, the way `Password` already is:\n"
+        "# on the same line after a : or =, or in the box beside or beneath it."
+    ),
+    "patterns": "# Regular expressions, for anyone who wants them:  ACME-\\d{6}",
+}
+
+
+def hide_list_path(config_dir: Path | None = None) -> Path:
+    """Where the user's own hide list lives -- beside `config.json`, so a
+    backup of one folder takes the settings and the list together."""
+    return config_path(config_dir).parent / "hide-list.txt"
+
+
+def load_hide_list(config_dir: Path | None = None) -> dict[str, list[str]]:
+    """The user's own entries, as `{"words": [...], "labels": [...],
+    "patterns": [...]}`.
+
+    Every failure -- no file, an unreadable one, a section name that is not
+    one of ours, entries before any section -- is empty lists rather than an
+    exception, the same rule `_read_config` follows: a list someone mistyped
+    must never be able to stop a capture.
+    """
+    entries: dict[str, list[str]] = {section: [] for section in HIDE_LIST_SECTIONS}
+    try:
+        text = hide_list_path(config_dir).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return entries
+
+    section = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1].strip().lower()
+            section = name if name in HIDE_LIST_SECTIONS else None
+            continue
+        if section and line not in entries[section]:
+            entries[section].append(line)
+    return entries
+
+
+def save_hide_list(
+    words: list[str],
+    labels: list[str],
+    patterns: list[str],
+    config_dir: Path | None = None,
+) -> bool:
+    """Write the three lists back, keeping the notes that explain the file.
+
+    False (never an exception) if it cannot be written -- a read-only config
+    directory is a step-level note here, like every other step in this
+    module.
+    """
+    document = list(_HIDE_LIST_PREAMBLE)
+    for section, lines in zip(HIDE_LIST_SECTIONS, (words, labels, patterns)):
+        document += ["", f"[{section}]", _HIDE_LIST_NOTES[section]]
+        document += _tidy(lines)
+    path = hide_list_path(config_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(document) + "\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def validate_hide_list(
+    words: list[str], labels: list[str], patterns: list[str]
+) -> list[str]:
+    """Everything wrong with these entries, one complaint per bad line, each
+    naming the line it is about. Empty when the list is fine.
+
+    Checked before saving rather than while hiding: an entry that would
+    black out half the screen, or a pattern that cannot compile, is a
+    mistake to catch while the user is looking at it -- not one to discover
+    from a capture that came out unusable.
+    """
+    complaints = []
+    for section, lines in zip(HIDE_LIST_SECTIONS, (words, labels, patterns)):
+        for line in _tidy(lines):
+            if section == "patterns":
+                complaints += _pattern_complaints(line)
+            elif len(line) < HIDE_LIST_MIN_LENGTH:
+                complaints.append(
+                    f"{line!r} is too short -- {HIDE_LIST_MIN_LENGTH} characters or "
+                    "more, or it will black out ordinary text"
+                )
+    return complaints
+
+
+def _pattern_complaints(line: str) -> list[str]:
+    """A pattern is judged by what it accepts, not by its length: `\\d{6}`
+    is short and precise, while one that matches empty text matches
+    everywhere."""
+    try:
+        compiled = re.compile(line)
+    except re.error as exc:
+        return [f"{line!r} is not a valid pattern: {exc}"]
+    if compiled.match(""):
+        return [f"{line!r} matches everywhere -- it accepts empty text"]
+    return []
+
+
+def _tidy(lines: list[str]) -> list[str]:
+    """Trimmed, blanks and comments dropped, order kept, duplicates removed."""
+    kept: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and stripped not in kept:
+            kept.append(stripped)
+    return kept
+
+
 def load_hints_enabled(config_dir: Path | None = None) -> bool:
     """Whether the overlay's top hint HUD (SNX-46) is shown from the start
     of a session.

@@ -1219,6 +1219,142 @@ class TestHideSensitivePreference:
         assert setup_desktop.load_reuse_last_region(tmp_path) is False
 
 
+class TestTheUsersOwnHideList:
+    """The list of things only this user knows are sensitive. A text file,
+    because people edit it at length and copy it between machines."""
+
+    def test_nothing_stored_is_three_empty_lists(self, tmp_path):
+        assert setup_desktop.load_hide_list(tmp_path) == {
+            "words": [], "labels": [], "patterns": []
+        }
+
+    def test_round_trips(self, tmp_path):
+        setup_desktop.save_hide_list(
+            ["Acme Corporation", "12 Maple Street"], ["Employee ID"], [r"ACME-\d{6}"], tmp_path
+        )
+
+        assert setup_desktop.load_hide_list(tmp_path) == {
+            "words": ["Acme Corporation", "12 Maple Street"],
+            "labels": ["Employee ID"],
+            "patterns": [r"ACME-\d{6}"],
+        }
+
+    def test_it_lives_beside_the_config(self, tmp_path):
+        path = setup_desktop.hide_list_path(tmp_path)
+
+        assert path.parent == setup_desktop.config_path(tmp_path).parent
+        assert path.name == "hide-list.txt"
+
+    def test_the_saved_file_explains_itself(self, tmp_path):
+        setup_desktop.save_hide_list(["Acme Corporation"], [], [], tmp_path)
+
+        text = setup_desktop.hide_list_path(tmp_path).read_text(encoding="utf-8")
+
+        assert text.lstrip().startswith("#")
+        for section in setup_desktop.HIDE_LIST_SECTIONS:
+            assert text.count(f"[{section}]") == 1
+
+    def test_comments_and_blank_lines_are_ignored(self, tmp_path):
+        setup_desktop.hide_list_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.hide_list_path(tmp_path).write_text(
+            "# a note\n\n[words]\n  Acme Corporation  \n# another\n\n[labels]\nEmployee ID\n",
+            encoding="utf-8",
+        )
+
+        assert setup_desktop.load_hide_list(tmp_path) == {
+            "words": ["Acme Corporation"], "labels": ["Employee ID"], "patterns": []
+        }
+
+    def test_an_unknown_section_is_ignored_rather_than_guessed_at(self, tmp_path):
+        setup_desktop.hide_list_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.hide_list_path(tmp_path).write_text(
+            "[nonsense]\nsomething\n[words]\nAcme Corporation\n", encoding="utf-8"
+        )
+
+        assert setup_desktop.load_hide_list(tmp_path) == {
+            "words": ["Acme Corporation"], "labels": [], "patterns": []
+        }
+
+    def test_lines_before_any_section_are_ignored(self, tmp_path):
+        setup_desktop.hide_list_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.hide_list_path(tmp_path).write_text(
+            "stray\n[words]\nAcme Corporation\n", encoding="utf-8"
+        )
+
+        assert setup_desktop.load_hide_list(tmp_path)["words"] == ["Acme Corporation"]
+
+    def test_a_file_that_cannot_be_read_is_three_empty_lists(self, tmp_path):
+        # A directory where the file should be: unreadable, not absent.
+        setup_desktop.hide_list_path(tmp_path).mkdir(parents=True, exist_ok=True)
+
+        assert setup_desktop.load_hide_list(tmp_path) == {
+            "words": [], "labels": [], "patterns": []
+        }
+
+    def test_saving_trims_blanks_and_duplicates_but_keeps_order(self, tmp_path):
+        setup_desktop.save_hide_list(["  Beta  ", "", "Alpha", "Beta"], [], [], tmp_path)
+
+        assert setup_desktop.load_hide_list(tmp_path)["words"] == ["Beta", "Alpha"]
+
+    def test_entries_may_contain_spaces_and_brackets(self, tmp_path):
+        setup_desktop.save_hide_list(["Acme (UK) Ltd"], [], [], tmp_path)
+
+        assert setup_desktop.load_hide_list(tmp_path)["words"] == ["Acme (UK) Ltd"]
+
+    def test_saving_over_an_existing_list_replaces_it(self, tmp_path):
+        setup_desktop.save_hide_list(["Acme Corporation"], [], [], tmp_path)
+
+        setup_desktop.save_hide_list(["Other Company"], [], [], tmp_path)
+
+        assert setup_desktop.load_hide_list(tmp_path)["words"] == ["Other Company"]
+
+    def test_it_is_independent_of_the_hide_sensitive_switch(self, tmp_path):
+        setup_desktop.save_hide_sensitive(True, tmp_path)
+
+        setup_desktop.save_hide_list(["Acme Corporation"], [], [], tmp_path)
+
+        assert setup_desktop.load_hide_sensitive(tmp_path) is True
+        assert setup_desktop.load_hide_list(tmp_path)["words"] == ["Acme Corporation"]
+
+
+class TestCheckingTheUsersOwnHideList:
+    def test_a_good_list_has_no_complaints(self):
+        assert setup_desktop.validate_hide_list(
+            ["Acme Corporation"], ["Employee ID"], [r"ACME-\d{6}"]
+        ) == []
+
+    @pytest.mark.parametrize("word", ["bob", "a", "  x  "])
+    def test_a_short_word_would_black_out_ordinary_text(self, word):
+        [complaint] = setup_desktop.validate_hide_list([word], [], [])
+
+        assert word.strip() in complaint and "too short" in complaint
+
+    def test_a_short_label_is_caught_too(self):
+        assert setup_desktop.validate_hide_list([], ["ID"], []) != []
+
+    def test_a_pattern_that_cannot_compile_says_why(self):
+        [complaint] = setup_desktop.validate_hide_list([], [], ["ACME-[0-9"])
+
+        assert "ACME-[0-9" in complaint and "not a valid pattern" in complaint
+
+    def test_a_pattern_matching_empty_text_would_match_everywhere(self):
+        [complaint] = setup_desktop.validate_hide_list([], [], [r"\d*"])
+
+        assert "everywhere" in complaint
+
+    def test_a_short_pattern_is_allowed(self):
+        # Short as text, precise as a rule.
+        assert setup_desktop.validate_hide_list([], [], [r"\d{6}"]) == []
+
+    def test_every_bad_line_is_reported_not_just_the_first(self):
+        complaints = setup_desktop.validate_hide_list(["bob", "x"], ["ID"], ["["])
+
+        assert len(complaints) == 4
+
+    def test_blank_lines_are_not_complaints(self):
+        assert setup_desktop.validate_hide_list(["", "   "], [], []) == []
+
+
 class TestLastRegionPersistence:
     """The rectangle the chooser's `Last region` mode recaptures. Persisted
     because autostart means the process a user reaches for in the morning is
