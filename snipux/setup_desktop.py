@@ -689,6 +689,45 @@ def save_last_region(
     return _write_config("last_region", [x, y, width, height], config_dir)
 
 
+def load_bar_position(config_dir: Path | None = None) -> tuple[float, float] | None:
+    """Where the stills bar goes when a selection leaves it no room above or
+    below -- where the user last dragged it to in that case (#50) -- or None
+    to place it automatically.
+
+    Two fractions, `(x, y)`, each from 0 to 1: how far along the room the
+    bar can travel it sits, across and down, inside the usable area of the
+    monitor the selection is on (`overlay.FloatingBar.spot`). Not pixels in
+    any space. A monitor unplugged, a resolution changed or a dock added
+    since leaves a pixel position off the screen or under the dock, where
+    a fraction of the room still names a place on any monitor: (1, 1) is
+    the bottom-right corner of every one of them.
+
+    Anything the document cannot be trusted to mean is None, never an
+    exception: a hand-edited or truncated entry must leave the bar placed
+    automatically, never fail the capture that reads it. A value outside
+    0..1 is one of those, since a save never writes one. So are NaN and
+    infinity, which Python's `json` reads without complaint and which fail
+    the range check, and `bool`, which is an `int` subclass.
+    """
+    stored = _read_config(config_dir).get("bar_position")
+    if not isinstance(stored, list) or len(stored) != 2:
+        return None
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in stored):
+        return None
+    x, y = (float(value) for value in stored)
+    if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+        return None
+    return x, y
+
+
+def save_bar_position(position: tuple[float, float], config_dir: Path | None = None) -> bool:
+    """Remember `position`, the fractions `load_bar_position` describes,
+    clamped into 0..1 so what is written always reads back.
+    """
+    x, y = (max(0.0, min(float(value), 1.0)) for value in position)
+    return _write_config("bar_position", [x, y], config_dir)
+
+
 def load_reuse_last_region(config_dir: Path | None = None) -> bool:
     """Whether Region mode opens with the last rectangle already selected
     instead of an empty overlay waiting for a drag.

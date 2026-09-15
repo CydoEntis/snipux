@@ -169,6 +169,24 @@ monitor, or wherever the user drags it": it is drag only.
 #50 lands after the stills bar (#67), so its placement rules are written once,
 against the new bar.
 
+### How it behaves
+
+- **It is taken hold of by its own surface**: the padding round the row, the
+  gaps between controls and the dividers, under an open hand. A press on a
+  control stays that control's, and a press that moves less than the
+  platform's drag distance moves nothing.
+- **Room beside the selection still decides first.** Below it, then above
+  it, as §8 says. A drag there moves the bar for that selection only and is
+  not remembered, so a remembered place can never put the bar over a
+  selection that had room.
+- **With no room on either side** the bar goes where it was last dragged to
+  in that case. It is stored as a fraction of the room the bar can travel
+  inside the monitor's usable area, so it names the same place on a monitor
+  of any size and stays clear of the top bar and dock. Anything unreadable
+  in the config is today's placement.
+- **The review window's bar does not drag.** It sits at the canvas floor,
+  which the fitted image keeps a margin from, and zooming out clears it.
+
 ---
 
 ## 10 · The watermark is text or an image

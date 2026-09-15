@@ -284,6 +284,29 @@ class TestAnnotateMode:
 
         assert window._bar._trailing == "done"
 
+    def test_its_bar_does_not_drag(self):
+        # The overlay's bar can be dragged (#50), because over a selection
+        # the size of a monitor it has nowhere else to go. This one is laid
+        # out at the canvas floor, which the fitted image keeps a margin
+        # from, and is never placed over a selection -- so it has nothing a
+        # drag could be clamped to, and a press on its surface stays still.
+        window = ReviewWindow(make_image())
+        window._set_annotating(True)
+        bar = window._bar
+        bar.resize(bar.sizeHint())
+        bar.layout().activate()
+        before = bar.pos()
+        grip = QPointF(bar.width() / 2, 2)
+        assert bar.childAt(grip.toPoint()) is None, "a press there is the bar's own"
+
+        QApplication.sendEvent(bar, _press(bar, grip.x(), grip.y()))
+        QApplication.sendEvent(bar, _move(bar, grip.x(), grip.y() - 200))
+        QApplication.sendEvent(bar, _release(bar, grip.x(), grip.y() - 200))
+
+        assert bar.pos() == before
+        assert not bar.is_dragging
+        assert bar.cursor().shape() != Qt.CursorShape.OpenHandCursor
+
     def test_drawing_flips_the_status_to_edited(self):
         window = ReviewWindow(make_image())
         window._set_annotating(True)

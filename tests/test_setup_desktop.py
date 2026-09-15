@@ -1433,6 +1433,72 @@ class TestLastRegionPersistence:
 
         assert setup_desktop.load_last_region(tmp_path) is None
 
+
+class TestBarPositionPersistence:
+    """Where the stills bar goes when a selection leaves it no room (#50): two
+    fractions of the room it can travel, so the place means the same thing on
+    a monitor of another size, and anything unreadable is automatic placement.
+    """
+
+    def test_nothing_stored_means_automatic_placement(self, tmp_path):
+        assert setup_desktop.load_bar_position(tmp_path) is None
+
+    def test_round_trips_through_save_and_load(self, tmp_path):
+        setup_desktop.save_bar_position((0.25, 0.8), tmp_path)
+
+        assert setup_desktop.load_bar_position(tmp_path) == (0.25, 0.8)
+
+    @pytest.mark.parametrize("position", [(0.0, 0.0), (1.0, 1.0), (0, 1)])
+    def test_both_ends_of_the_range_are_places(self, tmp_path, position):
+        setup_desktop.save_bar_position(position, tmp_path)
+
+        assert setup_desktop.load_bar_position(tmp_path) == tuple(map(float, position))
+
+    def test_a_save_out_of_range_is_clamped_so_it_still_reads_back(self, tmp_path):
+        setup_desktop.save_bar_position((1.4, -0.2), tmp_path)
+
+        assert setup_desktop.load_bar_position(tmp_path) == (1.0, 0.0)
+
+    def test_the_newest_position_replaces_the_last_one(self, tmp_path):
+        setup_desktop.save_bar_position((0.1, 0.1), tmp_path)
+        setup_desktop.save_bar_position((0.9, 0.4), tmp_path)
+
+        assert setup_desktop.load_bar_position(tmp_path) == (0.9, 0.4)
+
+    def test_it_leaves_every_other_setting_alone(self, tmp_path):
+        setup_desktop.save_last_region((1, 2, 3, 4), tmp_path)
+
+        setup_desktop.save_bar_position((0.5, 0.5), tmp_path)
+
+        assert setup_desktop.load_last_region(tmp_path) == (1, 2, 3, 4)
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            '{"bar_position": [0.5]}',                   # too few values
+            '{"bar_position": [0.5, 0.5, 0.5]}',         # too many
+            '{"bar_position": "bottom right"}',          # not a list at all
+            '{"bar_position": {"x": 0.5, "y": 0.5}}',    # nor is this
+            '{"bar_position": null}',
+            '{"bar_position": [0.5, "low"]}',            # a value that is not a number
+            '{"bar_position": [true, false]}',           # bool is an int subclass
+            '{"bar_position": [1.5, 0.5]}',              # past the room's far end
+            '{"bar_position": [0.5, -0.1]}',             # before its near end
+            '{"bar_position": [NaN, 0.5]}',              # json reads these happily
+            '{"bar_position": [0.5, Infinity]}',
+            '{"bar_position": [0.5, 0.5',                # truncated document
+        ],
+    )
+    def test_an_entry_that_is_not_a_position_means_automatic_placement(
+        self, tmp_path, stored
+    ):
+        # A hand-edited or truncated config must leave the bar placed as it
+        # always was, never raise into the capture that reads it.
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text(stored)
+
+        assert setup_desktop.load_bar_position(tmp_path) is None
+
     def test_saving_a_region_leaves_other_settings_alone(self, tmp_path):
         setup_desktop.save_shortcut("<Super>x", tmp_path)
 

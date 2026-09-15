@@ -3132,6 +3132,605 @@ class TestFloatingBarPositioning:
         assert QRectF(0, 0, 1920, 1080).contains(bar)
 
 
+# ---------------------------------------------------------------------------
+# Dragging the bar (#50)
+# ---------------------------------------------------------------------------
+
+_BAR_POINTER_EVENTS = {
+    "press": (QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+    "move": (QEvent.Type.MouseMove, Qt.MouseButton.NoButton),
+    "release": (QEvent.Type.MouseButtonRelease, Qt.MouseButton.LeftButton),
+}
+
+
+def _bar_pointer(widget: QWidget, kind: str, local: QPointF, buttons) -> None:
+    """Deliver one pointer event to `widget` at `local`, its own logical
+    coordinates. Through `QApplication.sendEvent`, so a press `widget`
+    declines is handed on to its parent the way Qt hands one on.
+    """
+    event_type, button = _BAR_POINTER_EVENTS[kind]
+    QApplication.sendEvent(
+        widget,
+        QMouseEvent(
+            event_type,
+            QPointF(local),
+            widget.mapToGlobal(QPointF(local)),
+            button,
+            buttons,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+
+def _grip(bar: FloatingBar) -> QPointF:
+    """A point on the bar's own surface -- its top padding, halfway along."""
+    return QPointF(bar.width() / 2, 2)
+
+
+def _drag_bar(
+    bar: FloatingBar, travel: QPointF, *, at: QPointF | None = None, release: bool = True
+) -> None:
+    """Press on `bar` at `at` (its own coordinates; its grip by default),
+    move the pointer `travel` in the parent's coordinates in two steps, and
+    release.
+
+    Each move is mapped against wherever the bar has got to by then, as Qt
+    maps a grabbed drag's moves: the bar moves under the pointer, so a fixed
+    point in the bar's own coordinates would be a pointer moving with it.
+    """
+    left = Qt.MouseButton.LeftButton
+    start = at if at is not None else _grip(bar)
+    start_in_parent = bar.mapToParent(start)
+    _bar_pointer(bar, "press", start, left)
+    for step in (0.5, 1.0):
+        _bar_pointer(bar, "move", bar.mapFromParent(start_in_parent + travel * step), left)
+    if release:
+        _bar_pointer(
+            bar, "release", bar.mapFromParent(start_in_parent + travel), Qt.MouseButton.NoButton
+        )
+
+
+class TestTheBarDrags:
+    """The stills bar is dragged by its own surface -- the padding, the gaps
+    between controls and the dividers -- and never by a control on it.
+    """
+
+    BOUNDS = QRectF(0, 0, 1600, 1000)
+    SELECTION = QRect(400, 200, 200, 150)
+    MARGIN = tokens.BarMetric.BAR_EDGE_MARGIN
+    OFFSET = tokens.BarMetric.BAR_OFFSET_Y
+    LEFT = Qt.MouseButton.LeftButton
+
+    def _bar(self) -> FloatingBar:
+        bar = FloatingBar()
+        bar.reposition(self.SELECTION, self.BOUNDS)
+        # Laid out now: an unshown widget defers its layout, and `childAt`
+        # is what tells a grip from a control.
+        bar.layout().activate()
+        return bar
+
+    def test_the_grip_these_tests_use_is_the_bars_own_surface(self):
+        bar = self._bar()
+
+        assert bar.childAt(_grip(bar).toPoint()) is None
+
+    def test_a_drag_on_its_own_surface_moves_it(self):
+        bar = self._bar()
+        before = bar.pos()
+
+        _drag_bar(bar, QPointF(-150, 300))
+
+        assert bar.pos() == before + QPoint(-150, 300)
+
+    def test_a_divider_is_a_grip_too(self):
+        bar = self._bar()
+        divider = bar.findChildren(_Divider)[0]
+        before = bar.pos()
+
+        _drag_bar(bar, QPointF(0, 200), at=QPointF(divider.geometry().center()))
+
+        assert bar.pos() == before + QPoint(0, 200)
+
+    def test_a_press_that_barely_moves_leaves_it_where_it_was(self):
+        # A press on the padding is usually a click that missed a button.
+        bar = self._bar()
+        before = bar.pos()
+        started = []
+        bar.dragStarted.connect(lambda: started.append(True))
+
+        _drag_bar(bar, QPointF(QApplication.startDragDistance() / 3, 0))
+
+        assert bar.pos() == before
+        assert started == []
+
+    def test_a_press_on_a_button_is_still_a_click(self):
+        bar = self._bar()
+        before = bar.pos()
+        picked = []
+        bar.toolSelected.connect(picked.append)
+        button = bar._tool_buttons["text"]
+        centre = QPointF(button.width() / 2, button.height() / 2)
+        # Past the drag distance, and still inside the button.
+        slid = centre + QPointF(QApplication.startDragDistance() + 1, 0)
+        assert button.rect().contains(slid.toPoint())
+
+        _bar_pointer(button, "press", centre, self.LEFT)
+        _bar_pointer(button, "move", slid, self.LEFT)
+        _bar_pointer(button, "release", slid, Qt.MouseButton.NoButton)
+
+        assert picked == ["text"]
+        assert bar.pos() == before
+        assert not bar.is_dragging
+
+    def test_no_control_on_the_row_is_a_grip(self):
+        bar = self._bar()
+        controls = [
+            *bar._tool_buttons.values(),
+            *(button.notch for button in bar._tool_buttons.values() if button.notch),
+            bar._style_dot,
+            bar._action,
+            bar._undo_button,
+            bar._clear_button,
+        ]
+
+        for control in controls:
+            centre = control.mapTo(bar, control.rect().center())
+            assert not bar._is_grip(QPointF(centre)), control
+
+    def test_a_control_that_declines_its_press_is_still_not_a_grip(self):
+        # A label or a plainly painted widget declines every press, and Qt
+        # hands it on to the bar. A slot built from one must not become a
+        # grip in the middle of the row.
+        bar = self._bar()
+        slot = bar._tool_buttons["step"]
+        label = QLabel("slot", bar)
+        label.setGeometry(slot.geometry())
+        label.show()
+        label.raise_()
+        before = bar.pos()
+        centre = QPointF(label.rect().center())
+
+        _bar_pointer(label, "press", centre, self.LEFT)
+        _bar_pointer(label, "move", centre + QPointF(0, 200), self.LEFT)
+        _bar_pointer(label, "release", centre + QPointF(0, 200), Qt.MouseButton.NoButton)
+
+        assert bar.pos() == before
+        assert not bar.is_dragging
+
+    def test_a_disabled_button_is_not_a_grip_either(self):
+        # Undo with nothing to undo sits in the middle of the row. Qt's
+        # buttons keep a press while disabled rather than let it through.
+        bar = self._bar()
+        undo = bar._undo_button
+        assert not undo.isEnabled()
+        before = bar.pos()
+        centre = QPointF(undo.rect().center())
+
+        _bar_pointer(undo, "press", centre, self.LEFT)
+        _bar_pointer(undo, "move", centre + QPointF(0, 200), self.LEFT)
+        _bar_pointer(undo, "release", centre + QPointF(0, 200), Qt.MouseButton.NoButton)
+
+        assert bar.pos() == before
+        assert not bar.is_dragging
+
+    def test_it_stays_inside_its_bounds_however_far_it_is_dragged(self):
+        bar = self._bar()
+        inside = self.BOUNDS.adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN)
+
+        _drag_bar(bar, QPointF(5000, 5000))
+        assert QRectF(bar.geometry()).bottomRight() == inside.bottomRight()
+
+        _drag_bar(bar, QPointF(-9000, -9000))
+        assert QRectF(bar.geometry()).topLeft() == inside.topLeft()
+
+    def test_the_cursor_says_the_surface_can_be_taken_hold_of(self):
+        bar = FloatingBar()
+        assert bar.cursor().shape() != Qt.CursorShape.OpenHandCursor
+
+        bar.reposition(self.SELECTION, self.BOUNDS)
+        bar.layout().activate()
+        assert bar.cursor().shape() == Qt.CursorShape.OpenHandCursor
+        assert bar._tool_buttons["pen"].cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+        _drag_bar(bar, QPointF(0, 200), release=False)
+        assert bar.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+
+        _bar_pointer(bar, "release", _grip(bar), Qt.MouseButton.NoButton)
+        assert bar.cursor().shape() == Qt.CursorShape.OpenHandCursor
+
+    def test_a_re_sync_for_the_same_selection_keeps_it_where_it_was_dragged(self):
+        bar = self._bar()
+        _drag_bar(bar, QPointF(-300, 200))
+        dragged = bar.pos()
+
+        bar.reposition(QRect(self.SELECTION), self.BOUNDS)
+
+        assert bar.pos() == dragged
+
+    def test_a_new_selection_puts_it_beside_that_selection_again(self):
+        bar = self._bar()
+        _drag_bar(bar, QPointF(-300, 200))
+        reframed = QRect(400, 200, 200, 160)
+
+        bar.reposition(reframed, self.BOUNDS)
+
+        assert QRectF(bar.geometry()).top() == QRectF(reframed).bottom() + self.OFFSET
+
+
+class TestTheBarsSpot:
+    """A position is remembered as a fraction of the room the bar can travel
+    inside its bounds, so it names the same place on any monitor.
+    """
+
+    SIZE = QSize(448, 42)
+    MARGIN = tokens.BarMetric.BAR_EDGE_MARGIN
+
+    def _inside(self, bounds: QRectF) -> QRectF:
+        return bounds.adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN)
+
+    def test_the_corners_are_the_ends_of_its_travel(self):
+        bounds = QRectF(0, 0, 1600, 1000)
+        inside = self._inside(bounds)
+
+        top_left = FloatingBar.from_spot((0.0, 0.0), bounds, self.SIZE)
+        bottom_right = FloatingBar.from_spot((1.0, 1.0), bounds, self.SIZE)
+
+        assert QPointF(top_left) == inside.topLeft()
+        assert QRectF(QRect(bottom_right, self.SIZE)).bottomRight() == inside.bottomRight()
+
+    def test_a_position_round_trips(self):
+        bounds = QRectF(0, 0, 1600, 1000)
+
+        spot = FloatingBar.spot(QPointF(300, 700), bounds, self.SIZE)
+
+        assert FloatingBar.from_spot(spot, bounds, self.SIZE) == QPoint(300, 700)
+
+    def test_a_corner_is_the_same_corner_on_a_monitor_of_another_size(self):
+        spot = FloatingBar.spot(
+            QPointF(2560 - self.MARGIN - self.SIZE.width(), self.MARGIN),
+            QRectF(0, 0, 2560, 1440),
+            self.SIZE,
+        )
+        smaller = QRectF(0, 0, 1280, 800)
+
+        placed = QRectF(QRect(FloatingBar.from_spot(spot, smaller, self.SIZE), self.SIZE))
+
+        assert placed.topRight() == self._inside(smaller).topRight()
+
+    def test_on_a_monitor_with_a_negative_origin(self):
+        # Left of and above the primary: no arithmetic may lean on a zero edge.
+        bounds = QRectF(-1920, -1080, 1920, 1080)
+
+        placed = QRectF(QRect(FloatingBar.from_spot((1.0, 0.0), bounds, self.SIZE), self.SIZE))
+
+        assert placed.topRight() == self._inside(bounds).topRight()
+        assert FloatingBar.spot(placed.topLeft(), bounds, self.SIZE) == (1.0, 0.0)
+
+    def test_a_value_from_outside_the_range_still_lands_inside(self):
+        bounds = QRectF(0, 0, 1600, 1000)
+
+        placed = QRectF(QRect(FloatingBar.from_spot((3.0, -2.0), bounds, self.SIZE), self.SIZE))
+
+        assert self._inside(bounds).contains(placed)
+
+    def test_a_bar_wider_than_its_bounds_is_pinned_where_it_always_was(self):
+        bounds = QRectF(0, 0, 400, 1000)
+
+        placed = FloatingBar.from_spot((1.0, 0.5), bounds, self.SIZE)
+
+        assert placed.x() == self.MARGIN
+
+
+class TestTheBarWithNoRoomAnywhere:
+    """#50 through the overlay, on a single monitor -- where a selection with
+    no room beside it is worst, because there is no other screen at all.
+    """
+
+    SIZE = (1600, 1000)
+    MARGIN = tokens.BarMetric.BAR_EDGE_MARGIN
+    OFFSET = tokens.BarMetric.BAR_OFFSET_Y
+    LEFT = Qt.MouseButton.LeftButton
+    NONE = Qt.MouseButton.NoButton
+
+    def _overlay(self, monkeypatch, size=SIZE) -> OverlayWindow:
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_margins", lambda screen: QMargins()
+        )
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame, monitor_geometries=[QRectF(0, 0, *size)])
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _whole(self, overlay: OverlayWindow) -> OverlayWindow:
+        monitor = overlay._monitor_geometries[0].toRect()
+        overlay.set_selection(QRect(0, 0, monitor.width(), monitor.height()))
+        assert overlay._bar.isVisible()
+        return overlay
+
+    def _inside(self, overlay: OverlayWindow) -> QRectF:
+        bounds = overlay._chrome_bounds()
+        return bounds.adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN)
+
+    def test_with_nothing_remembered_it_sits_where_it_always_has(self, monkeypatch):
+        overlay = self._whole(self._overlay(monkeypatch))
+
+        bar = QRectF(overlay._bar.geometry())
+
+        assert bar.bottom() == overlay._chrome_bounds().bottom() - self.MARGIN
+        assert self._inside(overlay).contains(bar)
+
+    def test_a_drag_moves_it_off_what_it_covered(self, monkeypatch):
+        overlay = self._whole(self._overlay(monkeypatch))
+        before = overlay._bar.pos()
+
+        _drag_bar(overlay._bar, QPointF(-400, -600))
+
+        assert overlay._bar.pos() == before + QPoint(-400, -600)
+
+    def test_where_it_was_dragged_is_remembered(self, monkeypatch):
+        overlay = self._whole(self._overlay(monkeypatch))
+        assert setup_desktop.load_bar_position() is None
+
+        _drag_bar(overlay._bar, QPointF(-400, -600))
+
+        bar = overlay._bar
+        expected = FloatingBar.spot(QPointF(bar.pos()), overlay._chrome_bounds(), bar.size())
+        assert setup_desktop.load_bar_position() == pytest.approx(expected)
+
+    def test_the_next_snip_with_no_room_puts_it_there(self, monkeypatch):
+        first = self._whole(self._overlay(monkeypatch))
+        _drag_bar(first._bar, QPointF(-400, -600))
+        dragged = first._bar.pos()
+
+        second = self._whole(self._overlay(monkeypatch))
+
+        assert second._bar.pos() == dragged
+
+    def test_it_survives_a_monitor_of_another_size(self, monkeypatch):
+        first = self._whole(self._overlay(monkeypatch, size=(2560, 1440)))
+        _drag_bar(first._bar, QPointF(-700, -500))
+        spot = setup_desktop.load_bar_position()
+
+        second = self._whole(self._overlay(monkeypatch, size=(1280, 800)))
+
+        bar = second._bar
+        assert bar.pos() == FloatingBar.from_spot(spot, second._chrome_bounds(), bar.size())
+        assert self._inside(second).contains(QRectF(bar.geometry()))
+
+    def test_a_corner_it_was_dragged_into_is_that_corner_on_a_smaller_monitor(
+        self, monkeypatch
+    ):
+        first = self._whole(self._overlay(monkeypatch, size=(2560, 1440)))
+        _drag_bar(first._bar, QPointF(5000, -5000))
+
+        second = self._whole(self._overlay(monkeypatch, size=(1280, 800)))
+
+        assert QRectF(second._bar.geometry()).topRight() == self._inside(second).topRight()
+
+    def test_a_remembered_place_is_not_used_while_there_is_room(self, monkeypatch):
+        setup_desktop.save_bar_position((0.5, 0.5))
+        overlay = self._overlay(monkeypatch)
+        selection = QRect(700, 400, 200, 150)
+        bar = overlay._bar
+        # Where the remembered place would have put it: over the selection.
+        remembered = QRect(
+            FloatingBar.from_spot((0.5, 0.5), overlay._chrome_bounds(), bar.sizeHint()),
+            bar.sizeHint(),
+        )
+        assert QRectF(remembered).intersects(QRectF(selection))
+
+        overlay.set_selection(selection)
+
+        assert not QRectF(bar.geometry()).intersects(QRectF(selection))
+        assert QRectF(bar.geometry()).top() == QRectF(selection).bottom() + self.OFFSET
+
+    def test_a_drag_beside_a_selection_with_room_is_not_remembered(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        overlay.set_selection(QRect(700, 400, 200, 150))
+
+        _drag_bar(overlay._bar, QPointF(-300, 250))
+
+        assert setup_desktop.load_bar_position() is None
+        self._whole(overlay)
+        bar = QRectF(overlay._bar.geometry())
+        assert bar.bottom() == overlay._chrome_bounds().bottom() - self.MARGIN
+
+    def test_the_dragged_place_holds_while_the_snip_is_marked_up(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+        selection = QRect(700, 400, 200, 150)
+        overlay.set_selection(selection)
+        _drag_bar(overlay._bar, QPointF(-300, 250))
+        dragged = overlay._bar.pos()
+
+        overlay.add_mark(
+            Rectangle(
+                colour=QColor("#ff0000"),
+                stroke_width=4,
+                start=QPointF(710, 410),
+                end=QPointF(800, 500),
+            )
+        )
+        overlay.set_selection(QRect(selection))
+
+        assert overlay._bar.pos() == dragged
+
+    def test_a_stored_place_it_cannot_read_leaves_placement_automatic(self, monkeypatch):
+        path = setup_desktop.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"bar_position": [0.5, "low"]}')
+
+        overlay = self._whole(self._overlay(monkeypatch))
+
+        bar = QRectF(overlay._bar.geometry())
+        assert bar.bottom() == overlay._chrome_bounds().bottom() - self.MARGIN
+
+    # -- a drag ends without its release, as a mark's does ----------------
+
+    def _mid_drag(self, monkeypatch) -> OverlayWindow:
+        overlay = self._whole(self._overlay(monkeypatch))
+        _drag_bar(overlay._bar, QPointF(-200, -300), release=False)
+        assert overlay._bar.is_dragging
+        return overlay
+
+    def test_a_move_with_no_button_held_ends_it_where_it_stood(self, monkeypatch):
+        overlay = self._mid_drag(monkeypatch)
+        dragged = overlay._bar.pos()
+
+        _send_mouse(overlay, "move", QPoint(50, 50), self.NONE)
+
+        assert not overlay._bar.is_dragging
+        assert overlay._bar.pos() == dragged
+        assert setup_desktop.load_bar_position() is not None
+
+    def test_later_movement_no_longer_moves_it(self, monkeypatch):
+        overlay = self._mid_drag(monkeypatch)
+        dragged = overlay._bar.pos()
+        _send_mouse(overlay, "move", QPoint(50, 50), self.NONE)
+
+        _bar_pointer(overlay._bar, "move", QPointF(400, 400), self.LEFT)
+
+        assert overlay._bar.pos() == dragged
+
+    def test_a_press_on_the_frame_ends_it(self, monkeypatch):
+        overlay = self._mid_drag(monkeypatch)
+        dragged = overlay._bar.pos()
+
+        _send_mouse(overlay, "press", QPoint(50, 50), self.LEFT)
+
+        assert not overlay._bar.is_dragging
+        assert overlay._bar.pos() == dragged
+
+    def test_focus_leaving_the_window_ends_it(self, monkeypatch):
+        overlay = self._mid_drag(monkeypatch)
+
+        QApplication.sendEvent(overlay, QEvent(QEvent.Type.WindowDeactivate))
+
+        assert not overlay._bar.is_dragging
+
+    # -- what hangs off the bar -------------------------------------------
+
+    def test_a_drag_closes_an_open_family_menu(self, monkeypatch):
+        overlay = self._whole(self._overlay(monkeypatch))
+        overlay._toggle_family_menu("shapes")
+        menu = overlay._family_menus["shapes"]
+        assert not menu.isHidden()
+
+        _drag_bar(overlay._bar, QPointF(0, -400))
+
+        assert menu.isHidden()
+
+    def test_a_drag_closes_the_style_tray_and_the_tool_hint_follows(self, monkeypatch):
+        overlay = self._whole(self._overlay(monkeypatch))
+        overlay._bar.select_tool("pen")
+        overlay._toggle_style()
+        assert overlay._tray.isVisible()
+
+        _drag_bar(overlay._bar, QPointF(0, -400))
+
+        assert not overlay._tray.isVisible()
+        hint = overlay._tool_hint
+        assert hint.isVisible()
+        assert hint.geometry().center().x() == pytest.approx(
+            overlay._bar.geometry().center().x(), abs=1
+        )
+        assert overlay._chrome_bounds().contains(QRectF(hint.geometry()))
+
+    def test_a_press_that_goes_nowhere_leaves_a_menu_open(self, monkeypatch):
+        overlay = self._whole(self._overlay(monkeypatch))
+        overlay._toggle_family_menu("redact")
+
+        _drag_bar(overlay._bar, QPointF(1, 1))
+
+        assert not overlay._family_menus["redact"].isHidden()
+
+    def test_a_bar_dragged_over_the_selection_is_not_in_the_export(self, monkeypatch):
+        overlay = self._whole(self._overlay(monkeypatch, size=(600, 600)))
+        _drag_bar(overlay._bar, QPointF(0, -250))
+        bar = overlay._bar.geometry()
+        assert overlay._bar.isVisible()
+        assert QRectF(overlay._selection).contains(QRectF(bar))
+
+        rendered = overlay.rendered_image()
+
+        assert pixel(rendered, bar.center()) == QColor(10, 20, 30)
+        assert pixel(rendered, bar.topLeft() + QPoint(4, 4)) == QColor(10, 20, 30)
+
+
+class TestADraggedBarClearsTheDock:
+    """Dragged or remembered, the bar and everything hanging off it stay
+    inside `_chrome_bounds` -- the monitor less the top bar and the dock.
+    """
+
+    DOCK = QMargins(0, 32, 0, 71)
+    MARGIN = tokens.BarMetric.BAR_EDGE_MARGIN
+
+    def _overlay(self, monkeypatch) -> OverlayWindow:
+        # As `TestChromeClearsTheDesktopsOwnDock` builds it: the whole
+        # offscreen screen, so the platform is actually asked for margins.
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_margins", lambda screen: self.DOCK
+        )
+        available = QGuiApplication.primaryScreen().geometry()
+        size = (available.width(), available.height())
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(overlay.rect())
+        assert overlay._bar.isVisible()
+        return overlay
+
+    def test_dragging_it_down_stops_above_a_bottom_dock(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+
+        _drag_bar(overlay._bar, QPointF(0, 5000))
+
+        bar = QRectF(overlay._bar.geometry())
+        assert overlay._chrome_bounds().contains(bar)
+        assert bar.bottom() == overlay.rect().height() - self.DOCK.bottom() - self.MARGIN
+
+    def test_dragging_it_up_stops_below_the_top_bar(self, monkeypatch):
+        overlay = self._overlay(monkeypatch)
+
+        _drag_bar(overlay._bar, QPointF(0, -5000))
+
+        assert overlay._bar.geometry().top() == self.DOCK.top() + self.MARGIN
+
+    def test_a_remembered_corner_lands_above_the_dock(self, monkeypatch):
+        setup_desktop.save_bar_position((1.0, 1.0))
+
+        overlay = self._overlay(monkeypatch)
+
+        bar = QRectF(overlay._bar.geometry())
+        assert overlay._chrome_bounds().contains(bar)
+        assert bar.bottom() == overlay.rect().height() - self.DOCK.bottom() - self.MARGIN
+
+    def test_menus_trays_and_the_hint_stay_inside_after_a_drag_into_a_corner(
+        self, monkeypatch
+    ):
+        overlay = self._overlay(monkeypatch)
+        overlay._bar.select_tool("pen")
+        _drag_bar(overlay._bar, QPointF(5000, 5000))
+        bounds = overlay._chrome_bounds()
+
+        assert overlay._tool_hint.isVisible()
+        assert bounds.contains(QRectF(overlay._tool_hint.geometry()))
+
+        overlay._toggle_family_menu("redact")
+        assert bounds.contains(QRectF(overlay._family_menus["redact"].geometry()))
+
+        overlay._toggle_style()
+        assert overlay._tray.isVisible()
+        tray = QRectF(overlay._tray.geometry())
+        # Top to bottom is what the dock and top bar take. Across, the
+        # offscreen screen is 533 logical px at 1.5x -- narrower than this
+        # tray, which no placement can fix -- so only its left edge is held.
+        assert bounds.top() <= tray.top() and tray.bottom() <= bounds.bottom()
+        assert tray.left() >= bounds.left()
+
+
 class TestFloatingBarActiveTool:
     """SNX-40: 'exactly one tool reads as active at a time.'"""
 
