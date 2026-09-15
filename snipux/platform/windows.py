@@ -63,6 +63,16 @@ through a bare function rather than a `Platform` method because it has to
 run before `platform.current` is of any use to anyone -- it is about
 whether `print()` itself works yet, not about picking an implementation.
 
+`windowless_launcher()`/`WindowsPlatform.relaunch_without_console()` (#52)
+are the pip-install counterpart of that windowed build. pip turns
+`[project.scripts]` into a console-stub `snipux.exe`, which runs snipux
+inside a console, and closing that console closes everything attached to
+it -- the tray app included. `[project.gui-scripts]` adds `snipuxw.exe`
+on the GUI stub, with no console at all: the Start Menu and Startup
+shortcuts point at it, and a bare `snipux` starts it detached and exits
+rather than becoming the tray app itself. `snipux` stays a console script
+so `--update`/`--setup`/`--help` still print where they were typed.
+
 `_ensure_stable_copy()`/`ensure_stable_install()` (SNX-103) are what make
 the portable `snipux.exe` safe to distribute at all: it is the *only*
 Windows distribution route now that the Inno Setup installer is gone
@@ -88,8 +98,10 @@ be untouched.
 from __future__ import annotations
 
 import ctypes
+import importlib.metadata
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
@@ -601,7 +613,7 @@ _ATTACH_PARENT_PROCESS = -1
 _ERROR_ACCESS_DENIED = 5
 
 
-def reattach_console() -> None:
+def reattach_console(*, attach: bool = True) -> None:
     """SNX-100: let a *windowed*-subsystem snipux.exe (see
     `packaging/windows/snipux.spec`'s own comment on why it is built that
     way rather than `console=True`) still print to a terminal it was
@@ -642,8 +654,22 @@ def reattach_console() -> None:
     which start with a real, already-working console inherited the
     ordinary way) -- `sys.stdout`/`sys.stderr` are already good streams
     there, and reopening them would be redundant at best.
+
+    `attach=False` (#52) never calls `AttachConsole` at all, and only
+    fills in a stream that is `None` -- `pythonw`, `snipuxw` and the
+    windowed build all start that way. `app._dispatch()` passes it for the
+    resident app, which has nothing for a terminal to show and runs until
+    Quit: a console it had attached itself to would take it down the
+    moment that console closed.
     """
     if sys.platform != "win32":
+        return
+
+    if not attach:
+        if sys.stdout is None:
+            sys.stdout = open(os.devnull, "w")
+        if sys.stderr is None:
+            sys.stderr = open(os.devnull, "w")
         return
 
     if ctypes.windll.kernel32.AttachConsole(_ATTACH_PARENT_PROCESS):
@@ -656,6 +682,60 @@ def reattach_console() -> None:
 
     sys.stdout = open(os.devnull, "w")
     sys.stderr = open(os.devnull, "w")
+
+
+# pyproject.toml's `[project.gui-scripts]` name, which pip writes as
+# `snipuxw.exe` on Windows.
+_WINDOWLESS_LAUNCHER = "snipuxw"
+
+# CreateProcess flags (winbase.h). `subprocess` only defines its own copies
+# when imported on Windows, and this module is imported everywhere.
+_DETACHED_PROCESS = 0x00000008
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
+def windowless_launcher() -> Path | None:
+    """#52: the `snipuxw.exe` pip installed alongside *the copy of snipux
+    this process is running*, or None when there is not one to be sure of.
+
+    Read from the installed distribution's RECORD rather than searched for
+    on PATH, because a launch handed to some other installation's
+    `snipuxw` runs different code from the one the user started. That is
+    the ordinary case on a development machine, not a corner: `python -m
+    snipux` in a checkout, with a PyPI install's Scripts folder on PATH,
+    would quietly start the release instead of the change being worked on.
+    So the package this module was imported from has to be the one that
+    distribution installed. A checkout or an editable install fails that
+    check and runs in place, as it always has.
+
+    RECORD also says where pip actually put the launcher, which no single
+    guess covers: the `Scripts` folder beside a system `python.exe`, a
+    venv's own, or `%APPDATA%\\Python\\Python3xx\\Scripts` for a `--user`
+    install -- none of which has to be on PATH.
+
+    None in a PyInstaller build before anything else. It is already
+    windowed, and a lookup that ever resolved to `sys.executable` there
+    would relaunch itself forever.
+    """
+    if getattr(sys, "frozen", False):
+        return None
+    try:
+        distribution = importlib.metadata.distribution("snipux")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+    running_package = Path(__file__).resolve().parent.parent
+    if Path(distribution.locate_file("snipux")).resolve() != running_package:
+        return None
+
+    wanted = f"{_WINDOWLESS_LAUNCHER}.exe"
+    for recorded in distribution.files or ():
+        if recorded.name.lower() != wanted:
+            continue
+        launcher = Path(distribution.locate_file(recorded)).resolve()
+        if launcher.is_file():
+            return launcher
+    return None
 
 
 class _MSG(ctypes.Structure):
@@ -764,8 +844,16 @@ class WindowsPlatform(Platform):
         `AppController._report_shortcut()` (the tray, or Settings), is the
         one place that ever reports whether it actually took.
 
-        Returns 1 (and prints why, to stderr) only when the console script
-        itself can't be found -- every other step can still report its own
+        Both shortcuts launch `snipuxw.exe` (#52), pip's GUI-stub launcher,
+        never the `snipux.exe` console script: a shortcut to that opens a
+        console window that stays for as long as Snipux runs, and closing
+        it closes Snipux. `windowless_launcher()` is asked first, because it
+        reads where pip actually put the launcher instead of hoping PATH
+        includes that folder; `find_console_script()` is the fallback, and
+        is also what still recognises a frozen build as its own launcher.
+
+        Returns 1 (and prints why, to stderr) only when that launcher can't
+        be found -- every other step can still report its own
         outcome without it, mirroring `setup_desktop.run_setup()`'s own
         "one missing prerequisite is fatal, everything else is a note" split.
 
@@ -780,8 +868,7 @@ class WindowsPlatform(Platform):
         already-in-place no-op `_ensure_stable_copy()`'s own docstring
         describes. A no-op for anything that isn't a portable build (a
         pip/pipx install, a source checkout), which is what leaves
-        `exec_path` -- the console script `find_console_script()` found --
-        untouched for those.
+        `exec_path` -- the launcher found above -- untouched for those.
         """
         if shortcut is not None:
             problem = setup_desktop.validate_shortcut(shortcut)
@@ -795,10 +882,12 @@ class WindowsPlatform(Platform):
                     file=sys.stderr,
                 )
 
-        exec_path = setup_desktop.find_console_script()
+        exec_path = windowless_launcher() or setup_desktop.find_console_script(
+            _WINDOWLESS_LAUNCHER
+        )
         if exec_path is None:
             print(
-                "error: could not locate the installed snipux executable -- "
+                f"error: could not locate the installed {_WINDOWLESS_LAUNCHER} launcher -- "
                 "is snipux actually installed (pip install), rather than just "
                 "being run from a checkout?",
                 file=sys.stderr,
@@ -863,6 +952,44 @@ class WindowsPlatform(Platform):
         acceptance criterion.
         """
         return _ensure_stable_copy()
+
+    def relaunch_without_console(self) -> bool:
+        """#52: start the resident app again under `windowless_launcher()`
+        and return True, so a bare `snipux` -- typed in a terminal, or run
+        by a shortcut `--setup` wrote before `snipuxw` existed -- can exit
+        and take its console with it instead of being closed along with it.
+
+        Detached, in a process group of its own, with nothing inherited on
+        stdin/stdout/stderr, so no handle to this console reaches it. No
+        job breakaway flag either: pip's console launcher and `py.exe`
+        both put their child in a job that already lets its own children
+        leave silently, and asking to break away from a job that does not
+        allow it makes the whole start fail.
+
+        Started in the launcher's own folder rather than the terminal's:
+        the resident app runs until Quit, and Windows will not delete a
+        folder that is some process's working directory.
+
+        False, with nothing started, when there is no launcher to be sure
+        of or it cannot be started. The caller then becomes the resident app
+        itself, which is what every launch did before this existed -- a
+        console left open is worse than none, but far better than no Snipux.
+        """
+        launcher = windowless_launcher()
+        if launcher is None:
+            return False
+        try:
+            subprocess.Popen(
+                [str(launcher)],
+                cwd=str(launcher.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP,
+            )
+        except OSError:
+            return False
+        return True
 
     def bind_shortcut(self, shortcut: str | None = None) -> str:
         """(Re)register the global hotkey via Win32's `RegisterHotKey` --

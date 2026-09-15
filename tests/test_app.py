@@ -1085,56 +1085,142 @@ class TestQLocalSocketTransportRace:
         assert transport._server is None
 
 
+def _stub_dispatch(monkeypatch, argv, *, relaunched=False):
+    """Stub everything `cli()`/`gui()` can dispatch to, recording the order
+    it was reached in. `reattach_console` is recorded with the keyword it
+    was given, since whether a launch joins its parent's console is half of
+    what #52 decides.
+    """
+    monkeypatch.setattr(app.sys, "argv", argv)
+    calls = []
+    monkeypatch.setattr(
+        app, "reattach_console", lambda **kwargs: calls.append(("reattach", kwargs))
+    )
+    monkeypatch.setattr(app, "main", lambda: calls.append("main") or 0)
+    monkeypatch.setattr(
+        app, "run_resident_app", lambda: calls.append("run_resident_app") or 0
+    )
+    monkeypatch.setattr(
+        app.platform.current,
+        "relaunch_without_console",
+        lambda: calls.append("relaunch") or relaunched,
+    )
+    return calls
+
+
 class TestCli:
     """`reattach_console` (SNX-100) is stubbed out in every test here, the
     same reasoning `TestWindowsHotkeyIntegration` already applies to
     `RegisterHotKey`: it is a real Win32 call on whatever machine runs this
     suite, and cli() must reach it on every dispatch path without this
     file's own assertions depending on (or corrupting) this process's
-    actual stdout/stderr.
+    actual stdout/stderr. `relaunch_without_console` is stubbed for the
+    same reason -- on Windows it would really start a process.
     """
 
     def test_dispatches_to_main_when_given_arguments(self, monkeypatch):
-        monkeypatch.setattr(app.sys, "argv", ["snipux", "--list-backends"])
-        monkeypatch.setattr(app, "reattach_console", lambda: None)
-        calls = []
-        monkeypatch.setattr(app, "main", lambda: calls.append("main"))
-        monkeypatch.setattr(
-            app, "run_resident_app", lambda: calls.append("run_resident_app")
-        )
+        calls = _stub_dispatch(monkeypatch, ["snipux", "--list-backends"])
 
         cli()
 
-        assert calls == ["main"]
+        assert calls == [("reattach", {"attach": True}), "main"]
 
     def test_dispatches_to_run_resident_app_when_given_none(self, monkeypatch):
-        monkeypatch.setattr(app.sys, "argv", ["snipux"])
-        monkeypatch.setattr(app, "reattach_console", lambda: None)
-        calls = []
-        monkeypatch.setattr(app, "main", lambda: calls.append("main"))
-        monkeypatch.setattr(
-            app, "run_resident_app", lambda: calls.append("run_resident_app")
-        )
+        calls = _stub_dispatch(monkeypatch, ["snipux"])
 
         cli()
 
-        assert calls == ["run_resident_app"]
+        assert calls == [("reattach", {"attach": False}), "relaunch", "run_resident_app"]
 
     def test_reattaches_the_console_before_dispatching(self, monkeypatch):
         # Order matters (SNX-100's own acceptance criterion): main()/
         # run_resident_app() may print before returning, so the console
         # must already be sorted out by the time either one is reached.
-        monkeypatch.setattr(app.sys, "argv", ["snipux"])
-        calls = []
-        monkeypatch.setattr(app, "reattach_console", lambda: calls.append("reattach"))
-        monkeypatch.setattr(app, "main", lambda: calls.append("main"))
-        monkeypatch.setattr(
-            app, "run_resident_app", lambda: calls.append("run_resident_app")
-        )
+        calls = _stub_dispatch(monkeypatch, ["snipux"])
 
         cli()
 
-        assert calls == ["reattach", "run_resident_app"]
+        assert calls[0][0] == "reattach"
+
+    def test_a_relaunched_bare_launch_returns_without_becoming_resident(self, monkeypatch):
+        # #52: on Windows a bare `snipux` hands the tray app to `snipuxw`
+        # and exits, so the console it was typed into can close without
+        # closing Snipux. Becoming resident as well would be two copies.
+        calls = _stub_dispatch(monkeypatch, ["snipux"], relaunched=True)
+
+        assert cli() == 0
+        assert "run_resident_app" not in calls
+
+    def test_a_command_is_never_relaunched(self, monkeypatch):
+        # `--update`/`--setup`/`--help` print where they were typed. A
+        # detached process has nowhere to print to.
+        calls = _stub_dispatch(monkeypatch, ["snipux", "--update"], relaunched=True)
+
+        cli()
+
+        assert "relaunch" not in calls
+        assert calls[-1] == "main"
+
+    def test_only_a_command_joins_the_parent_console(self, monkeypatch):
+        # #52: a resident app attached to a terminal's console is ended
+        # when that terminal closes -- the bug, reached from the inside.
+        with_arguments = _stub_dispatch(monkeypatch, ["snipux", "--snip"])
+        cli()
+        without_arguments = _stub_dispatch(monkeypatch, ["snipux"])
+        cli()
+
+        assert with_arguments[0] == ("reattach", {"attach": True})
+        assert without_arguments[0] == ("reattach", {"attach": False})
+
+
+class TestGui:
+    """`gui()` is `snipuxw`, the windowless launcher (#52): what the Windows
+    shortcuts run and what a bare `snipux` hands off to.
+    """
+
+    def test_dispatches_like_cli_when_given_arguments(self, monkeypatch):
+        calls = _stub_dispatch(monkeypatch, ["snipuxw", "--list-backends"])
+
+        app.gui()
+
+        assert calls == [("reattach", {"attach": True}), "main"]
+
+    def test_becomes_resident_itself_and_never_relaunches(self, monkeypatch):
+        # It is the thing a relaunch starts; relaunching from here would
+        # only start another copy of itself, forever.
+        calls = _stub_dispatch(monkeypatch, ["snipuxw"], relaunched=True)
+
+        app.gui()
+
+        assert calls == [("reattach", {"attach": False}), "run_resident_app"]
+
+
+class TestEntryPoints:
+    """pyproject.toml's entry points are the only thing that makes `snipux`
+    and `snipuxw` exist, and a typo there ships an exe that dies on import
+    -- nothing else in the suite would ever run it.
+    """
+
+    def _entry_points(self):
+        tomllib = pytest.importorskip("tomllib", reason="tomllib is Python 3.11+")
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+        return project["scripts"], project["gui-scripts"]
+
+    def test_the_console_and_windowless_launchers_are_both_declared(self):
+        scripts, gui_scripts = self._entry_points()
+
+        assert scripts == {"snipux": "snipux.app:cli"}
+        assert gui_scripts == {"snipuxw": "snipux.app:gui"}
+
+    def test_every_entry_point_resolves_to_a_callable(self):
+        import importlib
+
+        scripts, gui_scripts = self._entry_points()
+
+        for target in [*scripts.values(), *gui_scripts.values()]:
+            module_name, _, attribute = target.partition(":")
+            assert callable(getattr(importlib.import_module(module_name), attribute)), target
 
 
 class TestCrashLog:

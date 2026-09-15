@@ -23,6 +23,8 @@ three things the app asks for at its edges:
 
 `reserved_top()` joins `ensure_stable_install()` as an operation with a
 portable default rather than a required one -- see its own docstring.
+`relaunch_without_console()` (#52) is another: only Windows has a console
+that can take the tray app down with it.
 
 This module is the one place that interface (`Platform`) is defined, and the
 one place an implementation is picked -- from `sys.platform`, at import
@@ -156,6 +158,23 @@ class Platform(ABC):
         every other operation on this interface.
         """
         return None
+
+    def relaunch_without_console(self) -> bool:
+        """#52: start the resident app again in a process that no console
+        can take down, and return True so the caller can simply exit.
+
+        `app.cli()` asks this before a bare `snipux` becomes the tray app.
+        Only Windows answers True (see `WindowsPlatform`'s override): a
+        console-stub launcher there runs snipux inside a console, and
+        closing that console ends everything attached to it. Nothing on
+        Linux or macOS ties a process's life to the terminal that started it
+        in a way this could fix, so the default is False -- "run in place",
+        which is what every launch did before this existed.
+
+        Never raises. False is also the answer when a platform that would
+        relaunch cannot, so the caller always has a working fallback.
+        """
+        return False
 
 
     def reserved_top(self, screen) -> int:

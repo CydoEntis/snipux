@@ -2941,7 +2941,8 @@ def run_resident_app(
 
 def cli() -> int:
     """The `console_scripts` entry point (`pyproject.toml` points
-    `snipux` at this).
+    `snipux` at this), and what `python -m snipux` and the windowed
+    PyInstaller build run too.
 
     A `console_scripts` entry point calls `module:function()` directly, so
     it cannot execute an `if __name__ == "__main__":` block -- this
@@ -2949,14 +2950,47 @@ def cli() -> int:
     display-free CLI diagnostics in `main()`; none -> the resident,
     tray-icon app) as an importable function instead.
 
-    `reattach_console()` (SNX-100) runs first, before anything else here
-    has a chance to `print()` -- this is the one function every launch
-    path (`python -m snipux`, the pip-installed console script, and the
-    windowed PyInstaller build) actually goes through, which is what makes
-    it the right place for a step that has to happen before any of the
-    below can safely write to stdout/stderr at all.
+    With no arguments, `platform.current.relaunch_without_console()` gets
+    the launch first (#52). On Windows this process is running inside a
+    console, and closing that console would close the tray app with it, so
+    it starts `snipuxw` detached and this process returns, taking the
+    console with it. Anywhere there is nothing to hand off to -- Linux,
+    macOS, a frozen build, a checkout, or an install whose `snipuxw` cannot
+    be found -- it becomes the resident app itself, as it always has.
     """
-    reattach_console()
-    if sys.argv[1:]:
+    return _dispatch(may_relaunch=True)
+
+
+def gui() -> int:
+    """The `gui_scripts` entry point (`pyproject.toml` points `snipuxw` at
+    this): what the Windows Start Menu and Startup shortcuts run, and what
+    a bare `snipux` hands off to (#52).
+
+    `cli()`'s dispatch without the relaunch. This process already has no
+    console for anything to close, and relaunching would only start
+    another copy of itself.
+    """
+    return _dispatch(may_relaunch=False)
+
+
+def _dispatch(*, may_relaunch: bool) -> int:
+    """The body `cli()` and `gui()` share.
+
+    `reattach_console()` (SNX-100) runs first, before anything else here
+    has a chance to `print()` -- every launch path goes through this, which
+    is what makes it the right place for a step that has to happen before
+    anything can safely write to stdout/stderr at all.
+
+    It only joins the parent's console when there are arguments. A command
+    has output someone in that terminal is waiting to read. The resident
+    app has none, runs until Quit, and a console it had attached itself to
+    would take it down when closed -- #52's bug, reached from the inside
+    instead of through a console-stub launcher.
+    """
+    arguments = sys.argv[1:]
+    reattach_console(attach=bool(arguments))
+    if arguments:
         return main()
+    if may_relaunch and platform.current.relaunch_without_console():
+        return 0
     return run_resident_app()

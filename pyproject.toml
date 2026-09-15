@@ -80,6 +80,19 @@ Issues = "https://github.com/CydoEntis/snipux/issues"
 [project.scripts]
 snipux = "snipux.app:cli"
 
+# The same app on pip's GUI launcher stub rather than its console one. On
+# Windows a console-stub `snipux.exe` opens (or joins) a console and runs
+# the interpreter inside it, and closing that console ends everything
+# attached to it -- the tray app included (#52). `snipuxw.exe` has no
+# console to close, which is why the Start Menu and Startup shortcuts point
+# at it, and why a bare `snipux` on Windows hands off to it and returns
+# (see `snipux.platform.windows.windowless_launcher`). `snipux` stays the
+# console entry point because `--update`/`--setup`/`--help` have to print
+# somewhere a person can read. On Linux and macOS pip writes the two as
+# identical scripts.
+[project.gui-scripts]
+snipuxw = "snipux.app:gui"
+
 [tool.pytest.ini_options]
 # "-ra" keeps skip reasons (and their count) in the summary on every run,
 # `-q` included -- SNX-84: a platform gap that only shows up with an extra

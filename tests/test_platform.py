@@ -191,6 +191,12 @@ class TestLinuxPlatform:
         # manages, so `Platform`'s base implementation is what runs here.
         assert linux.LinuxPlatform().ensure_stable_install() is None
 
+    def test_relaunch_without_console_is_false_off_windows(self):
+        # #52: only Windows runs snipux inside a console whose closing ends
+        # it. Everywhere else a bare `snipux` becomes the tray app in place.
+        assert linux.LinuxPlatform().relaunch_without_console() is False
+        assert darwin.DarwinPlatform().relaunch_without_console() is False
+
 
 class _FakeScreen:
     """Just the two rects `reserved_top` reads off a `QScreen`."""
@@ -1080,7 +1086,14 @@ class TestWindowsDesktopIntegration:
         monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
         monkeypatch.setattr(setup_desktop, "config_path", lambda config_dir=None: tmp_path / "config.json")
-        monkeypatch.setattr(setup_desktop, "find_console_script", lambda: Path("C:/snipux/snipux.exe"))
+        # Neither this machine's own install metadata nor its PATH may decide
+        # which launcher these tests see -- see TestWindowlessLauncher.
+        monkeypatch.setattr(windows, "windowless_launcher", lambda: None)
+        monkeypatch.setattr(
+            setup_desktop,
+            "find_console_script",
+            lambda name="snipux": Path(f"C:/snipux/{name}.exe"),
+        )
 
     def test_writes_a_start_menu_and_a_startup_shortcut(self, monkeypatch, tmp_path):
         self._use_tmp_dirs(monkeypatch, tmp_path)
@@ -1098,7 +1111,48 @@ class TestWindowsDesktopIntegration:
         [(lnk1, target1), (lnk2, target2)] = created
         assert lnk1 == start_menu / "snipux.lnk"
         assert lnk2 == start_menu / "Startup" / "snipux.lnk"
-        assert target1 == target2 == Path("C:/snipux/snipux.exe")
+        assert target1 == target2 == Path("C:/snipux/snipuxw.exe")
+
+    def test_both_shortcuts_launch_snipuxw_and_never_the_console_script(
+        self, monkeypatch, tmp_path
+    ):
+        # #52: `snipux.exe` is pip's console stub. A shortcut pointed at it
+        # opens a console that sits there for as long as Snipux runs, and
+        # closing that console closes Snipux.
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        launcher = Path("C:/Python312/Scripts/snipuxw.exe")
+        monkeypatch.setattr(windows, "windowless_launcher", lambda: launcher)
+        asked_for = []
+        monkeypatch.setattr(
+            setup_desktop, "find_console_script", lambda name="snipux": asked_for.append(name)
+        )
+        targets = []
+        monkeypatch.setattr(
+            windows, "_create_shortcut", lambda lnk, target, **kw: targets.append(target) or True
+        )
+
+        windows.WindowsPlatform().install_desktop_integration()
+
+        assert targets == [launcher, launcher]
+        assert asked_for == []
+
+    def test_falls_back_to_looking_up_snipuxw_by_name(self, monkeypatch, tmp_path):
+        # No RECORD to read it from (e.g. a frozen build, or an installer
+        # that wrote none): find_console_script() still knows the frozen
+        # case and PATH -- but it has to be asked for snipuxw by name.
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        asked_for = []
+
+        def find(name="snipux"):
+            asked_for.append(name)
+            return Path(f"C:/snipux/{name}.exe")
+
+        monkeypatch.setattr(setup_desktop, "find_console_script", find)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+
+        windows.WindowsPlatform().install_desktop_integration()
+
+        assert asked_for == ["snipuxw"]
 
     def test_says_nothing_about_the_shortcut_needing_a_restart(self, monkeypatch, tmp_path, capsys):
         """SNX-101: `AppController.run_first_launch_setup()` calls this from
@@ -1136,9 +1190,9 @@ class TestWindowsDesktopIntegration:
         assert expected_icon.read_bytes() == b"icon-bytes"
         assert icon_paths == [expected_icon, expected_icon]
 
-    def test_missing_console_script_is_fatal(self, monkeypatch, tmp_path):
+    def test_missing_launcher_is_fatal(self, monkeypatch, tmp_path):
         self._use_tmp_dirs(monkeypatch, tmp_path)
-        monkeypatch.setattr(setup_desktop, "find_console_script", lambda: None)
+        monkeypatch.setattr(setup_desktop, "find_console_script", lambda name="snipux": None)
         monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
 
         exit_code = windows.WindowsPlatform().install_desktop_integration()
@@ -1199,7 +1253,9 @@ class TestWindowsDesktopIntegration:
         download.write_bytes(b"portable-build-bytes")
         monkeypatch.setattr(windows.sys, "frozen", True, raising=False)
         monkeypatch.setattr(windows.sys, "executable", str(download))
-        monkeypatch.setattr(setup_desktop, "find_console_script", lambda: download.resolve())
+        monkeypatch.setattr(
+            setup_desktop, "find_console_script", lambda name="snipux": download.resolve()
+        )
         created = []
         monkeypatch.setattr(
             windows,
@@ -1389,6 +1445,219 @@ class TestReattachConsole:
         windows.reattach_console()
 
         assert opened == []
+
+    def test_a_resident_launch_never_attaches_and_keeps_working_streams(self, monkeypatch):
+        # #52: the resident app runs until Quit, and a console it attached
+        # itself to would end it when that console closed. AttachConsole
+        # raises here, so this only passes if it is never reached; streams
+        # that already work (a console python.exe with nothing to hand off
+        # to) are left exactly as they were.
+        monkeypatch.setattr(windows.sys, "platform", "win32")
+
+        def attach(pid):
+            raise AssertionError("AttachConsole was called for a resident launch")
+
+        monkeypatch.setattr(
+            windows.ctypes,
+            "windll",
+            SimpleNamespace(kernel32=SimpleNamespace(AttachConsole=attach)),
+            raising=False,
+        )
+        opened = []
+        monkeypatch.setattr(
+            "builtins.open", lambda path, mode, **kwargs: opened.append(path)
+        )
+
+        windows.reattach_console(attach=False)
+
+        assert opened == []
+
+    def test_a_resident_launch_with_no_streams_gets_devnull(self, monkeypatch):
+        # pythonw, snipuxw and the windowed build all start with both as
+        # None, and the resident app still prints notes on its way up.
+        monkeypatch.setattr(windows.sys, "platform", "win32")
+        opened = []
+        fake_streams = [SimpleNamespace(write=lambda s: None) for _ in range(2)]
+
+        def fake_open(path, mode, **kwargs):
+            opened.append(path)
+            return fake_streams[len(opened) - 1]
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        original_stdout, original_stderr = sys.stdout, sys.stderr
+        try:
+            sys.stdout, sys.stderr = None, None
+            windows.reattach_console(attach=False)
+
+            assert opened == [windows.os.devnull, windows.os.devnull]
+            assert sys.stdout is fake_streams[0]
+            assert sys.stderr is fake_streams[1]
+        finally:
+            sys.stdout, sys.stderr = original_stdout, original_stderr
+
+
+class _FakeDistribution:
+    """Just what `windowless_launcher()` reads off an
+    `importlib.metadata.Distribution`: what it recorded (`files`) and where
+    a recorded path lives (`locate_file`). `package_dir` is where it says
+    the `snipux` package went; everything else resolves from `site_dir`,
+    the way RECORD's `../../Scripts/...` entries do.
+    """
+
+    def __init__(self, package_dir, site_dir, files):
+        self._package_dir = package_dir
+        self._site_dir = site_dir
+        self.files = files
+
+    def locate_file(self, path):
+        if str(path) == "snipux":
+            return self._package_dir
+        return self._site_dir / path
+
+
+class TestWindowlessLauncher:
+    """#52: which `snipuxw.exe` a bare `snipux` hands off to, and the Start
+    Menu/Startup shortcuts point at. `importlib.metadata.distribution` is
+    faked: the question is what this function makes of a RECORD, not what
+    the machine running the suite happens to have installed.
+    """
+
+    RUNNING_PACKAGE = Path(windows.__file__).resolve().parent.parent
+
+    def _install(self, monkeypatch, tmp_path, *, package_dir=None):
+        """A venv-shaped install: `Lib/site-packages` and a `Scripts` folder
+        holding both launchers pip writes, recorded the way pip records them.
+        """
+        site_dir = tmp_path / "Lib" / "site-packages"
+        site_dir.mkdir(parents=True)
+        scripts = tmp_path / "Scripts"
+        scripts.mkdir()
+        (scripts / "snipux.exe").write_bytes(b"MZ")
+        launcher = scripts / "snipuxw.exe"
+        launcher.write_bytes(b"MZ")
+        package_path = windows.importlib.metadata.PackagePath
+        distribution = _FakeDistribution(
+            package_dir if package_dir is not None else self.RUNNING_PACKAGE,
+            site_dir,
+            [
+                package_path("snipux/__init__.py"),
+                package_path("../../Scripts/snipux.exe"),
+                package_path("../../Scripts/snipuxw.exe"),
+            ],
+        )
+        monkeypatch.setattr(
+            windows.importlib.metadata, "distribution", lambda name: distribution
+        )
+        return launcher, distribution
+
+    def test_finds_the_windowless_launcher_pip_recorded(self, monkeypatch, tmp_path):
+        # snipux.exe is recorded first and exists too. It is the console
+        # stub -- the very thing a hand-off exists to get away from.
+        launcher, _ = self._install(monkeypatch, tmp_path)
+
+        assert windows.windowless_launcher() == launcher.resolve()
+
+    def test_none_when_the_running_code_is_not_the_installed_copy(self, monkeypatch, tmp_path):
+        # `python -m snipux` in a checkout, with a PyPI install on the same
+        # machine: handing off would start the release, not the code being
+        # worked on.
+        self._install(monkeypatch, tmp_path, package_dir=tmp_path / "Lib" / "site-packages" / "snipux")
+
+        assert windows.windowless_launcher() is None
+
+    def test_none_when_snipux_is_not_installed(self, monkeypatch):
+        def not_installed(name):
+            raise windows.importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(windows.importlib.metadata, "distribution", not_installed)
+
+        assert windows.windowless_launcher() is None
+
+    def test_none_when_the_recorded_launcher_is_gone(self, monkeypatch, tmp_path):
+        launcher, _ = self._install(monkeypatch, tmp_path)
+        launcher.unlink()
+
+        assert windows.windowless_launcher() is None
+
+    def test_none_when_the_installer_wrote_no_record(self, monkeypatch, tmp_path):
+        _, distribution = self._install(monkeypatch, tmp_path)
+        distribution.files = None
+
+        assert windows.windowless_launcher() is None
+
+    def test_none_in_a_frozen_build(self, monkeypatch, tmp_path):
+        # A lookup that ever answered here could hand the portable exe
+        # back to itself, and it would relaunch forever.
+        self._install(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows.sys, "frozen", True, raising=False)
+
+        assert windows.windowless_launcher() is None
+
+
+class TestRelaunchWithoutConsole:
+    """#52: what a bare `snipux` does on Windows instead of becoming the
+    tray app inside the console it was typed into. `Popen` is faked: this
+    suite must not start a process, and off Windows `creationflags` would
+    be refused anyway.
+    """
+
+    LAUNCHER = Path("/python/Scripts/snipuxw.exe")
+
+    def _record_starts(self, monkeypatch):
+        started = []
+        monkeypatch.setattr(
+            windows.subprocess,
+            "Popen",
+            lambda args, **kwargs: started.append((args, kwargs)) or SimpleNamespace(pid=1),
+        )
+        return started
+
+    def test_starts_snipuxw_detached_and_says_so(self, monkeypatch):
+        monkeypatch.setattr(windows, "windowless_launcher", lambda: self.LAUNCHER)
+        started = self._record_starts(monkeypatch)
+
+        assert windows.WindowsPlatform().relaunch_without_console() is True
+
+        [(args, kwargs)] = started
+        assert args == [str(self.LAUNCHER)]
+        # winbase.h's DETACHED_PROCESS and CREATE_NEW_PROCESS_GROUP, checked
+        # against the literal values: a flag one bit off would still start
+        # the process and simply not detach it, which no other test sees.
+        assert kwargs["creationflags"] == 0x00000008 | 0x00000200
+
+    def test_hands_down_nothing_tied_to_the_terminal(self, monkeypatch):
+        # The terminal closing afterwards is what this exists to survive:
+        # no handle to its console is passed down, and the resident app does
+        # not hold the terminal's working directory for as long as it runs
+        # (Windows refuses to delete a folder some process is sitting in).
+        monkeypatch.setattr(windows, "windowless_launcher", lambda: self.LAUNCHER)
+        started = self._record_starts(monkeypatch)
+
+        windows.WindowsPlatform().relaunch_without_console()
+
+        [(_, kwargs)] = started
+        devnull = windows.subprocess.DEVNULL
+        assert (kwargs["stdin"], kwargs["stdout"], kwargs["stderr"]) == (devnull, devnull, devnull)
+        assert kwargs["cwd"] == str(self.LAUNCHER.parent)
+
+    def test_no_launcher_means_running_in_place(self, monkeypatch):
+        monkeypatch.setattr(windows, "windowless_launcher", lambda: None)
+        started = self._record_starts(monkeypatch)
+
+        assert windows.WindowsPlatform().relaunch_without_console() is False
+        assert started == []
+
+    def test_a_launcher_that_will_not_start_means_running_in_place(self, monkeypatch):
+        # A console left open is worse than none, but far better than no
+        # Snipux at all.
+        monkeypatch.setattr(windows, "windowless_launcher", lambda: self.LAUNCHER)
+
+        def refuse(args, **kwargs):
+            raise OSError("access is denied")
+
+        monkeypatch.setattr(windows.subprocess, "Popen", refuse)
+
+        assert windows.WindowsPlatform().relaunch_without_console() is False
 
 
 class TestHotkeyEventFilter:

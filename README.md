@@ -484,6 +484,7 @@ details to `~/.config/snipux/crash.log`, beside its settings.
 | Command | What it does |
 |---------|--------------|
 | `snipux` | Start the resident/tray instance (or forward a snip request to one already running) |
+| `snipuxw` | The same, with no console window. On Windows this is what the Start Menu and Startup entries run, and what a bare `snipux` starts before giving the terminal back — so closing the terminal does not close Snipux |
 | `snipux --snip` | Ask the running instance to start a capture, starting one first if needed. This is what the shortcut runs |
 | `snipux --settings` | Open Settings — the way in on a machine with no tray icon |
 | `snipux --setup` | Install desktop integration. Safe to re-run |

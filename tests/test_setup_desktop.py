@@ -108,6 +108,32 @@ class TestFindConsoleScript:
 
         assert setup_desktop.find_console_script() is None
 
+    def test_finds_the_launcher_by_the_name_asked_for(self, tmp_path, monkeypatch):
+        # #52: Windows' shortcuts ask for `snipuxw`, the gui-scripts
+        # launcher, while Linux keeps asking for the default `snipux`. pip
+        # writes both beside the same interpreter, so the name is the only
+        # thing telling them apart.
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        python = bin_dir / "python"
+        python.write_text("")
+        console = bin_dir / "snipux"
+        console.write_text("")
+        windowless = bin_dir / "snipuxw"
+        windowless.write_text("")
+        monkeypatch.setattr(setup_desktop.sys, "executable", str(python))
+
+        assert setup_desktop.find_console_script("snipuxw") == windowless.resolve()
+        assert setup_desktop.find_console_script() == console.resolve()
+
+    def test_the_path_fallback_searches_for_the_name_asked_for(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(setup_desktop.sys, "executable", str(tmp_path / "python"))
+        searched = []
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: searched.append(name))
+
+        assert setup_desktop.find_console_script("snipuxw") is None
+        assert searched == ["snipuxw"]
+
 
 class TestRenderDesktopEntry:
     def test_replaces_the_placeholder_exec_line_with_the_real_path(self):

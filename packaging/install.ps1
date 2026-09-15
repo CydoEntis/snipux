@@ -117,21 +117,38 @@ Step 'Setting up the shortcut and Start Menu entry...'
 Python-Run -m snipux --setup
 
 # --- start it ----------------------------------------------------------------
-$running = Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
-    Where-Object { $_.CommandLine -like '*-m snipux*' }
+# Matched by launcher name as well as by command line: a copy started from
+# the Start Menu or Startup entry is snipuxw.exe with pythonw.exe under it,
+# one started by an older version of this script is `pythonw -m snipux`,
+# and the portable build is a snipux.exe of its own.
+$running = Get-CimInstance Win32_Process | Where-Object {
+    ($_.Name -in 'snipux.exe', 'snipuxw.exe') -or
+    (($_.Name -in 'python.exe', 'pythonw.exe') -and $_.CommandLine -like '*snipux*')
+}
 if ($running) {
     Say ''
     Say 'Snipux is already running. Quit it from the tray and press Ctrl+Alt+S'
     Say 'to start the version just installed.'
 } else {
     Step 'Starting Snipux...'
-    # pythonw, not python: the console host would otherwise sit there for as
-    # long as Snipux runs, and closing it would take Snipux with it.
-    $pythonw = Join-Path (Split-Path $python.Source) 'pythonw.exe'
-    if (Test-Path $pythonw) {
-        Start-Process -FilePath $pythonw -ArgumentList '-m', 'snipux'
+    # snipuxw, the launcher the Start Menu entry points at: it has no console,
+    # so there is no window left behind whose closing would end Snipux.
+    # Asked of Snipux rather than looked up on PATH, because pip may have put
+    # it in a Scripts folder PATH does not include. ErrorActionPreference is
+    # lowered around the call for the stderr reason Find-Python gives.
+    $launcher = $null
+    try {
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $launcher = & $python.Source @($python.Arguments + @('-c', 'import snipux.platform.windows as w;print(w.windowless_launcher())')) |
+            Select-Object -Last 1
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($launcher -and (Test-Path -LiteralPath $launcher)) {
+        Start-Process -FilePath $launcher
     } else {
-        Start-Process -FilePath $python.Source -ArgumentList '-m', 'snipux' -WindowStyle Hidden
+        Say 'Could not find the Snipux launcher to start. Start Snipux from the Start Menu.'
     }
 }
 

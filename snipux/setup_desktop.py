@@ -88,11 +88,16 @@ _LOGO_DIR = PACKAGE_DIR / "design" / "logo"
 _LOGO_SIZE_RE = re.compile(r"^snipux-(\d+)\.png$")
 
 
-def find_console_script() -> Path | None:
-    """Locate the absolute path to *this installation's* `snipux` console
-    script -- the file `pip`/`pipx` generated at install time from
-    `pyproject.toml`'s `[project.scripts]` entry, not just whatever a shell
-    happens to resolve "snipux" to.
+def find_console_script(name: str = "snipux") -> Path | None:
+    """Locate the absolute path to *this installation's* `name` launcher --
+    the file `pip`/`pipx` generated at install time from `pyproject.toml`'s
+    `[project.scripts]` (`snipux`) or `[project.gui-scripts]` (`snipuxw`)
+    entry, not just whatever a shell happens to resolve the name to.
+
+    `name` defaults to the console script, which is what Linux points its
+    `.desktop` entry and GNOME shortcut at: there is no console stub to
+    escape there, so nothing on Linux asks for anything else. Windows asks
+    for `snipuxw` (#52) -- see `WindowsPlatform.install_desktop_integration`.
 
     `sys.frozen` (SNX-96) is checked first: a PyInstaller bundle -- the
     Windows executable `packaging/windows/` builds -- *is* its own console
@@ -115,11 +120,11 @@ def find_console_script() -> Path | None:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve()
 
-    candidate = Path(sys.executable).resolve().parent / "snipux"
+    candidate = Path(sys.executable).resolve().parent / name
     if candidate.is_file():
         return candidate
 
-    found = shutil.which("snipux")
+    found = shutil.which(name)
     if found is not None:
         return Path(found).resolve()
 
