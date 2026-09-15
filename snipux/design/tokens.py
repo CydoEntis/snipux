@@ -448,6 +448,8 @@ class WinMetric:
     ENTRY_REMOVE_RADIUS = 6
     ENTRY_REMOVE_INSET = 4        # keeps it off the row's right edge
     ENTRY_REASON_GAP = 4          # a row and the reason beneath it
+    HIDE_TOGGLE_H    = 26         # Edit as text: small enough to sit beside a heading
+    HIDE_TEXT_H      = 96         # its box: a handful of lines before it scrolls
 
     # Review window
     REVIEW_IMG_BORDER = 1

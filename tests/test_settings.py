@@ -1034,6 +1034,20 @@ class TestTheHideSensitivePage:
 
         assert "Hide sensitive" in labels
 
+    @staticmethod
+    def _add(window, section: str, *entries: str) -> None:
+        """Type each entry into that list's add field and press Add -- the
+        way a user builds a list."""
+        rows = window._hide_lists[section].rows
+        for entry in entries:
+            rows._add_field.setText(entry)
+            rows._add_button.click()
+
+    @staticmethod
+    def _as_text(window, section: str):
+        window._hide_lists[section].as_text.click()
+        return window._hide_lists[section].text
+
     def test_it_opens_showing_what_is_stored(self, tmp_path):
         setup_desktop.save_hide_list(
             ["Acme Corporation", "12 Maple Street"], ["Employee ID"], [r"ACME-\d{6}"], tmp_path
@@ -1041,36 +1055,74 @@ class TestTheHideSensitivePage:
 
         window = self._window(tmp_path)
 
-        assert window._hide_boxes["words"].toPlainText() == "Acme Corporation\n12 Maple Street"
-        assert window._hide_boxes["labels"].toPlainText() == "Employee ID"
-        assert window._hide_boxes["patterns"].toPlainText() == r"ACME-\d{6}"
+        assert window._hide_lists["words"].rows.entries() == [
+            "Acme Corporation",
+            "12 Maple Street",
+        ]
+        assert window._hide_lists["labels"].rows.entries() == ["Employee ID"]
+        assert window._hide_lists["patterns"].rows.entries() == [r"ACME-\d{6}"]
 
-    def test_a_box_for_each_kind_of_entry(self, tmp_path):
+    def test_a_list_for_each_kind_of_entry(self, tmp_path):
         window = self._window(tmp_path)
 
-        assert set(window._hide_boxes) == {section for section, _t, _n in tokens.HIDE_LIST_FIELDS}
+        assert set(window._hide_lists) == {section for section, _t, _n in tokens.HIDE_LIST_FIELDS}
+        assert all(isinstance(each.rows, EntryList) for each in window._hide_lists.values())
 
-    def test_typing_marks_the_window_dirty(self, tmp_path):
+    def test_each_list_opens_as_rows_rather_than_text(self, tmp_path):
+        window = self._window(tmp_path)
+
+        for each in window._hide_lists.values():
+            assert not each.rows.isHidden()
+            assert each.text.isHidden()
+            assert each.as_text.text() == "Edit as text"
+
+    def test_adding_an_entry_marks_the_window_dirty(self, tmp_path):
         window = self._window(tmp_path)
         assert window._dirty is False
 
-        window._hide_boxes["words"].setPlainText("Acme Corporation")
+        self._add(window, "words", "Acme Corporation")
 
         assert window._dirty is True
+
+    def test_removing_an_entry_marks_the_window_dirty(self, tmp_path):
+        setup_desktop.save_hide_list(["Acme Corporation"], [], [], tmp_path)
+        window = self._window(tmp_path)
+
+        window._hide_lists["words"].rows._rows[0]._remove.click()
+
+        assert window._dirty is True
+
+    def test_typing_in_the_text_marks_the_window_dirty(self, tmp_path):
+        window = self._window(tmp_path)
+        text = self._as_text(window, "words")
+
+        text.setPlainText("Acme Corporation")
+
+        assert window._dirty is True
+
+    def test_swapping_to_text_and_back_is_not_an_edit(self, tmp_path):
+        setup_desktop.save_hide_list(["Acme Corporation"], [], [], tmp_path)
+        window = self._window(tmp_path)
+
+        self._as_text(window, "words")
+        window._hide_lists["words"].as_text.click()
+
+        assert window._dirty is False
 
     def test_nothing_is_written_until_save(self, tmp_path):
         window = self._window(tmp_path)
 
-        window._hide_boxes["words"].setPlainText("Acme Corporation")
+        self._add(window, "words", "Acme Corporation")
+        self._as_text(window, "labels").setPlainText("Employee ID")
 
-        assert setup_desktop.load_hide_list(tmp_path)["words"] == []
+        assert not setup_desktop.hide_list_path(tmp_path).exists()
 
-    def test_save_writes_all_three_boxes(self, tmp_path, monkeypatch):
+    def test_save_writes_all_three_lists(self, tmp_path, monkeypatch):
         self._no_dialogs(monkeypatch)
         window = self._window(tmp_path)
-        window._hide_boxes["words"].setPlainText("Acme Corporation\n12 Maple Street")
-        window._hide_boxes["labels"].setPlainText("Employee ID")
-        window._hide_boxes["patterns"].setPlainText(r"ACME-\d{6}")
+        self._add(window, "words", "Acme Corporation", "12 Maple Street")
+        self._add(window, "labels", "Employee ID")
+        self._add(window, "patterns", r"ACME-\d{6}")
 
         window._save()
 
@@ -1080,29 +1132,90 @@ class TestTheHideSensitivePage:
             "patterns": [r"ACME-\d{6}"],
         }
 
-    def test_a_bad_line_is_called_out_as_it_is_typed(self, tmp_path):
+    def test_the_file_on_disk_does_not_change_shape(self, tmp_path, monkeypatch):
+        # A list edited as rows is still the hide-list.txt someone can edit
+        # by hand: exactly what save_hide_list writes for the same entries,
+        # sections, notes and one entry per line.
+        self._no_dialogs(monkeypatch)
+        through_the_window, by_hand = tmp_path / "window", tmp_path / "hand"
+        window = self._window(through_the_window)
+        self._add(window, "words", "Acme Corporation", "12 Maple Street")
+        self._add(window, "labels", "Employee ID")
+        self._as_text(window, "patterns").setPlainText(r"ACME-\d{6}")
+
+        window._save()
+        setup_desktop.save_hide_list(
+            ["Acme Corporation", "12 Maple Street"], ["Employee ID"], [r"ACME-\d{6}"], by_hand
+        )
+
+        written = setup_desktop.hide_list_path(through_the_window).read_text(encoding="utf-8")
+        assert written == setup_desktop.hide_list_path(by_hand).read_text(encoding="utf-8")
+        lines = written.splitlines()
+        assert lines.index("[words]") < lines.index("Acme Corporation") < lines.index("[labels]")
+        assert lines.index("[labels]") < lines.index("Employee ID") < lines.index("[patterns]")
+        assert lines.index("[patterns]") < lines.index(r"ACME-\d{6}")
+
+    def test_a_bad_entry_is_called_out_on_its_own_row(self, tmp_path):
         window = self._window(tmp_path)
 
-        window._hide_boxes["words"].setPlainText("bob")
+        self._add(window, "words", "Acme Corporation", "bob")
 
+        acme, bob = window._hide_lists["words"].rows._rows
         # `isHidden`, not `isVisible`: this page is not the one on screen
         # when Settings opens, so nothing on it is visible yet.
-        assert not window._hide_complaints.isHidden()
-        assert "bob" in window._hide_complaints.text()
+        assert not bob._reason.isHidden()
+        assert "bob" in bob._reason.text()
+        assert acme._reason.isHidden()
+
+    def test_a_complaint_is_shown_in_its_own_list_not_under_all_three(self, tmp_path):
+        window = self._window(tmp_path)
+
+        self._add(window, "words", "bob")
+        self._add(window, "patterns", "ACME-[0-9")
+
+        (bob,) = window._hide_lists["words"].rows._rows
+        (pattern,) = window._hide_lists["patterns"].rows._rows
+        assert "bob" in bob._reason.text() and "ACME" not in bob._reason.text()
+        assert "ACME-[0-9" in pattern._reason.text() and "bob" not in pattern._reason.text()
+        assert window._hide_lists["labels"].complaints.isHidden()
+
+    def test_the_same_entry_is_judged_by_the_list_it_is_in(self, tmp_path):
+        # Too short to be a word, but a pattern is judged by what it
+        # matches rather than by its length.
+        window = self._window(tmp_path)
+
+        self._add(window, "words", "abc")
+        self._add(window, "patterns", "abc")
+
+        assert not window._hide_lists["words"].rows._rows[0]._reason.isHidden()
+        assert window._hide_lists["patterns"].rows._rows[0]._reason.isHidden()
 
     def test_the_complaint_goes_away_once_it_is_fixed(self, tmp_path):
         window = self._window(tmp_path)
-        window._hide_boxes["words"].setPlainText("bob")
+        self._add(window, "words", "bob")
+        row = window._hide_lists["words"].rows._rows[0]
 
-        window._hide_boxes["words"].setPlainText("bob.smith@example.com")
+        row.mousePressEvent(left_click())
+        row._editor.setText("bob.smith@example.com")
+        row._editor.keyPressEvent(press(Qt.Key.Key_Return))
 
-        assert window._hide_complaints.text() == ""
-        assert window._hide_complaints.isHidden()
+        assert row._reason.text() == ""
+        assert row._reason.isHidden()
 
-    def test_save_refuses_while_a_line_cannot_work(self, tmp_path, monkeypatch):
+    def test_a_bad_entry_already_in_the_file_is_called_out_on_opening(self, tmp_path):
+        # A hand-edited file can hold a line Save would refuse; the row it
+        # is on should say so before the user reaches Save and finds out.
+        setup_desktop.save_hide_list(["bob"], [], [], tmp_path)
+
+        window = self._window(tmp_path)
+
+        assert not window._hide_lists["words"].rows._rows[0]._reason.isHidden()
+        assert window._dirty is False
+
+    def test_save_refuses_while_an_entry_cannot_work(self, tmp_path, monkeypatch):
         warnings = self._no_dialogs(monkeypatch)
         window = self._window(tmp_path)
-        window._hide_boxes["patterns"].setPlainText("ACME-[0-9")
+        self._add(window, "patterns", "ACME-[0-9")
 
         window._save()
 
@@ -1110,13 +1223,35 @@ class TestTheHideSensitivePage:
         assert "ACME-[0-9" in warnings[0]
         assert setup_desktop.load_hide_list(tmp_path)["patterns"] == []
 
+    def test_save_refuses_a_bad_line_in_the_text_too(self, tmp_path, monkeypatch):
+        warnings = self._no_dialogs(monkeypatch)
+        window = self._window(tmp_path)
+        self._as_text(window, "words").setPlainText("Acme Corporation\nbob")
+
+        window._save()
+
+        assert len(warnings) == 1
+        assert "bob" in warnings[0]
+        assert setup_desktop.load_hide_list(tmp_path)["words"] == []
+
+    def test_save_goes_ahead_once_the_bad_entry_is_removed(self, tmp_path, monkeypatch):
+        warnings = self._no_dialogs(monkeypatch)
+        window = self._window(tmp_path)
+        self._add(window, "words", "Acme Corporation", "bob")
+
+        window._hide_lists["words"].rows._rows[1]._remove.click()
+        window._save()
+
+        assert warnings == []
+        assert setup_desktop.load_hide_list(tmp_path)["words"] == ["Acme Corporation"]
+
     def test_a_refusal_saves_nothing_at_all(self, tmp_path, monkeypatch):
         # Not even the settings on other pages: a half-applied Save is worse
         # than a refused one.
         self._no_dialogs(monkeypatch)
         window = self._window(tmp_path)
         window._recorder.set_shortcut("Control+Alt+K")
-        window._hide_boxes["words"].setPlainText("bob")
+        self._add(window, "words", "bob")
 
         window._save()
 
@@ -1128,14 +1263,88 @@ class TestTheHideSensitivePage:
         assert window._hide_file.text() == str(setup_desktop.hide_list_path(tmp_path))
         assert window._hide_file.isReadOnly()
 
+    # -- Edit as text ------------------------------------------------------
+
+    def test_edit_as_text_holds_the_same_entries_one_per_line(self, tmp_path):
+        setup_desktop.save_hide_list(["Acme Corporation", "12 Maple Street"], [], [], tmp_path)
+        window = self._window(tmp_path)
+
+        text = self._as_text(window, "words")
+
+        section = window._hide_lists["words"]
+        assert text.toPlainText() == "Acme Corporation\n12 Maple Street"
+        assert not text.isHidden()
+        assert section.rows.isHidden()
+        assert section.as_text.text() == "Edit as list"
+
+    def test_each_list_swaps_on_its_own(self, tmp_path):
+        window = self._window(tmp_path)
+
+        self._as_text(window, "words")
+
+        assert window._hide_lists["labels"].text.isHidden()
+        assert window._hide_lists["patterns"].text.isHidden()
+
+    def test_swapping_back_keeps_what_was_typed(self, tmp_path):
+        setup_desktop.save_hide_list(["Acme Corporation"], [], [], tmp_path)
+        window = self._window(tmp_path)
+        text = self._as_text(window, "words")
+        text.setPlainText("Acme Corporation\n12 Maple Street\nProject Nightjar")
+
+        window._hide_lists["words"].as_text.click()
+
+        section = window._hide_lists["words"]
+        assert section.rows.entries() == ["Acme Corporation", "12 Maple Street", "Project Nightjar"]
+        assert not section.rows.isHidden()
+        assert section.text.isHidden()
+
+    def test_pasted_blanks_and_repeats_are_tidied_on_the_way_back(self, tmp_path):
+        window = self._window(tmp_path)
+        text = self._as_text(window, "words")
+        text.setPlainText("\n  Acme Corporation  \n\nAcme Corporation\n")
+
+        window._hide_lists["words"].as_text.click()
+
+        assert window._hide_lists["words"].rows.entries() == ["Acme Corporation"]
+
+    def test_save_while_editing_as_text_writes_the_text(self, tmp_path, monkeypatch):
+        # Nobody should have to swap back for Save to see what they pasted.
+        self._no_dialogs(monkeypatch)
+        window = self._window(tmp_path)
+        self._as_text(window, "labels").setPlainText("Employee ID\nBadge number")
+
+        window._save()
+
+        assert setup_desktop.load_hide_list(tmp_path)["labels"] == ["Employee ID", "Badge number"]
+
     def test_blank_lines_and_spacing_survive_a_round_trip(self, tmp_path, monkeypatch):
         self._no_dialogs(monkeypatch)
         window = self._window(tmp_path)
-        window._hide_boxes["words"].setPlainText("\n  Acme Corporation  \n\n")
+        self._as_text(window, "words").setPlainText("\n  Acme Corporation  \n\n")
 
         window._save()
 
         assert setup_desktop.load_hide_list(tmp_path)["words"] == ["Acme Corporation"]
+
+    def test_while_editing_as_text_a_complaint_is_shown_under_that_text(self, tmp_path):
+        window = self._window(tmp_path)
+
+        self._as_text(window, "words").setPlainText("Acme Corporation\nbob")
+
+        section = window._hide_lists["words"]
+        assert not section.complaints.isHidden()
+        assert "bob" in section.complaints.text()
+        assert window._hide_lists["labels"].complaints.isHidden()
+
+    def test_on_the_way_back_the_complaint_moves_onto_its_row(self, tmp_path):
+        window = self._window(tmp_path)
+        self._as_text(window, "words").setPlainText("bob")
+
+        window._hide_lists["words"].as_text.click()
+
+        section = window._hide_lists["words"]
+        assert section.complaints.isHidden()
+        assert not section.rows._rows[0]._reason.isHidden()
 
 
 class TestSettingsScrollbars:
@@ -1149,10 +1358,10 @@ class TestSettingsScrollbars:
         assert "QScrollBar" in style
         assert "QScrollArea { background: transparent; }" in style
 
-    def test_the_hide_list_boxes_keep_it_too(self, tmp_path):
+    def test_the_hide_list_text_boxes_keep_it_too(self, tmp_path):
         window = SettingsWindow(config_dir=tmp_path)
 
-        style = window._hide_boxes["words"].styleSheet()
+        style = window._hide_lists["words"].text.styleSheet()
 
         assert "QScrollBar" in style
         assert "QPlainTextEdit" in style

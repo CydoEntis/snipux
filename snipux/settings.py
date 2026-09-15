@@ -829,6 +829,110 @@ class EntryList(QWidget):
         self._add_note.setVisible(duplicate)
 
 
+class _HideListSection(QWidget):
+    """One kind of entry on the Hide sensitive page: its title, what it
+    does, and its entries as an `EntryList` -- or, on request, as text.
+
+    Text stays for the one job rows are worse at: pasting many entries at
+    once, or copying the lot to another machine. Both show the same
+    entries, so swapping between them is not an edit; typing in the text
+    is.
+    """
+
+    changed = pyqtSignal()
+
+    def __init__(
+        self,
+        title: str,
+        note: str,
+        placeholder: str,
+        entries: list[str],
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        win, metric = tokens.Win, tokens.WinMetric
+        column = QVBoxLayout(self)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(metric.FIELD_GAP)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(metric.ENTRY_GAP)
+        heading = QLabel(title)
+        heading.setFont(_ui_font(12.5, 600))
+        heading.setStyleSheet(f"color: {win.TEXT_PRIMARY};")
+        top.addWidget(heading, 1)
+        self.as_text = SecondaryButton("Edit as text")
+        self.as_text.setCheckable(True)
+        self.as_text.setFont(_ui_font(11, 500))
+        self.as_text.setFixedHeight(metric.HIDE_TOGGLE_H)
+        self.as_text.toggled.connect(self._show_as_text)
+        top.addWidget(self.as_text)
+        column.addLayout(top)
+
+        caption = QLabel(note)
+        caption.setWordWrap(True)
+        caption.setFont(_ui_font(11.5, 400))
+        caption.setStyleSheet(f"color: {win.TEXT_FAINT};")
+        column.addWidget(caption)
+
+        self.rows = EntryList(placeholder)
+        self.rows.set_entries(entries)
+        self.rows.changed.connect(self.changed)
+        column.addWidget(self.rows)
+
+        self.text = QPlainTextEdit()
+        self.text.setFont(_mono_font(12))
+        self.text.setFixedHeight(metric.HIDE_TEXT_H)
+        self.text.setStyleSheet(
+            _field_style().replace("QLineEdit", "QPlainTextEdit") + scrollbar_style()
+        )
+        self.text.textChanged.connect(self.changed)
+        self.text.hide()
+        column.addWidget(self.text)
+
+        # The rows carry their own complaints. This is only for while the
+        # entries are text, when there is no row to put one on.
+        self.complaints = QLabel()
+        self.complaints.setTextFormat(Qt.TextFormat.PlainText)
+        self.complaints.setWordWrap(True)
+        self.complaints.setFont(_ui_font(11.5, 400))
+        self.complaints.setStyleSheet(f"color: {win.ERR_FG};")
+        self.complaints.hide()
+        column.addWidget(self.complaints)
+
+    def is_text(self) -> bool:
+        return self.as_text.isChecked()
+
+    def entries(self) -> list[str]:
+        """The entries as they stand -- read from the text while it is
+        showing, so Save writes what was pasted without anyone having to
+        swap back first."""
+        if self.is_text():
+            return self.text.toPlainText().splitlines()
+        return self.rows.entries()
+
+    def set_complaints(self, by_entry: dict[str, str]) -> None:
+        self.rows.set_problems(by_entry)
+        self.complaints.setText("\n".join(by_entry.values()))
+        self.complaints.setVisible(self.is_text() and bool(by_entry))
+
+    def _show_as_text(self, as_text: bool) -> None:
+        if as_text:
+            # Signals held while it is filled: the same entries appearing in
+            # the box is not the user typing, and must not mark Settings
+            # dirty.
+            self.text.blockSignals(True)
+            self.text.setPlainText("\n".join(self.rows.entries()))
+            self.text.blockSignals(False)
+        else:
+            self.rows.set_entries(self.text.toPlainText().splitlines())
+        self.rows.setVisible(not as_text)
+        self.text.setVisible(as_text)
+        self.complaints.setVisible(as_text and bool(self.complaints.text()))
+        self.as_text.setText("Edit as list" if as_text else "Edit as text")
+
+
 class _NavRow(QPushButton):
     def __init__(self, icon_name: str, label: str, parent=None):
         super().__init__(label, parent)
@@ -1042,12 +1146,13 @@ class SettingsWindow(WinWindow):
         )
 
     def _hide_pane(self) -> QWidget:
-        """The user's own hide list: three boxes, one entry per line.
+        """The user's own hide list: a list of rows for each kind of entry.
 
         Edited here rather than in a text editor because the file is no use
-        if nobody can find it -- and because a line that would black out
+        if nobody can find it -- and because an entry that would black out
         half the screen is worth catching while the user is looking at it,
-        not on the next capture.
+        not on the next capture. Rows rather than a box per kind, so that
+        catch lands on the entry it is about.
         """
         stored = setup_desktop.load_hide_list(self._config_dir)
         intro = QLabel(
@@ -1059,32 +1164,20 @@ class SettingsWindow(WinWindow):
         intro.setFont(_ui_font(11.5, 400))
         intro.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
 
-        rows: list[QWidget] = []
-        self._hide_boxes: dict[str, QPlainTextEdit] = {}
+        placeholders = {
+            "words": "Add a word or phrase",
+            "labels": "Add a field name",
+            "patterns": "Add a pattern",
+        }
+        rows: list[QWidget | None] = []
+        self._hide_lists: dict[str, _HideListSection] = {}
         for section, title, note in tokens.HIDE_LIST_FIELDS:
-            heading = QLabel(title)
-            heading.setFont(_ui_font(12.5, 600))
-            heading.setStyleSheet(f"color: {tokens.Win.TEXT_PRIMARY};")
-            caption = QLabel(note)
-            caption.setWordWrap(True)
-            caption.setFont(_ui_font(11.5, 400))
-            caption.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
-
-            box = QPlainTextEdit("\n".join(stored.get(section, [])))
-            box.setFont(_mono_font(12))
-            box.setFixedHeight(self._HIDE_BOX_H)
-            box.setStyleSheet(
-                _field_style().replace("QLineEdit", "QPlainTextEdit") + scrollbar_style()
+            hide_list = _HideListSection(
+                title, note, placeholders[section], stored.get(section, [])
             )
-            box.textChanged.connect(self._on_hide_list_edited)
-            self._hide_boxes[section] = box
-            rows += [heading, caption, box, None]
-
-        self._hide_complaints = QLabel()
-        self._hide_complaints.setWordWrap(True)
-        self._hide_complaints.setFont(_ui_font(11.5, 400))
-        self._hide_complaints.setStyleSheet(f"color: {tokens.Win.WARN_FG};")
-        self._hide_complaints.hide()
+            hide_list.changed.connect(self._on_hide_list_edited)
+            self._hide_lists[section] = hide_list
+            rows += [hide_list, None]
 
         self._hide_file = QLineEdit(str(setup_desktop.hide_list_path(self._config_dir)))
         self._hide_file.setReadOnly(True)
@@ -1099,12 +1192,15 @@ class SettingsWindow(WinWindow):
         where.setFont(_ui_font(11.5, 400))
         where.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
 
+        # Checked before anything is edited: a hand-edited file can already
+        # hold an entry Save will refuse, and its row should say so now
+        # rather than when Save does.
+        self._refresh_hide_complaints()
         return _pane(
             SectionHeading("Your own list"),
             intro,
             None,
             *rows,
-            self._hide_complaints,
             SectionHeading("Where it is kept"),
             where,
             self._hide_file,
@@ -1116,7 +1212,7 @@ class SettingsWindow(WinWindow):
 
     def _hide_list_entries(self) -> dict[str, list[str]]:
         return {
-            section: self._hide_boxes[section].toPlainText().splitlines()
+            section: self._hide_lists[section].entries()
             for section, _title, _note in tokens.HIDE_LIST_FIELDS
         }
 
@@ -1127,9 +1223,34 @@ class SettingsWindow(WinWindow):
         )
 
     def _refresh_hide_complaints(self) -> None:
-        complaints = self._hide_list_complaints()
-        self._hide_complaints.setText("\n".join(complaints))
-        self._hide_complaints.setVisible(bool(complaints))
+        for section, hide_list in self._hide_lists.items():
+            hide_list.set_complaints(
+                self._hide_list_complaints_by_entry(section, hide_list.entries())
+            )
+
+    @staticmethod
+    def _hide_list_complaints_by_entry(section: str, entries: list[str]) -> dict[str, str]:
+        """`validate_hide_list`'s complaints about one section's entries,
+        keyed by the entry each is about.
+
+        Each entry is validated on its own, rather than the whole list at
+        once with each complaint matched back to an entry by the quote in
+        it. A complaint is about a single line either way, and this way no
+        entry's text can be mistaken for the quote of another.
+        """
+        by_entry: dict[str, str] = {}
+        for line in entries:
+            entry = line.strip()
+            if not entry or entry in by_entry:
+                continue
+            lists: dict[str, list[str]] = {name: [] for name in setup_desktop.HIDE_LIST_SECTIONS}
+            lists[section] = [entry]
+            complaints = setup_desktop.validate_hide_list(
+                lists["words"], lists["labels"], lists["patterns"]
+            )
+            if complaints:
+                by_entry[entry] = "\n".join(complaints)
+        return by_entry
 
     def _saving_pane(self) -> QWidget:
         folder_row = QHBoxLayout()
@@ -1328,10 +1449,6 @@ class SettingsWindow(WinWindow):
         save = AccentButton("Save")
         save.clicked.connect(self._save)
         self.footer_right.addWidget(save)
-
-    # Tall enough for a handful of entries without a scrollbar, short
-    # enough that all three boxes and their notes fit one pane.
-    _HIDE_BOX_H = 96
 
     def _refresh_dirty(self) -> None:
         if self._dirty:
