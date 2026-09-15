@@ -1022,6 +1022,10 @@ class Chooser(QWidget):
         # does) greys the row rather than promising a window nothing has
         # found -- `OverlayWindow` is what asks the geometry provider.
         self._browser_available = False
+        # Why Active window cannot be picked, or None once `OverlayWindow`
+        # has found the window the user was in. Greyed until then, for the
+        # reason `_browser_available` starts False.
+        self._active_window_reason: str | None = tokens.ACTIVE_WINDOW_UNAVAILABLE
         # Each side's own destination, remembered across flips of the
         # switch. Only populated when a side is left, so a value that is
         # legal on both (`instant`, `save`) is never treated as displaced.
@@ -1122,21 +1126,36 @@ class Chooser(QWidget):
         self._browser_available = bool(available)
         self._refresh_triggers()
 
+    def set_active_window_available(
+        self, available: bool, reason: str = tokens.ACTIVE_WINDOW_UNAVAILABLE
+    ) -> None:
+        """Say whether Active window has a window to take, and if not, why.
+
+        Set from outside for `set_browser_available`'s reason. It carries a
+        reason where that one does not because only the caller knows which
+        is true: the platform cannot name a focused window at all, or it
+        can and found nothing.
+        """
+        self._active_window_reason = None if available else reason
+        self._refresh_triggers()
+
     def _unavailable_reason(self, mode: str) -> "str | None":
         """Why `mode` cannot be picked right now, or None if it can.
 
-        Two independent reasons -- the record side does not offer every
-        mode, and `Tab` needs a browser to be open -- resolved in one place
-        so the menu's greyed rows and `set_mode`'s shortcut guard can never
-        disagree about which modes are live. A disabled row already
-        swallows its own click (`_MenuRow`); a stray shortcut key has to be
-        just as inert, and that only stays true if both ask the same
-        question.
+        Three independent reasons -- the record side does not offer every
+        mode, `Tab` needs a browser to be open, and Active window needs a
+        focused window to take -- resolved in one place so the menu's
+        greyed rows and `set_mode`'s shortcut guard can never disagree
+        about which modes are live. A disabled row already swallows its own
+        click (`_MenuRow`); a stray shortcut key has to be just as inert,
+        and that only stays true if both ask the same question.
         """
         if self._kind == "record" and mode in tokens.RECORD_DISABLED_MODES:
             return tokens.RECORD_DISABLED_MODES[mode]
         if mode == tokens.BROWSER_MODE and not self._browser_available:
             return tokens.BROWSER_UNAVAILABLE
+        if mode == tokens.ACTIVE_WINDOW_MODE:
+            return self._active_window_reason
         return None
 
     def set_reuse_last_region(self, on: bool) -> None:

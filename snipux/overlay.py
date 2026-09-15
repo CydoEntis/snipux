@@ -123,6 +123,25 @@ class GeometryProvider(ABC):
         """
         return None
 
+    def active_window(self) -> "tuple[str, QRectF] | None":
+        """`(title, absolute logical rect)` of the window the user is in, or
+        None when there is not one this platform can name.
+
+        The rect is the frame as the compositor draws it: no drop shadow, no
+        invisible resize border, and a maximised window's whole frame.
+
+        Never one of snipux's own windows. That is part of the contract, not
+        a filter a caller could apply afterwards: once the chooser is up it
+        *is* the focused window. So `OverlayWindow` asks once, before it is
+        shown, and a provider asked at any other moment answers None rather
+        than naming a window of this process.
+
+        Defaulted to None for `browser_viewport`'s reasons. Wayland cannot
+        name another application's window at all, and the mode greys itself
+        out there rather than failing.
+        """
+        return None
+
     def window_named_at(self, point: QPointF) -> "tuple[str, QRectF] | None":
         """The window under `point` as `(title, rect)`, or None.
 
@@ -3622,6 +3641,18 @@ class OverlayWindow(QWidget):
         # frozen frame is on screen.
         self._browser_tab = self._geometry_provider.browser_viewport()
         self._chooser.set_browser_available(self._browser_tab is not None)
+        # Active window is asked here for the same reason, and for one that
+        # decides whether it works at all: this window is not on screen yet,
+        # so the focused window is still the one the user was in. Once the
+        # chooser is up, snipux is the focused window, and asking when the
+        # row is picked could only ever find it.
+        self._active_window = self._geometry_provider.active_window()
+        self._chooser.set_active_window_available(
+            self._active_window is not None,
+            design.tokens.ACTIVE_WINDOW_UNAVAILABLE
+            if self._geometry_provider.is_available()
+            else design.tokens.ACTIVE_WINDOW_UNSUPPORTED,
+        )
         self._chooser.reuseLastRegionChanged.connect(
             setup_desktop.save_reuse_last_region
         )
@@ -3951,6 +3982,8 @@ class OverlayWindow(QWidget):
             self._select_full_screen()
         elif mode == design.tokens.BROWSER_MODE:
             self._select_browser_tab()
+        elif mode == design.tokens.ACTIVE_WINDOW_MODE:
+            self._select_active_window()
         elif mode == "Region":  # design.tokens.CAPTURE_MODES[0][0]
             self._preselect_last_region()
         # handoff-chooser.md, Armed: "The cursor becomes a crosshair." The
@@ -4053,6 +4086,17 @@ class OverlayWindow(QWidget):
             self.show()
             self._show_toast("timer", str(exc))
             return
+
+        if mode == design.tokens.ACTIVE_WINDOW_MODE:
+            # A delay exists so the screen can change before the shot, and
+            # which window has focus is part of what can change. So it is
+            # asked again here, while this window is still hidden, to match
+            # the fresh frame. The opening answer is kept when nothing can
+            # be named this instant: the countdown was hidden a moment ago
+            # and focus may not have settled back yet.
+            self._active_window = (
+                self._geometry_provider.active_window() or self._active_window
+            )
 
         self._frame = frame
         self.setGeometry(
@@ -4402,7 +4446,28 @@ class OverlayWindow(QWidget):
         if self._browser_tab is None:
             return
         _title, viewport = self._browser_tab
-        usable = QRectF(viewport).intersected(
+        self._commit_found_rect(viewport)
+
+    def _select_active_window(self) -> None:
+        """Set `_selection` to the frame of the window the user was in.
+
+        `_select_browser_tab`'s shape: a rect learned while this window was
+        hidden -- see `__init__` and `_finish_delayed_capture` for why no
+        other moment will do -- committed at once. Nothing found leaves the
+        selection alone, and the chooser greys the row in that case anyway.
+        """
+        self._selection_anchor = None
+        if self._active_window is None:
+            return
+        _title, rect = self._active_window
+        self._commit_found_rect(rect)
+
+    def _commit_found_rect(self, absolute: QRectF) -> None:
+        """Commit an absolute logical rect a provider found, clipped to the
+        frame -- never to one monitor, so a window straddling two displays
+        comes out whole. A rect entirely off the frame commits nothing.
+        """
+        usable = QRectF(absolute).intersected(
             QRectF(self._frame.logical_origin, self._frame.logical_size)
         )
         if usable.isEmpty():

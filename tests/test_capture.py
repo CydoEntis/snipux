@@ -2143,3 +2143,341 @@ class TestGeometryProviderSurface:
         # page begins, so "cannot tell" is the truth here, and it has to be
         # said out loud rather than left to the ABC's default.
         assert provider_cls().browser_viewport() is None
+
+
+def _xwininfo_output(win_id, title, x, y, width, height, map_state="IsViewable"):
+    """`xwininfo -id` output, laid out line for line as the real tool
+    prints it (captured on GNOME 46 X11), so the parser has to find its
+    four numbers among all the lines it does not want."""
+    return (
+        f"\nxwininfo: Window id: {win_id} \"{title}\"\n\n"
+        f"  Absolute upper-left X:  {x}\n"
+        f"  Absolute upper-left Y:  {y}\n"
+        f"  Relative upper-left X:  {x}\n"
+        f"  Relative upper-left Y:  {y}\n"
+        f"  Width: {width}\n"
+        f"  Height: {height}\n"
+        "  Depth: 32\n"
+        "  Visual: 0x82\n"
+        "  Visual Class: TrueColor\n"
+        "  Border width: 0\n"
+        "  Class: InputOutput\n"
+        "  Colormap: 0x2800001 (not installed)\n"
+        "  Bit Gravity State: NorthWestGravity\n"
+        "  Window Gravity State: NorthWestGravity\n"
+        "  Backing Store State: NotUseful\n"
+        "  Save Under State: no\n"
+        f"  Map State: {map_state}\n"
+        "  Override Redirect State: no\n"
+        f"  Corners:  +{x}+{y}  -0+{y}  -0-0  +{x}-0\n"
+        f"  -geometry {width}x{height}+{x}+{y}\n\n"
+    )
+
+
+def _xprop_output(pid, state="", window_type="_NET_WM_WINDOW_TYPE_NORMAL",
+                  frame=None, gtk_frame=None, title="Window"):
+    """`xprop -id ... _NET_WM_PID _NET_WM_STATE _NET_WM_WINDOW_TYPE
+    _NET_FRAME_EXTENTS _GTK_FRAME_EXTENTS _NET_WM_NAME`, in the real tool's
+    format -- including the trailing space after an empty state and the
+    `not found.` line for a property a window does not set."""
+    lines = [
+        f"_NET_WM_PID(CARDINAL) = {pid}",
+        f"_NET_WM_STATE(ATOM) = {state}",
+        f"_NET_WM_WINDOW_TYPE(ATOM) = {window_type}",
+        "_NET_FRAME_EXTENTS:  not found." if frame is None
+        else f"_NET_FRAME_EXTENTS(CARDINAL) = {frame}",
+        "_GTK_FRAME_EXTENTS:  not found." if gtk_frame is None
+        else f"_GTK_FRAME_EXTENTS(CARDINAL) = {gtk_frame}",
+        f'_NET_WM_NAME(UTF8_STRING) = "{title}"',
+    ]
+    return "\n".join(lines) + "\n"
+
+
+class TestX11ActiveWindow:
+    """Active window on X11: `_NET_ACTIVE_WINDOW` names the window, `xprop`
+    says whose it is and what frame it has, and `xwininfo -id` measures it.
+
+    Every number below was read off a live GNOME 46 X11 desktop; only the
+    window titles are made up. Driven through a fake `subprocess.run`, so
+    nothing here depends on what is focused on the machine running it.
+    """
+
+    WIN_ID = "0x3800004"
+
+    @pytest.fixture(autouse=True)
+    def _x11_with_tools(self, monkeypatch):
+        _set_session_type(monkeypatch, "x11")
+        monkeypatch.setattr(capture.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def _answer(self, monkeypatch, props="", info="", active=WIN_ID, calls=None):
+        def fake_run(argv, **kwargs):
+            if calls is not None:
+                calls.append(argv)
+            if argv[:2] == ["xprop", "-root"]:
+                stdout = f"_NET_ACTIVE_WINDOW(WINDOW): window id # {active}\n"
+            elif argv[:3] == ["xprop", "-id", active]:
+                stdout = props
+            elif argv[:3] == ["xwininfo", "-id", active]:
+                stdout = info
+            else:
+                raise AssertionError(f"unexpected command {argv!r}")
+            return Mock(stdout=stdout, returncode=0)
+
+        monkeypatch.setattr(capture.subprocess, "run", fake_run)
+
+    def test_a_server_side_title_bar_is_part_of_the_frame(self, monkeypatch):
+        # Slack, decorated by mutter: the client window starts below the
+        # 37px title bar, and `_NET_FRAME_EXTENTS` is how much to add back.
+        self._answer(
+            monkeypatch,
+            props=_xprop_output(11716, frame="0, 0, 37, 0", title="general - Slack"),
+            info=_xwininfo_output(self.WIN_ID, "general - Slack", 2332, 327, 1199, 778),
+        )
+
+        assert capture._x11_active_window() == (
+            "general - Slack", QRectF(2332, 290, 1199, 815)
+        )
+
+    def test_a_client_drawn_shadow_is_not_part_of_the_frame(self, monkeypatch):
+        # Nautilus draws its own frame and shadow inside its own window, so
+        # the X11 rect is 122px wider than anything anyone sees.
+        self._answer(
+            monkeypatch,
+            props=_xprop_output(3314800, gtk_frame="61, 61, 55, 67", title="Trash"),
+            info=_xwininfo_output(self.WIN_ID, "Trash", 1909, 27, 1351, 996),
+        )
+
+        assert capture._x11_active_window() == ("Trash", QRectF(1970, 82, 1229, 874))
+
+    def test_a_maximised_window_is_taken_whole(self, monkeypatch):
+        self._answer(
+            monkeypatch,
+            props=_xprop_output(
+                3393719,
+                state="_NET_WM_STATE_MAXIMIZED_HORZ, _NET_WM_STATE_MAXIMIZED_VERT",
+                title="Example - Brave",
+            ),
+            info=_xwininfo_output(self.WIN_ID, "Example - Brave", 4480, 188, 1920, 1080),
+        )
+
+        assert capture._x11_active_window() == (
+            "Example - Brave", QRectF(4480, 188, 1920, 1080)
+        )
+
+    def test_a_window_of_this_process_is_never_the_answer(self, monkeypatch):
+        # Snipux's own windows, whichever is focused: the overlay asks
+        # before it is shown, but Settings or a review window can be in
+        # front when a snip starts.
+        self._answer(
+            monkeypatch,
+            props=_xprop_output(os.getpid(), title="snipux"),
+            info=_xwininfo_output(self.WIN_ID, "snipux", 0, 0, 800, 600),
+        )
+
+        assert capture._x11_active_window() is None
+
+    def test_nothing_focused_asks_nothing_more(self, monkeypatch):
+        calls = []
+        self._answer(monkeypatch, active="0x0", calls=calls)
+
+        assert capture._x11_active_window() is None
+        assert calls == [["xprop", "-root", "_NET_ACTIVE_WINDOW"]]
+
+    def test_a_window_manager_that_does_not_say_is_none(self, monkeypatch):
+        monkeypatch.setattr(
+            capture.subprocess, "run",
+            lambda *a, **k: Mock(stdout="_NET_ACTIVE_WINDOW:  not found.\n", returncode=0),
+        )
+
+        assert capture._x11_active_window() is None
+
+    def test_the_desktop_is_not_a_window_to_take(self, monkeypatch):
+        # Clicking the desktop on GNOME focuses its desktop-icons window,
+        # which covers the whole monitor, top bar included.
+        self._answer(
+            monkeypatch,
+            props=_xprop_output(
+                3861348,
+                state="_NET_WM_STATE_SKIP_PAGER, _NET_WM_STATE_SKIP_TASKBAR, _NET_WM_STATE_STICKY",
+                window_type="_NET_WM_WINDOW_TYPE_DESKTOP",
+                title="Desktop Icons 1",
+            ),
+            info=_xwininfo_output(self.WIN_ID, "Desktop Icons 1", 4480, 188, 1920, 1080),
+        )
+
+        assert capture._x11_active_window() is None
+
+    def test_a_minimised_window_is_not_taken_though_x11_calls_it_viewable(self, monkeypatch):
+        self._answer(
+            monkeypatch,
+            props=_xprop_output(
+                1232169, state="_NET_WM_STATE_HIDDEN, _NET_WM_STATE_STICKY",
+                frame="0, 0, 37, 0", title="Software Updater",
+            ),
+            info=_xwininfo_output(self.WIN_ID, "Software Updater", 637, 674, 645, 208),
+        )
+
+        assert capture._x11_active_window() is None
+
+    def test_an_unmapped_window_is_not_taken(self, monkeypatch):
+        self._answer(
+            monkeypatch,
+            props=_xprop_output(4242),
+            info=_xwininfo_output(self.WIN_ID, "Window", 0, 0, 800, 600, map_state="IsUnMapped"),
+        )
+
+        assert capture._x11_active_window() is None
+
+    @pytest.mark.parametrize("missing", ["xprop", "xwininfo"])
+    def test_a_missing_tool_is_none_rather_than_an_error(self, monkeypatch, missing):
+        monkeypatch.setattr(
+            capture.shutil, "which",
+            lambda binary: None if binary == missing else f"/usr/bin/{binary}",
+        )
+
+        assert capture._x11_active_window() is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [subprocess.CalledProcessError(1, ["xprop"]), subprocess.TimeoutExpired(["xprop"], 2), OSError()],
+        ids=["fails", "hangs", "cannot-run"],
+    )
+    def test_a_failing_query_is_none_rather_than_an_error(self, monkeypatch, error):
+        def raising_run(*a, **k):
+            raise error
+
+        monkeypatch.setattr(capture.subprocess, "run", raising_run)
+
+        assert capture._x11_active_window() is None
+
+    def test_wayland_cannot_name_another_apps_window_and_does_not_try(self, monkeypatch):
+        # Xwayland's `_NET_ACTIVE_WINDOW` only ever knows about other X11
+        # clients, so an answer from it would be wrong, not partial.
+        _set_session_type(monkeypatch, "wayland")
+        calls = []
+        self._answer(monkeypatch, calls=calls)
+
+        assert capture._x11_active_window() is None
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        "provider_cls",
+        (capture.X11WindowGeometryProvider, capture.XwininfoWindowGeometryProvider),
+        ids=lambda c: c.__name__,
+    )
+    def test_both_x11_providers_answer_with_it(self, monkeypatch, provider_cls):
+        self._answer(
+            monkeypatch,
+            props=_xprop_output(11716, frame="0, 0, 37, 0", title="general - Slack"),
+            info=_xwininfo_output(self.WIN_ID, "general - Slack", 2332, 327, 1199, 778),
+        )
+
+        assert provider_cls().active_window() == (
+            "general - Slack", QRectF(2332, 290, 1199, 815)
+        )
+
+
+class _FakeUser32Foreground(_FakeUser32Windows):
+    """`_FakeUser32Windows` plus the two calls `active_window` adds: which
+    window is in front, and which process owns a window."""
+
+    OTHER_PID = 2000
+
+    def __init__(self, windows, foreground, pids=None):
+        super().__init__(windows)
+        self._foreground = foreground
+        self._pids = pids or {}
+
+    def GetForegroundWindow(self):
+        return self._foreground
+
+    def GetWindowThreadProcessId(self, hwnd, pid_ref):
+        target = ctypes.cast(pid_ref, ctypes.POINTER(ctypes.c_uint32)).contents
+        target.value = self._pids.get(hwnd, self.OTHER_PID)
+        return 1
+
+
+class TestWindowsActiveWindow:
+    """Active window on Windows: `GetForegroundWindow`, measured with the
+    same DWM extended frame bounds a Window-mode pick uses."""
+
+    OWN_PID = 1000
+
+    def _provider(self, monkeypatch, windows, foreground, pids=None,
+                  frame_bounds=None, cloaked=None):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(
+            capture.ctypes,
+            "windll",
+            SimpleNamespace(
+                user32=_FakeUser32Foreground(windows, foreground, pids),
+                dwmapi=_FakeDwmapi(cloaked=cloaked, frame_bounds=frame_bounds),
+                kernel32=SimpleNamespace(GetCurrentProcessId=lambda: self.OWN_PID),
+            ),
+            raising=False,
+        )
+        return capture.WindowsWindowGeometryProvider()
+
+    @staticmethod
+    def _window(hwnd=1, title="Notepad", rect=(0, 0, 120, 120), **extra):
+        return {"hwnd": hwnd, "visible": True, "iconic": False,
+                "rect": rect, "title": title, **extra}
+
+    def test_it_is_the_foreground_windows_frame_without_its_resize_border(self, monkeypatch):
+        provider = self._provider(
+            monkeypatch, [self._window()], foreground=1,
+            frame_bounds={1: (10, 10, 100, 100)},
+        )
+
+        assert provider.active_window() == ("Notepad", QRectF(10, 10, 90, 90))
+
+    def test_it_is_converted_to_the_logical_space_the_contract_promises(self, monkeypatch):
+        # Win32 answers in physical pixels; at 150% the difference is a
+        # third of every coordinate, and invisible at 100%.
+        provider = self._provider(
+            monkeypatch, [self._window()], foreground=1,
+            frame_bounds={1: (300, 150, 1500, 1050)},
+        )
+        monkeypatch.setattr(
+            provider, "monitor_map",
+            lambda: [(QRectF(0, 0, 3840, 2160), QRectF(0, 0, 2560, 1440), 1.5)],
+        )
+
+        assert provider.active_window() == ("Notepad", QRectF(200, 100, 800, 600))
+
+    def test_a_window_of_this_process_is_never_the_answer(self, monkeypatch):
+        provider = self._provider(
+            monkeypatch, [self._window(title="Snipux")], foreground=1,
+            pids={1: self.OWN_PID}, frame_bounds={1: (10, 10, 100, 100)},
+        )
+
+        assert provider.active_window() is None
+
+    @pytest.mark.parametrize("class_name", ["Progman", "WorkerW", "Shell_TrayWnd"])
+    def test_the_shells_desktop_and_taskbar_are_not_windows_to_take(self, monkeypatch, class_name):
+        provider = self._provider(
+            monkeypatch, [self._window(title="", class_name=class_name)], foreground=1,
+            frame_bounds={1: (0, 0, 1920, 1080)},
+        )
+
+        assert provider.active_window() is None
+
+    def test_nothing_in_front_is_none(self, monkeypatch):
+        provider = self._provider(monkeypatch, [], foreground=0)
+
+        assert provider.active_window() is None
+
+    @pytest.mark.parametrize("state", ["hidden", "minimised", "cloaked"])
+    def test_a_window_nobody_can_see_is_not_taken(self, monkeypatch, state):
+        window = self._window(visible=state != "hidden", iconic=state == "minimised")
+        provider = self._provider(
+            monkeypatch, [window], foreground=1,
+            frame_bounds={1: (10, 10, 100, 100)}, cloaked={1: state == "cloaked"},
+        )
+
+        assert provider.active_window() is None
+
+    def test_off_windows_it_asks_nothing(self, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "linux")
+
+        assert capture.WindowsWindowGeometryProvider().active_window() is None

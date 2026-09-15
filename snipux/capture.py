@@ -409,6 +409,140 @@ class ScrotBackend(_ShellOutX11Backend):
         return ["scrot", path]
 
 
+def _run_x11_query(argv: list[str]) -> "str | None":
+    """stdout of one short `xprop`/`xwininfo` query, or None if it failed.
+
+    Bounded by a timeout because it runs while a snip is opening, and a
+    wedged X server should cost the Active window row, not the snip.
+    """
+    try:
+        result = subprocess.run(
+            argv, check=True, capture_output=True, text=True, timeout=2
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout
+
+
+def _xprop_field(output: str, name: str) -> "str | None":
+    """The value after `NAME(TYPE) =` in `xprop` output, or None when the
+    window does not set it (`xprop` prints `NAME:  not found.` for that).
+
+    Anchored on the whole name and its type, so asking for `_NET_WM_STATE`
+    cannot match a line that merely contains `_NET_WM_STATE_HIDDEN`.
+    """
+    match = re.search(
+        rf"^{re.escape(name)}\([^)]*\)\s*=\s?(.*)$", output, re.MULTILINE
+    )
+    return None if match is None else match.group(1)
+
+
+def _xprop_extents(value: "str | None") -> "tuple[int, int, int, int]":
+    """An extents property as `(left, right, top, bottom)` -- EWMH's order
+    for both `_NET_FRAME_EXTENTS` and `_GTK_FRAME_EXTENTS` -- or zeros when
+    the window does not set it."""
+    numbers = re.findall(r"-?\d+", value or "")
+    if len(numbers) != 4:
+        return (0, 0, 0, 0)
+    left, right, top, bottom = (int(number) for number in numbers)
+    return left, right, top, bottom
+
+
+def _x11_active_window() -> "tuple[str, QRectF] | None":
+    """`(title, rect)` of the X11 window that has focus, or None.
+
+    What both X11 providers answer `active_window()` with. Named by
+    `_NET_ACTIVE_WINDOW` and measured with `xwininfo -id`, rather than
+    looked up in either provider's window list, because neither list is
+    sure to hold it under that id. Mutter reparents a window with
+    server-side decorations into a frame window, so `xwininfo -root
+    -children` lists the frame while `_NET_ACTIVE_WINDOW` names the client
+    inside it. Measured on GNOME 46 X11: Slack's client 0x3800004 sat
+    14px inside frame 0x60003a, and was in no root-children list at all.
+
+    The client rect is then adjusted to the frame the compositor draws. It
+    grows by `_NET_FRAME_EXTENTS`, the server-side title bar the client
+    does not include, and shrinks by `_GTK_FRAME_EXTENTS`, the transparent
+    margin a client-decorated window draws its own shadow into. Measured on
+    the same desktop: Slack 0,0,37,0, Nautilus 61,61,55,67 -- a client rect
+    122px wider than the window anyone sees. A maximised Brave set neither,
+    and its client rect was exactly its monitor.
+
+    X11 root coordinates, used as absolute logical coordinates exactly as
+    both X11 providers use `wmctrl`'s and `xwininfo`'s numbers, so this and
+    a Window-mode pick agree about which space they are in.
+
+    None, never an exception, for anything it cannot name: a session that
+    is not X11 (Xwayland would only ever know about other X11 clients), no
+    `xprop` or `xwininfo`, no focused window, a window of this process, a
+    minimised or unmapped window, or the desktop or a dock -- clicking the
+    desktop on GNOME focuses its desktop-icons window, which covers the
+    whole monitor.
+    """
+    if detect_session_type() != "x11":
+        return None
+    if shutil.which("xprop") is None or shutil.which("xwininfo") is None:
+        return None
+
+    root = _run_x11_query(["xprop", "-root", "_NET_ACTIVE_WINDOW"])
+    match = re.search(r"window id # (0x[0-9a-fA-F]+)", root or "")
+    if match is None or int(match.group(1), 16) == 0:
+        return None
+    win_id = match.group(1)
+
+    props = _run_x11_query([
+        "xprop", "-id", win_id,
+        "_NET_WM_PID", "_NET_WM_STATE", "_NET_WM_WINDOW_TYPE",
+        "_NET_FRAME_EXTENTS", "_GTK_FRAME_EXTENTS", "_NET_WM_NAME",
+    ])
+    if props is None:
+        return None
+    if (_xprop_field(props, "_NET_WM_PID") or "").strip() == str(os.getpid()):
+        return None
+    # Minimised, on GNOME, is this state and not an unmapped window: a
+    # minimised Software Updater still reported `IsViewable`.
+    if "_NET_WM_STATE_HIDDEN" in (_xprop_field(props, "_NET_WM_STATE") or ""):
+        return None
+    window_type = _xprop_field(props, "_NET_WM_WINDOW_TYPE") or ""
+    if any(
+        kind in window_type for kind in XwininfoWindowGeometryProvider._FURNITURE_TYPES
+    ):
+        return None
+
+    info = _run_x11_query(["xwininfo", "-id", win_id])
+    if info is None or not re.search(
+        r"^\s*Map State:\s*IsViewable\s*$", info, re.MULTILINE
+    ):
+        return None
+    fields = dict(re.findall(
+        r"^\s*(Absolute upper-left X|Absolute upper-left Y|Width|Height):\s*(-?\d+)\s*$",
+        info,
+        re.MULTILINE,
+    ))
+    if len(fields) != 4:
+        return None
+
+    frame_left, frame_right, frame_top, frame_bottom = _xprop_extents(
+        _xprop_field(props, "_NET_FRAME_EXTENTS")
+    )
+    shadow_left, shadow_right, shadow_top, shadow_bottom = _xprop_extents(
+        _xprop_field(props, "_GTK_FRAME_EXTENTS")
+    )
+    rect = QRectF(
+        int(fields["Absolute upper-left X"]) - frame_left + shadow_left,
+        int(fields["Absolute upper-left Y"]) - frame_top + shadow_top,
+        int(fields["Width"]) + frame_left + frame_right - shadow_left - shadow_right,
+        int(fields["Height"]) + frame_top + frame_bottom - shadow_top - shadow_bottom,
+    )
+    if rect.width() <= 0 or rect.height() <= 0:
+        return None
+
+    title = _xprop_field(props, "_NET_WM_NAME") or ""
+    if len(title) >= 2 and title.startswith('"') and title.endswith('"'):
+        title = re.sub(r"\\(.)", r"\1", title[1:-1])
+    return title, rect
+
+
 class XwininfoWindowGeometryProvider:
     """Window geometry from `xwininfo`, for X11 sessions without `wmctrl`.
 
@@ -610,6 +744,13 @@ class XwininfoWindowGeometryProvider:
         """
         return None
 
+    def active_window(self) -> "tuple[str, QRectF] | None":
+        """The focused window, from `_x11_active_window`. Spelled out for
+        `browser_viewport`'s reason: the ABC's default never reaches a class
+        that duck-types it.
+        """
+        return _x11_active_window()
+
 
 class X11WindowGeometryProvider:
     """Real per-window geometry source for X11's window-selection mode.
@@ -724,6 +865,14 @@ class X11WindowGeometryProvider:
         cannot tell.
         """
         return None
+
+    def active_window(self) -> "tuple[str, QRectF] | None":
+        """The focused window, from `_x11_active_window` rather than from
+        `wmctrl -lG`. `wmctrl` reports the client window, which leaves out
+        a server-side title bar and keeps a client-drawn shadow, and this
+        mode promises the frame as the compositor draws it.
+        """
+        return _x11_active_window()
 
 
 def build_x11_registry() -> BackendRegistry:
@@ -1488,6 +1637,55 @@ class WindowsWindowGeometryProvider:
         )(_visit)
         user32.EnumWindows(enum_proc, 0)
         return found[0] if found else None
+
+    def active_window(self) -> "tuple[str, QRectF] | None":
+        """`(title, absolute logical frame rect)` of the foreground window,
+        or None when it is not one to take.
+
+        `GetForegroundWindow`, asked while the overlay is still hidden (see
+        `GeometryProvider.active_window`), so it is still the user's window.
+        The rect is `_frame_bounds`, the same extended frame bounds a
+        Window-mode pick of that window gives: the frame DWM draws, without
+        the invisible resize border `GetWindowRect` adds around it.
+
+        None when the foreground window belongs to this process -- Settings,
+        say -- or is the shell's desktop or taskbar. Neither is walked past
+        to the window behind it. That would be a guess at what the user
+        meant, where a greyed row with its reason is not. Hidden, minimised
+        and cloaked windows are refused for `list_windows`' reasons.
+
+        `_is_larger_than_its_monitor` is deliberately not applied. In the
+        hover list it guards against shell windows spanning the desktop,
+        which are refused by class here anyway, so all it could add is
+        refusing a window the user has sized past their monitor -- and the
+        overlay clips to the frame for that.
+        """
+        if not self.is_available():
+            return None
+        try:
+            user32 = ctypes.windll.user32
+            dwmapi = ctypes.windll.dwmapi
+            kernel32 = ctypes.windll.kernel32
+        except (AttributeError, OSError):
+            return None
+
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        pid = ctypes.c_uint32(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == kernel32.GetCurrentProcessId():
+            return None
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return None
+        if self._is_cloaked(dwmapi, hwnd) or self._is_shell_window(user32, hwnd):
+            return None
+        rect = self._frame_bounds(dwmapi, user32, hwnd)
+        if rect is None:
+            return None
+        # Physical pixels until this line, like every Win32 rect here (see
+        # `monitor_map`), and converted at the one place it leaves the class.
+        return self._window_title(user32, hwnd), self._to_logical(rect)
 
     def monitor_map(self) -> "list[tuple[QRectF, QRectF, float]]":
         """`[(physical monitor rect, logical screen rect, scale)]`, or `[]`

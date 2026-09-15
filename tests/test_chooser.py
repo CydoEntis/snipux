@@ -361,9 +361,13 @@ class TestEveryModeRowSaysWhatItCaptures:
     user could actually pick explained nothing.
     """
 
-    def _notes(self, kind, browser=False):
+    def _notes(self, kind, found=False):
+        # `found` seeds both modes that grey themselves when there is
+        # nothing to take -- Browser and Active window -- so their real
+        # notes are read, not just their reasons.
         chooser = Chooser(parent=None)
-        chooser.set_browser_available(browser)
+        chooser.set_browser_available(found)
+        chooser.set_active_window_available(found)
         chooser.set_kind(kind)
         rows, _selected, _width = chooser._rows_for("mode")
         return {row[0]: row[3] for row in rows}
@@ -383,7 +387,20 @@ class TestEveryModeRowSaysWhatItCaptures:
     def test_the_record_side_says_a_window_is_filmed_where_it_is(self):
         # The recorder is handed a rectangle once and does not follow the
         # window afterwards, which is the surprise worth naming up front.
-        assert "now" in self._notes("record")["Window"].lower()
+        assert "where it is" in self._notes("record")["Window"].lower()
+
+    def test_window_says_what_it_asks_of_you_on_both_sides(self):
+        # "One application's window" said what Window takes, which is also
+        # what Active window takes. What sets Window apart is that you aim
+        # it, so that is what its note says.
+        for kind in ("stills", "record"):
+            assert "click" in self._notes(kind, found=True)["Window"].lower()
+
+    def test_window_and_active_window_cannot_be_confused_at_a_glance(self):
+        for kind in ("stills", "record"):
+            notes = self._notes(kind, found=True)
+            assert notes["Window"] != notes[tokens.ACTIVE_WINDOW_MODE]
+            assert "click" not in notes[tokens.ACTIVE_WINDOW_MODE].lower()
 
     def test_a_disabled_rows_reason_outranks_its_description(self):
         notes = self._notes("record")
@@ -404,13 +421,13 @@ class TestEveryModeRowSaysWhatItCaptures:
         text_x = pad_h + metric.MENU_ROW_ICON + 9
         budget = metric.MENU_MODE_W - 10 - text_x - pad_h - (metric.MENU_TICK + 8)
         metrics = QFontMetricsF(_font(11, 400))
-        # Both browser states, because the notes differ between them: with
-        # no browser found, every browser mode shows the same short
-        # "unavailable" reason and their real notes are never measured at
+        # Both found states, because the notes differ between them: with
+        # nothing found, Browser and Active window show their short
+        # "unavailable" reasons and their real notes are never measured at
         # all. That gap let a 32-character note ship unchecked.
         for kind in ("stills", "record"):
-            for browser in (False, True):
-                for mode, note in self._notes(kind, browser).items():
+            for found in (False, True):
+                for mode, note in self._notes(kind, found).items():
                     assert metrics.horizontalAdvance(note) <= budget, (
                         f"{mode} on the {kind} side would elide: {note!r}"
                     )
@@ -436,9 +453,11 @@ class TestEveryModeRowSaysWhatItCaptures:
 class TestTheModeMenuNarrowsOnTheRecordSide:
     def test_stills_offers_every_mode_and_disables_none_of_them(self):
         chooser = Chooser(parent=None)
-        # Seeded, or `Tab` is the one row the stills side does grey out --
-        # see TestTheTabModeNeedsABrowser, which is about that rule itself.
+        # Seeded, or `Tab` and Active window are the rows the stills side
+        # does grey out -- see TestTheTabModeNeedsABrowser and
+        # TestActiveWindowNeedsAWindowToTake, which are about those rules.
         chooser.set_browser_available(True)
+        chooser.set_active_window_available(True)
 
         rows, _selected, _width = chooser._rows_for("mode")
 
@@ -960,3 +979,63 @@ class TestTheTabModeNeedsABrowser:
         note, disabled = by_value[tokens.BROWSER_MODE]
         assert disabled is True
         assert note == tokens.RECORD_DISABLED_MODES[tokens.BROWSER_MODE]
+
+
+class TestActiveWindowNeedsAWindowToTake:
+    """Active window takes the window the user was in. Where there is none
+    to take -- the desktop had focus, or the platform cannot name another
+    application's window at all -- the row says why instead.
+    """
+
+    @staticmethod
+    def _row(chooser):
+        rows, _selected, _width = chooser._rows_for("mode")
+        by_value = {value: (note, disabled) for value, _i, _l, note, _s, disabled in rows}
+        return by_value[tokens.ACTIVE_WINDOW_MODE]
+
+    def test_it_is_greyed_with_a_reason_by_default(self):
+        assert self._row(Chooser(parent=None)) == (tokens.ACTIVE_WINDOW_UNAVAILABLE, True)
+
+    def test_it_says_when_the_platform_cannot_name_a_window(self):
+        chooser = Chooser(parent=None)
+
+        chooser.set_active_window_available(False, tokens.ACTIVE_WINDOW_UNSUPPORTED)
+
+        assert self._row(chooser) == (tokens.ACTIVE_WINDOW_UNSUPPORTED, True)
+
+    def test_the_shortcut_is_inert_while_the_row_is_disabled(self):
+        chooser = Chooser(parent=None)
+        before = chooser.mode
+
+        chooser.handle_key(ord("A"), "A")
+
+        assert chooser.mode == before
+
+    def test_with_a_window_found_choosing_it_fires_rather_than_arms(self):
+        chooser = Chooser(parent=None)
+        chooser.set_active_window_available(True)
+        fired, armed = [], []
+        chooser.fireImmediately.connect(fired.append)
+        chooser.modeChosen.connect(armed.append)
+
+        chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert fired == [tokens.ACTIVE_WINDOW_MODE]
+        assert armed == []
+        assert chooser.phase == "choosing"
+
+    def test_it_is_offered_on_the_record_side_where_it_arms(self):
+        # Deliberately absent from RECORD_DISABLED_MODES; the comment there
+        # says why. Nothing fires immediately on the record side.
+        chooser = Chooser(parent=None)
+        chooser.set_active_window_available(True)
+        chooser.set_kind("record")
+        fired, armed = [], []
+        chooser.fireImmediately.connect(fired.append)
+        chooser.modeChosen.connect(armed.append)
+
+        assert self._row(chooser)[1] is False
+        chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert fired == []
+        assert armed == [tokens.ACTIVE_WINDOW_MODE]

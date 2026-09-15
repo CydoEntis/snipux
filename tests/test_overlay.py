@@ -7505,6 +7505,246 @@ class TestTheTabModeCapturesTheBrowsersPage:
         assert UnsupportedGeometryProvider().browser_viewport() is None
 
 
+def _snipux_on_screen() -> bool:
+    return any(widget.isVisible() for widget in QApplication.topLevelWidgets())
+
+
+class _FakeFocusedWindowProvider(UnsupportedGeometryProvider):
+    """Answers `active_window` with each of `answers` in turn, the last
+    repeating, and records whether any snipux window was on screen at each
+    ask. `available` is `is_available`'s answer."""
+
+    def __init__(self, *answers, available=True):
+        self._answers = list(answers)
+        self._available = available
+        self.asked_while_on_screen: list[bool] = []
+
+    def is_available(self):
+        return self._available
+
+    def active_window(self):
+        self.asked_while_on_screen.append(_snipux_on_screen())
+        if len(self._answers) > 1:
+            return self._answers.pop(0)
+        return self._answers[0] if self._answers else None
+
+
+class _WhateverHasFocusProvider(UnsupportedGeometryProvider):
+    """Answers the way a platform's focus query does: with whatever has
+    focus when it is asked. Once any snipux window is on screen, that is
+    snipux itself -- `SNIPUX`, the whole overlay -- which is exactly the
+    answer the overlay must never end up taking."""
+
+    USERS_WINDOW = QRectF(-1720, 300, 1280, 700)
+    SNIPUX = QRectF(-1920, 0, 3840, 1080)
+
+    def is_available(self):
+        return True
+
+    def active_window(self):
+        if _snipux_on_screen():
+            return ("snipux", self.SNIPUX)
+        return ("notes", self.USERS_WINDOW)
+
+
+class TestActiveWindowTakesTheWindowTheUserWasIn:
+    """Active window takes the focused application's window the moment it
+    is chosen, with nothing to aim at.
+
+    Driven entirely through fake providers, like the Browser tests above:
+    nothing here may pass or fail by what is focused on the machine
+    running it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self, monkeypatch):
+        _close_stray_toplevel_windows()
+        # `set_kind("record")` below would otherwise write this machine's
+        # real config, and a stale write could open a fresh overlay on the
+        # record side.
+        monkeypatch.setattr(overlay_module.setup_desktop, "save_kind", lambda *a, **k: True)
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_kind", lambda *a, **k: "stills")
+
+    # A desktop whose origin is not (0, 0), so a local-for-absolute mix-up
+    # is a whole monitor's error rather than an invisible one.
+    LEFT = QRectF(-1920, 0, 1920, 1080)
+    PRIMARY = QRectF(0, 0, 1920, 1080)
+    ORIGIN = (-1920, 0)
+    SIZE = (3840, 1080)
+    # Absolute (-1720, 300) is window-local (200, 300) against ORIGIN.
+    NOTES = ("notes", QRectF(-1720, 300, 1280, 700))
+    NOTES_LOCAL = QRect(200, 300, 1280, 700)
+
+    def _frame(self):
+        return make_frame(image_size=self.SIZE, logical_size=self.SIZE, logical_origin=self.ORIGIN)
+
+    def _overlay(self, provider, **kwargs):
+        overlay = OverlayWindow(
+            self._frame(),
+            monitor_geometries=[self.PRIMARY, self.LEFT],
+            geometry_provider=provider,
+            **kwargs,
+        )
+        overlay.setGeometry(round(self.ORIGIN[0]), round(self.ORIGIN[1]), *self.SIZE)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_choosing_it_takes_the_window_without_arming(self):
+        overlay = self._overlay(_FakeFocusedWindowProvider(self.NOTES))
+
+        overlay._chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert overlay._selection == self.NOTES_LOCAL
+        assert overlay._chooser.phase == "choosing", "nothing to aim at, so it never arms"
+
+    def test_its_shortcut_takes_it_too(self):
+        overlay = self._overlay(_FakeFocusedWindowProvider(self.NOTES))
+
+        overlay._chooser.handle_key(ord("A"), "A")
+
+        assert overlay._selection == self.NOTES_LOCAL
+
+    def test_its_key_is_not_taken_once_something_is_selected(self):
+        # A is also Arrow on the stills bar. The chooser takes keys only
+        # while nothing is selected, so the two never compete for it.
+        overlay = self._overlay(_FakeFocusedWindowProvider(self.NOTES))
+        overlay.set_selection(QRect(10, 10, 100, 100))
+
+        QTest.keyClick(overlay, Qt.Key.Key_A)
+
+        assert overlay._chooser.mode != tokens.ACTIVE_WINDOW_MODE
+        assert overlay._selection == QRect(10, 10, 100, 100)
+
+    def test_snipux_is_never_the_window_it_takes(self):
+        # The trap: by the time the row is picked the chooser is on screen
+        # and is the focused window, so a provider asked then names snipux.
+        # This one answers the way a real focus query does, and the snip
+        # must still land on the window the user was in.
+        overlay = self._overlay(_WhateverHasFocusProvider())
+        assert _snipux_on_screen()
+
+        overlay._chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert overlay._selection == self.NOTES_LOCAL
+
+    def test_it_is_asked_once_before_snipux_is_on_screen(self):
+        provider = _FakeFocusedWindowProvider(self.NOTES)
+        overlay = self._overlay(provider)
+
+        overlay._dispatch_capture_mode(tokens.ACTIVE_WINDOW_MODE)
+        overlay._dispatch_capture_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert provider.asked_while_on_screen == [False]
+
+    def test_the_row_is_offered_when_a_window_is_found(self):
+        overlay = self._overlay(_FakeFocusedWindowProvider(self.NOTES))
+
+        assert overlay._chooser._unavailable_reason(tokens.ACTIVE_WINDOW_MODE) is None
+
+    def test_the_row_is_greyed_when_there_is_nothing_to_take(self):
+        overlay = self._overlay(_FakeFocusedWindowProvider(None))
+
+        assert (
+            overlay._chooser._unavailable_reason(tokens.ACTIVE_WINDOW_MODE)
+            == tokens.ACTIVE_WINDOW_UNAVAILABLE
+        )
+
+    def test_the_row_says_so_where_the_platform_cannot_name_one(self):
+        # UnsupportedGeometryProvider is what Wayland gets.
+        overlay = self._overlay(UnsupportedGeometryProvider())
+
+        assert (
+            overlay._chooser._unavailable_reason(tokens.ACTIVE_WINDOW_MODE)
+            == tokens.ACTIVE_WINDOW_UNSUPPORTED
+        )
+
+    def test_nothing_found_selects_nothing(self):
+        overlay = self._overlay(_FakeFocusedWindowProvider(None))
+
+        overlay._dispatch_capture_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert overlay._selection is None
+
+    def test_a_window_across_two_monitors_comes_out_whole(self):
+        overlay = self._overlay(_FakeFocusedWindowProvider(("notes", QRectF(-400, 100, 800, 600))))
+
+        overlay._dispatch_capture_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert overlay._selection == QRect(1520, 100, 800, 600)
+
+    def test_a_window_reaching_past_the_desktop_is_clipped_to_it(self):
+        overlay = self._overlay(_FakeFocusedWindowProvider(("notes", QRectF(-2000, 300, 1280, 700))))
+
+        overlay._dispatch_capture_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert overlay._selection == QRect(0, 300, 1200, 700)
+
+    def test_a_window_entirely_off_the_desktop_selects_nothing(self):
+        overlay = self._overlay(_FakeFocusedWindowProvider(("notes", QRectF(9000, 9000, 800, 600))))
+
+        overlay._dispatch_capture_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert overlay._selection is None
+
+    def test_instant_finishes_the_moment_it_is_chosen(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay(_FakeFocusedWindowProvider(self.NOTES))
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+
+        overlay._chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert overlay.outcome == "instant"
+        assert len(copied) == 1
+
+    def test_on_the_record_side_it_frames_the_window_for_recording(self):
+        requests = []
+        overlay = self._overlay(
+            _FakeFocusedWindowProvider(self.NOTES),
+            on_recording_requested=lambda rect, delay, after: requests.append(rect),
+        )
+        overlay._chooser.set_kind("record")
+
+        overlay._chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+
+        assert requests == [self.NOTES[1]]
+        assert overlay._armed_for_recording is True
+
+    def _choose_after_a_delay(self, provider):
+        registry = BackendRegistry([_FakeCaptureBackend(self._frame())])
+        overlay = self._overlay(provider, registry=registry)
+        overlay._on_delay_changed(tokens.DELAYS[1])
+        overlay._chooser.set_mode(tokens.ACTIVE_WINDOW_MODE)
+        assert not overlay.isVisible()
+        for _ in range(3):
+            overlay._delay_timer.timeout.emit()
+        return overlay
+
+    def test_after_a_delay_it_takes_the_window_focused_by_then(self):
+        # A delay exists so the screen can change first, and which window
+        # has focus is part of that.
+        terminal = ("terminal", QRectF(100, 50, 900, 500))
+        provider = _FakeFocusedWindowProvider(self.NOTES, terminal)
+
+        overlay = self._choose_after_a_delay(provider)
+
+        assert overlay._selection == QRect(2020, 50, 900, 500)
+        assert provider.asked_while_on_screen == [False, False]
+
+    def test_after_a_delay_it_keeps_the_first_window_if_focus_has_not_settled(self):
+        provider = _FakeFocusedWindowProvider(self.NOTES, None)
+
+        overlay = self._choose_after_a_delay(provider)
+
+        assert overlay._selection == self.NOTES_LOCAL
+
+    def test_a_provider_that_knows_nothing_about_focus_still_works(self):
+        assert UnsupportedGeometryProvider().active_window() is None
+
+
 class TestReuseLastRegionPreselectsIt:
     """The `reuse last region` preference: Region mode opens on the
     rectangle the last snip came from instead of an empty overlay.
@@ -8699,8 +8939,10 @@ class TestCaptureChooser:
         overlay = self._overlay()
         # `Tab` is greyed, and its key correspondingly inert, without a
         # browser -- seeded so this test stays about the key map rather
-        # than that rule, which test_chooser.py covers on its own.
+        # than that rule, which test_chooser.py covers on its own. Active
+        # window likewise.
         overlay._chooser.set_browser_available(True)
+        overlay._chooser.set_active_window_available(True)
         fired = []
         overlay._chooser.fireImmediately.connect(fired.append)
 

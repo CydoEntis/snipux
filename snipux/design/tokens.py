@@ -278,17 +278,28 @@ SHORTCUTS = {
 # window, you're capturing a full screen?" One is an application's window,
 # the other is a whole monitor, and only the note distinguishes them at the
 # moment of choosing.
+#
+# Window is the exception, and says what it asks of you instead (#44). Once
+# Active window joined the menu, "One application's window" described both
+# rows equally well: they take the same kind of thing and differ only in
+# whether you aim. So Window's note leads with the hover and the click, and
+# Active window's names the window you are already in.
 CAPTURE_MODES = [
-    ("Region",      "crop",    "Any rectangle you drag"),
-    ("Window",      "window",  "One application's window"),
-    ("Full screen", "monitor", "The whole monitor you are on"),
-    ("Browser",     "panel",   "Your browser page, no toolbars"),
+    ("Region",        "crop",         "Any rectangle you drag"),
+    ("Window",        "window",       "Hover a window and click it"),
+    ("Full screen",   "monitor",      "The whole monitor you are on"),
+    ("Active window", "windowActive", "The window you are in"),
+    ("Browser",       "panel",        "Your browser page, no toolbars"),
 ]
 
 # The mode that captures a browser's page area. Named because three modules
 # read it -- the chooser greys the row, the overlay dispatches on it, and
 # IMMEDIATE_MODES lists it.
 BROWSER_MODE = "Browser"
+
+# The mode that captures the window the user was in when the snip started.
+# Named for the same three readers as BROWSER_MODE.
+ACTIVE_WINDOW_MODE = "Active window"
 
 
 
@@ -298,6 +309,16 @@ BROWSER_MODE = "Browser"
 # has space for a reason, not for a diagnosis, and every one of them means
 # the same thing to the user.
 BROWSER_UNAVAILABLE = "No browser window found"
+
+# What the Active window row says instead of its note. Two reasons where
+# BROWSER_UNAVAILABLE has one, because Wayland -- the session most Linux
+# users are on -- can never name another application's window, and "No
+# focused window found", said to someone looking straight at a focused
+# window, reads as a bug. UNSUPPORTED is a provider that cannot answer at
+# all; UNAVAILABLE is one that can but found nothing to take, because the
+# desktop has focus, or snipux itself does.
+ACTIVE_WINDOW_UNAVAILABLE = "No focused window found"
+ACTIVE_WINDOW_UNSUPPORTED = "Not available on this desktop"
 
 # Notes that replace the above on the record side only, where a mode means
 # something narrower than it does for a screenshot.
@@ -310,7 +331,11 @@ RECORD_MODE_NOTE = {
     # worse than none. The rest of the story -- that a window moved
     # mid-recording leaves the recording filming where it used to be -- is
     # in `RECORD_MODE_NEXT_STEP`, which has a whole pill to itself.
-    "Window": "Films where it is right now",
+    # Leads with the click, as the stills note does, so both sides describe
+    # the mode by what it asks of you.
+    "Window": "Click one; films where it is",
+    # Active window needs no entry: "The window you are in" is as true of a
+    # recording, and its caveat -- the same one -- is in the pill.
 }
 
 DELAYS = ["No delay", "3s", "5s", "10s"]
@@ -745,10 +770,11 @@ HIDE_SENSITIVE_HINT = {
 }
 
 MODE_NEXT_STEP = {
-    "Region":      "Drag anywhere to frame a region",
-    "Window":      "Hover a window, click to take it",
-    "Full screen": "Grabs this monitor the moment you choose it",
-    "Browser":     "Grabs your browser's page the moment you choose it",
+    "Region":        "Drag anywhere to frame a region",
+    "Window":        "Hover a window, click to take it",
+    "Full screen":   "Grabs this monitor the moment you choose it",
+    "Active window": "Grabs your focused window the moment you choose it",
+    "Browser":       "Grabs your browser's page the moment you choose it",
 }
 
 # Mode shortcuts. Live whenever the chooser is on screen, armed or not.
@@ -757,16 +783,22 @@ MODE_NEXT_STEP = {
 # gets said properly here.
 RECORD_MODE_NEXT_STEP = {
     "Window": "Click a window to frame it -- moving it later will not follow",
+    "Active window": "Frames the window you are in -- moving it later will not follow",
 }
 
 MODE_KEYS = {
     "R": "Region", "W": "Window", "F": "Full screen", "B": "Browser",
+    # A is also Arrow on the stills bar, and the two are never live at the
+    # same moment: the chooser takes keys only while nothing is selected,
+    # and the bar exists only once something is. That split already lets R
+    # be Region here and Rectangle there.
+    "A": "Active window",
 }
 
-# Full screen is the only mode with nothing left to aim at, so choosing it
-# fires the grab immediately (after any delay). Region and Window arm and wait.
+# Modes with nothing left to aim at, so choosing one fires the grab
+# immediately (after any delay). Region and Window arm and wait.
 # On the record side nothing fires immediately -- see RECORD_DISABLED_MODES.
-IMMEDIATE_MODES = ["Full screen", BROWSER_MODE]
+IMMEDIATE_MODES = ["Full screen", BROWSER_MODE, ACTIVE_WINDOW_MODE]
 
 # Destinations, from the locked capture-flow handoff (docs/design/flow/).
 # Merged one structure at a time as each gains a consumer rather than all at
@@ -838,6 +870,13 @@ KIND_DEFAULT = "stills"
 # so it needed no new machinery -- only asking for. Note the recorder films
 # a fixed rectangle, so a window moved or resized mid-recording keeps
 # filming the rectangle it started in.
+#
+# Active window is left off this list on purpose, for the same reason. It
+# resolves to a rect before anything is filmed, and from there its record
+# path is Window's, with nothing new downstream: the rect lands on the ready
+# stage, framed on the frozen frame and still reframeable, and nothing is
+# filmed until Record is pressed. A wrong rect is seen before it is
+# recorded. Window's caveat applies to it too, and its pill says so.
 # Full screen has nothing left to aim at on the stills side, but on the
 # record side there is equally nothing *downstream* wired up yet, so it must
 # not fire immediately there -- it arms and waits like Region does.
