@@ -49,12 +49,11 @@ you are dragging.
 
 ### Linux
 
-First, the things Ubuntu may not already have — [pipx](https://pipx.pypa.io/),
-`git` (which pipx shells out to for the install below), and one library Qt needs
-that nothing else on a stock desktop pulls in:
+First, the things Ubuntu may not already have — [pipx](https://pipx.pypa.io/)
+and one library Qt needs that nothing else on a stock desktop pulls in:
 
 ```sh
-sudo apt install pipx git libxcb-cursor0
+sudo apt install pipx libxcb-cursor0
 pipx ensurepath      # only needed once, and only if pipx was just installed
 ```
 
@@ -63,15 +62,17 @@ crashes on launch, behind four lines of Qt plugin text that name the library
 but not the package. Then:
 
 ```sh
-pipx install git+https://github.com/CydoEntis/snipux.git
+pipx install snipux
 snipux --setup
 snipux &
 ```
 
-`pipx` gives Snipux and its dependencies their own isolated environment and
-puts a `snipux` launcher on `PATH`. `--setup` writes the pieces `pipx` can't —
-the `.desktop` entry, the autostart entry, and the GNOME shortcut — and is safe
-to re-run.
+**pipx, not `pip`, on Linux.** A distribution's Python refuses a system-wide
+`pip install` outright — "externally-managed-environment" — and it is right
+to: that Python belongs to apt. pipx gives Snipux and its dependencies an
+environment of their own and puts a `snipux` launcher on `PATH`. `--setup`
+writes the pieces pipx can't — the `.desktop` entry, the autostart entry, and
+the GNOME shortcut — and is safe to re-run.
 
 **The third line is not optional the first time.** The shortcut runs
 `snipux --snip`, which needs a resident Snipux to talk to, and `--setup` only
@@ -81,7 +82,8 @@ does this step for you, which is why it isn't mentioned there.)
 
 That's it — press **Ctrl+Alt+S**.
 
-Prefer SSH, or contributing rather than just using it?
+Contributing rather than just using it? Install the repository itself, so
+`pipx upgrade` refetches the branch rather than the last release:
 
 ```sh
 pipx install git+ssh://git@github.com/CydoEntis/snipux.git
@@ -160,7 +162,7 @@ was installed, and the same machine cannot tell you which:
 | Installed with | `snipux --update` | `py -m snipux --update` |
 |---|---|---|
 | `py -m pip install …` (this README) | only if Python's `Scripts` folder is on `PATH` | ✅ |
-| `pipx install …` (an older README) | ✅ | ❌ `No module named snipux` |
+| `pipx install snipux` (Linux) | ✅ | ❌ `No module named snipux` |
 
 `pipx` puts Snipux in an environment of its own and a launcher on `PATH`, so
 the bare command works and `py -m` cannot see it at all — `py` runs the
@@ -169,19 +171,28 @@ way round. Try the bare command first, since it is shorter and covers the
 older instructions people may already have followed.
 
 **Installed with pipx? There is nothing to undo.** `pipx upgrade` is the
-cleanest route for those installs, and it needs no reinstalling and no
+cleanest route for those installs, and needs no reinstalling and no
 uninstalling first:
 
-```powershell
+```sh
 pipx upgrade snipux
 ```
 
-The original `pipx install git+https://github.com/CydoEntis/snipux.git`
-recorded that URL, and it tracks the default branch — so upgrading refetches
-`main` and lands the same code the instructions above install. There is no
-reason to switch a working pipx install over to `pip`, and doing so without
-uninstalling first leaves two copies fighting over one Ctrl+Alt+S
-registration and two Startup entries.
+**Installed from a GitHub URL, before Snipux was on PyPI?** Also nothing to
+undo. It is the same package under the same name, so upgrading replaces it in
+place — pip uninstalls the old copy itself:
+
+```powershell
+py -m pip install --upgrade snipux
+```
+
+An install made from `git+https://github.com/CydoEntis/snipux.git` is the one
+exception: pipx recorded that URL and keeps tracking the branch, so it
+upgrades to the tip of `main` rather than to the newest release. That is
+usually what someone who installed that way wanted. There is no reason to
+switch a working pipx install over to `pip`, and doing so without uninstalling
+first leaves two copies fighting over one Ctrl+Alt+S registration and two
+Startup entries.
 
 Either way `--update` runs exactly this on their behalf — it is not a second
 update mechanism, just the same one without a command to keep somewhere
@@ -195,7 +206,7 @@ Nothing else to run: the shortcut and hotkey point at a location that does not
 change between versions.
 
 **Check it worked:** tray → Settings, bottom-left, e.g.
-`Snipux 0.2.0 / Qt 6.11.0 · Windows`.
+`Snipux 0.6.0 / Qt 6.11.0 · Windows`.
 
 > `--upgrade` compares versions, so **every release needs a new version
 > number** in `pyproject.toml`. Left the same, pip decides the requirement is
@@ -236,7 +247,10 @@ python -m build --wheel
 ```
 
 That writes `dist/snipux-<version>-py3-none-any.whl`, which installs the same
-way — `py -m pip install snipux-0.2.0-py3-none-any.whl`.
+way — `py -m pip install snipux-0.6.0-py3-none-any.whl`. Every release
+also carries its wheel and sdist on
+[its GitHub release page](https://github.com/CydoEntis/snipux/releases), so
+there is nothing to build for this.
 
 ### The shortcut
 
@@ -452,7 +466,7 @@ Settings.
 | `snipux --setup` | Install desktop integration. Safe to re-run |
 | `snipux --setup --shortcut '…'` | Same, binding a specific accelerator and remembering it |
 | `snipux --remove` | Undo everything `--setup` wrote |
-| `snipux --update` | Fetch and install the newest Snipux from GitHub, then say what to restart. `py -m snipux --update` is the same thing where `PATH` has no `snipux` on it |
+| `snipux --update` | Fetch and install the newest Snipux from PyPI, then say what to restart. `py -m snipux --update` is the same thing where `PATH` has no `snipux` on it |
 | `snipux --list-backends` | Print every capture *and* recording backend, its availability, and why the unavailable ones aren't |
 
 ## Uninstall
