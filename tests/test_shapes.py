@@ -1909,9 +1909,13 @@ class TestExportedLengths:
 
         # A font's pixel size is whole pixels, so at 1.5x a 15px label
         # exports at 22 where the screen drew 22.5: a pixel or two out,
-        # where an unscaled label comes out a third smaller.
-        assert abs(saved_width - seen_width) <= 3
-        assert abs(saved_height - seen_height) <= 3
+        # where an unscaled label comes out a third smaller. That rounding
+        # grows with the label, and hinting at the two sizes differs by
+        # font: one Windows desk drew "Label gy" 84px on screen
+        # and 79px exported. So the slack is a share of the size, still far
+        # short of the third an unscaled export loses.
+        assert abs(saved_width - seen_width) <= max(3, seen_width * 0.08)
+        assert abs(saved_height - seen_height) <= max(3, seen_height * 0.08)
         # Its ink too -- but glyphs rasterised through a scaled painter and at
         # a larger pixel size are not the same pixels, and how far apart they
         # land depends on the font and the platform's rasteriser: up to 8% in
