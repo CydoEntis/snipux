@@ -8,13 +8,14 @@ no answer at all on a platform with no notion of an X11/Wayland session
 type. See `snipux/platform/__init__.py` for why that choice now lives
 behind the platform seam instead.
 
-`copy_image_to_clipboard`/`save_image` also live here rather than in
-`overlay.py`: this is the module with no existing reason to avoid
-`subprocess`/`shutil`/filesystem code (`capture.py` already owns that
-pattern for backends; `overlay.py` is scoped to widget/painting code).
-`app.py` has no reason to import `overlay.py`'s `OverlayWindow.copy`/`save`,
-so `overlay.py` importing these two functions from here (deferred, to avoid
-a circular import) stays one-directional.
+`copy_image_to_clipboard`/`copy_text_to_clipboard`/`save_image` also live
+here rather than in `overlay.py`: this is the module with no existing reason
+to avoid `subprocess`/`shutil`/filesystem code (`capture.py` already owns
+that pattern for backends; `overlay.py` is scoped to widget/painting code).
+`app.py` has no reason to import `overlay.py`'s
+`OverlayWindow.copy`/`copy_text`/`save`, so `overlay.py` importing these
+functions from here (deferred, to avoid a circular import) stays
+one-directional.
 
 `copy_file_to_clipboard`/`finish_recording` sit next to them for the same
 reason: recording has no bitmap to put on the clipboard, only a file, so
@@ -121,6 +122,25 @@ def copy_image_to_clipboard(image: QImage) -> None:
         )
     except (OSError, subprocess.CalledProcessError):
         pass  # Qt clipboard already holds the image; this sink is best-effort
+
+
+def copy_text_to_clipboard(text: str) -> None:
+    """Place `text` on the clipboard: the in-process Qt clipboard always,
+    and (best-effort) `wl-copy` as well when it's on PATH -- the same
+    Wayland persistence `copy_image_to_clipboard` exists for, and the same
+    reasoning applies here unchanged.
+    """
+    QGuiApplication.clipboard().setText(text)
+
+    if shutil.which("wl-copy") is None:
+        return
+
+    try:
+        subprocess.run(
+            ["wl-copy", "--type", "text/plain"], input=text.encode("utf-8"), check=True
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pass  # Qt clipboard already holds the text; this sink is best-effort
 
 
 def copy_file_to_clipboard(path: Path) -> None:
