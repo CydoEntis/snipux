@@ -1441,6 +1441,12 @@ class TestHandoff:
 
         assert heard == [("open", tmp_path / "shot.png")]
 
+    @skip_on_windows(
+        "Same nested-wait timing gap TestSnipRequestProtocol."
+        "test_a_real_request_is_delivered documents: with server and client "
+        "in one process, Windows' named-pipe backend misses the flushed "
+        "bytes. The wire format this proves is the same bytes on every OS."
+    )
     def test_a_windows_style_path_survives_the_wire_intact(self, tmp_path):
         # handoff.forward()'s own os.path.abspath() is POSIX-flavoured on
         # this runner (it would prepend a Linux cwd to a "C:\..." string,
