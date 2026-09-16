@@ -30,8 +30,12 @@ from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
     QGuiApplication,
     QImage,
+    QImageReader,
+    QImageWriter,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -42,6 +46,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -452,6 +457,32 @@ class ImageCanvas(QWidget):
         painter.drawRect(rect)
         painter.end()
 
+    def set_image(self, image: QImage, store: MarkStore) -> None:
+        """Swap in a new document -- what a file dropped onto the review
+        window does, in place of opening a second one.
+
+        Every bit of state this canvas keeps about the old image resets
+        with it: the composited-image cache (keyed on the old marks, which
+        are gone), the zoom (a new image is fit to the canvas fresh, not
+        left at whatever the last one was zoomed to), and any drag or label
+        the old image had in progress.
+        """
+        self._in_progress = None
+        self._erasing = False
+        self._text_editor.abandon()
+        self._text_editor.setParent(None)
+        self._text_editor.deleteLater()
+
+        self._image = image
+        self._store = store
+        self._composite_key = None
+        self._composite = image
+        self._zoom = 100
+        self._tool = None
+        self._text_editor = TextLabelEditor(self, store, to_document=self.to_image)
+        self._store.changed.connect(self.update)
+        self.update()
+
 
 class _Badge(QLabel):
     """The dimension and zoom clusters that float over the canvas.
@@ -690,6 +721,9 @@ class ReviewWindow(WinWindow):
 
         self._build_footer_contents()
         self._refresh_status()
+        # A colleague's screenshot dropped onto this window opens it here,
+        # the same as `snipux PATH` does over the socket -- see `open_path`.
+        self.setAcceptDrops(True)
 
     def _on_tool_selected(self, tool: str) -> None:
         self._canvas.set_tool(tool)
@@ -883,6 +917,10 @@ class ReviewWindow(WinWindow):
         self._folder_button.setEnabled(self._saved_path is not None)
         self.footer_right.addWidget(self._folder_button)
 
+        self._save_button = SecondaryButton("Save")
+        self._save_button.clicked.connect(self.save)
+        self.footer_right.addWidget(self._save_button)
+
         self._save_as_button = SecondaryButton("Save As…")
         self._save_as_button.clicked.connect(self.save_as)
         self.footer_right.addWidget(self._save_as_button)
@@ -1009,6 +1047,19 @@ class ReviewWindow(WinWindow):
             popover.hide()
         self._place_overlays()
 
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        urls = [url for url in event.mimeData().urls() if url.isLocalFile()]
+        if not urls:
+            return
+        event.acceptProposedAction()
+        # The first, where several land at once: one window opens one image,
+        # the same as `snipux PATH` only ever names one.
+        self.open_path(Path(urls[0].toLocalFile()))
+
     # -- actions ---------------------------------------------------------
 
     def _set_annotating(self, annotating: bool) -> None:
@@ -1052,6 +1103,33 @@ class ReviewWindow(WinWindow):
         self._refresh_status()
         self._show_toast("copy", "Copied to clipboard")
 
+    def save(self) -> Path | None:
+        """Write back to the file this snip already came from, in that
+        file's own format -- what an opened image's `Save` does, as
+        opposed to `Save As…`'s "pick somewhere new".
+
+        Falls through to `save_as()` -- which always writes PNG -- when
+        there is nowhere to write back to yet, or when the format at that
+        path is one `QImageWriter` can only read: GIF, SVG, SVGZ, PDF and
+        TGA, per `QImageWriter.supportedImageFormats()`, are never in the
+        set this checks against. No format list of our own to drift out of
+        step with Qt's.
+        """
+        if self._saved_path is None:
+            return self.save_as()
+        image_format = self._saved_path.suffix.lstrip(".").lower()
+        writable = {bytes(f).decode() for f in QImageWriter.supportedImageFormats()}
+        if image_format not in writable:
+            return self.save_as()
+        if not self._canvas.rendered_image().save(str(self._saved_path), image_format.upper()):
+            self._status.setText(f"Could not write {self._display_path(self._saved_path)}")
+            self._status.setStyleSheet(f"color: {tokens.Win.ERR_FG};")
+            return None
+        self._dirty = False
+        self._refresh_status()
+        self._show_toast("save", f"Saved to {self._display_path(self._saved_path)}")
+        return self._saved_path
+
     def save_as(self, path: Path | str | None = None) -> Path | None:
         """Write the snip where the user picks. Returns the path, or None if
         cancelled.
@@ -1085,7 +1163,13 @@ class ReviewWindow(WinWindow):
         return path
 
     def _suggested_path(self) -> Path:
-        if self._saved_path is not None:
+        # A `.png` `_saved_path` is always a real suggestion -- Save As
+        # writes PNG, and an ordinary snip's own path already sits in the
+        # snips folder. An opened image in some other format is not: its
+        # own path is where Save just failed to write, in a format the
+        # dialog's "PNG image" filter cannot save anyway, so the snips
+        # folder is the suggestion that is actually still true.
+        if self._saved_path is not None and self._saved_path.suffix.lower() == ".png":
             return self._saved_path
         return setup_desktop.load_save_folder() / "snip.png"
 
@@ -1098,3 +1182,55 @@ class ReviewWindow(WinWindow):
         if self._saved_path is None:
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._saved_path.parent)))
+
+    def open_path(self, path: Path) -> None:
+        """Load `path` into this window in place of what it currently
+        shows -- a file dropped onto the window, rather than a second one
+        opening next to it.
+
+        Guarded by `_confirm_discard` exactly like Settings' Cancel guards
+        discarding an edited settings pane: unsaved ink is not thrown away
+        silently just because a new file landed on the window.
+        """
+        if self._dirty and not self._confirm_discard():
+            return
+        reader = QImageReader(str(path))
+        image = reader.read()
+        if image.isNull():
+            QMessageBox.warning(
+                self, "Could not open image", f"{path.name}: {reader.errorString()}"
+            )
+            return
+        self._set_annotating(False)
+        self._image = image
+        self._saved_path = path
+        self._dirty = False
+        self._bar.undoRequested.disconnect()
+        self._bar.redoRequested.disconnect()
+        self._bar.clearRequested.disconnect()
+        self._store.setParent(None)
+        self._store.deleteLater()
+        self._store = MarkStore(self)
+        self._store.changed.connect(self._on_edited)
+        self._bar.undoRequested.connect(self._store.undo)
+        self._bar.redoRequested.connect(self._store.redo)
+        self._bar.clearRequested.connect(self._store.clear)
+        self._canvas.set_image(image, self._store)
+        self.title_label.setText(path.name)
+        self.title_detail.setText(f"{image.width()} × {image.height()}")
+        self._folder_button.setEnabled(True)
+        self._refresh_badges()
+        self._refresh_status()
+
+    def _confirm_discard(self) -> bool:
+        """The same "Discard changes?" prompt Settings' own Cancel shows
+        over an edited-but-unsaved pane, asked here before a dropped file
+        overwrites this window's unsaved ink.
+        """
+        answer = QMessageBox.question(
+            self,
+            "Discard changes?",
+            "This snip has been edited but not saved. Discard the changes?",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Discard

@@ -11,11 +11,18 @@ already up costs little more than starting Python.
 It speaks the resident's own protocol and nothing more. On a POSIX system Qt's
 `QLocalServer` listens on a Unix-domain socket named `SERVER_NAME` in the
 directory `QDir::tempPath()` resolves to -- `$TMPDIR` when it is set, `/tmp`
-otherwise -- and a request is one byte (see `app.QLocalSocketTransport`).
-Where there is no such socket to reach -- no resident yet, a stale socket file
-left by one that died, Windows' named pipes -- `forward` says so, and the
-caller takes the full path, which finds or becomes the resident exactly as it
-always has.
+otherwise -- and a request is one byte (see `app.QLocalSocketTransport`), or
+that byte followed by a path to open. Where there is no such socket to reach
+-- no resident yet, a stale socket file left by one that died, Windows'
+named pipes -- `forward` says so, and the caller takes the full path, which
+finds or becomes the resident exactly as it always has.
+
+A lone argument that isn't `--snip`/`--settings` and doesn't look like a flag
+is a path to open (`snipux shot.png`), forwarded the same way behind the
+`OPEN_REQUEST_PREFIX` byte. It travels as the bytes `os.fsencode` gives it,
+made absolute first -- the resident's working directory is not this
+process's -- so a name that isn't valid UTF-8 on Linux, or one with spaces on
+Windows, arrives unharmed.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ import sys
 SERVER_NAME = "snipux-resident"
 SNIP_REQUEST = b"S"
 SETTINGS_REQUEST = b"T"
+OPEN_REQUEST_PREFIX = b"O"
 
 _REQUESTS = {"--snip": SNIP_REQUEST, "--settings": SETTINGS_REQUEST}
 
@@ -47,11 +55,22 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
     """Send the request `arguments` names to a running resident, and say
     whether it was delivered.
 
-    Only a lone `--snip` or `--settings` is a request; anything else belongs to
-    the full CLI. False whenever the resident cannot be reached this way, which
-    is never an error -- it is the caller's cue to take the full path.
+    Only a lone `--snip`, `--settings`, or a path (anything else that
+    doesn't start with `-`, i.e. not a flag main() doesn't otherwise know)
+    is a request; anything else belongs to the full CLI. False whenever the
+    resident cannot be reached this way, which is never an error -- it is
+    the caller's cue to take the full path.
     """
-    if len(arguments) != 1 or arguments[0] not in _REQUESTS:
+    if len(arguments) != 1:
+        return False
+    argument = arguments[0]
+    if argument in _REQUESTS:
+        payload = _REQUESTS[argument]
+    elif not argument.startswith("-"):
+        # Made absolute here, before it travels anywhere -- the resident's
+        # working directory is not this process's.
+        payload = OPEN_REQUEST_PREFIX + os.fsencode(os.path.abspath(argument))
+    else:
         return False
     if not hasattr(socket, "AF_UNIX"):
         return False
@@ -59,7 +78,7 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(_CONNECT_TIMEOUT_S)
             connection.connect(socket_path(server_name))
-            connection.sendall(_REQUESTS[arguments[0]])
+            connection.sendall(payload)
     except OSError:
         return False
     return True
