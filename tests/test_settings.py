@@ -812,6 +812,35 @@ class TestSettingsWindow:
         assert "another application" in warnings[0]
         assert "Control+Alt+K" in warnings[0]
 
+    def test_an_unchanged_shortcut_never_blocks_the_other_settings(self, tmp_path, monkeypatch):
+        # When the running app could not grab its own shortcut at startup,
+        # the probe reports the saved combination as taken. Refusing then
+        # made every Save a no-op -- watermark, hide list and all -- over a
+        # shortcut the user had not touched.
+        setup_desktop.save_shortcut("Control+Alt+S", tmp_path)
+        window = self._window(tmp_path)
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current,
+            "find_shortcut_conflict",
+            lambda s: "another application",
+            raising=False,
+        )
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            lambda parent, title, text: warnings.append(text),
+        )
+        window._watermark_text.setText("Mine")
+        window._on_watermark_text_edited("Mine")
+
+        window._save()
+
+        assert warnings == []
+        assert setup_desktop.load_watermark_text(tmp_path) == "Mine"
+        assert setup_desktop.load_shortcut(tmp_path) == "Control+Alt+S"
+
     def test_save_calls_out_the_snipping_tool_by_name(self, tmp_path, monkeypatch):
         # AC: Win+Shift+S is called out as belonging to the Windows
         # Snipping Tool if the user tries it.

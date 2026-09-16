@@ -64,6 +64,13 @@ use it; the commit history has the detail.
   slider sets how strong the dim is. Several spotlights on one snip all
   stay lit together.
 
+### Fixed
+
+- **Settings saves again on Windows.** If Snipux could not claim its own
+  shortcut when it started, Save refused with "Shortcut already in use"
+  and nothing was kept -- not the watermark, not the hide list, nothing.
+  Save now only checks a shortcut you have changed.
+
 ## 0.8.2 — 2026-09-15
 
 ### Fixed
