@@ -250,7 +250,7 @@ monitor (#49, and §18 for the tab).
 
 **Ours is text or an image**, and Settings edits both on a Watermark page of
 its own (#69). A text mark is the handoff's placeholder chip: light type on
-a dark plate, in a colour the user does not pick. An image is drawn as it
+a dark plate by default; its colour, font and plate are the user's since §29. An image is drawn as it
 is. Either is sized to the snip -- 5% of its shorter side, between 20 and 64
 logical pixels tall -- and an image never past its own pixels. An image is
 copied into the config folder rather than remembered by path. The review
@@ -706,6 +706,33 @@ The bar being dragged never fades.
   leave the blurred glass and the icons as an opaque slab over the work.
 - **Nothing reaches an export.** `rendered_image()` never paints chrome,
   faded or not; the eyedropper reads the frozen frame, never the screen.
+
+---
+
+## 29 · The text watermark's colour, font and plate are the user's
+
+**§10 said** a text mark is light type on a dark plate, in a colour the
+user does not pick.
+
+**Now Settings picks all three**: a colour (the plate's own light type by
+default, the ink tray's colours, or any colour from a picker), a font (the
+app's own by default, or any installed family), and whether the plate is
+drawn at all. With the plate off, the type gets a thin halo in the opposite
+shade -- dark under light type, light under dark -- `WatermarkMetric.HALO_SHARE`
+of its pixel size wide. The page previews the mark on a light and a dark
+ground side by side. An image mark is unchanged.
+
+### Why
+
+- **A user report**: a watermark is a signature, and a signature in
+  someone else's colour and type is not quite theirs.
+- **The plate stays the default** for §10's reason: a mark lands on
+  whatever the capture holds in its corner. The halo is what lets the plate
+  go without the mark vanishing into a background of its own shade, and the
+  two-ground preview shows the choice against both before it is saved.
+- **Measured and painted in the same font.** The layout elides and sizes
+  the chip from the chosen family's metrics, so a family Qt has to
+  substitute for is substituted identically in the preview and the export.
 
 ---
 

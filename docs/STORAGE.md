@@ -37,9 +37,8 @@ hide_sensitive         recording_folder           save_folder
 hints_enabled          recording_frame_rate       setup_complete
 instant_saves          recent_captures            shortcut
 last_region            native_resolution          tray_toggles
-                                                  watermark_image
-                                                  watermark_kind
-                                                  watermark_text
+watermark_backing      watermark_color            watermark_font
+watermark_image        watermark_kind             watermark_text
 ```
 
 ### Rules

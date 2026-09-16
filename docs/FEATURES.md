@@ -35,6 +35,7 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Per-tool style: colour, fill, solid/dashed/dotted
 - [x] `done` Blur, pixelate and solid redaction
 - [x] `done` Watermark, text or image
+- [x] `dev` Watermark text colour, font, and an optional background box
 - [x] `done` Undo/redo shared by overlay and review
 - [x] `dev` Callout: a box with a tail and words in it
 - [x] `dev` Spotlight: dim everything but one region

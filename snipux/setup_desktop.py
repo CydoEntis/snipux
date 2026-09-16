@@ -1016,6 +1016,55 @@ def save_watermark_text(text: str, config_dir: Path | None = None) -> bool:
     return _write_config("watermark_text", " ".join(str(text).split()), config_dir)
 
 
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def load_watermark_color(config_dir: Path | None = None) -> str:
+    """The text mark's colour as lowercase `#rrggbb`, or the plate's own
+    light type (`WatermarkColor.MARK_TEXT`) when none was picked.
+
+    Only a bare six-digit hex counts: this module imports no Qt to parse
+    anything looser, and a name or an alpha would have to mean the same
+    thing to Settings, the preview and the export.
+    """
+    stored = _read_config(config_dir).get("watermark_color")
+    if isinstance(stored, str) and _HEX_COLOR.fullmatch(stored.strip()):
+        return stored.strip().lower()
+    return tokens.WatermarkColor.MARK_TEXT
+
+
+def save_watermark_color(color: str, config_dir: Path | None = None) -> bool:
+    value = str(color).strip()
+    if not _HEX_COLOR.fullmatch(value):
+        return False
+    return _write_config("watermark_color", value.lower(), config_dir)
+
+
+def load_watermark_font(config_dir: Path | None = None) -> str:
+    """The text mark's font family, or "" for the app's own UI font.
+
+    Whether the family is installed is the painter's question: a family
+    that has gone away still reads back, and Qt substitutes for it.
+    """
+    stored = _read_config(config_dir).get("watermark_font")
+    return " ".join(stored.split()) if isinstance(stored, str) else ""
+
+
+def save_watermark_font(family: str, config_dir: Path | None = None) -> bool:
+    return _write_config("watermark_font", " ".join(str(family).split()), config_dir)
+
+
+def load_watermark_backing(config_dir: Path | None = None) -> bool:
+    """Whether the text mark sits on its dark plate. On unless explicitly
+    turned off, since the plate is what keeps light type readable on a
+    light capture."""
+    return _read_config(config_dir).get("watermark_backing") is not False
+
+
+def save_watermark_backing(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("watermark_backing", bool(enabled), config_dir)
+
+
 def watermark_folder(config_dir: Path | None = None) -> Path:
     """Where snipux keeps its copy of the watermark image: beside
     `config.json`, so a backup of one folder takes both."""

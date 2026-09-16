@@ -13830,6 +13830,51 @@ class TestWatermarkExport:
         assert _exact_bounds(overlay.rendered_image(), WATERMARK_MAGENTA).isNull()
 
 
+class TestWatermarkTextStyleInOverlay:
+    """The colour, font and plate Settings keeps reach the mark the preview
+    shows and the one the export stamps, read at the start of the snip."""
+
+    SELECTION = QRect(40, 60, 320, 200)
+
+    def _overlay(self) -> OverlayWindow:
+        setup_desktop.save_watermark_kind("text")
+        setup_desktop.save_watermark_text("ACME")
+        setup_desktop.save_watermark_color("#ff00ff")
+        setup_desktop.save_watermark_font("Georgia")
+        setup_desktop.save_watermark_backing(False)
+        _switch_watermark_on("br")
+        overlay = OverlayWindow(make_frame(image_size=(400, 300), logical_size=(400, 300)))
+        overlay.set_selection(self.SELECTION)
+        return overlay
+
+    def test_the_mark_carries_the_kept_style(self):
+        mark = self._overlay()._active_watermark()
+
+        assert mark.color == QColor("#ff00ff")
+        assert mark.font_family == "Georgia"
+        assert mark.backing is False
+
+    def test_the_export_is_stamped_in_that_colour(self):
+        exported = self._overlay().rendered_image()
+
+        magentaish = sum(
+            1
+            for x in range(exported.width())
+            for y in range(exported.height())
+            if (c := exported.pixelColor(x, y)).red() > 200 and c.blue() > 200 and c.green() < 80
+        )
+        assert magentaish > 10
+
+    def test_a_change_in_settings_reaches_the_next_snip(self):
+        self._overlay()
+        setup_desktop.save_watermark_color("#00ff00")
+
+        after = OverlayWindow(make_frame(image_size=(400, 300), logical_size=(400, 300)))
+        after.set_selection(self.SELECTION)
+
+        assert after._active_watermark().color == QColor("#00ff00")
+
+
 class TestWatermarkIsNotAMark:
     """Applied once, on export, above every annotation -- never a mark in the
     undo stack, and out of the eraser's reach."""

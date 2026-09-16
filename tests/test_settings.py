@@ -1644,3 +1644,90 @@ class TestTheWatermarkPage:
         assert window._dirty
         window._save()
         assert setup_desktop.load_watermark_image_name(tmp_path) is None
+
+    def test_it_opens_on_the_kept_colour_font_and_plate(self, tmp_path):
+        setup_desktop.save_watermark_color("#ef4444", tmp_path)
+        setup_desktop.save_watermark_font("Georgia", tmp_path)
+        setup_desktop.save_watermark_backing(False, tmp_path)
+
+        window = self._window(tmp_path)
+
+        picked = [s for s in window._watermark_swatches if s.isChecked()]
+        assert [s.color for s in picked] == ["#ef4444"]
+        assert window._watermark_font.currentData() == "Georgia"
+        assert window._watermark_backing.switch.isChecked() is False
+
+    def test_by_default_it_is_the_plates_light_type_in_the_app_font(self, tmp_path):
+        window = self._window(tmp_path)
+
+        assert window._watermark_swatches[0].isChecked()
+        assert window._watermark_font.currentIndex() == 0
+        assert window._watermark_font.currentData() == ""
+        assert window._watermark_backing.switch.isChecked()
+        assert window._watermark_custom_swatch.isHidden()
+
+    def test_a_swatch_font_and_plate_are_saved(self, tmp_path, monkeypatch):
+        self._no_dialogs(monkeypatch)
+        window = self._window(tmp_path)
+
+        window._watermark_swatches[3].click()
+        # Whatever this machine lists first after Default: CI's fonts are
+        # not this desk's.
+        family = window._watermark_font.itemData(1)
+        window._watermark_font.setCurrentIndex(1)
+        window._watermark_backing.switch.setChecked(False)
+        assert "Unsaved changes" in window._dirty_label.text()
+        window._save()
+
+        assert setup_desktop.load_watermark_color(tmp_path) == tokens.WATERMARK_SWATCHES[3][1].lower()
+        assert setup_desktop.load_watermark_font(tmp_path) == family
+        assert setup_desktop.load_watermark_backing(tmp_path) is False
+
+    def test_a_custom_colour_gets_its_own_swatch_and_is_saved(self, tmp_path, monkeypatch):
+        self._no_dialogs(monkeypatch)
+        window = self._window(tmp_path)
+
+        window._choose_watermark_color(QColor(18, 52, 86))
+
+        assert not window._watermark_custom_swatch.isHidden()
+        assert window._watermark_custom_swatch.isChecked()
+        assert not any(s.isChecked() for s in window._watermark_swatches)
+        window._save()
+        assert setup_desktop.load_watermark_color(tmp_path) == "#123456"
+
+    def test_a_cancelled_colour_dialog_changes_nothing(self, tmp_path):
+        window = self._window(tmp_path)
+
+        window._choose_watermark_color(QColor())
+
+        assert "Everything saved" in window._dirty_label.text()
+
+    def test_styling_the_text_chooses_text(self, tmp_path):
+        setup_desktop.save_watermark_kind("image", tmp_path)
+        window = self._window(tmp_path)
+
+        window._watermark_swatches[4].click()
+
+        assert window._watermark_cards["text"].isChecked()
+
+    def test_a_kept_font_this_machine_lacks_is_still_offered(self, tmp_path):
+        setup_desktop.save_watermark_font("No Such Family 9", tmp_path)
+
+        window = self._window(tmp_path)
+
+        assert window._watermark_font.currentData() == "No Such Family 9"
+
+    def test_the_preview_shows_the_chosen_colour(self, tmp_path):
+        window = self._window(tmp_path)
+        window._watermark_text.setText("ACME")
+
+        window._choose_watermark_color(QColor(255, 0, 0))
+
+        image = window._watermark_preview.pixmap().toImage()
+        reds = sum(
+            1
+            for x in range(image.width())
+            for y in range(image.height())
+            if (c := image.pixelColor(x, y)).red() > 200 and c.green() < 60 and c.blue() < 60
+        )
+        assert reds > 10
