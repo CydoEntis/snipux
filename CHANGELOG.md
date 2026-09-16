@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 0.9.0 — 2026-09-16
+
 ### Added
 
 - **Open an image you already have.** `snipux path/to/shot.png` opens it in
