@@ -25,6 +25,7 @@ from PyQt6.QtCore import (
     Qt,
     QTimer,
     QUrl,
+    pyqtSignal,
 )
 from PyQt6.QtGui import QGuiApplication, QImage, qRgb
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -1964,13 +1965,27 @@ class FakeRecordingBackend(RecordingBackend):
     it receives rather than mocking the ABC.
     """
 
-    def __init__(self, backend_name="fake", available=True, start_error=None, stop_error=None):
+    def __init__(
+        self,
+        backend_name="fake",
+        available=True,
+        start_error=None,
+        stop_error=None,
+        can_pause=False,
+        pause_result=True,
+    ):
         self._name = backend_name
         self._available = available
         self._start_error = start_error
         self._stop_error = stop_error
+        self.can_pause = can_pause
+        # What pause() reports -- False is how a test drives the "Qt's own
+        # pause() silently did nothing" case #87's toast exists for.
+        self._pause_result = pause_result
         self.start_calls = []
         self.stop_calls = []
+        self.pause_calls = []
+        self.resume_calls = []
 
     def name(self):
         return self._name
@@ -1993,6 +2008,13 @@ class FakeRecordingBackend(RecordingBackend):
         self.stop_calls.append(True)
         if self._stop_error is not None:
             raise self._stop_error
+
+    def pause(self):
+        self.pause_calls.append(True)
+        return self._pause_result
+
+    def resume(self):
+        self.resume_calls.append(True)
 
 
 def _record(controller, rect, delay="No delay", after=None):
@@ -2681,6 +2703,207 @@ class TestAppControllerRecordingHud:
         assert controller._active_recording is None
 
 
+class _FakeClock:
+    """A `time.monotonic` stand-in whose value only moves when a test
+    moves it -- unlike a fixed `iter([...])`, every call between two
+    explicit `.now =` assignments returns the same reading, so a test does
+    not have to hand-count how many times application code happens to call
+    `time.monotonic()` for a single moment to stay consistent.
+    """
+
+    def __init__(self, start: float = 100.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestAppControllerPauseRecording:
+    """#87: the HUD's Pause control, wired to whichever backend
+    actually started -- `RecordingBackend.can_pause` decides whether a
+    click can do anything, and `pause()`'s own return value decides
+    whether a backend that silently ignored the request gets believed.
+    """
+
+    def _start_a_recording(self, make_controller, monkeypatch, **backend_kwargs):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend(**backend_kwargs)
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(50, 50, 200, 150), "No delay")
+        return controller, backend
+
+    def test_the_control_is_greyed_when_the_backend_cannot_pause(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=False
+        )
+
+        assert controller._recording_hud.pause_control()._enabled is False
+
+    def test_the_control_is_live_when_the_backend_can_pause(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True
+        )
+
+        assert controller._recording_hud.pause_control()._enabled is True
+
+    def test_clicking_pause_pauses_and_clicking_again_resumes(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True
+        )
+
+        controller._recording_hud.pauseClicked.emit()
+
+        assert backend.pause_calls == [True]
+        assert controller._recording_paused is True
+        # Still LIVE -- Pause is a control within the live state, not a
+        # fifth one of its own.
+        assert controller._recording_hud.state() == RecordingBar.LIVE
+        assert controller._recording_hud._pause._label.startswith("Resume")
+
+        controller._recording_hud.pauseClicked.emit()
+
+        assert backend.resume_calls == [True]
+        assert controller._recording_paused is False
+        assert controller._recording_hud._pause._label == "Pause"
+
+    def test_a_backend_that_silently_ignores_pause_reports_a_toast_and_stays_live(
+        self, make_controller, monkeypatch
+    ):
+        # Qt's own QMediaRecorder.pause() is allowed to do nothing where the
+        # backend beneath it can't honour it -- WindowsRecorderBackend.pause()
+        # checks recorderState() rather than trusting the call, and this is
+        # that check's other half: still recording, said so, never shown as
+        # paused.
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True, pause_result=False
+        )
+        messages = []
+        monkeypatch.setattr(controller, "_report_shortcut", messages.append)
+
+        controller._recording_hud.pauseClicked.emit()
+
+        assert backend.pause_calls == [True]
+        assert controller._recording_paused is False
+        assert controller._recording_hud._pause._label == "Pause"
+        assert controller._recording_hud.state() == RecordingBar.LIVE
+        assert messages == ["This recording can't be paused."]
+
+    def test_a_click_with_nothing_recording_is_a_noop(self, make_controller):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+
+        controller._on_pause_clicked()  # must not raise
+
+        assert controller._recording_paused is False
+
+    def test_stopping_while_paused_behaves_exactly_as_it_does_while_live(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True
+        )
+        controller._recording_hud.pauseClicked.emit()
+
+        controller._stop_recording()
+
+        assert backend.stop_calls == [True]
+        assert controller._active_recording is None
+
+    def test_discarding_while_paused_behaves_exactly_as_it_does_while_live(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True
+        )
+        controller._recording_hud.pauseClicked.emit()
+
+        controller._discard_recording()
+
+        assert backend.stop_calls == [True]
+        assert controller._active_recording is None
+
+
+class TestAppControllerElapsedTimeExcludesPausedTime:
+    def test_elapsed_freezes_while_paused_and_resumes_where_it_left_off(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend(can_pause=True)
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        clock = _FakeClock(100.0)
+        monkeypatch.setattr(app.time, "monotonic", clock)
+
+        _record(controller, QRectF(50, 50, 200, 150), "No delay")
+        clock.now = 110.0  # 10s of real recording
+        assert controller._elapsed_text() == "00:10"
+
+        controller._on_pause_clicked()
+        clock.now = 114.0  # 4s pass while paused
+        assert controller._elapsed_text() == "00:10"  # stopped, not moving
+
+        controller._on_pause_clicked()  # resume
+        clock.now = 120.0  # 6s more recording
+        assert controller._elapsed_text() == "00:16"  # 10 + 6, the 4 excluded
+
+        assert backend.pause_calls == [True]
+        assert backend.resume_calls == [True]
+
+    def test_several_pause_resume_cycles_all_get_excluded(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend(can_pause=True)
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        clock = _FakeClock(0.0)
+        monkeypatch.setattr(app.time, "monotonic", clock)
+
+        _record(controller, QRectF(50, 50, 200, 150), "No delay")
+        clock.now = 5.0
+        controller._on_pause_clicked()  # pause #1 at 5s recorded
+        clock.now = 8.0  # 3s paused
+        controller._on_pause_clicked()  # resume
+        clock.now = 13.0  # 5s more recording -- 10s recorded
+        controller._on_pause_clicked()  # pause #2
+        clock.now = 20.0  # 7s paused
+        controller._on_pause_clicked()  # resume
+        clock.now = 24.0  # 4s more recording -- 14s recorded
+
+        assert controller._elapsed_text() == "00:14"
+
+
 class TestAppControllerRecorderUnavailable:
     """A platform with nothing behind `build_recording_registry()` yet
     (macOS today) must not stop `AppController` from constructing -- the
@@ -2773,7 +2996,10 @@ class TestAppControllerLandingRecording:
         controller._stop_recording()
 
         assert not Path(temp_path).exists()
-        landed = list(tmp_path.iterdir())
+        # Filtered to files: landing now also writes the Recent list (#85)
+        # to config.json, and `_isolated_config` (conftest.py) happens to
+        # nest that config directory under this same tmp_path.
+        landed = [p for p in tmp_path.iterdir() if p.is_file()]
         assert len(landed) == 1
         assert landed[0].suffix == ".mp4"
 
@@ -2803,7 +3029,9 @@ class TestAppControllerLandingRecording:
 
         controller._stop_recording()
 
-        landed = next(tmp_path.iterdir())
+        # The actual recording, not config.json's own directory -- see the
+        # note on test_stopping_moves_the_temp_file_into_the_save_folder.
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
         assert produced, "landing never asked preview_filename for a name"
         assert landed == Path(produced[-1])
 
@@ -2879,7 +3107,9 @@ class TestAppControllerLandingRecording:
         controller._stop_recording()
 
         assert copied == []
-        assert len(list(tmp_path.iterdir())) == 1
+        # Filtered to files -- see the same note on
+        # test_stopping_moves_the_temp_file_into_the_save_folder above.
+        assert len([p for p in tmp_path.iterdir() if p.is_file()]) == 1
 
     def test_a_normal_stop_reports_the_landed_path_through_the_tray(
         self, make_controller, monkeypatch, tmp_path
@@ -2893,7 +3123,9 @@ class TestAppControllerLandingRecording:
         controller._stop_recording()
 
         assert len(calls) == 1
-        landed = next(tmp_path.iterdir())
+        # The actual recording, not config.json's own directory -- see the
+        # note on test_stopping_moves_the_temp_file_into_the_save_folder.
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
         assert str(landed) in calls[0][1]
 
     def test_a_failed_move_is_reported_not_raised(self, make_controller, monkeypatch):
@@ -2918,6 +3150,123 @@ class TestAppControllerLandingRecording:
         assert "failed" in calls[0][1].lower()
         assert controller._active_recording is None
         assert controller._stopping_recording is False
+
+
+class _FakeFfmpegExporter(QObject):
+    """Stands in for `player.FfmpegExporter`: records what it was built
+    with and finishes synchronously the moment `start()` is called, rather
+    than spawning a real ffmpeg -- exactly the "faked ffmpeg" the player's
+    own tests already use `export_availability(..., ffmpeg=...)` for,
+    applied to the one piece of this feature that is genuinely async.
+    """
+
+    progressed = pyqtSignal(float)
+    finished = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self, source, destination, state, format_id, *, muted, binary, **_kwargs
+    ):
+        super().__init__()
+        self.source = Path(source)
+        self.destination = Path(destination)
+        self.state = state
+        self.format_id = format_id
+        self.muted = muted
+        self.binary = binary
+
+    def start(self):
+        self.destination.write_bytes(b"not really a gif, but bytes are bytes")
+        self.finished.emit(str(self.destination))
+
+
+class TestAppControllerLandingRecordingAsGif:
+    """SNX-86: "gif" is `_land_recording`'s asynchronous sibling --
+    `AppController._land_recording_as_gif` -- since converting even a short
+    clip takes real seconds and cannot freeze the tray the way every other
+    destination's plain `shutil.move` does not.
+    """
+
+    def _start_a_gif_recording(self, make_controller, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "gif")
+        _rect, temp_path = backend.start_calls[0]
+        Path(temp_path).write_bytes(b"stand-in recording, not a real webm")
+        return controller, Path(temp_path)
+
+    def test_the_conversion_goes_through_the_players_own_exporter(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app, "system_ffmpeg", lambda: "/usr/bin/ffmpeg")
+        monkeypatch.setattr(app, "FfmpegExporter", _FakeFfmpegExporter)
+        controller, temp_path = self._start_a_gif_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+
+        controller._stop_recording()
+
+        landed = next(tmp_path.iterdir())
+        assert landed.suffix == ".gif"
+        assert landed.exists()
+        # The raw recording was only ever staging for the GIF, so it is
+        # discarded once the GIF has actually landed.
+        assert not temp_path.exists()
+
+    def test_the_landed_name_follows_the_recording_filename_pattern(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Same AC as `save`'s own naming test: the real filename is the one
+        # computation `preview_filename` does, not a second guess at it,
+        # watched rather than recomputed for the reason that test explains.
+        monkeypatch.setattr(app, "system_ffmpeg", lambda: "/usr/bin/ffmpeg")
+        monkeypatch.setattr(app, "FfmpegExporter", _FakeFfmpegExporter)
+        produced = []
+        real_preview_filename = setup_desktop.preview_filename
+
+        def spy(folder, pattern, extension="png"):
+            answer = real_preview_filename(folder, pattern, extension=extension)
+            produced.append(answer)
+            return answer
+
+        monkeypatch.setattr(app.setup_desktop, "preview_filename", spy)
+        controller, _temp_path = self._start_a_gif_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+
+        controller._stop_recording()
+
+        landed = next(tmp_path.iterdir())
+        assert produced, "landing as gif never asked preview_filename for a name"
+        assert landed == Path(produced[-1])
+        assert landed.suffix == ".gif"
+
+    def test_without_an_encoder_the_plain_recording_lands_instead(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # `system_ffmpeg()` is cached for the life of the process, so the
+        # chooser and Settings both greying "gif" ahead of time does not
+        # make this unreachable -- a binary gone after that first probe is
+        # rare, but the take must not be lost over it.
+        monkeypatch.setattr(app, "system_ffmpeg", lambda: None)
+        controller, temp_path = self._start_a_gif_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+
+        controller._stop_recording()
+
+        landed = next(tmp_path.iterdir())
+        assert landed.suffix != ".gif"
+        assert not temp_path.exists()
 
 
 class TestTheBarStaysUpAfterARecordingLands:
@@ -3348,7 +3697,9 @@ class TestAppControllerRecordingDiskSpace:
         _record(controller, QRectF(0, 0, 100, 100), "No delay", "save")
 
         assert len(calls) == 1
-        landed = next(tmp_path.iterdir())
+        # The actual recording, not config.json's own directory -- see the
+        # note on test_stopping_moves_the_temp_file_into_the_save_folder.
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
         assert str(landed) in calls[0][1]
         assert "disk" in calls[0][1].lower()
 
@@ -3525,6 +3876,196 @@ class TestAppControllerTrayMenu:
         )
 
         controller.quit_action.trigger()
+
+
+class TestAppControllerRecentCaptures:
+    """#85: a tray Recent section listing the last few captures, newest
+    first, each row opening the file it names.
+    """
+
+    def _make(self, make_controller):
+        return make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+    def _recent_texts(self, controller):
+        return [action.text() for action in controller._recent_menu.actions()]
+
+    def _start_a_recording(self, make_controller, monkeypatch, after="save"):
+        # Duplicated from TestAppControllerLandingRecording's own helper,
+        # the same way that class's helper is itself already duplicated
+        # from TestAppControllerRecordingHud's -- each class here keeps its
+        # own copy rather than sharing one across files.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", after)
+        return controller, backend
+
+    def test_nothing_appears_in_the_tray_menu_with_an_empty_list(self, make_controller):
+        controller = self._make(make_controller)
+
+        assert controller._recent_menu.menuAction() not in controller._tray_menu.actions()
+        assert self._recent_texts(controller) == []
+
+    def test_a_still_with_a_file_is_added_newest_first(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        first = tmp_path / "Screenshot from 2026-09-16 10-00-00.png"
+        first.write_bytes(b"one")
+        second = tmp_path / "Screenshot from 2026-09-16 10-05-00.png"
+        second.write_bytes(b"two")
+
+        controller._on_captured(make_image(), first)
+        controller._on_captured(make_image(), second)
+
+        assert self._recent_texts(controller) == [second.name, first.name]
+        assert controller._recent_menu.menuAction() in controller._tray_menu.actions()
+
+    def test_a_clipboard_only_still_adds_nothing(self, make_controller):
+        controller = self._make(make_controller)
+
+        controller._on_captured(make_image(), None)
+
+        assert self._recent_texts(controller) == []
+        assert controller._recent_menu.menuAction() not in controller._tray_menu.actions()
+
+    def test_a_row_names_the_filename_not_the_full_path(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        nested = tmp_path / "deeply" / "nested" / "folder"
+        nested.mkdir(parents=True)
+        path = nested / "snip.png"
+        path.write_bytes(b"x")
+
+        controller._on_captured(make_image(), path)
+
+        assert self._recent_texts(controller) == ["snip.png"]
+
+    def test_capped_at_the_max(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        paths = []
+        for index in range(setup_desktop.RECENT_CAPTURES_MAX + 2):
+            path = tmp_path / f"snip-{index}.png"
+            path.write_bytes(b"x")
+            paths.append(path)
+            controller._on_captured(make_image(), path)
+
+        newest_first = list(reversed(paths[-setup_desktop.RECENT_CAPTURES_MAX :]))
+        assert self._recent_texts(controller) == [p.name for p in newest_first]
+
+    def test_clicking_a_row_opens_it_with_the_system_default_app(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = self._make(make_controller)
+        path = tmp_path / "snip.png"
+        path.write_bytes(b"x")
+        controller._on_captured(make_image(), path)
+        opened = []
+        monkeypatch.setattr(app.QDesktopServices, "openUrl", lambda url: opened.append(url))
+
+        controller._recent_menu.actions()[0].trigger()
+
+        assert len(opened) == 1
+        # As paths, not strings: Qt spells a Windows path with forward
+        # slashes, and `str(path)` with backslashes.
+        assert Path(opened[0].toLocalFile()) == path
+
+    def test_a_row_whose_file_is_missing_is_dropped_when_the_menu_rebuilds(
+        self, make_controller, tmp_path
+    ):
+        controller = self._make(make_controller)
+        path = tmp_path / "snip.png"
+        path.write_bytes(b"x")
+        controller._on_captured(make_image(), path)
+        path.unlink()
+
+        # aboutToShow, not another capture landing -- see the ticket's own
+        # Context note on why the rebuild can't rely on this signal alone,
+        # covered separately by the "capture lands" tests above.
+        controller._tray_menu.aboutToShow.emit()
+
+        assert self._recent_texts(controller) == []
+        assert controller._recent_menu.menuAction() not in controller._tray_menu.actions()
+        assert setup_desktop.load_recent_captures() == []
+
+    def test_clicking_a_row_whose_file_vanished_since_the_last_rebuild_removes_it_with_a_toast(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = self._make(make_controller)
+        path = tmp_path / "snip.png"
+        path.write_bytes(b"x")
+        controller._on_captured(make_image(), path)
+        action = controller._recent_menu.actions()[0]
+        path.unlink()  # vanished after the rebuild, before the click
+        opened = []
+        monkeypatch.setattr(app.QDesktopServices, "openUrl", lambda url: opened.append(url))
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+
+        action.trigger()
+
+        assert opened == []
+        assert len(said) == 1
+        assert path.name in said[0]
+        assert setup_desktop.load_recent_captures() == []
+        assert self._recent_texts(controller) == []
+
+    def test_a_recording_saved_to_a_folder_is_added(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._start_a_recording(make_controller, monkeypatch, after="save")
+
+        controller._stop_recording()
+
+        # The actual recording, not config.json's own directory (the Recent
+        # list this test is exercising lives there too).
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
+        assert self._recent_texts(controller) == [landed.name]
+
+    def test_a_recording_opened_in_the_player_is_added(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._start_a_recording(make_controller, monkeypatch, after="open")
+        # Never the real player: it would load the fake recording's bytes into
+        # a media backend, which on Windows takes the test process down.
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+
+        controller._stop_recording()
+
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
+        assert opened == [landed]
+        assert self._recent_texts(controller) == [landed.name]
+
+    def test_a_recording_copied_to_the_clipboard_adds_nothing(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._start_a_recording(
+            make_controller, monkeypatch, after="instant"
+        )
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None)
+
+        controller._stop_recording()
+
+        assert self._recent_texts(controller) == []
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_list_survives_a_restart(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        path = tmp_path / "snip.png"
+        path.write_bytes(b"x")
+        controller._on_captured(make_image(), path)
+
+        fresh = self._make(make_controller)
+
+        assert self._recent_texts(fresh) == [path.name]
 
 
 class TestAppControllerIcon:

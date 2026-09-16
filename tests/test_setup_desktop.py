@@ -1435,6 +1435,92 @@ class TestLastRegionPersistence:
         assert setup_desktop.load_last_region(tmp_path) is None
 
 
+class TestRecentCapturesPersistence:
+    """The tray's Recent section (#85): the last few files snipux has
+    written, newest first. Persisted for the same reason `last_region` is
+    -- autostart means the process reached for in the morning is a fresh
+    one.
+    """
+
+    def test_nothing_stored_means_an_empty_list(self, tmp_path):
+        assert setup_desktop.load_recent_captures(tmp_path) == []
+
+    def test_round_trips_through_add_and_load(self, tmp_path):
+        setup_desktop.add_recent_capture(Path("/tmp/one.png"), tmp_path)
+
+        assert setup_desktop.load_recent_captures(tmp_path) == [Path("/tmp/one.png")]
+
+    def test_newest_first(self, tmp_path):
+        setup_desktop.add_recent_capture(Path("/tmp/one.png"), tmp_path)
+        setup_desktop.add_recent_capture(Path("/tmp/two.webm"), tmp_path)
+        setup_desktop.add_recent_capture(Path("/tmp/three.png"), tmp_path)
+
+        assert setup_desktop.load_recent_captures(tmp_path) == [
+            Path("/tmp/three.png"),
+            Path("/tmp/two.webm"),
+            Path("/tmp/one.png"),
+        ]
+
+    def test_capped_at_the_max(self, tmp_path):
+        for index in range(setup_desktop.RECENT_CAPTURES_MAX + 3):
+            setup_desktop.add_recent_capture(Path(f"/tmp/{index}.png"), tmp_path)
+
+        loaded = setup_desktop.load_recent_captures(tmp_path)
+
+        assert len(loaded) == setup_desktop.RECENT_CAPTURES_MAX
+        # The newest ones survive, not the oldest.
+        assert loaded[0] == Path(f"/tmp/{setup_desktop.RECENT_CAPTURES_MAX + 2}.png")
+
+    def test_re_adding_an_existing_entry_moves_it_to_the_front_without_duplicating(
+        self, tmp_path
+    ):
+        setup_desktop.add_recent_capture(Path("/tmp/one.png"), tmp_path)
+        setup_desktop.add_recent_capture(Path("/tmp/two.png"), tmp_path)
+        setup_desktop.add_recent_capture(Path("/tmp/one.png"), tmp_path)
+
+        assert setup_desktop.load_recent_captures(tmp_path) == [
+            Path("/tmp/one.png"),
+            Path("/tmp/two.png"),
+        ]
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            '{"recent_captures": "not-a-list"}',
+            '{"recent_captures": [1, 2, 3]}',
+            '{"recent_captures": [null, "/tmp/ok.png"]}',
+        ],
+    )
+    def test_a_malformed_entry_leaves_the_list_short_or_empty_never_raising(
+        self, tmp_path, stored
+    ):
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text(stored)
+
+        setup_desktop.load_recent_captures(tmp_path)  # must not raise
+
+    def test_a_non_list_value_is_dropped_entirely(self, tmp_path):
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text('{"recent_captures": "not-a-list"}')
+
+        assert setup_desktop.load_recent_captures(tmp_path) == []
+
+    def test_a_non_string_entry_is_skipped_but_its_siblings_survive(self, tmp_path):
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text(
+            '{"recent_captures": [1, "/tmp/ok.png", null]}'
+        )
+
+        assert setup_desktop.load_recent_captures(tmp_path) == [Path("/tmp/ok.png")]
+
+    def test_saving_recent_captures_leaves_other_settings_alone(self, tmp_path):
+        setup_desktop.save_last_region((10, 20, 30, 40), tmp_path)
+
+        setup_desktop.add_recent_capture(Path("/tmp/one.png"), tmp_path)
+
+        assert setup_desktop.load_last_region(tmp_path) == (10, 20, 30, 40)
+
+
 class TestBarPositionPersistence:
     """Where the stills bar goes when a selection leaves it no room (#50): the
     monitor, named relative to the selection's, and two fractions of the room
