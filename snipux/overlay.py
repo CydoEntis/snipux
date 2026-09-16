@@ -51,7 +51,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from snipux import design, glass, platform, sensitive, setup_desktop
+from snipux import design, glass, output, platform, sensitive, setup_desktop
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.flowbars import FlowMenu
@@ -7181,10 +7181,8 @@ class OverlayWindow(QWidget):
         take back, and nothing for export to include, per the ticket's "it
         creates no mark."
         """
-        from snipux.app import copy_text_to_clipboard
-
         hex_value = _hex_of(self.color_at(point))
-        copy_text_to_clipboard(hex_value)
+        output.copy_text_to_clipboard(hex_value)
         self._show_toast("eyedropper", f"Copied {hex_value}")
 
     def rendered_image(self) -> QImage:
@@ -7211,20 +7209,16 @@ class OverlayWindow(QWidget):
     # called, which is the actual fix this ticket makes: the old editor.py
     # flow (Editor.__init__) copied the raw, un-annotated capture to the
     # clipboard exactly once, before any annotation could exist, so the
-    # clipboard never reflected marks made afterwards. Neither method
-    # imports from app.py at module level -- app.py imports this module at
-    # its own top level (to build overlays), so a top-level import back
-    # would be circular; deferred here the same way
-    # `AppController._on_confirmed` defers importing `Editor`.
+    # clipboard never reflected marks made afterwards. The clipboard and
+    # file writes themselves are `snipux.output`'s, looked up on the module
+    # at call time so a test can patch them there.
 
     def copy(self) -> None:
         """Flatten the marks present *right now* onto the selection's crop,
         place the result on the clipboard, and toast `Copied to clipboard`.
         """
-        from snipux.app import copy_image_to_clipboard
-
         image = self.rendered_image()
-        copy_image_to_clipboard(image)
+        output.copy_image_to_clipboard(image)
         self._show_toast("copy", "Copied to clipboard")
         self._report_capture(image, None)
 
@@ -7244,8 +7238,6 @@ class OverlayWindow(QWidget):
         back one after another, so a line whose text exactly matches one
         already kept is that same line seen again, not new text.
         """
-        from snipux.app import copy_text_to_clipboard
-
         current = platform.current
         crop = self._selection_crop()
         lines = []
@@ -7262,7 +7254,7 @@ class OverlayWindow(QWidget):
                 kept.append(text)
 
         if kept:
-            copy_text_to_clipboard("\n".join(kept))
+            output.copy_text_to_clipboard("\n".join(kept))
             count = len(kept)
             self._show_toast("text", f"Copied {count} line{'' if count == 1 else 's'}")
         else:
@@ -7282,11 +7274,9 @@ class OverlayWindow(QWidget):
         that directory if it doesn't exist yet. Returns the path written,
         and toasts `Saved to ~/Pictures/snipux`.
         """
-        from snipux.app import save_image
-
         directory = Path.home() / "Pictures" / self.SAVE_SUBDIRECTORY
         image = self.rendered_image()
-        path = save_image(image, directory)
+        path = output.save_image(image, directory)
         self._show_toast("save", f"Saved to ~/Pictures/{self.SAVE_SUBDIRECTORY}")
         self._report_capture(image, path)
         return path
