@@ -468,18 +468,12 @@ class TestCopyImageToClipboard:
 
 
 class TestCopyTextToClipboard:
-    """The eyedropper's sink: `copy_image_to_clipboard`'s own shape, just
-    for a text/plain flavour -- the in-process Qt clipboard always, and
-    `wl-copy` best-effort so the hex survives the overlay process quitting
-    under Wayland.
-    """
-
     def test_always_places_the_text_on_the_qt_clipboard(self, monkeypatch):
         monkeypatch.setattr(app.shutil, "which", lambda binary: None)
 
-        copy_text_to_clipboard("#3b82f6")
+        copy_text_to_clipboard("Hello, world.")
 
-        assert QGuiApplication.clipboard().text() == "#3b82f6"
+        assert QGuiApplication.clipboard().text() == "Hello, world."
 
     def test_pipes_to_wl_copy_when_present_on_path(self, monkeypatch):
         monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
@@ -490,9 +484,9 @@ class TestCopyTextToClipboard:
 
         monkeypatch.setattr(app.subprocess, "run", fake_run)
 
-        copy_text_to_clipboard("#3b82f6")
+        copy_text_to_clipboard("Hello, world.")
 
-        assert calls == [(["wl-copy"], b"#3b82f6")]
+        assert calls == [(["wl-copy", "--type", "text/plain"], b"Hello, world.")]
 
     def test_does_not_raise_and_falls_back_to_qt_clipboard_when_wl_copy_absent(
         self, monkeypatch
@@ -503,12 +497,13 @@ class TestCopyTextToClipboard:
             app.subprocess, "run", lambda *a, **k: calls.append((a, k))
         )
 
-        copy_text_to_clipboard("#3b82f6")  # must not raise
+        copy_text_to_clipboard("Second line.")  # must not raise
 
         assert calls == []
-        assert QGuiApplication.clipboard().text() == "#3b82f6"
+        assert QGuiApplication.clipboard().text() == "Second line."
 
     def test_does_not_raise_when_wl_copy_binary_vanishes_before_running(self, monkeypatch):
+        # A TOCTOU race: shutil.which found it, but the run itself fails.
         monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
 
         def raising_run(*args, **kwargs):
@@ -516,9 +511,9 @@ class TestCopyTextToClipboard:
 
         monkeypatch.setattr(app.subprocess, "run", raising_run)
 
-        copy_text_to_clipboard("#3b82f6")  # must not raise
+        copy_text_to_clipboard("Still here.")  # must not raise
 
-        assert QGuiApplication.clipboard().text() == "#3b82f6"
+        assert QGuiApplication.clipboard().text() == "Still here."
 
 
 class TestCopyFileToClipboard:

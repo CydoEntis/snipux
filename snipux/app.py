@@ -8,13 +8,14 @@ no answer at all on a platform with no notion of an X11/Wayland session
 type. See `snipux/platform/__init__.py` for why that choice now lives
 behind the platform seam instead.
 
-`copy_image_to_clipboard`/`save_image` also live here rather than in
-`overlay.py`: this is the module with no existing reason to avoid
-`subprocess`/`shutil`/filesystem code (`capture.py` already owns that
-pattern for backends; `overlay.py` is scoped to widget/painting code).
-`app.py` has no reason to import `overlay.py`'s `OverlayWindow.copy`/`save`,
-so `overlay.py` importing these two functions from here (deferred, to avoid
-a circular import) stays one-directional.
+`copy_image_to_clipboard`/`copy_text_to_clipboard`/`save_image` also live
+here rather than in `overlay.py`: this is the module with no existing reason
+to avoid `subprocess`/`shutil`/filesystem code (`capture.py` already owns
+that pattern for backends; `overlay.py` is scoped to widget/painting code).
+`app.py` has no reason to import `overlay.py`'s
+`OverlayWindow.copy`/`copy_text`/`save`, so `overlay.py` importing these
+functions from here (deferred, to avoid a circular import) stays
+one-directional.
 
 `copy_file_to_clipboard`/`finish_recording` sit next to them for the same
 reason: recording has no bitmap to put on the clipboard, only a file, so
@@ -85,6 +86,7 @@ from snipux.overlay import (
 from snipux import __version__, design, handoff, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
 from snipux.recording import RecorderRegistry, RecordingError
+from snipux.pin import PinWindow
 from snipux.player import PlayerWindow
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
@@ -125,8 +127,8 @@ def copy_image_to_clipboard(image: QImage) -> None:
 def copy_text_to_clipboard(text: str) -> None:
     """Place `text` on the clipboard: the in-process Qt clipboard always,
     and (best-effort) `wl-copy` as well when it's on PATH -- the same
-    Wayland-survives-quitting reasoning as `copy_image_to_clipboard`'s own
-    docstring, just for a text/plain flavour instead of an image.
+    Wayland persistence `copy_image_to_clipboard` exists for, and the same
+    reasoning applies here unchanged.
     """
     QGuiApplication.clipboard().setText(text)
 
@@ -134,7 +136,9 @@ def copy_text_to_clipboard(text: str) -> None:
         return
 
     try:
-        subprocess.run(["wl-copy"], input=text.encode("utf-8"), check=True)
+        subprocess.run(
+            ["wl-copy", "--type", "text/plain"], input=text.encode("utf-8"), check=True
+        )
     except (OSError, subprocess.CalledProcessError):
         pass  # Qt clipboard already holds the text; this sink is best-effort
 
@@ -1194,6 +1198,7 @@ class AppController:
         # fair game for the GC while its window is still on screen.
         self._settings: SettingsDialog | None = None
         self._reviews: list[ReviewWindow] = []
+        self._pins: list[PinWindow] = []
         self._players: list[PlayerWindow] = []
         # Set by install_hotkey_listener(), not here -- see its own
         # docstring for why registering the real Windows hotkey is kept out
@@ -1576,6 +1581,9 @@ class AppController:
             # Fires only for a real capture, never for a cancelled snip --
             # see `OverlayWindow._report_capture`.
             on_captured=self._on_captured,
+            # SNX-83: fires only when Pin is chosen from the destination
+            # menu -- see `OverlayWindow._on_bar_pin`.
+            on_pin_requested=self._on_pin_requested,
             # SNX-122: fires only for the record side of the chooser -- see
             # `_on_recording_requested`.
             on_recording_requested=self._on_recording_requested,
@@ -1630,6 +1638,27 @@ class AppController:
         review.show()
         review.raise_()
         review.activateWindow()
+
+    def _on_pin_requested(self, image: QImage, rect: QRect) -> None:
+        """SNX-83: build and show the pin `OverlayWindow._on_bar_pin` asked
+        for, at exactly the selection's own rect.
+
+        A copy of the image, not the overlay's own, for the same reason
+        `_on_captured` copies before handing one to `ReviewWindow` -- the
+        overlay is about to close, and `rendered_image()` hands back a
+        `QImage` backed by buffers it owns.
+        """
+        pin = PinWindow(image.copy(), rect)
+        # Held for the same reason `_reviews` is -- a parentless widget is
+        # fair game for the GC while its window is still on screen, and
+        # several pins at once must each survive independently.
+        self._pins.append(pin)
+        pin.closed.connect(lambda w=pin: self._forget_pin(w))
+        pin.show()
+
+    def _forget_pin(self, window) -> None:
+        if window in self._pins:
+            self._pins.remove(window)
 
     def _notify_capture(self, path: "Path | None") -> None:
         """Confirm, through the tray, that a snip actually happened.

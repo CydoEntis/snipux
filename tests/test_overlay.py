@@ -2677,10 +2677,11 @@ class TestToast:
 
 
 class TestFloatingBarComposition:
-    """The stills bar is one row: the split action, a divider, eight tool
-    slots, a divider, the style dot, a divider, then undo and clear --
-    docs/design/bars/README.md section 2. Built from real widgets rather
-    than painted, so tooltips and hover come for free
+    """The stills bar is one row: the split action, a divider, Copy text, a
+    divider, eight tool slots, a divider, the style dot, a divider, then
+    undo and clear -- docs/design/bars/README.md section 2, with Copy text
+    added past it (#82; see FloatingBar's own docstring). Built from real
+    widgets rather than painted, so tooltips and hover come for free
     (TestFloatingBarTooltips below covers the tooltip half).
     """
 
@@ -2695,13 +2696,13 @@ class TestFloatingBarComposition:
 
         buttons = bar.findChildren(QPushButton)
 
-        # 8 slots + the watermark + undo + clear == 11 on the overlay's bar.
-        # The destinations are one split action and the style dot is a
-        # widget of its own, neither a QPushButton; the mode chip and redo
-        # are built but not placed, since the handoff's post-selection bar
-        # carries neither.
+        # 8 slots + Copy text + the watermark + undo + clear == 12 on the
+        # overlay's bar. The destinations are one split action and the
+        # style dot is a widget of its own, neither a QPushButton; the mode
+        # chip and redo are built but not placed, since the handoff's
+        # post-selection bar carries neither.
         visible = [button for button in buttons if not button.isHidden()]
-        assert len(visible) == 11
+        assert len(visible) == 12
         assert bar._action is not None
         assert bar._chip.isHidden()
         assert bar._redo_button.isHidden()
@@ -2714,6 +2715,9 @@ class TestFloatingBarComposition:
         assert bar._action is None
         assert bar._copy_button is not None
         assert bar._save_button is not None
+        # No fresh selection to read text out of -- see FloatingBar's own
+        # docstring on why Copy text is absent here.
+        assert bar._copy_text_button is None
 
     def test_slots_run_in_the_handoffs_order(self):
         # A gradient of consequence, never reordered: muscle memory is the
@@ -2730,18 +2734,20 @@ class TestFloatingBarComposition:
         row = [
             bar._action,
             dividers[0],
-            *bar._tool_buttons.values(),
+            bar._copy_text_button,
             dividers[1],
+            *bar._tool_buttons.values(),
+            dividers[2],
             bar._style_dot,
             bar._watermark,
-            dividers[2],
+            dividers[3],
             bar._undo_button,
             bar._clear_button,
         ]
 
         lefts = [widget.geometry().x() for widget in row]
 
-        assert len(dividers) == 3
+        assert len(dividers) == 4
         assert lefts == sorted(set(lefts))
 
     def test_the_review_windows_bar_adds_only_its_chip_and_redo(self):
@@ -9036,6 +9042,194 @@ class TestHideSensitiveText:
         assert overlay._chooser.hint.text == "Windows only for now"
 
 
+class TestCopyText:
+    """Copy text (#82): its own action on the floating bar, not a fourth
+    destination -- see FloatingBar's own docstring and OverlayWindow.
+    copy_text. Driven through a faked recognizer, the same way
+    TestHideSensitiveText above is, so nothing here depends on the machine
+    actually having OCR.
+    """
+
+    SELECTION = QRect(100, 50, 400, 300)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    @pytest.fixture
+    def recognizer(self, monkeypatch):
+        """Replaces the platform's text recognition. `lines` is what it
+        returns, each a list of (text, x, y, w, h) words already in
+        reading order, the way OCR hands words back within one line."""
+        state = SimpleNamespace(
+            available=True,
+            reason="",
+            lines=[
+                [("Hello,", 0, 0, 60, 20), ("world.", 70, 0, 60, 20)],
+                [("Second", 0, 30, 70, 20), ("line.", 80, 30, 50, 20)],
+            ],
+        )
+        current = overlay_module.platform.current
+
+        def recognize_text(image):
+            return [
+                [RecognizedWord(text, QRectF(x, y, w, h)) for text, x, y, w, h in line]
+                for line in state.lines
+            ]
+
+        monkeypatch.setattr(current, "recognizes_text", lambda: state.available)
+        monkeypatch.setattr(current, "text_recognition_unavailable_reason", lambda: state.reason)
+        monkeypatch.setattr(current, "recognize_text", recognize_text)
+        return state
+
+    def _overlay(self):
+        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(self.SELECTION)
+        return overlay
+
+    def test_lines_come_back_in_reading_order_one_per_line(self, recognizer, monkeypatch):
+        copied = []
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", copied.append)
+        overlay = self._overlay()
+
+        overlay.copy_text()
+
+        assert copied == ["Hello, world.\nSecond line."]
+
+    def test_the_toast_says_how_many_lines_came_back(self, recognizer, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        said = []
+        overlay._show_toast = lambda icon, text: said.append(text)
+
+        overlay.copy_text()
+
+        assert said == ["Copied 2 lines"]
+
+    def test_a_single_line_is_not_pluralised(self, recognizer, monkeypatch):
+        recognizer.lines = [[("Solo", 0, 0, 40, 20)]]
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        said = []
+        overlay._show_toast = lambda icon, text: said.append(text)
+
+        overlay.copy_text()
+
+        assert said == ["Copied 1 line"]
+
+    def test_finding_nothing_says_so_and_leaves_the_clipboard_alone(self, recognizer, monkeypatch):
+        recognizer.lines = []
+        copied = []
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", copied.append)
+        overlay = self._overlay()
+        said = []
+        overlay._show_toast = lambda icon, text: said.append(text)
+
+        overlay.copy_text()
+
+        assert copied == []
+        assert said == ["No text found"]
+
+    def test_a_line_seen_in_both_reads_is_kept_once(self, recognizer, monkeypatch):
+        # windows_ocr reads a small selection twice, at its own size and
+        # doubled, and hands both reads' lines back one after another --
+        # the same duplication TestHideSensitiveText's own
+        # test_the_same_value_found_by_both_reads_is_one_box_covering_both
+        # covers for the redaction-box side of this.
+        recognizer.lines = [
+            [("Hello,", 0, 0, 60, 20), ("world.", 70, 0, 60, 20)],
+            [("Hello,", 0, 0, 60, 20), ("world.", 70, 0, 60, 20)],
+        ]
+        copied = []
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", copied.append)
+        overlay = self._overlay()
+
+        overlay.copy_text()
+
+        assert copied == ["Hello, world."]
+
+    def test_the_recognizer_reads_the_selection_at_full_resolution(self, recognizer, monkeypatch):
+        # The same crop Hide sensitive hands the engine -- not
+        # rendered_image(), which flattens ink onto it (see copy_text's
+        # own docstring).
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        seen = []
+        monkeypatch.setattr(
+            overlay_module.platform.current,
+            "recognize_text",
+            lambda image: seen.append(QImage(image)) or [],
+        )
+
+        overlay.copy_text()
+
+        [image] = seen
+        assert (image.width(), image.height()) == (400, 300)
+
+    def test_the_bar_greys_copy_text_with_the_platforms_reason(self, recognizer):
+        recognizer.available = False
+        recognizer.reason = "Windows only for now"
+
+        overlay = self._overlay()
+
+        assert overlay._bar.copy_text_available is False
+        assert overlay._bar._copy_text_button.unavailable_reason == "Windows only for now"
+
+    def test_the_button_click_is_refused_while_the_platform_cannot(self, recognizer, monkeypatch):
+        recognizer.available = False
+        recognizer.reason = "Windows only for now"
+        copied = []
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", copied.append)
+        overlay = self._overlay()
+        said = []
+        overlay._show_toast = lambda icon, text: said.append(text)
+
+        # Not setEnabled(False) -- the tooltip explaining why must survive
+        # (_CopyTextButton's own docstring) -- so the click still reaches
+        # Qt; it is FloatingBar._on_copy_text_pressed that refuses it.
+        overlay._bar._copy_text_button.click()
+
+        assert copied == []
+        assert said == []
+
+    def test_the_key_is_refused_while_the_platform_cannot(self, recognizer, monkeypatch):
+        recognizer.available = False
+        recognizer.reason = "Windows only for now"
+        copied = []
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", copied.append)
+        overlay = self._overlay()
+        said = []
+        overlay._show_toast = lambda icon, text: said.append(text)
+
+        QTest.keyClick(overlay, Qt.Key.Key_X)
+
+        # A greyed button refuses its own click, and the key refuses it the
+        # same way -- neither the clipboard nor the toast moves at all.
+        assert copied == []
+        assert said == []
+
+    def test_the_key_copies_text_and_ends_the_snip(self, recognizer, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        QTest.keyClick(overlay, Qt.Key.Key_X)
+
+        assert not overlay.isVisible()
+
+    def test_the_button_click_copies_text_and_ends_the_snip(self, recognizer, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        overlay._bar.copyTextRequested.emit()
+
+        assert not overlay.isVisible()
+
+
 class _FakeBrowserProvider(UnsupportedGeometryProvider):
     """A geometry provider that answers about a browser, so these tests
     never depend on one actually being open.
@@ -12137,6 +12331,105 @@ class TestTheDestinationMenuChangesTheDestination:
         )
 
         assert fired == ["open"]
+
+
+class TestPinDestination:
+    """SNX-83: Pin joins Copy/Save/Open as a fourth ending on the
+    destination menu -- `OverlayWindow._on_bar_pin`/`_open_destination_menu`.
+    """
+
+    def _overlay(self, size=(800, 600), selection=QRect(100, 100, 300, 250)) -> OverlayWindow:
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, *size)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_pin_hands_the_render_and_the_selections_absolute_rect_to_the_callback(self):
+        overlay = self._overlay()
+        seen = []
+        overlay._on_pin_requested = lambda image, rect: seen.append((image, rect))
+
+        overlay._on_bar_pin()
+
+        assert len(seen) == 1
+        image, rect = seen[0]
+        assert image.size() == overlay.rendered_image().size()
+        # The frame's own logical origin is (0, 0) here, so the absolute
+        # rect is the selection unchanged.
+        assert rect == QRect(100, 100, 300, 250)
+
+    def test_pin_closes_the_overlay(self):
+        overlay = self._overlay()
+        overlay._on_pin_requested = lambda image, rect: None
+
+        overlay._on_bar_pin()
+
+        assert overlay.isHidden()
+
+    def test_pin_never_opens_a_review_window(self):
+        # Pin has no `tokens.AFTER_CAPTURE` outcome, so `outcome` is
+        # whatever it already was -- possibly "review", left over from an
+        # earlier choice. `_on_captured` (the review window's own trigger)
+        # must not fire at all for a pin, or a leftover "review" outcome
+        # would open one alongside the pin.
+        overlay = self._overlay()
+        overlay._chooser.set_after("review")
+        overlay._on_pin_requested = lambda image, rect: None
+        captured = Mock()
+        overlay._on_captured = captured
+
+        overlay._on_bar_pin()
+
+        captured.assert_not_called()
+
+    def test_pin_remembers_the_last_region(self, monkeypatch):
+        remembered = []
+        monkeypatch.setattr(
+            setup_desktop, "save_last_region", lambda rect: remembered.append(rect)
+        )
+        overlay = self._overlay()
+        overlay._on_pin_requested = lambda image, rect: None
+
+        overlay._on_bar_pin()
+
+        assert remembered == [(100, 100, 300, 250)]
+
+    def test_the_menus_pin_row_is_live_when_the_platform_can_pin(self, monkeypatch):
+        monkeypatch.setattr(overlay_module.platform.current, "can_pin", lambda: True)
+        overlay = self._overlay()
+
+        overlay._open_destination_menu()
+
+        rows = {value: reason for value, _label, _note, _key, reason in overlay._destination_menu._rows}
+        assert rows["Pin"] == ""
+        overlay._destination_menu.close()
+
+    def test_the_menus_pin_row_is_greyed_with_its_reason_when_the_platform_cannot(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(overlay_module.platform.current, "can_pin", lambda: False)
+        monkeypatch.setattr(
+            overlay_module.platform.current, "pin_unavailable_reason", lambda: "no Wayland"
+        )
+        overlay = self._overlay()
+
+        overlay._open_destination_menu()
+
+        rows = {value: reason for value, _label, _note, _key, reason in overlay._destination_menu._rows}
+        assert rows["Pin"] == "no Wayland"
+        overlay._destination_menu.close()
+
+    def test_choosing_pin_from_the_menu_fires_it(self):
+        overlay = self._overlay()
+        seen = []
+        overlay._on_pin_requested = lambda image, rect: seen.append(rect)
+
+        overlay._on_destination_chosen("Pin")
+
+        assert seen == [QRect(100, 100, 300, 250)]
+        # Unlike Copy/Save/Open, Pin has no outcome to write back.
+        assert overlay.outcome != "pin"
 
 
 class TestTheCursorInvitesTheDrag:

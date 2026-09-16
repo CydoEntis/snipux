@@ -130,6 +130,22 @@ class LinuxPlatform(Platform):
         widget.setAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash, True)
         return True
 
+    def can_pin(self) -> bool:
+        """True under X11, where an ordinary window can be placed at a
+        given rect and asked to stay on top -- the recording bar already
+        relies on the second half of that (`flowbars.py`,
+        `WindowStaysOnTopHint`). False under Wayland: a Wayland client can
+        neither place its own window nor ask to stay on top, so a pin there
+        could meet neither of Pin's own acceptance criteria.
+        """
+        return capture.detect_session_type() == "x11"
+
+    def pin_unavailable_reason(self) -> str:
+        return (
+            "" if self.can_pin() else
+            "Wayland doesn't let an app place its own window or keep it on top."
+        )
+
     def records_audio(self) -> bool:
         """False. `org.gnome.Shell.Screencast` takes `draw-cursor` and
         `framerate` and nothing else -- there is no audio option in the

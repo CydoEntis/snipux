@@ -7,6 +7,18 @@ use it; the commit history has the detail.
 
 ### Added
 
+- **Copy text**, on the floating bar after a selection (Windows only for
+  now). Reads the words out of the selection and puts them on the
+  clipboard as plain text instead of a picture -- for text you cannot
+  select yourself: a VM, a remote desktop, an error dialog, a screenshot
+  someone sent you. Greyed with why wherever it cannot run. Does not
+  change what the next snip's Copy, Save or Open does.
+- **Pin a snip on top of everything.** Choose Pin from the destination menu
+  next to Copy/Save/Open and the selection becomes a small frameless window,
+  always on top, opened exactly where you snipped it. Drag it by the image,
+  resize it (it keeps its own proportions), and close it with Escape or the
+  × that appears on hover. Right-click for Copy and Save. Greyed on Wayland,
+  where an app can't place its own window or keep it on top.
 - **Eyedropper.** Pick a colour off the frozen frame: hover to preview it
   magnified with its hex underneath, click to copy the hex to the clipboard.
   The tool stays active, so several colours can be taken in a row.

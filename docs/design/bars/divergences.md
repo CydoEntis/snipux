@@ -618,6 +618,35 @@ stills. Flipping to record lasts for that snip alone.
 
 ---
 
+## 26 · Copy text grows the stills bar past 478px
+
+**The handoff's** "Eight slots, no more" (`README.md`, rule 2) answers every
+new *tool* with a sibling, a popover section, or a Settings preference, and
+names the stills bar's own width, "478 × 42", as fixed.
+
+**We add a ninth control**, Copy text (#82), beside the split action, past
+its own divider -- and the bar grows by its width to carry it.
+
+### Why
+
+Rule 2 is about the seven tool slots -- the pen through the eraser, the
+gradient of consequence -- and the handoff's own examples (a rounded-rect
+sibling, an arrow-head popover, a default-ink preference) are all about
+*drawing*. Copy text draws nothing; it ends the snip the way Copy does, so
+it belongs with the split action, not the tools. It could not join the
+destination caret either -- the caret's three are `AFTER_CAPTURE`, a
+persisted default, and reading text out of one selection is not a way every
+future snip should end (see `FloatingBar`'s own docstring). With nowhere
+inside the existing 478px to put a control that is neither a tool nor a
+destination, the row is wider instead.
+
+`tests/test_glass.py`'s `TestTheOverlayIsTheHost` widened its left monitor
+to match (700px, not 600): the destination menu overhangs the bar's own
+left edge, centred as it is on the split action near it, and the wider bar
+left it just short of that monitor's edge.
+
+---
+
 ## Still open
 
 Not decided. Today's behaviour stands for each until it is, and each is
