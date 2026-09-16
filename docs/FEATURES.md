@@ -62,7 +62,9 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `dev` Land a recording as GIF without opening the player
 - [x] `dev` Pause and resume (Windows)
 - [ ] `now` Pause and resume on Linux (#93)
-- [ ] `later` Audio -- none on Linux (Screencast has no audio option); not wired on Windows yet
+- [x] `dev` Microphone audio in recordings (Windows)
+- [ ] `later` Desktop (system) sound on Windows -- Qt cannot capture it without a new dependency
+- [ ] `later` Audio on Linux -- GNOME Screencast has no audio option
 
 ## Desktop integration
 

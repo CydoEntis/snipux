@@ -16,8 +16,10 @@ key press / click
       -> destination                                   clipboard, file, pin, player
 ```
 
-A view never writes a file, touches the clipboard, or checks the OS. It says
-"Copy was clicked", and `app.py` does the copying.
+A view never decides a destination or checks the OS. It says "Copy was
+clicked", and `app.py` decides what that means. The actual clipboard and
+save calls live in `output.py`, so a view that must act directly (the
+overlay's instant Copy, a pin's right-click menu) uses that, never `app`.
 
 ## Adding a feature
 
