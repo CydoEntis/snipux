@@ -90,14 +90,9 @@ Windows gets all three.
 
 ## 3 · Not built yet, and why
 
-Listed here rather than silently skipped. None are refusals; all three are
+Listed here rather than silently skipped. Neither is a refusal; both are
 things the handoff itself leaves unresolved.
 
-- **Pause/resume** — the handoff's own "Still open" #2 does not say whether
-  a paused recording is one continuous file or segments concatenated on
-  stop. `QMediaRecorder` can pause on Windows; GNOME's screencast cannot,
-  so on Linux it would have to be stop-and-restart, which is precisely the
-  semantics question left open. Needs deciding before it is built.
 - **"Open" for a recording** — specified as "player with trim, mute and GIF
   export", which the handoff's "Still open" #3 says is described but not
   designed. Trim is separately deferred (`recording.md`: v1 records, it
@@ -105,6 +100,20 @@ things the handoff itself leaves unresolved.
 - **Freeform** — "Still open" #1 says it has no interaction design and
   behaves as a region drag in the prototype. It was removed (#42) rather
   than designed.
+
+**Pause/resume was on this list too, until #87.** The handoff's own
+"Still open" #2 never said whether a paused recording is one continuous
+file or segments concatenated on stop -- that was the open question, and
+#87 answered it: whether a backend can pause at all is a capability it
+declares (`RecordingBackend.can_pause`), defaulting to cannot, the same
+shape `starts_off_thread` already takes on that class. Windows answers yes
+on both its paths (the region path holds frames back and shifts later
+timestamps to close the gap; the full-screen path hands off to
+`QMediaRecorder.pause()`/`record()`) and produces one file with the paused
+time simply absent, never a frozen still. `GnomeScreencastBackend` still
+answers no -- `org.gnome.Shell.Screencast` has no pause call at all -- so
+Linux pause is pieces recorded separately and joined with the system
+ffmpeg on stop, and is its own ticket (#93) rather than bundled here.
 
 ---
 

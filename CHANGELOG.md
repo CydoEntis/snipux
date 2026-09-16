@@ -32,6 +32,9 @@ use it; the commit history has the detail.
   sits alongside Copy/Save/Open on the record side, in the chooser and as a
   default in Settings' Recording pane. Greyed with why on a machine with no
   system ffmpeg to convert with.
+- **Pause and resume a recording** (Windows). Pause sits beside Stop on the
+  recording bar; the clock stops with it, and Resume carries on in the same
+  file with the paused time left out. Greyed with why on Linux for now.
 
 ## 0.8.2 — 2026-09-15
 
