@@ -647,6 +647,40 @@ left it just short of that monitor's edge.
 
 ---
 
+## 27 · Spotlight joins the redaction family, not the shape family
+
+**The handoff lists it** (`README.md`, rule 2's own example of "which slot
+does it join"): "Rounded-rect, polygon, callout, spotlight → shape
+siblings."
+
+**We give it to the redaction family instead** — a fourth `ObscuringShape`
+sibling beside Blur, Pixelate and Blackout (`snipux/shapes.py`), cycling on
+the same key and popover strength section rather than colour/fill/dash.
+
+### Why
+
+- **Its contract already is `ObscuringShape`'s, not `Shape`'s.** A dragged
+  rectangle, undo, the eraser and a strength slider all come free from the
+  base class Blur/Pixelate/Blackout already share; a plain shape sibling
+  would need its own version of every one of those.
+- **Its dim has to survive a re-frame, the way a committed blur already
+  does.** A `Shape.draw()` mark paints live inside `_paint_marks`, clipped
+  to whatever the selection currently frames. A spotlight dims the *whole*
+  frame outside its rect, not just whatever the selection happens to be
+  showing at the moment — which only holds if it is baked into Layer 1 the
+  way `_base_layer_image` already bakes Blur/Pixelate/Redact
+  (`OverlayWindow._base_layer_image`), not painted inside the ink layer's
+  clip.
+- **The example sentence answers rule 2's "which slot", not family
+  membership.** Polygon and callout are not built yet, and nothing in the
+  handoff says how a spotlight is supposed to punch a hole in a dim.
+  `ObscuringShape`'s frame-level `apply()` is what lets several spotlights
+  combine into one dim with several holes (`shapes.Spotlight.apply_all`)
+  instead of each one blindly redimming the last one's — see that
+  method's own docstring.
+
+---
+
 ## Still open
 
 Not decided. Today's behaviour stands for each until it is, and each is

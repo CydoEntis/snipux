@@ -19,6 +19,12 @@ use it; the commit history has the detail.
   resize it (it keeps its own proportions), and close it with Escape or the
   × that appears on hover. Right-click for Copy and Save. Greyed on Wayland,
   where an app can't place its own window or keep it on top.
+- **Spotlight**, a fourth sibling on the redaction tool (B cycles to it
+  after Blackout). Drag a rectangle and everything outside it dims instead
+  of everything inside it being replaced -- the inverse of a redaction, for
+  pointing at one part of a snip rather than hiding one. Its strength
+  slider sets how strong the dim is. Several spotlights on one snip all
+  stay lit together.
 - **Callout**, a new shape in the shapes menu: a box with a tail, pointing
   at wherever the drag began. Click into it and type -- the text wraps to
   fit the box rather than spilling out of it. Colour, fill, line style and

@@ -79,6 +79,7 @@ from snipux.shapes import (
     Rectangle,
     Redact,
     Shape,
+    Spotlight,
     StepMarker,
     Text,
     Watermark,
@@ -8629,6 +8630,12 @@ class OverlayWindow(QWidget):
         `apply()` -- which expects both its rect and the image it samples
         to share one coordinate space -- can sample the right pixels; see
         `_window_to_frame_scale`.
+
+        Every `Spotlight` among `obscuring` is combined into one
+        `Spotlight.apply_all()` call instead of taking its own turn in the
+        loop -- shapes.render()'s own docstring gives the reasoning, which
+        applies here unchanged: several holes in one dim, not one dim per
+        spotlight redimming the last one's.
         """
         obscuring = [shape for shape in self._marks if isinstance(shape, ObscuringShape)]
         key = (
@@ -8651,12 +8658,28 @@ class OverlayWindow(QWidget):
         image = self._frame.image
         if obscuring:
             scale_x, scale_y = self._window_to_frame_scale()
-            for shape in obscuring:
-                image = replace(
+            scaled = [
+                replace(
                     shape,
                     start=QPointF(shape.start.x() * scale_x, shape.start.y() * scale_y),
                     end=QPointF(shape.end.x() * scale_x, shape.end.y() * scale_y),
-                ).apply(image)
+                )
+                for shape in obscuring
+            ]
+            # Spotlight is combined rather than applied one at a time, the
+            # same special case shapes.render() makes for export -- see
+            # Spotlight's own docstring for why stacking each one's apply()
+            # would leave only their rects' intersection lit.
+            spotlights = [shape for shape in scaled if isinstance(shape, Spotlight)]
+            spotlights_done = False
+            for shape in scaled:
+                if isinstance(shape, Spotlight):
+                    if spotlights_done:
+                        continue
+                    image = Spotlight.apply_all(image, spotlights)
+                    spotlights_done = True
+                    continue
+                image = shape.apply(image)
 
         self._base_layer_cache = (key, image)
         return image
