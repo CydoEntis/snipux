@@ -1,36 +1,45 @@
 # Releasing Snipux
 
-Snipux is MIT-licensed and distributed from its own GitHub repository. There
-are two channels today, and neither is PyPI:
+Snipux is MIT-licensed and published from its own GitHub repository. There
+are three channels:
 
-1. **The git install.** `pipx install git+https://github.com/CydoEntis/snipux.git`
-   builds from whatever `main` is at that moment. Nothing has to be published
-   for this to work -- `main` *is* the release, which is why it must stay
-   green.
-2. **The Windows `snipux.exe`**, attached to a
-   [GitHub Release](https://github.com/CydoEntis/snipux/releases). This is the
-   only artifact that gets uploaded anywhere, and the only one that needs the
-   procedure below.
+1. **PyPI.** `pip install snipux` / `pipx install snipux`, and what both
+   installers (`packaging/install.sh`, `packaging/install.ps1`) and
+   `snipux --update` fetch. Published automatically when a `v*` tag is
+   pushed -- see [What the tag does](#what-the-tag-does).
+2. **The GitHub Release** for the same tag, carrying the same wheel and
+   sdist. Created by the same workflow.
+3. **The Windows `snipux.exe`**, attached to that GitHub Release by hand.
+   The only artifact that is still built on a person's machine.
 
-PyPI is set up for but deliberately not used -- see
-"[Publishing to PyPI](#publishing-to-pypi-not-done-today)" at the bottom for
-what it would take and why it is not done.
+Work lands on `dev`; `main` moves only when a release is cut, so `main` is
+always the last released version.
 
 ## Cutting a release
 
-### 1. Bump the version, in both places
+### 1. Merge `dev` into `main`
+
+Open a pull request from `dev` to `main` and merge it once CI is green on
+both runners.
+
+### 2. Bump the version, in both places, and date the changelog
 
 ```sh
-# pyproject.toml     -> version = "0.2.0"
-# snipux/__init__.py -> __version__ = "0.2.0"
+# pyproject.toml     -> version = "0.9.0"
+# snipux/__init__.py -> __version__ = "0.9.0"
+# CHANGELOG.md       -> "## Unreleased" becomes "## 0.9.0 — YYYY-MM-DD",
+#                       with a fresh empty "## Unreleased" above it
 ```
+
+Commit it as `chore(release): 0.9.0`.
 
 `__version__` is **not** read from `pyproject.toml`. Changing one and not the
 other produces a build whose metadata and whose own reported version disagree,
 which is the kind of thing nobody notices until a bug report quotes the wrong
-number.
+number. The release workflow refuses a tag that disagrees with
+`pyproject.toml`, but it does not check `__init__.py`.
 
-### 2. Confirm the suite is green, at both scalings
+### 3. Confirm the suite is green, at both scalings
 
 ```sh
 QT_QPA_PLATFORM=offscreen python -m pytest -q
@@ -45,83 +54,55 @@ trap, restated" before treating it as a release gate: 1,444 tests once passed
 while the primary Linux recording path could not have worked even once. Drive
 whatever changed, on a real screen, before tagging.
 
-### 3. Tag it
+### 4. Tag it
 
 ```sh
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin v0.2.0
+git tag -a v0.9.0 -m "v0.9.0"
+git push origin v0.9.0
 ```
 
-The tag is what a user pins to:
-`pipx install git+https://github.com/CydoEntis/snipux.git@v0.2.0`.
-
-### 4. Build the Windows exe
+### 5. Build the Windows exe and attach it
 
 On a Windows machine or VM -- see
-[Building the Windows exe](#building-the-windows-exe) below. Then create the
-GitHub Release against the tag and attach `dist\snipux.exe`:
+[Building the Windows exe](#building-the-windows-exe) below. Once the
+workflow has created the release:
 
 ```sh
-gh release create v0.2.0 dist/snipux.exe \
-  --title "v0.2.0" --notes "..."
+gh release upload v0.9.0 dist/snipux.exe
 ```
 
-Linux needs no artifact: the git install above covers it.
+Linux needs no extra artifact: PyPI covers it.
 
-## Publishing to PyPI (not done today)
+## What the tag does
 
-`snipux` is unclaimed on PyPI and the packaging metadata is already valid for
-it, so this is available whenever it is wanted. It is not done because the git
-install already gives a one-command install on both platforms, and publishing
-adds a namespace to own and a release cadence to keep up with in exchange for
-`pip install snipux` and discoverability.
+`.github/workflows/release.yml` runs on every pushed `v*` tag:
 
-If that trade changes, this is the whole procedure. It needs a PyPI account
-with ownership of the `snipux` project name and an API token for it -- the
-token must never be committed anywhere in this repository.
+1. checks the tag matches `version` in `pyproject.toml`, and stops if not;
+2. builds the wheel and sdist with `python -m build`;
+3. publishes them to PyPI with **trusted publishing** -- no API token is
+   stored anywhere; PyPI checks the workflow's own identity, which is why
+   the job needs `id-token: write` and why the PyPI project names that
+   workflow file exactly (renaming it breaks publishing);
+4. creates the GitHub Release for the tag (or adds the files to it) with
+   generated notes.
 
-### Build clean artifacts
+PyPI refuses a second upload of a version number that has already been
+published, even if that upload was later deleted. A mistake after the tag
+means a new patch version, not a re-tag.
+
+### Publishing by hand (only if the workflow cannot)
 
 ```sh
 rm -rf dist build *.egg-info
 python -m build
-```
-
-`build` reads `[project]` in `pyproject.toml` and produces both a wheel and
-an sdist under `dist/`. The `rm -rf` first matters: `python -m build` does
-not prune stale files from a previous version out of `dist/`, so skipping it
-risks uploading an old artifact alongside the new one.
-
-Before uploading, sanity-check what got built:
-
-```sh
 twine check dist/*
-```
-
-`twine check` catches the two things PyPI itself rejects at upload time -- a
-`long_description` that fails to render, and metadata missing fields PyPI
-requires. Fix and rebuild rather than uploading and finding out from a failed
-upload.
-
-### Upload
-
-```sh
 twine upload dist/*
 ```
 
-`twine` prompts for credentials; use `__token__` as the username and the
-PyPI API token as the password. To skip the prompt, export
-`TWINE_USERNAME=__token__` and `TWINE_PASSWORD=<token>` in the shell before
-running the command -- never write the token itself into a file in this
-repository.
-
-PyPI refuses to accept a second upload of a version number that has already
-been published, even if the previous upload was later deleted. So the version
-bump in step 1 above is not optional here, it is load-bearing.
-
-**If this is ever done, update the README's Install section** -- it currently
-documents the git install as the only route, on purpose, so that nothing tells
-a user to run a command that 404s.
+The `rm -rf` matters: `python -m build` does not prune stale files from
+`dist/`. `twine` wants `__token__` as the username and a PyPI API token as
+the password -- set `TWINE_USERNAME`/`TWINE_PASSWORD` in the shell, and never
+write the token into a file in this repository.
 
 ## Building the Windows exe
 

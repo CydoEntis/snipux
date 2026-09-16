@@ -48,14 +48,11 @@ Done 2026-09-02. The repo was private with no `LICENSE` file at all, while
 `pyproject.toml` and the README both claimed MIT -- so nothing actually
 granted anyone rights. `LICENSE` exists now and the repo is public.
 
-The install story is **the git install**, not PyPI:
-`pipx install git+https://github.com/CydoEntis/snipux.git`, then
-`snipux --setup`. `main` is the release, which is another reason it has to
-stay green. `snipux` is unclaimed on PyPI and the metadata is valid for it,
-but publishing is deliberately not done -- it buys `pip install snipux` and
-discoverability in exchange for a namespace to own and a cadence to keep.
-`docs/releasing.md` carries the whole procedure for when that trade changes,
-and says to update the README's Install section if it ever is.
+The install story was the git install until 0.6.0; since then it is
+**PyPI**: `pip install snipux` (or the one-line installers), then
+`snipux --setup`. Pushing a `v*` tag publishes to PyPI through
+`.github/workflows/release.yml` with trusted publishing -- no token stored.
+`docs/releasing.md` has the procedure.
 
 Windows still ships `snipux.exe` on the Releases page. No installer, unsigned,
 both for reasons already recorded in `docs/releasing.md` -- Smart App Control
