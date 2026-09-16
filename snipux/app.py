@@ -56,6 +56,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor,
+    QDesktopServices,
     QFont,
     QGuiApplication,
     QIcon,
@@ -1232,6 +1233,7 @@ class AppController:
 
         self._tray_icon = QSystemTrayIcon(icon)
         menu = QMenu()
+        self._tray_menu = menu
         # A single Snip item, not one per SelectionMode: OverlayWindow's own
         # capture-mode popover (CaptureModePopover, opened from its floating
         # bar's chip) is what picks Region/Window/Full screen/Browser now,
@@ -1240,6 +1242,12 @@ class AppController:
         # pair couldn't change mode once a selection was already open.
         self.snip_action = menu.addAction("Snip")
         self.snip_action.triggered.connect(self.start_capture)
+        # #85: the Recent section. A submenu, not a batch of top-level rows,
+        # so an empty list costs the top-level menu nothing at all --
+        # `_rebuild_recent_menu` inserts and removes its one menu action
+        # rather than leaving it in place disabled, which is the "greyed
+        # placeholder" the ticket rules out.
+        self._recent_menu = QMenu("Recent")
         self.settings_action = menu.addAction("Settings...")
         self.settings_action.triggered.connect(self.open_settings)
         # Disabled by default and only ever enabled while a recording is
@@ -1254,11 +1262,18 @@ class AppController:
         self.discard_action.setEnabled(False)
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
+        # #85: rebuilds on `aboutToShow`, but that alone is not trusted --
+        # whether GNOME's AppIndicator extension actually asks for the menu
+        # over D-Bus before opening it (which is what would fire this) has
+        # not been confirmed, so a capture landing is the rebuild
+        # `_on_captured`/`_land_recording` can each count on for real.
+        menu.aboutToShow.connect(self._rebuild_recent_menu)
         self._tray_icon.setContextMenu(menu)
         # A click on the icon itself opens Settings. Nothing listened to
         # the icon before, so clicking it did nothing at all -- and the
         # menu's own Settings item is a right-click plus a click away.
         self._tray_icon.activated.connect(self._on_tray_activated)
+        self._rebuild_recent_menu()
 
         if self._tray_available:
             self._tray_icon.show()
@@ -1275,6 +1290,65 @@ class AppController:
             )
 
         self._transport.listen(self.start_capture, self.open_settings)
+
+    def _rebuild_recent_menu(self) -> None:
+        """Refresh the tray's Recent section from what is actually still on
+        disk (#85).
+
+        Called when a capture lands (`_on_captured`, `_land_recording`) and
+        from the tray menu's own `aboutToShow` -- see the `aboutToShow`
+        connection above for why a capture landing has to trigger this too,
+        not just the signal.
+
+        An entry whose file has been moved, renamed or deleted since it was
+        written is dropped here, and the stored list is rewritten to just
+        the survivors -- so a file that vanished once does not keep costing
+        every later rebuild, and a hand-emptied folder simply empties the
+        section. The config file is only actually rewritten when something
+        was dropped -- an untouched list (the common case: nothing landed
+        since the last rebuild) leaves it alone rather than restamping it
+        on every menu popup for no reason.
+
+        The section itself is a submenu (`self._recent_menu`), inserted
+        before Settings only while it has rows and removed outright when it
+        doesn't -- nothing greyed out, nothing shown for an empty list.
+        """
+        stored = setup_desktop.load_recent_captures()
+        survivors = [path for path in stored if path.exists()]
+        if survivors != stored:
+            setup_desktop.save_recent_captures(survivors)
+
+        self._recent_menu.clear()
+        for path in survivors:
+            action = self._recent_menu.addAction(path.name)
+            action.triggered.connect(lambda checked=False, p=path: self._open_recent_capture(p))
+
+        menu_action = self._recent_menu.menuAction()
+        if survivors:
+            if menu_action not in self._tray_menu.actions():
+                self._tray_menu.insertMenu(self.settings_action, self._recent_menu)
+        elif menu_action in self._tray_menu.actions():
+            self._tray_menu.removeAction(menu_action)
+
+    def _open_recent_capture(self, path: Path) -> None:
+        """Open a Recent-section row in the system's default app for it
+        (#85) -- never snipux's own review window or player, which are for
+        something just captured, not something being revisited later.
+
+        `_rebuild_recent_menu` only runs when a capture lands or the tray
+        menu is about to show, so a file can still vanish in the gap
+        between that rebuild and an actual click. Caught here rather than
+        left to `QDesktopServices.openUrl` fail silently: the entry is
+        dropped from the stored list so the next rebuild does not have to
+        rediscover it is gone, and a toast says why nothing opened.
+        """
+        if not path.exists():
+            survivors = [p for p in setup_desktop.load_recent_captures() if p != path]
+            setup_desktop.save_recent_captures(survivors)
+            self._rebuild_recent_menu()
+            self._report_shortcut(f"{path.name} is gone -- it was moved, renamed or deleted.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     # Windows sends `Trigger` for a single click and both `Trigger` and
     # `DoubleClick` for a double one; GNOME's indicator sends neither and
@@ -1611,6 +1685,13 @@ class AppController:
         startup, so toggling it in Settings takes effect on the next snip
         instead of the next launch.
         """
+        # #85: a still with nowhere else to reopen it from goes on the tray's
+        # Recent list. `path` is None for a clipboard-only destination --
+        # there is nothing to reopen, so nothing is added.
+        if path is not None:
+            setup_desktop.add_recent_capture(path)
+            self._rebuild_recent_menu()
+
         # The chooser is the authority: it is seeded from Settings when the
         # overlay opens, so its value is either what Settings says or what
         # the user changed it to for this snip. Either way it is the more
@@ -2681,6 +2762,11 @@ class AppController:
         )
         shutil.move(path, destination)
         finish_recording(destination, after)
+        # #85: "save" and "open" both leave a real file in the recordings
+        # folder -- "instant" returned above before reaching here, since a
+        # clipboard reference has nothing for the Recent section to reopen.
+        setup_desktop.add_recent_capture(destination)
+        self._rebuild_recent_menu()
         if after == "open":
             self._open_player(destination)
         landed = destination

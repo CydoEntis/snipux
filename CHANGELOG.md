@@ -22,6 +22,12 @@ use it; the commit history has the detail.
 - **Eyedropper.** Pick a colour off the frozen frame: hover to preview it
   magnified with its hex underneath, click to copy the hex to the clipboard.
   The tool stays active, so several colours can be taken in a row.
+- **Recent captures in the tray menu.** The last few things you saved --
+  stills and recordings both -- now show up under a Recent section, newest
+  first, named by their filename. Click one to open it in whatever your
+  system opens that kind of file with. A capture that only went to the
+  clipboard adds nothing; a row whose file has moved, been renamed or been
+  deleted quietly drops out.
 
 ## 0.8.2 — 2026-09-15
 
