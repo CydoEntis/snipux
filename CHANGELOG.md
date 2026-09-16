@@ -42,6 +42,10 @@ use it; the commit history has the detail.
 - **Pause and resume a recording** (Windows). Pause sits beside Stop on the
   recording bar; the clock stops with it, and Resume carries on in the same
   file with the paused time left out. Greyed with why on Linux for now.
+- **Record your microphone** (Windows). Pick Mic from the audio menu on the
+  recording bar and the recording carries what it hears, paused and resumed
+  with the picture. Desktop sound (System) is greyed for now, with why, as
+  is Mic on a machine with no microphone. Each recording starts muted.
 - **Nudge the selection with the arrow keys** — one logical pixel a press,
   ten with Shift, for framing a region precisely without the mouse.
   Alt+arrow resizes it instead, from the bottom-right corner. Both are in
