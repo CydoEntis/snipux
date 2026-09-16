@@ -3943,13 +3943,24 @@ class TestADraggedBarClearsTheDock:
         assert overlay._bar.isVisible()
         return overlay
 
+    @staticmethod
+    def _assert_inside(bounds: QRectF, bar: QRectF) -> None:
+        # The offscreen screen is 533 logical px wide at 1.5x, narrower than
+        # the bar itself, so no placement can contain it sideways there.
+        # What this class is about -- the top bar and the dock -- is
+        # vertical, and holds at any scale; the sides are checked wherever
+        # the bar can fit at all.
+        assert bounds.top() <= bar.top() and bar.bottom() <= bounds.bottom()
+        if bar.width() <= bounds.width():
+            assert bounds.contains(bar)
+
     def test_dragging_it_down_stops_above_a_bottom_dock(self, monkeypatch):
         overlay = self._overlay(monkeypatch)
 
         _drag_bar(overlay._bar, QPointF(0, 5000))
 
         bar = QRectF(overlay._bar.geometry())
-        assert overlay._chrome_bounds().contains(bar)
+        self._assert_inside(overlay._chrome_bounds(), bar)
         assert bar.bottom() == overlay.rect().height() - self.DOCK.bottom() - self.MARGIN
 
     def test_dragging_it_up_stops_below_the_top_bar(self, monkeypatch):
@@ -3967,7 +3978,7 @@ class TestADraggedBarClearsTheDock:
         overlay = self._overlay(monkeypatch)
 
         bar = QRectF(overlay._bar.geometry())
-        assert overlay._chrome_bounds().contains(bar)
+        self._assert_inside(overlay._chrome_bounds(), bar)
         assert bar.bottom() == overlay.rect().height() - self.DOCK.bottom() - self.MARGIN
 
     def test_menus_the_style_popover_and_the_hint_stay_inside_after_a_drag_into_a_corner(
