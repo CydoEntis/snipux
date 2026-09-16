@@ -670,6 +670,57 @@ def save_last_region(
     return _write_config("last_region", [x, y, width, height], config_dir)
 
 
+# How many recent captures the tray's Recent section offers (#85): enough to
+# get back to something captured a few minutes ago, not so many that a tray
+# menu turns into a file manager -- the ticket's own words.
+RECENT_CAPTURES_MAX = 5
+
+
+def load_recent_captures(config_dir: Path | None = None) -> list[Path]:
+    """The last few files snipux has written, newest first -- what the
+    tray's Recent section lists (#85).
+
+    Persisted for the same reason `last_region` above is: autostart means
+    the process reached for in the morning is a fresh one, so an
+    in-memory-only list would already be empty by the time anyone opened
+    the tray.
+
+    Every stored entry is expected to be a path string; anything else -- a
+    non-list value, a non-string entry -- is dropped rather than raised,
+    the same direction every loader here takes: a hand-edited or truncated
+    config must leave the section simply shorter, never break the menu
+    that reads it. Whether a path still exists on disk is not this
+    function's job -- `AppController` checks that itself each time the
+    section is rebuilt, since a file can vanish between one rebuild and
+    the next.
+    """
+    stored = _read_config(config_dir).get("recent_captures")
+    if not isinstance(stored, list):
+        return []
+    paths = [Path(entry) for entry in stored if isinstance(entry, str) and entry]
+    return paths[:RECENT_CAPTURES_MAX]
+
+
+def save_recent_captures(paths: list[Path], config_dir: Path | None = None) -> bool:
+    """Replace the whole Recent list with `paths`, newest first, capped at
+    `RECENT_CAPTURES_MAX` -- what `AppController._rebuild_recent_menu`
+    writes back once it has dropped any entry whose file is gone.
+    """
+    stored = [str(path) for path in paths[:RECENT_CAPTURES_MAX]]
+    return _write_config("recent_captures", stored, config_dir)
+
+
+def add_recent_capture(path: Path, config_dir: Path | None = None) -> bool:
+    """Record `path` as the newest capture, for the tray's Recent section.
+
+    Called only for a capture that actually left a file behind -- a
+    clipboard-only destination has nothing to reopen later, so its caller
+    never reaches this.
+    """
+    existing = [p for p in load_recent_captures(config_dir) if p != path]
+    return save_recent_captures([path] + existing, config_dir)
+
+
 # Which monitor a remembered bar position is on, named relative to the
 # selection rather than by any monitor's own name or index: the selection's
 # own monitor, or the other one the bar is sent to when that one leaves it no

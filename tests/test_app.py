@@ -2773,7 +2773,10 @@ class TestAppControllerLandingRecording:
         controller._stop_recording()
 
         assert not Path(temp_path).exists()
-        landed = list(tmp_path.iterdir())
+        # Filtered to files: landing now also writes the Recent list (#85)
+        # to config.json, and `_isolated_config` (conftest.py) happens to
+        # nest that config directory under this same tmp_path.
+        landed = [p for p in tmp_path.iterdir() if p.is_file()]
         assert len(landed) == 1
         assert landed[0].suffix == ".mp4"
 
@@ -2803,7 +2806,9 @@ class TestAppControllerLandingRecording:
 
         controller._stop_recording()
 
-        landed = next(tmp_path.iterdir())
+        # The actual recording, not config.json's own directory -- see the
+        # note on test_stopping_moves_the_temp_file_into_the_save_folder.
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
         assert produced, "landing never asked preview_filename for a name"
         assert landed == Path(produced[-1])
 
@@ -2879,7 +2884,9 @@ class TestAppControllerLandingRecording:
         controller._stop_recording()
 
         assert copied == []
-        assert len(list(tmp_path.iterdir())) == 1
+        # Filtered to files -- see the same note on
+        # test_stopping_moves_the_temp_file_into_the_save_folder above.
+        assert len([p for p in tmp_path.iterdir() if p.is_file()]) == 1
 
     def test_a_normal_stop_reports_the_landed_path_through_the_tray(
         self, make_controller, monkeypatch, tmp_path
@@ -2893,7 +2900,9 @@ class TestAppControllerLandingRecording:
         controller._stop_recording()
 
         assert len(calls) == 1
-        landed = next(tmp_path.iterdir())
+        # The actual recording, not config.json's own directory -- see the
+        # note on test_stopping_moves_the_temp_file_into_the_save_folder.
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
         assert str(landed) in calls[0][1]
 
     def test_a_failed_move_is_reported_not_raised(self, make_controller, monkeypatch):
@@ -3348,7 +3357,9 @@ class TestAppControllerRecordingDiskSpace:
         _record(controller, QRectF(0, 0, 100, 100), "No delay", "save")
 
         assert len(calls) == 1
-        landed = next(tmp_path.iterdir())
+        # The actual recording, not config.json's own directory -- see the
+        # note on test_stopping_moves_the_temp_file_into_the_save_folder.
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
         assert str(landed) in calls[0][1]
         assert "disk" in calls[0][1].lower()
 
@@ -3525,6 +3536,189 @@ class TestAppControllerTrayMenu:
         )
 
         controller.quit_action.trigger()
+
+
+class TestAppControllerRecentCaptures:
+    """#85: a tray Recent section listing the last few captures, newest
+    first, each row opening the file it names.
+    """
+
+    def _make(self, make_controller):
+        return make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+    def _recent_texts(self, controller):
+        return [action.text() for action in controller._recent_menu.actions()]
+
+    def _start_a_recording(self, make_controller, monkeypatch, after="save"):
+        # Duplicated from TestAppControllerLandingRecording's own helper,
+        # the same way that class's helper is itself already duplicated
+        # from TestAppControllerRecordingHud's -- each class here keeps its
+        # own copy rather than sharing one across files.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", after)
+        return controller, backend
+
+    def test_nothing_appears_in_the_tray_menu_with_an_empty_list(self, make_controller):
+        controller = self._make(make_controller)
+
+        assert controller._recent_menu.menuAction() not in controller._tray_menu.actions()
+        assert self._recent_texts(controller) == []
+
+    def test_a_still_with_a_file_is_added_newest_first(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        first = tmp_path / "Screenshot from 2026-09-16 10-00-00.png"
+        first.write_bytes(b"one")
+        second = tmp_path / "Screenshot from 2026-09-16 10-05-00.png"
+        second.write_bytes(b"two")
+
+        controller._on_captured(make_image(), first)
+        controller._on_captured(make_image(), second)
+
+        assert self._recent_texts(controller) == [second.name, first.name]
+        assert controller._recent_menu.menuAction() in controller._tray_menu.actions()
+
+    def test_a_clipboard_only_still_adds_nothing(self, make_controller):
+        controller = self._make(make_controller)
+
+        controller._on_captured(make_image(), None)
+
+        assert self._recent_texts(controller) == []
+        assert controller._recent_menu.menuAction() not in controller._tray_menu.actions()
+
+    def test_a_row_names_the_filename_not_the_full_path(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        nested = tmp_path / "deeply" / "nested" / "folder"
+        nested.mkdir(parents=True)
+        path = nested / "snip.png"
+        path.write_bytes(b"x")
+
+        controller._on_captured(make_image(), path)
+
+        assert self._recent_texts(controller) == ["snip.png"]
+
+    def test_capped_at_the_max(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        paths = []
+        for index in range(setup_desktop.RECENT_CAPTURES_MAX + 2):
+            path = tmp_path / f"snip-{index}.png"
+            path.write_bytes(b"x")
+            paths.append(path)
+            controller._on_captured(make_image(), path)
+
+        newest_first = list(reversed(paths[-setup_desktop.RECENT_CAPTURES_MAX :]))
+        assert self._recent_texts(controller) == [p.name for p in newest_first]
+
+    def test_clicking_a_row_opens_it_with_the_system_default_app(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = self._make(make_controller)
+        path = tmp_path / "snip.png"
+        path.write_bytes(b"x")
+        controller._on_captured(make_image(), path)
+        opened = []
+        monkeypatch.setattr(app.QDesktopServices, "openUrl", lambda url: opened.append(url))
+
+        controller._recent_menu.actions()[0].trigger()
+
+        assert len(opened) == 1
+        assert opened[0].toLocalFile() == str(path)
+
+    def test_a_row_whose_file_is_missing_is_dropped_when_the_menu_rebuilds(
+        self, make_controller, tmp_path
+    ):
+        controller = self._make(make_controller)
+        path = tmp_path / "snip.png"
+        path.write_bytes(b"x")
+        controller._on_captured(make_image(), path)
+        path.unlink()
+
+        # aboutToShow, not another capture landing -- see the ticket's own
+        # Context note on why the rebuild can't rely on this signal alone,
+        # covered separately by the "capture lands" tests above.
+        controller._tray_menu.aboutToShow.emit()
+
+        assert self._recent_texts(controller) == []
+        assert controller._recent_menu.menuAction() not in controller._tray_menu.actions()
+        assert setup_desktop.load_recent_captures() == []
+
+    def test_clicking_a_row_whose_file_vanished_since_the_last_rebuild_removes_it_with_a_toast(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = self._make(make_controller)
+        path = tmp_path / "snip.png"
+        path.write_bytes(b"x")
+        controller._on_captured(make_image(), path)
+        action = controller._recent_menu.actions()[0]
+        path.unlink()  # vanished after the rebuild, before the click
+        opened = []
+        monkeypatch.setattr(app.QDesktopServices, "openUrl", lambda url: opened.append(url))
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+
+        action.trigger()
+
+        assert opened == []
+        assert len(said) == 1
+        assert path.name in said[0]
+        assert setup_desktop.load_recent_captures() == []
+        assert self._recent_texts(controller) == []
+
+    def test_a_recording_saved_to_a_folder_is_added(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._start_a_recording(make_controller, monkeypatch, after="save")
+
+        controller._stop_recording()
+
+        # The actual recording, not config.json's own directory (the Recent
+        # list this test is exercising lives there too).
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
+        assert self._recent_texts(controller) == [landed.name]
+
+    def test_a_recording_opened_in_the_player_is_added(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._start_a_recording(make_controller, monkeypatch, after="open")
+
+        controller._stop_recording()
+
+        landed = next(p for p in tmp_path.iterdir() if p.is_file())
+        assert self._recent_texts(controller) == [landed.name]
+
+    def test_a_recording_copied_to_the_clipboard_adds_nothing(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._start_a_recording(
+            make_controller, monkeypatch, after="instant"
+        )
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None)
+
+        controller._stop_recording()
+
+        assert self._recent_texts(controller) == []
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_list_survives_a_restart(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        path = tmp_path / "snip.png"
+        path.write_bytes(b"x")
+        controller._on_captured(make_image(), path)
+
+        fresh = self._make(make_controller)
+
+        assert self._recent_texts(fresh) == [path.name]
 
 
 class TestAppControllerIcon:
