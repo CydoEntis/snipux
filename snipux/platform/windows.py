@@ -104,15 +104,20 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from PyQt6.QtCore import QAbstractNativeEventFilter
 
 from snipux import capture, recording, setup_desktop
-from snipux.capture import BackendRegistry
-from snipux.recording import RecorderRegistry
 
 from . import Platform, UnimplementedPlatformError, windows_ocr
+
+# Type-only: `capture.py`/`recording.py` import this package at their top, so
+# a name imported out of either here could still be undefined when
+# `platform/__init__.py`'s `_select()` imports this module.
+if TYPE_CHECKING:
+    from snipux.capture import BackendRegistry
+    from snipux.recording import RecorderRegistry
 
 _PLATFORM_NAME = "Windows"
 

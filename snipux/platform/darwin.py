@@ -33,11 +33,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from snipux.capture import BackendRegistry, UnsupportedPlatformBackend
+from snipux import capture
 
 from . import Platform, UnimplementedPlatformError
 
+# Type-only, like `RecorderRegistry`: `capture.py` imports this package at
+# its top, so a name imported out of it here could still be undefined.
 if TYPE_CHECKING:
+    from snipux.capture import BackendRegistry
     from snipux.recording import RecorderRegistry
 
 _PLATFORM_NAME = "macOS"
@@ -60,8 +63,8 @@ class DarwinPlatform(Platform):
         raise UnimplementedPlatformError(_PLATFORM_NAME, "default_save_folder")
 
     def build_capture_registry(self) -> BackendRegistry:
-        registry = BackendRegistry()
-        registry.add(UnsupportedPlatformBackend(_PLATFORM_NAME))
+        registry = capture.BackendRegistry()
+        registry.add(capture.UnsupportedPlatformBackend(_PLATFORM_NAME))
         return registry
 
     def build_recording_registry(self) -> "RecorderRegistry":

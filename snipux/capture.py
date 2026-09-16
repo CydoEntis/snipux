@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
@@ -27,6 +26,8 @@ from jeepney.io.blocking import open_dbus_connection
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF, QUrl
 from PyQt6.QtGui import QGuiApplication, QImage, QPainter
+
+from snipux import platform
 
 
 @dataclass
@@ -131,7 +132,7 @@ def _missing_backend_advice() -> str:
     can even be tried -- still worth a platform-appropriate message rather
     than falling through to Linux's.
     """
-    if sys.platform == "win32":
+    if platform.is_windows():
         return "check that this build of Snipux includes Windows capture support"
     session_type = detect_session_type()
     if session_type == "wayland":
@@ -1219,7 +1220,7 @@ class QtNativeWindowsBackend(CaptureBackend):
         return "qt-native"
 
     def is_available(self) -> bool:
-        return sys.platform == "win32"
+        return platform.is_windows()
 
     def unavailable_reason(self) -> str | None:
         return None if self.is_available() else "not running on Windows"
@@ -1278,7 +1279,7 @@ class Win32GdiBackend(CaptureBackend):
         return "win32-gdi"
 
     def is_available(self) -> bool:
-        return sys.platform == "win32"
+        return platform.is_windows()
 
     def unavailable_reason(self) -> str | None:
         return None if self.is_available() else "not running on Windows"
@@ -1483,7 +1484,7 @@ class WindowsWindowGeometryProvider:
         self._cache_time: float | None = None
 
     def is_available(self) -> bool:
-        return sys.platform == "win32"
+        return platform.is_windows()
 
     # Chromium-family executables. Firefox is deliberately absent: it has
     # no `Chrome_RenderWidgetHostHWND` equivalent, so there is nothing to

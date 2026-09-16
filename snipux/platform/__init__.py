@@ -352,6 +352,33 @@ class UnimplementedPlatformError(NotImplementedError):
         super().__init__(f"{operation} is not implemented on {platform_name} yet")
 
 
+def is_windows() -> bool:
+    """Whether this process is running on Windows.
+
+    For the few places below the seam -- a backend's own `is_available()`,
+    an error message -- that need the answer without a `Platform` object.
+    Read live rather than cached, so a test that sets `sys.platform` sees
+    its own value. Defined above `current` on purpose: `capture.py`,
+    `recording.py` and `setup_desktop.py` import this package at their top,
+    while `_select()` below imports modules that import them back, so these
+    must already exist when that cycle re-enters this half-built module.
+    """
+    return sys.platform == "win32"
+
+
+def is_linux() -> bool:
+    """Whether this process is running on Linux. See `is_windows()`."""
+    return sys.platform.startswith("linux")
+
+
+def os_name() -> str:
+    """The OS as a person would name it: `Linux`, `Windows`, `macOS`, or
+    the raw `sys.platform` for anything else. See `is_windows()`."""
+    if is_linux():
+        return "Linux"
+    return {"win32": "Windows", "darwin": "macOS"}.get(sys.platform, sys.platform)
+
+
 def _select() -> Platform:
     """The one place `sys.platform` is read to choose an implementation --
     every other module reaches `current` instead.

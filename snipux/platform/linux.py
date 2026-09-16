@@ -20,15 +20,21 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QMargins, Qt
 from PyQt6.QtGui import QGuiApplication
 
 from snipux import capture, recording, setup_desktop
-from snipux.capture import BackendRegistry
-from snipux.recording import RecorderRegistry
 
 from . import Platform
+
+# Type-only: `capture.py`/`recording.py` import this package at their top, so
+# a name imported out of either here could still be undefined when
+# `platform/__init__.py`'s `_select()` imports this module.
+if TYPE_CHECKING:
+    from snipux.capture import BackendRegistry
+    from snipux.recording import RecorderRegistry
 
 
 class LinuxPlatform(Platform):

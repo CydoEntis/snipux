@@ -1,3 +1,4 @@
+import sys
 import threading
 import time
 from unittest.mock import Mock
@@ -221,7 +222,7 @@ class TestRecorderRegistryStart:
 
 class TestRecordingErrorWhenNoBackendIsAvailable:
     def test_names_the_platform_and_enumerates_each_unavailable_backend(self, monkeypatch):
-        monkeypatch.setattr(recording.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         registry = RecorderRegistry(
             [FakeBackend("qt-native", False, reason="not implemented yet")]
         )
@@ -241,7 +242,7 @@ class TestRecordingErrorWhenNoBackendIsAvailable:
         # Linux-package advice terms should ever leak into a recording
         # message, on any platform, since there is no such fix for
         # recording yet.
-        monkeypatch.setattr(recording.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         registry = RecorderRegistry(
             [FakeBackend("qt-native", False, reason="not implemented yet")]
         )
@@ -255,7 +256,7 @@ class TestRecordingErrorWhenNoBackendIsAvailable:
         assert "apt install" not in message
 
     def test_names_linux_when_not_on_windows_or_macos(self, monkeypatch):
-        monkeypatch.setattr(recording.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         registry = RecorderRegistry(
             [FakeBackend("gnome-screencast", False, reason="not a GNOME session")]
         )
@@ -269,7 +270,7 @@ class TestRecordingErrorWhenNoBackendIsAvailable:
         assert "not a GNOME session" in message
 
     def test_names_macos(self, monkeypatch):
-        monkeypatch.setattr(recording.sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "platform", "darwin")
         registry = RecorderRegistry([FakeBackend("macos-native", False, reason="not implemented yet")])
 
         with pytest.raises(RecordingError) as excinfo:
@@ -283,7 +284,7 @@ class TestRecordingErrorWhenNoBackendIsAvailable:
         # This ticket's own end state: a bare registry with no backend
         # added at all. There's nothing to enumerate, so the message
         # shouldn't dangle a "(tried: )" with nothing after it.
-        monkeypatch.setattr(recording.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         registry = RecorderRegistry()
 
         with pytest.raises(RecordingError) as excinfo:
@@ -296,7 +297,7 @@ class TestRecordingErrorWhenNoBackendIsAvailable:
     def test_unavailable_is_reachable_from_the_exception_without_calling_back_into_the_registry(
         self, monkeypatch
     ):
-        monkeypatch.setattr(recording.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         registry = RecorderRegistry(
             [FakeBackend("qt-native", False, reason="not implemented yet")]
         )
@@ -1485,7 +1486,7 @@ def _windows_backend(**overrides):
 
 class TestWindowsRecorderBackendAvailability:
     def test_available_on_windows(self, monkeypatch):
-        monkeypatch.setattr(recording.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
 
         backend = WindowsRecorderBackend()
 
@@ -1493,7 +1494,7 @@ class TestWindowsRecorderBackendAvailability:
         assert backend.unavailable_reason() is None
 
     def test_unavailable_elsewhere_with_a_reason(self, monkeypatch):
-        monkeypatch.setattr(recording.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
 
         backend = WindowsRecorderBackend()
 

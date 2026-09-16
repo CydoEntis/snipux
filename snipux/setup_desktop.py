@@ -36,6 +36,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
+from . import platform
 from .design import PACKAGE_DIR, tokens
 
 # PACKAGE_DIR (snipux/design/__init__.py) rather than a second
@@ -398,9 +399,9 @@ def _platform_field() -> str:
     everywhere else, where there is no session-type concept to detect and
     `detect_session_type()` would otherwise report 'unknown' on every run.
     """
-    if sys.platform.startswith("linux"):
+    if platform.is_linux():
         return detect_session_type()
-    return {"win32": "Windows", "darwin": "macOS"}.get(sys.platform, sys.platform)
+    return platform.os_name()
 
 
 def detect_session_type() -> str:

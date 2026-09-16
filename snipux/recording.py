@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import posixpath
-import sys
 import time
 from abc import ABC, abstractmethod
 
@@ -45,7 +44,7 @@ from PyQt6.QtMultimedia import (
     QVideoSink,
 )
 
-from . import setup_desktop
+from . import platform, setup_desktop
 
 
 class RecordingBackend(ABC):
@@ -146,11 +145,10 @@ def _platform_name() -> str:
     Naming the platform is the honest thing `RecordingError` can say
     instead.
     """
-    if sys.platform == "win32":
-        return "Windows"
-    if sys.platform == "darwin":
-        return "macOS"
-    return "Linux"
+    # Anything that is neither Windows nor macOS has always read as Linux
+    # here; `os_name()` would name it by its raw `sys.platform` instead.
+    name = platform.os_name()
+    return name if name in ("Windows", "macOS") else "Linux"
 
 
 class RecordingError(Exception):
@@ -190,13 +188,13 @@ class RecordingError(Exception):
         self.failures = failures
         self.unavailable = unavailable or []
         if not failures:
-            platform = _platform_name()
+            platform_name = _platform_name()
             if not self.unavailable:
-                super().__init__(f"no recording backend is available on {platform}")
+                super().__init__(f"no recording backend is available on {platform_name}")
                 return
             tried = "; ".join(f"{name}: {reason}" for name, reason in self.unavailable)
             super().__init__(
-                f"no recording backend is available on {platform} (tried: {tried})"
+                f"no recording backend is available on {platform_name} (tried: {tried})"
             )
             return
         summary = "; ".join(f"{name}: {exc}" for name, exc in failures)
@@ -1035,7 +1033,7 @@ class WindowsRecorderBackend(RecordingBackend):
         return "qt-native"
 
     def is_available(self) -> bool:
-        return sys.platform == "win32"
+        return platform.is_windows()
 
     def unavailable_reason(self) -> str | None:
         return None if self.is_available() else "qt-native recording is Windows-only"
