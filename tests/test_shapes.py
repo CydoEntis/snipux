@@ -29,6 +29,7 @@ from snipux.design.tokens import (
 from snipux.shapes import (
     Arrow,
     Blur,
+    Callout,
     Crop,
     DROP_THRESHOLD,
     Ellipse,
@@ -48,6 +49,7 @@ from snipux.shapes import (
     render,
     render_selection,
     _line_pen,
+    _transformed,
 )
 
 BACKGROUND = qRgb(255, 255, 255)
@@ -822,6 +824,198 @@ class TestRectangleGeometry:
         assert corner_coverage > edge_coverage + 50
 
 
+class TestCalloutGeometry:
+    """`start` is the tail's own tip -- where the drag began -- and the
+    body is the drag's bounding rect, pulled in by `TAIL_LENGTH` at
+    whichever corner `start` sits on. See `Callout._geometry`.
+    """
+
+    def test_body_is_the_drag_inset_by_the_tail_notch(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        body = callout.body_rect()
+
+        assert body == QRectF(QPointF(10 + Callout.TAIL_LENGTH, 10 + Callout.TAIL_LENGTH),
+                               QPointF(110, 90))
+
+    def test_tail_tip_is_where_the_drag_began_not_where_it_ended(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        _body, tail = callout._geometry()
+
+        assert tail[0] == QPointF(10, 10)
+
+    def test_body_follows_whichever_corner_start_dragged_from(self):
+        # Dragged from the bottom-right this time: the notch -- and the
+        # tail -- move to that corner instead.
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(110, 90), end=QPointF(10, 10)
+        )
+
+        body = callout.body_rect()
+
+        assert body == QRectF(QPointF(10, 10),
+                               QPointF(110 - Callout.TAIL_LENGTH, 90 - Callout.TAIL_LENGTH))
+
+    def test_a_zero_width_drag_leaves_no_room_for_a_tail(self):
+        # Below DROP_THRESHOLD this never reaches finalize_mark, but
+        # _geometry itself must not produce a negative notch, or divide by
+        # zero, for a drag with no width to inset a corner from.
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(10, 90)
+        )
+
+        body, tail = callout._geometry()
+
+        assert body.width() == 0
+        assert tail is None
+
+
+class TestCalloutRendering:
+    def test_body_outline_is_painted_and_its_interior_is_not(self):
+        base = make_image(size=(200, 200))
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        result = render(base, [callout])
+
+        body = callout.body_rect()
+        assert result.pixelColor(round(body.left()), round(body.center().y())) == RED
+        assert result.pixelColor(
+            round(body.center().x()), round(body.center().y())
+        ) == QColor(BACKGROUND)
+
+    def test_the_tail_is_painted_from_its_tip_to_the_body(self):
+        base = make_image(size=(200, 200))
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        result = render(base, [callout])
+
+        _body, tail = callout._geometry()
+        tip, base_a = tail[0], tail[1]
+        midpoint = QPointF((tip.x() + base_a.x()) / 2, (tip.y() + base_a.y()) / 2)
+        assert result.pixelColor(round(midpoint.x()), round(midpoint.y())).green() < 128
+
+    def test_text_paints_inside_the_body_in_the_marks_colour(self):
+        base = make_image(size=(200, 200))
+        callout = Callout(
+            colour=RED, stroke_width=6, start=QPointF(10, 10), end=QPointF(150, 100),
+            text="Hi",
+        )
+
+        result = render(base, [callout])
+
+        rect = callout._text_rect(callout.body_rect())
+        metrics = QFontMetricsF(callout._font())
+        xs = range(int(rect.left()), int(rect.left() + metrics.horizontalAdvance("Hi")) + 1)
+        ys = range(int(rect.top()), int(rect.top() + metrics.height()) + 1)
+        painted = [result.pixelColor(x, y) for x in xs for y in ys]
+
+        assert any(p == RED for p in painted)
+
+    def test_empty_text_paints_no_glyphs(self):
+        base = make_image(size=(200, 200))
+        with_text = render(base, [Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(150, 100), text="X",
+        )])
+        without_text = render(base, [Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(150, 100), text="",
+        )])
+
+        assert with_text != without_text
+
+
+class TestCalloutWrapping:
+    """The wrap point depends on the font this mark actually draws with --
+    worked out from `QFontMetrics` below rather than assumed, per
+    CLAUDE.md: CI's Ubuntu runner only has DejaVu Sans, wider than this
+    desk's own font, and Windows rasterises text differently again.
+    """
+
+    def test_empty_text_wraps_to_no_lines(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(90, 70)
+        )
+
+        assert callout.wrapped_lines() == []
+
+    def test_text_narrower_than_the_body_stays_on_one_line(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(300, 200), text="Hi",
+        )
+
+        assert callout.wrapped_lines() == ["Hi"]
+
+    def test_long_text_wraps_without_losing_or_reordering_any_word(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(90, 70),
+            text="one two three four five six seven eight nine ten",
+        )
+        metrics = QFontMetricsF(callout._font())
+        max_width = callout._text_rect(callout.body_rect()).width()
+
+        lines = callout.wrapped_lines()
+
+        assert len(lines) > 1
+        assert " ".join(lines).split() == callout.text.split()
+        for line in lines:
+            assert metrics.horizontalAdvance(line) <= max_width + 0.5
+
+    def test_a_single_word_wider_than_the_body_gets_its_own_line(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 70),
+            text="a supercalifragilisticexpialidocious word",
+        )
+
+        lines = callout.wrapped_lines()
+
+        assert "supercalifragilisticexpialidocious" in lines
+
+
+class TestCalloutHitTest:
+    def test_hits_the_body_outline_not_its_interior(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+        body = callout.body_rect()
+
+        assert callout.hit_test(QPointF(body.left(), body.center().y())) is True
+        assert callout.hit_test(body.center()) is False
+
+    def test_hits_the_tail(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+        _body, tail = callout._geometry()
+        tip, base_a = tail[0], tail[1]
+        midpoint = QPointF((tip.x() + base_a.x()) / 2, (tip.y() + base_a.y()) / 2)
+
+        assert callout.hit_test(midpoint) is True
+
+    def test_misses_well_clear_of_the_mark(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        assert callout.hit_test(QPointF(500, 500)) is False
+
+    def test_filled_callout_counts_its_interior_as_a_hit(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90),
+            fill="filled",
+        )
+        body = callout.body_rect()
+
+        assert callout.hit_test(body.center()) is True
+
+
 class TestFinalizeMark:
     def test_freehand_with_one_point_is_discarded(self):
         pen = Pen(colour=RED, stroke_width=4, points=[QPointF(10, 10)])
@@ -888,13 +1082,14 @@ class TestFinalizeMark:
         assert result.start == QPointF(50, 50)
         assert result.end == QPointF(10, 10)
 
-    @pytest.mark.parametrize("shape_class", [Ellipse, Line, Crop])
+    @pytest.mark.parametrize("shape_class", [Ellipse, Line, Crop, Callout])
     def test_restored_shape_tools_discard_a_stray_click(self, shape_class):
         # SNX-64: Ellipse/Line/Crop joined Arrow/Rectangle/ObscuringShape in
         # finalize_mark's drop-threshold check when they were wired up as
         # overlay.py mark tools -- a click too small to be a deliberate
         # drag must not leave an invisible mark behind for any of them,
-        # same as it already didn't for Rectangle.
+        # same as it already didn't for Rectangle. Callout joined the same
+        # group when it was added.
         tiny = shape_class(
             colour=RED, stroke_width=4, start=QPointF(10, 10),
             end=QPointF(10 + DROP_THRESHOLD, 10 + DROP_THRESHOLD),
@@ -910,6 +1105,20 @@ class TestFinalizeMark:
         # of "corners" at all) -- so, like Arrow, they come back exactly as
         # dragged.
         dragged_up_left = shape_class(
+            colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10)
+        )
+
+        result = finalize_mark(dragged_up_left)
+
+        assert result.start == QPointF(50, 50)
+        assert result.end == QPointF(10, 10)
+
+    def test_callout_keeps_its_corner_order_since_start_is_the_tail_tip(self):
+        # Unlike the shapes above, Callout's start isn't just "a corner" --
+        # it's where the drag began, the tail's own tip. Normalising it
+        # away the way Rectangle's is would silently move what the mark is
+        # pointing at.
+        dragged_up_left = Callout(
             colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10)
         )
 
@@ -1547,7 +1756,7 @@ class TestExportedLengths:
         assert abs(saved - seen) <= 1
 
     @pytest.mark.parametrize("width", [2, 5, 8])
-    @pytest.mark.parametrize("kind", ["text", "step", "crop"])
+    @pytest.mark.parametrize("kind", ["text", "step", "crop", "callout"])
     def test_a_label_badge_or_dashed_box_exports_the_size_the_screen_drew_it(self, kind, width):
         mark = {
             "text": lambda: Text(
@@ -1558,6 +1767,10 @@ class TestExportedLengths:
             ),
             "crop": lambda: Crop(
                 colour=RED, stroke_width=width, start=QPointF(30, 20), end=QPointF(170, 100)
+            ),
+            "callout": lambda: Callout(
+                colour=RED, stroke_width=width, start=QPointF(20, 20), end=QPointF(170, 100),
+                text="Hi",
             ),
         }[kind]()
 
@@ -1628,12 +1841,39 @@ class TestExportedLengths:
             Arrow(colour=BLUE, stroke_width=width, start=QPointF(30, 100), end=QPointF(170, 40)),
             Text(colour=RED, stroke_width=width, text="Hi gy", point=QPointF(30, 40)),
             StepMarker(colour=BLUE, stroke_width=width, point=QPointF(140, 60), number=2),
+            Callout(colour=RED, stroke_width=width, start=QPointF(30, 20), end=QPointF(170, 100),
+                    text="Hi"),
         ]
 
         for mark in marks:
             expected = self.on_screen(mark, ratio=1.0, size=(200, 120)).copy(selection.toRect())
             exported = render_selection(frame, [mark], selection)
             assert exported.convertToFormat(expected.format()) == expected, type(mark).__name__
+
+
+class TestCalloutExportScaling:
+    """The ticket's own "exported at 1.0 and 1.5 display scaling with the
+    text the same size relative to its box in both": font size and the
+    body's own size are both lengths (`Callout._font`, `TAIL_LENGTH`) that
+    go through `_scaled` together with the crop's point-mapping, so their
+    *ratio* should survive a change of scale even though neither one does
+    on its own -- `render_selection`'s `_transformed` call is exercised
+    directly here, the same one it uses internally, rather than a second,
+    parallel scaling computation that could drift from it.
+    """
+
+    def test_ratios_match_between_1x_and_1_5x(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(20, 20), end=QPointF(160, 100), text="Hi",
+        )
+
+        def ratio_at(scale: float) -> float:
+            mapped = _transformed(
+                callout, lambda p: QPointF(p.x() * scale, p.y() * scale), scale
+            )
+            return mapped._font().pixelSize() / mapped.body_rect().height()
+
+        assert ratio_at(1.5) == pytest.approx(ratio_at(1.0), rel=0.05)
 
 
 # -- the watermark (#69) -------------------------------------------------------

@@ -821,6 +821,7 @@ TOOL_HINTS = {
     "eraser":      "Click a mark to remove it",
     "ellipse":     "Drag to draw an oval",
     "line":        "Drag for a straight line",
+    "callout":     "Drag from the thing it points to, then type",
 }
 
 # Fill and line style for the shape marks, from the locked stills-bar handoff:
@@ -1494,13 +1495,16 @@ class BarColor:
 # last.
 STILLS_SLOTS = ["pen", "highlighter", "shapes", "step", "text", "redact", "eraser"]
 
-# (tool, label, shortcut): the handoff's four. Crop was a fifth until it
-# turned out to draw a dashed box and crop nothing (divergences.md 7).
+# (tool, label, shortcut): the handoff's four, plus Callout
+# (docs/design/bars/README.md:78: "Rounded-rect, polygon, callout,
+# spotlight -> shape siblings"). Crop was a fifth until it turned out to
+# draw a dashed box and crop nothing (divergences.md 7).
 SHAPES = [
     ("rect",    "Rectangle",     "R"),
     ("ellipse", "Ellipse",       "O"),
     ("line",    "Straight line", "L"),
     ("arrow",   "Arrow",         "A"),
+    ("callout", "Callout",       "C"),
 ]
 
 # (tool, glyph, label, note). The note is not decoration: blur on small text
@@ -1533,7 +1537,7 @@ TOOL_GLYPHS = {tool: glyph for tool, glyph, _label, _note in REDACTIONS}
 TOOL_NAMES = {
     "pen": "Pen", "highlighter": "Highlighter", "rect": "Rectangle",
     "ellipse": "Ellipse", "line": "Straight line", "arrow": "Arrow",
-    "step": "Numbered step", "text": "Text",
+    "step": "Numbered step", "text": "Text", "callout": "Callout",
     "blur": "Blur", "pixelate": "Pixelate", "blackout": "Blackout",
     "eraser": "Eraser",
 }
@@ -1560,6 +1564,7 @@ STYLE_SECTIONS = {
     "arrow":       ["color", "dash", "size"],
     "step":        ["color", "size"],
     "text":        ["color", "size"],
+    "callout":     ["color", "fill", "dash", "size"],
     "blur":        ["strength"],
     "pixelate":    ["strength"],
     "blackout":    [],
@@ -1584,6 +1589,7 @@ DEFAULT_STYLE = {
     "arrow":       {"color": "#ef4444", "size": 3, "dash": "solid", "fill": "outline"},
     "step":        {"color": "#ef4444", "size": 5, "dash": "solid", "fill": "filled"},
     "text":        {"color": "#ffffff", "size": 5, "dash": "solid", "fill": "outline"},
+    "callout":     {"color": "#ef4444", "size": 3, "dash": "solid", "fill": "outline"},
 }
 # What the spec seeds every tool DEFAULT_STYLE leaves out with.
 DEFAULT_STYLE_OTHER = {"color": "#e3ff4f", "size": 5, "dash": "solid", "fill": "outline"}

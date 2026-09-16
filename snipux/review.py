@@ -23,6 +23,7 @@ looked.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, QUrl, pyqtSignal
@@ -178,6 +179,16 @@ class ImageCanvas(QWidget):
         scale = self._scale() or 1.0
         return QPointF((point.x() - rect.x()) / scale, (point.y() - rect.y()) / scale)
 
+    def _to_widget(self, point: QPointF) -> QPointF:
+        """Image point -> widget coordinates -- `to_image`'s own inverse,
+        for the one caller (`_start_callout_text_entry`) that has to place
+        a widget (the text editor's field) at a mark's own image-space
+        point rather than read a click.
+        """
+        rect = self.image_rect()
+        scale = self._scale() or 1.0
+        return QPointF(rect.x() + point.x() * scale, rect.y() + point.y() * scale)
+
     # -- annotation ------------------------------------------------------
 
     def is_annotating(self) -> bool:
@@ -313,10 +324,33 @@ class ImageCanvas(QWidget):
         if isinstance(finished, shapes.Highlighter) and self._styles.of("highlighter").snap == "text":
             # Marks here are already in the image's pixels: nothing to scale.
             finished = snap_to_text(finished, self._image)
-        if finished is not None:
+        if isinstance(finished, shapes.Callout):
+            # Not added yet -- see `_start_callout_text_entry` and
+            # `shapes.Callout`'s own docstring for why body/tail/text
+            # become one mark only once its text editor commits.
+            self._start_callout_text_entry(finished)
+        elif finished is not None:
             self._store.add(finished)
             self.marksChanged.emit()
         self.update()
+
+    def _start_callout_text_entry(self, shape: shapes.Callout) -> None:
+        """The overlay's own `_start_callout_text_entry`, mirrored here for
+        Annotate mode: open the label editor over the just-dragged
+        `Callout`'s body (mapped back to widget coordinates -- marks here
+        are in image space, the field is not), and add the mark, once,
+        when it commits.
+        """
+        self._text_editor.begin(
+            self._to_widget(shape.body_rect().topLeft()),
+            shape.colour,
+            shape.stroke_width,
+            on_commit=lambda text: self._commit_callout(shape, text),
+        )
+
+    def _commit_callout(self, shape: shapes.Callout, text: str) -> None:
+        self._store.add(replace(shape, text=text))
+        self.marksChanged.emit()
 
     def _composited(self) -> QImage:
         """The image with every committed obscuring mark baked in.

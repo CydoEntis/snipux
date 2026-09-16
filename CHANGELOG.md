@@ -19,6 +19,11 @@ use it; the commit history has the detail.
   resize it (it keeps its own proportions), and close it with Escape or the
   × that appears on hover. Right-click for Copy and Save. Greyed on Wayland,
   where an app can't place its own window or keep it on top.
+- **Callout**, a new shape in the shapes menu: a box with a tail, pointing
+  at wherever the drag began. Click into it and type -- the text wraps to
+  fit the box rather than spilling out of it. Colour, fill, line style and
+  size come from the same style popover every other shape uses, and the
+  whole thing -- box, tail and words -- undoes and erases as one mark.
 
 ## 0.8.2 — 2026-09-15
 

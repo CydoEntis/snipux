@@ -68,6 +68,7 @@ from snipux.marks import (
 from snipux.shapes import (
     Arrow,
     Blur,
+    Callout,
     Crop,
     Ellipse,
     Highlighter,
@@ -7993,6 +7994,24 @@ class OverlayWindow(QWidget):
         """
         self._text_editor.begin(pos, colour, self._styles.of("text").size)
 
+    def _start_callout_text_entry(self, shape: Callout) -> None:
+        """Open the label editor over a just-dragged `Callout`'s body, for
+        immediate typing -- the same click-then-type gesture the text tool
+        itself uses (`_start_text_entry`), reused via `TextLabelEditor.
+        begin`'s `on_commit` rather than duplicated.
+
+        `shape` is not in the mark store yet: `on_commit` adds it, once,
+        with whatever was typed baked in, so undo removes body, tail and
+        text together -- see Callout's own docstring for why this is not
+        committed now and edited in place later instead.
+        """
+        self._text_editor.begin(
+            shape.body_rect().topLeft(),
+            shape.colour,
+            shape.stroke_width,
+            on_commit=lambda text: self.add_mark(replace(shape, text=text)),
+        )
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._dragging() and not event.buttons() & Qt.MouseButton.LeftButton:
             # Nothing is held, so the drag lost its release somewhere --
@@ -8141,7 +8160,12 @@ class OverlayWindow(QWidget):
             # Against the frozen frame, never the live screen: the pixels
             # under the sweep are the ones the user was looking at.
             committed = snap_to_text(committed, self._frame.image, *self._window_to_frame_scale())
-        if committed is not None:
+        if isinstance(committed, Callout):
+            # Not added yet -- `_start_callout_text_entry` adds it once the
+            # text editor it opens commits, so body/tail/text land in the
+            # store as one mark. See Callout's own docstring.
+            self._start_callout_text_entry(committed)
+        elif committed is not None:
             self.add_mark(committed)
         else:
             # Below the spec's minimum size -- discarded, not committed
