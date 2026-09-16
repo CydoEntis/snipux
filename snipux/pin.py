@@ -36,6 +36,7 @@ from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QMouseEvent, QPainter
 from PyQt6.QtWidgets import QMenu, QPushButton, QWidget
 
+from . import output
 from .design import tokens
 
 # How far in from an edge still counts as grabbing it, matched to
@@ -172,14 +173,10 @@ class PinWindow(QWidget):
         return menu
 
     def copy(self) -> None:
-        from snipux.app import copy_image_to_clipboard
-
-        copy_image_to_clipboard(self._image)
+        output.copy_image_to_clipboard(self._image)
 
     def save(self) -> Path:
-        from snipux.app import save_image
-
-        return save_image(self._image, Path.home() / "Pictures" / "snipux")
+        return output.save_image(self._image, Path.home() / "Pictures" / "snipux")
 
     # -- hover close affordance -------------------------------------------
 

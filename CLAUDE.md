@@ -86,6 +86,8 @@ snipux/
                 a recording (docs/design/player/, and its divergences.md for
                 what this Qt build cannot encode)
   marks.py      the ink layer + undo/redo, shared by the overlay and review
+  output.py     where a finished capture goes: clipboard and file writes,
+                below the views so none of them imports app.py
   winchrome.py  frameless title bar/footer/controls for the two ordinary windows
   setup_desktop.py  Linux desktop/autostart entries, icons, the GNOME
                 shortcut, config -- what platform/linux.py adapts
