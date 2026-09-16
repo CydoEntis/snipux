@@ -1035,11 +1035,11 @@ class TestFamilySlots:
         window = self._editing()
 
         seen = []
-        for _ in range(4):
+        for _ in range(5):
             QTest.keyClick(window, Qt.Key.Key_B)
             seen.append(window._bar.active_tool)
 
-        assert seen == ["blur", "pixelate", "blackout", "blur"]
+        assert seen == ["blur", "pixelate", "blackout", "spotlight", "blur"]
 
     def test_the_keys_do_nothing_while_not_editing(self):
         window = ReviewWindow(make_image())

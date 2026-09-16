@@ -1507,9 +1507,12 @@ SHAPES = [
 # is famously recoverable, so each row has to say what it actually
 # guarantees.
 REDACTIONS = [
-    ("blur",     "blur",     "Blur",     "Softens it — shapes still readable"),
-    ("pixelate", "mask",     "Pixelate", "Blocky, obviously deliberate"),
-    ("blackout", "blackout", "Blackout", "Solid bar. Nothing to reconstruct"),
+    ("blur",      "blur",     "Blur",      "Softens it — shapes still readable"),
+    ("pixelate",  "mask",     "Pixelate",  "Blocky, obviously deliberate"),
+    ("blackout",  "blackout", "Blackout",  "Solid bar. Nothing to reconstruct"),
+    # Reuses the "eye" glyph -- the destination row's Review icon -- rather
+    # than a new one of its own, the same way Pixelate reuses "mask".
+    ("spotlight", "eye",      "Spotlight", "Dims everything else, not this"),
 ]
 BLACKOUT_FILL = "#0b0c09"
 
@@ -1535,6 +1538,7 @@ TOOL_NAMES = {
     "ellipse": "Ellipse", "line": "Straight line", "arrow": "Arrow",
     "step": "Numbered step", "text": "Text",
     "blur": "Blur", "pixelate": "Pixelate", "blackout": "Blackout",
+    "spotlight": "Spotlight",
     "eraser": "Eraser",
 }
 
@@ -1546,7 +1550,7 @@ SHORTCUTS = {
     "S": "step", "T": "text", "E": "eraser",
 }
 
-# The redaction family has one key between three siblings, and it cycles.
+# The redaction family has one key between its siblings, and it cycles.
 REDACTION_KEY = "B"
 
 # Which style popover sections a tool shows, in the order they are laid out.
@@ -1563,6 +1567,7 @@ STYLE_SECTIONS = {
     "blur":        ["strength"],
     "pixelate":    ["strength"],
     "blackout":    [],
+    "spotlight":   ["strength"],
     "eraser":      [],
 }
 

@@ -39,6 +39,7 @@ from PyQt6.QtGui import (
     QPainterPathStroker,
     QPen,
     QPolygonF,
+    QRegion,
     QTransform,
 )
 
@@ -766,6 +767,105 @@ class Blackout(Redact):
 
 
 @dataclass
+class Spotlight(ObscuringShape):
+    """The inverse of the rest of this family: dims everything *outside*
+    its rect instead of replacing what's inside it, so the eye goes where
+    it's pointed (docs/design/bars/README.md:78's "spotlight", named
+    alongside the callout).
+
+    Joins `ObscuringShape` rather than the handoff's literal "shape
+    sibling" wording, a call this ticket asks to be made and written down:
+    a plain `Shape` (the `SHAPES` family -- Rectangle/Ellipse/Line/Arrow)
+    paints itself once, straight onto whatever painter `_paint_marks` has
+    open, clipped to the current selection. A spotlight has to darken
+    every pixel outside its rect, not just whatever the selection happens
+    to be framing at the moment, and it has to survive a re-frame the way
+    a committed blur or redaction already does -- which is exactly the
+    "baked into the frame, not painted live" contract `ObscuringShape`
+    already carries (`OverlayWindow._base_layer_image`, `render()` below).
+    Fitting the existing family costs nothing extra: dragging a rect,
+    undo, the eraser and a strength slider all come for free from the
+    base class, and `strength` here reads as a dim level instead of a
+    block size -- see `_alpha`.
+
+    Several spotlights on one snip do not stack their own `apply()`
+    independently: the second one dimming "everything outside *my* rect"
+    would redim the first one's hole the moment it ran, leaving only the
+    rects' *intersection* lit rather than their union. `apply_all` is what
+    `render()` and `_base_layer_image` call instead, once, with every
+    spotlight in the mark list -- the same reasoning `_paint_scrim`
+    (overlay.py) gives for its own single dim-and-punch fill, though the
+    fill itself is a `QRegion` boolean subtraction rather than
+    `_paint_scrim`'s even-odd `QPainterPath` -- see `apply_all`'s own
+    docstring for why that one hole's trick does not extend to several.
+    """
+
+    def _alpha(self) -> float:
+        """This mark's own dim level, `strength` read against the
+        redaction family's shared 2-20 slider (`tokens.STRENGTH_RANGE`)
+        rather than as a block-size divisor.
+
+        Scaled so the slider's own default (`Metric.BLUR_DEFAULT`, the
+        `strength` every `ObscuringShape` starts at) reproduces
+        `Color.DIM_ALPHA` exactly -- the same dim the selection scrim
+        already paints outside the selection, and this app's own existing
+        answer to "reads rather than black" rather than a new number
+        invented for this mark alone. Clamped to 1.0 so the top of the
+        slider is a strong dim, not literally opaque.
+        """
+        ratio = self.strength / design.tokens.Metric.BLUR_DEFAULT
+        return min(1.0, design.tokens.Color.DIM_ALPHA * ratio)
+
+    def apply(self, image: QImage) -> QImage:
+        return Spotlight.apply_all(image, [self])
+
+    @staticmethod
+    def apply_all(image: QImage, spotlights: list["Spotlight"]) -> QImage:
+        """Dim `image` outside the union of every rect in `spotlights`, as
+        one fill rather than one per spotlight -- see the class docstring
+        for why stacking would leave only the rects' intersection lit.
+
+        Built as a `QRegion` union-then-subtract rather than `_paint_scrim`'s
+        even-odd `QPainterPath`: even-odd toggles per subpath crossed, so a
+        point inside *two overlapping* holes crosses three subpaths (the
+        outer rect and both holes) and comes out filled again -- exactly
+        the "second spotlight redims the first's hole" bug this method
+        exists to avoid, just moved to wherever two spotlights overlap
+        instead of gone. `QRegion.united`/`subtracted` are real set
+        operations on the holes first, so an overlap only ever merges,
+        never double-counts.
+
+        The darkest of the spotlights' own dim levels wins, since a single
+        fill can only carry one alpha: a fainter sibling should not wash
+        out a stronger one sharing the same dim.
+
+        Degenerate or out-of-bounds rects drop out silently, same as
+        every other `ObscuringShape` (`_clamped_pixel_rect`), and a
+        `spotlights` list with nothing left after that is a no-op.
+        """
+        holes = QRegion()
+        alpha = 0.0
+        for spot in spotlights:
+            pixel_rect = _clamped_pixel_rect(spot.start, spot.end, image)
+            if pixel_rect is None:
+                continue
+            holes = holes.united(QRegion(pixel_rect))
+            alpha = max(alpha, spot._alpha())
+        if holes.isEmpty():
+            return image
+        dim_region = QRegion(image.rect()).subtracted(holes)
+        colour = QColor(design.tokens.Color.DIM)
+        colour.setAlphaF(alpha)
+
+        result = QImage(image)
+        painter = QPainter(result)
+        painter.setClipRegion(dim_region)
+        painter.fillRect(image.rect(), colour)
+        painter.end()  # closed before this call returns the image
+        return result
+
+
+@dataclass
 class Crop(Shape):
     """A dashed, unfilled rectangle: the live marquee blur and pixelate show
     while they are dragged.
@@ -1054,11 +1154,30 @@ def render(base_image: QImage, shapes: list[Shape]) -> QImage:
     afterwards for whatever shapes follow. This is the core of this
     ticket's ordering guarantee — see shapes.py's module docstring and
     CLAUDE.md.
+
+    `Spotlight` is the one `ObscuringShape` this loop does not call
+    `apply()` on individually: every `Spotlight` in `shapes` is collected
+    up front and flattened in one `Spotlight.apply_all()` call, the first
+    time any of them is reached, so several spotlights combine into a
+    single dim with several holes rather than each redimming the last
+    one's (see `Spotlight`'s own docstring). Later spotlights in the list
+    are then skipped as already accounted for.
     """
     result = QImage(base_image)
     painter = QPainter(result)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    spotlights = [shape for shape in shapes if isinstance(shape, Spotlight)]
+    spotlights_done = False
     for shape in shapes:
+        if isinstance(shape, Spotlight):
+            if spotlights_done:
+                continue
+            painter.end()
+            result = Spotlight.apply_all(result, spotlights)
+            painter = QPainter(result)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            spotlights_done = True
+            continue
         if isinstance(shape, ObscuringShape):
             painter.end()
             result = shape.apply(result)
