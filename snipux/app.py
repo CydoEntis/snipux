@@ -122,6 +122,23 @@ def copy_image_to_clipboard(image: QImage) -> None:
         pass  # Qt clipboard already holds the image; this sink is best-effort
 
 
+def copy_text_to_clipboard(text: str) -> None:
+    """Place `text` on the clipboard: the in-process Qt clipboard always,
+    and (best-effort) `wl-copy` as well when it's on PATH -- the same
+    Wayland-survives-quitting reasoning as `copy_image_to_clipboard`'s own
+    docstring, just for a text/plain flavour instead of an image.
+    """
+    QGuiApplication.clipboard().setText(text)
+
+    if shutil.which("wl-copy") is None:
+        return
+
+    try:
+        subprocess.run(["wl-copy"], input=text.encode("utf-8"), check=True)
+    except (OSError, subprocess.CalledProcessError):
+        pass  # Qt clipboard already holds the text; this sink is best-effort
+
+
 def copy_file_to_clipboard(path: Path) -> None:
     """Place a *reference* to the file at `path` on the clipboard -- the way
     Windows Snipping Tool does it, and the only way a recording can be

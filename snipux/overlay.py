@@ -639,6 +639,15 @@ def _tool_glyph(tool: str) -> str:
     return design.tokens.TOOL_GLYPHS.get(tool, tool)
 
 
+def _hex_of(colour: QColor) -> str:
+    """`colour` as a lowercase `#rrggbb` string -- the eyedropper's own
+    format, spelled out explicitly rather than trusted to `QColor.name()`,
+    whose case is a Qt implementation detail this ticket's "lowercase" is
+    not.
+    """
+    return f"#{colour.red():02x}{colour.green():02x}{colour.blue():02x}"
+
+
 def _family_of(tool: str | None) -> str | None:
     """The family slot `tool` is a sibling in, or None for a tool that has a
     slot to itself.
@@ -1422,7 +1431,7 @@ class _WatermarkSlot(_IconButton):
 class FloatingBar(_Chrome):
     """The stills bar: one row under the selection, per
     docs/design/bars/README.md section 2 -- the destination at the left end,
-    seven tool slots in a fixed order of consequence, the style dot and the
+    eight tool slots in a fixed order of consequence, the style dot and the
     watermark, then undo and clear.
 
     Two of the slots hold families (`tokens.FAMILIES`): shapes and
@@ -4569,6 +4578,7 @@ class OverlayWindow(QWidget):
     _FROZEN_INNER_GAP = 7  # frozen pill: gap between the pin icon and its label
     _FROZEN_ICON_SIZE = 13
     _FROZEN_LABEL = "Frozen"
+    _EYEDROPPER_READOUT_GAP = 6  # eyedropper: gap between the loupe box and its hex chip
 
     def __init__(
         self,
@@ -4806,6 +4816,13 @@ class OverlayWindow(QWidget):
         # docs/design/overlay-redesign.md's "Drawing": "hit-testable only
         # while the eraser is active," so ordinary drawing never pays for it.
         self._eraser_active = False
+
+        # Eyedropper tool state, the same shape as `_eraser_active` above:
+        # set by `_on_tool_selected` through `set_eyedropper_active`, read
+        # by mousePressEvent/mouseMoveEvent/paintEvent to divert a click
+        # inside the selection into `pick_color_at` instead of a stroke,
+        # and to paint the loupe (`_paint_eyedropper`) while it is active.
+        self._eyedropper_active = False
 
         # Live drawing (SNX-52): the mark a left-press/drag/release is
         # currently building, in this widget's own window coordinates --
@@ -5160,6 +5177,7 @@ class OverlayWindow(QWidget):
             # reopened over it steps aside.
             self._chooser.collapse()
         self.set_eraser_active(tool == "eraser")
+        self.set_eyedropper_active(tool == "eyedropper")
         for menu in self._family_menus.values():
             menu.hide()
         self._watermark_menu.hide()
@@ -6622,7 +6640,11 @@ class OverlayWindow(QWidget):
         if self._armed_default_tool:
             return
         self._armed_default_tool = True
-        if self._bar.active_tool is None and not self._eraser_active:
+        if (
+            self._bar.active_tool is None
+            and not self._eraser_active
+            and not self._eyedropper_active
+        ):
             self._bar.select_tool(design.tokens.TOOLS[0])
 
     def _sync_tool_hint(self) -> None:
@@ -6981,6 +7003,51 @@ class OverlayWindow(QWidget):
         in the UI ever called.
         """
         return self._mark_store.erase(point)
+
+    def set_eyedropper_active(self, active: bool) -> None:
+        """Arm/disarm the eyedropper tool, the same shape as
+        `set_eraser_active` above: while active, a plain left-click inside
+        the selection that doesn't land on a resize handle calls
+        `pick_color_at` instead of starting a stroke -- see
+        mousePressEvent -- and the loupe `_paint_eyedropper` paints follows
+        the cursor there instead of nothing.
+        """
+        self._eyedropper_active = active
+
+    def color_at(self, point: QPointF) -> QColor:
+        """The frame's own pixel colour under `point` (this widget's own
+        window coordinates -- the same space `_marks`/`erase_at` read).
+
+        Goes through `_window_to_frame_scale` to reach `self._frame.image`,
+        the same conversion `_base_layer_image`/`snap_to_text` already use
+        to turn a window-local point into an image-pixel one -- never a
+        `grab()` of this widget read back (which would show the *painted*
+        magnifier, not the pixel under it) and never `point` used as an
+        image index directly (which reads the wrong pixel wherever the
+        frame's image is a different size than this window's logical one,
+        e.g. any monitor above 1x scaling).
+        """
+        image = self._frame.image
+        scale_x, scale_y = self._window_to_frame_scale()
+        x = max(0, min(round(point.x() * scale_x), image.width() - 1))
+        y = max(0, min(round(point.y() * scale_y), image.height() - 1))
+        return image.pixelColor(x, y)
+
+    def pick_color_at(self, point: QPointF) -> None:
+        """The eyedropper's click: copy the frame's own pixel colour under
+        `point` to the clipboard as a lowercase `#rrggbb` hex string, and
+        toast what was copied.
+
+        Unlike every drawing tool and the eraser, this never touches
+        `_mark_store`/the undo stack -- there is nothing here for Ctrl+Z to
+        take back, and nothing for export to include, per the ticket's "it
+        creates no mark."
+        """
+        from snipux.app import copy_text_to_clipboard
+
+        hex_value = _hex_of(self.color_at(point))
+        copy_text_to_clipboard(hex_value)
+        self._show_toast("eyedropper", f"Copied {hex_value}")
 
     def rendered_image(self) -> QImage:
         """The final exported image: `_marks` flattened onto the current
@@ -7631,6 +7698,12 @@ class OverlayWindow(QWidget):
                     # exists. A miss is a safe no-op inside erase_at.
                     self._erasing = True
                     self.erase_at(event.position())
+                elif self._eyedropper_active:
+                    # A click, not a drag (same "no drag" shape as the
+                    # eraser above): the tool stays armed and the loupe
+                    # keeps following the cursor, so several colours can be
+                    # taken in a row without a trip back to the bar.
+                    self.pick_color_at(event.position())
                 else:
                     self._start_stroke(event.position())
             else:
@@ -7798,6 +7871,12 @@ class OverlayWindow(QWidget):
         # monitor is being looked at, which changes as the pointer crosses
         # a bezel -- see `_follow_pointer_to_its_monitor`.
         self._follow_pointer_to_its_monitor()
+        if self._eyedropper_active:
+            # Nothing else here already repaints on a plain hover (no
+            # button held) -- the loupe (`_paint_eyedropper`) needs one on
+            # every move to actually follow the cursor, and to disappear
+            # the instant it leaves the selection.
+            self.update()
 
         if self._picking_window:
             # Live preview while armed: a hit sets `_selection` to that
@@ -7860,9 +7939,11 @@ class OverlayWindow(QWidget):
             # inside the selection, every tool shows a crosshair except the
             # eraser, which shows a pointer (SNX-38) -- so the cursor
             # itself reads as "click to remove" rather than "drag to draw."
+            # The eyedropper is the same shape of click, not a drag, so it
+            # gets the same pointer.
             self.setCursor(
                 Qt.CursorShape.PointingHandCursor
-                if self._eraser_active
+                if self._eraser_active or self._eyedropper_active
                 else Qt.CursorShape.CrossCursor
             )
         else:
@@ -8071,6 +8152,7 @@ class OverlayWindow(QWidget):
             # save/copy.
             self._paint_dimension_chip(painter)
             self._paint_frozen_pill(painter)
+            self._paint_eyedropper(painter)
         if self._picking_window and self._hovered_window is not None:
             self._paint_window_hover(painter)
         if self._picking_monitor and self._hovered_monitor is not None:
@@ -8664,6 +8746,105 @@ class OverlayWindow(QWidget):
         painter.setFont(font)
         painter.setPen(design.color("CHIP_DARK_FG"))
         painter.drawText(QPointF(text_x, baseline), self._FROZEN_LABEL)
+
+    def _paint_eyedropper(self, painter: QPainter) -> None:
+        """The eyedropper's loupe: `Overlay._paint_magnifier`'s own
+        crop-and-blow-up, reusing its box/source-size/offset constants
+        rather than redefining them here, plus a chip under it naming the
+        colour under the crosshair by its hex.
+
+        Only while the tool is active and the cursor sits inside the
+        selection -- the one place `mousePressEvent` actually turns a
+        click into a pick (`pick_color_at`). Painting the loupe anywhere
+        else on the frame would promise a colour a click there could never
+        take: a press outside the selection starts a new one instead.
+        """
+        if not self._eyedropper_active or self._cursor_pos is None:
+            return
+        if self._selection is None or not QRectF(self._selection).contains(self._cursor_pos):
+            return
+
+        image = self._frame.image
+        scale_x, scale_y = self._window_to_frame_scale()
+
+        image_cursor_x = self._cursor_pos.x() * scale_x
+        image_cursor_y = self._cursor_pos.y() * scale_y
+
+        half_width = (Overlay.MAGNIFIER_SOURCE_LOGICAL_SIZE / 2) * scale_x
+        half_height = (Overlay.MAGNIFIER_SOURCE_LOGICAL_SIZE / 2) * scale_y
+
+        width = min(round(half_width * 2), image.width())
+        height = min(round(half_height * 2), image.height())
+        if width <= 0 or height <= 0:
+            return
+
+        left = round(image_cursor_x - half_width)
+        top = round(image_cursor_y - half_height)
+        left = max(0, min(left, image.width() - width))
+        top = max(0, min(top, image.height() - height))
+
+        cropped = image.copy(QRect(left, top, width, height))
+        zoomed = cropped.scaled(
+            Overlay.MAGNIFIER_BOX_SIZE,
+            Overlay.MAGNIFIER_BOX_SIZE,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            # Smoothing would hide the exact pixel this tool exists to read.
+            Qt.TransformationMode.FastTransformation,
+        )
+
+        box_x = self._cursor_pos.x() + Overlay.MAGNIFIER_OFFSET.x()
+        box_y = self._cursor_pos.y() + Overlay.MAGNIFIER_OFFSET.y()
+        box_x = max(0.0, min(box_x, self.width() - Overlay.MAGNIFIER_BOX_SIZE))
+        box_y = max(0.0, min(box_y, self.height() - Overlay.MAGNIFIER_BOX_SIZE))
+        box_rect = QRectF(
+            QPointF(box_x, box_y),
+            QSizeF(Overlay.MAGNIFIER_BOX_SIZE, Overlay.MAGNIFIER_BOX_SIZE),
+        )
+        painter.drawImage(box_rect, zoomed)
+
+        center = box_rect.center()
+        painter.setPen(Overlay.CROSSHAIR_COLOR)
+        painter.drawLine(QPointF(box_rect.left(), center.y()), QPointF(box_rect.right(), center.y()))
+        painter.drawLine(QPointF(center.x(), box_rect.top()), QPointF(center.x(), box_rect.bottom()))
+
+        self._paint_eyedropper_readout(painter, box_rect, self.color_at(self._cursor_pos))
+
+    def _paint_eyedropper_readout(self, painter: QPainter, box_rect: QRectF, colour: QColor) -> None:
+        """The chip under the loupe: a swatch of `colour`, then its hex --
+        `_paint_frozen_pill`'s own rounded-chip look, positioned under the
+        magnifier box (and clamped into the window the same way that box
+        already is) instead of a fixed corner.
+        """
+        hex_text = _hex_of(colour)
+        ui = design.font_families().ui
+        font = self._chip_font(design.tokens.Font.FROZEN, ui)
+        fm = QFontMetricsF(font)
+
+        swatch_size = self._FROZEN_ICON_SIZE
+        content_width = swatch_size + self._FROZEN_INNER_GAP + fm.horizontalAdvance(hex_text)
+        content_height = max(swatch_size, fm.height())
+        width = content_width + 2 * self._CHIP_PAD_H
+        height = content_height + 2 * self._CHIP_PAD_V
+
+        x = max(0.0, min(box_rect.left(), self.width() - width))
+        y = min(box_rect.bottom() + self._EYEDROPPER_READOUT_GAP, self.height() - height)
+        rect = QRectF(x, y, width, height)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(design.color("CHIP_DARK_BG"))
+        painter.drawRoundedRect(rect, self._CHIP_RADIUS, self._CHIP_RADIUS)
+
+        swatch_x = rect.left() + self._CHIP_PAD_H
+        swatch_y = rect.top() + (rect.height() - swatch_size) / 2
+        painter.setBrush(colour)
+        painter.setPen(design.color("CHIP_DARK_FG"))
+        painter.drawRoundedRect(QRectF(swatch_x, swatch_y, swatch_size, swatch_size), 3, 3)
+
+        text_x = swatch_x + swatch_size + self._FROZEN_INNER_GAP
+        baseline = rect.top() + (rect.height() - fm.height()) / 2 + fm.ascent()
+        painter.setFont(font)
+        painter.setPen(design.color("CHIP_DARK_FG"))
+        painter.drawText(QPointF(text_x, baseline), hex_text)
 
 
 class _MonitorVeil(QWidget):

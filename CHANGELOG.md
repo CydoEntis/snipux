@@ -5,6 +5,12 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **Eyedropper.** Pick a colour off the frozen frame: hover to preview it
+  magnified with its hex underneath, click to copy the hex to the clipboard.
+  The tool stays active, so several colours can be taken in a row.
+
 ## 0.8.2 — 2026-09-15
 
 ### Fixed

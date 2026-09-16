@@ -252,7 +252,14 @@ class TestTheOverlayIsTheHost:
     their own -- is cropped from where it is, not from the selection's
     monitor or from the desktop's origin."""
 
-    LEFT = QRectF(-600, -200, 600, 400)
+    # 700 wide, not 600: the destination menu centres on the bar's own
+    # split-action button with no clamp of its own (`FlowMenu.open_below`),
+    # so the room it needs comes entirely from how far right the bar's own
+    # clamp (against this monitor's right edge) lets the bar sit. 600 was
+    # tight enough before the eyedropper's slot widened the bar by one
+    # icon that the menu already touched this monitor's left edge with
+    # nothing to spare; 700 restores the same margin the handoff intended.
+    LEFT = QRectF(-600, -200, 700, 400)
     PRIMARY = QRectF(0, 0, 800, 500)
 
     @pytest.fixture(autouse=True)
