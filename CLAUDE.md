@@ -114,6 +114,18 @@ macOS gain real implementations behind the `platform/` seam, their tests must
 pass headless too, the same way `tests/test_platform.py` already runs against
 `windows.py`/`darwin.py`'s stubs without a display today.
 
+A passing local run proves one platform. CI runs the suite on Ubuntu, which
+has only DejaVu Sans, and on Windows, whose text rasteriser is different. So:
+
+- **A test must not depend on this machine's fonts.** Size text from the
+  `QFontMetrics` of the font actually in use rather than hard-coding a line
+  count or a width, and allow room in any check that counts painted text
+  pixels.
+- **A path that only works on one OS is tested by faking the platform**
+  (`platform.current` and the backend in question), so the test answers the
+  same on both runners. A test must never call real Windows OCR, a real
+  recorder or a real `ffmpeg`.
+
 ## Conventions
 
 - **Python 3.10+, PyQt6.** Qt6 enums are fully scoped: `Qt.PenStyle.DashLine`,
