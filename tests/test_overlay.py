@@ -12020,6 +12020,105 @@ class TestTheDestinationMenuChangesTheDestination:
         assert fired == ["open"]
 
 
+class TestPinDestination:
+    """SNX-83: Pin joins Copy/Save/Open as a fourth ending on the
+    destination menu -- `OverlayWindow._on_bar_pin`/`_open_destination_menu`.
+    """
+
+    def _overlay(self, size=(800, 600), selection=QRect(100, 100, 300, 250)) -> OverlayWindow:
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, *size)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_pin_hands_the_render_and_the_selections_absolute_rect_to_the_callback(self):
+        overlay = self._overlay()
+        seen = []
+        overlay._on_pin_requested = lambda image, rect: seen.append((image, rect))
+
+        overlay._on_bar_pin()
+
+        assert len(seen) == 1
+        image, rect = seen[0]
+        assert image.size() == overlay.rendered_image().size()
+        # The frame's own logical origin is (0, 0) here, so the absolute
+        # rect is the selection unchanged.
+        assert rect == QRect(100, 100, 300, 250)
+
+    def test_pin_closes_the_overlay(self):
+        overlay = self._overlay()
+        overlay._on_pin_requested = lambda image, rect: None
+
+        overlay._on_bar_pin()
+
+        assert overlay.isHidden()
+
+    def test_pin_never_opens_a_review_window(self):
+        # Pin has no `tokens.AFTER_CAPTURE` outcome, so `outcome` is
+        # whatever it already was -- possibly "review", left over from an
+        # earlier choice. `_on_captured` (the review window's own trigger)
+        # must not fire at all for a pin, or a leftover "review" outcome
+        # would open one alongside the pin.
+        overlay = self._overlay()
+        overlay._chooser.set_after("review")
+        overlay._on_pin_requested = lambda image, rect: None
+        captured = Mock()
+        overlay._on_captured = captured
+
+        overlay._on_bar_pin()
+
+        captured.assert_not_called()
+
+    def test_pin_remembers_the_last_region(self, monkeypatch):
+        remembered = []
+        monkeypatch.setattr(
+            setup_desktop, "save_last_region", lambda rect: remembered.append(rect)
+        )
+        overlay = self._overlay()
+        overlay._on_pin_requested = lambda image, rect: None
+
+        overlay._on_bar_pin()
+
+        assert remembered == [(100, 100, 300, 250)]
+
+    def test_the_menus_pin_row_is_live_when_the_platform_can_pin(self, monkeypatch):
+        monkeypatch.setattr(overlay_module.platform.current, "can_pin", lambda: True)
+        overlay = self._overlay()
+
+        overlay._open_destination_menu()
+
+        rows = {value: reason for value, _label, _note, _key, reason in overlay._destination_menu._rows}
+        assert rows["Pin"] == ""
+        overlay._destination_menu.close()
+
+    def test_the_menus_pin_row_is_greyed_with_its_reason_when_the_platform_cannot(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(overlay_module.platform.current, "can_pin", lambda: False)
+        monkeypatch.setattr(
+            overlay_module.platform.current, "pin_unavailable_reason", lambda: "no Wayland"
+        )
+        overlay = self._overlay()
+
+        overlay._open_destination_menu()
+
+        rows = {value: reason for value, _label, _note, _key, reason in overlay._destination_menu._rows}
+        assert rows["Pin"] == "no Wayland"
+        overlay._destination_menu.close()
+
+    def test_choosing_pin_from_the_menu_fires_it(self):
+        overlay = self._overlay()
+        seen = []
+        overlay._on_pin_requested = lambda image, rect: seen.append(rect)
+
+        overlay._on_destination_chosen("Pin")
+
+        assert seen == [QRect(100, 100, 300, 250)]
+        # Unlike Copy/Save/Open, Pin has no outcome to write back.
+        assert overlay.outcome != "pin"
+
+
 class TestTheCursorInvitesTheDrag:
     """With nothing selected the frozen frame takes a drag whatever mode is
     showing. Picking a mode no longer arms it (#66), so the crosshair is up

@@ -287,6 +287,33 @@ class Platform(ABC):
         """
         return ""
 
+    def can_pin(self) -> bool:
+        """Whether a pin (SNX-83) can be placed at the selection's exact
+        rect and kept on top here.
+
+        Chrome only, like `exclude_from_capture` and `records_audio`: it
+        decides whether Pin is offered live on the destination menu or
+        greyed with `pin_unavailable_reason()`, never anything about the
+        window itself once one is allowed to open.
+
+        Defaults to False. A pin needs two things a client can only ask the
+        compositor for on some platforms: placing its own window at a given
+        screen rect, and asking to stay on top of everything else. Windows
+        answers True for both; Linux answers True under X11 and False under
+        Wayland, where neither is available to a client at all -- see
+        `LinuxPlatform.can_pin`.
+        """
+        return False
+
+    def pin_unavailable_reason(self) -> str:
+        """Why `can_pin()` is False, for the greyed destination-menu row to
+        carry -- the handoff's rule that an option which cannot work says
+        why, the same as `audio_unavailable_reason()` and
+        `text_recognition_unavailable_reason()`. Empty when pinning is
+        available.
+        """
+        return "Not supported on this platform yet"
+
     def recognizes_text(self) -> bool:
         """Whether `recognize_text` can read text out of an image here.
 

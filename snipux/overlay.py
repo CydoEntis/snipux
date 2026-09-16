@@ -1484,6 +1484,9 @@ class FloatingBar(_Chrome):
     copyRequested = pyqtSignal()
     saveRequested = pyqtSignal()
     openRequested = pyqtSignal()
+    # SNX-83: the destination menu's fourth ending, alongside the three
+    # above -- see `OverlayWindow._open_destination_menu`.
+    pinRequested = pyqtSignal()
     destinationMenuRequested = pyqtSignal()
     captureChipClicked = pyqtSignal()
     # Which tool the cursor is over, so a window can name it without relying
@@ -1680,7 +1683,9 @@ class FloatingBar(_Chrome):
         """
         if self._action is None:
             return
-        icon = {"Copy": "copy", "Save": "save", "Open": "eye"}.get(destination, "copy")
+        icon = {"Copy": "copy", "Save": "save", "Open": "eye", "Pin": "pin"}.get(
+            destination, "copy"
+        )
         self._action.set_destination(destination, icon)
 
     def destination(self) -> str:
@@ -1691,6 +1696,7 @@ class FloatingBar(_Chrome):
             "Copy": self.copyRequested,
             "Save": self.saveRequested,
             "Open": self.openRequested,
+            "Pin": self.pinRequested,
         }.get(destination, self.copyRequested).emit()
 
     # -- construction helpers ------------------------------------------------
@@ -4584,6 +4590,7 @@ class OverlayWindow(QWidget):
         registry: BackendRegistry | None = None,
         on_dismissed: Callable[[], None] | None = None,
         on_captured: "Callable[[QImage, Path | None], None] | None" = None,
+        on_pin_requested: "Callable[[QImage, QRect], None] | None" = None,
         on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
         on_recording_start: "Callable[[], None] | None" = None,
     ):
@@ -4591,6 +4598,11 @@ class OverlayWindow(QWidget):
         self._frame = frame
         # Fired by `copy()`/`save()` only -- see `_report_capture`.
         self._on_captured = on_captured
+        # SNX-83: fired by `_on_bar_pin`, with the rendered image and the
+        # selection's absolute screen rect -- `app.py` owns building and
+        # showing the actual `PinWindow`, the same split `on_captured`
+        # already makes for the review window.
+        self._on_pin_requested = on_pin_requested
         # SNX-122: fired by `_commit_selection`'s record branch, with an
         # absolute-coordinate rect (None for the whole desktop), the armed
         # delay string, and the chooser's after-capture destination
@@ -4854,6 +4866,7 @@ class OverlayWindow(QWidget):
         self._bar.copyRequested.connect(self._on_bar_copy)
         self._bar.saveRequested.connect(self._on_bar_save)
         self._bar.openRequested.connect(self._on_bar_open)
+        self._bar.pinRequested.connect(self._on_bar_pin)
         self._bar.destinationMenuRequested.connect(self._open_destination_menu)
         self._bar.toolSelected.connect(self._on_tool_selected)
         # Bound, not a lambda: a lambda holding this window, kept by a bar
@@ -7112,8 +7125,27 @@ class OverlayWindow(QWidget):
         self.save()
         self.close()
 
+    def _on_bar_pin(self) -> None:
+        """Pin (SNX-83): hand the render and the selection's own absolute
+        rect to `app.py`, which builds and shows the actual `PinWindow` --
+        the same split `_on_bar_open` makes with the review window.
+
+        Nothing is copied or written here: the window itself is the
+        artefact, so unlike Copy/Save/Open this never touches
+        `_report_capture`, only the region-memory half of it -- a pin still
+        counts as "the last region" for the chooser's own mode, but must
+        not also trigger `app.py`'s `_on_captured` (which opens a *review*
+        window keyed on `outcome`, a value Pin never sets).
+        """
+        image = self.rendered_image()
+        rect = self._to_absolute_rect(QRectF(self._selection)).toRect()
+        self._remember_last_region()
+        if self._on_pin_requested is not None:
+            self._on_pin_requested(image, rect)
+        self.close()
+
     def _open_destination_menu(self) -> None:
-        """The split action's caret: the two destinations its face is not.
+        """The split action's caret: every destination the face could show.
 
         A top-level popup, for the reason `FlowMenu`'s own docstring gives
         -- it has to paint above the hint pill below the bar, and a parent
@@ -7128,6 +7160,17 @@ class OverlayWindow(QWidget):
                 ("Open", "Review window -- annotate, export.", "O"),
             )
         ]
+        # SNX-83: greyed with its reason rather than left out where the
+        # platform can't back it (`platform.current.can_pin()`) -- the
+        # handoff's rule that an option which cannot work says why, which is
+        # exactly what `FlowMenu`'s `disabled_reason` column already does.
+        rows.append((
+            "Pin",
+            "Pin",
+            "Stays on top while you work elsewhere.",
+            "P",
+            "" if platform.current.can_pin() else platform.current.pin_unavailable_reason(),
+        ))
         menu = FlowMenu(rows, current, design.tokens.FlowMetric.MENU_W_DEST, None)
         # No parent to find this window through, so its glass is told.
         menu.glass.set_host(self)
@@ -7146,6 +7189,11 @@ class OverlayWindow(QWidget):
     # past by the time a bar exists to press; `edit` is the value whose
     # face is Copy and whose meaning is "the bar decides", which is exactly
     # what just happened.
+    #
+    # Pin has no entry, deliberately: it is not one of `tokens.AFTER_CAPTURE`
+    # -- it opens its own window rather than choosing what Copy/Save/Open
+    # already choose between -- so `_on_destination_chosen`'s `.get()` below
+    # finds nothing for it and leaves the chooser's `after` untouched.
     _DESTINATION_OUTCOMES = {"Copy": "edit", "Save": "save", "Open": "review"}
 
     def _on_destination_chosen(self, destination: str) -> None:
@@ -8808,6 +8856,8 @@ def open_overlay(
     registry: BackendRegistry | None = None,
     on_dismissed: Callable[[], None] | None = None,
     on_captured: "Callable[[QImage, Path | None], None] | None" = None,
+    # SNX-83: see `OverlayWindow.__init__`'s own comment on the same parameter.
+    on_pin_requested: "Callable[[QImage, QRect], None] | None" = None,
     # rect, delay, and the chooser's after-capture destination ("instant" or
     # "save") -- see `OverlayWindow.__init__`'s own comment on the same
     # parameter.
@@ -8882,6 +8932,7 @@ def open_overlay(
         registry=registry,
         on_dismissed=_on_overlay_dismissed if needs_dismissal_hook else None,
         on_captured=on_captured,
+        on_pin_requested=on_pin_requested,
         on_recording_requested=on_recording_requested,
         on_recording_start=on_recording_start,
     )

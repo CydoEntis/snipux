@@ -1119,6 +1119,14 @@ class WindowsPlatform(Platform):
     def build_recording_registry(self) -> RecorderRegistry:
         return recording.build_windows_registry()
 
+    def can_pin(self) -> bool:
+        """True: Windows lets a client place its own window at a given rect
+        and set `WindowStaysOnTopHint`, the two things a pin needs."""
+        return True
+
+    def pin_unavailable_reason(self) -> str:
+        return ""
+
     def recognizes_text(self) -> bool:
         return windows_ocr.available()
 
