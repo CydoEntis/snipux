@@ -777,6 +777,93 @@ class TestTextTool:
         assert any(getattr(m, "text", None) == "exported" for m in window._store.marks)
 
 
+class TestCalloutInReviewWindow:
+    """Callout's own click-then-type flow (see `shapes.Callout` and
+    `ImageCanvas._start_callout_text_entry`), mirrored here from the
+    overlay's identical behaviour -- the same `FloatingBar`/`MarkStore`
+    this window shares with it, per the module docstring's "not a second
+    editor."
+    """
+
+    def _editing(self) -> ReviewWindow:
+        window = ReviewWindow(make_image(600, 400))
+        window.resize(1020, 700)
+        window._canvas.resize(1020, 600)
+        window._set_annotating(True)
+        window._canvas.set_tool("callout")
+        return window
+
+    def test_the_drag_alone_commits_nothing_and_opens_the_editor(self):
+        window = self._editing()
+        canvas = window._canvas
+
+        canvas.mousePressEvent(_press(canvas, 400, 300))
+        canvas.mouseMoveEvent(_move(canvas, 500, 380))
+        canvas.mouseReleaseEvent(_release(canvas, 500, 380))
+
+        assert len(window._store) == 0
+        assert canvas._text_editor.field is not None
+        assert not canvas._text_editor.field.isHidden()
+
+    def test_typing_then_finishing_commits_one_callout_mark(self):
+        window = self._editing()
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 400, 300))
+        canvas.mouseMoveEvent(_move(canvas, 500, 380))
+        canvas.mouseReleaseEvent(_release(canvas, 500, 380))
+
+        canvas._text_editor.field.setText("hello")
+        canvas._text_editor.commit()
+
+        assert len(window._store) == 1
+        mark = window._store.marks[0]
+        assert isinstance(mark, shapes.Callout)
+        assert mark.text == "hello"
+
+    def test_committing_with_nothing_typed_still_keeps_the_body_and_tail(self):
+        window = self._editing()
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 400, 300))
+        canvas.mouseMoveEvent(_move(canvas, 500, 380))
+        canvas.mouseReleaseEvent(_release(canvas, 500, 380))
+
+        canvas._text_editor.commit()
+
+        assert len(window._store) == 1
+        assert window._store.marks[0].text == ""
+
+    def test_one_undo_removes_the_whole_mark(self):
+        window = self._editing()
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 400, 300))
+        canvas.mouseMoveEvent(_move(canvas, 500, 380))
+        canvas.mouseReleaseEvent(_release(canvas, 500, 380))
+        canvas._text_editor.field.setText("hello")
+        canvas._text_editor.commit()
+        assert len(window._store) == 1
+
+        window._store.undo()
+
+        assert len(window._store) == 0
+
+    def test_drawing_then_painting_does_not_raise(self):
+        # Same crash class TestEveryToolSurvivesAPaint guards against, for
+        # both the pending (no mark yet) and the committed callout.
+        window = self._editing()
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 400, 300))
+        canvas.mouseMoveEvent(_move(canvas, 500, 380))
+        canvas.mouseReleaseEvent(_release(canvas, 500, 380))
+
+        canvas.grab()  # while the field is open and nothing is committed yet
+
+        canvas._text_editor.field.setText("hi")
+        canvas._text_editor.commit()
+        canvas.grab()  # and again once it is a real mark
+
+        assert len(window._store) == 1
+
+
 class TestThePopoverFollowsTheTool:
     def test_it_styles_whichever_tool_is_armed(self):
         # Left untold it would style whichever tool it last showed.

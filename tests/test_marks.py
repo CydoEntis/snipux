@@ -226,6 +226,7 @@ class TestStrokeFactory:
             ("rect", shapes.Rectangle),
             ("ellipse", shapes.Ellipse),
             ("line", shapes.Line),
+            ("callout", shapes.Callout),
             ("blur", shapes.Blur),
             ("pixelate", shapes.Pixelate),
             ("blackout", shapes.Blackout),
@@ -266,7 +267,7 @@ class TestStrokeFactory:
 
         assert shape.end == QPointF(10, 10)
 
-    @pytest.mark.parametrize("tool", ["rect", "ellipse"])
+    @pytest.mark.parametrize("tool", ["rect", "ellipse", "callout"])
     def test_a_closed_shape_takes_a_fill_and_a_line_style(self, tool):
         shape = begin_stroke(
             tool, QPointF(1, 1), colour=QColor("#fff"), stroke_width=4, fill="both", dash="dotted"
@@ -294,7 +295,7 @@ class TestStrokeFactory:
         assert shape is not None
         assert not hasattr(shape, "fill") and not hasattr(shape, "dash")
 
-    @pytest.mark.parametrize("tool", ["rect", "ellipse", "line", "arrow"])
+    @pytest.mark.parametrize("tool", ["rect", "ellipse", "line", "arrow", "callout"])
     def test_no_style_given_is_todays_look(self, tool):
         shape = begin_stroke(tool, QPointF(1, 1), colour=QColor("#fff"), stroke_width=4)
 
