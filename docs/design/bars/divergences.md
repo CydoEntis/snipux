@@ -681,6 +681,34 @@ the same key and popover strength section rather than colour/fill/dash.
 
 ---
 
+## 28 · The bar and the tool hint fade while a tool works under them
+
+**The handoff says** (`README.md`, "Alpha is not opacity"): bars are a
+translucent *fill* with fully opaque children, and real opacity has two
+legitimate uses, the collapsed tab and the disabled style dot.
+
+**We add a third.** While the eyedropper reads within
+`BarMetric.WORKING_REACH` of the bar or the tool hint, its loupe or chip
+would touch them, or a stroke or eraser sweep's pointer passes that close,
+both fade to `BarMetric.WORKING_OPACITY` (0.25) as a whole -- glass, fill
+and icons together. They come back the moment the tool stops, moves away,
+or the pointer reaches them, so they are never faded while being clicked.
+The bar being dragged never fades.
+
+### Why
+
+- **A user report.** The eyedropper's loupe opened behind the bar, so the
+  pixels being read and their hex were hidden exactly where the user was
+  looking (#106). Moving the loupe to a clear corner fixes the loupe; the
+  fade covers what placement cannot: the spot being read, or a stroke,
+  right up against the controls.
+- **Opacity, not alpha, is the point here.** Lowering only the fill would
+  leave the blurred glass and the icons as an opaque slab over the work.
+- **Nothing reaches an export.** `rendered_image()` never paints chrome,
+  faded or not; the eyedropper reads the frozen frame, never the screen.
+
+---
+
 ## Still open
 
 Not decided. Today's behaviour stands for each until it is, and each is

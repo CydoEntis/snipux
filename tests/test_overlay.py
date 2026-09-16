@@ -1474,6 +1474,269 @@ class TestEyedropperTool:
         assert overlay.cursor().shape() == Qt.CursorShape.PointingHandCursor
 
 
+def _send_move(widget, pos, buttons=Qt.MouseButton.NoButton):
+    """A real move event, delivered straight to `widget` -- no dependence on
+    which window the OS thinks is active, which QTest.mouseMove has on
+    Windows even offscreen."""
+    point = QPointF(pos)
+    event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        point,
+        QPointF(widget.mapToGlobal(point.toPoint())),
+        Qt.MouseButton.NoButton,
+        buttons,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, event)
+
+
+class TestEyedropperLoupeClearsTheChrome:
+    """#106: the loupe and its hex chip open in the first corner around the
+    pointer that clears the showing chrome and stays on the pointer's own
+    monitor. All rects here are window-local logical, compared as rects --
+    never sampled pixels.
+    """
+
+    MONITOR = QRectF(0, 0, 800, 800)
+
+    def _overlay(self, monitors=None, size=(800, 800), selection=None):
+        _close_stray_toplevel_windows()
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame, monitor_geometries=monitors or [self.MONITOR])
+        overlay.setGeometry(0, 0, *size)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(selection or QRect(100, 100, 600, 400))
+        overlay.set_eyedropper_active(True)
+        assert overlay._bar.isVisible()
+        return overlay
+
+    def _rects(self, overlay, cursor):
+        return overlay._eyedropper_rects(QPointF(cursor), overlay.color_at(QPointF(cursor)))
+
+    def test_just_above_the_bar_the_loupe_and_chip_clear_it(self):
+        overlay = self._overlay()
+        bar = QRectF(overlay._bar.geometry())
+        cursor = QPointF(bar.left() + 30, overlay._selection.bottom() - 4)
+
+        box, readout = self._rects(overlay, cursor)
+
+        assert not box.intersects(bar)
+        assert not readout.intersects(bar)
+        assert self.MONITOR.contains(box) and self.MONITOR.contains(readout)
+
+    def test_the_default_corner_is_still_below_right(self):
+        overlay = self._overlay()
+        cursor = QPointF(200, 150)
+
+        box, readout = self._rects(overlay, cursor)
+
+        assert box.topLeft() == cursor + Overlay.MAGNIFIER_OFFSET
+        assert readout.top() == box.bottom() + overlay._EYEDROPPER_READOUT_GAP
+        assert readout.left() == box.left()
+
+    def test_near_the_monitors_right_edge_it_flips_left(self):
+        overlay = self._overlay(selection=QRect(100, 100, 690, 300))
+        cursor = QPointF(780, 150)
+
+        box, readout = self._rects(overlay, cursor)
+
+        assert box.right() == cursor.x() - Overlay.MAGNIFIER_OFFSET.x()
+        assert box.top() > cursor.y()
+        assert self.MONITOR.contains(readout)
+
+    def test_near_the_monitors_bottom_it_flips_above_with_the_chip_on_top(self):
+        overlay = self._overlay(selection=QRect(100, 450, 300, 345))
+        cursor = QPointF(200, 790)
+
+        box, readout = self._rects(overlay, cursor)
+
+        assert box.bottom() == cursor.y() - Overlay.MAGNIFIER_OFFSET.y()
+        assert readout.bottom() == box.top() - overlay._EYEDROPPER_READOUT_GAP
+        assert self.MONITOR.contains(box) and self.MONITOR.contains(readout)
+
+    def test_on_a_two_monitor_desk_it_stays_on_the_pointers_monitor(self):
+        left, right = QRectF(0, 0, 800, 800), QRectF(800, 0, 800, 800)
+        overlay = self._overlay(
+            monitors=[left, right], size=(1600, 800), selection=QRect(100, 100, 1400, 300)
+        )
+        # The window runs on past the bezel, so a window clamp would let the
+        # box hang across it. Only the monitor keeps it on the left one.
+        cursor = QPointF(790, 150)
+
+        box, readout = self._rects(overlay, cursor)
+
+        assert left.contains(box)
+        assert left.contains(readout)
+
+    def test_with_no_clear_corner_it_goes_above_left_inside_the_monitor(self, monkeypatch):
+        overlay = self._overlay()
+        monkeypatch.setattr(overlay, "_chrome_to_keep_clear", lambda: [QRectF(self.MONITOR)])
+        cursor = QPointF(60, 60)
+
+        box, _readout = self._rects(overlay, cursor)
+
+        assert self.MONITOR.contains(box)
+        assert box.topLeft() == QPointF(0, 0)
+
+    def test_an_open_style_popover_is_kept_clear_too(self):
+        overlay = self._overlay()
+        overlay._toggle_style()
+        popover = QRectF(overlay._style_popover.geometry())
+        assert overlay._style_popover.isVisible()
+        cursor = QPointF(popover.left() + 10, popover.top() - 30)
+
+        box, readout = self._rects(overlay, cursor)
+
+        assert not box.intersects(popover)
+        assert not readout.intersects(popover)
+
+
+class TestChromeFadesWhileAToolWorksUnderIt:
+    """The bar and the tool hint fade to `WORKING_OPACITY` while a tool is
+    working under them, come back when it stops or the pointer reaches
+    them, and never reach an export either way.
+    """
+
+    SIZE = (800, 800)
+
+    def _overlay(self):
+        # The selection is the whole monitor, so the bar sits inside it and
+        # a tool can work right up against it.
+        _close_stray_toplevel_windows()
+        frame = make_frame(image_size=self.SIZE, logical_size=self.SIZE)
+        overlay = OverlayWindow(frame, monitor_geometries=[QRectF(0, 0, *self.SIZE)])
+        overlay.setGeometry(0, 0, *self.SIZE)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(overlay.rect())
+        assert overlay._bar.isVisible()
+        return overlay
+
+    def _just_above(self, widget) -> QPoint:
+        geometry = widget.geometry()
+        return QPoint(geometry.center().x(), geometry.top() - 4)
+
+    def test_the_eyedropper_reading_beside_the_bar_fades_it(self):
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+
+        _send_move(overlay, self._just_above(overlay._bar))
+
+        assert overlay.is_chrome_faded(overlay._bar)
+        effect = overlay._bar.graphicsEffect()
+        assert effect.opacity() == tokens.BarMetric.WORKING_OPACITY
+
+    def test_moving_away_brings_the_bar_back(self):
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+        _send_move(overlay, self._just_above(overlay._bar))
+
+        _send_move(overlay, QPoint(100, 100))
+
+        assert not overlay.is_chrome_faded(overlay._bar)
+        assert overlay._bar.graphicsEffect() is None
+
+    def test_disarming_the_eyedropper_brings_the_bar_back(self):
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+        _send_move(overlay, self._just_above(overlay._bar))
+
+        overlay.set_eyedropper_active(False)
+
+        assert not overlay.is_chrome_faded(overlay._bar)
+
+    def test_a_hover_elsewhere_leaves_the_bar_alone(self):
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+
+        _send_move(overlay, QPoint(100, 100))
+
+        assert not overlay.is_chrome_faded(overlay._bar)
+
+    def test_no_tool_means_no_fade(self):
+        overlay = self._overlay()
+
+        _send_move(overlay, self._just_above(overlay._bar))
+
+        assert not overlay.is_chrome_faded(overlay._bar)
+
+    def test_reaching_the_bar_brings_it_back_so_it_can_be_clicked(self):
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+        _send_move(overlay, self._just_above(overlay._bar))
+        assert overlay.is_chrome_faded(overlay._bar)
+
+        QApplication.sendEvent(overlay._bar, QEvent(QEvent.Type.Enter))
+
+        assert not overlay.is_chrome_faded(overlay._bar)
+
+    def test_a_stroke_passing_under_the_bar_fades_it_until_release(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+        bar = overlay._bar.geometry()
+        start = QPoint(bar.center().x(), bar.top() - 120)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=start)
+        _send_move(overlay, start + QPoint(0, 40), Qt.MouseButton.LeftButton)
+        assert not overlay.is_chrome_faded(overlay._bar)
+        _send_move(overlay, bar.center(), Qt.MouseButton.LeftButton)
+        assert overlay.is_chrome_faded(overlay._bar)
+
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=bar.center())
+
+        assert not overlay.is_chrome_faded(overlay._bar)
+        assert len(overlay.marks) == 1
+
+    def test_the_tool_hint_fades_too(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("pen")
+        hint = overlay._tool_hint
+        assert hint.isVisible()
+        start = QPoint(hint.geometry().center().x(), hint.geometry().top() - 150)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=start)
+        _send_move(overlay, hint.geometry().center(), Qt.MouseButton.LeftButton)
+
+        assert overlay.is_chrome_faded(hint)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=hint.geometry().center())
+        assert not overlay.is_chrome_faded(hint)
+
+    def test_a_pick_under_the_bar_reads_the_frame_not_the_bar(self, monkeypatch):
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+        under = QPointF(overlay._bar.geometry().center())
+        marker = QColor(0x12, 0x34, 0x56)
+        scale_x, scale_y = overlay._window_to_frame_scale()
+        overlay._frame.image.setPixelColor(
+            int(under.x() * scale_x), int(under.y() * scale_y), marker
+        )
+        calls = []
+        monkeypatch.setattr(output_module, "copy_text_to_clipboard", calls.append)
+
+        overlay.pick_color_at(under)
+
+        assert calls == ["#123456"]
+
+    def test_the_export_holds_no_chrome_faded_or_not(self):
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+        bar = overlay._bar.geometry()
+        scale_x, scale_y = overlay._window_to_frame_scale()
+
+        def bar_pixels(image):
+            return {
+                image.pixel(int(x * scale_x), int(y * scale_y))
+                for x in range(bar.left(), bar.right(), 7)
+                for y in range(bar.top(), bar.bottom(), 5)
+            }
+
+        assert bar_pixels(overlay.rendered_image()) == {BASE_COLOR}
+        _send_move(overlay, self._just_above(overlay._bar))
+        assert overlay.is_chrome_faded(overlay._bar)
+        assert bar_pixels(overlay.rendered_image()) == {BASE_COLOR}
+
+
 class TestDrawingTools:
     """SNX-52: a press inside the selection starts a mark for whichever
     tool `_bar.active_tool` names; move extends it; release either commits

@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QApplication,
     QColorDialog,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -5190,6 +5191,8 @@ class OverlayWindow(QWidget):
         # window's own many pixel-sampling tests, none of which call
         # `.show()`, the same reason `_sync_bar_visibility` gates `_bar`.
         self._toast = Toast(self)
+        for widget in self._fading_chrome():
+            widget.installEventFilter(self)
 
 
         # The top hint HUD (SNX-46): behind the `hints` preference the spec
@@ -7151,6 +7154,7 @@ class OverlayWindow(QWidget):
         the cursor there instead of nothing.
         """
         self._eyedropper_active = active
+        self._sync_chrome_fade()
 
     def color_at(self, point: QPointF) -> QColor:
         """The frame's own pixel colour under `point` (this widget's own
@@ -8113,14 +8117,16 @@ class OverlayWindow(QWidget):
             # outside the window, to a grab, to anything. Without this,
             # ordinary movement would go on stretching the mark.
             self._end_drags()
-        if self._erasing:
-            self.erase_at(event.position())
-            return
         # SNX-48: tracked on every move regardless of mode, so
         # `_select_full_screen` always has a recent position to answer
         # "which display is the cursor on" from -- see its own docstring
-        # for why this beats `QCursor.pos()`.
+        # for why this beats `QCursor.pos()`. Before the eraser's branch,
+        # which returns early, so its sweep can fade the chrome it crosses.
         self._cursor_pos = event.position()
+        if self._erasing:
+            self.erase_at(event.position())
+            self._sync_chrome_fade()
+            return
         # Before anything is selected the chooser row belongs on whichever
         # monitor is being looked at, which changes as the pointer crosses
         # a bezel -- see `_follow_pointer_to_its_monitor`.
@@ -8202,11 +8208,13 @@ class OverlayWindow(QWidget):
             )
         else:
             self._apply_idle_cursor()
+        self._sync_chrome_fade()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             self._erasing = False
+            self._sync_chrome_fade()
             return
         self._end_drags(event.position())
 
@@ -8246,6 +8254,12 @@ class OverlayWindow(QWidget):
         here -- the bar tracks no hover of its own -- as do a press on the
         frame and the window losing focus.
         """
+        try:
+            self._end_open_drags(pos)
+        finally:
+            self._sync_chrome_fade()
+
+    def _end_open_drags(self, pos: QPointF | None) -> None:
         self._bar.end_drag()
         self._erasing = False
         self._active_handle = None
@@ -9120,14 +9134,8 @@ class OverlayWindow(QWidget):
             Qt.TransformationMode.FastTransformation,
         )
 
-        box_x = self._cursor_pos.x() + Overlay.MAGNIFIER_OFFSET.x()
-        box_y = self._cursor_pos.y() + Overlay.MAGNIFIER_OFFSET.y()
-        box_x = max(0.0, min(box_x, self.width() - Overlay.MAGNIFIER_BOX_SIZE))
-        box_y = max(0.0, min(box_y, self.height() - Overlay.MAGNIFIER_BOX_SIZE))
-        box_rect = QRectF(
-            QPointF(box_x, box_y),
-            QSizeF(Overlay.MAGNIFIER_BOX_SIZE, Overlay.MAGNIFIER_BOX_SIZE),
-        )
+        colour = self.color_at(self._cursor_pos)
+        box_rect, readout_rect = self._eyedropper_rects(self._cursor_pos, colour)
         painter.drawImage(box_rect, zoomed)
 
         center = box_rect.center()
@@ -9135,28 +9143,195 @@ class OverlayWindow(QWidget):
         painter.drawLine(QPointF(box_rect.left(), center.y()), QPointF(box_rect.right(), center.y()))
         painter.drawLine(QPointF(center.x(), box_rect.top()), QPointF(center.x(), box_rect.bottom()))
 
-        self._paint_eyedropper_readout(painter, box_rect, self.color_at(self._cursor_pos))
+        self._paint_eyedropper_readout(painter, readout_rect, colour)
 
-    def _paint_eyedropper_readout(self, painter: QPainter, box_rect: QRectF, colour: QColor) -> None:
-        """The chip under the loupe: a swatch of `colour`, then its hex --
-        `_paint_frozen_pill`'s own rounded-chip look, positioned under the
-        magnifier box (and clamped into the window the same way that box
-        already is) instead of a fixed corner.
+    def _eyedropper_readout_font(self) -> QFont:
+        return self._chip_font(design.tokens.Font.FROZEN, design.font_families().ui)
+
+    def _eyedropper_readout_size(self, colour: QColor) -> QSizeF:
+        """The hex chip's size for `colour` -- its text is the colour's own
+        hex, so its width is measured, never assumed."""
+        fm = QFontMetricsF(self._eyedropper_readout_font())
+        swatch_size = self._FROZEN_ICON_SIZE
+        content_width = swatch_size + self._FROZEN_INNER_GAP + fm.horizontalAdvance(_hex_of(colour))
+        content_height = max(swatch_size, fm.height())
+        return QSizeF(content_width + 2 * self._CHIP_PAD_H, content_height + 2 * self._CHIP_PAD_V)
+
+    def _eyedropper_rects(self, cursor: QPointF, colour: QColor) -> tuple[QRectF, QRectF]:
+        """Where the loupe box and its hex chip go for a pointer at `cursor`,
+        both as window-local logical rects (#106).
+
+        The loupe used to open below-right of the pointer, always, and near
+        the bottom of a selection that is exactly where the bar sits -- a
+        child widget, so it painted over the loupe the user was reading.
+        Now the corners are tried in order -- below-right, below-left,
+        above-right, above-left, each `MAGNIFIER_OFFSET` from the pointer --
+        and the first whose box *and* chip clear every piece of showing
+        chrome and fit inside the monitor under the pointer wins. The
+        monitor, not this window: the window spans the whole desk, and
+        clamping to it can hang the loupe across a bezel or into the gap of
+        a staggered layout. If no corner is clear, above-left, clamped into
+        that monitor.
+
+        The chip goes on the far side of the box from the pointer -- under a
+        box below it, over a box above it -- so it never sits on the spot
+        being read.
+        """
+        box_size = Overlay.MAGNIFIER_BOX_SIZE
+        offset = Overlay.MAGNIFIER_OFFSET
+        readout_size = self._eyedropper_readout_size(colour)
+        monitor = self._to_local_rect(self._monitor_at(self._to_absolute(cursor)))
+        chrome = self._chrome_to_keep_clear()
+
+        def box_at(right: bool, below: bool) -> QRectF:
+            x = cursor.x() + offset.x() if right else cursor.x() - offset.x() - box_size
+            y = cursor.y() + offset.y() if below else cursor.y() - offset.y() - box_size
+            return QRectF(x, y, box_size, box_size)
+
+        for right, below in ((True, True), (False, True), (True, False), (False, False)):
+            box = box_at(right, below)
+            readout = self._eyedropper_readout_rect(box, readout_size, below, monitor)
+            if (
+                monitor.contains(box)
+                and monitor.contains(readout)
+                and not any(box.intersects(c) or readout.intersects(c) for c in chrome)
+            ):
+                return box, readout
+
+        box = box_at(False, False)
+        box.moveLeft(max(monitor.left(), min(box.left(), monitor.right() - box_size)))
+        box.moveTop(max(monitor.top(), min(box.top(), monitor.bottom() - box_size)))
+        # Under the box when the clamp pushed it below the pointer.
+        below = box.top() > cursor.y()
+        return box, self._eyedropper_readout_rect(box, readout_size, below, monitor)
+
+    def _eyedropper_readout_rect(
+        self, box: QRectF, size: QSizeF, below: bool, monitor: QRectF
+    ) -> QRectF:
+        """The hex chip attached to `box` -- under it when the box is below
+        the pointer, over it otherwise -- left-aligned with it and kept
+        inside `monitor` sideways. All window-local logical."""
+        gap = self._EYEDROPPER_READOUT_GAP
+        x = max(monitor.left(), min(box.left(), monitor.right() - size.width()))
+        y = box.bottom() + gap if below else box.top() - gap - size.height()
+        return QRectF(QPointF(x, y), size)
+
+    def _chrome_to_keep_clear(self) -> list[QRectF]:
+        """Every piece of this window's chrome that is showing, as
+        window-local logical rects: the bar, the tool hint, the toast, the
+        style and capture popovers, the top hint HUD, the bar's menus, and the destination
+        menu -- a top-level popup, so mapped in from global coordinates.
+        """
+        widgets = [
+            self._bar,
+            self._tool_hint,
+            self._toast,
+            self._style_popover,
+            self._popover,
+            self._hud,
+            self._watermark_menu,
+            *self._family_menus.values(),
+        ]
+        rects = [QRectF(widget.geometry()) for widget in widgets if widget.isVisible()]
+        menu = getattr(self, "_destination_menu", None)
+        try:
+            if menu is not None and menu.isVisible():
+                top_left = self.mapFromGlobal(menu.geometry().topLeft())
+                rects.append(QRectF(QPointF(top_left), QSizeF(menu.size())))
+        except RuntimeError:
+            # Its C++ side is already gone once it has closed.
+            pass
+        return rects
+
+    # -- chrome that gives way to a tool working under it --------------------
+
+    def _tool_working_rects(self) -> list[QRectF]:
+        """What the active tool is working on right now, as window-local
+        logical rects: the eyedropper's read spot, loupe and chip while it
+        hovers the selection; the pointer's neighbourhood while a stroke or
+        an eraser sweep is under way. Empty when no tool is working.
+        """
+        cursor = self._cursor_pos
+        if cursor is None:
+            return []
+        reach = design.tokens.BarMetric.WORKING_REACH
+        if self._in_progress_shape is not None or self._erasing:
+            return [QRectF(cursor.x() - reach, cursor.y() - reach, 2 * reach, 2 * reach)]
+        if (
+            self._eyedropper_active
+            and self._selection is not None
+            and QRectF(self._selection).contains(cursor)
+        ):
+            # At least the pixels the loupe magnifies, and never less room
+            # than a stroke gets.
+            half = max(Overlay.MAGNIFIER_SOURCE_LOGICAL_SIZE / 2, reach)
+            spot = QRectF(cursor.x() - half, cursor.y() - half, 2 * half, 2 * half)
+            box, readout = self._eyedropper_rects(cursor, self.color_at(cursor))
+            return [spot, box, readout]
+        return []
+
+    def _fading_chrome(self) -> tuple[QWidget, ...]:
+        return (self._bar, self._tool_hint)
+
+    def _sync_chrome_fade(self) -> None:
+        """Fade the bar and the tool hint while the active tool works under
+        them, and bring them back once it stops.
+
+        The user asked for it after the eyedropper's loupe was lost behind
+        the bar: whatever a tool is working on should never be hidden by the
+        controls. Faded, not hidden: they stay where the hand expects them,
+        and the pointer reaching one brings it straight back
+        (`eventFilter`) so it is never faded while being clicked. The bar
+        being dragged is never faded. None of this reaches an export --
+        `rendered_image()` never paints chrome at all.
+        """
+        working = self._tool_working_rects()
+        dragging = self._dragging()
+        for widget in self._fading_chrome():
+            faded = (
+                bool(working)
+                and widget.isVisible()
+                and not self._bar.is_dragging
+                and not (not dragging and widget.underMouse())
+                and any(QRectF(widget.geometry()).intersects(rect) for rect in working)
+            )
+            self._set_chrome_faded(widget, faded)
+
+    def _set_chrome_faded(self, widget: QWidget, faded: bool) -> None:
+        # The effect is only attached while faded: an opacity effect renders
+        # its widget through an offscreen pixmap, which the bar has no reason
+        # to pay for the rest of the time. Opacity, not alpha, on purpose --
+        # the glass behind the fill has to fade with the icons, or an opaque
+        # slab of blur would still cover what the tool is working on.
+        effect = widget.graphicsEffect()
+        if faded:
+            if not isinstance(effect, QGraphicsOpacityEffect):
+                effect = QGraphicsOpacityEffect(widget)
+                widget.setGraphicsEffect(effect)
+            effect.setOpacity(design.tokens.BarMetric.WORKING_OPACITY)
+        elif effect is not None:
+            widget.setGraphicsEffect(None)
+
+    def is_chrome_faded(self, widget: QWidget) -> bool:
+        """Whether `widget` is faded for a tool working under it."""
+        return isinstance(widget.graphicsEffect(), QGraphicsOpacityEffect)
+
+    def eventFilter(self, watched, event) -> bool:
+        # The overlay gets no moves while the pointer is over a child, so
+        # reaching the bar or the hint is where their fade has to end.
+        if event.type() == QEvent.Type.Enter and watched in self._fading_chrome():
+            self._set_chrome_faded(watched, False)
+        return super().eventFilter(watched, event)
+
+    def _paint_eyedropper_readout(self, painter: QPainter, rect: QRectF, colour: QColor) -> None:
+        """The chip beside the loupe: a swatch of `colour`, then its hex --
+        `_paint_frozen_pill`'s own rounded-chip look, at `rect` from
+        `_eyedropper_rects`.
         """
         hex_text = _hex_of(colour)
-        ui = design.font_families().ui
-        font = self._chip_font(design.tokens.Font.FROZEN, ui)
+        font = self._eyedropper_readout_font()
         fm = QFontMetricsF(font)
-
         swatch_size = self._FROZEN_ICON_SIZE
-        content_width = swatch_size + self._FROZEN_INNER_GAP + fm.horizontalAdvance(hex_text)
-        content_height = max(swatch_size, fm.height())
-        width = content_width + 2 * self._CHIP_PAD_H
-        height = content_height + 2 * self._CHIP_PAD_V
-
-        x = max(0.0, min(box_rect.left(), self.width() - width))
-        y = min(box_rect.bottom() + self._EYEDROPPER_READOUT_GAP, self.height() - height)
-        rect = QRectF(x, y, width, height)
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(design.color("CHIP_DARK_BG"))
