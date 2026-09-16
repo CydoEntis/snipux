@@ -25,6 +25,7 @@ from PyQt6.QtCore import (
     Qt,
     QTimer,
     QUrl,
+    pyqtSignal,
 )
 from PyQt6.QtGui import QGuiApplication, QImage, qRgb
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -2918,6 +2919,123 @@ class TestAppControllerLandingRecording:
         assert "failed" in calls[0][1].lower()
         assert controller._active_recording is None
         assert controller._stopping_recording is False
+
+
+class _FakeFfmpegExporter(QObject):
+    """Stands in for `player.FfmpegExporter`: records what it was built
+    with and finishes synchronously the moment `start()` is called, rather
+    than spawning a real ffmpeg -- exactly the "faked ffmpeg" the player's
+    own tests already use `export_availability(..., ffmpeg=...)` for,
+    applied to the one piece of this feature that is genuinely async.
+    """
+
+    progressed = pyqtSignal(float)
+    finished = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self, source, destination, state, format_id, *, muted, binary, **_kwargs
+    ):
+        super().__init__()
+        self.source = Path(source)
+        self.destination = Path(destination)
+        self.state = state
+        self.format_id = format_id
+        self.muted = muted
+        self.binary = binary
+
+    def start(self):
+        self.destination.write_bytes(b"not really a gif, but bytes are bytes")
+        self.finished.emit(str(self.destination))
+
+
+class TestAppControllerLandingRecordingAsGif:
+    """SNX-86: "gif" is `_land_recording`'s asynchronous sibling --
+    `AppController._land_recording_as_gif` -- since converting even a short
+    clip takes real seconds and cannot freeze the tray the way every other
+    destination's plain `shutil.move` does not.
+    """
+
+    def _start_a_gif_recording(self, make_controller, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend()
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "gif")
+        _rect, temp_path = backend.start_calls[0]
+        Path(temp_path).write_bytes(b"stand-in recording, not a real webm")
+        return controller, Path(temp_path)
+
+    def test_the_conversion_goes_through_the_players_own_exporter(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(app, "system_ffmpeg", lambda: "/usr/bin/ffmpeg")
+        monkeypatch.setattr(app, "FfmpegExporter", _FakeFfmpegExporter)
+        controller, temp_path = self._start_a_gif_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+
+        controller._stop_recording()
+
+        landed = next(tmp_path.iterdir())
+        assert landed.suffix == ".gif"
+        assert landed.exists()
+        # The raw recording was only ever staging for the GIF, so it is
+        # discarded once the GIF has actually landed.
+        assert not temp_path.exists()
+
+    def test_the_landed_name_follows_the_recording_filename_pattern(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Same AC as `save`'s own naming test: the real filename is the one
+        # computation `preview_filename` does, not a second guess at it,
+        # watched rather than recomputed for the reason that test explains.
+        monkeypatch.setattr(app, "system_ffmpeg", lambda: "/usr/bin/ffmpeg")
+        monkeypatch.setattr(app, "FfmpegExporter", _FakeFfmpegExporter)
+        produced = []
+        real_preview_filename = setup_desktop.preview_filename
+
+        def spy(folder, pattern, extension="png"):
+            answer = real_preview_filename(folder, pattern, extension=extension)
+            produced.append(answer)
+            return answer
+
+        monkeypatch.setattr(app.setup_desktop, "preview_filename", spy)
+        controller, _temp_path = self._start_a_gif_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+
+        controller._stop_recording()
+
+        landed = next(tmp_path.iterdir())
+        assert produced, "landing as gif never asked preview_filename for a name"
+        assert landed == Path(produced[-1])
+        assert landed.suffix == ".gif"
+
+    def test_without_an_encoder_the_plain_recording_lands_instead(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # `system_ffmpeg()` is cached for the life of the process, so the
+        # chooser and Settings both greying "gif" ahead of time does not
+        # make this unreachable -- a binary gone after that first probe is
+        # rare, but the take must not be lost over it.
+        monkeypatch.setattr(app, "system_ffmpeg", lambda: None)
+        controller, temp_path = self._start_a_gif_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+
+        controller._stop_recording()
+
+        landed = next(tmp_path.iterdir())
+        assert landed.suffix != ".gif"
+        assert not temp_path.exists()
 
 
 class TestTheBarStaysUpAfterARecordingLands:

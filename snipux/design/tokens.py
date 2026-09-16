@@ -766,6 +766,7 @@ CHOOSER_RECORD_AFTER_NOTE = {
     "instant": "Copy to the clipboard. No file is kept.",
     "save": "Save to your recordings folder.",
     "open": "Save, then open it to trim and export.",
+    "gif": "Convert and save as a GIF. Silent, loops -- big above ~10 seconds.",
 }
 RECORD_AFTER_DEFAULT = "instant"
 
@@ -784,6 +785,9 @@ RECORDING_AFTER = [
     ("open", "Open in the player",
      "Saved as above, then opened in the trim editor -- play it back, cut "
      "the dead air off either end and export."),
+    ("gif", "Save as a GIF",
+     "Converts the finished recording and saves it as a GIF, under the "
+     "filename pattern below. Silent, loops -- big above ~10 seconds."),
 ]
 
 # Recordings get their own default name, not the stills one. Sharing
