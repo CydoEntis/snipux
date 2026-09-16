@@ -70,6 +70,13 @@ use it; the commit history has the detail.
   shortcut when it started, Save refused with "Shortcut already in use"
   and nothing was kept -- not the watermark, not the hide list, nothing.
   Save now only checks a shortcut you have changed.
+- **The eyedropper's magnifier no longer hides behind the toolbar.** It
+  opens in whichever corner around the pointer is clear of the toolbar,
+  its menus and the hint, and stays on the monitor you are pointing at.
+- **The toolbar fades while a tool works right under it** -- the
+  eyedropper reading next to it, or a stroke passing beneath it -- and
+  comes back as soon as you move away or reach for it. It is never part
+  of the snip either way.
 
 ## 0.8.2 — 2026-09-15
 

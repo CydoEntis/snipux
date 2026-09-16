@@ -1327,6 +1327,12 @@ class BarMetric:
     TAB_SEP_H        = 11          # spec markup
     TAB_RADIUS       = (0, 0, 10, 10)
     TAB_OPACITY      = 0.70        # 1.0 on hover
+    # The bar and the tool hint while a tool works under them: the
+    # eyedropper's loupe or read spot, or a stroke's pointer, within
+    # WORKING_REACH of them. 1.0 again the moment the pointer is on them.
+    # Not in the handoff -- see docs/design/bars/divergences.md.
+    WORKING_OPACITY  = 0.25
+    WORKING_REACH    = 16          # logical px around the working pointer
 
     # The hint pill under the chooser row.
     HINT_GAP         = 7
