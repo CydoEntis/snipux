@@ -19,6 +19,9 @@ use it; the commit history has the detail.
   resize it (it keeps its own proportions), and close it with Escape or the
   × that appears on hover. Right-click for Copy and Save. Greyed on Wayland,
   where an app can't place its own window or keep it on top.
+- **Pause and resume a recording** (Windows). Pause sits beside Stop on the
+  recording bar; the clock stops with it, and Resume carries on in the same
+  file with the paused time left out. Greyed with why on Linux for now.
 
 ## 0.8.2 — 2026-09-15
 
