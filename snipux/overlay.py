@@ -6221,18 +6221,28 @@ class OverlayWindow(QWidget):
         though it is, technically, inside the window.
 
         The monitor is where the selection's drag *started*
-        (`_selection_anchor`) whenever that is known. "The monitor I ran the
-        selection on" is the whole of what a user means here, and it is the
-        one answer that cannot surprise them: a drag begun on the left
-        monitor and carried a little way past the bezel would otherwise hand
-        its toolbar to the middle monitor the instant a few more pixels of
-        the rectangle landed there, moving the controls away from the screen
-        being worked on for no reason the user can see.
+        (`_selection_anchor`), for as long as a fair share of the selection
+        is still on it -- `ANCHOR_MONITOR_SHARE`. "The monitor I ran the
+        selection on" is what a user means by this, and it is the one answer
+        that cannot surprise them while the two monitors are anywhere near
+        even: a drag begun on the left monitor and carried a little way past
+        the bezel would otherwise hand its toolbar to the middle monitor the
+        instant a few more pixels of the rectangle landed there, moving the
+        controls away from the screen being worked on for no reason the user
+        can see.
 
-        Largest overlap with the selection is the fallback, for selections
-        that never came from a drag at all -- Window and Full screen pick a
-        rect outright -- and it beats "whichever monitor holds the centre"
-        for those, since a rect can perfectly well have its centre in a gap.
+        A press that lands just the wrong side of a bezel is the other half
+        of it, and was reported: a region drawn over the whole of the right
+        monitor, begun a few pixels inside the left one, put the toolbar on
+        the left monitor -- a screen away from every pixel being marked up.
+        Once the starting monitor holds less than a share of the selection,
+        the monitor the selection is actually on wins.
+
+        Largest overlap with the selection is that answer, and the fallback
+        for selections that never came from a drag at all -- Window and Full
+        screen pick a rect outright -- and it beats "whichever monitor holds
+        the centre" for those, since a rect can perfectly well have its
+        centre in a gap.
         With no selection it is the monitor being worked on
         (`_active_screen_rect`), the one the chooser row is on. Never the
         window's centre: that is the virtual desktop's centre, and with a
@@ -6253,22 +6263,36 @@ class OverlayWindow(QWidget):
         """
         return self._to_local_rect(self._usable_area(self._chrome_monitor()))
 
+    # How much of the selection has to remain on the monitor its drag began
+    # on for that monitor to keep the chrome -- see `_chrome_bounds`. A third
+    # holds the bezel-spill case the rule exists for, where the two monitors
+    # are near even, and lets go when the selection has plainly moved next
+    # door.
+    ANCHOR_MONITOR_SHARE = 1 / 3
+
     def _chrome_monitor(self) -> QRectF:
         """The monitor `_chrome_bounds` is carved from, in absolute
         coordinates, chosen by the rules that method's docstring gives.
         """
         if self._selection is not None:
             selection = QRectF(self._selection)
+            total = selection.width() * selection.height()
+            started_on: QRectF | None = None
             if self._selection_anchor is not None:
                 anchor = self._to_absolute(self._selection_anchor)
                 for geometry in self._monitor_geometries:
                     if geometry.contains(anchor):
-                        return geometry
+                        started_on = geometry
+                        break
             best: QRectF | None = None
             best_area = 0.0
             for geometry in self._monitor_geometries:
                 overlap = self._to_local_rect(geometry).intersected(selection)
                 area = overlap.width() * overlap.height()
+                if geometry == started_on and (
+                    total <= 0 or area >= total * self.ANCHOR_MONITOR_SHARE
+                ):
+                    return geometry
                 if area > best_area:
                     best, best_area = geometry, area
             if best is not None:

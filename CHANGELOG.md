@@ -5,6 +5,15 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **The toolbar follows the region onto the monitor it is on.** A region
+  drawn across the whole of another monitor, begun a few pixels the wrong
+  side of the bezel, left its controls behind on the monitor the drag
+  started on. The start still wins while a fair share of the region is on
+  it, so a drag that spills a little past the bezel keeps its toolbar where
+  it began.
+
 ## 0.8.1 — 2026-09-15
 
 ### Fixed

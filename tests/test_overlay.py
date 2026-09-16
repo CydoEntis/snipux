@@ -10020,6 +10020,19 @@ class TestChromeStaysOnTheSelectionsMonitor:
         bar = overlay._bar.geometry()
         assert QRectF(STAGGERED_LEFT).contains(QRectF(bar)), f"bar at {bar}"
 
+    def test_a_drag_that_lands_next_door_takes_its_toolbar_with_it(self):
+        # Reported: a region drawn over the whole of the next monitor, begun
+        # a few pixels the wrong side of the bezel, kept its toolbar on the
+        # monitor the press landed on -- a screen away from every pixel
+        # being marked up. The monitor the drag started on holds the chrome
+        # while a fair share of the selection is still on it, and no longer.
+        overlay = self._empty_overlay()
+
+        self._drag(overlay, QPoint(1900, 200), QPoint(3800, 1300))
+
+        bar = overlay._bar.geometry()
+        assert QRectF(STAGGERED_CENTRE).contains(QRectF(bar)), f"bar at {bar}"
+
     def test_a_drag_started_on_the_right_monitor_keeps_its_toolbar_there(self):
         overlay = self._empty_overlay()
 
