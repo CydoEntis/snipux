@@ -1,4 +1,5 @@
 import ctypes
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -638,7 +639,7 @@ class TestWindowsWindowGeometryProviderIntegration:
     def test_click_on_an_enumerated_window_confirms_its_extended_frame_bounds(
         self, monkeypatch
     ):
-        monkeypatch.setattr("snipux.capture.sys.platform", "win32")
+        monkeypatch.setattr("sys.platform", "win32")
         monkeypatch.setattr(
             "snipux.capture.ctypes.windll",
             SimpleNamespace(

@@ -1,6 +1,7 @@
 import ctypes
 import os
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -469,7 +470,7 @@ class TestBackendRegistry:
     def test_capture_names_a_wayland_package_when_no_backend_is_available(self, monkeypatch):
         # Pinned off Windows: this suite runs there too, and the advice
         # branches on sys.platform before it ever looks at session type.
-        monkeypatch.setattr(capture.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
         registry = BackendRegistry([FakeBackend("b", False, reason="not a Wayland session")])
 
@@ -483,7 +484,7 @@ class TestBackendRegistry:
         assert "grim" in message
 
     def test_capture_names_an_x11_package_when_no_backend_is_available(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
         registry = BackendRegistry([FakeBackend("b", False, reason="not an X11 session")])
 
@@ -497,7 +498,7 @@ class TestBackendRegistry:
         assert "maim" in message
 
     def test_capture_still_names_a_package_when_session_type_is_unknown(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
         registry = BackendRegistry([])
 
@@ -517,7 +518,7 @@ class TestBackendRegistry:
         # since XDG_SESSION_TYPE is a Linux/X11/Wayland concept) and told a
         # Windows user to `sudo apt install grim maim` -- advice for a
         # different OS entirely.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         registry = BackendRegistry([FakeBackend("b", False, reason="not running on Windows")])
 
         with pytest.raises(CaptureError) as excinfo:
@@ -1493,23 +1494,23 @@ class TestQtNativeWindowsBackend:
     def test_is_available_only_on_windows(self, monkeypatch):
         backend = capture.QtNativeWindowsBackend()
 
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         assert backend.is_available() is True
 
-        monkeypatch.setattr(capture.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         assert backend.is_available() is False
 
     def test_unavailable_reason_matches_availability(self, monkeypatch):
         backend = capture.QtNativeWindowsBackend()
 
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         assert backend.unavailable_reason() is None
 
-        monkeypatch.setattr(capture.sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "platform", "darwin")
         assert backend.unavailable_reason() == "not running on Windows"
 
     def test_capture_covers_every_monitor_including_one_above_and_left(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         # Mirrors the real desktop this backend was verified against:
         # negative x *and* negative y in the same virtual desktop.
         screens = [
@@ -1532,7 +1533,7 @@ class TestQtNativeWindowsBackend:
         # warns about must not be silently painted as black -- it has to
         # raise, so BackendRegistry.capture() falls through to the Win32
         # GDI backend instead of handing back a frame missing a monitor.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
 
         class _NullGrabScreen(_FakeScreen):
             def grabWindow(self, window_id):
@@ -1557,23 +1558,23 @@ class TestWin32GdiBackend:
     def test_is_available_only_on_windows(self, monkeypatch):
         backend = capture.Win32GdiBackend()
 
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         assert backend.is_available() is True
 
-        monkeypatch.setattr(capture.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         assert backend.is_available() is False
 
     def test_unavailable_reason_matches_availability(self, monkeypatch):
         backend = capture.Win32GdiBackend()
 
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         assert backend.unavailable_reason() is None
 
-        monkeypatch.setattr(capture.sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "platform", "darwin")
         assert backend.unavailable_reason() == "not running on Windows"
 
     def test_capture_blits_the_gsm_reported_region_in_one_call(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         # A monitor left of the primary, like _virtual_desktop_geometry()
         # sees on X11's equivalent test -- the logical rect this backend
         # reports must still come from Qt, not from GDI's own numbers.
@@ -1597,7 +1598,7 @@ class TestWin32GdiBackend:
         assert frame.logical_size == QSizeF(300, 200)
 
     def test_capture_releases_the_screen_dc_even_when_bitblt_fails(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         screens = [_FakeScreen(QRect(0, 0, 100, 50))]
         monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
         user32 = _FakeUser32({76: 0, 77: 0, 78: 100, 79: 50})
@@ -1610,7 +1611,7 @@ class TestWin32GdiBackend:
         assert user32.released == [user32._dc]
 
     def test_capture_raises_when_get_dibits_fails(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         screens = [_FakeScreen(QRect(0, 0, 100, 50))]
         monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
         user32 = _FakeUser32({76: 0, 77: 0, 78: 100, 79: 50})
@@ -1621,7 +1622,7 @@ class TestWin32GdiBackend:
             capture.Win32GdiBackend().capture()
 
     def test_capture_raises_when_the_reported_virtual_screen_is_empty(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32({76: 0, 77: 0, 78: 0, 79: 0})
         gdi32 = _FakeGdi32()
         _patch_win32_dll(monkeypatch, user32, gdi32)
@@ -1641,7 +1642,7 @@ class TestBuildWindowsRegistry:
         assert [backend.name() for backend in registry] == ["qt-native", "win32-gdi"]
 
     def test_capture_falls_through_from_qt_native_to_the_gdi_backend(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         screens = [_FakeScreen(QRect(0, 0, 100, 50))]
         monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
         monkeypatch.setattr(
@@ -1671,10 +1672,10 @@ class TestWindowsWindowGeometryProvider:
     def test_is_available_only_on_windows(self, monkeypatch):
         provider = capture.WindowsWindowGeometryProvider()
 
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         assert provider.is_available() is True
 
-        monkeypatch.setattr(capture.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         assert provider.is_available() is False
 
     def test_list_windows_uses_extended_frame_bounds_not_get_window_rect(
@@ -1683,7 +1684,7 @@ class TestWindowsWindowGeometryProvider:
         # The invisible resize border GetWindowRect would include: its
         # rect (0,0,120,120) is padded 10px past what DWM's own extended
         # frame bounds (10,10,100,100) report as actually visible.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows(
             [{"hwnd": 1, "visible": True, "iconic": False,
               "rect": (0, 0, 120, 120), "title": "Notepad"}]
@@ -1698,7 +1699,7 @@ class TestWindowsWindowGeometryProvider:
     def test_list_windows_falls_back_to_get_window_rect_when_dwm_fails(
         self, monkeypatch
     ):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows(
             [{"hwnd": 1, "visible": True, "iconic": False,
               "rect": (0, 0, 50, 50), "title": "Old-style window"}]
@@ -1715,7 +1716,7 @@ class TestWindowsWindowGeometryProvider:
     def test_list_windows_skips_hidden_minimised_and_cloaked_windows(
         self, monkeypatch
     ):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows([
             {"hwnd": 1, "visible": False, "iconic": False,
              "rect": (0, 0, 50, 50), "title": "Hidden"},
@@ -1746,7 +1747,7 @@ class TestWindowsWindowGeometryProvider:
         # top-level windows -- small ones here, deliberately well within
         # their monitor, to prove class name alone (not size) is what
         # excludes them.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows([
             {"hwnd": 1, "visible": True, "iconic": False, "class_name": "Progman",
              "rect": (0, 0, 50, 50), "title": ""},
@@ -1769,7 +1770,7 @@ class TestWindowsWindowGeometryProvider:
         # it as a window either. Shell_SecondaryTrayWnd covers a
         # secondary monitor's taskbar, the same way Shell_TrayWnd covers
         # the primary one.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows([
             {"hwnd": 1, "visible": True, "iconic": False, "class_name": "Shell_TrayWnd",
              "rect": (0, 1040, 1920, 1080), "title": ""},
@@ -1796,7 +1797,7 @@ class TestWindowsWindowGeometryProvider:
         # were a window -- this is the generic, class-name-independent
         # guard against exactly that, in case something other than
         # Progman/WorkerW is ever sized past its own monitor.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows(
             [{"hwnd": 1, "visible": True, "iconic": False, "class_name": "",
               "rect": (0, 0, 5120, 2880), "title": "Spans every monitor"}],
@@ -1813,7 +1814,7 @@ class TestWindowsWindowGeometryProvider:
         # The counterpart to the previous test: a window exactly the size
         # of the monitor it's on (a borderless-fullscreen game, say) is
         # not "larger than" that monitor and must still be offered.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows(
             [{"hwnd": 1, "visible": True, "iconic": False, "class_name": "",
               "rect": (0, 0, 1920, 1080), "title": "Fullscreen game"}],
@@ -1831,7 +1832,7 @@ class TestWindowsWindowGeometryProvider:
     ):
         # The actual bug report: hovering an empty area of the desktop
         # must offer no window, not the whole virtual desktop.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows(
             [{"hwnd": 1, "visible": True, "iconic": False, "class_name": "Progman",
               "rect": (0, 0, 5120, 2880), "title": ""}]
@@ -1848,7 +1849,7 @@ class TestWindowsWindowGeometryProvider:
         # origin; an ordinary window on it must still be picked, and must
         # not be mistaken for spanning past its own (also
         # negative-origin) monitor.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows(
             [{"hwnd": 1, "visible": True, "iconic": False, "class_name": "Notepad",
               "rect": (-1920, 0, -920, 1080), "title": "Notepad"}],
@@ -1868,7 +1869,7 @@ class TestWindowsWindowGeometryProvider:
         # last) match in enumeration order must win -- unlike
         # XwininfoWindowGeometryProvider, this needs no reversal to get
         # there.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows([
             {"hwnd": 1, "visible": True, "iconic": False,
              "rect": (0, 0, 100, 100), "title": "Front"},
@@ -1890,7 +1891,7 @@ class TestWindowsWindowGeometryProvider:
         # label what it is about to take. It is not defaulted in from the
         # ABC -- this class duck-types it -- so its absence was an
         # AttributeError per move, not a missing title.
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows([
             {"hwnd": 1, "visible": True, "iconic": False,
              "rect": (0, 0, 100, 100), "title": "Front"},
@@ -1908,7 +1909,7 @@ class TestWindowsWindowGeometryProvider:
     def test_list_windows_reuses_cached_list_within_the_cache_window(
         self, monkeypatch
     ):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows(
             [{"hwnd": 1, "visible": True, "iconic": False,
               "rect": (0, 0, 50, 50), "title": "W"}]
@@ -1928,7 +1929,7 @@ class TestWindowsWindowGeometryProvider:
         assert enum_windows.call_count == 1
 
     def test_list_windows_refetches_once_the_cache_expires(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         user32 = _FakeUser32Windows(
             [{"hwnd": 1, "visible": True, "iconic": False,
               "rect": (0, 0, 50, 50), "title": "W"}]
@@ -1948,7 +1949,7 @@ class TestWindowsWindowGeometryProvider:
         assert enum_windows.call_count == 2
 
     def test_list_windows_is_empty_off_windows(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
 
         assert capture.WindowsWindowGeometryProvider().list_windows() == []
 
@@ -2405,7 +2406,7 @@ class TestWindowsActiveWindow:
 
     def _provider(self, monkeypatch, windows, foreground, pids=None,
                   frame_bounds=None, cloaked=None):
-        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr(
             capture.ctypes,
             "windll",
@@ -2478,6 +2479,6 @@ class TestWindowsActiveWindow:
         assert provider.active_window() is None
 
     def test_off_windows_it_asks_nothing(self, monkeypatch):
-        monkeypatch.setattr(capture.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
 
         assert capture.WindowsWindowGeometryProvider().active_window() is None
