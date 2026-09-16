@@ -19,6 +19,15 @@ use it; the commit history has the detail.
   resize it (it keeps its own proportions), and close it with Escape or the
   × that appears on hover. Right-click for Copy and Save. Greyed on Wayland,
   where an app can't place its own window or keep it on top.
+- **Eyedropper.** Pick a colour off the frozen frame: hover to preview it
+  magnified with its hex underneath, click to copy the hex to the clipboard.
+  The tool stays active, so several colours can be taken in a row.
+- **Recent captures in the tray menu.** The last few things you saved --
+  stills and recordings both -- now show up under a Recent section, newest
+  first, named by their filename. Click one to open it in whatever your
+  system opens that kind of file with. A capture that only went to the
+  clipboard adds nothing; a row whose file has moved, been renamed or been
+  deleted quietly drops out.
 - **Land a recording straight to GIF**, no trip through the player. GIF now
   sits alongside Copy/Save/Open on the record side, in the chooser and as a
   default in Settings' Recording pane. Greyed with why on a machine with no
