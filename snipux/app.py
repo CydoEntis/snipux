@@ -86,6 +86,7 @@ from snipux.overlay import (
 from snipux import __version__, design, handoff, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
 from snipux.recording import RecorderRegistry, RecordingError
+from snipux.pin import PinWindow
 from snipux.player import PlayerWindow
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
@@ -1197,6 +1198,7 @@ class AppController:
         # fair game for the GC while its window is still on screen.
         self._settings: SettingsDialog | None = None
         self._reviews: list[ReviewWindow] = []
+        self._pins: list[PinWindow] = []
         self._players: list[PlayerWindow] = []
         # Set by install_hotkey_listener(), not here -- see its own
         # docstring for why registering the real Windows hotkey is kept out
@@ -1579,6 +1581,9 @@ class AppController:
             # Fires only for a real capture, never for a cancelled snip --
             # see `OverlayWindow._report_capture`.
             on_captured=self._on_captured,
+            # SNX-83: fires only when Pin is chosen from the destination
+            # menu -- see `OverlayWindow._on_bar_pin`.
+            on_pin_requested=self._on_pin_requested,
             # SNX-122: fires only for the record side of the chooser -- see
             # `_on_recording_requested`.
             on_recording_requested=self._on_recording_requested,
@@ -1633,6 +1638,27 @@ class AppController:
         review.show()
         review.raise_()
         review.activateWindow()
+
+    def _on_pin_requested(self, image: QImage, rect: QRect) -> None:
+        """SNX-83: build and show the pin `OverlayWindow._on_bar_pin` asked
+        for, at exactly the selection's own rect.
+
+        A copy of the image, not the overlay's own, for the same reason
+        `_on_captured` copies before handing one to `ReviewWindow` -- the
+        overlay is about to close, and `rendered_image()` hands back a
+        `QImage` backed by buffers it owns.
+        """
+        pin = PinWindow(image.copy(), rect)
+        # Held for the same reason `_reviews` is -- a parentless widget is
+        # fair game for the GC while its window is still on screen, and
+        # several pins at once must each survive independently.
+        self._pins.append(pin)
+        pin.closed.connect(lambda w=pin: self._forget_pin(w))
+        pin.show()
+
+    def _forget_pin(self, window) -> None:
+        if window in self._pins:
+            self._pins.remove(window)
 
     def _notify_capture(self, path: "Path | None") -> None:
         """Confirm, through the tray, that a snip actually happened.

@@ -467,6 +467,43 @@ class TestStubPlatforms:
         assert isinstance(darwin.DarwinPlatform(), Platform)
 
 
+class TestCanPin:
+    """SNX-83: whether a pin can be placed at the selection's exact rect and
+    kept on top here -- Pin's own capability on the platform seam.
+    """
+
+    def test_defaults_to_false_with_a_reason(self):
+        # Darwin overrides none of this -- it inherits Platform's own
+        # base answer, the same way TestReservedTop's Windows/Darwin cases
+        # exercise the portable default rather than a platform-specific one.
+        stub = darwin.DarwinPlatform()
+
+        assert stub.can_pin() is False
+        assert stub.pin_unavailable_reason() != ""
+
+    def test_windows_can_pin(self):
+        assert windows.WindowsPlatform().can_pin() is True
+        assert windows.WindowsPlatform().pin_unavailable_reason() == ""
+
+    def test_linux_can_pin_under_x11(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "x11")
+
+        platform_impl = linux.LinuxPlatform()
+
+        assert platform_impl.can_pin() is True
+        assert platform_impl.pin_unavailable_reason() == ""
+
+    def test_linux_cannot_pin_under_wayland(self, monkeypatch):
+        # A Wayland client can neither place its own window nor ask to
+        # stay on top -- the two things Pin's acceptance criteria need.
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "wayland")
+
+        platform_impl = linux.LinuxPlatform()
+
+        assert platform_impl.can_pin() is False
+        assert platform_impl.pin_unavailable_reason() != ""
+
+
 class _FakeUser32Hotkey:
     """Stand-in for `ctypes.windll.user32`, covering only what
     `WindowsPlatform.bind_shortcut`/`unbind_shortcut` call:
