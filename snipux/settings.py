@@ -1788,7 +1788,13 @@ class SettingsWindow(WinWindow):
 
     def _save(self) -> None:
         shortcut = self._recorder.shortcut_value()
-        if HotkeyEventFilter.is_available():
+        unchanged = setup_desktop.normalise_shortcut(shortcut) == setup_desktop.normalise_shortcut(
+            setup_desktop.load_shortcut(self._config_dir)
+        )
+        # Only a *new* combination is checked. The probe cannot tell the
+        # saved one apart from a registration this process failed to make
+        # at startup, and refusing it then blocked every other setting too.
+        if HotkeyEventFilter.is_available() and not unchanged:
             # Windows, unlike GNOME, can actually tell a taken combination
             # apart from a free one (see find_shortcut_conflict's own
             # docstring) -- so here, unlike the banner above, a clash is
