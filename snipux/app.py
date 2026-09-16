@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import shutil
 import subprocess
 import sys
@@ -61,6 +62,7 @@ from PyQt6.QtGui import (
     QGuiApplication,
     QIcon,
     QImage,
+    QImageReader,
     QPainter,
     QPen,
     QPixmap,
@@ -602,6 +604,20 @@ def build_default_geometry_provider() -> GeometryProvider:
     return UnsupportedGeometryProvider()
 
 
+# `PATH` sits outside `_build_parser()`'s mutually exclusive group --
+# argparse has no way to add a positional to one -- so `main()` checks it
+# against every one of the group's own flags by hand. One place, so a flag
+# added to the group later can't be forgotten here.
+_ACTION_FLAGS = (
+    ("list_backends", "--list-backends"),
+    ("snip", "--snip"),
+    ("settings", "--settings"),
+    ("setup", "--setup"),
+    ("remove", "--remove"),
+    ("update", "--update"),
+)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="snipux",
@@ -656,6 +672,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="fetch and install the newest Snipux from GitHub, then report "
         "what to restart -- the same pip command the README gives, without "
         "anyone having to keep a URL",
+    )
+    # Outside the mutually exclusive group above -- argparse has no way to
+    # put a positional in one -- so `main()` checks it against the group's
+    # own flags by hand, right after parsing, and errors the same way
+    # `--shortcut` without `--setup` already does below.
+    parser.add_argument(
+        "path",
+        nargs="?",
+        metavar="PATH",
+        help="open this image in the review window, with the full "
+        "toolbar, instead of re-snipping it off your own screen -- "
+        "forwarded to an already-running Snipux instance the way --snip "
+        "already is, starting one first if none is running yet",
     )
     # Outside the mutually exclusive group above: this modifies --setup
     # rather than being an action of its own.
@@ -802,6 +831,11 @@ def main(
     if args.shortcut is not None and not args.setup:
         parser.error("--shortcut only means anything alongside --setup")
 
+    if args.path is not None:
+        for dest, flag in _ACTION_FLAGS:
+            if getattr(args, dest):
+                parser.error(f"argument PATH: not allowed with argument {flag}")
+
     if args.setup:
         # No registry/transport involved -- unlike --snip and the default
         # resident path, this never touches capture backends or a display,
@@ -876,6 +910,27 @@ def main(
         transport.send_settings_request()
         return 0
 
+    if args.path is not None:
+        # Same forward-or-become-resident shape as --snip/--settings above,
+        # for the same reason: an image opened in its own short-lived
+        # process would just be a second, disconnected review window next
+        # to whatever is already running, rather than living alongside
+        # every other snip that instance has open.
+        #
+        # Made absolute here, before it travels anywhere -- the resident
+        # (or the process that becomes it) may not share this one's working
+        # directory.
+        target = Path(os.path.abspath(args.path))
+        if transport is None:
+            transport = QLocalSocketTransport()
+        _ensure_qapplication()
+        if transport.try_claim():
+            if registry is None:
+                registry = build_default_registry()
+            return _become_resident(registry, transport, open_path_immediately=target)
+        transport.send_open_request(target)
+        return 0
+
     if registry is None:
         registry = build_default_registry()
 
@@ -936,14 +991,24 @@ class Transport(ABC):
         """
 
     @abstractmethod
+    def send_open_request(self, path: Path) -> None:
+        """Ask the primary instance to open `path` in a fresh review
+        window. Same shape as `send_snip_request`/`send_settings_request`,
+        for the same reason: `path` is opened by whichever instance is
+        actually resident, not by this short-lived one.
+        """
+
+    @abstractmethod
     def listen(
         self,
         on_snip_request: Callable[[], None],
         on_settings_request: Callable[[], None],
+        on_open_request: Callable[[Path], None],
     ) -> None:
         """Primary-instance only: call `on_snip_request` for every snip
-        request, and `on_settings_request` for every Settings request, that
-        a later, non-primary launch forwards.
+        request, `on_settings_request` for every Settings request, and
+        `on_open_request` for every path, that a later, non-primary launch
+        forwards.
         """
 
 
@@ -955,10 +1020,11 @@ class QLocalSocketTransport(Transport):
     alongside `QtCore`/`QtGui`/`QtWidgets`, the same way capture.py already
     reaches `QtGui` without declaring it separately.
 
-    The protocol is one byte: `_REQUEST_BYTE` means "take a snip",
-    `_SETTINGS_REQUEST_BYTE` (SNX-78) means "raise the Settings window",
-    and a connection that sends nothing is only asking whether anyone is
-    home.
+    The protocol is one byte, or one byte plus a path: `_REQUEST_BYTE` means
+    "take a snip", `_SETTINGS_REQUEST_BYTE` (SNX-78) means "raise the
+    Settings window", `_OPEN_REQUEST_PREFIX` followed by a path (as
+    `os.fsencode` gives it) means "open that path", and a connection that
+    sends nothing is only asking whether anyone is home.
 
     That distinction is load-bearing, not ceremony. `try_claim()` probes by
     connecting, so when a bare connection *was* the request, every liveness
@@ -972,6 +1038,7 @@ class QLocalSocketTransport(Transport):
     _CONNECT_TIMEOUT_MS = 200
     _REQUEST_BYTE = handoff.SNIP_REQUEST
     _SETTINGS_REQUEST_BYTE = handoff.SETTINGS_REQUEST
+    _OPEN_REQUEST_PREFIX = handoff.OPEN_REQUEST_PREFIX
     # Long enough that a request is never lost to scheduling, short enough
     # that a probe (which sends nothing) doesn't hold the handler up.
     _READ_TIMEOUT_MS = 200
@@ -1015,6 +1082,9 @@ class QLocalSocketTransport(Transport):
     def send_settings_request(self) -> None:
         self._send(self._SETTINGS_REQUEST_BYTE)
 
+    def send_open_request(self, path: Path) -> None:
+        self._send(self._OPEN_REQUEST_PREFIX + os.fsencode(str(path)))
+
     def _send(self, payload: bytes) -> None:
         socket = QLocalSocket()
         socket.connectToServer(self._server_name)
@@ -1031,6 +1101,7 @@ class QLocalSocketTransport(Transport):
         self,
         on_snip_request: Callable[[], None],
         on_settings_request: Callable[[], None],
+        on_open_request: Callable[[Path], None],
     ) -> None:
         if self._server is None:
             raise RuntimeError("listen() called before a successful try_claim()")
@@ -1051,6 +1122,10 @@ class QLocalSocketTransport(Transport):
                 on_snip_request()
             elif received.startswith(self._SETTINGS_REQUEST_BYTE):
                 on_settings_request()
+            elif received.startswith(self._OPEN_REQUEST_PREFIX):
+                on_open_request(
+                    Path(os.fsdecode(received[len(self._OPEN_REQUEST_PREFIX):]))
+                )
 
         self._server.newConnection.connect(_accept)
 
@@ -1318,7 +1393,7 @@ class AppController:
                 "quit it, kill this process."
             )
 
-        self._transport.listen(self.start_capture, self.open_settings)
+        self._transport.listen(self.start_capture, self.open_settings, self.open_image_path)
 
     def _rebuild_recent_menu(self) -> None:
         """Refresh the tray's Recent section from what is actually still on
@@ -1743,6 +1818,38 @@ class AppController:
         # parentless widget is fair game for the GC while it is on screen.
         # A list, not one slot: taking several snips in a row should leave
         # several windows open, which is most of the point of having one.
+        self._reviews.append(review)
+        review.closed.connect(lambda w=review: self._forget_review(w))
+        review.show()
+        review.raise_()
+        review.activateWindow()
+
+    def open_image_path(self, path: Path) -> None:
+        """Open an image you already have in a fresh review window, with
+        the full toolbar -- `snipux PATH`'s and a socket-forwarded PATH's
+        own equivalent of `_on_captured`'s review branch.
+
+        Always a new window, the same reasoning `_on_captured` already
+        gives for `_reviews` being a list rather than one slot: several
+        files opened in a row should leave several windows open.
+
+        `QImageReader` (rather than `QImage(path)` directly) is what makes
+        a bad path -- missing, unreadable, not an image Qt recognises --
+        reported by name instead of opening an empty window; nothing else
+        here promises a format list of its own to keep in step with Qt's.
+        """
+        reader = QImageReader(str(path))
+        image = reader.read()
+        if image.isNull():
+            message = f"Could not open {path.name}: {reader.errorString()}"
+            if self._tray_available:
+                self._tray_icon.showMessage(
+                    "Snipux", message, QSystemTrayIcon.MessageIcon.Warning
+                )
+            else:
+                print(message)
+            return
+        review = ReviewWindow(image, saved_path=path)
         self._reviews.append(review)
         review.closed.connect(lambda w=review: self._forget_review(w))
         review.show()
@@ -3171,6 +3278,7 @@ def _become_resident(
     transport: Transport,
     start_capture_immediately: bool = False,
     open_settings_immediately: bool = False,
+    open_path_immediately: Path | None = None,
 ) -> int:
     """Build the `QApplication`/`AppController` and run the event loop.
 
@@ -3181,15 +3289,18 @@ def _become_resident(
     here rather than something this function repeats.
 
     Shared by `run_resident_app()` (a bare `snipux` launch), `main()`'s
-    `--snip` path, and its `--settings` path (SNX-78), whenever nothing was
-    resident yet: refusing to start one there made whether Super+Shift+S
-    did anything at all depend on invisible state the user had no way to
-    see (SNX-53), and the same would be true of a `--settings` launch on a
-    machine with no tray to fall back on. `start_capture_immediately`/
-    `open_settings_immediately` are what tell the three callers apart -- a
-    bare launch opens idle to the tray, `--snip` opens the overlay right
-    away, and `--settings` opens Settings right away, each the same as if
-    it had forwarded its request to an instance that was already up.
+    `--snip` path, its `--settings` path (SNX-78), and its `PATH` path,
+    whenever nothing was resident yet: refusing to start one there made
+    whether Super+Shift+S did anything at all depend on invisible state the
+    user had no way to see (SNX-53), and the same would be true of a
+    `--settings` launch on a machine with no tray to fall back on, or a
+    `snipux PATH` run with no resident to hand it to.
+    `start_capture_immediately`/`open_settings_immediately`/
+    `open_path_immediately` are what tell the four callers apart -- a bare
+    launch opens idle to the tray, `--snip` opens the overlay right away,
+    `--settings` opens Settings right away, and `PATH` opens it in a review
+    window right away, each the same as if it had forwarded its request to
+    an instance that was already up.
 
     `install_hotkey_listener()` runs here, once, for the same reason: this
     is the process that is actually resident, so it is the one that should
@@ -3239,6 +3350,8 @@ def _become_resident(
         controller.start_capture()
     if open_settings_immediately:
         controller.open_settings()
+    if open_path_immediately is not None:
+        controller.open_image_path(open_path_immediately)
     return app.exec()
 
 
