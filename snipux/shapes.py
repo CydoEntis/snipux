@@ -506,14 +506,15 @@ def finalize_mark(shape: Shape) -> Shape | None:
     - `Pen`/`Highlighter` need more than one point -- a plain click never
       reaches a second `mouseMoveEvent` to append one.
     - `Arrow`/`Rectangle`/`Ellipse`/`Line`/`Crop`/`ObscuringShape` (`Blur`/
-      `Pixelate`) need their bounding box to exceed `DROP_THRESHOLD` in at
-      least one axis -- a horizontal or vertical drag is a deliberate mark
-      even though it is exactly zero in the other axis, so this is an *or*,
-      not an *and*. SNX-64 added Ellipse/Line/Crop to this group when it
-      wired them up as overlay.py mark tools alongside Rectangle/Arrow --
-      the same stray-click-vs-deliberate-drag distinction the design doc's
-      "Marks under the minimum size are discarded on release" describes
-      applies to any two-point drag, not just the two this scoped first.
+      `Pixelate`)/`Callout` need their bounding box to exceed
+      `DROP_THRESHOLD` in at least one axis -- a horizontal or vertical
+      drag is a deliberate mark even though it is exactly zero in the
+      other axis, so this is an *or*, not an *and*. SNX-64 added
+      Ellipse/Line/Crop to this group when it wired them up as overlay.py
+      mark tools alongside Rectangle/Arrow -- the same stray-click-vs-
+      deliberate-drag distinction the design doc's "Marks under the
+      minimum size are discarded on release" describes applies to any
+      two-point drag, not just the two this scoped first.
 
     `Rectangle` additionally gets its `start`/`end` normalised to
     top-left/bottom-right order here, independent of the size check --
@@ -523,7 +524,11 @@ def finalize_mark(shape: Shape) -> Shape | None:
     two-point shape already has by construction. `Ellipse`/`Line`/`Crop`
     keep `Arrow`'s own behaviour instead -- corner order preserved exactly
     as dragged -- since none of their own `draw()`/`hit_test()` cares which
-    corner is which the way Rectangle's historical callers did.
+    corner is which the way Rectangle's historical callers did. `Callout`
+    keeps that same unnormalised order too, and for a stronger reason than
+    "doesn't care": its `start` *is* the point the drag began at, the
+    tail's own tip -- normalising it away the way Rectangle's is would
+    silently move what the mark is pointing at.
     `ObscuringShape` needs no such normalising either: `apply()` already
     runs its own corners through `_rect_from_corners` internally, so a raw
     start/end pair -- release ahead of press or not -- is already what it
@@ -535,7 +540,7 @@ def finalize_mark(shape: Shape) -> Shape | None:
     if isinstance(shape, (Pen, Highlighter)):
         return shape if len(shape.points) > 1 else None
 
-    if isinstance(shape, (Arrow, Rectangle, Ellipse, Line, Crop, ObscuringShape)):
+    if isinstance(shape, (Arrow, Rectangle, Ellipse, Line, Crop, ObscuringShape, Callout)):
         rect = _rect_from_corners(shape.start, shape.end)
         if rect.width() <= DROP_THRESHOLD and rect.height() <= DROP_THRESHOLD:
             return None
@@ -912,6 +917,210 @@ class Text(Shape):
             -self.HIT_TOLERANCE, -self.HIT_TOLERANCE,
             self.HIT_TOLERANCE, self.HIT_TOLERANCE,
         ).contains(point)
+
+
+def _wrap_text(text: str, metrics: QFontMetricsF, max_width: float) -> list[str]:
+    """`text` broken into lines no wider than `max_width` per `metrics` --
+    greedy word wrap: each line takes words until the next one would
+    overflow it, then starts a new line. A single word wider than
+    `max_width` on its own still gets a line of its own rather than being
+    split mid-word, the same call a word processor makes.
+
+    Shared by `Callout.draw()` and its own `wrapped_lines()`, so the lines
+    a test works out from a `QFontMetrics` are the same ones actually
+    painted -- see CLAUDE.md's rule against a test assuming this
+    machine's fonts.
+    """
+    words = text.split(" ")
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if current and metrics.horizontalAdvance(candidate) > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    lines.append(current)
+    return lines
+
+
+@dataclass
+class Callout(Shape):
+    """A rounded-rect body plus a triangular tail, with text that wraps
+    inside it -- an arrow and a label that move, undo and erase as the one
+    mark docs/design/bars/README.md:78 names it a shape sibling for
+    ("Rounded-rect, polygon, callout, spotlight -> shape siblings"), rather
+    than two marks lined up by hand.
+
+    Geometry, in one gesture -- the handoff leaves the drag itself
+    unspecified, so this is this ticket's own choice, recorded here rather
+    than left to be re-derived: `start` is where the drag began, and stays
+    the tail's own tip -- the point the mark is pointing at. `end` is the
+    corner dragged to. The body is the drag's own bounding rect
+    (`_rect_from_corners(start, end)`, exactly `Rectangle`'s own), pulled
+    in by `TAIL_LENGTH` at whichever corner `start` sits on, so that corner
+    is left as a notch the tail fills rather than `start` landing exactly
+    on the body's own outline -- which would draw a tail of zero length.
+    `_geometry()` works out the body and the tail's triangle together,
+    once, the way `Text.chip_rect()` does, for the same "two callers must
+    not disagree" reason.
+
+    Text reuses `Text`'s own click-then-type editor rather than a second
+    one: `TextLabelEditor.begin`'s `on_commit` (driven from
+    `OverlayWindow._start_callout_text_entry`, and `ImageCanvas`'s own
+    twin in review.py) fires once the field commits, with whatever was
+    typed -- empty included -- baked into the one `Callout` added to the
+    mark store then. That is what keeps body, tail and text a single undo
+    step: nothing is ever added twice, and nothing already committed is
+    mutated afterwards. Escape/abandon commits the callout as dragged,
+    with the field cleared first -- the body and tail the drag placed
+    survive; only a half-typed word is what gets discarded, the same split
+    `Text`'s own abandon makes (`TextLabelEditor.abandon`). Re-editing an
+    already-committed callout's text is out of scope here for the same
+    reason it is for `Text`: neither mark supports it.
+
+    Unlike `Text`'s chip, the body does not grow to fit what is typed --
+    it is the size the drag gave it, per the ticket's "text wraps inside
+    the body rather than overflowing it." `draw()` wraps greedily
+    (`_wrap_text`) at the body's own padded width and clips to its padded
+    height, so text past either edge is wrapped, never spilled outside the
+    box; text past the bottom is clipped rather than growing the box to
+    fit, the same trade any fixed-size box makes.
+    """
+
+    TAIL_LENGTH = 16.0
+    CORNER_RADIUS = Rectangle.CORNER_RADIUS
+    # The same formula `Text._font` uses, kept as this class's own constant
+    # rather than shared -- `Arrow`'s HEAD_LENGTH_MIN/FACTOR are the same
+    # precedent -- since a callout has no other reason to depend on Text.
+    TEXT_FONT_SIZE_MIN = 12
+    TEXT_FONT_SIZE_FACTOR = 3.0
+
+    start: QPointF = field(default_factory=QPointF)
+    end: QPointF = field(default_factory=QPointF)
+    text: str = ""
+    fill: str = "outline"
+    dash: str = "solid"
+
+    def __post_init__(self) -> None:
+        _check_style(self)
+
+    def _geometry(self) -> tuple[QRectF, QPolygonF | None]:
+        """`(body, tail)` -- see the class docstring. `tail` is None when
+        the drag left no room for a notch on some axis (a sliver-thin
+        callout); the body still draws, just without one.
+        """
+        full = _rect_from_corners(self.start, self.end)
+        notch = self._scaled(self.TAIL_LENGTH)
+        notch_x = min(notch, full.width() / 2)
+        notch_y = min(notch, full.height() / 2)
+        near_left = self.start.x() <= self.end.x()
+        near_top = self.start.y() <= self.end.y()
+        left, right = full.left(), full.right()
+        top, bottom = full.top(), full.bottom()
+        if near_left:
+            left += notch_x
+        else:
+            right -= notch_x
+        if near_top:
+            top += notch_y
+        else:
+            bottom -= notch_y
+        body = QRectF(QPointF(left, top), QPointF(right, bottom))
+        if notch_x <= 0 or notch_y <= 0:
+            return body, None
+        corner_x = body.left() if near_left else body.right()
+        corner_y = body.top() if near_top else body.bottom()
+        base_a = QPointF(corner_x, corner_y + (notch_y if near_top else -notch_y))
+        base_b = QPointF(corner_x + (notch_x if near_left else -notch_x), corner_y)
+        return body, QPolygonF([self.start, base_a, base_b])
+
+    def body_rect(self) -> QRectF:
+        """The body alone -- for callers (the text editor's own placement,
+        tests) that only need where the box sits, not the tail too.
+        """
+        return self._geometry()[0]
+
+    def _combined_path(self) -> QPainterPath:
+        """The body's rounded rect and the tail's triangle, unioned into
+        one outline -- so `draw()`'s stroke wraps both without a seam
+        where the tail meets the body, and `hit_test`/`interior_hit_test`
+        read the mark as the one shape it is.
+        """
+        body, tail = self._geometry()
+        radius = self._scaled(self.CORNER_RADIUS)
+        path = QPainterPath()
+        path.addRoundedRect(body, radius, radius)
+        if tail is not None:
+            tail_path = QPainterPath()
+            tail_path.addPolygon(tail)
+            tail_path.closeSubpath()
+            path = path.united(tail_path)
+        return path
+
+    def _font(self) -> QFont:
+        logical_size = max(
+            self.TEXT_FONT_SIZE_MIN, round(self.stroke_width * self.TEXT_FONT_SIZE_FACTOR)
+        )
+        font = QFont()
+        font.setPixelSize(round(self._scaled(logical_size)))
+        return font
+
+    def _text_rect(self, body: QRectF) -> QRectF:
+        pad_h = self._scaled(design.tokens.Metric.TEXT_LABEL_PAD_H)
+        pad_v = self._scaled(design.tokens.Metric.TEXT_LABEL_PAD_V)
+        return body.adjusted(pad_h, pad_v, -pad_h, -pad_v)
+
+    def wrapped_lines(self) -> list[str]:
+        """`self.text` broken into the lines `draw()` paints, at the
+        body's own current padded width -- exposed so a test can compare
+        against a `QFontMetrics`-derived expectation without building a
+        `QPainter`.
+        """
+        if not self.text:
+            return []
+        rect = self._text_rect(self.body_rect())
+        metrics = QFontMetricsF(self._font())
+        return _wrap_text(self.text, metrics, max(0.0, rect.width()))
+
+    def draw(self, painter: QPainter) -> None:
+        _set_fill_and_outline(painter, self)
+        painter.drawPath(self._combined_path())
+        if not self.text:
+            return  # an empty string is a no-op, same as Text's own draw()
+        rect = self._text_rect(self.body_rect())
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        font = self._font()
+        metrics = QFontMetricsF(font)
+        lines = _wrap_text(self.text, metrics, rect.width())
+        painter.save()
+        # Clips vertically as well as horizontally: wrapping alone keeps a
+        # long line from overflowing the sides, but more lines than the
+        # body is tall still needs somewhere to stop -- see the class
+        # docstring's "clipped rather than growing the box".
+        painter.setClipRect(rect)
+        painter.setFont(font)
+        painter.setPen(QPen(self.colour))
+        line_height = metrics.height()
+        y = rect.top() + metrics.ascent()
+        for line in lines:
+            if y - metrics.ascent() >= rect.bottom():
+                break
+            painter.drawText(QPointF(rect.left(), y), line)
+            y += line_height
+        painter.restore()
+
+    def hit_test(self, point: QPointF) -> bool:
+        # Same "outline, plus the interior only when filled" rule as
+        # Rectangle.hit_test -- see its own docstring.
+        if self.fill == "filled" and self.interior_hit_test(point):
+            return True
+        return self._stroke_hit_test(self._combined_path(), point)
+
+    def interior_hit_test(self, point: QPointF) -> bool:
+        return self._combined_path().contains(point)
 
 
 @dataclass

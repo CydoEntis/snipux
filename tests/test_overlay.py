@@ -49,6 +49,7 @@ from snipux.shapes import (
     Redact,
     Arrow,
     Blur,
+    Callout,
     Ellipse,
     Highlighter,
     Line,
@@ -1741,6 +1742,107 @@ class TestDrawingTools:
         assert overlay._bar.active_tool == "text"  # the "P" shortcut never fired
 
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+    def test_callout_drag_opens_the_label_editor_with_no_mark_yet(self):
+        # Unlike Rectangle/Arrow, a callout's drag alone does not commit --
+        # see Callout's own docstring for why body/tail/text have to land
+        # in the store together, as one undo step.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+
+        assert overlay.marks == ()
+        assert overlay._text_edit is not None
+        assert not overlay._text_edit.isHidden()
+
+    def test_callout_commits_once_typed_and_editing_finishes(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "Click here")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Callout)
+        assert mark.text == "Click here"
+        assert mark.start == QPointF(20, 20)  # the drag's own start -- the tail's tip
+        assert mark.end == QPointF(80, 60)
+        assert overlay._text_edit.isHidden()
+
+    def test_callout_with_nothing_typed_still_commits_body_and_tail(self):
+        # Unlike a bare Text label, an empty callout is still a real mark:
+        # the drag already placed a visible body and tail, so committing it
+        # is not conditioned on typing anything into it.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Callout)
+        assert mark.text == ""
+
+    def test_callout_abandon_discards_the_half_typed_word_not_the_mark(self):
+        # SNX-79's Escape-abandons-a-label rule, applied to Callout: the
+        # word being typed is discarded, but the body and tail the drag
+        # already placed are not -- see Callout's own docstring for why
+        # this differs from a bare Text label, which never commits at all
+        # without a click landing outside it first.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "a draft nobody wants")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert len(overlay.marks) == 1
+        assert overlay.marks[0].text == ""
+
+    def test_one_undo_removes_the_whole_callout(self):
+        # The whole reason a callout beats an arrow plus a separate label:
+        # body, tail and text are one mark, so one undo takes all three.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+        assert len(overlay.marks) == 1
+
+        overlay.undo()
+
+        assert overlay.marks == ()
 
     def test_press_on_a_handle_resizes_and_commits_no_mark(self):
         overlay = self._overlay(selection=QRect(0, 0, 100, 100))
@@ -5763,12 +5865,13 @@ class TestCaptureModePopoverOverlayIntegration:
 class TestFamilyMenuComposition:
     """A family's menu carries every sibling, in the family's own order."""
 
-    def test_the_shapes_menu_lists_the_handoffs_four_shapes_and_no_crop(self):
+    def test_the_shapes_menu_lists_the_handoffs_shapes_and_no_crop(self):
         # #78: Crop was a fifth row, and it drew a dashed box that cropped
-        # nothing.
+        # nothing. Callout joined afterwards, named as a shape sibling by
+        # docs/design/bars/README.md:78.
         menu = FamilyMenu("shapes")
 
-        assert list(menu._rows) == ["rect", "ellipse", "line", "arrow"]
+        assert list(menu._rows) == ["rect", "ellipse", "line", "arrow", "callout"]
         assert "crop" not in tokens.TOOLS
         assert menu.width() == tokens.BarMetric.MENU_W_SHAPES
 
@@ -5777,7 +5880,9 @@ class TestFamilyMenuComposition:
 
         keys = {tool: row._shortcut for tool, row in menu._rows.items()}
 
-        assert keys == {"rect": "R", "ellipse": "O", "line": "L", "arrow": "A"}
+        assert keys == {
+            "rect": "R", "ellipse": "O", "line": "L", "arrow": "A", "callout": "C",
+        }
 
     def test_the_redaction_menu_says_what_each_one_guarantees(self):
         menu = FamilyMenu("redact")
@@ -5885,6 +5990,19 @@ class TestFamilyMenuOverlayIntegration:
         assert not menu.isVisible()
         slot = overlay._bar._tool_buttons["shapes"]
         assert slot._icon_name == "arrow"
+        assert slot.is_active
+
+    def test_callout_is_a_shapes_sibling_picked_like_the_others(self):
+        overlay = self._overlay()
+        menu = self._notch(overlay, "shapes")
+        assert "callout" in menu._rows
+
+        QTest.mouseClick(menu._rows["callout"], Qt.MouseButton.LeftButton)
+
+        assert overlay._bar.active_tool == "callout"
+        assert not menu.isVisible()
+        slot = overlay._bar._tool_buttons["shapes"]
+        assert slot._icon_name == "callout"
         assert slot.is_active
 
     def test_the_slot_arms_whichever_sibling_was_used_last(self):
@@ -7604,9 +7722,9 @@ class TestChipsExcludedFromExport:
 class TestHintHUDComposition:
     """SNX-46: the standalone `HintHUD` widget's content -- the exact hint
     line from docs/design/overlay-redesign.md's "Top hint HUD" section, with
-    key names (`Esc`, `Enter`, the eight tool shortcuts) set apart from the
-    surrounding prose by family and colour, per "Key names are mono in pure
-    white."
+    key names (`Esc`, `Enter`, the tool shortcuts -- Callout's `C` among
+    them since it joined the shapes family) set apart from the surrounding
+    prose by family and colour, per "Key names are mono in pure white."
     """
 
     def test_reads_the_full_hint_line(self):
@@ -7616,7 +7734,7 @@ class TestHintHUDComposition:
 
         assert text == (
             "Esc discard ink · Enter copy & dismiss · "
-            "P H R O L A S T B E I pick a tool · drag any edge to re-frame · "
+            "P H R O L A C S T B E I pick a tool · drag any edge to re-frame · "
             "arrows nudge · Alt+arrows resize"
             " — the ink stays where you put it"
         )
@@ -7629,7 +7747,7 @@ class TestHintHUDComposition:
         assert key_texts == [
             "Esc",
             "Enter",
-            "P H R O L A S T B E I",
+            "P H R O L A C S T B E I",
             "arrows",
             "Alt+arrows",
         ]

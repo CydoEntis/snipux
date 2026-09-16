@@ -39,6 +39,11 @@ use it; the commit history has the detail.
   ten with Shift, for framing a region precisely without the mouse.
   Alt+arrow resizes it instead, from the bottom-right corner. Both are in
   the shortcuts overlay (`?`).
+- **Callout**, a new shape in the shapes menu: a box with a tail, pointing
+  at wherever the drag began. Click into it and type -- the text wraps to
+  fit the box rather than spilling out of it. Colour, fill, line style and
+  size come from the same style popover every other shape uses, and the
+  whole thing -- box, tail and words -- undoes and erases as one mark.
 
 ## 0.8.2 — 2026-09-15
 
