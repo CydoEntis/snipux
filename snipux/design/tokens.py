@@ -766,6 +766,7 @@ CHOOSER_RECORD_AFTER_NOTE = {
     "instant": "Copy to the clipboard. No file is kept.",
     "save": "Save to your recordings folder.",
     "open": "Save, then open it to trim and export.",
+    "gif": "Convert and save as a GIF. Silent, loops -- big above ~10 seconds.",
 }
 RECORD_AFTER_DEFAULT = "instant"
 
@@ -784,6 +785,9 @@ RECORDING_AFTER = [
     ("open", "Open in the player",
      "Saved as above, then opened in the trim editor -- play it back, cut "
      "the dead air off either end and export."),
+    ("gif", "Save as a GIF",
+     "Converts the finished recording and saves it as a GIF, under the "
+     "filename pattern below. Silent, loops -- big above ~10 seconds."),
 ]
 
 # Recordings get their own default name, not the stills one. Sharing
@@ -821,6 +825,7 @@ TOOL_HINTS = {
     "eraser":      "Click a mark to remove it",
     "ellipse":     "Drag to draw an oval",
     "line":        "Drag for a straight line",
+    "eyedropper":  "Click a pixel to copy its hex",
     "callout":     "Drag from the thing it points to, then type",
 }
 
@@ -1493,7 +1498,7 @@ class BarColor:
 # never sorted by use or reordered at runtime: muscle memory is the feature.
 # `shapes` and `redact` are families, and show whichever sibling was used
 # last.
-STILLS_SLOTS = ["pen", "highlighter", "shapes", "step", "text", "redact", "eraser"]
+STILLS_SLOTS = ["pen", "highlighter", "shapes", "step", "text", "redact", "eraser", "eyedropper"]
 
 # (tool, label, shortcut): the handoff's four, plus Callout
 # (docs/design/bars/README.md:78: "Rounded-rect, polygon, callout,
@@ -1539,7 +1544,7 @@ TOOL_NAMES = {
     "ellipse": "Ellipse", "line": "Straight line", "arrow": "Arrow",
     "step": "Numbered step", "text": "Text", "callout": "Callout",
     "blur": "Blur", "pixelate": "Pixelate", "blackout": "Blackout",
-    "eraser": "Eraser",
+    "eraser": "Eraser", "eyedropper": "Eyedropper",
 }
 
 # One letter, one tool. Every shape sibling keeps its own letter, so its menu
@@ -1547,7 +1552,7 @@ TOOL_NAMES = {
 SHORTCUTS = {
     "P": "pen", "H": "highlighter",
     **{key: tool for tool, _label, key in SHAPES if key},
-    "S": "step", "T": "text", "E": "eraser",
+    "S": "step", "T": "text", "E": "eraser", "I": "eyedropper",
 }
 
 # The redaction family has one key between three siblings, and it cycles.
@@ -1569,6 +1574,7 @@ STYLE_SECTIONS = {
     "pixelate":    ["strength"],
     "blackout":    [],
     "eraser":      [],
+    "eyedropper":  [],
 }
 
 # Nothing on the style dot can change what these draw, so it dims and does

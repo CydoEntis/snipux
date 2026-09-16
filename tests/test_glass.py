@@ -253,11 +253,11 @@ class TestTheOverlayIsTheHost:
     monitor or from the desktop's origin."""
 
     # 700 wide, not the 600 an earlier version of this fixture used: Copy
-    # text (#82) widened the stills bar, and 600 left the destination
-    # menu's left edge -- which overhangs the bar's own left end, centred
-    # as it is on the split action near it -- clamped just past this
-    # monitor's edge instead of on it, in `test_the_destination_menu_a_
-    # window_with_no_parent` below.
+    # text (#82) and the eyedropper (#84) each widened the stills bar, and
+    # 600 left the destination menu's left edge -- which overhangs the bar's
+    # own left end, centred as it is on the split action near it -- clamped
+    # just past this monitor's edge instead of on it, in
+    # `test_the_destination_menu_a_window_with_no_parent` below.
     LEFT = QRectF(-600, -200, 700, 400)
     PRIMARY = QRectF(100, 0, 800, 500)
 
@@ -401,7 +401,10 @@ class TestTheCropIsCached:
         surface.grab()
 
         clock[0] += 10
-        surface.move(250, 180)
+        # Still inside the frame at the new place: every slot added to the
+        # stills bar widens it, and so does a wider UI font, and a bar hanging
+        # past the frame's edge is cropped differently from the backdrop.
+        surface.move(min(250, 800 - surface.width()), 180)
         surface.grab()
 
         assert len(blurs) == 2

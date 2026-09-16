@@ -314,7 +314,13 @@ post-selection flow changed and none of it has run there:
   it -- this is the only platform where all three sources are selectable,
   and nothing has ever verified that choosing one changes what is
   recorded;
-- stopping leaves the bar up for six seconds with a summary and Discard.
+- stopping leaves the bar up for six seconds with a summary and Discard;
+- **pause/resume (#87) has never run against a real recorder.** Tests
+  cover both paths with faked frames and a faked `QMediaRecorder`, but
+  whether `QMediaRecorder.pause()` genuinely pauses on this box's Media
+  Foundation build, and whether a paused-then-resumed region recording
+  actually plays back with the paused time simply absent -- not a stutter,
+  not a frozen frame -- needs a real file looked at, not a test double.
 
 Cheap to eyeball while you are there: the frameless windows' new resize
 borders (`WinWindow` asks `startSystemResize` first, which Windows
