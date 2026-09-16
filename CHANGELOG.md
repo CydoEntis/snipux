@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 0.8.2 — 2026-09-15
+
 ### Fixed
 
 - **The toolbar follows the region onto the monitor it is on.** A region
