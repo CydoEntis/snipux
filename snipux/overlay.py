@@ -3928,6 +3928,24 @@ def watermark_content(config_dir: Path | None = None) -> "tuple[str | QImage | N
     return (text, "") if text else (None, tokens.WATERMARK_UNSET)
 
 
+@dataclass(frozen=True)
+class WatermarkTextStyle:
+    """How a text mark looks, as Settings has it: read with the content at
+    the start of every snip, so the preview and the export share one."""
+
+    color: QColor
+    font_family: str
+    backing: bool
+
+
+def watermark_text_style(config_dir: Path | None = None) -> WatermarkTextStyle:
+    return WatermarkTextStyle(
+        color=QColor(setup_desktop.load_watermark_color(config_dir)),
+        font_family=setup_desktop.load_watermark_font(config_dir),
+        backing=setup_desktop.load_watermark_backing(config_dir),
+    )
+
+
 def _watermark_menu_font(spec: tuple[float, int], mono: bool = False) -> QFont:
     families = design.font_families()
     font = QFont(families.mono if mono else families.ui)
@@ -5155,6 +5173,7 @@ class OverlayWindow(QWidget):
         self._bar.watermarkToggled.connect(self._toggle_watermark)
         self._bar.watermarkMenuRequested.connect(self._toggle_watermark_menu)
         self._watermark_content, unavailable = watermark_content()
+        self._watermark_style = watermark_text_style()
         self._bar.set_watermark_unavailable(unavailable)
         self._sync_watermark()
         # Hovering a tool names it -- see `ToolHintStrip`. Not Qt's tooltip,
@@ -5533,6 +5552,9 @@ class OverlayWindow(QWidget):
             opacity=watermark_session.opacity,
             text=content if isinstance(content, str) else "",
             image=content if isinstance(content, QImage) else None,
+            color=self._watermark_style.color,
+            font_family=self._watermark_style.font_family,
+            backing=self._watermark_style.backing,
         )
 
     def _paint_watermark(self, painter: QPainter) -> None:

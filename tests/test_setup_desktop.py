@@ -1770,6 +1770,59 @@ class TestRecordingDrawCursorPersistence:
         assert setup_desktop.load_recording_draw_cursor(tmp_path) is True
 
 
+class TestWatermarkTextStylePersistence:
+    """The text mark's colour, font and plate: what Settings keeps, and how
+    a hand-edited config reads back."""
+
+    @staticmethod
+    def _write_config(config_dir, text: str) -> None:
+        setup_desktop.config_path(config_dir).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(config_dir).write_text(text)
+
+    def test_with_nothing_kept_it_is_todays_mark(self, tmp_path):
+        assert setup_desktop.load_watermark_color(tmp_path) == tokens.WatermarkColor.MARK_TEXT
+        assert setup_desktop.load_watermark_font(tmp_path) == ""
+        assert setup_desktop.load_watermark_backing(tmp_path) is True
+
+    def test_each_round_trips(self, tmp_path):
+        assert setup_desktop.save_watermark_color("#FFCC00", tmp_path)
+        assert setup_desktop.save_watermark_font("  Georgia  ", tmp_path)
+        assert setup_desktop.save_watermark_backing(False, tmp_path)
+
+        assert setup_desktop.load_watermark_color(tmp_path) == "#ffcc00"
+        assert setup_desktop.load_watermark_font(tmp_path) == "Georgia"
+        assert setup_desktop.load_watermark_backing(tmp_path) is False
+
+    def test_a_colour_that_is_not_six_hex_digits_is_refused(self, tmp_path):
+        assert not setup_desktop.save_watermark_color("red", tmp_path)
+        assert not setup_desktop.save_watermark_color("#ffcc0080", tmp_path)
+
+        assert setup_desktop.load_watermark_color(tmp_path) == tokens.WatermarkColor.MARK_TEXT
+
+    @pytest.mark.parametrize(
+        "document",
+        [
+            '{"watermark_color": "yellow", "watermark_font": 7, "watermark_backing": "no"}',
+            '{"watermark_color": ["#ffcc00"], "watermark_font": null, "watermark_backing": 0}',
+            "not json at all",
+        ],
+    )
+    def test_a_hand_edited_value_reads_as_the_default(self, tmp_path, document):
+        self._write_config(tmp_path, document)
+
+        assert setup_desktop.load_watermark_color(tmp_path) == tokens.WatermarkColor.MARK_TEXT
+        assert setup_desktop.load_watermark_font(tmp_path) == ""
+        assert setup_desktop.load_watermark_backing(tmp_path) is True
+
+    def test_saving_one_keeps_the_others(self, tmp_path):
+        setup_desktop.save_watermark_text("acme", tmp_path)
+        setup_desktop.save_watermark_color("#ef4444", tmp_path)
+        setup_desktop.save_watermark_backing(False, tmp_path)
+
+        assert setup_desktop.load_watermark_text(tmp_path) == "acme"
+        assert setup_desktop.load_watermark_color(tmp_path) == "#ef4444"
+
+
 class TestWatermarkContentPersistence:
     """#69: what the stills bar's watermark stamps. Only what the mark is --
     whether it is on, its corner and its opacity last a session and are

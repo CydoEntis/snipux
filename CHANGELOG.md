@@ -9,6 +9,11 @@ use it; the commit history has the detail.
 
 ### Added
 
+- **Style your watermark.** Settings → Watermark now picks the text's
+  colour (a preset or any colour you like), its font, and whether it sits
+  on a dark box. Without the box the text gets a thin edge in the opposite
+  shade so it still reads on light and dark snips, and a preview shows it
+  on both before you save.
 - **Open an image you already have.** `snipux path/to/shot.png` opens it in
   the review window with the full toolbar, instead of re-snipping it off
   your own screen at whatever size it happens to be displayed. Dropping an

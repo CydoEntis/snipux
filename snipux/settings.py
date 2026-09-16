@@ -31,10 +31,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QImage, QImageReader, QKeyEvent, QKeySequence, QPixmap
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QImage,
+    QImageReader,
+    QKeyEvent,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
     QButtonGroup,
+    QColorDialog,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -53,6 +66,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import design, platform, player, setup_desktop
+from .shapes import Watermark
 from .design import tokens
 from .platform.windows import HotkeyEventFilter
 from .winchrome import (
@@ -489,6 +503,68 @@ class SpinRow(QWidget):
         self.spin.setValue(value)
         self.spin.setFixedHeight(tokens.WinMetric.CONTROL_H)
         row.addWidget(self.spin, 0, Qt.AlignmentFlag.AlignTop)
+
+
+class _ColorSwatch(QPushButton):
+    """One colour on the watermark page's row: a rounded square, ringed
+    while it is the picked one. Painted rather than styled, as the overlay's
+    ink swatches are, because a stylesheet cannot draw the ring outside the
+    colour with a gap between."""
+
+    def __init__(self, name: str, color: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.color = color
+        self.setCheckable(True)
+        self.setToolTip(name)
+        self.setAccessibleName(name)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        size = tokens.WatermarkMetric.SWATCH
+        self.setFixedSize(size, size)
+
+    def set_color(self, color: str) -> None:
+        self.color = color
+        self.setToolTip(color)
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt override
+        mark = tokens.WatermarkMetric
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        outer = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        inset = mark.SWATCH_RING + 2 if self.isChecked() else 1
+        inner = outer.adjusted(inset, inset, -inset, -inset)
+        if self.isChecked():
+            painter.setPen(QPen(QColor(tokens.BarColor.SWATCH_RING), mark.SWATCH_RING))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            half = mark.SWATCH_RING / 2
+            painter.drawRoundedRect(
+                outer.adjusted(half, half, -half, -half), mark.SWATCH_RADIUS, mark.SWATCH_RADIUS
+            )
+        border = design.bar_color("SWATCH_BORDER")
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(QColor(self.color))
+        radius = max(2.0, mark.SWATCH_RADIUS - inset + 1)
+        painter.drawRoundedRect(inner, radius, radius)
+        painter.end()
+
+
+class _FontCombo(QComboBox):
+    """A combo box styled like the Settings fields. Once a stylesheet
+    touches a combo box Qt stops drawing its arrow, so this paints the
+    app's own chevron where the drop-down sits."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(event)
+        size = tokens.WatermarkMetric.FONT_COMBO_CHEVRON
+        width = tokens.WatermarkMetric.FONT_COMBO_ARROW_W
+        pixmap = design.icon("chevron", tokens.Win.TEXT_MUTED).pixmap(size, size)
+        painter = QPainter(self)
+        painter.drawPixmap(
+            self.width() - width + (width - size) // 2 - 4,
+            (self.height() - size) // 2,
+            pixmap,
+        )
+        painter.end()
 
 
 def _field_style() -> str:
@@ -1505,6 +1581,7 @@ class SettingsWindow(WinWindow):
         self._watermark_text.setStyleSheet(_field_style())
         # `textEdited`, not `textChanged`: only typing is an edit.
         self._watermark_text.textEdited.connect(self._on_watermark_text_edited)
+        text_style = self._watermark_text_style_rows()
 
         self._watermark_thumb = QLabel()
         self._watermark_thumb.setFixedSize(mark.THUMB_W, mark.THUMB_H)
@@ -1560,6 +1637,7 @@ class SettingsWindow(WinWindow):
             SectionHeading("What the mark is"),
             self._watermark_cards["text"],
             self._watermark_text,
+            *text_style,
             None,
             self._watermark_cards["image"],
             image_widget,
@@ -1568,6 +1646,183 @@ class SettingsWindow(WinWindow):
             SectionHeading("Size"),
             size_note,
         )
+
+    def _watermark_text_style_rows(self) -> list[QWidget]:
+        """The text mark's colour, font and plate, and a preview of it on a
+        light and a dark ground -- a colour only means something against
+        what it will land on, and a watermark lands on both."""
+        win, metric = tokens.Win, tokens.WinMetric
+        mark = tokens.WatermarkMetric
+
+        def label(text: str) -> QLabel:
+            widget = QLabel(text)
+            widget.setFont(_ui_font(12.5, 500))
+            widget.setStyleSheet(f"color: {win.TEXT_BODY};")
+            widget.setFixedWidth(mark.STYLE_LABEL_W)
+            return widget
+
+        self._watermark_color = setup_desktop.load_watermark_color(self._config_dir)
+        self._watermark_swatch_group = QButtonGroup(self)
+        self._watermark_swatch_group.setExclusive(True)
+        self._watermark_swatches: list[_ColorSwatch] = []
+        colour_row = QHBoxLayout()
+        colour_row.setContentsMargins(0, 0, 0, 0)
+        colour_row.setSpacing(mark.SWATCH_GAP)
+        colour_row.addWidget(label("Colour"))
+        for name, value in tokens.WATERMARK_SWATCHES:
+            swatch = _ColorSwatch(name, value)
+            swatch.clicked.connect(lambda _c=False, v=value: self._pick_watermark_color(v))
+            self._watermark_swatch_group.addButton(swatch)
+            self._watermark_swatches.append(swatch)
+            colour_row.addWidget(swatch)
+        # A colour from the picker gets a swatch of its own, shown only
+        # while it is one the presets do not already hold.
+        self._watermark_custom_swatch = _ColorSwatch("Custom", self._watermark_color)
+        self._watermark_custom_swatch.clicked.connect(
+            lambda _c=False: self._pick_watermark_color(self._watermark_custom_swatch.color)
+        )
+        self._watermark_swatch_group.addButton(self._watermark_custom_swatch)
+        colour_row.addWidget(self._watermark_custom_swatch)
+        custom = SecondaryButton("Custom…")
+        custom.clicked.connect(lambda _checked=False: self._choose_watermark_color())
+        colour_row.addSpacing(mark.SWATCH_GAP)
+        colour_row.addWidget(custom)
+        colour_row.addStretch()
+        colour_widget = QWidget()
+        colour_widget.setLayout(colour_row)
+
+        self._watermark_font = _FontCombo()
+        self._watermark_font.setFont(_ui_font(12.5, 400))
+        self._watermark_font.setFixedHeight(metric.CONTROL_H)
+        self._watermark_font.setFixedWidth(mark.FONT_COMBO_W)
+        self._watermark_font.setMaxVisibleItems(16)
+        self._watermark_font.setStyleSheet(
+            f"QComboBox {{ background: {win.FIELD_BG}; border: 1px solid {win.FIELD_BORDER};"
+            f" border-radius: {metric.CONTROL_RADIUS}px; color: {win.TEXT_PRIMARY};"
+            " padding: 0 11px; }"
+            "QComboBox::drop-down { border: none; background: transparent;"
+            f" width: {mark.FONT_COMBO_ARROW_W}px; }}"
+            "QComboBox::down-arrow { image: none; }"
+            f"QComboBox QAbstractItemView {{ background: {win.FIELD_BG};"
+            f" color: {win.TEXT_PRIMARY}; selection-background-color: {win.ROW_HOVER}; }}"
+        )
+        self._watermark_font.addItem(tokens.WATERMARK_FONT_DEFAULT_LABEL, "")
+        stored_font = setup_desktop.load_watermark_font(self._config_dir)
+        families = sorted(
+            {f for f in QFontDatabase.families() if not QFontDatabase.isPrivateFamily(f)},
+            key=str.casefold,
+        )
+        # A family saved on a machine that no longer has it still shows, so
+        # opening Settings never quietly swaps it for something else.
+        if stored_font and stored_font not in families:
+            families.insert(0, stored_font)
+        for family in families:
+            self._watermark_font.addItem(family, family)
+        self._watermark_font.setCurrentIndex(max(0, self._watermark_font.findData(stored_font)))
+        self._watermark_font.currentIndexChanged.connect(
+            lambda _i: self._on_watermark_style_edited()
+        )
+        font_row = QHBoxLayout()
+        font_row.setContentsMargins(0, 0, 0, 0)
+        font_row.setSpacing(mark.SWATCH_GAP)
+        font_row.addWidget(label("Font"))
+        font_row.addWidget(self._watermark_font)
+        font_row.addStretch()
+        font_widget = QWidget()
+        font_widget.setLayout(font_row)
+
+        self._watermark_backing = SwitchRow(
+            "Dark box behind the text",
+            "Keeps light text readable on a light snip. Off, the text gets a "
+            "thin edge in the opposite shade instead.",
+            setup_desktop.load_watermark_backing(self._config_dir),
+        )
+        self._watermark_backing.switch.toggled.connect(
+            lambda _c: self._on_watermark_style_edited()
+        )
+
+        self._watermark_preview = QLabel()
+        self._watermark_preview.setFixedHeight(mark.PREVIEW_H)
+        self._watermark_preview.setMinimumWidth(2 * mark.THUMB_W)
+        self._watermark_preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._watermark_text.textChanged.connect(lambda _t: self._refresh_watermark_preview())
+
+        self._refresh_watermark_swatches()
+        return [colour_widget, font_widget, self._watermark_backing, self._watermark_preview]
+
+    def _watermark_text_mark(self) -> Watermark:
+        """The text mark as the page would save it, for the preview."""
+        return Watermark(
+            corner="tl",
+            opacity=100,
+            text=self._watermark_text.text() or self._watermark_text.placeholderText(),
+            color=QColor(self._watermark_color),
+            font_family=self._watermark_font.currentData() or "",
+            backing=self._watermark_backing.switch.isChecked(),
+        )
+
+    def _refresh_watermark_preview(self) -> None:
+        mark = tokens.WatermarkMetric
+        ratio = self.devicePixelRatioF()
+        width = max(self._watermark_preview.width(), 2 * mark.THUMB_W)
+        height = mark.PREVIEW_H
+        image = QImage(
+            round(width * ratio), round(height * ratio), QImage.Format.Format_ARGB32_Premultiplied
+        )
+        image.setDevicePixelRatio(ratio)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        half = width / 2
+        radius = tokens.WinMetric.CONTROL_RADIUS
+        watermark = self._watermark_text_mark()
+        for index, ground in enumerate(("PREVIEW_LIGHT", "PREVIEW_DARK")):
+            area = QRectF(index * half, 0, half, height)
+            painter.setBrush(design.watermark_color(ground))
+            painter.setPen(QPen(QColor(tokens.Win.FIELD_BORDER), 1))
+            painter.drawRoundedRect(area.adjusted(1, 1, -1, -1), radius, radius)
+            # Laid out as on a snip this size, at 1:1, then shifted so the
+            # mark sits in the middle of its ground rather than its corner.
+            placed = watermark.rect(area)
+            if placed is not None:
+                shift = area.center() - placed.center()
+                watermark.paint(painter, area.translated(shift))
+        painter.end()
+        self._watermark_preview.setPixmap(QPixmap.fromImage(image))
+
+    def _refresh_watermark_swatches(self) -> None:
+        presets = {value.lower() for _name, value in tokens.WATERMARK_SWATCHES}
+        is_custom = self._watermark_color.lower() not in presets
+        if is_custom:
+            self._watermark_custom_swatch.set_color(self._watermark_color)
+        self._watermark_custom_swatch.setVisible(is_custom)
+        for swatch in self._watermark_swatches:
+            swatch.setChecked(swatch.color.lower() == self._watermark_color.lower())
+        self._watermark_custom_swatch.setChecked(is_custom)
+        self._refresh_watermark_preview()
+
+    def _pick_watermark_color(self, color: str) -> None:
+        self._watermark_color = QColor(color).name()
+        self._refresh_watermark_swatches()
+        self._on_watermark_style_edited()
+
+    def _choose_watermark_color(self, color: QColor | str | None = None) -> None:
+        """Pick any colour. `color` is only ever passed by tests: the
+        colour dialog, like the file dialog, cannot be driven offscreen."""
+        if color is None:
+            color = QColorDialog.getColor(QColor(self._watermark_color), self, "Watermark colour")
+        color = QColor(color)
+        if not color.isValid():
+            return
+        self._pick_watermark_color(color.name())
+
+    def _on_watermark_style_edited(self) -> None:
+        # Styling the text is choosing to stamp text, as typing it is.
+        self._watermark_cards["text"].setChecked(True)
+        self._refresh_watermark_preview()
+        self._mark_dirty()
 
     def _refresh_watermark_image(self) -> None:
         """Show the image the page would save: the one chosen on this visit,
@@ -1861,6 +2116,11 @@ class SettingsWindow(WinWindow):
             self._config_dir,
         )
         setup_desktop.save_watermark_text(self._watermark_text.text(), self._config_dir)
+        setup_desktop.save_watermark_color(self._watermark_color, self._config_dir)
+        setup_desktop.save_watermark_font(self._watermark_font.currentData() or "", self._config_dir)
+        setup_desktop.save_watermark_backing(
+            self._watermark_backing.switch.isChecked(), self._config_dir
+        )
         if self._watermark_image_source is not None:
             setup_desktop.save_watermark_image(self._watermark_image_source, self._config_dir)
         elif self._watermark_image_removed:

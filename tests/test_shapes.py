@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 import pytest
 from PyQt6.QtCore import Qt, QPointF, QRect, QRectF, QSizeF
 from PyQt6.QtGui import (
+    QFontDatabase,
     QColor,
     QFontMetrics,
     QFontMetricsF,
@@ -2160,6 +2161,107 @@ class TestWatermark:
 
         with pytest.raises(ValueError):
             Watermark(corner="br", opacity=low - 1, text="acme")
+
+
+class TestWatermarkTextStyle:
+    """The text mark in the user's colour and font, with or without its
+    plate. Painted onto a flat ground, and read back loosely: type is
+    antialiased and its exact pixels are the rasteriser's."""
+
+    AREA = QRectF(0, 0, 400, 300)
+
+    def _paint(self, mark, ground=QColor(128, 128, 128)) -> QImage:
+        image = QImage(400, 300, QImage.Format.Format_ARGB32)
+        image.fill(ground)
+        painter = QPainter(image)
+        mark.paint(painter, self.AREA)
+        painter.end()
+        return image
+
+    @staticmethod
+    def _count(image: QImage, rect: QRectF, test) -> int:
+        box = rect.toAlignedRect()
+        return sum(
+            1
+            for x in range(box.left(), box.right() + 1)
+            for y in range(box.top(), box.bottom() + 1)
+            if test(image.pixelColor(x, y))
+        )
+
+    def test_the_text_is_in_the_chosen_colour(self):
+        mark = Watermark(corner="br", opacity=100, text="ACME", color=QColor(255, 0, 0))
+        image = self._paint(mark)
+
+        reds = self._count(
+            image, mark.rect(self.AREA),
+            lambda c: c.red() > 200 and c.green() < 60 and c.blue() < 60,
+        )
+
+        assert reds > 10
+
+    def test_by_default_it_is_the_plates_light_type(self):
+        mark = Watermark(corner="br", opacity=100, text="ACME")
+        image = self._paint(mark)
+
+        reds = self._count(
+            image, mark.rect(self.AREA),
+            lambda c: c.red() > 200 and c.green() < 60 and c.blue() < 60,
+        )
+        light = self._count(image, mark.rect(self.AREA), lambda c: c.lightnessF() > 0.85)
+
+        assert reds == 0
+        assert light > 10
+
+    def test_with_the_plate_off_the_ground_shows_round_the_type(self):
+        ground = QColor(128, 128, 128)
+        plated = Watermark(corner="br", opacity=100, text="ACME")
+        bare = replace(plated, backing=False)
+
+        with_plate = self._paint(plated, ground)
+        without = self._paint(bare, ground)
+        rect = bare.rect(self.AREA)
+        # Just inside the chip's corner: plate there, bare ground without it.
+        probe = (round(rect.left()) + 2, round(rect.top()) + 2)
+
+        assert with_plate.pixelColor(*probe) != ground
+        assert without.pixelColor(*probe) == ground
+
+    @pytest.mark.parametrize(
+        "ink,halo_is_dark",
+        [(QColor(255, 255, 255), True), (QColor(20, 20, 20), False)],
+    )
+    def test_with_the_plate_off_a_halo_of_the_opposite_shade_edges_it(self, ink, halo_is_dark):
+        ground = QColor(128, 128, 128)
+        mark = Watermark(corner="br", opacity=100, text="ACME", color=ink, backing=False)
+        image = self._paint(mark, ground)
+        rect = mark.rect(self.AREA)
+
+        if halo_is_dark:
+            edged = self._count(image, rect, lambda c: c.lightness() < ground.lightness() - 25)
+        else:
+            edged = self._count(image, rect, lambda c: c.lightness() > ground.lightness() + 25)
+
+        assert edged > 5
+
+    def test_the_font_is_measured_as_it_is_painted(self):
+        base = Watermark(corner="tl", opacity=100, text="Watermark Wm")
+        families = QFontDatabase.families()
+        if len(families) < 2:
+            pytest.skip("one installed font family: nothing to measure against")
+        widths = {}
+        for family in families[:40]:
+            styled = replace(base, font_family=family)
+            widths[family] = styled.rect(QRectF(0, 0, 2000, 1000)).width()
+        # Some installed family sets the same words to another width, so
+        # the family really reaches the layout rather than only the paint.
+        default = base.rect(QRectF(0, 0, 2000, 1000)).width()
+        assert any(abs(width - default) > 1 for width in widths.values())
+
+    def test_a_family_that_is_not_installed_still_lays_out(self):
+        mark = Watermark(corner="br", opacity=100, text="ACME", font_family="No Such Family 9")
+
+        assert mark.rect(self.AREA) is not None
+        self._paint(mark)
 
 
 class TestRenderSelectionWatermark:

@@ -1484,9 +1484,11 @@ _WATERMARK_CORNERS = frozenset(corner for corner, _name in design.tokens.WATERMA
 _watermark_family: str | None = None
 
 
-def _watermark_font(logical_px: float, scale: float) -> QFont:
+def _watermark_font(logical_px: float, scale: float, family: str = "") -> QFont:
     """The text mark's type at `logical_px`, drawn `scale` painter pixels to
-    a logical one.
+    a logical one, in `family` -- or the app's UI font when that is "".
+    Measuring and painting both come through here, so a family Qt has to
+    substitute for is substituted the same way for both.
 
     Whole logical pixels first, and only then scaled, as `Text._font` does:
     rounding once in each space keeps the export's type the screen's at the
@@ -1496,7 +1498,7 @@ def _watermark_font(logical_px: float, scale: float) -> QFont:
     if _watermark_family is None:
         _watermark_family = design.font_families().ui
     metric = design.tokens.WatermarkMetric
-    font = QFont(_watermark_family)
+    font = QFont(family or _watermark_family)
     font.setPixelSize(max(1, round(max(1, round(logical_px)) * scale)))
     font.setWeight(QFont.Weight(design.tokens.WatermarkFont.MARK_WEIGHT))
     font.setLetterSpacing(
@@ -1533,6 +1535,13 @@ class Watermark:
     opacity: int
     text: str = ""
     image: QImage | None = None
+    # The text mark's own look, from Settings. `color` None is the plate's
+    # light type; `font_family` "" is the app's UI font. Without `backing`
+    # there is no plate, and a thin halo in the opposite lightness keeps the
+    # type readable over whatever the corner holds.
+    color: QColor | None = None
+    font_family: str = ""
+    backing: bool = True
 
     def __post_init__(self) -> None:
         if self.corner not in _WATERMARK_CORNERS:
@@ -1570,22 +1579,51 @@ class Watermark:
             painter.drawImage(rect, self.image)
         else:
             metric = design.tokens.WatermarkMetric
-            radius = metric.TEXT_RADIUS * grow * scale
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(design.watermark_color("MARK_PLATE"))
-            painter.drawRoundedRect(rect, radius, radius)
-            pad_h = metric.TEXT_PAD[1] * grow * scale
-            painter.setFont(_watermark_font(metric.TEXT_PX * grow, scale))
-            painter.setPen(design.watermark_color("MARK_TEXT"))
-            # Not clipped to the chip: the text was measured at the logical
-            # size, and whole-pixel type at another scale can run a pixel
-            # wider than the chip scaled from it.
-            painter.drawText(
-                rect.adjusted(pad_h, 0, -pad_h, 0),
-                int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextDontClip),
-                text,
-            )
+            font = _watermark_font(metric.TEXT_PX * grow, scale, self.font_family)
+            ink = QColor(self.color) if self.color is not None else design.watermark_color("MARK_TEXT")
+            if self.backing:
+                radius = metric.TEXT_RADIUS * grow * scale
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(design.watermark_color("MARK_PLATE"))
+                painter.drawRoundedRect(rect, radius, radius)
+                pad_h = metric.TEXT_PAD[1] * grow * scale
+                painter.setFont(font)
+                painter.setPen(ink)
+                # Not clipped to the chip: the text was measured at the
+                # logical size, and whole-pixel type at another scale can
+                # run a pixel wider than the chip scaled from it.
+                painter.drawText(
+                    rect.adjusted(pad_h, 0, -pad_h, 0),
+                    int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextDontClip),
+                    text,
+                )
+            else:
+                self._paint_haloed_text(painter, rect, text, font, ink)
         painter.restore()
+
+    @staticmethod
+    def _paint_haloed_text(
+        painter: QPainter, rect: QRectF, text: str, font: QFont, ink: QColor
+    ) -> None:
+        """`text` centred in `rect` with no plate: a halo in the opposite
+        lightness under the fill, so light type still reads on a light
+        corner and dark type on a dark one. As a path, because a stroke
+        can only follow an outline, and the fill uses the same path so the
+        two cannot drift apart.
+        """
+        metrics = QFontMetricsF(font)
+        advance = metrics.horizontalAdvance(text)
+        baseline = rect.center().y() + (metrics.ascent() - metrics.descent()) / 2
+        path = QPainterPath()
+        path.addText(QPointF(rect.center().x() - advance / 2, baseline), font, text)
+        halo = design.watermark_color(
+            "MARK_HALO_DARK" if ink.lightnessF() > 0.5 else "MARK_HALO_LIGHT"
+        )
+        width = max(1.0, font.pixelSize() * design.tokens.WatermarkMetric.HALO_SHARE)
+        pen = QPen(halo, width)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.strokePath(path, pen)
+        painter.fillPath(path, ink)
 
     def _layout(
         self, area: QRectF, scale: float, pixel_ratio: float | None
@@ -1630,7 +1668,7 @@ class Watermark:
             height = min(height, room_h)
             pad_v, pad_h = metric.TEXT_PAD
             grow = height / (metric.TEXT_PX + 2 * pad_v)
-            metrics = QFontMetricsF(_watermark_font(metric.TEXT_PX * grow, 1.0))
+            metrics = QFontMetricsF(_watermark_font(metric.TEXT_PX * grow, 1.0, self.font_family))
             pad = pad_h * grow
             text = metrics.elidedText(self.text, Qt.TextElideMode.ElideRight, room_w - 2 * pad)
             if not text:

@@ -1711,12 +1711,25 @@ class WatermarkMetric:
     TEXT_PAD         = (5, 9)      # v, h
     TEXT_RADIUS      = 6
     TEXT_TRACKING    = 0.04        # em
+    # With the plate off: the halo's width as a share of the type's pixel
+    # size -- enough to part the letters from a busy corner, thin enough
+    # to stay an edge rather than become an outline font.
+    HALO_SHARE       = 0.11
 
     # The Settings page.
     THUMB_W          = 132
     THUMB_H          = 72
     THUMB_PAD        = 8
     TEXT_MAX_CHARS   = 120
+    SWATCH           = 26          # between the overlay's 22 and Settings' 30
+    SWATCH_GAP       = 6
+    SWATCH_RADIUS    = 7
+    SWATCH_RING      = 2           # the picked swatch's ring
+    FONT_COMBO_W     = 220
+    FONT_COMBO_ARROW_W = 22
+    FONT_COMBO_CHEVRON = 14
+    PREVIEW_H        = 64          # the mark on light and on dark, side by side
+    STYLE_LABEL_W    = 56          # "Colour" and "Font", so their controls line up
 
 
 class WatermarkFont:
@@ -1765,14 +1778,21 @@ class WatermarkColor:
     CORNER_DOT       = "#8f9689"
     CORNER_DOT_ON    = "#c3e399"
 
-    # The text mark: the spec's placeholder chip, light type on a dark
-    # plate. Not a colour of the user's: a watermark lands on whatever the
-    # capture holds in that corner, and the plate brings its own dark ground
-    # with it, where a colour picked against one capture can vanish into the
-    # next one's background.
+    # The text mark: by default the spec's placeholder chip, light type on
+    # a dark plate. The plate stays the default because a watermark lands
+    # on whatever the capture holds in that corner; the colour and the
+    # plate are the user's to change since divergences.md 29, and with the
+    # plate off a halo of the opposite lightness does its job.
     MARK_TEXT        = "#f1f3e8"
     MARK_PLATE       = "#0c0d0a"   # at 42%
     MARK_PLATE_ALPHA = 0.42
+    MARK_HALO_DARK   = "#000000"   # at 45%, under light type
+    MARK_HALO_DARK_ALPHA = 0.45
+    MARK_HALO_LIGHT  = "#ffffff"   # at 60%, under dark type
+    MARK_HALO_LIGHT_ALPHA = 0.60
+    # The Settings page's preview grounds, one light and one dark.
+    PREVIEW_LIGHT    = "#e9ebe4"
+    PREVIEW_DARK     = "#16181c"
 
 
 WATERMARK_TOOLTIP_ON = "Watermark is on — applied on export"
@@ -1789,8 +1809,21 @@ WATERMARK_IMAGE_UNREADABLE = "Watermark image can't be read — choose it again 
 # What a watermark can be, as the Settings page offers it: (kind, label, note).
 WATERMARK_KINDS = [
     ("text", "Text",
-     "A line of text, in light type on a dark plate of its own."),
+     "A line of text, in the colour and font below."),
     ("image", "Image",
      "A logo or any picture, drawn as it is. A PNG keeps its transparency."),
 ]
 WATERMARK_KIND_DEFAULT = "text"
+
+# The text mark's colour presets on the Settings page: (name, #rrggbb). The
+# first is the plate's own light type, the default; the rest are the ink
+# tray's, so a mark can match what is drawn on the snip.
+WATERMARK_SWATCHES = [
+    ("Default", WatermarkColor.MARK_TEXT),
+    ("White",   "#ffffff"),
+    ("Ink",     "#12141a"),
+    ("Acid",    "#e3ff4f"),
+    ("Red",     "#ef4444"),
+    ("Sky",     "#38bdf8"),
+]
+WATERMARK_FONT_DEFAULT_LABEL = "Default (app font)"
