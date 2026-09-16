@@ -711,9 +711,16 @@ class FakeTransport(Transport):
         if primary_on_settings_request is not None:
             primary_on_settings_request()
 
-    def listen(self, on_request, on_settings_request) -> None:
+    def send_open_request(self, path: Path) -> None:
+        self._state["forwarded_open_paths"].append(path)
+        primary_on_open_request = self._state["primary_on_open_request"]
+        if primary_on_open_request is not None:
+            primary_on_open_request(path)
+
+    def listen(self, on_request, on_settings_request, on_open_request) -> None:
         self._state["primary_on_request"] = on_request
         self._state["primary_on_settings_request"] = on_settings_request
+        self._state["primary_on_open_request"] = on_open_request
 
 
 def make_transport_state() -> dict:
@@ -721,8 +728,10 @@ def make_transport_state() -> dict:
         "claimed": False,
         "forwarded_requests": 0,
         "forwarded_settings_requests": 0,
+        "forwarded_open_paths": [],
         "primary_on_request": None,
         "primary_on_settings_request": None,
+        "primary_on_open_request": None,
     }
 
 
@@ -987,6 +996,98 @@ class TestSettingsFlag:
     def test_mutually_exclusive_with_list_backends(self):
         with pytest.raises(SystemExit) as excinfo:
             main(["--settings", "--list-backends"])
+
+        assert excinfo.value.code != 0
+
+
+class TestOpenPathArgument:
+    """`snipux PATH` follows the same forward-or-become-resident shape
+    `TestSnipFlag`/`TestSettingsFlag` above already cover -- opening an
+    image you already have must not start a second, disconnected copy any
+    more than a keybound snip or a Settings launch would.
+    """
+
+    def test_forwards_to_an_already_running_instance(self, tmp_path):
+        state = make_transport_state()
+        state["claimed"] = True  # simulates a resident instance already running
+        target = tmp_path / "shot.png"
+
+        exit_code = main([str(target)], transport=FakeTransport(state))
+
+        assert exit_code == 0
+        assert state["forwarded_open_paths"] == [target]
+        # Neither of the other requests: opening a file is its own thing.
+        assert state["forwarded_requests"] == 0
+        assert state["forwarded_settings_requests"] == 0
+
+    def test_a_relative_path_arrives_absolute(self, monkeypatch, tmp_path):
+        # The resident (or the process that becomes it) does not share this
+        # one's working directory, so a relative PATH means nothing to it
+        # unless it is made absolute here, before it travels.
+        monkeypatch.chdir(tmp_path)
+        state = make_transport_state()
+        state["claimed"] = True
+
+        exit_code = main(["shot.png"], transport=FakeTransport(state))
+
+        assert exit_code == 0
+        assert state["forwarded_open_paths"] == [tmp_path / "shot.png"]
+
+    def test_starts_a_resident_instance_and_opens_the_review_window_when_nothing_is_running(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        state = make_transport_state()  # fresh: nothing resident yet
+        target = tmp_path / "shot.png"
+        QImage(64, 48, QImage.Format.Format_RGB32).save(str(target), "PNG")
+
+        try:
+            exit_code = main(
+                [str(target)], registry=registry, transport=FakeTransport(state)
+            )
+
+            assert exit_code == 0
+            assert state["forwarded_open_paths"] == []
+            assert len(created) == 1
+            # Stayed resident, same as --snip/--settings's own equivalent
+            # test -- the *next* PATH (or --snip, or --settings) is
+            # forwarded to it rather than this whole dance repeating.
+            assert state["primary_on_open_request"] is not None
+            assert len(created[0]._reviews) == 1
+            assert created[0]._reviews[0].title_label.text() == "shot.png"
+            assert created[0]._reviews[0].title_detail.text() == "64 × 48"
+            # No overlay: opening a file must not also start a capture.
+            assert created[0]._overlay is None
+        finally:
+            if created:
+                for review in list(created[0]._reviews):
+                    review.close()
+                created[0]._tray_icon.hide()
+
+    def test_mutually_exclusive_with_snip(self, tmp_path):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--snip", str(tmp_path / "shot.png")])
+
+        assert excinfo.value.code != 0
+
+    def test_mutually_exclusive_with_settings(self, tmp_path):
+        with pytest.raises(SystemExit) as excinfo:
+            main([str(tmp_path / "shot.png"), "--settings"])
+
+        assert excinfo.value.code != 0
+
+    def test_mutually_exclusive_with_list_backends(self, tmp_path):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--list-backends", str(tmp_path / "shot.png")])
 
         assert excinfo.value.code != 0
 
@@ -1297,7 +1398,11 @@ class TestHandoff:
         server = app.QLocalSocketTransport(name)
         assert server.try_claim()
         heard = []
-        server.listen(lambda: heard.append("snip"), lambda: heard.append("settings"))
+        server.listen(
+            lambda: heard.append("snip"),
+            lambda: heard.append("settings"),
+            lambda path: heard.append(("open", path)),
+        )
         return name, heard
 
     @staticmethod
@@ -1315,6 +1420,46 @@ class TestHandoff:
         self._settle()
 
         assert heard == [expected]
+
+    @skip_on_windows(_NO_SOCKET_FILE)
+    def test_a_path_reaches_a_running_resident(self, tmp_path):
+        name, heard = self._resident(tmp_path)
+        target = tmp_path / "shot.png"
+
+        assert handoff.forward([str(target)], server_name=name) is True
+        self._settle()
+
+        assert heard == [("open", target)]
+
+    @skip_on_windows(_NO_SOCKET_FILE)
+    def test_a_relative_path_arrives_absolute(self, tmp_path, monkeypatch):
+        name, heard = self._resident(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        assert handoff.forward(["shot.png"], server_name=name) is True
+        self._settle()
+
+        assert heard == [("open", tmp_path / "shot.png")]
+
+    def test_a_windows_style_path_survives_the_wire_intact(self, tmp_path):
+        # handoff.forward()'s own os.path.abspath() is POSIX-flavoured on
+        # this runner (it would prepend a Linux cwd to a "C:\..." string,
+        # which is not what proves anything about the wire format) -- what
+        # this is really about is QLocalSocketTransport's own half of the
+        # protocol: a path carried as os.fsencode/os.fsdecode bytes, not
+        # text, arrives unchanged whatever OS's shape it has.
+        name = f"snipux-handoff-windows-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        heard = []
+        server.listen(lambda: None, lambda: None, lambda path: heard.append(path))
+        client = app.QLocalSocketTransport(name)
+        windows_path = Path(r"C:\Users\Cody\My Pictures\shot from a friend.png")
+
+        client.send_open_request(windows_path)
+        self._settle()
+
+        assert heard == [windows_path]
 
     @skip_on_windows(_NO_SOCKET_FILE)
     def test_forwarding_loads_neither_qt_nor_the_app(self, tmp_path):
@@ -1550,7 +1695,7 @@ class TestTransportSingleInstance:
         second = FakeTransport(state)
         first.try_claim()
         received = []
-        first.listen(lambda: received.append(True), lambda: None)
+        first.listen(lambda: received.append(True), lambda: None, lambda path: None)
 
         second.try_claim()
         second.send_snip_request()
@@ -1563,12 +1708,25 @@ class TestTransportSingleInstance:
         second = FakeTransport(state)
         first.try_claim()
         received = []
-        first.listen(lambda: None, lambda: received.append(True))
+        first.listen(lambda: None, lambda: received.append(True), lambda path: None)
 
         second.try_claim()
         second.send_settings_request()
 
         assert received == [True]
+
+    def test_forwarded_open_request_reaches_the_primarys_listener(self):
+        state = make_transport_state()
+        first = FakeTransport(state)
+        second = FakeTransport(state)
+        first.try_claim()
+        received = []
+        first.listen(lambda: None, lambda: None, lambda path: received.append(path))
+
+        second.try_claim()
+        second.send_open_request(Path("/tmp/shot.png"))
+
+        assert received == [Path("/tmp/shot.png")]
 
 
 @pytest.fixture
@@ -4334,6 +4492,119 @@ class TestReviewWindowIntegration:
         assert controller._reviews == []
 
 
+class TestOpenImagePath:
+    """`AppController.open_image_path` -- what `snipux PATH` and a
+    socket-forwarded PATH both end up calling once this instance is (or
+    becomes) the resident one. `TestOpenPathArgument` covers the CLI shape
+    that reaches it.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+
+    @staticmethod
+    def _write_png(path: Path, width: int, height: int) -> None:
+        image = QImage(width, height, QImage.Format.Format_RGB32)
+        image.fill(FILL_COLOR)
+        assert image.save(str(path), "PNG")
+
+    def test_opens_a_review_window_at_the_images_own_dimensions(
+        self, make_controller, tmp_path
+    ):
+        controller = self._controller(make_controller)
+        target = tmp_path / "photo.png"
+        self._write_png(target, 300, 150)
+
+        controller.open_image_path(target)
+
+        assert len(controller._reviews) == 1
+        assert controller._reviews[0].title_detail.text() == "300 × 150"
+
+    def test_titles_the_window_with_the_filename(self, make_controller, tmp_path):
+        controller = self._controller(make_controller)
+        target = tmp_path / "photo from a friend.png"
+        self._write_png(target, 20, 20)
+
+        controller.open_image_path(target)
+
+        assert controller._reviews[0].title_label.text() == "photo from a friend.png"
+
+    def test_several_paths_leave_several_windows_open(self, make_controller, tmp_path):
+        controller = self._controller(make_controller)
+        first = tmp_path / "first.png"
+        second = tmp_path / "second.png"
+        self._write_png(first, 10, 10)
+        self._write_png(second, 10, 10)
+
+        controller.open_image_path(first)
+        controller.open_image_path(second)
+
+        assert len(controller._reviews) == 2
+
+    def test_a_non_image_file_is_rejected_with_its_message_and_opens_nothing(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Same "force the tray branch" reasoning as the failed-capture test
+        # above this one's own equivalent for --snip: the no-tray fallback
+        # for this same failure path is covered separately below.
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        calls = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: calls.append(message),
+        )
+        controller = self._controller(make_controller)
+        target = tmp_path / "notes.txt"
+        target.write_text("this is not an image")
+
+        controller.open_image_path(target)
+
+        assert controller._reviews == []
+        assert len(calls) == 1
+        assert "notes.txt" in calls[0]
+
+    def test_a_missing_file_is_rejected_with_its_message_and_opens_nothing(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        calls = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: calls.append(message),
+        )
+        controller = self._controller(make_controller)
+        target = tmp_path / "does-not-exist.png"
+
+        controller.open_image_path(target)
+
+        assert controller._reviews == []
+        assert len(calls) == 1
+        assert "does-not-exist.png" in calls[0]
+
+    def test_a_rejected_file_is_reported_on_stdout_with_no_tray(
+        self, make_controller, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+        )
+        controller = self._controller(make_controller)
+        target = tmp_path / "does-not-exist.png"
+
+        controller.open_image_path(target)
+
+        assert controller._reviews == []
+        assert "does-not-exist.png" in capsys.readouterr().out
+
+
 class TestChooserKindIntegration:
     """SNX-120: the stills/record switch has to remember which side was
     last used *across snips*, not just across a `reopen()` on one live
@@ -4421,7 +4692,7 @@ class TestSnipRequestProtocol:
         server = app.QLocalSocketTransport(name)
         assert server.try_claim()
         fired = []
-        server.listen(lambda: fired.append(True), lambda: None)
+        server.listen(lambda: fired.append(True), lambda: None, lambda path: None)
 
         probe = app.QLocalSocketTransport(name)
         assert probe.try_claim() is False  # the probe connects, then gives up
@@ -4447,7 +4718,7 @@ class TestSnipRequestProtocol:
         server = app.QLocalSocketTransport(name)
         assert server.try_claim()
         fired = []
-        server.listen(lambda: fired.append(True), lambda: None)
+        server.listen(lambda: fired.append(True), lambda: None, lambda path: None)
 
         client = app.QLocalSocketTransport(name)
         client.send_snip_request()
@@ -4476,7 +4747,9 @@ class TestSnipRequestProtocol:
         assert server.try_claim()
         snip_fired, settings_fired = [], []
         server.listen(
-            lambda: snip_fired.append(True), lambda: settings_fired.append(True)
+            lambda: snip_fired.append(True),
+            lambda: settings_fired.append(True),
+            lambda path: None,
         )
 
         client = app.QLocalSocketTransport(name)
@@ -4489,6 +4762,36 @@ class TestSnipRequestProtocol:
 
         assert settings_fired == [True]
         assert snip_fired == []
+
+    @skip_on_windows(
+        "Same nested-wait timing gap test_a_real_request_is_delivered "
+        "documents for the snip byte -- an open request goes through the "
+        "identical _accept() path, on the identical Windows named-pipe "
+        "backend."
+    )
+    def test_an_open_request_is_delivered_and_never_fires_a_snip_or_settings(self, tmp_path):
+        name = f"snipux-test-open-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        snip_fired, settings_fired, opened = [], [], []
+        server.listen(
+            lambda: snip_fired.append(True),
+            lambda: settings_fired.append(True),
+            lambda path: opened.append(path),
+        )
+
+        client = app.QLocalSocketTransport(name)
+        target = tmp_path / "shot.png"
+        client.send_open_request(target)
+        for _ in range(20):
+            QApplication.processEvents()
+            QTest.qWait(20)
+            if opened:
+                break
+
+        assert opened == [target]
+        assert snip_fired == []
+        assert settings_fired == []
 
 
 class TestASecondRequestSurfacesTheOverlay:

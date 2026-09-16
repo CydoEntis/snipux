@@ -7,6 +7,13 @@ use it; the commit history has the detail.
 
 ### Added
 
+- **Open an image you already have.** `snipux path/to/shot.png` opens it in
+  the review window with the full toolbar, instead of re-snipping it off
+  your own screen at whatever size it happens to be displayed. Dropping an
+  image file onto an open review window opens it there too, after
+  confirming if the window has unsaved edits. Save writes back to the file
+  it came from, in its own format, where Qt can write that format; where it
+  cannot, Save opens Save As instead.
 - **Copy text**, on the floating bar after a selection (Windows only for
   now). Reads the words out of the selection and puts them on the
   clipboard as plain text instead of a picture -- for text you cannot

@@ -13,12 +13,12 @@ import os
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtCore import QEvent, QMimeData, QPointF, Qt, QUrl
 from PyQt6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from snipux import shapes
+from snipux import setup_desktop, shapes
 from snipux.design import tokens
 from snipux.marks import session_styles
 from snipux.overlay import FloatingBar
@@ -445,6 +445,201 @@ class TestExport:
         reloaded = QImage(str(target))
         colours = {reloaded.pixelColor(x, 20).name() for x in range(20, 180)}
         assert "#ff0000" in colours, "the rectangle should be in the exported pixels"
+
+
+class TestSave:
+    """`save()` writes back to the file this snip already came from, in its
+    own format -- unlike `save_as()`, which always writes PNG somewhere the
+    user picks.
+    """
+
+    def test_writes_back_to_the_original_path_in_its_own_format(self, tmp_path):
+        target = tmp_path / "photo.bmp"
+        make_image(40, 30).save(str(target), "BMP")
+        window = ReviewWindow(QImage(str(target)), saved_path=target)
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
+
+        result = window.save()
+
+        assert result == target
+        reloaded = QImage(str(target))
+        assert (reloaded.width(), reloaded.height()) == (40, 30)
+        assert "Saved" in window._status.text()
+
+    def test_with_nothing_saved_yet_falls_through_to_save_as(self):
+        window = ReviewWindow(make_image())
+        calls = []
+        window.save_as = lambda *a, **k: calls.append(True) or Path("/chosen.png")
+
+        result = window.save()
+
+        assert calls == [True]
+        assert result == Path("/chosen.png")
+
+    def test_on_a_format_qt_cannot_write_opens_save_as(self, tmp_path):
+        # Per QImageWriter.supportedImageFormats(): this PyQt6 reads GIF
+        # but does not write it.
+        target = tmp_path / "photo.gif"
+        target.write_bytes(b"GIF89a")
+        window = ReviewWindow(make_image(), saved_path=target)
+        calls = []
+        window.save_as = lambda *a, **k: calls.append(True) or Path("/chosen.png")
+
+        result = window.save()
+
+        assert calls == [True]
+        assert result == Path("/chosen.png")
+
+    def test_save_as_suggests_the_snips_folder_for_a_non_png_original(
+        self, tmp_path, monkeypatch
+    ):
+        # save_as() always writes PNG -- suggesting the original GIF's own
+        # path (where it just failed to write) would be a location the
+        # dialog's "PNG image" filter can't actually save to.
+        monkeypatch.setattr(setup_desktop, "load_save_folder", lambda: tmp_path)
+        window = ReviewWindow(make_image(), saved_path=Path("/elsewhere/friend.gif"))
+
+        assert window._suggested_path() == tmp_path / "snip.png"
+
+    def test_save_as_suggests_the_original_path_for_a_png(self, tmp_path):
+        target = tmp_path / "shot.png"
+        window = ReviewWindow(make_image(), saved_path=target)
+
+        assert window._suggested_path() == target
+
+
+class _FakeDropEvent:
+    """Stands in for a `QDropEvent`/`QDragEnterEvent`: `dragEnterEvent`/
+    `dropEvent` only ever call `.mimeData()` and `.acceptProposedAction()`
+    on it, and PyQt6's own event constructors are fiddlier to build by hand
+    than this window's own logic is worth testing through.
+    """
+
+    def __init__(self, mime_data: QMimeData):
+        self._mime_data = mime_data
+        self.accepted = False
+
+    def mimeData(self) -> QMimeData:
+        return self._mime_data
+
+    def acceptProposedAction(self) -> None:
+        self.accepted = True
+
+
+def _file_drop(path: Path) -> _FakeDropEvent:
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+    return _FakeDropEvent(mime)
+
+
+class TestOpenPath:
+    """`open_path` -- what a file dropped onto the review window does: load
+    it in place of what the window currently shows, rather than opening a
+    second window.
+    """
+
+    def test_replaces_the_image_and_retitles_the_window(self, tmp_path):
+        window = ReviewWindow(make_image(100, 100))
+        target = tmp_path / "dropped.png"
+        make_image(50, 40).save(str(target), "PNG")
+
+        window.open_path(target)
+
+        assert window.title_label.text() == "dropped.png"
+        assert window.title_detail.text() == "50 × 40"
+        assert window._canvas._image.width() == 50
+
+    def test_a_dropped_file_opens_it(self, tmp_path):
+        window = ReviewWindow(make_image(100, 100))
+        target = tmp_path / "dropped.png"
+        make_image(30, 20).save(str(target), "PNG")
+
+        window.dropEvent(_file_drop(target))
+
+        assert window.title_label.text() == "dropped.png"
+        assert window.title_detail.text() == "30 × 20"
+
+    def test_drag_enter_accepts_a_local_file(self, tmp_path):
+        window = ReviewWindow(make_image())
+        event = _file_drop(tmp_path / "whatever.png")
+
+        window.dragEnterEvent(event)
+
+        assert event.accepted
+
+    def test_a_non_image_file_is_rejected_with_its_message(self, tmp_path, monkeypatch):
+        window = ReviewWindow(make_image(100, 100))
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox, "warning", lambda parent, title, text: warnings.append(text)
+        )
+        target = tmp_path / "notes.txt"
+        target.write_text("this is not an image")
+
+        window.open_path(target)
+
+        assert len(warnings) == 1
+        assert "notes.txt" in warnings[0]
+        # Nothing replaced -- still the original image, not an empty window.
+        assert window._canvas._image.width() == 100
+
+    def test_unsaved_ink_asks_before_it_is_discarded(self, tmp_path, monkeypatch):
+        window = ReviewWindow(make_image(100, 100))
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
+        asked = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **k: asked.append(True) or QMessageBox.StandardButton.Cancel,
+        )
+        target = tmp_path / "dropped.png"
+        make_image(10, 10).save(str(target), "PNG")
+
+        window.open_path(target)
+
+        assert asked == [True]
+        # Cancelled: the original snip and its ink are untouched.
+        assert window.title_label.text() == "Unsaved snip"
+        assert len(window._store) == 1
+
+    def test_confirming_discards_the_old_ink_and_loads_the_new_image(self, tmp_path, monkeypatch):
+        window = ReviewWindow(make_image(100, 100))
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Discard
+        )
+        target = tmp_path / "dropped.png"
+        make_image(10, 10).save(str(target), "PNG")
+
+        window.open_path(target)
+
+        assert window.title_label.text() == "dropped.png"
+        assert len(window._store) == 0
+
+    def test_undo_redo_and_clear_operate_on_the_new_document(self, tmp_path):
+        # The bar's Undo/Redo/Clear are connected straight to the old
+        # MarkStore's bound methods in __init__ -- open_path() must rewire
+        # them to the fresh store it creates, or they would keep acting on
+        # a document this window no longer shows.
+        window = ReviewWindow(make_image(100, 100))
+        target = tmp_path / "dropped.png"
+        make_image(10, 10).save(str(target), "PNG")
+
+        window.open_path(target)
+        window._store.add(
+            shapes.Pen(colour=QColor("#000"), stroke_width=2, points=[QPointF(2, 2)])
+        )
+        assert len(window._store) == 1
+
+        window._bar.undoRequested.emit()
+
+        assert len(window._store) == 0
 
 
 class TestEveryToolSurvivesAPaint:
