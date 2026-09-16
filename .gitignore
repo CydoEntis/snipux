@@ -32,7 +32,7 @@ selftest-out/
 *.local.*
 dist-new/
 build-new/
-.mule/tasks/
-.mule/trees/
-.mule/runs/
-.mule/report.md
+.tugboat/tasks/
+.tugboat/trees/
+.tugboat/runs/
+.tugboat/report.md
