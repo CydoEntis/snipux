@@ -1179,6 +1179,16 @@ class AppController:
         self._starting_recording = False
         self._pending_start_request: str | None = None
         self._recording_started_at: float | None = None
+        # Whether the active recording is currently paused, the wall-clock
+        # moment the current pause began (None while not paused), and how
+        # much wall-clock time earlier pauses in this same recording have
+        # already spent -- `_elapsed_text()` subtracts both so the readout,
+        # and the finished summary built from it, report recorded length
+        # rather than wall clock, across as many pause/resume cycles as the
+        # user makes.
+        self._recording_paused = False
+        self._recording_paused_at: float | None = None
+        self._recording_paused_total = 0.0
         # No QObject parent -- same reasoning as `_recording_delay_timer`
         # above: this attribute's own strong reference is what keeps it
         # alive.
@@ -1938,6 +1948,7 @@ class AppController:
         bar.audioClicked.connect(self._open_audio_menu)
         bar.cancelClicked.connect(self._cancel_armed_recording)
         bar.stopClicked.connect(self._stop_recording)
+        bar.pauseClicked.connect(self._on_pause_clicked)
         bar.discardClicked.connect(self._on_discard_clicked)
 
         self._recording_hud = bar
@@ -1963,17 +1974,39 @@ class AppController:
         platform.current.exclude_from_capture(bar)
 
     def _elapsed_text(self) -> str:
-        """The running time as the clock shows it, or "0:00" if nothing is
+        """The recorded time as the clock shows it, or "0:00" if nothing is
         running. One formatting rule, so the summary cannot disagree with
         the clock the user was just watching.
+
+        Wall clock minus every paused span -- `_recording_paused_total`'s
+        earlier ones, plus the one still running if a pause is live right
+        now -- so pausing and resuming needs no separate "freeze the timer"
+        mechanism: each second a pause continues, both terms grow by the
+        same second and the reading does not move, which is exactly "stops
+        while paused and resumes where it left off".
         """
         if self._recording_started_at is None:
             return "0:00"
-        elapsed = int(time.monotonic() - self._recording_started_at)
-        minutes, seconds = divmod(elapsed, 60)
+        now = time.monotonic()
+        paused = self._recording_paused_total
+        if self._recording_paused_at is not None:
+            paused += now - self._recording_paused_at
+        elapsed = int(now - self._recording_started_at - paused)
+        minutes, seconds = divmod(max(0, elapsed), 60)
         # Zero-padded, as the spec's clock is: a mono clock that gains a
         # digit at 10:00 shifts everything right of it, and the whole
         # argument for putting the clock left of Stop was that it does not.
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _pause_elapsed_text(self) -> str:
+        """How long the *current* pause has run, for the Resume control's
+        own growing "Resume · 0:12" -- distinct from `_elapsed_text()`,
+        which is frozen for exactly as long as this one is counting up.
+        """
+        if self._recording_paused_at is None:
+            return "0:00"
+        elapsed = int(time.monotonic() - self._recording_paused_at)
+        minutes, seconds = divmod(max(0, elapsed), 60)
         return f"{minutes:02d}:{seconds:02d}"
 
     def _show_finished_bar(
@@ -2424,6 +2457,11 @@ class AppController:
                 # who starts performing on it loses the opening half second.
                 # The word says which of the two is true.
                 self._recording_hud.set_live(_STARTING_LABEL, size="")
+                # No backend is running yet to ask `can_pause` of --
+                # `_start_recording_ui` restores the real answer the moment
+                # one is. Nothing but greyed for this half-second window is
+                # correct regardless of which backend ends up starting.
+                self._recording_hud.set_pause_enabled(False)
                 self._reposition_recording_bar()
 
         if rect is None and self._recording_hud is not None:
@@ -2493,6 +2531,19 @@ class AppController:
         up earlier, in `_show_recording_chrome`.
         """
         self._recording_started_at = time.monotonic()
+        self._recording_paused = False
+        self._recording_paused_at = None
+        self._recording_paused_total = 0.0
+
+        if self._recording_hud is not None and self._active_recording is not None:
+            backend, _path, _after = self._active_recording
+            # The real answer, from the backend that actually started --
+            # `_show_recording_chrome` could only grey this, since nothing
+            # had started yet to ask.
+            self._recording_hud.set_pause_enabled(backend.can_pause)
+            self._recording_hud.pause_control().setToolTip(
+                "" if backend.can_pause else (backend.pause_unavailable_reason() or "")
+            )
 
         # No QObject parent -- see `_recording_elapsed_timer`'s own
         # docstring in __init__.
@@ -2544,6 +2595,9 @@ class AppController:
             self._recording_bar_anchor = None
         self._hide_countdown()
         self._recording_started_at = None
+        self._recording_paused = False
+        self._recording_paused_at = None
+        self._recording_paused_total = 0.0
         self._tray_icon.setIcon(self._idle_tray_icon)
         self._tray_icon.setToolTip("")
         self.discard_action.setEnabled(False)
@@ -2567,7 +2621,14 @@ class AppController:
         text = self._elapsed_text()
         self._tray_icon.setToolTip(text)
         if self._recording_hud is not None:
-            self._recording_hud.set_live(text, size=self._live_readout())
+            if self._recording_paused:
+                # `set_live` would also reset the Pause control back to
+                # "Pause" -- `set_paused` is the one call that only moves
+                # the clock (frozen, by `_elapsed_text()`'s own paused-time
+                # subtraction) and grows the Resume label's own count.
+                self._recording_hud.set_paused(text, self._pause_elapsed_text())
+            else:
+                self._recording_hud.set_live(text, size=self._live_readout())
             self._reposition_recording_bar()
         elif not self._tray_available:
             print(f"Snipux is recording -- {text}")
@@ -2611,6 +2672,46 @@ class AppController:
         if free >= design.tokens.RECORDING_MIN_FREE_BYTES:
             return
         self._stop_recording(reason="Recording stopped: running low on disk space.")
+
+    def _on_pause_clicked(self) -> None:
+        """The HUD's own Pause/Resume control -- one signal for both,
+        the same shape `_on_discard_clicked` already routes by state
+        rather than needing two.
+
+        A click reaching here with no active recording (the Starting
+        window, or a race with a stop already unwinding) is a no-op:
+        the control is disabled through that window
+        (`_show_recording_chrome`/`_start_recording_ui`), so a genuine
+        click can only land once a backend really is running.
+        """
+        if self._active_recording is None:
+            return
+        backend, _path, _after = self._active_recording
+        if self._recording_paused:
+            backend.resume()
+            self._recording_paused_total += time.monotonic() - self._recording_paused_at
+            self._recording_paused_at = None
+            self._recording_paused = False
+        else:
+            if not backend.pause():
+                # Qt's own `QMediaRecorder.pause()` is allowed to do
+                # nothing where the backend beneath it can't honour it --
+                # `WindowsRecorderBackend.pause()` already checked
+                # `recorderState()` rather than trusting the call, and this
+                # is that check's other half: still recording, said so,
+                # never shown as paused.
+                self._report_shortcut("This recording can't be paused.")
+                return
+            self._recording_paused = True
+            self._recording_paused_at = time.monotonic()
+        if self._recording_hud is not None:
+            if self._recording_paused:
+                self._recording_hud.set_paused(
+                    self._elapsed_text(), self._pause_elapsed_text()
+                )
+            else:
+                self._recording_hud.set_live(self._elapsed_text(), size=self._live_readout())
+            self._reposition_recording_bar()
 
     def _stop_recording(self, *, reason: str | None = None) -> None:
         """Stop the in-progress recording, if there is one -- wired as the
