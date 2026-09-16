@@ -766,6 +766,7 @@ CHOOSER_RECORD_AFTER_NOTE = {
     "instant": "Copy to the clipboard. No file is kept.",
     "save": "Save to your recordings folder.",
     "open": "Save, then open it to trim and export.",
+    "gif": "Convert and save as a GIF. Silent, loops -- big above ~10 seconds.",
 }
 RECORD_AFTER_DEFAULT = "instant"
 
@@ -784,6 +785,9 @@ RECORDING_AFTER = [
     ("open", "Open in the player",
      "Saved as above, then opened in the trim editor -- play it back, cut "
      "the dead air off either end and export."),
+    ("gif", "Save as a GIF",
+     "Converts the finished recording and saves it as a GIF, under the "
+     "filename pattern below. Silent, loops -- big above ~10 seconds."),
 ]
 
 # Recordings get their own default name, not the stills one. Sharing
@@ -821,6 +825,8 @@ TOOL_HINTS = {
     "eraser":      "Click a mark to remove it",
     "ellipse":     "Drag to draw an oval",
     "line":        "Drag for a straight line",
+    "eyedropper":  "Click a pixel to copy its hex",
+    "callout":     "Drag from the thing it points to, then type",
 }
 
 # Fill and line style for the shape marks, from the locked stills-bar handoff:
@@ -1492,15 +1498,18 @@ class BarColor:
 # never sorted by use or reordered at runtime: muscle memory is the feature.
 # `shapes` and `redact` are families, and show whichever sibling was used
 # last.
-STILLS_SLOTS = ["pen", "highlighter", "shapes", "step", "text", "redact", "eraser"]
+STILLS_SLOTS = ["pen", "highlighter", "shapes", "step", "text", "redact", "eraser", "eyedropper"]
 
-# (tool, label, shortcut): the handoff's four. Crop was a fifth until it
-# turned out to draw a dashed box and crop nothing (divergences.md 7).
+# (tool, label, shortcut): the handoff's four, plus Callout
+# (docs/design/bars/README.md:78: "Rounded-rect, polygon, callout,
+# spotlight -> shape siblings"). Crop was a fifth until it turned out to
+# draw a dashed box and crop nothing (divergences.md 7).
 SHAPES = [
     ("rect",    "Rectangle",     "R"),
     ("ellipse", "Ellipse",       "O"),
     ("line",    "Straight line", "L"),
     ("arrow",   "Arrow",         "A"),
+    ("callout", "Callout",       "C"),
 ]
 
 # (tool, glyph, label, note). The note is not decoration: blur on small text
@@ -1536,10 +1545,10 @@ TOOL_GLYPHS = {tool: glyph for tool, glyph, _label, _note in REDACTIONS}
 TOOL_NAMES = {
     "pen": "Pen", "highlighter": "Highlighter", "rect": "Rectangle",
     "ellipse": "Ellipse", "line": "Straight line", "arrow": "Arrow",
-    "step": "Numbered step", "text": "Text",
+    "step": "Numbered step", "text": "Text", "callout": "Callout",
     "blur": "Blur", "pixelate": "Pixelate", "blackout": "Blackout",
     "spotlight": "Spotlight",
-    "eraser": "Eraser",
+    "eraser": "Eraser", "eyedropper": "Eyedropper",
 }
 
 # One letter, one tool. Every shape sibling keeps its own letter, so its menu
@@ -1547,7 +1556,7 @@ TOOL_NAMES = {
 SHORTCUTS = {
     "P": "pen", "H": "highlighter",
     **{key: tool for tool, _label, key in SHAPES if key},
-    "S": "step", "T": "text", "E": "eraser",
+    "S": "step", "T": "text", "E": "eraser", "I": "eyedropper",
 }
 
 # The redaction family has one key between its siblings, and it cycles.
@@ -1564,11 +1573,13 @@ STYLE_SECTIONS = {
     "arrow":       ["color", "dash", "size"],
     "step":        ["color", "size"],
     "text":        ["color", "size"],
+    "callout":     ["color", "fill", "dash", "size"],
     "blur":        ["strength"],
     "pixelate":    ["strength"],
     "blackout":    [],
     "spotlight":   ["strength"],
     "eraser":      [],
+    "eyedropper":  [],
 }
 
 # Nothing on the style dot can change what these draw, so it dims and does
@@ -1589,6 +1600,7 @@ DEFAULT_STYLE = {
     "arrow":       {"color": "#ef4444", "size": 3, "dash": "solid", "fill": "outline"},
     "step":        {"color": "#ef4444", "size": 5, "dash": "solid", "fill": "filled"},
     "text":        {"color": "#ffffff", "size": 5, "dash": "solid", "fill": "outline"},
+    "callout":     {"color": "#ef4444", "size": 3, "dash": "solid", "fill": "outline"},
 }
 # What the spec seeds every tool DEFAULT_STYLE leaves out with.
 DEFAULT_STYLE_OTHER = {"color": "#e3ff4f", "size": 5, "dash": "solid", "fill": "outline"}

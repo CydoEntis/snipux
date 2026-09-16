@@ -18,6 +18,7 @@ at them except to hit-test, which the shapes do themselves.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
+from typing import Callable
 
 from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QImage
@@ -326,6 +327,7 @@ TWO_POINT_TOOLS = {
     "rect": shapes_module.Rectangle,
     "ellipse": shapes_module.Ellipse,
     "line": shapes_module.Line,
+    "callout": shapes_module.Callout,
 }
 # The redaction family: one tool per sibling, so which one a drag commits is
 # the tool itself rather than a mode read off a tray.
@@ -487,6 +489,7 @@ class TextLabelEditor(QObject):
         self._colour = None
         self._stroke_width: float | None = None
         self._committing = False
+        self._on_commit: Callable[[str], None] | None = None
 
     @property
     def field(self) -> "LabelLineEdit | None":
@@ -498,7 +501,14 @@ class TextLabelEditor(QObject):
     def is_active(self) -> bool:
         return self._field is not None and self._field.isVisible()
 
-    def begin(self, point: QPointF, colour, stroke_width: float) -> None:
+    def begin(
+        self,
+        point: QPointF,
+        colour,
+        stroke_width: float,
+        *,
+        on_commit: "Callable[[str], None] | None" = None,
+    ) -> None:
         """Open a label at `point` (host coordinates), seeded empty and
         focused for immediate typing.
 
@@ -506,12 +516,22 @@ class TextLabelEditor(QObject):
         colour rather than this click's -- a click elsewhere never blurs the
         field, so nothing else would force the `editingFinished` the commit
         hangs off, and the previous label would be lost.
+
+        `on_commit`, when given, replaces the default "add a `Text` mark"
+        behaviour: `commit()` below calls it with whatever was typed --
+        empty included -- instead of touching `self._store` itself.
+        `Callout` reuses this (`OverlayWindow._start_callout_text_entry`,
+        and `ImageCanvas`'s own twin in review.py) so that typing into a
+        mark that already carries its own body and tail finishes that one
+        mark, rather than committing a second, separate one the way a bare
+        `Text` label would.
         """
         if self._field is not None:
             self.commit()
         self._point = self._to_document(point)
         self._colour = colour
         self._stroke_width = stroke_width
+        self._on_commit = on_commit
         field = self._ensure_field()
         field.clear()
         field.move(point.toPoint())
@@ -553,7 +573,8 @@ class TextLabelEditor(QObject):
 
     def commit(self) -> None:
         """Turn whatever was typed into a `Text` mark, or nothing if the
-        field is empty.
+        field is empty -- or, with an `on_commit` from `begin`, hand the
+        text to that instead, empty or not (see `begin`'s own docstring).
         """
         # A re-entrancy guard, not a signal disconnect: hide() below drops
         # focus and re-fires editingFinished synchronously.
@@ -561,17 +582,21 @@ class TextLabelEditor(QObject):
             return
         self._committing = True
         try:
-            if self._field.text():
+            text = self._field.text()
+            if self._on_commit is not None:
+                self._on_commit(text)
+            elif text:
                 self._store.add(
                     shapes_module.Text(
                         colour=self._colour,
                         stroke_width=self._stroke_width,
                         point=self._point,
-                        text=self._field.text(),
+                        text=text,
                     )
                 )
             self._field.hide()
             self._point = None
+            self._on_commit = None
         finally:
             self._committing = False
 
