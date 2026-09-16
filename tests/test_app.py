@@ -3633,7 +3633,9 @@ class TestAppControllerRecentCaptures:
         controller._recent_menu.actions()[0].trigger()
 
         assert len(opened) == 1
-        assert opened[0].toLocalFile() == str(path)
+        # As paths, not strings: Qt spells a Windows path with forward
+        # slashes, and `str(path)` with backslashes.
+        assert Path(opened[0].toLocalFile()) == path
 
     def test_a_row_whose_file_is_missing_is_dropped_when_the_menu_rebuilds(
         self, make_controller, tmp_path
@@ -3691,10 +3693,15 @@ class TestAppControllerRecentCaptures:
         self, make_controller, monkeypatch, tmp_path
     ):
         controller, _backend = self._start_a_recording(make_controller, monkeypatch, after="open")
+        # Never the real player: it would load the fake recording's bytes into
+        # a media backend, which on Windows takes the test process down.
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
 
         controller._stop_recording()
 
         landed = next(p for p in tmp_path.iterdir() if p.is_file())
+        assert opened == [landed]
         assert self._recent_texts(controller) == [landed.name]
 
     def test_a_recording_copied_to_the_clipboard_adds_nothing(
