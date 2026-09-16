@@ -64,7 +64,7 @@ from snipux.capture import (
 )
 from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
 from snipux.platform import windows as windows_platform
-from snipux.flowbars import RecordingBar
+from snipux.flowbars import FlowMenu, RecordingBar
 from snipux.recording import RecorderRegistry, RecordingBackend, RecordingError
 from snipux.settings import SettingsDialog
 
@@ -2195,6 +2195,76 @@ def _record(controller, rect, delay="No delay", after=None):
     else:
         controller._on_recording_requested(rect, delay, after)
     controller._begin_armed_recording()
+
+
+class TestAppControllerRecordingAudio:
+    """The audio menu offers what the platform can record, and the choice
+    reaches the recorder."""
+
+    def _controller(self, make_controller, backend):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+        )
+
+    def _platform_reasons(self, monkeypatch, reasons):
+        monkeypatch.setattr(
+            app.platform.current, "audio_source_unavailable_reason",
+            lambda source: reasons.get(source, ""),
+        )
+
+    def test_menu_greys_each_source_with_its_own_reason(self, make_controller, monkeypatch):
+        self._platform_reasons(monkeypatch, {"system": "no desktop sound"})
+        opened = []
+
+        class RecordingFlowMenu(FlowMenu):
+            def __init__(self, rows, *args, **kwargs):
+                opened.append(rows)
+                super().__init__(rows, *args, **kwargs)
+
+        monkeypatch.setattr(app, "FlowMenu", RecordingFlowMenu)
+        controller = self._controller(make_controller, FakeRecordingBackend())
+        controller._on_recording_requested(QRectF(10, 20, 300, 200), "No delay")
+
+        controller._open_audio_menu()
+
+        reasons = {row[0]: row[4] for row in opened[0]}
+        assert reasons == {"system": "no desktop sound", "mic": "", "off": ""}
+
+    def test_the_chosen_source_reaches_the_backend(self, make_controller, monkeypatch):
+        self._platform_reasons(monkeypatch, {})
+        backend = FakeRecordingBackend()
+        controller = self._controller(make_controller, backend)
+        controller._on_recording_requested(QRectF(10, 20, 300, 200), "No delay")
+        controller._recording_audio = "mic"
+
+        controller._begin_armed_recording()
+
+        assert backend.audio_source == "mic"
+
+    def test_a_source_that_went_away_records_muted_instead_of_failing(
+        self, make_controller, monkeypatch
+    ):
+        self._platform_reasons(monkeypatch, {"mic": "No microphone found"})
+        backend = FakeRecordingBackend()
+        controller = self._controller(make_controller, backend)
+        controller._on_recording_requested(QRectF(10, 20, 300, 200), "No delay")
+        controller._recording_audio = "mic"
+
+        controller._begin_armed_recording()
+
+        assert len(backend.start_calls) == 1
+        assert backend.audio_source == "off"
+
+    def test_each_recording_starts_muted(self, make_controller, monkeypatch):
+        self._platform_reasons(monkeypatch, {})
+        controller = self._controller(make_controller, FakeRecordingBackend())
+        controller._recording_audio = "mic"
+
+        controller._on_recording_requested(QRectF(10, 20, 300, 200), "No delay")
+
+        assert controller._recording_audio == "off"
 
 
 class TestAppControllerRecording:

@@ -107,6 +107,7 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import QAbstractNativeEventFilter
+from PyQt6.QtMultimedia import QMediaDevices
 
 from snipux import capture, recording, setup_desktop
 from snipux.capture import BackendRegistry
@@ -1118,6 +1119,19 @@ class WindowsPlatform(Platform):
 
     def build_recording_registry(self) -> RecorderRegistry:
         return recording.build_windows_registry()
+
+    def audio_source_unavailable_reason(self, source: str) -> str:
+        """The microphone is `QAudioInput` on the default input device, so
+        it is available exactly when Windows has one. Desktop sound is not
+        available at all: capturing it needs WASAPI loopback, which Qt does
+        not expose, and reaching it without Qt would mean a COM audio
+        client written by hand -- a separate piece of work.
+        """
+        if source == recording.AUDIO_SYSTEM:
+            return "Recording desktop sound isn't supported on Windows yet"
+        if source == recording.AUDIO_MIC and QMediaDevices.defaultAudioInput().isNull():
+            return "No microphone found"
+        return ""
 
     def can_pin(self) -> bool:
         """True: Windows lets a client place its own window at a given rect

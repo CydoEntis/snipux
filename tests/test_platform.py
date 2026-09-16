@@ -467,6 +467,51 @@ class TestStubPlatforms:
         assert isinstance(darwin.DarwinPlatform(), Platform)
 
 
+class TestAudioSourceAvailability:
+    """Which of the recording bar's audio sources each platform lets the
+    user pick. The UI greys a source with this reason instead of hiding it.
+    """
+
+    def test_linux_greys_both_sources_but_never_muted(self):
+        linux_platform = linux.LinuxPlatform()
+        reason = linux_platform.audio_unavailable_reason()
+
+        assert reason
+        assert linux_platform.audio_source_unavailable_reason("system") == reason
+        assert linux_platform.audio_source_unavailable_reason("mic") == reason
+        assert linux_platform.audio_source_unavailable_reason("off") == ""
+
+    def test_windows_never_offers_desktop_sound(self):
+        assert windows.WindowsPlatform().audio_source_unavailable_reason(
+            recording.AUDIO_SYSTEM
+        )
+
+    def test_windows_offers_the_mic_when_there_is_an_input_device(self, monkeypatch):
+        monkeypatch.setattr(
+            windows.QMediaDevices, "defaultAudioInput",
+            staticmethod(lambda: SimpleNamespace(isNull=lambda: False)),
+        )
+
+        assert windows.WindowsPlatform().audio_source_unavailable_reason(
+            recording.AUDIO_MIC
+        ) == ""
+
+    def test_windows_greys_the_mic_when_there_is_none(self, monkeypatch):
+        monkeypatch.setattr(
+            windows.QMediaDevices, "defaultAudioInput",
+            staticmethod(lambda: SimpleNamespace(isNull=lambda: True)),
+        )
+
+        assert "microphone" in windows.WindowsPlatform().audio_source_unavailable_reason(
+            recording.AUDIO_MIC
+        )
+
+    def test_muted_is_always_available_on_windows(self):
+        assert windows.WindowsPlatform().audio_source_unavailable_reason(
+            recording.AUDIO_OFF
+        ) == ""
+
+
 class TestCanPin:
     """SNX-83: whether a pin can be placed at the selection's exact rect and
     kept on top here -- Pin's own capability on the platform seam.

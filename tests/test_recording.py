@@ -854,6 +854,10 @@ class FakeCaptureSession:
         self.recorder = None
         self.video_sink = None
         self.video_frame_input = None
+        self.audio_input = None
+
+    def setAudioInput(self, audio_input):
+        self.audio_input = audio_input
 
     def setScreenCapture(self, screen_capture):
         self.screen_capture = screen_capture
@@ -1855,6 +1859,128 @@ class TestWindowsRecorderBackendRegionPause:
         backend.stop()
 
         assert backend._worker_thread is None
+
+
+class _FakeAudioDevice:
+    def __init__(self, null=False):
+        self._null = null
+
+    def isNull(self):
+        return self._null
+
+
+class FakeAudioInput:
+    """Stands in for `QAudioInput` -- a test must never open the real
+    microphone."""
+
+    def __init__(self, null_device=False):
+        self._device = _FakeAudioDevice(null_device)
+
+    def device(self):
+        return self._device
+
+
+class TestWindowsRecorderBackendAudio:
+    RECT = QRectF(10, 20, 200, 100)
+    PATH = "C:/tmp/snipux-recording-audio.mp4"
+
+    def _backend(self, **overrides):
+        overrides.setdefault("audio_input_factory", FakeAudioInput)
+        return _windows_backend(**overrides)
+
+    def test_off_by_default_wires_no_audio_on_either_path(self):
+        full = self._backend()
+        full.start(None, self.PATH)
+        region = self._backend()
+        region.start(self.RECT, self.PATH)
+
+        assert full._session.audio_input is None
+        assert region._encode_session.audio_input is None
+        assert full._recorder.media_format.audioCodec() == recording.QMediaFormat.AudioCodec.Unspecified
+
+    def test_mic_on_full_screen_joins_the_recording_session(self):
+        backend = self._backend()
+        backend.set_audio_source(recording.AUDIO_MIC)
+
+        backend.start(None, self.PATH)
+
+        assert isinstance(backend._session.audio_input, FakeAudioInput)
+        assert backend._recorder.media_format.audioCodec() == recording.QMediaFormat.AudioCodec.AAC
+
+    def test_mic_on_a_region_joins_the_encoding_session_not_the_capture_one(self):
+        backend = self._backend()
+        backend.set_audio_source(recording.AUDIO_MIC)
+
+        backend.start(self.RECT, self.PATH)
+
+        assert isinstance(backend._encode_session.audio_input, FakeAudioInput)
+        assert backend._capture_session.audio_input is None
+
+    def test_no_microphone_fails_the_start_instead_of_recording_silence(self):
+        backend = self._backend(audio_input_factory=lambda: FakeAudioInput(null_device=True))
+        backend.set_audio_source(recording.AUDIO_MIC)
+
+        with pytest.raises(RuntimeError, match="no microphone"):
+            backend.start(None, self.PATH)
+
+    def test_desktop_sound_is_refused(self):
+        backend = self._backend()
+        backend.set_audio_source(recording.AUDIO_SYSTEM)
+
+        with pytest.raises(RuntimeError, match="system"):
+            backend.start(self.RECT, self.PATH)
+
+    def test_stop_lets_go_of_the_audio_input(self):
+        backend = self._backend()
+        backend.set_audio_source(recording.AUDIO_MIC)
+        backend.start(self.RECT, self.PATH)
+
+        backend.stop()
+
+        assert backend._audio_input is None
+
+    def test_region_pause_with_audio_pauses_the_recorder_too(self):
+        # The worker only holds back video; without this the microphone
+        # kept recording through the pause -- measured on Windows 11 as a
+        # 5.9s audio track beside 3.7s of video for 4s of recording.
+        backend = self._backend()
+        backend.set_audio_source(recording.AUDIO_MIC)
+        backend.start(self.RECT, self.PATH)
+
+        assert backend.pause() is True
+        assert backend._recorder.pause_calls == 1
+
+        backend.resume()
+        assert backend._recorder.record_calls == 2
+        assert backend._worker._paused is False
+
+    def test_region_pause_without_audio_leaves_the_recorder_alone(self):
+        backend = self._backend()
+        backend.start(self.RECT, self.PATH)
+
+        backend.pause()
+        backend.resume()
+
+        assert backend._recorder.pause_calls == 0
+        assert backend._recorder.record_calls == 1
+
+
+class TestRecorderRegistryAudioSource:
+    def test_start_hands_the_source_to_the_backend_that_starts(self):
+        backend = FakeBackend("fake", available=True)
+        registry = RecorderRegistry([backend])
+
+        registry.start(None, "/tmp/out.webm", recording.AUDIO_MIC)
+
+        assert backend.audio_source == recording.AUDIO_MIC
+
+    def test_source_defaults_to_off(self):
+        backend = FakeBackend("fake", available=True)
+        backend.set_audio_source(recording.AUDIO_MIC)
+
+        RecorderRegistry([backend]).start(None, "/tmp/out.webm")
+
+        assert backend.audio_source == recording.AUDIO_OFF
 
 
 class TestWindowsRecorderBackendStop:

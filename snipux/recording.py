@@ -35,7 +35,9 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QGuiApplication, QImage
 from PyQt6.QtMultimedia import (
+    QAudioInput,
     QMediaCaptureSession,
+    QMediaDevices,
     QMediaFormat,
     QMediaRecorder,
     QScreenCapture,
@@ -48,9 +50,27 @@ from PyQt6.QtMultimedia import (
 from . import setup_desktop
 
 
+# The recording bar's audio choices, by the identifiers
+# `design.tokens.AUDIO_SOURCES` gives them. Named here too because this is
+# the module that has to act on them, and it must not import the design
+# package to find out what "mic" means.
+AUDIO_OFF = "off"
+AUDIO_MIC = "mic"
+AUDIO_SYSTEM = "system"
+
+
 class RecordingBackend(ABC):
     """A way of recording a region of the virtual desktop on a particular
     session type."""
+
+    # Which of the bar's audio sources the next `start()` should record.
+    # Set through `set_audio_source()` rather than a `start()` argument, so
+    # a backend with no audio route at all (GNOME's screencast) keeps the
+    # two-argument `start()` it already has and simply never reads this.
+    audio_source: str = AUDIO_OFF
+
+    def set_audio_source(self, source: str) -> None:
+        self.audio_source = source
 
     @abstractmethod
     def name(self) -> str:
@@ -235,7 +255,9 @@ class RecorderRegistry:
         """
         return [(b.name(), b.unavailable_reason()) for b in self._backends if not b.is_available()]
 
-    def start(self, rect: QRectF | None, path: str) -> tuple[RecordingBackend, str]:
+    def start(
+        self, rect: QRectF | None, path: str, audio_source: str = AUDIO_OFF
+    ) -> tuple[RecordingBackend, str]:
         """Try available backends in order; return the first that starts
         recording `rect` (or the whole virtual desktop, when `rect` is
         None) to `path` successfully.
@@ -257,6 +279,7 @@ class RecorderRegistry:
         failures: list[tuple[str, Exception]] = []
         for backend in self.available():
             try:
+                backend.set_audio_source(audio_source)
                 return backend, backend.start(rect, path)
             except Exception as exc:  # noqa: BLE001 - collected, not swallowed
                 failures.append((backend.name(), exc))
@@ -996,6 +1019,7 @@ class WindowsRecorderBackend(RecordingBackend):
         video_sink_factory=QVideoSink,
         video_frame_input_factory=QVideoFrameInput,
         thread_factory=QThread,
+        audio_input_factory=None,
         stop_settle_seconds: float = 1.0,
     ):
         self._screen_capture_factory = screen_capture_factory
@@ -1004,6 +1028,15 @@ class WindowsRecorderBackend(RecordingBackend):
         self._video_sink_factory = video_sink_factory
         self._video_frame_input_factory = video_frame_input_factory
         self._thread_factory = thread_factory
+        self._audio_input_factory = (
+            audio_input_factory
+            if audio_input_factory is not None
+            else lambda: QAudioInput(QMediaDevices.defaultAudioInput())
+        )
+        # The live QAudioInput, if this recording has one. Held for the
+        # recording's lifetime: a session does not keep its input alive, and
+        # a collected one ends the audio track without a word.
+        self._audio_input = None
         # See _wait_for_stopped()'s docstring: real, load-bearing settle
         # time for the muxer's asynchronous finalization, not a cosmetic
         # default -- tests that don't care about it pass 0 here rather
@@ -1054,7 +1087,31 @@ class WindowsRecorderBackend(RecordingBackend):
         """
         media_format = QMediaFormat(QMediaFormat.FileFormat.MPEG4)
         media_format.setVideoCodec(QMediaFormat.VideoCodec.H264)
+        if self.audio_source != AUDIO_OFF:
+            # Named for the same reason the video codec is: AAC in MP4 is
+            # what plays everywhere, and a default Qt picks is a default Qt
+            # can change.
+            media_format.setAudioCodec(QMediaFormat.AudioCodec.AAC)
         return media_format
+
+    def _build_audio_input(self):
+        """The `QAudioInput` for `audio_source`, or None for no audio.
+
+        Raises rather than quietly recording without sound: the bar greys a
+        source this machine cannot record (`Platform.
+        audio_source_unavailable_reason`), so reaching here with one means
+        something upstream went wrong, and a silent file would hide it.
+        """
+        if self.audio_source == AUDIO_OFF:
+            return None
+        if self.audio_source != AUDIO_MIC:
+            raise RuntimeError(
+                f"qt-native: cannot record {self.audio_source!r} audio on Windows"
+            )
+        audio_input = self._audio_input_factory()
+        if audio_input.device().isNull():
+            raise RuntimeError("qt-native: no microphone to record from")
+        return audio_input
 
     def _wire_errors(self, screen_capture, recorder, errors: list[str]) -> None:
         """Collect failures from `screen_capture` and `recorder` into
@@ -1107,7 +1164,10 @@ class WindowsRecorderBackend(RecordingBackend):
         errors.clear()
         self._wire_errors(screen_capture, recorder, errors)
 
+        audio_input = self._build_audio_input()
         session.setScreenCapture(screen_capture)
+        if audio_input is not None:
+            session.setAudioInput(audio_input)
         session.setRecorder(recorder)
         screen_capture.setActive(True)
         recorder.record()
@@ -1115,6 +1175,7 @@ class WindowsRecorderBackend(RecordingBackend):
         if errors:
             raise RuntimeError(f"qt-native: {errors[0]}")
 
+        self._audio_input = audio_input
         self._session = session
         self._screen_capture = screen_capture
         self._recorder = recorder
@@ -1152,6 +1213,7 @@ class WindowsRecorderBackend(RecordingBackend):
         screen_capture = self._screen_capture_factory()
         video_sink = self._video_sink_factory()
 
+        audio_input = self._build_audio_input()
         encode_session = self._capture_session_factory()
         frame_input = self._video_frame_input_factory()
         recorder = self._recorder_factory()
@@ -1197,6 +1259,10 @@ class WindowsRecorderBackend(RecordingBackend):
         capture_session.setScreenCapture(screen_capture)
         capture_session.setVideoSink(video_sink)
         encode_session.setVideoFrameInput(frame_input)
+        if audio_input is not None:
+            # On the encoding session, beside the cropped frames: the
+            # capture session only feeds the sink and never reaches a file.
+            encode_session.setAudioInput(audio_input)
         encode_session.setRecorder(recorder)
 
         # Before setActive: an active capture is already delivering frames
@@ -1211,6 +1277,7 @@ class WindowsRecorderBackend(RecordingBackend):
             worker_thread.wait()
             raise RuntimeError(f"qt-native: {errors[0]}")
 
+        self._audio_input = audio_input
         self._capture_session = capture_session
         self._screen_capture = screen_capture
         self._video_sink = video_sink
@@ -1236,6 +1303,8 @@ class WindowsRecorderBackend(RecordingBackend):
         """
         if self._worker is not None:
             self._worker.pause()
+            if self._audio_input is not None:
+                self._recorder.pause()
             return True
         if self._recorder is not None:
             self._recorder.pause()
@@ -1245,6 +1314,8 @@ class WindowsRecorderBackend(RecordingBackend):
     def resume(self) -> None:
         """Resume a recording paused by `pause()`."""
         if self._worker is not None:
+            if self._audio_input is not None:
+                self._recorder.record()
             self._worker.resume()
             return
         if self._recorder is not None:
@@ -1286,6 +1357,7 @@ class WindowsRecorderBackend(RecordingBackend):
         self._session = None
         self._screen_capture = None
         self._recorder = None
+        self._audio_input = None
 
     def _stop_region(self) -> None:
         # Opposite order from _start_region's wiring: stop new frames from
@@ -1315,6 +1387,7 @@ class WindowsRecorderBackend(RecordingBackend):
         self._recorder = None
         self._worker = None
         self._worker_thread = None
+        self._audio_input = None
 
     def _wait_for_stopped(
         self,

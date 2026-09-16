@@ -266,18 +266,19 @@ class _RecorderStarter(QObject):
 
     done = pyqtSignal()
 
-    def __init__(self, registry, rect, path):
+    def __init__(self, registry, rect, path, audio_source="off"):
         super().__init__()
         self._registry = registry
         self._rect = rect
         self._path = path
+        self._audio_source = audio_source
         self.result: tuple | None = None
         self.error: Exception | None = None
 
     def run(self) -> None:
         """Worker thread. Never touches a widget."""
         try:
-            self.result = self._registry.start(self._rect, self._path)
+            self.result = self._registry.start(self._rect, self._path, self._audio_source)
         except Exception as exc:  # noqa: BLE001 - handed back, not swallowed
             self.error = exc
         # Queued, because this object lives on the UI thread: the receiver
@@ -2039,6 +2040,9 @@ class AppController:
         # Audio is the platform's answer, not the bar's: GNOME's screencast
         # has no audio option at all, so the control is offered inert with
         # the reason on it rather than hidden (divergences.md 2).
+        # Each recording starts muted, so the icon and what gets recorded
+        # never disagree about a choice left over from the last one.
+        self._recording_audio = design.tokens.AUDIO_DEFAULT
         bar.set_audio(design.tokens.AUDIO_DEFAULT)
         bar.set_audio_enabled(platform.current.records_audio())
         if not platform.current.records_audio():
@@ -2234,12 +2238,9 @@ class AppController:
         bar = self._recording_hud
         if bar is None:
             return
-        reason = "" if platform.current.records_audio() else (
-            platform.current.audio_unavailable_reason()
-        )
         rows = [
             (identifier, label, note, "",
-             "" if identifier == design.tokens.AUDIO_DEFAULT else reason)
+             platform.current.audio_source_unavailable_reason(identifier))
             for identifier, _icon, label, note in design.tokens.AUDIO_SOURCES
         ]
         menu = FlowMenu(rows, self._recording_audio,
@@ -2496,6 +2497,12 @@ class AppController:
         `_pending_start_request` -- because the honest answer to "stop"
         during start-up is to stop, not to ignore it.
         """
+        # A source the bar greyed can still be the remembered choice if the
+        # microphone went away after it was picked; record without sound
+        # rather than fail the whole recording over it.
+        audio = self._recording_audio
+        if platform.current.audio_source_unavailable_reason(audio):
+            audio = design.tokens.AUDIO_DEFAULT
         # Only when every backend that could run says it is safe. The
         # Windows recorder builds a QScreenCapture, a QMediaCaptureSession
         # and a QMediaRecorder in start(); created on a worker thread, they
@@ -2506,9 +2513,9 @@ class AppController:
             backend.starts_off_thread
             for backend in self._recorder_registry.available()
         ):
-            return self._recorder_registry.start(rect, path)
+            return self._recorder_registry.start(rect, path, audio)
 
-        starter = _RecorderStarter(self._recorder_registry, rect, path)
+        starter = _RecorderStarter(self._recorder_registry, rect, path, audio)
         loop = QEventLoop()
         starter.done.connect(loop.quit)
 

@@ -287,6 +287,20 @@ class Platform(ABC):
         """
         return ""
 
+    def audio_source_unavailable_reason(self, source: str) -> str:
+        """Why the recording bar's audio `source` ("system", "mic" or
+        "off", `design.tokens.AUDIO_SOURCES`) cannot be chosen here, or ""
+        when it can.
+
+        Per source because `records_audio()` is one answer for all of them,
+        and Windows has two different ones: a microphone Qt can open, and
+        desktop sound it cannot. "off" is always available -- a recording
+        with no audio track is something every recorder can make.
+        """
+        if source == "off" or self.records_audio():
+            return ""
+        return self.audio_unavailable_reason()
+
     def can_pin(self) -> bool:
         """Whether a pin (SNX-83) can be placed at the selection's exact
         rect and kept on top here.
