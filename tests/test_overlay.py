@@ -1320,6 +1320,115 @@ class TestEraserTool:
         assert overlay.cursor().shape() == Qt.CursorShape.PointingHandCursor
 
 
+class TestEyedropperTool:
+    """The eyedropper: `color_at` reads a pixel straight from `Frame.image`
+    -- never a `grab()`/repaint of this widget, and never a logical point
+    used as an image index directly, which is the coordinate-space bug a
+    fractionally-scaled monitor (GNOME's common 1.5x) would otherwise hide.
+    `pick_color_at` is `OverlayWindow.copy()`'s own shape -- clipboard, then
+    toast -- but for one pixel's hex instead of the whole selection's image,
+    and (per the ticket's "it creates no mark") never touches `_mark_store`.
+    """
+
+    MARKER = QColor(0, 255, 0)
+
+    def _overlay(self, selection=QRect(0, 0, 200, 200)):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_color_at_reads_the_frames_own_pixel_at_1x_scaling(self):
+        overlay = self._overlay()
+        overlay._frame.image.setPixelColor(40, 60, self.MARKER)
+
+        assert overlay.color_at(QPointF(40, 60)) == self.MARKER
+
+    def test_color_at_reads_the_correct_image_pixel_under_1_5x_scaling(self):
+        # Image is 1.5x logical size -- GNOME's common fractional-scaling
+        # case, and the one a naive "point used as an image index" bug
+        # would misread: image-pixel (150, 150) is logical (100, 100) here,
+        # not image-pixel (100, 100).
+        image = QImage(300, 300, QImage.Format.Format_RGB32)
+        image.fill(BASE_COLOR)
+        image.setPixelColor(150, 150, self.MARKER)
+        frame = Frame(image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+
+        assert overlay.color_at(QPointF(100, 100)) == self.MARKER
+        # The bug this guards against: image-pixel (100, 100) -- what a
+        # naive "point used as an image index" read would return instead --
+        # is still the base colour, never the marker.
+        assert image.pixelColor(100, 100) == BASE_COLOR
+
+    def test_click_copies_the_hex_to_the_clipboard_lowercase(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_text_to_clipboard", lambda text: calls.append(text)
+        )
+        overlay = self._overlay()
+        overlay._frame.image.fill(QColor(0x3B, 0x82, 0xF6))  # the ticket's own #3b82f6
+        overlay.set_eyedropper_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert calls == ["#3b82f6"]
+
+    def test_click_with_eyedropper_inactive_copies_nothing(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_text_to_clipboard", lambda text: calls.append(text)
+        )
+        overlay = self._overlay()
+        # set_eyedropper_active is never called: default state is inactive.
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert calls == []
+
+    def test_the_tool_stays_active_after_a_click(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert overlay._eyedropper_active is True
+
+    def test_a_click_adds_nothing_to_the_undo_stack_or_marks(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert overlay.marks == ()
+        assert overlay.can_undo is False
+
+    def test_pick_color_at_never_calls_add_mark(self, monkeypatch):
+        # Belt and suspenders on top of the undo-stack check above: nothing
+        # here goes through the one path every real mark is added by.
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        calls = []
+        overlay = self._overlay()
+        monkeypatch.setattr(overlay, "add_mark", lambda mark: calls.append(mark))
+
+        overlay.pick_color_at(QPointF(50, 50))
+
+        assert calls == []
+
+    def test_cursor_is_a_pointer_over_the_selection_while_the_eyedropper_is_active(self):
+        overlay = self._overlay(selection=QRect(50, 50, 100, 80))
+        overlay.set_eyedropper_active(True)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        QTest.mouseMove(overlay, QPoint(100, 90))  # deep inside the selection
+
+        assert overlay.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
 class TestDrawingTools:
     """SNX-52: a press inside the selection starts a mark for whichever
     tool `_bar.active_tool` names; move extends it; release either commits
@@ -2569,7 +2678,7 @@ class TestToast:
 
 class TestFloatingBarComposition:
     """The stills bar is one row: the split action, a divider, Copy text, a
-    divider, seven tool slots, a divider, the style dot, a divider, then
+    divider, eight tool slots, a divider, the style dot, a divider, then
     undo and clear -- docs/design/bars/README.md section 2, with Copy text
     added past it (#82; see FloatingBar's own docstring). Built from real
     widgets rather than painted, so tooltips and hover come for free
@@ -2587,13 +2696,13 @@ class TestFloatingBarComposition:
 
         buttons = bar.findChildren(QPushButton)
 
-        # 7 slots + Copy text + the watermark + undo + clear == 11 on the
+        # 8 slots + Copy text + the watermark + undo + clear == 12 on the
         # overlay's bar. The destinations are one split action and the
         # style dot is a widget of its own, neither a QPushButton; the mode
         # chip and redo are built but not placed, since the handoff's
         # post-selection bar carries neither.
         visible = [button for button in buttons if not button.isHidden()]
-        assert len(visible) == 11
+        assert len(visible) == 12
         assert bar._action is not None
         assert bar._chip.isHidden()
         assert bar._redo_button.isHidden()
@@ -2616,7 +2725,7 @@ class TestFloatingBarComposition:
         bar = FloatingBar()
 
         assert list(bar._tool_buttons) == [
-            "pen", "highlighter", "shapes", "step", "text", "redact", "eraser"
+            "pen", "highlighter", "shapes", "step", "text", "redact", "eraser", "eyedropper"
         ]
 
     def test_the_row_reads_action_tools_style_then_history(self):
@@ -5197,6 +5306,16 @@ class TestOverlayWindowToasts:
         assert overlay._toast.isVisible()
         assert overlay._toast._text_label.text() == "Saved to ~/Pictures/snipux"
 
+    def test_pick_color_at_shows_what_was_copied(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        overlay._frame.image.fill(QColor(0x3B, 0x82, 0xF6))
+
+        overlay.pick_color_at(QPointF(50, 50))
+
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Copied #3b82f6"
+
     def test_clear_shows_the_ink_cleared_toast(self):
         overlay = self._overlay()
         overlay.add_mark(
@@ -7497,7 +7616,7 @@ class TestHintHUDComposition:
 
         assert text == (
             "Esc discard ink · Enter copy & dismiss · "
-            "P H R O L A S T B E pick a tool · drag any edge to re-frame "
+            "P H R O L A S T B E I pick a tool · drag any edge to re-frame "
             "— the ink stays where you put it"
         )
 
@@ -7509,7 +7628,7 @@ class TestHintHUDComposition:
         assert key_texts == [
             "Esc",
             "Enter",
-            "P H R O L A S T B E",
+            "P H R O L A S T B E I",
         ]
 
     def test_key_segments_are_set_in_the_mono_family_at_pure_white(self):

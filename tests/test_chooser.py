@@ -514,7 +514,7 @@ class TestEachControlShowsItsState:
         "kind, expected",
         [
             ("stills", ["save", "review", "instant", "edit"]),
-            ("record", ["save", "open", "instant"]),
+            ("record", ["save", "open", "gif", "instant"]),
         ],
     )
     def test_a_click_cycles_todays_destinations(self, kind, expected):
@@ -1351,8 +1351,10 @@ class TestTheDestinationVocabularies:
     def test_stills_offers_instant_edit_save_and_review(self):
         assert [value for value, *_rest in _AFTER_ROWS] == ["instant", "edit", "save", "review"]
 
-    def test_record_offers_copy_save_and_open(self):
-        assert [value for value, *_rest in _RECORD_AFTER_ROWS] == ["instant", "save", "open"]
+    def test_record_offers_copy_save_open_and_gif(self):
+        assert [value for value, *_rest in _RECORD_AFTER_ROWS] == [
+            "instant", "save", "open", "gif",
+        ]
 
     def test_the_two_lists_agree_on_what_the_shared_ids_mean(self):
         stills = {value for value, *_rest in _AFTER_ROWS}
@@ -1374,6 +1376,11 @@ class TestTheDestinationVocabularies:
         # Two surfaces, two lengths of prose, one list of destinations.
         assert set(tokens.CHOOSER_AFTER_NOTE) == {
             value for value, _label, _description in tokens.AFTER_CAPTURE
+        }
+
+    def test_the_notes_cover_exactly_the_record_destinations(self):
+        assert set(tokens.CHOOSER_RECORD_AFTER_NOTE) == {
+            value for value, _label, _description in tokens.RECORDING_AFTER
         }
 
 
