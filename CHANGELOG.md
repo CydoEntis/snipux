@@ -35,6 +35,10 @@ use it; the commit history has the detail.
 - **Pause and resume a recording** (Windows). Pause sits beside Stop on the
   recording bar; the clock stops with it, and Resume carries on in the same
   file with the paused time left out. Greyed with why on Linux for now.
+- **Nudge the selection with the arrow keys** — one logical pixel a press,
+  ten with Shift, for framing a region precisely without the mouse.
+  Alt+arrow resizes it instead, from the bottom-right corner. Both are in
+  the shortcuts overlay (`?`).
 
 ## 0.8.2 — 2026-09-15
 
