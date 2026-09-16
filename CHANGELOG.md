@@ -77,6 +77,8 @@ use it; the commit history has the detail.
   eyedropper reading next to it, or a stroke passing beneath it -- and
   comes back as soon as you move away or reach for it. It is never part
   of the snip either way.
+- **The eyedropper looks like an eyedropper.** Its button showed a plain
+  slanted bar, easy to mistake for the pen beside it; it is a pipette now.
 
 ## 0.8.2 — 2026-09-15
 
