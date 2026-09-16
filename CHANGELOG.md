@@ -5,6 +5,15 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **Copy text**, on the floating bar after a selection (Windows only for
+  now). Reads the words out of the selection and puts them on the
+  clipboard as plain text instead of a picture -- for text you cannot
+  select yourself: a VM, a remote desktop, an error dialog, a screenshot
+  someone sent you. Greyed with why wherever it cannot run. Does not
+  change what the next snip's Copy, Save or Open does.
+
 ## 0.8.2 — 2026-09-15
 
 ### Fixed
