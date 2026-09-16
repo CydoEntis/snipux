@@ -47,6 +47,7 @@ from snipux.app import (
     copy_file_to_clipboard,
     install_crash_log,
     copy_image_to_clipboard,
+    copy_text_to_clipboard,
     finish_recording,
     main,
     run_resident_app,
@@ -464,6 +465,55 @@ class TestCopyImageToClipboard:
         copy_image_to_clipboard(image)  # must not raise
 
         assert QGuiApplication.clipboard().image() == image
+
+
+class TestCopyTextToClipboard:
+    def test_always_places_the_text_on_the_qt_clipboard(self, monkeypatch):
+        monkeypatch.setattr(app.shutil, "which", lambda binary: None)
+
+        copy_text_to_clipboard("Hello, world.")
+
+        assert QGuiApplication.clipboard().text() == "Hello, world."
+
+    def test_pipes_to_wl_copy_when_present_on_path(self, monkeypatch):
+        monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+        calls = []
+
+        def fake_run(argv, input=None, check=None):
+            calls.append((argv, input))
+
+        monkeypatch.setattr(app.subprocess, "run", fake_run)
+
+        copy_text_to_clipboard("Hello, world.")
+
+        assert calls == [(["wl-copy", "--type", "text/plain"], b"Hello, world.")]
+
+    def test_does_not_raise_and_falls_back_to_qt_clipboard_when_wl_copy_absent(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(app.shutil, "which", lambda binary: None)
+        calls = []
+        monkeypatch.setattr(
+            app.subprocess, "run", lambda *a, **k: calls.append((a, k))
+        )
+
+        copy_text_to_clipboard("Second line.")  # must not raise
+
+        assert calls == []
+        assert QGuiApplication.clipboard().text() == "Second line."
+
+    def test_does_not_raise_when_wl_copy_binary_vanishes_before_running(self, monkeypatch):
+        # A TOCTOU race: shutil.which found it, but the run itself fails.
+        monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+        def raising_run(*args, **kwargs):
+            raise FileNotFoundError("wl-copy")
+
+        monkeypatch.setattr(app.subprocess, "run", raising_run)
+
+        copy_text_to_clipboard("Still here.")  # must not raise
+
+        assert QGuiApplication.clipboard().text() == "Still here."
 
 
 class TestCopyFileToClipboard:

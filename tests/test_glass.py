@@ -252,8 +252,14 @@ class TestTheOverlayIsTheHost:
     their own -- is cropped from where it is, not from the selection's
     monitor or from the desktop's origin."""
 
-    LEFT = QRectF(-600, -200, 600, 400)
-    PRIMARY = QRectF(0, 0, 800, 500)
+    # 700 wide, not the 600 an earlier version of this fixture used: Copy
+    # text (#82) widened the stills bar, and 600 left the destination
+    # menu's left edge -- which overhangs the bar's own left end, centred
+    # as it is on the split action near it -- clamped just past this
+    # monitor's edge instead of on it, in `test_the_destination_menu_a_
+    # window_with_no_parent` below.
+    LEFT = QRectF(-600, -200, 700, 400)
+    PRIMARY = QRectF(100, 0, 800, 500)
 
     @pytest.fixture(autouse=True)
     def _desk(self, monkeypatch, blurs):
@@ -263,7 +269,7 @@ class TestTheOverlayIsTheHost:
         # The pointer is on the left monitor as far as the OS knows, so the
         # row opens there.
         monkeypatch.setattr(overlay_module, "QCursor", SimpleNamespace(pos=lambda: QPoint(-300, 0)))
-        self.frame = coded_frame((1400, 700), origin=(-600, -200))
+        self.frame = coded_frame((1500, 700), origin=(-600, -200))
         self.overlay = OverlayWindow(self.frame, monitor_geometries=[self.LEFT, self.PRIMARY])
         self.overlay.show()
         QTest.qWaitForWindowExposed(self.overlay)
