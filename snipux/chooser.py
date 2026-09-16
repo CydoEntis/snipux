@@ -1598,13 +1598,25 @@ _AFTER_ROWS = [
     ("review", "eye", "Review", tokens.CHOOSER_AFTER_NOTE["review"]),
 ]
 
-# The record side's own vocabulary: Copy, Save and Open, never Edit or Review,
-# because there is no annotate-in-place for a video. `instant` and `save` mean
-# the same on both sides; `open` is the player, not the review window.
+# The record side's own vocabulary: Copy, Save, Open and GIF, never Edit or
+# Review, because there is no annotate-in-place for a video. `instant` and
+# `save` mean the same on both sides; `open` is the player, not the review
+# window.
+#
+# GIF is offered here unconditionally, with no availability check: whether a
+# system ffmpeg exists is a subprocess probe (`player.system_ffmpeg()`), and
+# this row is built while the overlay is going up, on the one path snipux's
+# own timing budget is measured against (see the timing test and #76). The
+# player defers the same probe to its own menu open for exactly this reason.
+# Settings' Recording pane is where a machine without one actually finds out
+# -- opening it is a deliberate act, not part of a snip -- and a recording
+# landed here without an encoder falls back to saving the plain file rather
+# than losing the take (`AppController._land_recording_as_gif`).
 _RECORD_AFTER_ROWS = [
     ("instant", "copy", "Copy", tokens.CHOOSER_RECORD_AFTER_NOTE["instant"]),
     ("save", "save", "Save", tokens.CHOOSER_RECORD_AFTER_NOTE["save"]),
     ("open", "pen", "Open", tokens.CHOOSER_RECORD_AFTER_NOTE["open"]),
+    ("gif", "image", "GIF", tokens.CHOOSER_RECORD_AFTER_NOTE["gif"]),
 ]
 
 

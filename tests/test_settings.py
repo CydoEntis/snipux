@@ -13,7 +13,7 @@ from PyQt6.QtGui import QColor, QFocusEvent, QImage, QKeyEvent, QMouseEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QAbstractButton, QApplication, QLabel, QMessageBox
 
-from snipux import platform, settings, setup_desktop
+from snipux import platform, player, settings, setup_desktop
 from snipux.design import tokens
 from snipux.settings import (
     ConflictBanner,
@@ -57,6 +57,17 @@ def _default_to_the_gnome_conflict_check(monkeypatch):
     below that want the Windows path override it back to `True`.
     """
     monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: False))
+
+
+@pytest.fixture(autouse=True)
+def _default_to_no_gif_encoder(monkeypatch):
+    """Every test in this file builds a `SettingsWindow`, and its Recording
+    pane now probes `player.system_ffmpeg()` to grey the GIF row -- pinned
+    off by default, the same reasoning as the GNOME hotkey fixture above,
+    so a test that isn't about GIF is not answered by whether this machine
+    happens to have one. The handful below that are override it back on.
+    """
+    monkeypatch.setattr(player, "system_ffmpeg", lambda: None)
 
 
 def press(key: Qt.Key, modifiers=Qt.KeyboardModifier.NoModifier) -> QKeyEvent:
@@ -917,6 +928,48 @@ class TestSettingsWindow:
         window._save()
 
         assert setup_desktop.load_recording_after(tmp_path) == "save"
+
+    def test_gif_is_greyed_without_an_encoder(self, tmp_path):
+        # Qt's QImageWriter carries no GIF plugin, so this needs a system
+        # ffmpeg -- greyed with its reason exactly as the player's own
+        # export row greys, not merely left out (a missing row reads as a
+        # bug; a greyed one reads as a limit).
+        window = self._window(tmp_path)
+
+        card = window._recording_after_group.buttons()[
+            [row[0] for row in tokens.RECORDING_AFTER].index("gif")
+        ]
+
+        assert card.isEnabled() is False
+        assert card.isChecked() is False
+        assert player.EXPORT_UNAVAILABLE["gif"] in card._sub.text()
+
+    def test_gif_is_pickable_with_an_encoder(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(player, "system_ffmpeg", lambda: "/usr/bin/ffmpeg")
+        window = self._window(tmp_path)
+
+        card = window._recording_after_group.buttons()[
+            [row[0] for row in tokens.RECORDING_AFTER].index("gif")
+        ]
+        assert card.isEnabled() is True
+
+        self._choose_recording_after(window, "gif")
+        window._save()
+
+        assert setup_desktop.load_recording_after(tmp_path) == "gif"
+
+    def test_a_stored_gif_default_falls_back_without_an_encoder(self, tmp_path):
+        # Stored on a machine that had ffmpeg, opened on one that does not:
+        # nothing here re-checks that box, so every card would otherwise
+        # open unchecked -- and saving that state would hand
+        # `QButtonGroup.checkedId()`'s -1 straight to `tokens.RECORDING_AFTER`,
+        # which Python reads as *the last row* rather than "nothing picked".
+        setup_desktop.save_recording_after("gif", tmp_path)
+
+        window = self._window(tmp_path)
+        window._save()
+
+        assert setup_desktop.load_recording_after(tmp_path) == tokens.RECORD_AFTER_DEFAULT
 
     def test_recording_folder_and_pattern_round_trip(self, tmp_path):
         window = self._window(tmp_path)
