@@ -57,6 +57,7 @@ from snipux.shapes import (
     Pen,
     Pixelate,
     Rectangle,
+    Spotlight,
     StepMarker,
     Text,
 )
@@ -1058,6 +1059,47 @@ class TestOverlayWindowObscuringMarks:
         raw = frame.image.pixelColor(70, 70)
         rendered = pixel(overlay.grab().toImage(), 70, 70)
         assert rendered != raw
+
+    def test_committed_spotlight_dims_the_frame_immediately_after_release(self):
+        frame = make_gradient_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay._bar.select_tool("spotlight")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(120, 120))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
+
+        # Outside the dragged rect, deep enough that neither the selection
+        # frame nor a corner bracket (painted over the ink layer) could
+        # account for the difference.
+        raw = frame.image.pixelColor(170, 170)
+        rendered = pixel(overlay.grab().toImage(), 170, 170)
+        assert rendered != raw
+
+    def test_two_committed_spotlights_both_stay_lit_on_screen(self):
+        # The live-preview twin of test_shapes.py's
+        # TestSpotlight.test_two_spotlights_both_stay_lit: `_base_layer_image`
+        # has to make the same "combine, don't stack" call `render()` does,
+        # or a second spotlight redims the first one's hole the moment it
+        # is committed.
+        frame = make_gradient_frame(size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(
+            Spotlight(colour=QColor("#ff0000"), stroke_width=4,
+                      start=QPointF(10, 10), end=QPointF(50, 50))
+        )
+        overlay.add_mark(
+            Spotlight(colour=QColor("#ff0000"), stroke_width=4,
+                      start=QPointF(120, 120), end=QPointF(160, 160))
+        )
+
+        rendered = overlay.grab().toImage()
+
+        assert pixel(rendered, 30, 30) == pixel(frame.image, 30, 30)
+        assert pixel(rendered, 140, 140) == pixel(frame.image, 140, 140)
+        assert pixel(rendered, 90, 90) != pixel(frame.image, 90, 90)
 
     def test_committed_pixelate_shows_its_blocks_on_screen(self):
         # Same probe technique test_shapes.py's TestPixelateBlocky uses:
@@ -5887,12 +5929,13 @@ class TestFamilyMenuComposition:
     def test_the_redaction_menu_says_what_each_one_guarantees(self):
         menu = FamilyMenu("redact")
 
-        assert list(menu._rows) == ["blur", "pixelate", "blackout"]
+        assert list(menu._rows) == ["blur", "pixelate", "blackout", "spotlight"]
         assert menu.width() == tokens.BarMetric.MENU_W_REDACT
         assert [row._note for row in menu._rows.values()] == [
             "Softens it — shapes still readable",
             "Blocky, obviously deliberate",
             "Solid bar. Nothing to reconstruct",
+            "Dims everything else, not this",
         ]
 
     @pytest.mark.parametrize(
@@ -8099,7 +8142,7 @@ class TestKeyboardToolShortcuts:
         overlay = self._overlay()
 
         seen = []
-        for _ in range(4):
+        for _ in range(5):
             QTest.keyClick(overlay, Qt.Key.Key_B)
             seen.append(
                 (overlay._bar.active_tool, overlay._bar._tool_buttons["redact"]._icon_name)
@@ -8109,6 +8152,7 @@ class TestKeyboardToolShortcuts:
             ("blur", "blur"),
             ("pixelate", "mask"),
             ("blackout", "blackout"),
+            ("spotlight", "eye"),
             ("blur", "blur"),
         ]
 

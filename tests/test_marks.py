@@ -230,6 +230,7 @@ class TestStrokeFactory:
             ("blur", shapes.Blur),
             ("pixelate", shapes.Pixelate),
             ("blackout", shapes.Blackout),
+            ("spotlight", shapes.Spotlight),
         ],
     )
     def test_each_drag_tool_starts_its_own_shape(self, tool, expected):

@@ -40,6 +40,7 @@ from snipux.shapes import (
     Rectangle,
     Redact,
     Shape,
+    Spotlight,
     StepMarker,
     Text,
     Watermark,
@@ -783,6 +784,135 @@ class TestRedact:
         render(base, [Redact(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(80, 80))])
 
         assert base == before
+
+
+class TestSpotlight:
+    """The inverse of Redact: dims everything *outside* its rect, and
+    leaves the inside alone.
+    """
+
+    def test_pixels_inside_are_untouched(self):
+        base = make_gradient_image(size=(80, 80))
+        spot = Spotlight(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 40))
+
+        result = render(base, [spot])
+
+        for x in (10, 30, 49):
+            for y in (10, 25, 39):
+                assert result.pixelColor(x, y) == base.pixelColor(x, y)
+
+    def test_pixels_outside_are_dimmed(self):
+        base = make_image(size=(80, 80))
+        spot = Spotlight(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 40))
+
+        result = render(base, [spot])
+        outside, before = result.pixelColor(70, 70), base.pixelColor(70, 70)
+
+        assert outside != before
+        # A translucent near-black laid over white: every channel drops.
+        assert outside.red() < before.red()
+        assert outside.green() < before.green()
+        assert outside.blue() < before.blue()
+
+    def test_two_spotlights_both_stay_lit(self):
+        # The property `apply_all` exists for: each rect stays lit even
+        # though neither spotlight knows about the other.
+        base = make_image(size=(100, 100))
+        first = Spotlight(colour=RED, stroke_width=4, start=QPointF(5, 5), end=QPointF(25, 25))
+        second = Spotlight(colour=RED, stroke_width=4, start=QPointF(60, 60), end=QPointF(90, 90))
+
+        result = render(base, [first, second])
+
+        assert result.pixelColor(15, 15) == base.pixelColor(15, 15)
+        assert result.pixelColor(75, 75) == base.pixelColor(75, 75)
+        # Between the two: dimmed, same as anywhere outside a single one.
+        assert result.pixelColor(40, 40) != base.pixelColor(40, 40)
+
+    def test_overlapping_spotlights_stay_lit_where_they_overlap(self):
+        # A plain even-odd path (`_paint_scrim`'s own trick) breaks here: a
+        # point inside both rects crosses the outer boundary and both
+        # holes -- three subpaths, an odd count -- and comes out filled
+        # again. `apply_all` builds the holes as a `QRegion` union first,
+        # so an overlap only ever merges.
+        base = make_image(size=(100, 100))
+        first = Spotlight(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 50))
+        second = Spotlight(colour=RED, stroke_width=4, start=QPointF(30, 30), end=QPointF(70, 70))
+
+        result = render(base, [first, second])
+
+        assert result.pixelColor(40, 40) == base.pixelColor(40, 40)  # the overlap
+        assert result.pixelColor(15, 15) == base.pixelColor(15, 15)  # first only
+        assert result.pixelColor(65, 65) == base.pixelColor(65, 65)  # second only
+        assert result.pixelColor(90, 90) != base.pixelColor(90, 90)  # outside both
+
+    def test_a_second_spotlight_does_not_redim_the_firsts_hole(self):
+        # Were each spotlight applied on its own turn rather than combined,
+        # the second one's "dim everything outside *my* rect" would darken
+        # the first one's hole again the moment it ran -- only the rects'
+        # intersection would stay lit instead of their union. Proven by
+        # comparing against the first spotlight rendered alone: the pixel
+        # inside only the first rect must come out identically either way.
+        base = make_image(size=(100, 100))
+        first = Spotlight(colour=RED, stroke_width=4, start=QPointF(5, 5), end=QPointF(25, 25))
+        second = Spotlight(colour=RED, stroke_width=4, start=QPointF(60, 60), end=QPointF(90, 90))
+
+        together = render(base, [first, second])
+        alone = render(QImage(base), [first])
+
+        assert together.pixelColor(15, 15) == alone.pixelColor(15, 15)
+
+    def test_higher_strength_dims_more(self):
+        base = make_image(size=(80, 80))
+        rect = dict(start=QPointF(10, 10), end=QPointF(50, 40))
+        light = Spotlight(colour=RED, stroke_width=4, strength=Metric.BLUR_MIN, **rect)
+        heavy = Spotlight(colour=RED, stroke_width=4, strength=Metric.BLUR_MAX, **rect)
+
+        light_result = render(QImage(base), [light])
+        heavy_result = render(QImage(base), [heavy])
+
+        assert heavy_result.pixelColor(70, 70).red() < light_result.pixelColor(70, 70).red()
+
+    def test_default_strength_reproduces_the_selection_scrims_own_dim(self):
+        # "Something that still reads rather than black" is already this
+        # app's own answer for dimming outside a lit region -- the
+        # selection scrim's DIM_ALPHA -- not a new number invented here.
+        spot = Spotlight(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+
+        assert spot.strength == Metric.BLUR_DEFAULT
+        assert spot._alpha() == pytest.approx(Color.DIM_ALPHA)
+
+    def test_degenerate_rect_is_a_no_op(self):
+        base = make_image()
+        spot = Spotlight(colour=RED, stroke_width=4, start=QPointF(30, 30), end=QPointF(30, 30))
+
+        result = render(base, [spot])
+
+        assert result == base
+
+    def test_does_not_mutate_the_base_image(self):
+        base = make_gradient_image(size=(80, 80))
+        before = QImage(base)
+
+        render(base, [Spotlight(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(40, 40))])
+
+        assert base == before
+
+    def test_undo_removes_it(self):
+        # `MarkStore` is geometry-agnostic, so undoing an add is already
+        # covered generically in test_marks.py -- this is the acceptance
+        # criterion itself: undo a spotlight and its dim is gone from what
+        # actually renders, the same as removing it from the shape list by
+        # hand.
+        from snipux.marks import MarkStore
+
+        base = make_image(size=(80, 80))
+        store = MarkStore()
+        store.add(Spotlight(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 40)))
+
+        store.undo()
+
+        assert len(store) == 0
+        assert render(base, list(store.marks)) == base
 
 
 class TestRectangleGeometry:
@@ -1789,12 +1919,13 @@ class TestExportedLengths:
         # exported unscaled is 55% short, so 15% still catches it.
         assert abs(saved_pixels - seen_pixels) <= seen_pixels * 0.15
 
-    @pytest.mark.parametrize("kind", [Blur, Pixelate])
+    @pytest.mark.parametrize("kind", [Blur, Pixelate, Spotlight])
     def test_blur_strength_stays_in_the_frames_own_pixels(self, kind):
-        # The overlay bakes a blur into the frozen frame itself: the mark
-        # mapped into the frame's physical pixels, strength as it stands.
-        # An export that scaled strength with the lengths would come out
-        # blockier than the screen.
+        # The overlay bakes a blur (or a spotlight's dim) into the frozen
+        # frame itself: the mark mapped into the frame's physical pixels,
+        # strength as it stands. An export that scaled strength with the
+        # lengths would come out blockier -- or, for a spotlight, dimmer or
+        # fainter -- than the screen.
         image = make_gradient_image(size=self.PHYSICAL)
         mark = kind(
             colour=RED, stroke_width=4, start=QPointF(30, 20), end=QPointF(150, 90), strength=8

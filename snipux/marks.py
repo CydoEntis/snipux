@@ -335,6 +335,7 @@ REDACTION_TOOLS = {
     "blur": shapes_module.Blur,
     "pixelate": shapes_module.Pixelate,
     "blackout": shapes_module.Blackout,
+    "spotlight": shapes_module.Spotlight,
 }
 
 

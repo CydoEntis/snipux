@@ -44,6 +44,12 @@ use it; the commit history has the detail.
   fit the box rather than spilling out of it. Colour, fill, line style and
   size come from the same style popover every other shape uses, and the
   whole thing -- box, tail and words -- undoes and erases as one mark.
+- **Spotlight**, a fourth sibling on the redaction tool (B cycles to it
+  after Blackout). Drag a rectangle and everything outside it dims instead
+  of everything inside it being replaced -- the inverse of a redaction, for
+  pointing at one part of a snip rather than hiding one. Its strength
+  slider sets how strong the dim is. Several spotlights on one snip all
+  stay lit together.
 
 ## 0.8.2 — 2026-09-15
 
