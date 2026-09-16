@@ -162,7 +162,35 @@ section under the new version and date, next to the version bump in
 `pyproject.toml` and `snipux/__init__.py`. The changelog is for people who
 use the tool: say what they will see, not which module changed.
 
+## Standards
+
+The long-form rules live in `docs/`. Read the one that matches the job:
+
+- `docs/ARCHITECTURE.md` -- layers, dependency direction, known drift
+- `docs/CODE-STANDARDS.md` -- Python/PyQt6 style, coordinates, errors, tests
+- `docs/PATTERNS.md` -- how a feature flows: views, controller, backends, seam
+- `docs/STORAGE.md` -- `config.json` and every file snipux writes
+- `docs/ENVIRONMENT.md` -- setup, env vars, secrets (there are none)
+- `docs/PLATFORM-CAPABILITIES.md` -- every OS facility snipux touches
+- `docs/FEATURES.md` -- what exists and what is next
+- `docs/IMPLEMENTATION-PHASES.md` -- issue -> dev -> main, and the queue
+- `docs/COMMIT-STANDARDS.md` -- commit and PR format
+
 ## Commits
+
+**Every commit and PR title is a Conventional Commit:**
+`<type>(<scope>): <subject>` -- lowercase, imperative, at most 50
+characters, no trailing period. For example
+`fix(overlay): keep the loupe clear of the bar` or
+`feat(recording): pause and resume on linux`. Types are `feat`, `fix`,
+`refactor`, `perf`, `test`, `docs`, `style`, `build`, `ci`, `chore`; the
+scope is the area, usually the module name. The full list and the rules
+for bodies are in `docs/COMMIT-STANDARDS.md`. Plain-sentence subjects
+("Add a spotlight that...") are the old style; don't copy them from
+`git log`.
+
+Work goes on a branch off `dev` and lands by pull request. `main` moves
+only on a release.
 
 **Never add AI attribution to a commit or pull request.** No
 `Co-Authored-By: Claude` / `Codex` trailer, no `Claude-Session:` link, no

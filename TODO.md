@@ -40,7 +40,7 @@ is **settled** -- see "Export: decided" below. The *stills* destination
 model is still open, but it is a product question rather than a build one
 and nothing waits on it.
 
-**Everything is on `main`, pushed. There is no `dev` branch on this repo.**
+**Work now lands on `dev` by pull request; `main` moves only on a release** (see docs/IMPLEMENTATION-PHASES.md).
 
 ## The repository is public, MIT, and installed with one command
 
