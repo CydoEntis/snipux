@@ -19,6 +19,10 @@ use it; the commit history has the detail.
   resize it (it keeps its own proportions), and close it with Escape or the
   × that appears on hover. Right-click for Copy and Save. Greyed on Wayland,
   where an app can't place its own window or keep it on top.
+- **Nudge the selection with the arrow keys** — one logical pixel a press,
+  ten with Shift, for framing a region precisely without the mouse.
+  Alt+arrow resizes it instead, from the bottom-right corner. Both are in
+  the shortcuts overlay (`?`).
 
 ## 0.8.2 — 2026-09-15
 

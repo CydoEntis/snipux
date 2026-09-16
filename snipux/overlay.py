@@ -630,6 +630,19 @@ _COPY_TEXT_KEY = "X"
 _COPY_TEXT_TOOLTIP = f"Copy text — {_COPY_TEXT_KEY}"
 _COPY_TEXT_KEY_CODE = getattr(Qt.Key, f"Key_{_COPY_TEXT_KEY}")
 
+# Arrow keys nudge the selection one logical pixel per press; Alt+arrow
+# resizes it from the bottom-right corner instead -- see
+# OverlayWindow._nudge_selection. One (dx, dy) logical-pixel step per key,
+# before Shift/Alt scale or redirect what it does.
+_NUDGE_KEY_DELTAS = {
+    Qt.Key.Key_Left: (-1, 0),
+    Qt.Key.Key_Right: (1, 0),
+    Qt.Key.Key_Up: (0, -1),
+    Qt.Key.Key_Down: (0, 1),
+}
+_NUDGE_STEP = 1
+_NUDGE_STEP_SHIFT = 10
+
 
 def _tool_label(tool: str) -> str:
     """Human-facing text for a `tokens.TOOLS` entry.
@@ -4189,8 +4202,10 @@ class WatermarkMenu(_Chrome):
 class HintHUD(_Chrome):
     """The overlay's full-width top hint bar, per docs/design/overlay-
     redesign.md's "Top hint HUD" section: `Esc discard ink · Enter copy &
-    dismiss · P H R O L A S T B E pick a tool · drag any edge to re-frame -- the
-    ink stays where you put it`.
+    dismiss · P H R O L A S T B E pick a tool · drag any edge to re-frame ·
+    arrows nudge · Alt+arrows resize -- the ink stays where you put it`. The
+    last two segments are this file's own addition (#88) -- the spec
+    predates the feature and never named it.
 
     A real child widget of `OverlayWindow` -- built from real `QLabel`
     segments, not painted inside `OverlayWindow.paintEvent` -- the same
@@ -4220,11 +4235,11 @@ class HintHUD(_Chrome):
             ("Enter", True),
             (" copy & dismiss · ", False),
             (keys, True),
-            (
-                " pick a tool · drag any edge to re-frame — the ink"
-                " stays where you put it",
-                False,
-            ),
+            (" pick a tool · drag any edge to re-frame · ", False),
+            ("arrows", True),
+            (" nudge · ", False),
+            ("Alt+arrows", True),
+            (" resize — the ink stays where you put it", False),
         ]
 
     def __init__(self, parent=None):
@@ -4608,7 +4623,10 @@ class OverlayWindow(QWidget):
     `tokens.SHORTCUTS` and the redaction family's key, Ctrl+Z/Ctrl+Shift+Z
     for undo/redo, Enter to
     copy-and-dismiss, 1-7, [, ] and D for the active tool's style
-    (`StylePopover.handle_key`), `?` to reveal the hint HUD, and the two-stage Esc
+    (`StylePopover.handle_key`), `?` to reveal the hint HUD, arrow keys to
+    nudge the selection one logical pixel at a time (ten with Shift, and
+    resizing instead of moving with Alt -- `_nudge_selection`), and the
+    two-stage Esc
     (`_handle_escape`) the spec leaves for us to decide -- all of it
     suppressed while a slider or a text-editing widget has focus
     (`_shortcuts_suppressed`). `_close_button` (SNX-80) is Esc's visible
@@ -7711,6 +7729,19 @@ class OverlayWindow(QWidget):
             super().keyPressEvent(event)
             return
 
+        # Arrow keys nudge the selection (#88); Alt+arrow resizes it
+        # instead. Guarded on a real, confirmed selection -- not the live
+        # preview `_picking_window`/`_picking_monitor` set while a pick is
+        # still in progress, which nothing here should be walking around.
+        if (
+            key in _NUDGE_KEY_DELTAS
+            and self._selection is not None
+            and not self._picking_window
+            and not self._picking_monitor
+        ):
+            self._nudge_selection(key, modifiers)
+            return
+
         if key in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
             # Enter fires the stage's primary action, and on a recording
             # that is Record -- not Copy. Without this branch it took a
@@ -8181,6 +8212,53 @@ class OverlayWindow(QWidget):
             self.set_selection(None)
             return
         self._commit_selection(rect)
+
+    def _nudge_selection(self, key: int, modifiers) -> None:
+        """One arrow-key press (#88): move the selection by one logical
+        pixel, or by `_NUDGE_STEP_SHIFT` with Shift held, in `key`'s
+        direction. `self._selection` is already stored in this window's own
+        logical coordinate space -- the class docstring's "window
+        coordinates" -- so a step of `_NUDGE_STEP` logical pixels here is a
+        step of `_NUDGE_STEP` logical pixels at any display scale: there is
+        no physical-pixel size anywhere in this path to convert against and
+        get wrong.
+
+        Alt resizes instead of moving, from the bottom-right corner, by
+        reusing `_resize_selection` itself under a synthetic
+        `Handle.BOTTOM_RIGHT` drag -- one press is handed to it as a single
+        (already-anchored) drag-move, so a nudge stops at exactly the same
+        minimum size and desk-edge clamps a real drag does, with nothing
+        duplicated here. `_active_handle`/`_resize_anchor` are restored to
+        their idle `None` once it returns, matching every other path that
+        sets them only for the span of a drag.
+        """
+        step = _NUDGE_STEP_SHIFT if modifiers & Qt.KeyboardModifier.ShiftModifier else _NUDGE_STEP
+        dx, dy = _NUDGE_KEY_DELTAS[key]
+        dx, dy = dx * step, dy * step
+
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            anchor = QRectF(self._selection)
+            self._resize_anchor = QRect(self._selection)
+            self._active_handle = Handle.BOTTOM_RIGHT
+            self._resize_selection(QPointF(anchor.right() + dx, anchor.bottom() + dy))
+            self._active_handle = None
+            self._resize_anchor = None
+            return
+
+        rect = QRect(self._selection)
+        rect.translate(dx, dy)
+        # Same desk-edge bounds `_resize_selection` clamps a drag to (its
+        # steps 2-4): x >= 0, y >= the hint HUD's clearance when it's on
+        # screen to clear, and the rect stays inside the window -- the
+        # virtual desktop this single window spans in full (its own class
+        # docstring). Its step-5 bar-room clamp is deliberately not
+        # repeated here: that one only bites a resize that is actively
+        # growing the bottom edge, never a move that leaves the size alone.
+        top_clearance = self._TOP_CLEARANCE if self._hints_enabled else 0
+        x = max(0, min(rect.x(), self.width() - rect.width()))
+        y = max(top_clearance, min(rect.y(), self.height() - rect.height()))
+        rect.moveTo(x, y)
+        self.set_selection(rect)
 
     def _resize_selection(self, pos: QPointF) -> None:
         """Apply one drag-move of `self._active_handle` to the selection.
