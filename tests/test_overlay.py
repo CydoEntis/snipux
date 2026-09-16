@@ -7616,8 +7616,9 @@ class TestHintHUDComposition:
 
         assert text == (
             "Esc discard ink · Enter copy & dismiss · "
-            "P H R O L A S T B E I pick a tool · drag any edge to re-frame "
-            "— the ink stays where you put it"
+            "P H R O L A S T B E I pick a tool · drag any edge to re-frame · "
+            "arrows nudge · Alt+arrows resize"
+            " — the ink stays where you put it"
         )
 
     def test_key_segments_cover_esc_enter_and_every_tool_shortcut_in_order(self):
@@ -7629,6 +7630,8 @@ class TestHintHUDComposition:
             "Esc",
             "Enter",
             "P H R O L A S T B E I",
+            "arrows",
+            "Alt+arrows",
         ]
 
     def test_key_segments_are_set_in_the_mono_family_at_pure_white(self):
@@ -8036,6 +8039,161 @@ class TestKeyboardUndoRedo:
         )
 
         assert overlay.marks == (mark,)
+
+
+class TestKeyboardNudge:
+    """#88 AC: arrows move the selection one logical pixel (Shift: ten);
+    Alt+arrow resizes it instead, from the bottom-right corner, stopping at
+    the same minimum a drag stops at; movement clamps to the desktop edge
+    exactly as a drag does; nothing moves while a text mark is being typed
+    into.
+
+    Every assertion here reads `overlay._selection`, a plain `QRect` in
+    this window's own logical coordinate space (the class docstring's
+    "window coordinates") -- nothing in `_nudge_selection` ever touches an
+    image or a physical pixel, so a press moving it by exactly one unit
+    here is already one *logical* pixel at any display scale. This file's
+    `QT_SCALE_FACTOR=1.5` run (CONTRIBUTING.md) exercises these same
+    assertions unchanged, which is what "at 1.0 and 1.5" comes down to for
+    a path with no scale factor anywhere in it to get wrong.
+    """
+
+    def _overlay(self, size=(400, 400), selection=QRect(100, 100, 150, 100)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_right_moves_one_logical_pixel(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Right)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (101, 100)
+        assert (sel.width(), sel.height()) == (150, 100)
+
+    def test_all_four_arrows_move_one_pixel_each(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Left)
+        QTest.keyClick(overlay, Qt.Key.Key_Down)
+        QTest.keyClick(overlay, Qt.Key.Key_Left)
+        QTest.keyClick(overlay, Qt.Key.Key_Up)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (98, 100)
+        assert (sel.width(), sel.height()) == (150, 100)
+
+    def test_shift_arrow_moves_ten(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (100, 110)
+
+    def test_alt_right_grows_from_the_bottom_right_corner(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (100, 100)  # top-left anchor unmoved
+        assert (sel.width(), sel.height()) == (151, 100)
+
+    def test_alt_left_shrinks_from_the_bottom_right_corner(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Left, Qt.KeyboardModifier.AltModifier)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (100, 100)
+        assert (sel.width(), sel.height()) == (149, 100)
+
+    def test_alt_shift_resizes_by_ten(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(
+            overlay,
+            Qt.Key.Key_Down,
+            Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        sel = overlay._selection
+        assert (sel.width(), sel.height()) == (150, 110)
+
+    def test_alt_arrow_stops_at_the_same_minimum_a_drag_stops_at(self):
+        overlay = self._overlay(selection=QRect(100, 100, 18, 100))
+
+        for _ in range(3):
+            QTest.keyClick(overlay, Qt.Key.Key_Left, Qt.KeyboardModifier.AltModifier)
+
+        sel = overlay._selection
+        assert sel.x() == 100  # top-left anchor never moves for this handle
+        assert sel.width() == tokens.Metric.SEL_MIN_W == 16
+
+    def test_move_is_clamped_at_the_top_left_edge(self):
+        overlay = self._overlay(selection=QRect(5, 5, 150, 100))
+
+        for _ in range(20):
+            QTest.keyClick(overlay, Qt.Key.Key_Left)
+        for _ in range(20):
+            QTest.keyClick(overlay, Qt.Key.Key_Up)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (0, 0)
+        assert (sel.width(), sel.height()) == (150, 100)  # size untouched by a plain move
+
+    def test_move_is_clamped_at_the_bottom_right_edge(self):
+        overlay = self._overlay(size=(200, 200), selection=QRect(150, 150, 40, 40))
+
+        for _ in range(20):
+            QTest.keyClick(overlay, Qt.Key.Key_Right)
+        for _ in range(20):
+            QTest.keyClick(overlay, Qt.Key.Key_Down)
+
+        sel = overlay._selection
+        assert sel.x() == overlay.width() - sel.width() == 160
+        assert sel.y() == overlay.height() - sel.height() == 160
+
+    def test_a_selection_cannot_be_walked_off_the_desk(self):
+        # A whole desktop's worth of presses in one direction: whatever the
+        # window's size, this must still land exactly on the far edge, not
+        # past it.
+        overlay = self._overlay(size=(150, 150), selection=QRect(0, 0, 50, 50))
+
+        for _ in range(50):
+            QTest.keyClick(overlay, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+
+        sel = overlay._selection
+        assert sel.x() + sel.width() == overlay.width()
+
+    def test_the_size_chip_updates_from_a_nudge_without_a_mouse_release(self):
+        overlay = self._overlay()
+        before, _ = overlay._dimension_chip_texts()
+        assert before == "150 × 100"
+
+        QTest.keyClick(overlay, Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier)
+
+        after, _ = overlay._dimension_chip_texts()
+        assert after == "151 × 100"
+
+    def test_nothing_moves_while_typing_into_a_text_mark(self):
+        # Mirrors TestKeyboardToolShortcuts's/`?`'s own suppression cases:
+        # a QLineEdit given focus via setFocus() is enough for
+        # _shortcuts_suppressed() to see, without the window ever being
+        # shown.
+        overlay = self._overlay()
+        before = QRect(overlay._selection)
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Right)
+        QTest.keyClick(overlay, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+        QTest.keyClick(overlay, Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier)
+
+        assert overlay._selection == before
 
 
 class TestKeyboardEnter:
