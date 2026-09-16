@@ -28,6 +28,10 @@ use it; the commit history has the detail.
   system opens that kind of file with. A capture that only went to the
   clipboard adds nothing; a row whose file has moved, been renamed or been
   deleted quietly drops out.
+- **Land a recording straight to GIF**, no trip through the player. GIF now
+  sits alongside Copy/Save/Open on the record side, in the chooser and as a
+  default in Settings' Recording pane. Greyed with why on a machine with no
+  system ffmpeg to convert with.
 
 ## 0.8.2 — 2026-09-15
 

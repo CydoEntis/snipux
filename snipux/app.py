@@ -88,7 +88,13 @@ from snipux import __version__, design, handoff, platform, setup_desktop
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
 from snipux.recording import RecorderRegistry, RecordingError
 from snipux.pin import PinWindow
-from snipux.player import PlayerWindow
+from snipux.player import (
+    EXPORT_UNAVAILABLE,
+    FfmpegExporter,
+    PlayerWindow,
+    TrimState,
+    system_ffmpeg,
+)
 from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
 
@@ -225,6 +231,14 @@ _STARTING_LABEL = "Starting"
 # the backend anyway. It normally needs a frame or two; this only has to
 # be long enough that a slow compositor is not mistaken for a stuck one.
 _CHROME_PAINT_BUDGET_MS = 150
+
+# `_land_recording_as_gif` has no ground-truth duration for the file it is
+# converting -- getting one would mean decoding the recording first, the
+# way the player does with a live `QMediaPlayer`, just to throw the number
+# away a moment later. `FfmpegExporter`'s `-t` only ever caps the output;
+# ffmpeg stops at end of input regardless, so a cap well past any plausible
+# recording is exactly as correct as the real duration would have been.
+_GIF_LAND_DURATION_CAP_S = 6 * 60 * 60.0
 
 
 class _RecorderStarter(QObject):
@@ -1189,6 +1203,11 @@ class AppController:
         # something to remove once there is no recording left to stop.
         self._landed_recording: Path | None = None
         self._done_timer: QTimer | None = None
+        # The in-flight "gif" landing's converter -- held explicitly, the
+        # same as `player.py`'s own `self._exporter`, because a Qt parent
+        # keeps the C++ side alive but not the Python wrapper carrying this
+        # method's signal connections. See `_land_recording_as_gif`.
+        self._gif_exporter: FfmpegExporter | None = None
         # The red outline around what is being recorded. The overlay is
         # gone by then and took the frame with it, so without this there is
         # nothing on screen saying which region is live.
@@ -2637,11 +2656,12 @@ class AppController:
         guard is what keeps this from racing `_discard_recording()` over
         the same in-flight recording.
 
-        `_active_recording` is cleared only in the `finally`, after landing
-        has already run -- the ordering ticket 9 needs so that anything
-        this same call graph could still reach (a second `_stop_recording`,
-        a discard, another low-disk tick) never sees "no recording active"
-        while the file is still mid-move.
+        `_active_recording` is cleared only after landing has already run
+        (or, for "gif", after `backend.stop()` has -- see
+        `_land_recording_as_gif`) -- the ordering ticket 9 needs so that
+        anything this same call graph could still reach (a second
+        `_stop_recording`, a discard, another low-disk tick) never sees "no
+        recording active" while the file is still mid-move.
         """
         if self._starting_recording:
             # Pressed during the backend's start-up. There is nothing to
@@ -2661,20 +2681,28 @@ class AppController:
         self._teardown_recording_ui(keep_bar=True)
         backend, path, after = self._active_recording
         landed = None
+        stopped = True
         try:
             backend.stop()
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             self._report_shortcut(f"Stopping the recording failed: {exc}")
+            stopped = False
         else:
-            try:
-                landed = self._land_recording(path, after, reason=reason)
-            except OSError as exc:
-                self._report_shortcut(f"Saving the recording failed: {exc}")
-        finally:
-            self._active_recording = None
-            self._stopping_recording = False
+            # "gif" lands asynchronously (`_land_recording_as_gif` runs
+            # ffmpeg as a `QProcess`), so it cannot hand back a path here
+            # the way every other destination does -- it reports its own
+            # toast and finished bar once the convert actually finishes.
+            if after != "gif":
+                try:
+                    landed = self._land_recording(path, after, reason=reason)
+                except OSError as exc:
+                    self._report_shortcut(f"Saving the recording failed: {exc}")
+        self._active_recording = None
+        self._stopping_recording = False
 
-        if landed is None:
+        if stopped and after == "gif":
+            self._land_recording_as_gif(Path(path), elapsed, reason=reason)
+        elif landed is None:
             self._close_recording_bar()
         else:
             self._show_finished_bar(landed, elapsed, copied=after == "instant")
@@ -2715,8 +2743,10 @@ class AppController:
         without a second, separate notification for the same event.
 
         Called only from `_stop_recording()`, once `backend.stop()` has
-        already returned without raising -- never from `_discard_recording()`,
-        which deletes the temp file outright instead of landing it. Raises
+        already returned without raising -- or from `_land_recording_as_gif`'s
+        own no-encoder fallback, which only runs once that has already been
+        true -- never from `_discard_recording()`, which deletes the temp
+        file outright instead of landing it. Raises
         `OSError` uncaught -- `shutil.move` into a nearly-full save folder
         is exactly the failure ticket 9 needs reported, and `_stop_recording`
         is what catches it and turns it into a toast; this method itself
@@ -2775,6 +2805,87 @@ class AppController:
         else:
             self._report_shortcut(f"Recording saved to {destination}")
         return landed
+
+    def _land_recording_as_gif(
+        self, source: Path, elapsed: str, *, reason: str | None
+    ) -> None:
+        """The "gif" destination's `_land_recording`: convert instead of
+        move, through the player's own `FfmpegExporter` rather than a
+        second ffmpeg invocation -- the encoder gains a better palette or
+        frame rate, a GIF landed this way gets it too, for free.
+
+        Asynchronous, unlike every other destination: encoding even a short
+        clip is seconds, not milliseconds, and `FfmpegExporter` runs ffmpeg
+        as a `QProcess` precisely so that does not freeze the tray. It
+        cannot hand back a landed path the way `_land_recording` does, so
+        `_stop_recording()` calls this instead of showing the finished bar
+        itself -- `_on_gif_landed`/`_on_gif_land_failed` do that once the
+        process actually finishes.
+
+        Reached only once `backend.stop()` has already returned without
+        raising, same as `_land_recording`. The chooser and Settings both
+        gate offering "gif" on `system_ffmpeg()`, but its probe is cached
+        for the life of the process (its own docstring), so a binary
+        removed after that first probe is a real, if rare, race -- this
+        falls back to landing the plain recording rather than losing the
+        take.
+        """
+        binary = system_ffmpeg()
+        if binary is None:
+            self._report_shortcut(f"{EXPORT_UNAVAILABLE['gif']}.")
+            try:
+                landed = self._land_recording(str(source), "save", reason=reason)
+            except OSError as exc:
+                self._report_shortcut(f"Saving the recording failed: {exc}")
+                self._close_recording_bar()
+                return
+            self._show_finished_bar(landed, elapsed)
+            return
+
+        folder = setup_desktop.load_recording_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        destination = Path(
+            setup_desktop.preview_filename(
+                folder, setup_desktop.load_recording_filename_pattern(), extension="gif"
+            )
+        )
+        state = TrimState(
+            duration=_GIF_LAND_DURATION_CAP_S, start=0.0, end=_GIF_LAND_DURATION_CAP_S
+        )
+        exporter = FfmpegExporter(source, destination, state, "gif", muted=True, binary=binary)
+        self._gif_exporter = exporter
+        exporter.finished.connect(
+            lambda _written: self._on_gif_landed(source, destination, elapsed, reason=reason)
+        )
+        exporter.failed.connect(self._on_gif_land_failed)
+        exporter.start()
+
+    def _on_gif_landed(
+        self, source: Path, destination: Path, elapsed: str, *, reason: str | None
+    ) -> None:
+        """`_land_recording_as_gif`'s success path: the raw recording was
+        only ever staging for the GIF, so it is discarded rather than
+        landed alongside it -- landing both would defeat the point of a
+        destination that skips the trip through the player.
+        """
+        self._gif_exporter = None
+        source.unlink(missing_ok=True)
+        if reason is not None:
+            self._report_shortcut(f"{reason} Saved to {destination}")
+        else:
+            self._report_shortcut(f"Recording saved to {destination}")
+        self._show_finished_bar(destination, elapsed)
+
+    def _on_gif_land_failed(self, why: str) -> None:
+        """`_land_recording_as_gif`'s failure path. The raw recording is
+        left at its temp path rather than landed as a fallback here, the
+        same "left for the next sweep" outcome `_land_recording` itself
+        leaves a failed move in -- `_clean_up_crashed_recording_temp_files()`
+        takes it on the next startup either way.
+        """
+        self._gif_exporter = None
+        self._report_shortcut(f"Converting to GIF failed: {why}")
+        self._close_recording_bar()
 
     def _discard_recording(self) -> None:
         """Tray action (recording.md ticket 9): stop the in-progress
