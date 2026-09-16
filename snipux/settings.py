@@ -52,7 +52,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import design, platform, setup_desktop
+from . import design, platform, player, setup_desktop
 from .design import tokens
 from .platform.windows import HotkeyEventFilter
 from .winchrome import (
@@ -345,6 +345,10 @@ class RadioCard(QPushButton):
     its own sizeHint is for a text label it does not have -- so the height
     is taken from the layout explicitly, or the card collapses to a sliver
     with its contents clipped away.
+
+    `set_unavailable` greys a card whose behaviour cannot run on this
+    machine at all -- the Recording pane's GIF row, when there is no
+    ffmpeg to convert with.
     """
 
     def __init__(self, label: str, note: str, parent: QWidget | None = None):
@@ -376,17 +380,39 @@ class RadioCard(QPushButton):
             text.addWidget(self._sub)
         row.addLayout(text, 1)
 
+        self._unavailable_reason = ""
         self.setMinimumHeight(row.sizeHint().height())
         self.toggled.connect(lambda _checked: self._refresh())
         self._refresh()
 
+    def set_unavailable(self, reason: str) -> None:
+        """Grey the card and swap its note for `reason`, exactly as the
+        player's own export menu greys a row it cannot write -- a missing
+        row reads as a bug, a greyed one with a reason reads as a limit.
+
+        Unchecked and disabled rather than merely dimmed: a card the user
+        cannot pick must not also be the one `QButtonGroup.checkedId()`
+        reports as selected.
+        """
+        self._unavailable_reason = reason
+        self.setChecked(False)
+        self.setEnabled(False)
+        if self._sub is not None:
+            self._sub.setText(reason)
+        self._refresh()
+
     def _refresh(self) -> None:
         selected = self.isChecked()
+        unavailable = bool(self._unavailable_reason)
         self._ring.set_selected(selected)
-        self._title.setStyleSheet(
-            f"color: {tokens.Win.TEXT_PRIMARY if selected else tokens.Win.TEXT_BODY};"
-            " background: transparent;"
+        title_colour = (
+            tokens.Win.TEXT_FAINT if unavailable
+            else tokens.Win.TEXT_PRIMARY if selected
+            else tokens.Win.TEXT_BODY
         )
+        self._title.setStyleSheet(f"color: {title_colour}; background: transparent;")
+        if self._sub is not None and unavailable:
+            self._sub.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT}; background: transparent;")
         background = "#1e2229" if selected else "transparent"
         border = tokens.Win.CONTROL_BORDER_HOVER if selected else tokens.Win.SEGMENT_BORDER
         self.setStyleSheet(
@@ -1331,9 +1357,23 @@ class SettingsWindow(WinWindow):
         self._recording_after_group.setExclusive(True)
         recording_cards = []
         stored_after = setup_desktop.load_recording_after(self._config_dir)
+        # Qt has no GIF encoder (`QImageWriter` carries no such plugin), so
+        # landing one needs the system ffmpeg the player's own export row
+        # already gates on -- greyed here the same way, with the same
+        # wording, rather than a second check invented for this pane.
+        gif_reason = player.export_availability(False).get("gif", "")
+        if stored_after == "gif" and gif_reason:
+            # Stored on a machine that had ffmpeg, opened on one that does
+            # not: nothing here re-checks that box, so falling back to the
+            # ordinary default is what keeps `checkedId()` from landing on
+            # -1 -- every card unchecked -- the moment this pane is saved.
+            stored_after = tokens.RECORD_AFTER_DEFAULT
         for index, (identifier, label, note) in enumerate(tokens.RECORDING_AFTER):
             card = RadioCard(label, note)
-            card.setChecked(identifier == stored_after)
+            if identifier == "gif" and gif_reason:
+                card.set_unavailable(gif_reason)
+            else:
+                card.setChecked(identifier == stored_after)
             card.toggled.connect(lambda _c: self._mark_dirty())
             self._recording_after_group.addButton(card, index)
             recording_cards.append(card)

@@ -29,6 +29,7 @@ from snipux.design.tokens import (
 from snipux.shapes import (
     Arrow,
     Blur,
+    Callout,
     Crop,
     DROP_THRESHOLD,
     Ellipse,
@@ -39,6 +40,7 @@ from snipux.shapes import (
     Rectangle,
     Redact,
     Shape,
+    Spotlight,
     StepMarker,
     Text,
     Watermark,
@@ -48,6 +50,7 @@ from snipux.shapes import (
     render,
     render_selection,
     _line_pen,
+    _transformed,
 )
 
 BACKGROUND = qRgb(255, 255, 255)
@@ -783,6 +786,135 @@ class TestRedact:
         assert base == before
 
 
+class TestSpotlight:
+    """The inverse of Redact: dims everything *outside* its rect, and
+    leaves the inside alone.
+    """
+
+    def test_pixels_inside_are_untouched(self):
+        base = make_gradient_image(size=(80, 80))
+        spot = Spotlight(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 40))
+
+        result = render(base, [spot])
+
+        for x in (10, 30, 49):
+            for y in (10, 25, 39):
+                assert result.pixelColor(x, y) == base.pixelColor(x, y)
+
+    def test_pixels_outside_are_dimmed(self):
+        base = make_image(size=(80, 80))
+        spot = Spotlight(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 40))
+
+        result = render(base, [spot])
+        outside, before = result.pixelColor(70, 70), base.pixelColor(70, 70)
+
+        assert outside != before
+        # A translucent near-black laid over white: every channel drops.
+        assert outside.red() < before.red()
+        assert outside.green() < before.green()
+        assert outside.blue() < before.blue()
+
+    def test_two_spotlights_both_stay_lit(self):
+        # The property `apply_all` exists for: each rect stays lit even
+        # though neither spotlight knows about the other.
+        base = make_image(size=(100, 100))
+        first = Spotlight(colour=RED, stroke_width=4, start=QPointF(5, 5), end=QPointF(25, 25))
+        second = Spotlight(colour=RED, stroke_width=4, start=QPointF(60, 60), end=QPointF(90, 90))
+
+        result = render(base, [first, second])
+
+        assert result.pixelColor(15, 15) == base.pixelColor(15, 15)
+        assert result.pixelColor(75, 75) == base.pixelColor(75, 75)
+        # Between the two: dimmed, same as anywhere outside a single one.
+        assert result.pixelColor(40, 40) != base.pixelColor(40, 40)
+
+    def test_overlapping_spotlights_stay_lit_where_they_overlap(self):
+        # A plain even-odd path (`_paint_scrim`'s own trick) breaks here: a
+        # point inside both rects crosses the outer boundary and both
+        # holes -- three subpaths, an odd count -- and comes out filled
+        # again. `apply_all` builds the holes as a `QRegion` union first,
+        # so an overlap only ever merges.
+        base = make_image(size=(100, 100))
+        first = Spotlight(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 50))
+        second = Spotlight(colour=RED, stroke_width=4, start=QPointF(30, 30), end=QPointF(70, 70))
+
+        result = render(base, [first, second])
+
+        assert result.pixelColor(40, 40) == base.pixelColor(40, 40)  # the overlap
+        assert result.pixelColor(15, 15) == base.pixelColor(15, 15)  # first only
+        assert result.pixelColor(65, 65) == base.pixelColor(65, 65)  # second only
+        assert result.pixelColor(90, 90) != base.pixelColor(90, 90)  # outside both
+
+    def test_a_second_spotlight_does_not_redim_the_firsts_hole(self):
+        # Were each spotlight applied on its own turn rather than combined,
+        # the second one's "dim everything outside *my* rect" would darken
+        # the first one's hole again the moment it ran -- only the rects'
+        # intersection would stay lit instead of their union. Proven by
+        # comparing against the first spotlight rendered alone: the pixel
+        # inside only the first rect must come out identically either way.
+        base = make_image(size=(100, 100))
+        first = Spotlight(colour=RED, stroke_width=4, start=QPointF(5, 5), end=QPointF(25, 25))
+        second = Spotlight(colour=RED, stroke_width=4, start=QPointF(60, 60), end=QPointF(90, 90))
+
+        together = render(base, [first, second])
+        alone = render(QImage(base), [first])
+
+        assert together.pixelColor(15, 15) == alone.pixelColor(15, 15)
+
+    def test_higher_strength_dims_more(self):
+        base = make_image(size=(80, 80))
+        rect = dict(start=QPointF(10, 10), end=QPointF(50, 40))
+        light = Spotlight(colour=RED, stroke_width=4, strength=Metric.BLUR_MIN, **rect)
+        heavy = Spotlight(colour=RED, stroke_width=4, strength=Metric.BLUR_MAX, **rect)
+
+        light_result = render(QImage(base), [light])
+        heavy_result = render(QImage(base), [heavy])
+
+        assert heavy_result.pixelColor(70, 70).red() < light_result.pixelColor(70, 70).red()
+
+    def test_default_strength_reproduces_the_selection_scrims_own_dim(self):
+        # "Something that still reads rather than black" is already this
+        # app's own answer for dimming outside a lit region -- the
+        # selection scrim's DIM_ALPHA -- not a new number invented here.
+        spot = Spotlight(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(10, 10))
+
+        assert spot.strength == Metric.BLUR_DEFAULT
+        assert spot._alpha() == pytest.approx(Color.DIM_ALPHA)
+
+    def test_degenerate_rect_is_a_no_op(self):
+        base = make_image()
+        spot = Spotlight(colour=RED, stroke_width=4, start=QPointF(30, 30), end=QPointF(30, 30))
+
+        result = render(base, [spot])
+
+        assert result == base
+
+    def test_does_not_mutate_the_base_image(self):
+        base = make_gradient_image(size=(80, 80))
+        before = QImage(base)
+
+        render(base, [Spotlight(colour=RED, stroke_width=4, start=QPointF(0, 0), end=QPointF(40, 40))])
+
+        assert base == before
+
+    def test_undo_removes_it(self):
+        # `MarkStore` is geometry-agnostic, so undoing an add is already
+        # covered generically in test_marks.py -- this is the acceptance
+        # criterion itself: undo a spotlight and its dim is gone from what
+        # actually renders, the same as removing it from the shape list by
+        # hand.
+        from snipux.marks import MarkStore
+
+        base = make_image(size=(80, 80))
+        store = MarkStore()
+        store.add(Spotlight(colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 40)))
+
+        store.undo()
+
+        assert len(store) == 0
+        assert render(base, list(store.marks)) == base
+
+
 class TestRectangleGeometry:
     # #65 gave rectangles a fill. `outline` is the default, so a rectangle
     # made the way every caller made one before is still unfilled -- and so
@@ -820,6 +952,198 @@ class TestRectangleGeometry:
         corner_coverage = result.pixelColor(10, 10).green()
         edge_coverage = result.pixelColor(10, 30).green()
         assert corner_coverage > edge_coverage + 50
+
+
+class TestCalloutGeometry:
+    """`start` is the tail's own tip -- where the drag began -- and the
+    body is the drag's bounding rect, pulled in by `TAIL_LENGTH` at
+    whichever corner `start` sits on. See `Callout._geometry`.
+    """
+
+    def test_body_is_the_drag_inset_by_the_tail_notch(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        body = callout.body_rect()
+
+        assert body == QRectF(QPointF(10 + Callout.TAIL_LENGTH, 10 + Callout.TAIL_LENGTH),
+                               QPointF(110, 90))
+
+    def test_tail_tip_is_where_the_drag_began_not_where_it_ended(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        _body, tail = callout._geometry()
+
+        assert tail[0] == QPointF(10, 10)
+
+    def test_body_follows_whichever_corner_start_dragged_from(self):
+        # Dragged from the bottom-right this time: the notch -- and the
+        # tail -- move to that corner instead.
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(110, 90), end=QPointF(10, 10)
+        )
+
+        body = callout.body_rect()
+
+        assert body == QRectF(QPointF(10, 10),
+                               QPointF(110 - Callout.TAIL_LENGTH, 90 - Callout.TAIL_LENGTH))
+
+    def test_a_zero_width_drag_leaves_no_room_for_a_tail(self):
+        # Below DROP_THRESHOLD this never reaches finalize_mark, but
+        # _geometry itself must not produce a negative notch, or divide by
+        # zero, for a drag with no width to inset a corner from.
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(10, 90)
+        )
+
+        body, tail = callout._geometry()
+
+        assert body.width() == 0
+        assert tail is None
+
+
+class TestCalloutRendering:
+    def test_body_outline_is_painted_and_its_interior_is_not(self):
+        base = make_image(size=(200, 200))
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        result = render(base, [callout])
+
+        body = callout.body_rect()
+        assert result.pixelColor(round(body.left()), round(body.center().y())) == RED
+        assert result.pixelColor(
+            round(body.center().x()), round(body.center().y())
+        ) == QColor(BACKGROUND)
+
+    def test_the_tail_is_painted_from_its_tip_to_the_body(self):
+        base = make_image(size=(200, 200))
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        result = render(base, [callout])
+
+        _body, tail = callout._geometry()
+        tip, base_a = tail[0], tail[1]
+        midpoint = QPointF((tip.x() + base_a.x()) / 2, (tip.y() + base_a.y()) / 2)
+        assert result.pixelColor(round(midpoint.x()), round(midpoint.y())).green() < 128
+
+    def test_text_paints_inside_the_body_in_the_marks_colour(self):
+        base = make_image(size=(200, 200))
+        callout = Callout(
+            colour=RED, stroke_width=6, start=QPointF(10, 10), end=QPointF(150, 100),
+            text="Hi",
+        )
+
+        result = render(base, [callout])
+
+        rect = callout._text_rect(callout.body_rect())
+        metrics = QFontMetricsF(callout._font())
+        xs = range(int(rect.left()), int(rect.left() + metrics.horizontalAdvance("Hi")) + 1)
+        ys = range(int(rect.top()), int(rect.top() + metrics.height()) + 1)
+        painted = [result.pixelColor(x, y) for x in xs for y in ys]
+
+        assert any(p == RED for p in painted)
+
+    def test_empty_text_paints_no_glyphs(self):
+        base = make_image(size=(200, 200))
+        with_text = render(base, [Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(150, 100), text="X",
+        )])
+        without_text = render(base, [Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(150, 100), text="",
+        )])
+
+        assert with_text != without_text
+
+
+class TestCalloutWrapping:
+    """The wrap point depends on the font this mark actually draws with --
+    worked out from `QFontMetrics` below rather than assumed, per
+    CLAUDE.md: CI's Ubuntu runner only has DejaVu Sans, wider than this
+    desk's own font, and Windows rasterises text differently again.
+    """
+
+    def test_empty_text_wraps_to_no_lines(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(90, 70)
+        )
+
+        assert callout.wrapped_lines() == []
+
+    def test_text_narrower_than_the_body_stays_on_one_line(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(300, 200), text="Hi",
+        )
+
+        assert callout.wrapped_lines() == ["Hi"]
+
+    def test_long_text_wraps_without_losing_or_reordering_any_word(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(90, 70),
+            text="one two three four five six seven eight nine ten",
+        )
+        metrics = QFontMetricsF(callout._font())
+        max_width = callout._text_rect(callout.body_rect()).width()
+
+        lines = callout.wrapped_lines()
+
+        assert len(lines) > 1
+        assert " ".join(lines).split() == callout.text.split()
+        for line in lines:
+            assert metrics.horizontalAdvance(line) <= max_width + 0.5
+
+    def test_a_single_word_wider_than_the_body_gets_its_own_line(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(50, 70),
+            text="a supercalifragilisticexpialidocious word",
+        )
+
+        lines = callout.wrapped_lines()
+
+        assert "supercalifragilisticexpialidocious" in lines
+
+
+class TestCalloutHitTest:
+    def test_hits_the_body_outline_not_its_interior(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+        body = callout.body_rect()
+
+        assert callout.hit_test(QPointF(body.left(), body.center().y())) is True
+        assert callout.hit_test(body.center()) is False
+
+    def test_hits_the_tail(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+        _body, tail = callout._geometry()
+        tip, base_a = tail[0], tail[1]
+        midpoint = QPointF((tip.x() + base_a.x()) / 2, (tip.y() + base_a.y()) / 2)
+
+        assert callout.hit_test(midpoint) is True
+
+    def test_misses_well_clear_of_the_mark(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90)
+        )
+
+        assert callout.hit_test(QPointF(500, 500)) is False
+
+    def test_filled_callout_counts_its_interior_as_a_hit(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(10, 10), end=QPointF(110, 90),
+            fill="filled",
+        )
+        body = callout.body_rect()
+
+        assert callout.hit_test(body.center()) is True
 
 
 class TestFinalizeMark:
@@ -888,13 +1212,14 @@ class TestFinalizeMark:
         assert result.start == QPointF(50, 50)
         assert result.end == QPointF(10, 10)
 
-    @pytest.mark.parametrize("shape_class", [Ellipse, Line, Crop])
+    @pytest.mark.parametrize("shape_class", [Ellipse, Line, Crop, Callout])
     def test_restored_shape_tools_discard_a_stray_click(self, shape_class):
         # SNX-64: Ellipse/Line/Crop joined Arrow/Rectangle/ObscuringShape in
         # finalize_mark's drop-threshold check when they were wired up as
         # overlay.py mark tools -- a click too small to be a deliberate
         # drag must not leave an invisible mark behind for any of them,
-        # same as it already didn't for Rectangle.
+        # same as it already didn't for Rectangle. Callout joined the same
+        # group when it was added.
         tiny = shape_class(
             colour=RED, stroke_width=4, start=QPointF(10, 10),
             end=QPointF(10 + DROP_THRESHOLD, 10 + DROP_THRESHOLD),
@@ -910,6 +1235,20 @@ class TestFinalizeMark:
         # of "corners" at all) -- so, like Arrow, they come back exactly as
         # dragged.
         dragged_up_left = shape_class(
+            colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10)
+        )
+
+        result = finalize_mark(dragged_up_left)
+
+        assert result.start == QPointF(50, 50)
+        assert result.end == QPointF(10, 10)
+
+    def test_callout_keeps_its_corner_order_since_start_is_the_tail_tip(self):
+        # Unlike the shapes above, Callout's start isn't just "a corner" --
+        # it's where the drag began, the tail's own tip. Normalising it
+        # away the way Rectangle's is would silently move what the mark is
+        # pointing at.
+        dragged_up_left = Callout(
             colour=RED, stroke_width=4, start=QPointF(50, 50), end=QPointF(10, 10)
         )
 
@@ -1547,7 +1886,7 @@ class TestExportedLengths:
         assert abs(saved - seen) <= 1
 
     @pytest.mark.parametrize("width", [2, 5, 8])
-    @pytest.mark.parametrize("kind", ["text", "step", "crop"])
+    @pytest.mark.parametrize("kind", ["text", "step", "crop", "callout"])
     def test_a_label_badge_or_dashed_box_exports_the_size_the_screen_drew_it(self, kind, width):
         mark = {
             "text": lambda: Text(
@@ -1558,6 +1897,10 @@ class TestExportedLengths:
             ),
             "crop": lambda: Crop(
                 colour=RED, stroke_width=width, start=QPointF(30, 20), end=QPointF(170, 100)
+            ),
+            "callout": lambda: Callout(
+                colour=RED, stroke_width=width, start=QPointF(20, 20), end=QPointF(170, 100),
+                text="Hi",
             ),
         }[kind]()
 
@@ -1576,12 +1919,13 @@ class TestExportedLengths:
         # exported unscaled is 55% short, so 15% still catches it.
         assert abs(saved_pixels - seen_pixels) <= seen_pixels * 0.15
 
-    @pytest.mark.parametrize("kind", [Blur, Pixelate])
+    @pytest.mark.parametrize("kind", [Blur, Pixelate, Spotlight])
     def test_blur_strength_stays_in_the_frames_own_pixels(self, kind):
-        # The overlay bakes a blur into the frozen frame itself: the mark
-        # mapped into the frame's physical pixels, strength as it stands.
-        # An export that scaled strength with the lengths would come out
-        # blockier than the screen.
+        # The overlay bakes a blur (or a spotlight's dim) into the frozen
+        # frame itself: the mark mapped into the frame's physical pixels,
+        # strength as it stands. An export that scaled strength with the
+        # lengths would come out blockier -- or, for a spotlight, dimmer or
+        # fainter -- than the screen.
         image = make_gradient_image(size=self.PHYSICAL)
         mark = kind(
             colour=RED, stroke_width=4, start=QPointF(30, 20), end=QPointF(150, 90), strength=8
@@ -1628,12 +1972,39 @@ class TestExportedLengths:
             Arrow(colour=BLUE, stroke_width=width, start=QPointF(30, 100), end=QPointF(170, 40)),
             Text(colour=RED, stroke_width=width, text="Hi gy", point=QPointF(30, 40)),
             StepMarker(colour=BLUE, stroke_width=width, point=QPointF(140, 60), number=2),
+            Callout(colour=RED, stroke_width=width, start=QPointF(30, 20), end=QPointF(170, 100),
+                    text="Hi"),
         ]
 
         for mark in marks:
             expected = self.on_screen(mark, ratio=1.0, size=(200, 120)).copy(selection.toRect())
             exported = render_selection(frame, [mark], selection)
             assert exported.convertToFormat(expected.format()) == expected, type(mark).__name__
+
+
+class TestCalloutExportScaling:
+    """The ticket's own "exported at 1.0 and 1.5 display scaling with the
+    text the same size relative to its box in both": font size and the
+    body's own size are both lengths (`Callout._font`, `TAIL_LENGTH`) that
+    go through `_scaled` together with the crop's point-mapping, so their
+    *ratio* should survive a change of scale even though neither one does
+    on its own -- `render_selection`'s `_transformed` call is exercised
+    directly here, the same one it uses internally, rather than a second,
+    parallel scaling computation that could drift from it.
+    """
+
+    def test_ratios_match_between_1x_and_1_5x(self):
+        callout = Callout(
+            colour=RED, stroke_width=4, start=QPointF(20, 20), end=QPointF(160, 100), text="Hi",
+        )
+
+        def ratio_at(scale: float) -> float:
+            mapped = _transformed(
+                callout, lambda p: QPointF(p.x() * scale, p.y() * scale), scale
+            )
+            return mapped._font().pixelSize() / mapped.body_rect().height()
+
+        assert ratio_at(1.5) == pytest.approx(ratio_at(1.0), rel=0.05)
 
 
 # -- the watermark (#69) -------------------------------------------------------

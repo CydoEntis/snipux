@@ -49,6 +49,7 @@ from snipux.shapes import (
     Redact,
     Arrow,
     Blur,
+    Callout,
     Ellipse,
     Highlighter,
     Line,
@@ -56,6 +57,7 @@ from snipux.shapes import (
     Pen,
     Pixelate,
     Rectangle,
+    Spotlight,
     StepMarker,
     Text,
 )
@@ -1058,6 +1060,47 @@ class TestOverlayWindowObscuringMarks:
         rendered = pixel(overlay.grab().toImage(), 70, 70)
         assert rendered != raw
 
+    def test_committed_spotlight_dims_the_frame_immediately_after_release(self):
+        frame = make_gradient_frame()
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay._bar.select_tool("spotlight")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(120, 120))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
+
+        # Outside the dragged rect, deep enough that neither the selection
+        # frame nor a corner bracket (painted over the ink layer) could
+        # account for the difference.
+        raw = frame.image.pixelColor(170, 170)
+        rendered = pixel(overlay.grab().toImage(), 170, 170)
+        assert rendered != raw
+
+    def test_two_committed_spotlights_both_stay_lit_on_screen(self):
+        # The live-preview twin of test_shapes.py's
+        # TestSpotlight.test_two_spotlights_both_stay_lit: `_base_layer_image`
+        # has to make the same "combine, don't stack" call `render()` does,
+        # or a second spotlight redims the first one's hole the moment it
+        # is committed.
+        frame = make_gradient_frame(size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(
+            Spotlight(colour=QColor("#ff0000"), stroke_width=4,
+                      start=QPointF(10, 10), end=QPointF(50, 50))
+        )
+        overlay.add_mark(
+            Spotlight(colour=QColor("#ff0000"), stroke_width=4,
+                      start=QPointF(120, 120), end=QPointF(160, 160))
+        )
+
+        rendered = overlay.grab().toImage()
+
+        assert pixel(rendered, 30, 30) == pixel(frame.image, 30, 30)
+        assert pixel(rendered, 140, 140) == pixel(frame.image, 140, 140)
+        assert pixel(rendered, 90, 90) != pixel(frame.image, 90, 90)
+
     def test_committed_pixelate_shows_its_blocks_on_screen(self):
         # Same probe technique test_shapes.py's TestPixelateBlocky uses:
         # a coarser (higher-strength) downsample spans a wider block, so
@@ -1312,6 +1355,115 @@ class TestEraserTool:
     def test_cursor_is_a_pointer_over_the_selection_while_the_eraser_is_active(self):
         overlay = self._overlay(selection=QRect(50, 50, 100, 80))
         overlay.set_eraser_active(True)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        QTest.mouseMove(overlay, QPoint(100, 90))  # deep inside the selection
+
+        assert overlay.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
+class TestEyedropperTool:
+    """The eyedropper: `color_at` reads a pixel straight from `Frame.image`
+    -- never a `grab()`/repaint of this widget, and never a logical point
+    used as an image index directly, which is the coordinate-space bug a
+    fractionally-scaled monitor (GNOME's common 1.5x) would otherwise hide.
+    `pick_color_at` is `OverlayWindow.copy()`'s own shape -- clipboard, then
+    toast -- but for one pixel's hex instead of the whole selection's image,
+    and (per the ticket's "it creates no mark") never touches `_mark_store`.
+    """
+
+    MARKER = QColor(0, 255, 0)
+
+    def _overlay(self, selection=QRect(0, 0, 200, 200)):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_color_at_reads_the_frames_own_pixel_at_1x_scaling(self):
+        overlay = self._overlay()
+        overlay._frame.image.setPixelColor(40, 60, self.MARKER)
+
+        assert overlay.color_at(QPointF(40, 60)) == self.MARKER
+
+    def test_color_at_reads_the_correct_image_pixel_under_1_5x_scaling(self):
+        # Image is 1.5x logical size -- GNOME's common fractional-scaling
+        # case, and the one a naive "point used as an image index" bug
+        # would misread: image-pixel (150, 150) is logical (100, 100) here,
+        # not image-pixel (100, 100).
+        image = QImage(300, 300, QImage.Format.Format_RGB32)
+        image.fill(BASE_COLOR)
+        image.setPixelColor(150, 150, self.MARKER)
+        frame = Frame(image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 200, 200))
+
+        assert overlay.color_at(QPointF(100, 100)) == self.MARKER
+        # The bug this guards against: image-pixel (100, 100) -- what a
+        # naive "point used as an image index" read would return instead --
+        # is still the base colour, never the marker.
+        assert image.pixelColor(100, 100) == BASE_COLOR
+
+    def test_click_copies_the_hex_to_the_clipboard_lowercase(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_text_to_clipboard", lambda text: calls.append(text)
+        )
+        overlay = self._overlay()
+        overlay._frame.image.fill(QColor(0x3B, 0x82, 0xF6))  # the ticket's own #3b82f6
+        overlay.set_eyedropper_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert calls == ["#3b82f6"]
+
+    def test_click_with_eyedropper_inactive_copies_nothing(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            app_module, "copy_text_to_clipboard", lambda text: calls.append(text)
+        )
+        overlay = self._overlay()
+        # set_eyedropper_active is never called: default state is inactive.
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert calls == []
+
+    def test_the_tool_stays_active_after_a_click(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert overlay._eyedropper_active is True
+
+    def test_a_click_adds_nothing_to_the_undo_stack_or_marks(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        overlay.set_eyedropper_active(True)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+        assert overlay.marks == ()
+        assert overlay.can_undo is False
+
+    def test_pick_color_at_never_calls_add_mark(self, monkeypatch):
+        # Belt and suspenders on top of the undo-stack check above: nothing
+        # here goes through the one path every real mark is added by.
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        calls = []
+        overlay = self._overlay()
+        monkeypatch.setattr(overlay, "add_mark", lambda mark: calls.append(mark))
+
+        overlay.pick_color_at(QPointF(50, 50))
+
+        assert calls == []
+
+    def test_cursor_is_a_pointer_over_the_selection_while_the_eyedropper_is_active(self):
+        overlay = self._overlay(selection=QRect(50, 50, 100, 80))
+        overlay.set_eyedropper_active(True)
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
 
@@ -1632,6 +1784,107 @@ class TestDrawingTools:
         assert overlay._bar.active_tool == "text"  # the "P" shortcut never fired
 
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+
+    def test_callout_drag_opens_the_label_editor_with_no_mark_yet(self):
+        # Unlike Rectangle/Arrow, a callout's drag alone does not commit --
+        # see Callout's own docstring for why body/tail/text have to land
+        # in the store together, as one undo step.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+
+        assert overlay.marks == ()
+        assert overlay._text_edit is not None
+        assert not overlay._text_edit.isHidden()
+
+    def test_callout_commits_once_typed_and_editing_finishes(self):
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "Click here")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Callout)
+        assert mark.text == "Click here"
+        assert mark.start == QPointF(20, 20)  # the drag's own start -- the tail's tip
+        assert mark.end == QPointF(80, 60)
+        assert overlay._text_edit.isHidden()
+
+    def test_callout_with_nothing_typed_still_commits_body_and_tail(self):
+        # Unlike a bare Text label, an empty callout is still a real mark:
+        # the drag already placed a visible body and tail, so committing it
+        # is not conditioned on typing anything into it.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        assert len(overlay.marks) == 1
+        mark = overlay.marks[0]
+        assert isinstance(mark, Callout)
+        assert mark.text == ""
+
+    def test_callout_abandon_discards_the_half_typed_word_not_the_mark(self):
+        # SNX-79's Escape-abandons-a-label rule, applied to Callout: the
+        # word being typed is discarded, but the body and tail the drag
+        # already placed are not -- see Callout's own docstring for why
+        # this differs from a bare Text label, which never commits at all
+        # without a click landing outside it first.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "a draft nobody wants")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert len(overlay.marks) == 1
+        assert overlay.marks[0].text == ""
+
+    def test_one_undo_removes_the_whole_callout(self):
+        # The whole reason a callout beats an arrow plus a separate label:
+        # body, tail and text are one mark, so one undo takes all three.
+        overlay = self._overlay()
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._bar.select_tool("callout")
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+        QTest.mouseMove(overlay, QPoint(80, 60))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(80, 60))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+        assert len(overlay.marks) == 1
+
+        overlay.undo()
+
+        assert overlay.marks == ()
 
     def test_press_on_a_handle_resizes_and_commits_no_mark(self):
         overlay = self._overlay(selection=QRect(0, 0, 100, 100))
@@ -2569,7 +2822,7 @@ class TestToast:
 
 class TestFloatingBarComposition:
     """The stills bar is one row: the split action, a divider, Copy text, a
-    divider, seven tool slots, a divider, the style dot, a divider, then
+    divider, eight tool slots, a divider, the style dot, a divider, then
     undo and clear -- docs/design/bars/README.md section 2, with Copy text
     added past it (#82; see FloatingBar's own docstring). Built from real
     widgets rather than painted, so tooltips and hover come for free
@@ -2587,13 +2840,13 @@ class TestFloatingBarComposition:
 
         buttons = bar.findChildren(QPushButton)
 
-        # 7 slots + Copy text + the watermark + undo + clear == 11 on the
+        # 8 slots + Copy text + the watermark + undo + clear == 12 on the
         # overlay's bar. The destinations are one split action and the
         # style dot is a widget of its own, neither a QPushButton; the mode
         # chip and redo are built but not placed, since the handoff's
         # post-selection bar carries neither.
         visible = [button for button in buttons if not button.isHidden()]
-        assert len(visible) == 11
+        assert len(visible) == 12
         assert bar._action is not None
         assert bar._chip.isHidden()
         assert bar._redo_button.isHidden()
@@ -2616,7 +2869,7 @@ class TestFloatingBarComposition:
         bar = FloatingBar()
 
         assert list(bar._tool_buttons) == [
-            "pen", "highlighter", "shapes", "step", "text", "redact", "eraser"
+            "pen", "highlighter", "shapes", "step", "text", "redact", "eraser", "eyedropper"
         ]
 
     def test_the_row_reads_action_tools_style_then_history(self):
@@ -5197,6 +5450,16 @@ class TestOverlayWindowToasts:
         assert overlay._toast.isVisible()
         assert overlay._toast._text_label.text() == "Saved to ~/Pictures/snipux"
 
+    def test_pick_color_at_shows_what_was_copied(self, monkeypatch):
+        monkeypatch.setattr(app_module, "copy_text_to_clipboard", lambda text: None)
+        overlay = self._overlay()
+        overlay._frame.image.fill(QColor(0x3B, 0x82, 0xF6))
+
+        overlay.pick_color_at(QPointF(50, 50))
+
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Copied #3b82f6"
+
     def test_clear_shows_the_ink_cleared_toast(self):
         overlay = self._overlay()
         overlay.add_mark(
@@ -5644,12 +5907,13 @@ class TestCaptureModePopoverOverlayIntegration:
 class TestFamilyMenuComposition:
     """A family's menu carries every sibling, in the family's own order."""
 
-    def test_the_shapes_menu_lists_the_handoffs_four_shapes_and_no_crop(self):
+    def test_the_shapes_menu_lists_the_handoffs_shapes_and_no_crop(self):
         # #78: Crop was a fifth row, and it drew a dashed box that cropped
-        # nothing.
+        # nothing. Callout joined afterwards, named as a shape sibling by
+        # docs/design/bars/README.md:78.
         menu = FamilyMenu("shapes")
 
-        assert list(menu._rows) == ["rect", "ellipse", "line", "arrow"]
+        assert list(menu._rows) == ["rect", "ellipse", "line", "arrow", "callout"]
         assert "crop" not in tokens.TOOLS
         assert menu.width() == tokens.BarMetric.MENU_W_SHAPES
 
@@ -5658,17 +5922,20 @@ class TestFamilyMenuComposition:
 
         keys = {tool: row._shortcut for tool, row in menu._rows.items()}
 
-        assert keys == {"rect": "R", "ellipse": "O", "line": "L", "arrow": "A"}
+        assert keys == {
+            "rect": "R", "ellipse": "O", "line": "L", "arrow": "A", "callout": "C",
+        }
 
     def test_the_redaction_menu_says_what_each_one_guarantees(self):
         menu = FamilyMenu("redact")
 
-        assert list(menu._rows) == ["blur", "pixelate", "blackout"]
+        assert list(menu._rows) == ["blur", "pixelate", "blackout", "spotlight"]
         assert menu.width() == tokens.BarMetric.MENU_W_REDACT
         assert [row._note for row in menu._rows.values()] == [
             "Softens it — shapes still readable",
             "Blocky, obviously deliberate",
             "Solid bar. Nothing to reconstruct",
+            "Dims everything else, not this",
         ]
 
     @pytest.mark.parametrize(
@@ -5766,6 +6033,19 @@ class TestFamilyMenuOverlayIntegration:
         assert not menu.isVisible()
         slot = overlay._bar._tool_buttons["shapes"]
         assert slot._icon_name == "arrow"
+        assert slot.is_active
+
+    def test_callout_is_a_shapes_sibling_picked_like_the_others(self):
+        overlay = self._overlay()
+        menu = self._notch(overlay, "shapes")
+        assert "callout" in menu._rows
+
+        QTest.mouseClick(menu._rows["callout"], Qt.MouseButton.LeftButton)
+
+        assert overlay._bar.active_tool == "callout"
+        assert not menu.isVisible()
+        slot = overlay._bar._tool_buttons["shapes"]
+        assert slot._icon_name == "callout"
         assert slot.is_active
 
     def test_the_slot_arms_whichever_sibling_was_used_last(self):
@@ -7485,9 +7765,9 @@ class TestChipsExcludedFromExport:
 class TestHintHUDComposition:
     """SNX-46: the standalone `HintHUD` widget's content -- the exact hint
     line from docs/design/overlay-redesign.md's "Top hint HUD" section, with
-    key names (`Esc`, `Enter`, the eight tool shortcuts) set apart from the
-    surrounding prose by family and colour, per "Key names are mono in pure
-    white."
+    key names (`Esc`, `Enter`, the tool shortcuts -- Callout's `C` among
+    them since it joined the shapes family) set apart from the surrounding
+    prose by family and colour, per "Key names are mono in pure white."
     """
 
     def test_reads_the_full_hint_line(self):
@@ -7497,8 +7777,9 @@ class TestHintHUDComposition:
 
         assert text == (
             "Esc discard ink · Enter copy & dismiss · "
-            "P H R O L A S T B E pick a tool · drag any edge to re-frame "
-            "— the ink stays where you put it"
+            "P H R O L A C S T B E I pick a tool · drag any edge to re-frame · "
+            "arrows nudge · Alt+arrows resize"
+            " — the ink stays where you put it"
         )
 
     def test_key_segments_cover_esc_enter_and_every_tool_shortcut_in_order(self):
@@ -7509,7 +7790,9 @@ class TestHintHUDComposition:
         assert key_texts == [
             "Esc",
             "Enter",
-            "P H R O L A S T B E",
+            "P H R O L A C S T B E I",
+            "arrows",
+            "Alt+arrows",
         ]
 
     def test_key_segments_are_set_in_the_mono_family_at_pure_white(self):
@@ -7859,7 +8142,7 @@ class TestKeyboardToolShortcuts:
         overlay = self._overlay()
 
         seen = []
-        for _ in range(4):
+        for _ in range(5):
             QTest.keyClick(overlay, Qt.Key.Key_B)
             seen.append(
                 (overlay._bar.active_tool, overlay._bar._tool_buttons["redact"]._icon_name)
@@ -7869,6 +8152,7 @@ class TestKeyboardToolShortcuts:
             ("blur", "blur"),
             ("pixelate", "mask"),
             ("blackout", "blackout"),
+            ("spotlight", "eye"),
             ("blur", "blur"),
         ]
 
@@ -7917,6 +8201,161 @@ class TestKeyboardUndoRedo:
         )
 
         assert overlay.marks == (mark,)
+
+
+class TestKeyboardNudge:
+    """#88 AC: arrows move the selection one logical pixel (Shift: ten);
+    Alt+arrow resizes it instead, from the bottom-right corner, stopping at
+    the same minimum a drag stops at; movement clamps to the desktop edge
+    exactly as a drag does; nothing moves while a text mark is being typed
+    into.
+
+    Every assertion here reads `overlay._selection`, a plain `QRect` in
+    this window's own logical coordinate space (the class docstring's
+    "window coordinates") -- nothing in `_nudge_selection` ever touches an
+    image or a physical pixel, so a press moving it by exactly one unit
+    here is already one *logical* pixel at any display scale. This file's
+    `QT_SCALE_FACTOR=1.5` run (CONTRIBUTING.md) exercises these same
+    assertions unchanged, which is what "at 1.0 and 1.5" comes down to for
+    a path with no scale factor anywhere in it to get wrong.
+    """
+
+    def _overlay(self, size=(400, 400), selection=QRect(100, 100, 150, 100)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def test_right_moves_one_logical_pixel(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Right)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (101, 100)
+        assert (sel.width(), sel.height()) == (150, 100)
+
+    def test_all_four_arrows_move_one_pixel_each(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Left)
+        QTest.keyClick(overlay, Qt.Key.Key_Down)
+        QTest.keyClick(overlay, Qt.Key.Key_Left)
+        QTest.keyClick(overlay, Qt.Key.Key_Up)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (98, 100)
+        assert (sel.width(), sel.height()) == (150, 100)
+
+    def test_shift_arrow_moves_ten(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (100, 110)
+
+    def test_alt_right_grows_from_the_bottom_right_corner(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (100, 100)  # top-left anchor unmoved
+        assert (sel.width(), sel.height()) == (151, 100)
+
+    def test_alt_left_shrinks_from_the_bottom_right_corner(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Left, Qt.KeyboardModifier.AltModifier)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (100, 100)
+        assert (sel.width(), sel.height()) == (149, 100)
+
+    def test_alt_shift_resizes_by_ten(self):
+        overlay = self._overlay()
+
+        QTest.keyClick(
+            overlay,
+            Qt.Key.Key_Down,
+            Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        sel = overlay._selection
+        assert (sel.width(), sel.height()) == (150, 110)
+
+    def test_alt_arrow_stops_at_the_same_minimum_a_drag_stops_at(self):
+        overlay = self._overlay(selection=QRect(100, 100, 18, 100))
+
+        for _ in range(3):
+            QTest.keyClick(overlay, Qt.Key.Key_Left, Qt.KeyboardModifier.AltModifier)
+
+        sel = overlay._selection
+        assert sel.x() == 100  # top-left anchor never moves for this handle
+        assert sel.width() == tokens.Metric.SEL_MIN_W == 16
+
+    def test_move_is_clamped_at_the_top_left_edge(self):
+        overlay = self._overlay(selection=QRect(5, 5, 150, 100))
+
+        for _ in range(20):
+            QTest.keyClick(overlay, Qt.Key.Key_Left)
+        for _ in range(20):
+            QTest.keyClick(overlay, Qt.Key.Key_Up)
+
+        sel = overlay._selection
+        assert (sel.x(), sel.y()) == (0, 0)
+        assert (sel.width(), sel.height()) == (150, 100)  # size untouched by a plain move
+
+    def test_move_is_clamped_at_the_bottom_right_edge(self):
+        overlay = self._overlay(size=(200, 200), selection=QRect(150, 150, 40, 40))
+
+        for _ in range(20):
+            QTest.keyClick(overlay, Qt.Key.Key_Right)
+        for _ in range(20):
+            QTest.keyClick(overlay, Qt.Key.Key_Down)
+
+        sel = overlay._selection
+        assert sel.x() == overlay.width() - sel.width() == 160
+        assert sel.y() == overlay.height() - sel.height() == 160
+
+    def test_a_selection_cannot_be_walked_off_the_desk(self):
+        # A whole desktop's worth of presses in one direction: whatever the
+        # window's size, this must still land exactly on the far edge, not
+        # past it.
+        overlay = self._overlay(size=(150, 150), selection=QRect(0, 0, 50, 50))
+
+        for _ in range(50):
+            QTest.keyClick(overlay, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+
+        sel = overlay._selection
+        assert sel.x() + sel.width() == overlay.width()
+
+    def test_the_size_chip_updates_from_a_nudge_without_a_mouse_release(self):
+        overlay = self._overlay()
+        before, _ = overlay._dimension_chip_texts()
+        assert before == "150 × 100"
+
+        QTest.keyClick(overlay, Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier)
+
+        after, _ = overlay._dimension_chip_texts()
+        assert after == "151 × 100"
+
+    def test_nothing_moves_while_typing_into_a_text_mark(self):
+        # Mirrors TestKeyboardToolShortcuts's/`?`'s own suppression cases:
+        # a QLineEdit given focus via setFocus() is enough for
+        # _shortcuts_suppressed() to see, without the window ever being
+        # shown.
+        overlay = self._overlay()
+        before = QRect(overlay._selection)
+        label = QLineEdit(overlay)
+        label.setFocus()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Right)
+        QTest.keyClick(overlay, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+        QTest.keyClick(overlay, Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier)
+
+        assert overlay._selection == before
 
 
 class TestKeyboardEnter:
