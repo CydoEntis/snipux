@@ -727,7 +727,7 @@ class RecordingBar(QWidget):
       with trim and GIF export, which the handoff says is described but not
       designed, and trimming is separately deferred.
 
-    **Pause** (SNX-128) is built: a control on the `live` state, beside
+    **Pause** (#87) is built: a control on the `live` state, beside
     Stop, that always names what a click does next -- "Pause", then
     "Resume · 0:12" once paused. Whether the active backend can honour it
     at all is `RecordingBackend.can_pause`, a capability the backend

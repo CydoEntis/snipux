@@ -1979,7 +1979,7 @@ class FakeRecordingBackend(RecordingBackend):
         self._stop_error = stop_error
         self.can_pause = can_pause
         # What pause() reports -- False is how a test drives the "Qt's own
-        # pause() silently did nothing" case SNX-128's toast exists for.
+        # pause() silently did nothing" case #87's toast exists for.
         self._pause_result = pause_result
         self.start_calls = []
         self.stop_calls = []
@@ -2718,7 +2718,7 @@ class _FakeClock:
 
 
 class TestAppControllerPauseRecording:
-    """SNX-128: the HUD's Pause control, wired to whichever backend
+    """#87: the HUD's Pause control, wired to whichever backend
     actually started -- `RecordingBackend.can_pause` decides whether a
     click can do anything, and `pause()`'s own return value decides
     whether a backend that silently ignored the request gets believed.

@@ -315,7 +315,7 @@ post-selection flow changed and none of it has run there:
   and nothing has ever verified that choosing one changes what is
   recorded;
 - stopping leaves the bar up for six seconds with a summary and Discard;
-- **pause/resume (SNX-128) has never run against a real recorder.** Tests
+- **pause/resume (#87) has never run against a real recorder.** Tests
   cover both paths with faked frames and a faked `QMediaRecorder`, but
   whether `QMediaRecorder.pause()` genuinely pauses on this box's Media
   Foundation build, and whether a paused-then-resumed region recording

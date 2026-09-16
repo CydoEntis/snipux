@@ -92,7 +92,7 @@ class TestRecordingBackendIsAbstract:
 
 
 class TestRecordingBackendPauseCapability:
-    """SNX-128: `can_pause` is the shape a capability flag already takes on
+    """#87: `can_pause` is the shape a capability flag already takes on
     this ABC (`starts_off_thread`) -- off by default, so a backend that
     never declares it never claims it silently.
     """
@@ -696,7 +696,7 @@ class TestGnomeScreencastBackendStop:
             GnomeScreencastBackend().stop()
 
     def test_cannot_pause(self):
-        # SNX-128: org.gnome.Shell.Screencast has no pause call at all --
+        # #87: org.gnome.Shell.Screencast has no pause call at all --
         # this ticket's answer for Linux is the ABC's own default, not an
         # override here. #93 is what would change it.
         assert GnomeScreencastBackend().can_pause is False
@@ -1287,7 +1287,7 @@ class TestRegionCropWorker:
 
 
 class TestRegionCropWorkerPause:
-    """SNX-128: `QScreenCapture` never stops delivering frames, so pausing
+    """#87: `QScreenCapture` never stops delivering frames, so pausing
     the region path means not forwarding them, and resuming means shifting
     every later frame's timestamp back by however long that gap lasted --
     a paused recording has to come out as absent time, never a frozen
@@ -1501,7 +1501,7 @@ class TestWindowsRecorderBackendAvailability:
         assert backend.unavailable_reason() is not None
 
     def test_can_pause_on_both_paths(self):
-        # SNX-128's acceptance criterion, both Windows paths: declared once
+        # #87's acceptance criterion, both Windows paths: declared once
         # on the backend, not per path -- pause()/resume() are what branch
         # on which path is actually live.
         backend = WindowsRecorderBackend()

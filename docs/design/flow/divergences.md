@@ -101,10 +101,10 @@ things the handoff itself leaves unresolved.
   behaves as a region drag in the prototype. It was removed (#42) rather
   than designed.
 
-**Pause/resume was on this list too, until SNX-128.** The handoff's own
+**Pause/resume was on this list too, until #87.** The handoff's own
 "Still open" #2 never said whether a paused recording is one continuous
 file or segments concatenated on stop -- that was the open question, and
-SNX-128 answered it: whether a backend can pause at all is a capability it
+#87 answered it: whether a backend can pause at all is a capability it
 declares (`RecordingBackend.can_pause`), defaulting to cannot, the same
 shape `starts_off_thread` already takes on that class. Windows answers yes
 on both its paths (the region path holds frames back and shifts later

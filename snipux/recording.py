@@ -822,7 +822,7 @@ class _RegionCropWorker(QObject):
     since coalescing is a deliberate output-side choice that must not feed
     back into what rate this claims frames arrived at.
 
-    `pause()`/`resume()` (SNX-128) are how the region path answers
+    `pause()`/`resume()` (#87) are how the region path answers
     `RecordingBackend.can_pause`: `QScreenCapture` never stops delivering
     frames, so pausing here means simply not forwarding them, and resuming
     means shifting every later frame's timestamp back by however long that

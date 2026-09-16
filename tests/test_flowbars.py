@@ -242,7 +242,7 @@ class TestAudio:
 
 
 class TestPause:
-    """SNX-128: whether a click on this control does anything is
+    """#87: whether a click on this control does anything is
     `RecordingBackend.can_pause`, answered by `app.py` and applied here
     through `set_pause_enabled` -- the same "the bar renders it, the
     caller decides it" split `TestAudio` already covers for GNOME's
