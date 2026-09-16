@@ -113,6 +113,8 @@ Habits that actually catch things here:
 ## Before you open a pull request
 
 1. Both test runs above are green.
+1. Commits and the PR title follow `docs/COMMIT-STANDARDS.md`:
+   `<type>(<scope>): <subject>`, e.g. `fix(capture): keep the toolbar on its monitor`.
 2. New behaviour is verified against something real, not only against the suite
    — see above.
 3. If you changed anything with a locked design handoff under `docs/design/`,
