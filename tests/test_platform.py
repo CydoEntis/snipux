@@ -865,7 +865,10 @@ class _FakeShellLinkCom:
 
     _HRESULT = ctypes.c_long
 
-    def __init__(self, fail_save=False):
+    def __init__(self, fail_save=False, has_property_store=True):
+        self.app_id = None
+        self.committed = False
+        self._has_property_store = has_property_store
         self.path = None
         self.description = None
         self.icon_location = None
@@ -875,6 +878,7 @@ class _FakeShellLinkCom:
         self._keepalive = []  # ctypes callback trampolines must outlive the calls
         self.shell_link = self._build_shell_link_vtable()
         self.persist_file = self._build_persist_file_vtable()
+        self.property_store = self._build_property_store_vtable()
 
     def _vtable(self, size, slots):
         entries = [0] * size
@@ -895,8 +899,18 @@ class _FakeShellLinkCom:
         # already points windows.ctypes.WINFUNCTYPE at ctypes.CFUNCTYPE for
         # every platform, so _create_shortcut() calls back into these slots
         # with the same convention they were built with either way.
-        def query_interface(_this, _riid, out):
-            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = self.persist_file.value
+        def query_interface(_this, riid, out):
+            # Answer by IID, as the real object does: `_create_shortcut`
+            # asks for two different interfaces on it.
+            guid = ctypes.cast(riid, ctypes.POINTER(windows._GUID))[0]
+            asked = bytes(guid)
+            if asked == bytes(windows._guid(windows._IID_IPERSISTFILE)):
+                found = self.persist_file
+            elif asked == bytes(windows._guid(windows._IID_IPROPERTYSTORE)) and self._has_property_store:
+                found = self.property_store
+            else:
+                return ctypes.c_long(0x80004002).value  # E_NOINTERFACE
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = found.value
             return 0
 
         def release(_this):
@@ -954,6 +968,36 @@ class _FakeShellLinkCom:
         )
 
 
+    def _build_property_store_vtable(self):
+        def release(_this):
+            self.released.append("property_store")
+            return 0
+
+        def set_value(_this, key_ptr, value_ptr):
+            key = ctypes.cast(key_ptr, ctypes.POINTER(windows._PropertyKey))[0]
+            value = ctypes.cast(value_ptr, ctypes.POINTER(windows._PropVariant))[0]
+            fmtid, pid = windows._PKEY_APP_USER_MODEL_ID
+            if bytes(key.fmtid) == bytes(windows._guid(fmtid)) and key.pid == pid:
+                assert value.vt == windows._VT_LPWSTR
+                self.app_id = value.pwszVal
+            return 0
+
+        def commit(_this):
+            self.committed = True
+            return 0
+
+        return self._vtable(
+            8,
+            {
+                2: ctypes.CFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(release),
+                6: ctypes.CFUNCTYPE(
+                    self._HRESULT, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+                )(set_value),
+                7: ctypes.CFUNCTYPE(self._HRESULT, ctypes.c_void_p)(commit),
+            },
+        )
+
+
 def _patch_windows_com(monkeypatch, fake=None, *, cocreate_hresult=0):
     """Points `windows.ctypes.windll.ole32` at a fake `CoCreateInstance`
     that hands back `fake.shell_link` (a real vtable-shaped COM double --
@@ -979,6 +1023,47 @@ def _patch_windows_com(monkeypatch, fake=None, *, cocreate_hresult=0):
     )
     monkeypatch.setattr(windows.ctypes, "windll", SimpleNamespace(ole32=ole32), raising=False)
     monkeypatch.setattr(windows.ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE, raising=False)
+
+
+class TestShortcutAppId:
+    """The shortcuts carry the process's AppUserModelID, so the taskbar
+    shows one Snipux with its own icon, not a Python one beside it."""
+
+    def test_the_shortcut_is_stamped_with_snipuxs_app_id(self, monkeypatch):
+        fake = _FakeShellLinkCom()
+        _patch_windows_com(monkeypatch, fake)
+
+        windows._create_shortcut(Path("C:/x/snipux.lnk"), Path("C:/x/snipux.exe"))
+
+        assert fake.app_id == windows.APP_USER_MODEL_ID
+        assert fake.committed
+        assert "property_store" in fake.released
+
+    def test_a_shell_without_a_property_store_still_saves_the_shortcut(self, monkeypatch):
+        fake = _FakeShellLinkCom(has_property_store=False)
+        _patch_windows_com(monkeypatch, fake)
+
+        result = windows._create_shortcut(Path("C:/x/snipux.lnk"), Path("C:/x/snipux.exe"))
+
+        assert result is True
+        assert fake.app_id is None
+        assert fake.saved_to is not None
+
+
+class TestAppIdentity:
+    def test_windows_names_the_process_before_any_window(self, monkeypatch):
+        calls = []
+        shell32 = SimpleNamespace(SetCurrentProcessExplicitAppUserModelID=lambda app_id: calls.append(app_id))
+        monkeypatch.setattr(windows.ctypes, "windll", SimpleNamespace(shell32=shell32), raising=False)
+
+        windows.WindowsPlatform().set_app_identity()
+
+        assert calls == [windows.APP_USER_MODEL_ID]
+
+    def test_a_refused_identity_is_not_an_error(self, monkeypatch):
+        monkeypatch.setattr(windows.ctypes, "windll", SimpleNamespace(), raising=False)
+
+        windows.WindowsPlatform().set_app_identity()
 
 
 class TestCreateShortcut:
@@ -1007,10 +1092,10 @@ class TestCreateShortcut:
         assert fake.description == "snipux"
         assert fake.icon_location == (str(icon_path), 0)
         assert fake.saved_to == str(lnk_path)
-        # Both interfaces released, not just the one _create_shortcut asked
+        # Every interface released, not just the one _create_shortcut asked
         # CoCreateInstance for -- a leaked COM reference on every --setup
         # run is exactly the kind of bug this fake exists to catch.
-        assert fake.released == ["persist_file", "shell_link"]
+        assert fake.released == ["property_store", "persist_file", "shell_link"]
 
     def test_no_description_or_icon_skips_those_calls(self, monkeypatch):
         fake = _FakeShellLinkCom()
@@ -1040,7 +1125,7 @@ class TestCreateShortcut:
         # Still released, even on failure -- a leak on the failure path
         # would be worse than one on the happy path, since a broken
         # shortcut is exactly when --setup is likely to be run again.
-        assert fake.released == ["persist_file", "shell_link"]
+        assert fake.released == ["property_store", "persist_file", "shell_link"]
 
 
 class TestWriteAndRemoveIcon:

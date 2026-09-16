@@ -79,6 +79,9 @@ use it; the commit history has the detail.
   of the snip either way.
 - **The eyedropper looks like an eyedropper.** Its button showed a plain
   slanted bar, easy to mistake for the pen beside it; it is a pipette now.
+- **Snipux's own icon in the Windows taskbar.** Its windows showed the
+  Python logo there. Run `snipux --setup` once after updating so the Start
+  Menu and Startup shortcuts match.
 
 ## 0.8.2 — 2026-09-15
 

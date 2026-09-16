@@ -266,6 +266,16 @@ _IID_ISHELLLINKW = "{000214F9-0000-0000-C000-000000000046}"
 _IID_IPERSISTFILE = "{0000010B-0000-0000-C000-000000000046}"
 _CLSCTX_INPROC_SERVER = 0x1
 
+# The taskbar groups windows, and picks their icon, by AppUserModelID. With
+# none set it uses the executable's -- pythonw.exe's, the Python logo -- so
+# the process and its shortcuts all carry this one. Changing it splits
+# existing pinned shortcuts from the running app until `--setup` reruns.
+APP_USER_MODEL_ID = "CydoEntis.Snipux"
+_IID_IPROPERTYSTORE = "{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}"
+# PKEY_AppUserModel_ID (propkey.h): the shortcut's copy of the ID above.
+_PKEY_APP_USER_MODEL_ID = ("{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}", 5)
+_VT_LPWSTR = 31
+
 # IShellLinkW/IPersistFile vtable slot indices -- the offsets `_com_call`
 # below reads a function pointer out of, in the order shobjidl_core.h and
 # objidl.h declare them. Every COM interface is-a IUnknown, so slot 0 is
@@ -280,6 +290,57 @@ _ISHELLLINKW_SET_DESCRIPTION = 7
 _ISHELLLINKW_SET_ICON_LOCATION = 17
 _ISHELLLINKW_SET_PATH = 20
 _IPERSISTFILE_SAVE = 6
+_IPROPERTYSTORE_SET_VALUE = 6
+_IPROPERTYSTORE_COMMIT = 7
+
+
+class _PropertyKey(ctypes.Structure):
+    """`PROPERTYKEY` (wtypes.h)."""
+
+    _fields_ = [("fmtid", _GUID), ("pid", ctypes.c_uint32)]
+
+
+class _PropVariant(ctypes.Structure):
+    """Just enough of `PROPVARIANT` (propidl.h) to carry one string: the
+    16-bit type tag, three reserved words, then the value. The trailing
+    pointer pads it to the real 16/24-byte size, which `SetValue` copies.
+    """
+
+    _fields_ = [
+        ("vt", ctypes.c_uint16),
+        ("reserved1", ctypes.c_uint16),
+        ("reserved2", ctypes.c_uint16),
+        ("reserved3", ctypes.c_uint16),
+        ("pwszVal", ctypes.c_wchar_p),
+        ("padding", ctypes.c_void_p),
+    ]
+
+
+def _set_shortcut_app_id(shell_link: ctypes.c_void_p, app_id: str) -> bool:
+    """Stamp `app_id` on a shortcut being built, so the taskbar treats it
+    and the running process as one app. False, never an exception, if the
+    shell refuses: the shortcut still works, it just groups separately.
+    """
+    query_interface = _com_call(
+        shell_link, _QUERY_INTERFACE, ctypes.c_long,
+        ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p),
+    )
+    store = ctypes.c_void_p()
+    if query_interface(shell_link, ctypes.byref(_guid(_IID_IPROPERTYSTORE)), ctypes.byref(store)) != 0 or not store:
+        return False
+    try:
+        fmtid, pid = _PKEY_APP_USER_MODEL_ID
+        key = _PropertyKey(_guid(fmtid), pid)
+        value = _PropVariant(vt=_VT_LPWSTR, pwszVal=app_id)
+        set_value = _com_call(
+            store, _IPROPERTYSTORE_SET_VALUE, ctypes.c_long,
+            ctypes.POINTER(_PropertyKey), ctypes.POINTER(_PropVariant),
+        )
+        if set_value(store, ctypes.byref(key), ctypes.byref(value)) != 0:
+            return False
+        return _com_call(store, _IPROPERTYSTORE_COMMIT, ctypes.c_long)(store) == 0
+    finally:
+        _com_call(store, _RELEASE, ctypes.c_ulong)(store)
 
 
 def _com_call(interface: ctypes.c_void_p, index: int, restype, *argtypes):
@@ -348,6 +409,8 @@ def _create_shortcut(
                     shell_link, _ISHELLLINKW_SET_ICON_LOCATION, ctypes.c_long, ctypes.c_wchar_p, ctypes.c_int
                 )
                 set_icon(shell_link, str(icon_path), 0)
+
+            _set_shortcut_app_id(shell_link, APP_USER_MODEL_ID)
 
             query_interface = _com_call(
                 shell_link,
@@ -1070,6 +1133,17 @@ class WindowsPlatform(Platform):
         if not ctypes.windll.user32.UnregisterHotKey(None, _HOTKEY_ID):
             return f"Could not release {setup_desktop.human_shortcut(shortcut)}."
         return f"Released {setup_desktop.human_shortcut(shortcut)}."
+
+    def set_app_identity(self) -> None:
+        """`SetCurrentProcessExplicitAppUserModelID`, so the taskbar shows
+        Snipux's window icon instead of pythonw.exe's. Must run before the
+        first window is created; best-effort."""
+        try:
+            set_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+            set_id.argtypes = [ctypes.c_wchar_p]
+            set_id(APP_USER_MODEL_ID)
+        except (AttributeError, OSError):
+            pass
 
     def find_shortcut_conflict(self, shortcut: str) -> str | None:
         """None if `shortcut` looks free to register, else a short name of

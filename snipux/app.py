@@ -3076,6 +3076,7 @@ def _ensure_qapplication() -> QApplication:
     global _QAPPLICATION
     app = QApplication.instance()
     if app is None:
+        platform.current.set_app_identity()
         app = QApplication(sys.argv)
     # Held module-level, not merely returned: a caller that drops the
     # returned value -- which `run_resident_app` legitimately does, having

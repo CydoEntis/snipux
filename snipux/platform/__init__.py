@@ -215,6 +215,15 @@ class Platform(ABC):
         """
         return self.reserved_margins(screen).top()
 
+    def set_app_identity(self) -> None:
+        """Tell the OS this process is Snipux, before any window exists.
+
+        Needed where the OS names a running app after its executable, and
+        that executable is the Python interpreter. Never raises; the
+        default does nothing, which is right where the OS already names
+        the app from its own entry (Linux's `.desktop` file).
+        """
+
     def skip_map_animation(self, widget) -> bool:
         """Ask the desktop to show `widget` without its window-opening
         animation, and say whether it will. Called before `widget` is first
