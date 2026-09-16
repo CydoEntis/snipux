@@ -87,7 +87,8 @@ frozen frame has picked up a platform assumption.
 
 ```text
 snipux/
-  app.py            controller, tray, CLI, clipboard/save helpers, socket
+  app.py            controller, tray, CLI, socket
+  output.py         clipboard and save helpers shared by app, overlay and pin
   handoff.py        forwards --snip/--settings to a running snipux without Qt
   capture.py        Frame, capture backends and their registry
   recording.py      recording backends and their registry
@@ -112,19 +113,17 @@ docs/               standards, design handoffs and their divergences
 packaging/          installers and the Windows exe build
 ```
 
-## Known drift from these rules
+## Rules that are easy to break
 
-Recorded here so nobody copies it, and so fixing it is a known, bounded job:
-
-- `capture.py` and `recording.py` read `sys.platform` directly in a few places
-  (backend `is_available()` checks and default selection). The rule says only
-  `platform/` should.
-- `overlay.py` and `pin.py` import `copy_*_to_clipboard` and `save_image` from
-  `app.py`, inside functions to dodge the import cycle. Those helpers belong
-  in a small module below the views.
-- `shapes.py` imports `capture.py` for the `Frame` type.
-
-New code should not add to this list.
+- **Only `platform/` reads `sys.platform`.** Anything else asks
+  `platform.is_windows()`, `platform.is_linux()` or `platform.os_name()`, or
+  better, a `platform.current` operation. Those helpers are defined above
+  `current = _select()` so `capture.py` and `recording.py` can use them
+  despite the import cycle.
+- **Views don't import `app.py`.** Clipboard and save helpers live in
+  `output.py`, below the views; `app.py` re-exports them.
+- `shapes.py` imports `capture.py` for `Frame`, which `apply_crop()` builds
+  at runtime. That is a model using a lower layer's data type, and allowed.
 
 ## Security and privacy
 

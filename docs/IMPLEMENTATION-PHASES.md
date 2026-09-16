@@ -35,11 +35,9 @@ uv run --no-project --with-requirements requirements.txt python -m pytest -q
 Don't start a batch on a red base, and never weaken the verify command to get
 green.
 
-Known local-only failure, 2026-09-16: on the owner's Windows machine
-`test_shapes.py::TestExportedLengths::...[text-5]` fails (5px against a 3px
-tolerance) on both `main` and `dev`. CI is green on both runners, so it is a
-font difference on this machine, not a regression -- but it should be fixed
-per CODE-STANDARDS ("a test must not depend on this machine's fonts").
+Run it again with `QT_SCALE_FACTOR=1.5`; CI only runs 1.0. Don't run two
+suites at once from different worktrees: the single-instance socket tests
+share one server name and will trip over each other.
 
 ## Phase 1: done -- the 2026-09-16 Tugboat run
 

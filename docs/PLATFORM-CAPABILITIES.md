@@ -18,7 +18,8 @@ and only for something the user just asked for.
 | `ffmpeg` (subprocess) | H.264 and GIF export | Optional, found on `PATH`, never installed by us. |
 
 **Not used anywhere:** network requests, telemetry, crash upload, automatic
-updates, accounts, microphone, camera, location, keylogging. The
+updates, accounts, camera, location, keylogging. The microphone is used
+only on Windows, only when the user picks Mic for a recording. The
 global hotkey registers one chord; snipux does not see other keystrokes.
 
 ## Linux
@@ -43,7 +44,8 @@ top there. Copy text is greyed on Linux until a system OCR route exists
 | Facility | Used for | What the user sees |
 | --- | --- | --- |
 | `QScreenCapture` (QtMultimedia) | the one-shot grab | Nothing. |
-| `QScreenCapture` -> `QMediaRecorder` | recording, pause/resume | Video only: `recording.py` wires no audio input today, although `records_audio()` answers True here. |
+| `QScreenCapture` -> `QMediaRecorder` | recording, pause/resume | Windows' own recording indicator. H.264 video. |
+| `QAudioInput` (default input device) | Mic audio in a recording | Only when the user picks Mic; each recording starts Muted. Windows may ask for microphone access. System (desktop) sound is greyed: Qt cannot capture it. |
 | `user32.RegisterHotKey` / `UnregisterHotKey` | the global shortcut | One chord (`MOD_NOREPEAT`). |
 | `user32.SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` | keeping snipux's own bars out of a recording | Nothing. Windows 10 2004+. |
 | `kernel32.AttachConsole` | printing `--help`/`--update` output from the windowless launcher | Nothing. |
@@ -65,7 +67,8 @@ lands.
 ## Adding a capability
 
 1. Put the call in `snipux/platform/` (or a backend the platform chooses).
-2. Add a `can_<x>()` / `<x>_unavailable_reason()` pair if some OSes can't do
+2. Add a `can_<x>()` / `<x>_unavailable_reason()` pair (or a per-option
+   reason, like `audio_source_unavailable_reason()`) if some OSes can't do
    it, so the control is greyed with a reason rather than hidden.
 3. Add its row here: what it is, what it is for, what the user sees.
 4. Call out anything new that touches the network, the clipboard in the
