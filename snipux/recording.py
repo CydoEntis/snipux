@@ -99,6 +99,42 @@ class RecordingBackend(ABC):
     def stop(self) -> None:
         """End a recording started by this backend's `start()`."""
 
+    # Whether this backend can pause a running recording and resume it
+    # later into the same file, the paused time simply absent rather than a
+    # frozen still stretched over it. Off by default, the same shape
+    # `starts_off_thread` already takes for a capability a new platform
+    # must not claim silently -- `RecordingBar` greys its Pause control,
+    # with `pause_unavailable_reason()` below, wherever this is False.
+    # `GnomeScreencastBackend` leaves it at the default:
+    # `org.gnome.Shell.Screencast` has no pause call at all, so Linux pause
+    # is pieces recorded separately and joined with the system ffmpeg on
+    # stop (#93), not this.
+    can_pause: bool = False
+
+    def pause_unavailable_reason(self) -> str | None:
+        """Why `can_pause` is False, for the bar's greyed Pause control to
+        carry -- the same "an option that cannot work says why" rule
+        `Platform.audio_unavailable_reason()` already follows. None when
+        `can_pause` is True, since there is nothing to explain.
+        """
+        return None if self.can_pause else f"{self.name()} cannot pause a recording"
+
+    def pause(self) -> bool:
+        """Pause the recording in progress and report whether it actually
+        did -- checked rather than assumed because Qt's own `pause()` is
+        allowed to do nothing where a backend beneath it cannot pause it.
+
+        Only ever called when `can_pause` is True: a backend that declares
+        it cannot pause has no reason to override this, so the default
+        just says so.
+        """
+        raise NotImplementedError(f"{self.name()} cannot pause a recording")
+
+    def resume(self) -> None:
+        """Resume a recording paused by this backend's `pause()`; see its
+        docstring."""
+        raise NotImplementedError(f"{self.name()} cannot resume a recording")
+
 
 def _platform_name() -> str:
     """Human-readable platform name for `RecordingError`'s message.
@@ -785,6 +821,22 @@ class _RegionCropWorker(QObject):
     `QScreenCapture`, not the smaller rate that survives to the encoder,
     since coalescing is a deliberate output-side choice that must not feed
     back into what rate this claims frames arrived at.
+
+    `pause()`/`resume()` (SNX-128) are how the region path answers
+    `RecordingBackend.can_pause`: `QScreenCapture` never stops delivering
+    frames, so pausing here means simply not forwarding them, and resuming
+    means shifting every later frame's timestamp back by however long that
+    gap lasted -- `on_frame` is what actually applies the running total,
+    `_pause_offset_us`, so a pause never shows up as a frozen still, only
+    as absent time. Both touch nothing but this object's own Python
+    attributes, never a Qt Multimedia call (`sendVideoFrame`, the one call
+    on this object that genuinely needs to run on `_worker_thread`, is
+    never reached from either) -- so calling them directly from
+    `WindowsRecorderBackend.pause()`/`resume()` on the UI thread, while
+    `on_frame` runs on the worker thread, is safe under the GIL the same
+    way `stop()`'s direct `disconnect()` call already is; the only thing a
+    genuinely unlucky interleaving could do is place the pause boundary one
+    frame early or late.
     """
 
     # How many genuine arrivals to average over before emitting
@@ -805,12 +857,51 @@ class _RegionCropWorker(QObject):
         self._ready = False
         self._arrival_start_times: list[int] = []
         self._rate_measured = False
+        self._paused = False
+        # The most recent frame's own startTime() -- the clock pause()/
+        # resume() measure the paused span in, since it is the one clock
+        # `_crop_frame()`'s output timestamps are already expressed in.
+        # -1 means "no frame has arrived yet".
+        self._last_frame_time = -1
+        self._pause_started_at = -1
+        self._pause_offset_us = 0
 
     def on_frame(self, frame: QVideoFrame) -> None:
         self._record_arrival(frame)
+        if frame.startTime() >= 0:
+            self._last_frame_time = frame.startTime()
+        if self._paused:
+            return
+        if self._pause_offset_us:
+            frame.setStartTime(frame.startTime() - self._pause_offset_us)
+            end_time = frame.endTime()
+            if end_time >= 0:
+                frame.setEndTime(end_time - self._pause_offset_us)
         self._pending = frame
         if self._ready:
             self._send_pending()
+
+    def pause(self) -> None:
+        """Stop forwarding frames to the encoder. Any frame already
+        pending is dropped rather than carried across the gap -- letting
+        it survive to be sent after `resume()` would apply this pause's
+        offset to a timestamp captured before the pause even began.
+        """
+        self._paused = True
+        self._pending = None
+        self._pause_started_at = self._last_frame_time
+
+    def resume(self) -> None:
+        """The counterpart to `pause()`: fold how long that span lasted
+        into `_pause_offset_us`, which `on_frame` subtracts from every
+        later frame's timestamp.
+        """
+        if self._pause_started_at >= 0 and self._last_frame_time >= 0:
+            self._pause_offset_us += max(
+                0, self._last_frame_time - self._pause_started_at
+            )
+        self._pause_started_at = -1
+        self._paused = False
 
     def on_ready_to_send(self) -> None:
         self._ready = True
@@ -948,6 +1039,10 @@ class WindowsRecorderBackend(RecordingBackend):
 
     def unavailable_reason(self) -> str | None:
         return None if self.is_available() else "qt-native recording is Windows-only"
+
+    # Both paths pause -- see `pause()`/`resume()` below for how each
+    # actually does it.
+    can_pause = True
 
     def _media_format(self) -> QMediaFormat:
         """MPEG4/H264, explicitly -- not left to default-construct.
@@ -1124,6 +1219,36 @@ class WindowsRecorderBackend(RecordingBackend):
         self._recorder = recorder
         self._worker = worker
         self._worker_thread = worker_thread
+
+    def pause(self) -> bool:
+        """Pause the recording in progress and report whether it actually
+        did (`RecordingBackend.can_pause`'s contract).
+
+        The region path always succeeds: `_RegionCropWorker` is the only
+        thing standing between `QScreenCapture` and the encoder, so
+        pausing it -- simply not forwarding frames -- can't be refused.
+        The full-screen path has no such worker in front of it, so it
+        hands off to `QMediaRecorder.pause()` directly and reads
+        `recorderState()` back afterwards rather than trusting the call:
+        Qt documents `pause()` as best-effort, silently doing nothing on a
+        backend that can't honour it, and a caller that assumed success
+        would show the bar as paused over a recording that never stopped.
+        """
+        if self._worker is not None:
+            self._worker.pause()
+            return True
+        if self._recorder is not None:
+            self._recorder.pause()
+            return self._recorder.recorderState() == QMediaRecorder.RecorderState.PausedState
+        return False
+
+    def resume(self) -> None:
+        """Resume a recording paused by `pause()`."""
+        if self._worker is not None:
+            self._worker.resume()
+            return
+        if self._recorder is not None:
+            self._recorder.record()
 
     def stop(self) -> None:
         """End the recording, and raise if the recorder reported a failure

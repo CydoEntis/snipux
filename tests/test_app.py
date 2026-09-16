@@ -1964,13 +1964,27 @@ class FakeRecordingBackend(RecordingBackend):
     it receives rather than mocking the ABC.
     """
 
-    def __init__(self, backend_name="fake", available=True, start_error=None, stop_error=None):
+    def __init__(
+        self,
+        backend_name="fake",
+        available=True,
+        start_error=None,
+        stop_error=None,
+        can_pause=False,
+        pause_result=True,
+    ):
         self._name = backend_name
         self._available = available
         self._start_error = start_error
         self._stop_error = stop_error
+        self.can_pause = can_pause
+        # What pause() reports -- False is how a test drives the "Qt's own
+        # pause() silently did nothing" case SNX-128's toast exists for.
+        self._pause_result = pause_result
         self.start_calls = []
         self.stop_calls = []
+        self.pause_calls = []
+        self.resume_calls = []
 
     def name(self):
         return self._name
@@ -1993,6 +2007,13 @@ class FakeRecordingBackend(RecordingBackend):
         self.stop_calls.append(True)
         if self._stop_error is not None:
             raise self._stop_error
+
+    def pause(self):
+        self.pause_calls.append(True)
+        return self._pause_result
+
+    def resume(self):
+        self.resume_calls.append(True)
 
 
 def _record(controller, rect, delay="No delay", after=None):
@@ -2679,6 +2700,207 @@ class TestAppControllerRecordingHud:
         controller._stop_recording()  # must not raise
 
         assert controller._active_recording is None
+
+
+class _FakeClock:
+    """A `time.monotonic` stand-in whose value only moves when a test
+    moves it -- unlike a fixed `iter([...])`, every call between two
+    explicit `.now =` assignments returns the same reading, so a test does
+    not have to hand-count how many times application code happens to call
+    `time.monotonic()` for a single moment to stay consistent.
+    """
+
+    def __init__(self, start: float = 100.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestAppControllerPauseRecording:
+    """SNX-128: the HUD's Pause control, wired to whichever backend
+    actually started -- `RecordingBackend.can_pause` decides whether a
+    click can do anything, and `pause()`'s own return value decides
+    whether a backend that silently ignored the request gets believed.
+    """
+
+    def _start_a_recording(self, make_controller, monkeypatch, **backend_kwargs):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend(**backend_kwargs)
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(50, 50, 200, 150), "No delay")
+        return controller, backend
+
+    def test_the_control_is_greyed_when_the_backend_cannot_pause(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=False
+        )
+
+        assert controller._recording_hud.pause_control()._enabled is False
+
+    def test_the_control_is_live_when_the_backend_can_pause(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True
+        )
+
+        assert controller._recording_hud.pause_control()._enabled is True
+
+    def test_clicking_pause_pauses_and_clicking_again_resumes(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True
+        )
+
+        controller._recording_hud.pauseClicked.emit()
+
+        assert backend.pause_calls == [True]
+        assert controller._recording_paused is True
+        # Still LIVE -- Pause is a control within the live state, not a
+        # fifth one of its own.
+        assert controller._recording_hud.state() == RecordingBar.LIVE
+        assert controller._recording_hud._pause._label.startswith("Resume")
+
+        controller._recording_hud.pauseClicked.emit()
+
+        assert backend.resume_calls == [True]
+        assert controller._recording_paused is False
+        assert controller._recording_hud._pause._label == "Pause"
+
+    def test_a_backend_that_silently_ignores_pause_reports_a_toast_and_stays_live(
+        self, make_controller, monkeypatch
+    ):
+        # Qt's own QMediaRecorder.pause() is allowed to do nothing where the
+        # backend beneath it can't honour it -- WindowsRecorderBackend.pause()
+        # checks recorderState() rather than trusting the call, and this is
+        # that check's other half: still recording, said so, never shown as
+        # paused.
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True, pause_result=False
+        )
+        messages = []
+        monkeypatch.setattr(controller, "_report_shortcut", messages.append)
+
+        controller._recording_hud.pauseClicked.emit()
+
+        assert backend.pause_calls == [True]
+        assert controller._recording_paused is False
+        assert controller._recording_hud._pause._label == "Pause"
+        assert controller._recording_hud.state() == RecordingBar.LIVE
+        assert messages == ["This recording can't be paused."]
+
+    def test_a_click_with_nothing_recording_is_a_noop(self, make_controller):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+
+        controller._on_pause_clicked()  # must not raise
+
+        assert controller._recording_paused is False
+
+    def test_stopping_while_paused_behaves_exactly_as_it_does_while_live(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True
+        )
+        controller._recording_hud.pauseClicked.emit()
+
+        controller._stop_recording()
+
+        assert backend.stop_calls == [True]
+        assert controller._active_recording is None
+
+    def test_discarding_while_paused_behaves_exactly_as_it_does_while_live(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._start_a_recording(
+            make_controller, monkeypatch, can_pause=True
+        )
+        controller._recording_hud.pauseClicked.emit()
+
+        controller._discard_recording()
+
+        assert backend.stop_calls == [True]
+        assert controller._active_recording is None
+
+
+class TestAppControllerElapsedTimeExcludesPausedTime:
+    def test_elapsed_freezes_while_paused_and_resumes_where_it_left_off(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend(can_pause=True)
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        clock = _FakeClock(100.0)
+        monkeypatch.setattr(app.time, "monotonic", clock)
+
+        _record(controller, QRectF(50, 50, 200, 150), "No delay")
+        clock.now = 110.0  # 10s of real recording
+        assert controller._elapsed_text() == "00:10"
+
+        controller._on_pause_clicked()
+        clock.now = 114.0  # 4s pass while paused
+        assert controller._elapsed_text() == "00:10"  # stopped, not moving
+
+        controller._on_pause_clicked()  # resume
+        clock.now = 120.0  # 6s more recording
+        assert controller._elapsed_text() == "00:16"  # 10 + 6, the 4 excluded
+
+        assert backend.pause_calls == [True]
+        assert backend.resume_calls == [True]
+
+    def test_several_pause_resume_cycles_all_get_excluded(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend(can_pause=True)
+        registry = RecorderRegistry([backend])
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=registry,
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        clock = _FakeClock(0.0)
+        monkeypatch.setattr(app.time, "monotonic", clock)
+
+        _record(controller, QRectF(50, 50, 200, 150), "No delay")
+        clock.now = 5.0
+        controller._on_pause_clicked()  # pause #1 at 5s recorded
+        clock.now = 8.0  # 3s paused
+        controller._on_pause_clicked()  # resume
+        clock.now = 13.0  # 5s more recording -- 10s recorded
+        controller._on_pause_clicked()  # pause #2
+        clock.now = 20.0  # 7s paused
+        controller._on_pause_clicked()  # resume
+        clock.now = 24.0  # 4s more recording -- 14s recorded
+
+        assert controller._elapsed_text() == "00:14"
 
 
 class TestAppControllerRecorderUnavailable:

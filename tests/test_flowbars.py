@@ -131,6 +131,16 @@ class TestWhatEachStateShows:
         assert bar._delay.isHidden() is True
         assert bar._clock.text() == "0:12"
 
+    def test_pause_is_only_offered_while_live(self, bar):
+        bar.set_ready()
+        assert bar._pause.isHidden() is True
+        bar.set_counting(3)
+        assert bar._pause.isHidden() is True
+        bar.set_live("0:12")
+        assert bar._pause.isHidden() is False
+        bar.set_done("00:27")
+        assert bar._pause.isHidden() is True
+
     def test_delay_is_gone_once_it_is_rolling(self, bar):
         # A countdown control during a recording is a control that cannot
         # act -- the same "a control that opens a menu it can't act on is a
@@ -229,6 +239,65 @@ class TestAudio:
         _click(bar._audio)
 
         assert fired == [True]
+
+
+class TestPause:
+    """SNX-128: whether a click on this control does anything is
+    `RecordingBackend.can_pause`, answered by `app.py` and applied here
+    through `set_pause_enabled` -- the same "the bar renders it, the
+    caller decides it" split `TestAudio` already covers for GNOME's
+    missing audio route.
+    """
+
+    def test_live_names_pause_beside_stop(self, bar):
+        bar.set_live("0:12")
+
+        assert bar._pause._label == "Pause"
+        assert bar._action._label == "Stop"
+
+    def test_a_disabled_control_stays_visible_and_inert(self, bar):
+        bar.set_live("0:12")
+        bar.set_pause_enabled(False)
+        fired = []
+        bar.pauseClicked.connect(lambda: fired.append(True))
+
+        _click(bar._pause)
+
+        assert bar._pause.isHidden() is False
+        assert fired == []
+
+    def test_an_enabled_control_reports_its_click(self, bar):
+        bar.set_live("0:12")
+        bar.set_pause_enabled(True)
+        fired = []
+        bar.pauseClicked.connect(lambda: fired.append(True))
+
+        _click(bar._pause)
+
+        assert fired == [True]
+
+    def test_pause_control_is_handed_out_for_a_tooltip(self, bar):
+        assert bar.pause_control() is bar._pause
+
+    def test_set_paused_names_resume_and_freezes_the_clock(self, bar):
+        bar.set_live("0:12")
+
+        bar.set_paused("0:12", "0:03")
+
+        assert bar._pause._label == "Resume · 0:03"
+        assert bar._clock.text() == "0:12"
+        # Still the live state -- Stop and Discard work exactly as they do
+        # while recording, per the class docstring.
+        assert bar.state() == RecordingBar.LIVE
+
+    def test_set_live_resumes_the_control_back_to_pause(self, bar):
+        # live -> paused -> live, and as many times as the user pauses.
+        bar.set_live("0:12")
+        bar.set_paused("0:12", "0:03")
+
+        bar.set_live("0:15")
+
+        assert bar._pause._label == "Pause"
 
 
 class TestTheActionRoutesByState:

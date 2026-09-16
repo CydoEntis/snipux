@@ -91,6 +91,30 @@ class TestRecordingBackendIsAbstract:
             RecordingBackend()
 
 
+class TestRecordingBackendPauseCapability:
+    """SNX-128: `can_pause` is the shape a capability flag already takes on
+    this ABC (`starts_off_thread`) -- off by default, so a backend that
+    never declares it never claims it silently.
+    """
+
+    def test_defaults_to_false(self):
+        assert FakeBackend("a", True).can_pause is False
+
+    def test_the_default_reason_names_why_when_it_cannot_pause(self):
+        backend = FakeBackend("a", True)
+        assert backend.pause_unavailable_reason() is not None
+
+    def test_the_default_pause_and_resume_are_never_meant_to_be_reached(self):
+        # Only ever called when can_pause is True -- a backend that leaves
+        # the default False has no reason to override either, so the base
+        # implementation just says so rather than silently doing nothing.
+        backend = FakeBackend("a", True)
+        with pytest.raises(NotImplementedError):
+            backend.pause()
+        with pytest.raises(NotImplementedError):
+            backend.resume()
+
+
 class TestRecorderRegistryAvailable:
     def test_available_filters_to_available_backends_only(self):
         available_backend = FakeBackend("a", True)
@@ -671,6 +695,12 @@ class TestGnomeScreencastBackendStop:
         with pytest.raises(RuntimeError):
             GnomeScreencastBackend().stop()
 
+    def test_cannot_pause(self):
+        # SNX-128: org.gnome.Shell.Screencast has no pause call at all --
+        # this ticket's answer for Linux is the ABC's own default, not an
+        # override here. #93 is what would change it.
+        assert GnomeScreencastBackend().can_pause is False
+
 
 class TestBuildLinuxRegistry:
     def test_registers_the_gnome_screencast_backend(self):
@@ -756,7 +786,7 @@ class FakeRecorder:
     PyQt6/QtMultimedia build.
     """
 
-    def __init__(self, fail_message=None):
+    def __init__(self, fail_message=None, can_pause=True):
         self.errorChanged = _FakeSignal()
         self._fail_message = fail_message
         self._error = QMediaRecorder.Error.NoError
@@ -765,9 +795,15 @@ class FakeRecorder:
         self.output_location = None
         self.record_calls = 0
         self.stop_calls = 0
+        self.pause_calls = 0
         self.video_frame_rate = None
         self.set_video_frame_rate_calls = []
         self._state = QMediaRecorder.RecorderState.StoppedState
+        # Real hardware Qt's own pause() is allowed to silently refuse --
+        # see WindowsRecorderBackend.pause()'s docstring. False here is
+        # what a test drives that refusal with: recorderState() simply
+        # never moves to PausedState.
+        self._can_pause = can_pause
 
     def setMediaFormat(self, media_format):
         self.media_format = media_format
@@ -794,6 +830,13 @@ class FakeRecorder:
         # WindowsRecorderBackend._wait_for_stopped() checks recorderState()
         # rather than assuming.
         self._state = QMediaRecorder.RecorderState.StoppedState
+
+    def pause(self):
+        self.pause_calls += 1
+        if self._can_pause:
+            self._state = QMediaRecorder.RecorderState.PausedState
+        # else: exactly what Qt itself documents as allowed -- the call
+        # returns and recorderState() simply never moves.
 
     def recorderState(self):
         return self._state
@@ -1243,6 +1286,126 @@ class TestRegionCropWorker:
         assert sent.endTime() == 66_666
 
 
+class TestRegionCropWorkerPause:
+    """SNX-128: `QScreenCapture` never stops delivering frames, so pausing
+    the region path means not forwarding them, and resuming means shifting
+    every later frame's timestamp back by however long that gap lasted --
+    a paused recording has to come out as absent time, never a frozen
+    still stretched over the pause.
+    """
+
+    def test_a_frame_arriving_while_paused_is_never_forwarded(self):
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+        frame = _make_frame(4, 4, lambda row, col: 1)
+        frame.setStartTime(0)
+        frame.setEndTime(33_333)
+
+        worker.pause()
+        worker.on_frame(frame)
+        worker.on_ready_to_send()
+
+        assert frame_input.sent_frames == []
+
+    def test_pause_drops_a_frame_that_was_still_waiting_to_be_sent(self):
+        # A frame captured just before the pause but not yet handed to the
+        # encoder must not survive to be sent afterwards carrying a
+        # timestamp from before the pause even started.
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+        pending = _make_frame(4, 4, lambda row, col: 9)
+        pending.setStartTime(0)
+        pending.setEndTime(33_333)
+
+        worker.on_frame(pending)  # not yet ready -- stays pending
+        worker.pause()
+        worker.on_ready_to_send()  # would have sent `pending` if it survived
+
+        assert frame_input.sent_frames == []
+
+    def test_resume_shifts_later_timestamps_back_by_the_paused_span(self):
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+
+        before = _make_frame(4, 4, lambda row, col: 1)
+        before.setStartTime(0)
+        before.setEndTime(33_333)
+        worker.on_frame(before)
+        worker.on_ready_to_send()
+
+        worker.pause()
+        # Frames keep arriving while paused -- QScreenCapture never stops
+        # -- they are simply never forwarded.
+        for start, end in ((66_666, 100_000), (100_000, 133_333)):
+            during = _make_frame(4, 4, lambda row, col: 2)
+            during.setStartTime(start)
+            during.setEndTime(end)
+            worker.on_frame(during)
+            worker.on_ready_to_send()
+        worker.resume()
+
+        after = _make_frame(4, 4, lambda row, col: 3)
+        after.setStartTime(133_333)
+        after.setEndTime(166_666)
+        worker.on_frame(after)
+        worker.on_ready_to_send()
+
+        assert len(frame_input.sent_frames) == 2
+        resumed = frame_input.sent_frames[-1]
+        # The paused span, measured in the same clock the timestamps are
+        # already in, is the last frame time seen while paused (100_000)
+        # minus the last one seen before pause() was called (0).
+        assert resumed.startTime() == 133_333 - 100_000
+        assert resumed.endTime() == 166_666 - 100_000
+
+    def test_several_pause_resume_cycles_accumulate_the_offset(self):
+        frame_input = FakeVideoFrameInput()
+        worker = _RegionCropWorker(frame_input, QRect(0, 0, 2, 2))
+
+        first = _make_frame(4, 4, lambda row, col: 1)
+        first.setStartTime(0)
+        first.setEndTime(33_333)
+        worker.on_frame(first)
+        worker.on_ready_to_send()
+
+        # First pause. The offset a resume banks is measured between the
+        # raw (unshifted) startTime() of the last frame seen before pause()
+        # and the last one seen before resume() -- here, 50_000 - 0.
+        worker.pause()
+        gap_one = _make_frame(4, 4, lambda row, col: 2)
+        gap_one.setStartTime(50_000)
+        gap_one.setEndTime(83_333)
+        worker.on_frame(gap_one)
+        worker.resume()
+
+        second = _make_frame(4, 4, lambda row, col: 3)
+        second.setStartTime(83_333)
+        second.setEndTime(116_666)
+        worker.on_frame(second)
+        worker.on_ready_to_send()
+
+        # Second pause: another gap, 156_666 - 83_333.
+        worker.pause()
+        gap_two = _make_frame(4, 4, lambda row, col: 4)
+        gap_two.setStartTime(156_666)
+        gap_two.setEndTime(190_000)
+        worker.on_frame(gap_two)
+        worker.resume()
+
+        third = _make_frame(4, 4, lambda row, col: 5)
+        third.setStartTime(190_000)
+        third.setEndTime(223_333)
+        worker.on_frame(third)
+        worker.on_ready_to_send()
+
+        assert len(frame_input.sent_frames) == 3
+        # Both gaps subtracted: 50_000 from the first resume, 73_333 from
+        # the second -- 123_333 total off the third frame.
+        total_offset = 50_000 + 73_333
+        assert frame_input.sent_frames[-1].startTime() == 190_000 - total_offset
+        assert frame_input.sent_frames[-1].endTime() == 223_333 - total_offset
+
+
 class TestRegionCropWorkerDuration:
     """The ticket's own acceptance criterion: "a test records for a fixed
     wall-clock interval and fails if the output duration disagrees with
@@ -1337,6 +1500,15 @@ class TestWindowsRecorderBackendAvailability:
         assert backend.is_available() is False
         assert backend.unavailable_reason() is not None
 
+    def test_can_pause_on_both_paths(self):
+        # SNX-128's acceptance criterion, both Windows paths: declared once
+        # on the backend, not per path -- pause()/resume() are what branch
+        # on which path is actually live.
+        backend = WindowsRecorderBackend()
+
+        assert backend.can_pause is True
+        assert backend.pause_unavailable_reason() is None
+
 
 class TestWindowsRecorderBackendFullScreenStart:
     """SNX-125 checked this path for the same "recordings play back sped
@@ -1416,6 +1588,61 @@ class TestWindowsRecorderBackendFullScreenStart:
 
         with pytest.raises(RuntimeError, match="no codec available"):
             backend.start(None, self.PATH)
+
+
+class TestWindowsRecorderBackendFullScreenPause:
+    """The full-screen path has no worker in front of it, so pause()/
+    resume() hand off to QMediaRecorder directly -- and, since Qt
+    documents pause() as best-effort, `pause()` is checked against
+    `recorderState()` afterwards rather than trusted.
+    """
+
+    PATH = "C:/tmp/snipux-recording.mp4"
+
+    def test_pause_calls_the_recorder_and_reports_success(self):
+        backend = _windows_backend()
+        backend.start(None, self.PATH)
+
+        paused = backend.pause()
+
+        assert backend._recorder.pause_calls == 1
+        assert paused is True
+
+    def test_pause_reports_failure_when_the_state_does_not_actually_change(self):
+        # The acceptance criterion this exists for: a backend that leaves
+        # recorderState() alone must not be believed, or the bar would show
+        # paused over a recording that never stopped.
+        backend = _windows_backend(
+            recorder_factory=lambda: FakeRecorder(can_pause=False)
+        )
+        backend.start(None, self.PATH)
+
+        paused = backend.pause()
+
+        assert backend._recorder.pause_calls == 1
+        assert paused is False
+        assert (
+            backend._recorder.recorderState()
+            == recording.QMediaRecorder.RecorderState.RecordingState
+        )
+
+    def test_resume_calls_record_again(self):
+        backend = _windows_backend()
+        backend.start(None, self.PATH)
+        backend.pause()
+
+        backend.resume()
+
+        assert backend._recorder.record_calls == 2
+
+    def test_stop_while_paused_tears_down_exactly_as_it_does_while_live(self):
+        backend = _windows_backend()
+        backend.start(None, self.PATH)
+        backend.pause()
+
+        backend.stop()
+
+        assert backend._recorder is None
 
 
 class TestWindowsRecorderBackendRegionStart:
@@ -1591,6 +1818,43 @@ class TestTheRecordedScreenIsTheOneTheRegionIsOn:
 
         # Screen-local logical (40, 100, 400, 300), doubled by the DPR.
         assert backend._worker._pixel_rect == QRect(80, 200, 800, 600)
+
+
+class TestWindowsRecorderBackendRegionPause:
+    """The region path's own worker is the only thing between
+    `QScreenCapture` and the encoder, so pausing it can never be refused --
+    unlike the full-screen path, `pause()` always reports success here.
+    """
+
+    RECT = QRectF(10, 20, 200, 100)
+    PATH = "C:/tmp/snipux-recording-region.mp4"
+
+    def test_pause_always_reports_success_and_stops_the_worker_forwarding(self):
+        backend = _windows_backend()
+        backend.start(self.RECT, self.PATH)
+
+        paused = backend.pause()
+
+        assert paused is True
+        assert backend._worker._paused is True
+
+    def test_resume_tells_the_worker_to_resume(self):
+        backend = _windows_backend()
+        backend.start(self.RECT, self.PATH)
+        backend.pause()
+
+        backend.resume()
+
+        assert backend._worker._paused is False
+
+    def test_stop_while_paused_tears_down_exactly_as_it_does_while_live(self):
+        backend = _windows_backend()
+        backend.start(self.RECT, self.PATH)
+        backend.pause()
+
+        backend.stop()
+
+        assert backend._worker_thread is None
 
 
 class TestWindowsRecorderBackendStop:

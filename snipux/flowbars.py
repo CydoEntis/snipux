@@ -250,6 +250,59 @@ class _LabelledIcon(_IconButton):
         painter.end()
 
 
+class _IconTextButton(_IconButton):
+    """An icon button with a text label beside it -- `_LabelledIcon`
+    without the chevron, for a control whose label just names what the
+    next click does (Pause, then "Resume · 0:12") rather than opening a
+    menu.
+    """
+
+    def __init__(self, icon_name: str, label: str, parent: QWidget | None = None):
+        self._label = label
+        super().__init__(icon_name, parent)
+        self._relayout()
+
+    def set_content(self, icon_name: str, label: str) -> None:
+        self._icon_name = icon_name
+        self._label = label
+        self._relayout()
+
+    def _relayout(self) -> None:
+        metric = tokens.FlowMetric
+        width = QFontMetricsF(_font(12, 500)).horizontalAdvance(self._label)
+        self.setFixedWidth(round(metric.PAD + metric.ICON + 6 + width + metric.PAD))
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = tokens.FlowMetric
+        if self._hovered and self._enabled:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(design.flow_color("ROW_HOVER_BG"))
+            painter.drawRoundedRect(
+                QRectF(self.rect()), metric.BTN_RADIUS, metric.BTN_RADIUS
+            )
+
+        tint = design.flow_color(
+            "TOOL_DISABLED_FG" if not self._enabled else "TOOL_IDLE_FG"
+        )
+        x = float(metric.PAD)
+        icon = design.icon(self._icon_name, tint)
+        size = metric.ICON
+        icon.paint(painter, round(x), (self.height() - size) // 2, size, size)
+        x += size + 6
+
+        painter.setFont(_font(12, 500))
+        painter.setPen(tint)
+        painter.drawText(
+            QRectF(x, 0, self.width() - x - metric.PAD, self.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self._label,
+        )
+        painter.end()
+
+
 class _TextButton(_IconButton):
     """A bare word. Cancel, where a cross would read as "close the bar"
     rather than "do not record this".
@@ -667,22 +720,28 @@ class RecordingBar(QWidget):
     makes a control's identity survive a state change, so a click already in
     flight lands on the thing the user pressed.
 
-    Two controls the handoff specifies are deliberately absent, both
-    recorded in docs/design/flow/divergences.md 3:
+    One control the handoff specifies is still deliberately absent, per
+    docs/design/flow/divergences.md 3:
 
-    * **Pause** -- the handoff's own "Still open" does not say whether a
-      paused recording is one file or segments concatenated on stop, and
-      GNOME's screencast cannot pause at all, so on Linux it would have to
-      be stop-and-restart. That *is* the unresolved question, so it is not
-      guessed at here.
     * **Open**, on the `done` state's destination -- specified as a player
       with trim and GIF export, which the handoff says is described but not
       designed, and trimming is separately deferred.
+
+    **Pause** (SNX-128) is built: a control on the `live` state, beside
+    Stop, that always names what a click does next -- "Pause", then
+    "Resume · 0:12" once paused. Whether the active backend can honour it
+    at all is `RecordingBackend.can_pause`, a capability the backend
+    declares rather than this widget guessing; where it can't, the control
+    stays visible and greyed with its reason
+    (`set_pause_enabled`/`pause_control`), the same "an option that cannot
+    work says why" rule `_audio` already follows for GNOME's missing audio
+    route.
     """
 
     startClicked = pyqtSignal()
     cancelClicked = pyqtSignal()
     stopClicked = pyqtSignal()
+    pauseClicked = pyqtSignal()
     audioClicked = pyqtSignal()
     delayClicked = pyqtSignal()
     destinationClicked = pyqtSignal()
@@ -746,6 +805,12 @@ class RecordingBar(QWidget):
         self._action.clicked.connect(self._on_action)
         layout.addWidget(self._action)
 
+        # Beside Stop, live state only -- see the class docstring's Pause
+        # note.
+        self._pause = _IconTextButton("pause", "Pause", self)
+        self._pause.clicked.connect(self.pauseClicked)
+        layout.addWidget(self._pause)
+
         self._action_divider = _Divider(self)
         layout.addSpacing(metric.GROUP_GAP - metric.GAP)
         layout.addWidget(self._action_divider)
@@ -795,7 +860,7 @@ class RecordingBar(QWidget):
         self._state = self.READY
         self._action.set_label("Record", shortcut="↵", glyph="circle")
         self._action.set_tone("accent")
-        self._show(action=True, clock=False, audio=True,
+        self._show(action=True, clock=False, pause=False, audio=True,
                    delay=self._delay_available,
                    summary=False, cancel=True, discard=False)
 
@@ -807,7 +872,7 @@ class RecordingBar(QWidget):
         self._state = self.COUNTING
         self._action.set_label(f"Starting in {seconds}", shortcut="", glyph="circle")
         self._action.set_tone("accent")
-        self._show(action=True, clock=False, audio=False, delay=False,
+        self._show(action=True, clock=False, pause=False, audio=False, delay=False,
                    summary=False, cancel=True, discard=False)
 
     def clock_text(self) -> str:
@@ -834,8 +899,24 @@ class RecordingBar(QWidget):
         self._summary.setText(size)
         self._action.set_label("Stop", shortcut="", glyph="square")
         self._action.set_tone("rec")
-        self._show(action=True, clock=True, audio=True, delay=False,
+        # Whether this call is a fresh start or a resume from `set_paused`,
+        # "recording" always means the Pause control offers to pause --
+        # resuming through `set_live` rather than a dedicated method is
+        # what makes several pause/resume cycles just work.
+        self._pause.set_content("pause", "Pause")
+        self._show(action=True, clock=True, pause=True, audio=True, delay=False,
                    summary=bool(size), cancel=False, discard=False)
+
+    def set_paused(self, elapsed: str, paused_for: str) -> None:
+        """The `live` state's paused sub-state: the clock freezes at
+        `elapsed` -- the recorded length so far, paused time already
+        excluded -- and the Pause control becomes Resume, growing by
+        `paused_for` so the user can see how long the pause itself has
+        run. Still `LIVE`: Stop and Discard work exactly as they do while
+        recording, per the class docstring.
+        """
+        self._clock.setText(elapsed)
+        self._pause.set_content("play", f"Resume · {paused_for}")
 
     def set_done(self, summary: str, *, destination: str | None = None) -> None:
         """Stage 6: what was produced, and a way to decide it was not worth
@@ -857,7 +938,7 @@ class RecordingBar(QWidget):
             self._action.set_tone("accent")
         self._summary.setText(summary)
         self._clock.set_wash(None)
-        self._show(action=destination is not None, clock=False, audio=False,
+        self._show(action=destination is not None, clock=False, pause=False, audio=False,
                    delay=False, summary=True, cancel=False, discard=True)
 
     # -- audio ---------------------------------------------------------
@@ -897,6 +978,26 @@ class RecordingBar(QWidget):
         self._delay_available = available
         self._refresh_visibility()
 
+    # -- pause -----------------------------------------------------------
+    def set_pause_enabled(self, enabled: bool) -> None:
+        """Grey the Pause control, or restore it -- never hide it.
+
+        Whether a click can do anything is `RecordingBackend.can_pause`,
+        answered fresh for the backend that actually started this
+        recording, the same "the bar renders it, the caller decides it"
+        split `set_audio_enabled` already draws for GNOME's missing audio
+        route.
+        """
+        self._pause.set_enabled(enabled)
+
+    def pause_control(self) -> QWidget:
+        """The Pause/Resume button itself, so a caller can hang the
+        backend's own `pause_unavailable_reason()` on it as a tooltip --
+        the same handoff-out `audio_control()` already does for why
+        audio is unavailable.
+        """
+        return self._pause
+
     # -- internals -----------------------------------------------------
     def _on_action(self) -> None:
         if self._state == self.READY:
@@ -924,6 +1025,7 @@ class RecordingBar(QWidget):
         widgets = {
             "action": self._action,
             "clock": self._clock,
+            "pause": self._pause,
             "audio": self._audio,
             "delay": self._delay,
             "summary": self._summary,
@@ -936,7 +1038,11 @@ class RecordingBar(QWidget):
         # A divider earns its place only when there is something on both
         # sides of it; two dividers with nothing between them is how a bar
         # ends up looking broken in one state and fine in every other.
-        head = visible.get("action", False) or visible.get("clock", False)
+        head = (
+            visible.get("action", False)
+            or visible.get("clock", False)
+            or visible.get("pause", False)
+        )
         middle = (
             visible.get("audio", False)
             or visible.get("delay", False)
