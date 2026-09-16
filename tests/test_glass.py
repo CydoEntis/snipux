@@ -401,7 +401,10 @@ class TestTheCropIsCached:
         surface.grab()
 
         clock[0] += 10
-        surface.move(250, 180)
+        # Still inside the frame at the new place: every slot added to the
+        # stills bar widens it, and so does a wider UI font, and a bar hanging
+        # past the frame's edge is cropped differently from the backdrop.
+        surface.move(min(250, 800 - surface.width()), 180)
         surface.grab()
 
         assert len(blurs) == 2
