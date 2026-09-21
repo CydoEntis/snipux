@@ -2352,6 +2352,14 @@ class TestHandleCursors:
 
     SEL = QRect(50, 50, 100, 80)
 
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        # These are hover-only moves, which the offscreen platform can route
+        # to a stale same-rect window left open by an earlier test -- see
+        # `_close_stray_toplevel_windows`. Measured: all ten failed when
+        # test_app.py and test_flowbars.py ran first in the same process.
+        _close_stray_toplevel_windows()
+
     def _shown_overlay(self):
         frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
         overlay = OverlayWindow(frame)
