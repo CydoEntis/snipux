@@ -1260,7 +1260,7 @@ class AppController:
         self._tray_icon = QSystemTrayIcon(icon)
         menu = QMenu()
         self._tray_menu = menu
-        # A single Snip item, not one per SelectionMode: OverlayWindow's own
+        # A single Snip item, not one per capture mode: OverlayWindow's own
         # capture-mode popover (CaptureModePopover, opened from its floating
         # bar's chip) is what picks Region/Window/Full screen/Browser now,
         # so the tray no longer needs a separate entry point for each -- the
@@ -1586,9 +1586,8 @@ class AppController:
         if self._countdown_timer is not None or self._armed_recording is not None:
             self._cancel_armed_recording()
 
-        # No mode parameter: unlike the old per-monitor Overlay, a single
-        # OverlayWindow starts in Region and lets its own capture-mode
-        # popover switch to Window/Full screen/Browser after the fact, so
+        # No mode parameter: an OverlayWindow starts in Region and lets its
+        # own capture-mode popover switch to Window/Full screen/Browser, so
         # every caller here -- the tray's own Snip action, the --snip
         # transport listener wired below, and a forwarded request from a
         # second launch -- needs no mode of its own to pass in.
@@ -1951,9 +1950,6 @@ class AppController:
         jumped between those states would be harder to track than one that
         simply changes what it says.
         """
-        # The same union-of-monitor-geometries source `create_overlays()`
-        # in overlay.py already uses to build its own `virtual_desktop_rect`
-        # for X11.
         geometries = (
             self._monitor_geometries
             if self._monitor_geometries is not None
