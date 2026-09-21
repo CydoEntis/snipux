@@ -4727,6 +4727,7 @@ class OverlayWindow(QWidget):
         on_pin_requested: "Callable[[QImage, QRect], None] | None" = None,
         on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
         on_recording_start: "Callable[[], None] | None" = None,
+        on_recording_reframed: "Callable[[QRectF], None] | None" = None,
     ):
         super().__init__(parent)
         self._frame = frame
@@ -4739,13 +4740,17 @@ class OverlayWindow(QWidget):
         self._on_pin_requested = on_pin_requested
         # SNX-122: fired by `_commit_selection`'s record branch, with an
         # absolute-coordinate rect (None for the whole desktop), the armed
-        # delay string, and the chooser's after-capture destination
-        # ("instant" or "save") -- app.py owns starting/stopping the actual
+        # delay string, and the chooser's after-capture destination (one of
+        # `tokens.RECORDING_AFTER`'s ids) -- app.py owns starting/stopping the actual
         # recorder, per CLAUDE.md's split between this file (widget/
         # painting) and app.py (subprocess/filesystem/stateful side
         # effects).
         self._on_recording_requested = on_recording_requested
         self._on_recording_start = on_recording_start
+        # Fired with the new absolute rect whenever the selection changes
+        # while a recording is armed, so the recording bar can follow the
+        # region the way the stills bar follows its selection.
+        self._on_recording_reframed = on_recording_reframed
         # SNX-58: called once, from closeEvent, when this window is the
         # Wayland-primary of a multi-monitor `open_overlay` group -- the
         # hook that closes the non-interactive `_MonitorVeil` companions
@@ -5032,6 +5037,9 @@ class OverlayWindow(QWidget):
         # `StylePopover`. It is one of the bar's menus: one of those is open
         # at a time.
         self._styles: ToolStyles = session_styles
+        # What Settings says each tool starts with; a no-op unless it has
+        # changed since the last window asked (`ToolStyles.configure`).
+        self._styles.configure(*setup_desktop.load_style_defaults())
         self._style_popover = StylePopover(self._styles, self)
         self._style_popover.hide()
         self._style_popover.styleChanged.connect(self._on_style_changed)
@@ -5131,9 +5139,17 @@ class OverlayWindow(QWidget):
         # the backend: the window stays up so the region can still be
         # reframed, with the stills bar suppressed. See `_commit_selection`.
         self._armed_for_recording = False
-        # Latch for `_arm_default_tool`: the pen is armed once, the first
-        # time this snip's toolbar appears, and never again -- see there.
+        # Latch for `_arm_default_tool`: the opening tool is armed once, the
+        # first time this snip's toolbar appears, and never again -- see there.
         self._armed_default_tool = False
+        # Which tool that is: Settings' choice, or the last one a snip ended
+        # on when the user asked for that (`setup_desktop.load_opening_tool`).
+        # Read once here rather than when the bar appears, which happens
+        # mid-drag.
+        self._opening_tool = setup_desktop.load_opening_tool()
+        # The last tool armed this snip that a snip could also open with,
+        # for "Remember my last tool" to keep -- see `_remember_last_tool`.
+        self._last_opening_tool: str | None = None
         # True while `_selection` is a rectangle this window recalled by
         # itself (`_preselect_last_region`) and the user has not yet
         # adopted it by doing anything to it. It is the one selection
@@ -5299,6 +5315,12 @@ class OverlayWindow(QWidget):
         self._selection = rect
         self._sync_bar_visibility()
         self._sync_chooser_visibility()
+        if (
+            self._armed_for_recording
+            and rect is not None
+            and self._on_recording_reframed is not None
+        ):
+            self._on_recording_reframed(self._to_absolute_rect(rect))
         # Follows the selection onto its monitor, like every other piece of
         # chrome -- see `_reposition_close_button`.
         self._reposition_close_button()
@@ -5319,6 +5341,8 @@ class OverlayWindow(QWidget):
         # a press inside a recalled region draws rather than reframing,
         # which is the whole point of having picked one.
         self._recalled_selection = False
+        if tool in design.tokens.OPENING_TOOLS:
+            self._last_opening_tool = tool
         if self._selection is not None and not self._picking_window:
             # Reaching for a tool is back to work on the selection, so a row
             # reopened over it steps aside.
@@ -5882,8 +5906,8 @@ class OverlayWindow(QWidget):
             self._sync_bar_visibility()
             self._sync_chooser_visibility()
             if self._on_recording_requested is not None:
-                # `self.outcome` (== `self._chooser.after`) is "instant" or
-                # "save" here -- ticket 9's `_land_recording` is what
+                # `self.outcome` (== `self._chooser.after`) is one of
+                # `tokens.RECORDING_AFTER`'s ids here -- `_land_recording` is what
                 # actually acts on it, once the file is real; this branch
                 # only ever hands the choice along.
                 self._on_recording_requested(record_rect, self._delay, self.outcome)
@@ -6354,6 +6378,15 @@ class OverlayWindow(QWidget):
         """
         return local_point + self._frame.logical_origin
 
+    def to_local_point(self, absolute_point: QPointF) -> QPointF:
+        """Absolute logical virtual-desktop point -> this window's own logical
+        coordinates, by the frame's origin like every other conversion here
+        (a Wayland client is never told where its window is) -- for chrome
+        `app.py` places inside this window rather than as a window of its
+        own.
+        """
+        return QPointF(absolute_point) - self._frame.logical_origin
+
     def _to_local_rect(self, absolute_rect: QRectF) -> QRectF:
         """Absolute logical virtual-desktop rect -> this widget's own
         window-local logical rect -- the inverse of `_to_absolute`,
@@ -6766,13 +6799,16 @@ class OverlayWindow(QWidget):
         self._reposition_tool_hint()
 
     def _arm_default_tool(self) -> None:
-        """Arm the pen the first time the toolbar comes up for a snip.
+        """Arm the opening tool the first time the toolbar comes up for a
+        snip.
 
         The bar is the annotate-in-place surface, and it used to appear
         with nothing armed at all -- so the first stroke of every
         annotation cost a trip to the bar to pick the tool that was going
-        to be picked anyway. Pen is the one that is: it is
-        `tokens.TOOLS`' own first entry.
+        to be picked anyway. Which tool that is was the pen for everyone
+        until it became a setting (`_opening_tool`), and one of its choices
+        is none at all, for anyone who would rather a press did nothing
+        until they had picked.
 
         Once only, and only while nothing is armed. `_sync_bar_visibility`
         runs on every mouse-move of a live drag, so re-arming here
@@ -6804,11 +6840,12 @@ class OverlayWindow(QWidget):
             return
         self._armed_default_tool = True
         if (
-            self._bar.active_tool is None
+            self._opening_tool != design.tokens.OPENING_TOOL_NONE
+            and self._bar.active_tool is None
             and not self._eraser_active
             and not self._eyedropper_active
         ):
-            self._bar.select_tool(design.tokens.TOOLS[0])
+            self._bar.select_tool(self._opening_tool)
 
     def _sync_tool_hint(self) -> None:
         """Name the active tool under the bar, and say what it does, while
@@ -7551,9 +7588,23 @@ class OverlayWindow(QWidget):
         # own `_MonitorVeil` companions (if any) -- only an actual close()
         # (today, only the second stage of Esc) means the session itself
         # is over.
+        self._remember_last_tool()
         super().closeEvent(event)
         if self._on_dismissed is not None:
             self._on_dismissed()
+
+    def _remember_last_tool(self) -> None:
+        """Keep the tool this snip ended on, for "Remember my last tool".
+
+        Only a tool the bar could open with: a snip that ends on the eraser
+        or the eyedropper keeps the tool armed before it
+        (`tokens.OPENING_TOOLS` says why neither is a place to start), and
+        one that never armed anything -- it never showed the bar -- leaves
+        the stored one alone.
+        """
+        tool = self._last_opening_tool
+        if tool is not None and setup_desktop.load_remember_tool():
+            setup_desktop.save_last_tool(tool)
 
     # How long to stay invisible while the compositor plays its map
     # animation. GNOME's is in this range; erring slightly long costs a few
@@ -9516,8 +9567,8 @@ def open_overlay(
     on_captured: "Callable[[QImage, Path | None], None] | None" = None,
     # SNX-83: see `OverlayWindow.__init__`'s own comment on the same parameter.
     on_pin_requested: "Callable[[QImage, QRect], None] | None" = None,
-    # rect, delay, and the chooser's after-capture destination ("instant" or
-    # "save") -- see `OverlayWindow.__init__`'s own comment on the same
+    # rect, delay, and the chooser's after-capture destination (one of
+    # `tokens.RECORDING_AFTER`'s ids) -- see `OverlayWindow.__init__`'s own comment on the same
     # parameter.
     on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
     # Enter, while a recording is armed. Fires the stage's primary action,
@@ -9525,6 +9576,9 @@ def open_overlay(
     # keyPressEvent, where the alternative was copying a screenshot of the
     # region a recording was being set up around.
     on_recording_start: "Callable[[], None] | None" = None,
+    # The armed region reframed -- see `OverlayWindow.__init__`'s own comment
+    # on the same parameter.
+    on_recording_reframed: "Callable[[QRectF], None] | None" = None,
 ) -> OverlayWindow:
     """Build and show the overlay for one snip, positioned for the
     caller's already-detected session type (`wayland`) rather than assumed
@@ -9593,6 +9647,7 @@ def open_overlay(
         on_pin_requested=on_pin_requested,
         on_recording_requested=on_recording_requested,
         on_recording_start=on_recording_start,
+        on_recording_reframed=on_recording_reframed,
     )
 
     if not wayland:

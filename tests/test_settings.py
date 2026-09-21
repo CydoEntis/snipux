@@ -772,6 +772,55 @@ class TestSettingsWindow:
 
         assert window._show_hints.switch.isChecked() is True
 
+    def test_the_opening_tool_starts_on_the_pen(self, tmp_path):
+        window = self._window(tmp_path)
+
+        assert window._opening_tool.value() == "pen"
+        assert window._opening_tool.text() == "Pen"
+
+    def test_the_opening_tool_reads_back_what_was_stored(self, tmp_path):
+        setup_desktop.save_default_tool("arrow", tmp_path)
+
+        window = self._window(tmp_path)
+
+        assert window._opening_tool.value() == "arrow"
+
+    def test_every_tool_the_bar_can_open_with_is_offered_and_no_other(self, tmp_path):
+        window = self._window(tmp_path)
+
+        offered = window._opening_tool.values()
+
+        assert offered == tokens.OPENING_TOOLS
+        assert "eraser" not in offered and "eyedropper" not in offered
+        assert tokens.OPENING_TOOL_NONE in offered
+
+    def test_the_opening_tool_is_a_dropdown_listing_every_choice(self, tmp_path):
+        window = self._window(tmp_path)
+
+        window._opening_tool.click()
+        menu = window._opening_tool.menu_widget()
+        try:
+            labels = [action.text() for action in menu.actions()]
+            assert labels[0] == "Pen" and labels[-1] == "No tool"
+            assert len(labels) == len(tokens.OPENING_TOOLS)
+        finally:
+            menu.close()
+
+    def test_picking_an_opening_tool_is_an_unsaved_change_until_save(self, tmp_path):
+        window = self._window(tmp_path)
+        window._opening_tool.click()
+        menu = window._opening_tool.menu_widget()
+
+        menu.actions()[-1].trigger()  # No tool
+        menu.close()
+
+        assert window._dirty
+        assert setup_desktop.load_default_tool(tmp_path) == "pen"
+
+        window._save()
+
+        assert setup_desktop.load_default_tool(tmp_path) == tokens.OPENING_TOOL_NONE
+
     def test_save_calls_back_so_the_shortcut_can_be_rebound(self, tmp_path):
         # Remembering a shortcut is not binding it: GNOME only knows about
         # the binding it was told.
@@ -1450,36 +1499,192 @@ class TestSettingsScrollbars:
         assert "QPlainTextEdit" in style
 
 
+class TestAnnotationDefaults:
+    """Settings -> Annotation: the default ink every coloured tool starts
+    with, and per-tool defaults for anything a tool's style popover
+    offers."""
+
+    def _window(self, tmp_path):
+        return SettingsWindow(config_dir=tmp_path)
+
+    # -- default ink ---------------------------------------------------
+
+    def test_the_default_ink_starts_as_each_tools_own(self, tmp_path):
+        window = self._window(tmp_path)
+
+        assert window._default_ink.value() is None
+        assert window._default_ink.text() == "Each tool's own"
+
+    def test_a_swatch_is_named_and_saved(self, tmp_path):
+        window = self._window(tmp_path)
+        window._default_ink.click()
+        popup = window._default_ink.popup_widget()
+        red = next(s for s in popup.swatches if s.colour == "#ef4444")
+
+        red.click()
+
+        assert window._default_ink.text() == "Red"
+        assert window._dirty
+        window._save()
+        assert setup_desktop.load_default_ink(tmp_path) == "#ef4444"
+
+    def test_any_colour_can_be_typed_as_hex(self, tmp_path):
+        window = self._window(tmp_path)
+        window._default_ink.click()
+        popup = window._default_ink.popup_widget()
+
+        popup.hex.setText("ff8800")
+        popup.hex.returnPressed.emit()
+
+        assert window._default_ink.value() == "#ff8800"
+        assert window._default_ink.text() == "#FF8800"
+
+    def test_a_hex_that_is_not_a_colour_changes_nothing(self, tmp_path):
+        window = self._window(tmp_path)
+        window._default_ink.click()
+        popup = window._default_ink.popup_widget()
+
+        popup.hex.setText("#ff88")
+        popup.hex.returnPressed.emit()
+
+        assert window._default_ink.value() is None
+        assert not window._dirty
+
+    def test_each_tools_own_can_be_chosen_back(self, tmp_path):
+        setup_desktop.save_default_ink("#ef4444", tmp_path)
+        window = self._window(tmp_path)
+        window._default_ink.click()
+
+        window._default_ink.popup_widget().inherit.click()
+        window._save()
+
+        assert setup_desktop.load_default_ink(tmp_path) is None
+
+    # -- per-tool defaults ---------------------------------------------
+
+    @staticmethod
+    def _pick_tool(window, tool):
+        window._custom_tool._choose(tool)
+
+    def test_only_tools_with_something_to_set_are_offered(self, tmp_path):
+        window = self._window(tmp_path)
+
+        offered = window._custom_tool.values()
+
+        assert offered == [t for t in tokens.TOOLS if tokens.STYLE_SECTIONS.get(t)]
+        assert "blackout" not in offered and "eraser" not in offered
+
+    @pytest.mark.parametrize("tool", ["pen", "rect", "blur", "highlighter", "arrow"])
+    def test_a_tool_shows_the_rows_its_style_popover_has_and_no_others(self, tmp_path, tool):
+        window = self._window(tmp_path)
+
+        self._pick_tool(window, tool)
+
+        shown = [
+            section for section, row in window._tool_rows.items()
+            if not row.isHidden()
+        ]
+        assert shown == [s for s in window._tool_rows if s in tokens.STYLE_SECTIONS[tool]]
+
+    def test_a_tool_shows_what_it_ships_with_until_changed(self, tmp_path):
+        window = self._window(tmp_path)
+
+        self._pick_tool(window, "rect")
+
+        assert window._tool_size.value() == tokens.DEFAULT_STYLE["rect"]["size"]
+        assert window._tool_dash.value() == tokens.DEFAULT_STYLE["rect"]["dash"]
+        assert window._tool_fill.value() == tokens.DEFAULT_STYLE["rect"]["fill"]
+        assert window._tool_colour.value() is None
+
+    def test_changes_are_kept_per_tool_and_saved_together(self, tmp_path):
+        window = self._window(tmp_path)
+        self._pick_tool(window, "rect")
+        window._tool_dash._choose("dotted")
+        window._tool_size.slider.setValue(9)
+        self._pick_tool(window, "pen")
+        window._tool_size.slider.setValue(12)
+        self._pick_tool(window, "rect")
+
+        # Back on the rectangle, its own changes are still what it shows.
+        assert window._tool_dash.value() == "dotted"
+        assert window._tool_size.value() == 9
+
+        window._save()
+
+        assert setup_desktop.load_tool_defaults(tmp_path) == {
+            "rect": {"dash": "dotted", "size": 9},
+            "pen": {"size": 12},
+        }
+
+    def test_setting_a_value_back_to_how_it_shipped_forgets_it(self, tmp_path):
+        setup_desktop.save_tool_defaults({"rect": {"dash": "dotted"}}, tmp_path)
+        window = self._window(tmp_path)
+        self._pick_tool(window, "rect")
+
+        window._tool_dash._choose(tokens.DEFAULT_STYLE["rect"]["dash"])
+        window._save()
+
+        assert setup_desktop.load_tool_defaults(tmp_path) == {}
+
+    def test_a_tools_default_colour_follows_the_default_ink(self, tmp_path):
+        window = self._window(tmp_path)
+        self._pick_tool(window, "rect")
+        window._default_ink.click()
+        popup = window._default_ink.popup_widget()
+
+        next(s for s in popup.swatches if s.colour == "#38bdf8").click()
+
+        assert window._tool_colour._inherit_colours == ["#38bdf8"]
+
+    def test_a_tool_can_keep_its_own_colour_under_a_default_ink(self, tmp_path):
+        # Choosing the shipped colour explicitly is how one tool opts out.
+        setup_desktop.save_default_ink("#38bdf8", tmp_path)
+        window = self._window(tmp_path)
+        self._pick_tool(window, "highlighter")
+        window._tool_colour.click()
+
+        next(
+            s for s in window._tool_colour.popup_widget().swatches if s.colour == "#facc15"
+        ).click()
+        window._save()
+
+        assert setup_desktop.load_tool_defaults(tmp_path) == {
+            "highlighter": {"color": "#facc15"}
+        }
+
+    def test_reset_all_tools_clears_every_tools_defaults(self, tmp_path):
+        setup_desktop.save_tool_defaults(
+            {"rect": {"dash": "dotted"}, "pen": {"size": 12}}, tmp_path
+        )
+        window = self._window(tmp_path)
+        self._pick_tool(window, "rect")
+
+        window._reset_tools.click()
+
+        assert window._tool_dash.value() == tokens.DEFAULT_STYLE["rect"]["dash"]
+        window._save()
+        assert setup_desktop.load_tool_defaults(tmp_path) == {}
+
+
 class TestVersionLine:
-    """`setup_desktop.version_line()`'s trailing field -- what
-    `TestSettingsWindow`'s footer test above renders, tested here without a
-    `SettingsWindow` in the way.
-    """
+    """`setup_desktop.version_line()`, what the nav rail's footer shows."""
 
-    def test_shows_the_session_type_on_linux(self, monkeypatch):
-        monkeypatch.setattr(setup_desktop.sys, "platform", "linux")
-        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-        monkeypatch.delenv("DISPLAY", raising=False)
-        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    def test_is_snipuxs_own_version_and_nothing_else(self, monkeypatch):
+        # It carried the Qt version and the session type too, which read as
+        # noise: "we shouldnt even show the QT version just snipux version".
+        monkeypatch.setattr(
+            "importlib.metadata.version", lambda name: "1.2.3" if name == "snipux" else "9"
+        )
 
-        assert setup_desktop.version_line().endswith("wayland")
+        assert setup_desktop.version_line() == "Snipux 1.2.3"
 
-    def test_shows_a_platform_name_on_windows_rather_than_an_always_unknown_session_type(
-        self, monkeypatch
-    ):
-        # AC: Windows has no session-type concept, so the field must not be
-        # the "unknown" `detect_session_type()` would always report there.
-        monkeypatch.setattr(setup_desktop.sys, "platform", "win32")
+    def test_the_footer_draws_no_border_of_its_own(self, tmp_path):
+        # The rail's border rule used to reach the label and draw a hairline
+        # down its right edge, inside the rail.
+        window = SettingsWindow(config_dir=tmp_path)
 
-        line = setup_desktop.version_line()
-
-        assert line.endswith("Windows")
-        assert "unknown" not in line
-
-    def test_shows_a_platform_name_on_macos(self, monkeypatch):
-        monkeypatch.setattr(setup_desktop.sys, "platform", "darwin")
-
-        assert setup_desktop.version_line().endswith("macOS")
+        assert "border" not in window._version_label.styleSheet()
+        assert window._version_label.parentWidget().objectName() == "navRail"
 
 
 class TestTheWatermarkPage:

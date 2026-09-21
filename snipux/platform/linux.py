@@ -136,6 +136,11 @@ class LinuxPlatform(Platform):
         widget.setAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash, True)
         return True
 
+    def places_windows(self) -> bool:
+        """True under X11. Under Wayland a client cannot place its own
+        window at all; the compositor does."""
+        return capture.detect_session_type() == "x11"
+
     def can_pin(self) -> bool:
         """True under X11, where an ordinary window can be placed at a
         given rect and asked to stay on top -- the recording bar already

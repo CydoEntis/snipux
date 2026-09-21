@@ -37,6 +37,7 @@ from snipux import app
 from snipux import handoff
 from snipux import overlay as overlay_module
 from snipux import __version__, setup_desktop
+from snipux.design import tokens
 from snipux.app import (
     AppController,
     QLocalSocketTransport,
@@ -109,6 +110,16 @@ def _assume_setup_already_ran(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _windows_land_where_they_are_put(monkeypatch):
+    """Default every test here to a desktop that places snipux's own windows
+    where it asks -- X11 and Windows -- rather than whatever this machine's
+    session type happens to be: a CI runner has none, and would read as
+    Wayland-like. The Wayland path is its own tests, which say so
+    (`TestRecordingWhereWindowsCannotBePlaced`)."""
+    monkeypatch.setattr(app.platform.current, "places_windows", lambda: True)
+
+
+@pytest.fixture(autouse=True)
 def _recordings_land_in_a_temp_folder(monkeypatch, tmp_path):
     """A stopped recording now lands somewhere real (recording.md ticket
     9's `_land_recording`) -- default that destination to pytest's own
@@ -160,7 +171,7 @@ def test_list_backends_reports_name_availability_and_reason(capsys):
         ]
     )
 
-    exit_code = main(["--list-backends"], registry=registry)
+    exit_code = main(["--list-backends"], registry=registry, recorder_registry=RecorderRegistry())
 
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -215,7 +226,9 @@ def test_list_backends_says_so_when_nothing_can_record(capsys):
 def test_list_backends_on_empty_registry_reports_none_registered(capsys):
     registry = BackendRegistry()
 
-    exit_code = main(["--list-backends"], registry=registry)
+    # An empty recorder registry too: left out, `main` builds the real one,
+    # and on a GNOME desk that probes the live session bus's screencast.
+    exit_code = main(["--list-backends"], registry=registry, recorder_registry=RecorderRegistry())
 
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -355,7 +368,9 @@ def test_main_does_not_require_a_display():
     # Guards against snipux.app accidentally importing something that
     # needs a live QApplication at import time; run under
     # QT_QPA_PLATFORM=offscreen like the rest of the suite.
-    exit_code = main(["--list-backends"], registry=BackendRegistry())
+    exit_code = main(
+        ["--list-backends"], registry=BackendRegistry(), recorder_registry=RecorderRegistry()
+    )
     assert exit_code == 0
 
 
@@ -1974,29 +1989,48 @@ class TestPlaceRecordingHud:
     HUD_SIZE = QSize(220, 44)
     SCREEN = QRectF(0, 0, 1000, 800)
 
-    def test_sits_top_centre_of_the_screen(self):
+    GAP = tokens.FlowMetric.BAR_OFFSET_Y
+
+    def test_sits_centred_under_the_region_like_the_stills_bar(self):
         rect = QRectF(100, 300, 200, 150)
+
+        result = _place_recording_hud(rect, [self.SCREEN], self.HUD_SIZE)
+
+        assert result is not None
+        assert result.top() == round(rect.bottom() + self.GAP)
+        assert result.left() == round(rect.center().x() - 220 / 2)
+
+    def test_the_bar_follows_the_region(self):
+        # It sat top-centre whatever the region, and was reported as the
+        # thing to fix: "the controls should follow the region no like how
+        # screenshotting works?"
+        first = _place_recording_hud(
+            QRectF(300, 100, 200, 200), [self.SCREEN], self.HUD_SIZE
+        )
+        second = _place_recording_hud(
+            QRectF(600, 300, 250, 200), [self.SCREEN], self.HUD_SIZE
+        )
+
+        assert first is not None and second is not None
+        assert (first.left(), second.left()) == (400 - 110, 725 - 110)
+        assert first.top() != second.top()
+
+    def test_a_region_against_an_edge_keeps_its_bar_on_the_screen(self):
+        rect = QRectF(0, 300, 50, 50)
+
+        result = _place_recording_hud(rect, [self.SCREEN], self.HUD_SIZE)
+
+        assert result is not None
+        assert result.left() == 12
+
+    def test_no_room_below_falls_back_to_top_centre(self):
+        rect = QRectF(100, 600, 200, 190)
 
         result = _place_recording_hud(rect, [self.SCREEN], self.HUD_SIZE)
 
         assert result is not None
         assert result.top() == round(self.SCREEN.top() + 12.0)
         assert result.left() == round(self.SCREEN.center().x() - 220 / 2)
-
-    def test_the_position_does_not_depend_on_where_the_region_is(self):
-        # The rule this replaced centred the pill on an edge of the
-        # *region*, so a region in the middle of the screen put the pill
-        # in the middle of the screen, with nothing tying its position to
-        # anywhere the user could predict.
-        first = _place_recording_hud(
-            QRectF(10, 500, 40, 40), [self.SCREEN], self.HUD_SIZE
-        )
-        second = _place_recording_hud(
-            QRectF(700, 200, 250, 300), [self.SCREEN], self.HUD_SIZE
-        )
-
-        assert first is not None
-        assert first == second
 
     def test_a_full_screen_recording_still_gets_somewhere_to_arm_from(self):
         # This returned None before, which made "no pill in a full-screen
@@ -2015,7 +2049,7 @@ class TestPlaceRecordingHud:
         result = _place_recording_hud(rect, [self.SCREEN], self.HUD_SIZE)
 
         assert result is not None
-        assert result.top() == round(rect.bottom() + 12.0)
+        assert result.top() == round(rect.bottom() + self.GAP)
 
     def test_never_overlaps_the_recorded_area(self):
         # The pill sitting inside the recording is the one thing top-centre
@@ -2109,8 +2143,9 @@ class TestPlaceRecordingHud:
         )
 
         assert result is not None
-        assert result.top() == round(left_monitor.top() + 12.0)
-        assert result.left() == round(left_monitor.center().x() - 220 / 2)
+        assert left_monitor.contains(QRectF(result))
+        assert result.top() == round(rect.bottom() + self.GAP)
+        assert result.left() == round(rect.center().x() - 220 / 2)
 
     def test_falls_back_to_the_union_for_a_region_between_two_monitors(self):
         # A centre landing in the gap between two non-adjacent monitors
@@ -2638,6 +2673,257 @@ class TestAppControllerArmingARecording:
         assert len(backend.start_calls) == 1
         assert controller._recording_hud is None
         assert controller._tray_icon.toolTip() == "00:00"
+
+
+class TestTheReadyBarPicksTheEnding:
+    """The chip beside Record says what Stop will do with this recording,
+    and its menu changes that for this recording alone -- the same ids the
+    chooser's record side offers."""
+
+    _controller = TestAppControllerArmingARecording._controller
+
+    @pytest.fixture(autouse=True)
+    def _no_real_ffmpeg(self, monkeypatch):
+        # The GIF row asks whether a system ffmpeg exists; a test must never
+        # run a real one.
+        monkeypatch.setattr(app, "system_ffmpeg", lambda: "/usr/bin/ffmpeg")
+
+    @staticmethod
+    def _open_destination_menu(controller):
+        controller._recording_hud.destinationMenuRequested.emit()
+        menu = controller._flow_menu
+        assert menu is not None
+        return menu
+
+    def test_the_chip_shows_the_ending_the_chooser_handed_over(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._controller(make_controller, monkeypatch)
+
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay", "save")
+
+        assert controller._recording_hud.destination() == "save"
+        assert controller._recording_hud._destination_chip.label() == "Save"
+
+    def test_the_chip_offers_every_ending(self, make_controller, monkeypatch):
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+
+        menu = self._open_destination_menu(controller)
+        try:
+            offered = [row[0] for row in menu._rows]
+            assert offered == [row[0] for row in app.design.tokens.RECORD_DESTINATIONS]
+            assert all(not row[4] for row in menu._rows)
+        finally:
+            menu.close()
+
+    def test_choosing_an_ending_is_for_this_recording_only(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+        stored = setup_desktop.load_recording_after()
+
+        menu = self._open_destination_menu(controller)
+        menu.chosen.emit("open")
+        menu.close()
+
+        assert controller._armed_recording[2] == "open"
+        assert controller._recording_hud._destination_chip.label() == "Open"
+        # A per-recording override, never the user's setting.
+        assert setup_desktop.load_recording_after() == stored
+
+        controller._recording_hud.startClicked.emit()
+
+        assert len(backend.start_calls) == 1
+        assert controller._active_recording[2] == "open"
+
+    def test_gif_is_greyed_with_its_reason_without_an_encoder(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(app, "system_ffmpeg", lambda: None)
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+
+        menu = self._open_destination_menu(controller)
+        try:
+            reasons = {row[0]: row[4] for row in menu._rows}
+            assert reasons["gif"] == app.EXPORT_UNAVAILABLE["gif"]
+            assert not any(reasons[key] for key in ("instant", "save", "open"))
+        finally:
+            menu.close()
+
+    def test_every_ending_fits_its_menu(self, make_controller, monkeypatch):
+        # Measured in the font actually in use, per CLAUDE.md: a note that
+        # overruns is clipped mid-word rather than wrapped.
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+
+        menu = self._open_destination_menu(controller)
+        try:
+            assert app.FlowMenu.fitting_width(menu._rows, 0) <= menu.width()
+        finally:
+            menu.close()
+
+    def test_the_armed_delay_is_on_the_bar_and_follows_its_menu(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "3s")
+        assert controller._recording_hud._delay.value() == "3s"
+
+        controller._recording_hud.delayClicked.emit()
+        menu = controller._flow_menu
+        menu.chosen.emit("10s")
+        menu.close()
+
+        assert controller._armed_recording[1] == "10s"
+        assert controller._recording_hud._delay.value() == "10s"
+
+    def test_the_bar_is_glass_over_the_overlay_only_while_it_is_up(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller.start_capture()
+        overlay = controller._overlay
+        assert overlay is not None and overlay.isVisible()
+
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+        assert controller._recording_hud.glass.host() is overlay
+
+        controller._recording_hud.startClicked.emit()
+
+        # Recording closed the overlay; what is behind the bar now is the
+        # live desktop, not the frame it was blurring.
+        assert controller._recording_hud is not None
+        assert controller._recording_hud.glass.host() is None
+
+
+class TestTheReadyBarFollowsTheRegion:
+    """The recording bar sits under its region, as the stills bar does, and
+    follows the region while its handles reframe it."""
+
+    _controller = TestAppControllerArmingARecording._controller
+    GAP = tokens.FlowMetric.BAR_OFFSET_Y
+
+    def test_arming_puts_the_bar_under_the_region(self, make_controller, monkeypatch):
+        controller, _backend = self._controller(make_controller, monkeypatch)
+
+        controller._on_recording_requested(QRectF(250, 50, 200, 150), "No delay")
+
+        bar = controller._recording_hud
+        assert bar.geometry().top() == 200 + self.GAP
+        assert abs(bar.geometry().center().x() - 350) <= 1
+
+    def test_reframing_takes_the_bar_with_it(self, make_controller, monkeypatch):
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+
+        controller._on_recording_reframed(QRectF(300, 200, 200, 150))
+
+        bar = controller._recording_hud
+        assert bar.geometry().top() == 350 + self.GAP
+        assert abs(bar.geometry().center().x() - 400) <= 1
+        # And the reframed region is the one armed.
+        assert controller._armed_recording[0] == QRectF(300, 200, 200, 150)
+
+    def test_a_reframe_with_nowhere_clear_to_go_leaves_the_bar_be(
+        self, make_controller, monkeypatch
+    ):
+        # Mid-drag, a bar that vanished whenever the region briefly covered
+        # everything would flicker; it waits where it was.
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+        before = controller._recording_hud.geometry()
+
+        controller._on_recording_reframed(QRectF(0, 0, 800, 600))
+
+        assert controller._recording_hud is not None
+        assert controller._recording_hud.geometry() == before
+
+    def test_recording_a_region_the_bar_cannot_clear_takes_the_bar_down(
+        self, make_controller, monkeypatch
+    ):
+        # The bar is placed for whatever the drag last passed through; what
+        # is filmed is the region at Record. A bar inside that would be in
+        # the recording, so it goes, and the tray note says how to stop.
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+        controller._on_recording_reframed(QRectF(0, 0, 800, 600))
+
+        controller._recording_hud.startClicked.emit()
+
+        assert len(backend.start_calls) == 1
+        assert controller._recording_hud is None
+
+    def test_the_bar_stays_put_from_ready_to_live(self, make_controller, monkeypatch):
+        # Rule 1: a bar must not shift sideways between stages.
+        controller, _backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+        ready = controller._recording_hud.geometry()
+
+        controller._recording_hud.startClicked.emit()
+
+        live = controller._recording_hud.geometry()
+        assert abs(live.center().x() - ready.center().x()) <= 1
+        assert live.top() == ready.top()
+
+
+class TestRecordingWhereWindowsCannotBePlaced:
+    """Wayland: a window of snipux's own lands wherever the compositor puts
+    it -- measured on GNOME 46, the outline's strips cascaded across the
+    recorded region. So the ready bar lives inside the overlay, and once
+    the overlay closes nothing of snipux's is on screen."""
+
+    _controller = TestAppControllerArmingARecording._controller
+
+    @pytest.fixture(autouse=True)
+    def _wayland(self, monkeypatch):
+        monkeypatch.setattr(app.platform.current, "places_windows", lambda: False)
+
+    def _armed(self, make_controller, monkeypatch, delay="No delay"):
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller.start_capture()
+        assert controller._overlay is not None and controller._overlay.isVisible()
+        controller._on_recording_requested(QRectF(250, 50, 200, 150), delay)
+        return controller, backend
+
+    def test_the_ready_bar_is_inside_the_overlay(self, make_controller, monkeypatch):
+        controller, _backend = self._armed(make_controller, monkeypatch)
+
+        assert controller._recording_hud.parentWidget() is controller._overlay
+
+    def test_it_sits_under_the_region_in_the_overlays_own_coordinates(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._armed(make_controller, monkeypatch)
+        bar = controller._recording_hud
+        local = controller._overlay.to_local_point(QPointF(350, 200 + tokens.FlowMetric.BAR_OFFSET_Y))
+
+        assert abs(bar.geometry().center().x() - local.x()) <= 1
+        assert bar.geometry().top() == round(local.y())
+
+    def test_recording_runs_with_nothing_of_snipuxs_on_screen(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._armed(make_controller, monkeypatch)
+        reports = []
+        monkeypatch.setattr(controller, "_report_shortcut", reports.append)
+
+        controller._recording_hud.startClicked.emit()
+
+        assert len(backend.start_calls) == 1
+        assert controller._recording_hud is None
+        assert not controller._region_frame.is_showing()
+        assert any("tray" in r for r in reports)
+
+    def test_the_countdown_is_the_bars_alone(self, make_controller, monkeypatch):
+        controller, _backend = self._armed(make_controller, monkeypatch, delay="3s")
+
+        controller._begin_armed_recording()
+
+        assert controller._countdown_numeral is None
+        assert "3" in controller._recording_hud._action._label
 
 
 class TestAppControllerRecordingHud:
@@ -3868,6 +4154,15 @@ class TestAppControllerDiscardRecording:
         controller._stop_recording()
 
         assert controller.discard_action.isEnabled() is False
+
+    def test_snip_reads_stop_recording_while_recording(self, make_controller, monkeypatch):
+        controller, _backend = self._start_a_recording(make_controller, monkeypatch)
+
+        assert controller.snip_action.text() == "Stop recording"
+
+        controller._stop_recording()
+
+        assert controller.snip_action.text() == "Snip"
 
     def test_discard_stops_the_backend_and_deletes_the_temp_file(
         self, make_controller, monkeypatch, tmp_path
