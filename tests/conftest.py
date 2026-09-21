@@ -67,7 +67,7 @@ if sys.platform == "win32":
 
 import pytest
 
-from snipux import setup_desktop
+from snipux import ffmpeg, setup_desktop
 from snipux.marks import session_styles
 
 
@@ -85,6 +85,23 @@ def _fresh_tool_styles():
         yield
     finally:
         session_styles.reset()
+
+
+@pytest.fixture(autouse=True)
+def _no_system_ffmpeg():
+    """Every test starts on a machine with no system ffmpeg.
+
+    `snipux.ffmpeg.probe()` runs the real binary, which no test may do
+    (CODE-STANDARDS.md), and caches the answer for the process -- so an
+    unguarded probe would make the suite's result depend on what this
+    machine has installed. A test that needs one says what it has, by
+    monkeypatching `ffmpeg.probe`.
+    """
+    ffmpeg._probed = None
+    try:
+        yield
+    finally:
+        ffmpeg.reset()
 
 
 @pytest.fixture(autouse=True)

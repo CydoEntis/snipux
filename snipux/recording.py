@@ -16,8 +16,14 @@ from __future__ import annotations
 
 import os
 import posixpath
+import re
+import signal
+import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
 
 from jeepney import DBusAddress, MessageType, new_method_call
 from jeepney.io.blocking import open_dbus_connection
@@ -46,7 +52,7 @@ from PyQt6.QtMultimedia import (
     QVideoSink,
 )
 
-from . import platform, setup_desktop
+from . import ffmpeg, platform, setup_desktop
 
 
 # The recording bar's audio choices, by the identifiers
@@ -153,6 +159,28 @@ class RecordingBackend(ABC):
         """Resume a recording paused by this backend's `pause()`; see its
         docstring."""
         raise NotImplementedError(f"{self.name()} cannot resume a recording")
+
+    def discard(self) -> None:
+        """End the recording to throw it away.
+
+        By default just `stop()`, leaving the caller to delete the one file.
+        A backend that writes more than one overrides it to delete them all,
+        rather than join pieces only for the result to be deleted -- and so
+        a join that fails cannot leave pieces of a discarded take behind.
+        """
+        self.stop()
+
+
+class RecordingPartsError(RuntimeError):
+    """`stop()` could not join a recording's pieces into one file.
+
+    Carries every piece, in order, each a playable recording of its own, so
+    the caller can keep them: a recording is never lost to a failed join.
+    """
+
+    def __init__(self, message: str, parts: list[str]):
+        super().__init__(message)
+        self.parts = list(parts)
 
 
 def _platform_name() -> str:
@@ -284,6 +312,122 @@ class RecorderRegistry:
         raise RecordingError(failures, unavailable=self.unavailable())
 
 
+class _PulseAudioCapture:
+    """One piece of a GNOME recording's sound, taken by the system ffmpeg.
+
+    GNOME's screencast records no audio at all, so the sound is recorded
+    beside it -- the default output's monitor for "system", the default
+    input for "mic", both through PulseAudio, which PipeWire also serves --
+    and joined to the video when the recording stops.
+
+    The join has to know when the first sample was taken, to line the sound
+    up with a video that started a few hundred milliseconds later. ffmpeg's
+    PulseAudio input stamps its samples with the wall clock, less the
+    server's own latency, and reports the first one as the input's `start:`
+    as it opens -- which is the answer, read from stderr. Its progress lines
+    are the fallback: when each arrives, less how much it says it has
+    written. They arrive late by however long the pipe held them, so they
+    run late -- measured against a reference capture of the same sink, the
+    progress estimate put the sound 32ms behind the picture.
+    """
+
+    DEVICES = {AUDIO_SYSTEM: "@DEFAULT_MONITOR@", AUDIO_MIC: "@DEFAULT_SOURCE@"}
+
+    def __init__(self, binary: str, source: str, path: str, *, popen, clock):
+        self.path = path
+        self._command = [
+            binary, "-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-y",
+            "-f", "pulse", "-i", self.DEVICES[source],
+            "-c:a", "libopus", "-b:a", "128k",
+            "-progress", "pipe:1", "-stats_period", "0.1",
+            path,
+        ]
+        self._popen = popen
+        self._clock = clock
+        self._process = None
+        self._readers: list[threading.Thread] = []
+        self._lock = threading.Lock()
+        self._started_at: float | None = None
+        self._input_start: float | None = None
+
+    def start(self) -> None:
+        self._process = self._popen(
+            self._command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        self._readers = [
+            threading.Thread(target=self._read_progress, daemon=True),
+            threading.Thread(target=self._read_input_start, daemon=True),
+        ]
+        for reader in self._readers:
+            reader.start()
+
+    def _read_input_start(self) -> None:
+        # Read to the end whatever is found, so ffmpeg never blocks on a
+        # full stderr pipe.
+        for line in self._process.stderr:
+            match = _PULSE_INPUT_START.search(line)
+            if match is not None:
+                with self._lock:
+                    if self._input_start is None:
+                        self._input_start = float(match.group(1))
+
+    def _read_progress(self) -> None:
+        for line in self._process.stdout:
+            key, _, value = line.strip().partition("=")
+            if key != "out_time_us":
+                continue
+            try:
+                written_us = int(value)
+            except ValueError:
+                continue
+            if written_us <= 0:
+                continue
+            estimate = self._clock() - written_us / 1_000_000
+            with self._lock:
+                if self._started_at is None or estimate < self._started_at:
+                    self._started_at = estimate
+
+    def started_at(self) -> float | None:
+        """Wall-clock time of the first sample, or None if none was written."""
+        with self._lock:
+            return self._input_start if self._input_start is not None else self._started_at
+
+    def stop(self) -> None:
+        """End the capture the way ffmpeg finishes a file cleanly: SIGINT,
+        not a kill, which would leave the container unfinished."""
+        process, self._process = self._process, None
+        if process is None:
+            return
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        for reader in self._readers:
+            reader.join(timeout=1)
+
+
+@dataclass
+class _Piece:
+    """One stretch of a GNOME recording between a start or resume and the
+    next pause or stop: Shell's video file, when it began, and its sound."""
+
+    video: str
+    started_at: float
+    audio: _PulseAudioCapture | None = None
+
+
+# The wall-clock time of a PulseAudio input's first sample, as ffmpeg reports
+# it when it opens the device: "Duration: N/A, start: 1790007196.188887".
+_PULSE_INPUT_START = re.compile(r"Duration: N/A, start: (\d{9,}\.\d+)")
+
+# `ffmpeg -i`'s own report of a file's length, read without ffprobe, which
+# is not always installed beside it.
+_DURATION = re.compile(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
 class GnomeScreencastBackend(RecordingBackend):
     """`org.gnome.Shell.Screencast`, following `GnomeShellHelperBackend` in
     capture.py: manual D-Bus calls over jeepney, no wrapper library.
@@ -314,6 +458,14 @@ class GnomeScreencastBackend(RecordingBackend):
     * **The interface moved.** GNOME 41 split Screencast out of the main
       shell object into a service of its own; Shell 46 answers only at the
       new address and returns "No such interface" at the old one.
+
+    Shell has no pause and no audio, so both are built beside it on the
+    system ffmpeg (`snipux.ffmpeg`), and neither exists without one. A
+    paused recording is **pieces**: pause stops Shell's screencast, resume
+    starts another with the same area, and stop joins them into the file
+    the first one wrote. Sound is recorded beside each piece and joined to
+    it the same way. A recording never paused and silent is one file,
+    untouched by ffmpeg, exactly as before.
     """
 
     # (bus name, object path), current layout first, legacy second -- see
@@ -326,7 +478,7 @@ class GnomeScreencastBackend(RecordingBackend):
     _INTERFACE = "org.gnome.Shell.Screencast"
     _PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
 
-    def __init__(self):
+    def __init__(self, *, popen=subprocess.Popen, run=subprocess.run, clock=time.time):
         # The live recording's lifeline, held from start() to stop() -- see
         # the class docstring for why closing it early truncates the file.
         self._connection = None
@@ -335,6 +487,27 @@ class GnomeScreencastBackend(RecordingBackend):
         # again -- and so both halves of one recording are guaranteed to
         # talk to the same one.
         self._address = None
+        # What each resume re-asks Shell for, and the pieces so far.
+        self._rect: QRectF | None = None
+        self._requested_path: str | None = None
+        self._pieces: list[_Piece] = []
+        # Where ffmpeg is run from, swapped by the tests: none may run a
+        # real one.
+        self._popen = popen
+        self._run = run
+        self._clock = clock
+
+    @property
+    def can_pause(self) -> bool:
+        return ffmpeg.probe() is not None
+
+    def pause_unavailable_reason(self) -> str | None:
+        if self.can_pause:
+            return None
+        return (
+            "Pausing a recording on Linux needs ffmpeg installed, to join "
+            "the pieces when it stops."
+        )
 
     # Nothing here is a QObject: jeepney's connection is a plain socket,
     # opened by start() and used by stop() strictly one thread at a time,
@@ -467,22 +640,61 @@ class GnomeScreencastBackend(RecordingBackend):
         of them, so callers that mean the whole virtual desktop must say so
         by omitting `rect` rather than by passing its dimensions.
         """
+        self._rect = rect
+        self._requested_path = path
+        self._pieces = []
+        return self._start_piece(path)
+
+    def _start_piece(self, path: str) -> str:
+        """Start Shell recording the area to `path`, and its sound beside
+        it; return the file Shell is writing.
+
+        The sound starts first. Shell's call blocks for ~400ms while it
+        builds its pipeline, and sound that began inside that wait is
+        trimmed off at the join, where sound that began after the video
+        would leave a silent gap at the front.
+        """
+        audio = self._start_audio(path)
         bus_name, object_path = self._address_or_default()
         connection = open_dbus_connection(bus="SESSION")
         try:
             shell = DBusAddress(
                 object_path, bus_name=bus_name, interface=self._INTERFACE
             )
-            if rect is None:
+            if self._rect is None:
                 reply = self._call_screencast(connection, shell, path)
             else:
-                reply = self._call_screencast_area(connection, shell, rect, path)
+                reply = self._call_screencast_area(connection, shell, self._rect, path)
             actual_path = self._finish_start(reply, path)
         except Exception:
             connection.close()
+            if audio is not None:
+                audio.stop()
+                Path(audio.path).unlink(missing_ok=True)
             raise
         self._connection = connection
+        self._pieces.append(_Piece(actual_path, self._clock(), audio))
         return actual_path
+
+    def _start_audio(self, path: str) -> _PulseAudioCapture | None:
+        if self.audio_source not in _PulseAudioCapture.DEVICES:
+            return None
+        capabilities = ffmpeg.probe()
+        if capabilities is None or not capabilities.records_sound:
+            # The bar greys a source this cannot record, and the controller
+            # falls back to none (`Platform.audio_source_unavailable_reason`),
+            # so this is ffmpeg gone mid-session: a silent recording beats
+            # none at all.
+            return None
+        audio = _PulseAudioCapture(
+            capabilities.binary,
+            self.audio_source,
+            f"{path}.audio{len(self._pieces) + 1}.mka",
+            popen=self._popen,
+            clock=self._clock,
+        )
+        audio.start()
+        return audio
 
     @staticmethod
     def _screencast_options() -> dict:
@@ -576,21 +788,65 @@ class GnomeScreencastBackend(RecordingBackend):
         return str(filename)
 
     def stop(self) -> None:
-        """End the recording via `StopScreencast()`, on the very connection
-        `start()` opened.
+        """End the recording, and join its pieces and sound into the file
+        the first piece wrote.
+
+        A recording never paused and silent is left exactly as Shell wrote
+        it; ffmpeg is never run for one.
+        """
+        if self._connection is not None:
+            self._stop_piece()
+        elif not self._pieces:
+            raise RuntimeError(
+                "gnome-screencast: stop() called with no recording in progress"
+            )
+        pieces, self._pieces = self._pieces, []
+        if len(pieces) == 1 and pieces[0].audio is None:
+            return
+        self._assemble(pieces)
+
+    def pause(self) -> bool:
+        """End the current piece. Shell has no pause call; the next piece
+        starts on `resume()`, and `stop()` joins them."""
+        if self._connection is None or not self.can_pause:
+            return False
+        self._stop_piece()
+        return True
+
+    def resume(self) -> None:
+        """Start the next piece: the same area, frame rate and cursor, to a
+        name of its own beside the first. Blocks for Shell's ~400ms start,
+        as `start()` does."""
+        if self._connection is not None:
+            return
+        self._start_piece(f"{self._requested_path}.part{len(self._pieces) + 1}")
+
+    def discard(self) -> None:
+        """Stop, and delete every piece and its sound -- nothing is joined."""
+        try:
+            if self._connection is not None:
+                self._stop_piece()
+        finally:
+            pieces, self._pieces = self._pieces, []
+            for piece in pieces:
+                Path(piece.video).unlink(missing_ok=True)
+                if piece.audio is not None:
+                    Path(piece.audio.path).unlink(missing_ok=True)
+
+    def _stop_piece(self) -> None:
+        """End the piece in progress via `StopScreencast()`, on the very
+        connection `_start_piece()` opened, then its sound.
 
         Reusing that connection is load-bearing, not tidiness: Shell keys
         the in-progress recording to the calling connection, and a
         `StopScreencast()` from any other one answers `False` while leaving
         the real recording running (measured on Shell 46). The connection
         is closed here whatever happens, since the recording is over either
-        way and a held-open socket would otherwise outlive it.
+        way and a held-open socket would otherwise outlive it. The sound
+        stops after the video, so it covers all of it; the join trims the
+        end.
         """
         connection = self._connection
-        if connection is None:
-            raise RuntimeError(
-                "gnome-screencast: stop() called with no recording in progress"
-            )
         bus_name, object_path = self._address_or_default()
         try:
             shell = DBusAddress(
@@ -602,6 +858,8 @@ class GnomeScreencastBackend(RecordingBackend):
         finally:
             connection.close()
             self._connection = None
+            if self._pieces and self._pieces[-1].audio is not None:
+                self._pieces[-1].audio.stop()
 
         error = self._reply_error(reply)
         if error is not None:
@@ -609,6 +867,125 @@ class GnomeScreencastBackend(RecordingBackend):
         (success,) = reply.body
         if not success:
             raise RuntimeError("gnome-screencast: StopScreencast() reported failure")
+
+    def _assemble(self, pieces: list[_Piece]) -> None:
+        """Put each piece's sound on it, join the pieces in order, and put
+        the result where the first piece was.
+
+        Every step copies streams rather than re-encoding, so this takes a
+        moment even for a long recording. The pieces go only once the joined
+        file is checked -- ffmpeg exited cleanly and it is no more than half a
+        second shorter than they are -- and if anything fails they are all
+        kept and handed back in `RecordingPartsError`.
+        """
+        final = pieces[0].video
+        made: list[str] = []
+        try:
+            capabilities = ffmpeg.probe()
+            if capabilities is None:
+                raise RuntimeError("ffmpeg is no longer installed")
+            binary = capabilities.binary
+            expected = 0.0
+            parts = []
+            for piece in pieces:
+                length = self._duration(binary, piece.video)
+                if length is None:
+                    raise RuntimeError(f"could not read the length of {piece.video}")
+                expected += length
+                audio_start = piece.audio.started_at() if piece.audio is not None else None
+                if audio_start is None or not Path(piece.audio.path).exists():
+                    parts.append(piece.video)
+                    continue
+                muxed = f"{piece.video}.av.webm"
+                made.append(muxed)
+                self._ffmpeg(binary, self._mux_arguments(piece, audio_start, length, muxed))
+                parts.append(muxed)
+            if len(parts) == 1:
+                joined = parts[0]
+            else:
+                listing = f"{final}.pieces.txt"
+                joined = f"{final}.joined.webm"
+                made += [listing, joined]
+                Path(listing).write_text(
+                    "".join(f"file '{_concat_quoted(part)}'\n" for part in parts)
+                )
+                self._ffmpeg(
+                    binary,
+                    ["-f", "concat", "-safe", "0", "-i", listing, "-c", "copy", joined],
+                )
+            # Only "not shorter": a piece lost or cut short is what the check
+            # is for, since the pieces go next. Longer is harmless and
+            # routine. Shell sends a frame only when the screen changes, so
+            # a still one runs at a frame or two a second, and the length a
+            # file reports counts its last frame as lasting that long --
+            # measured: two 2.01s pieces of a static screen joined to a file
+            # reporting 5.06s, with 4.05s of sound and video in it.
+            length = self._duration(binary, joined)
+            if length is None or length < expected - 0.5:
+                raise RuntimeError(
+                    f"the joined recording is {length}s long, not the {expected:.2f}s "
+                    "its pieces add up to"
+                )
+            os.replace(joined, final)
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            for path in made:
+                Path(path).unlink(missing_ok=True)
+            raise RecordingPartsError(
+                f"gnome-screencast: could not join the recording's pieces: {exc}",
+                [piece.video for piece in pieces],
+            ) from exc
+        for path in made:
+            if path != joined:
+                Path(path).unlink(missing_ok=True)
+        for piece in pieces:
+            if piece.video != final:
+                Path(piece.video).unlink(missing_ok=True)
+            if piece.audio is not None:
+                Path(piece.audio.path).unlink(missing_ok=True)
+
+    @staticmethod
+    def _mux_arguments(
+        piece: _Piece, audio_start: float, length: float, output: str
+    ) -> list[str]:
+        """The video as it is, with its sound lined up: trimmed by however
+        long it ran before the video started, or delayed by however long it
+        started after, and cut at the video's own `length` -- the sound
+        stops after the video does.
+        """
+        lead = piece.started_at - audio_start
+        audio_input = (
+            ["-ss", f"{lead:.3f}"] if lead >= 0 else ["-itsoffset", f"{-lead:.3f}"]
+        )
+        return [
+            "-i", piece.video, *audio_input, "-i", piece.audio.path,
+            "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-t", f"{length:.3f}", output,
+        ]
+
+    def _ffmpeg(self, binary: str, arguments: list[str]) -> None:
+        result = self._run(
+            [binary, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *arguments],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr.strip()[-300:]}")
+
+    def _duration(self, binary: str, path: str) -> float | None:
+        """A file's length in seconds, from `ffmpeg -i`'s report, or None."""
+        result = self._run(
+            [binary, "-hide_banner", "-nostdin", "-i", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        match = _DURATION.search(result.stderr or "")
+        if match is None:
+            return None
+        hours, minutes, seconds = match.groups()
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _concat_quoted(path: str) -> str:
+    """`path` for a line of ffmpeg's concat list, which quotes with single
+    quotes and escapes one as `'\''`."""
+    return path.replace("'", "'\\''")
 
 
 def build_linux_registry() -> RecorderRegistry:

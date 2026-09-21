@@ -35,7 +35,7 @@ uv run --no-project --with-requirements requirements.txt python -m pytest -q
 Don't start a batch on a red base, and never weaken the verify command to get
 green.
 
-Run it again with `QT_SCALE_FACTOR=1.5`; CI only runs 1.0. Don't run two
+Run it again with `QT_SCALE_FACTOR=1.5`; CI runs 1.5 on Ubuntu only. Don't run two
 suites at once from different worktrees: the single-instance socket tests
 share one server name and will trip over each other.
 

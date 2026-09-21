@@ -28,12 +28,15 @@ of three.
 
 from __future__ import annotations
 
+import math
+
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
     QFontMetricsF,
+    QGuiApplication,
     QPainter,
     QPainterPath,
     QPen,
@@ -52,15 +55,19 @@ def _font(size: float, weight: int, mono: bool = False) -> QFont:
     return font
 
 
-def _glass(painter: QPainter, rect: QRectF, radius: float, *, live: bool) -> None:
-    """The warm glass every bar is drawn on.
+def _glass(
+    painter: QPainter, surface: "glass.Glass", rect: QRectF, radius: float, *, live: bool
+) -> None:
+    """The warm glass every bar is drawn on: `surface`'s blur of the frozen
+    frame behind it under the fill, as the stills bar's is, or -- with no
+    frame behind it to blur -- the denser fill `snipux.glass` falls back to.
 
-    `backdrop-filter: blur(16px)` has no Qt equivalent and the handoff says
-    never to attempt a live one, so this is its documented fallback: a denser
-    fill and no blur. The desktop behind is a frozen grab, so nothing moves
-    under it to give the absence away.
+    It used to be the 93% fill alone, on the grounds that the desktop behind
+    was a frozen grab with nothing moving to give the missing blur away. But
+    a still desktop has text in it, and 7% of a window title through the
+    bar read as a ghost of some other control sitting behind it.
 
-    Alpha, not opacity -- a 93% *fill* under fully opaque children.
+    Alpha, not opacity -- a translucent *fill* under fully opaque children.
     `setWindowOpacity(0.93)` would wash the glyphs out with it, which the
     handoff calls out by name.
 
@@ -68,18 +75,33 @@ def _glass(painter: QPainter, rect: QRectF, radius: float, *, live: bool) -> Non
     product, which is exactly what lets the border alone say "recording"
     without a label; do not spend it on anything that is not live.
     """
-    path = QPainterPath()
-    path.addRoundedRect(rect, radius, radius)
-
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(design.flow_color("BAR_BG"))
-    painter.drawPath(path)
+    path = glass.rounded(rect, radius)
+    surface.paint(painter, path, design.flow_color("BAR_BG"))
 
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.setPen(
         design.flow_color("BAR_BORDER_LIVE" if live else "BAR_BORDER")
     )
     painter.drawPath(path)
+
+
+def _paint_notch(painter: QPainter, width: float, height: float, *, enabled: bool) -> None:
+    """The stills bar's "this opens a menu" triangle, in a control's
+    bottom-right corner -- the same geometry and colour as its `_Notch`, so
+    the two bars say it the same way.
+    """
+    metric = tokens.BarMetric
+    leg = metric.NOTCH_TRIANGLE
+    right = float(width - metric.NOTCH_INSET)
+    bottom = height - metric.NOTCH_INSET - (metric.NOTCH_BOX - leg) / 2
+    path = QPainterPath()
+    path.moveTo(right, bottom - leg)
+    path.lineTo(right, bottom)
+    path.lineTo(right - leg, bottom)
+    path.closeSubpath()
+    painter.fillPath(
+        path, design.bar_color("NOTCH_IDLE" if enabled else "TOOL_DISABLED_FG")
+    )
 
 
 class _Divider(QWidget):
@@ -118,9 +140,30 @@ class _IconButton(QWidget):
         self._hovered = False
         self._enabled = True
         self._active = False
+        self._notch = False
+        self._readout = False
 
     def set_icon(self, icon_name: str) -> None:
         self._icon_name = icon_name
+        self.update()
+
+    def set_notch(self, notch: bool) -> None:
+        """Mark this as a control that opens a menu, with the stills bar's
+        corner notch rather than a chevron: the chevron is a label's, and a
+        bare glyph with one beside it is two controls' worth of width.
+        """
+        self._notch = notch
+        self.update()
+
+    def set_readout(self, readout: bool) -> None:
+        """Show the glyph as a statement rather than a control: no hover, no
+        notch, no click, and not greyed -- nothing is unavailable, there is
+        just nothing to do.
+        """
+        self._readout = readout
+        self.setCursor(
+            Qt.CursorShape.ArrowCursor if readout else Qt.CursorShape.PointingHandCursor
+        )
         self.update()
 
     def set_active(self, active: bool) -> None:
@@ -150,7 +193,11 @@ class _IconButton(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
-        if not self._enabled or event.button() != Qt.MouseButton.LeftButton:
+        if (
+            not self._enabled
+            or self._readout
+            or event.button() != Qt.MouseButton.LeftButton
+        ):
             return
         # Pressing a control then sliding off it is how a user says "no".
         if self.rect().contains(event.position().toPoint()):
@@ -161,7 +208,7 @@ class _IconButton(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         metric = tokens.FlowMetric
 
-        if self._active or (self._hovered and self._enabled):
+        if self._active or (self._hovered and self._enabled and not self._readout):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(
                 design.flow_color(
@@ -182,21 +229,26 @@ class _IconButton(QWidget):
         size = metric.ICON
         offset = (metric.BTN - size) / 2
         icon.paint(painter, round(offset), round(offset), size, size)
+        if self._notch and not self._readout:
+            _paint_notch(painter, self.width(), self.height(), enabled=self._enabled)
         painter.end()
 
 
 class _LabelledIcon(_IconButton):
     """An icon button that also says what it is set to, with a chevron.
 
-    Used where the answer matters more than the control: "which audio
-    source" has three answers and a speaker glyph gives none of them, so
-    the spec draws the name beside it.
+    Used where the answer matters more than the control: which destination
+    a recording is headed for is the one thing on the ready bar a glyph
+    alone would leave the user guessing at, so it is named.
     """
 
     def __init__(self, icon_name: str, label: str, parent: QWidget | None = None):
         self._label = label
         super().__init__(icon_name, parent)
         self._relayout()
+
+    def label(self) -> str:
+        return self._label
 
     def set_content(self, icon_name: str, label: str) -> None:
         self._icon_name = icon_name
@@ -205,9 +257,9 @@ class _LabelledIcon(_IconButton):
 
     def _relayout(self) -> None:
         metric = tokens.FlowMetric
-        width = QFontMetricsF(_font(12, 500)).horizontalAdvance(self._label)
+        width = QFontMetricsF(_font(*tokens.BarFont.CHIP)).horizontalAdvance(self._label)
         self.setFixedWidth(
-            round(metric.PAD + metric.ICON + 6 + width + 5 + metric.CHEVRON + metric.PAD)
+            math.ceil(metric.PAD + metric.ICON + 6 + width + 5 + metric.CHEVRON + metric.PAD)
         )
         self.update()
 
@@ -226,12 +278,13 @@ class _LabelledIcon(_IconButton):
             "TOOL_DISABLED_FG" if not self._enabled else "TOOL_IDLE_FG"
         )
         x = float(metric.PAD)
-        icon = design.icon(self._icon_name, tint)
         size = metric.ICON
-        icon.paint(painter, round(x), (self.height() - size) // 2, size, size)
+        design.icon(self._icon_name, tint).paint(
+            painter, round(x), (self.height() - size) // 2, size, size
+        )
         x += size + 6
 
-        painter.setFont(_font(12, 500))
+        painter.setFont(_font(*tokens.BarFont.CHIP))
         painter.setPen(tint)
         painter.drawText(
             QRectF(x, 0, self.width() - x - metric.CHEVRON - metric.PAD, self.height()),
@@ -239,8 +292,7 @@ class _LabelledIcon(_IconButton):
             self._label,
         )
 
-        chevron = design.icon("chevron", tint)
-        chevron.paint(
+        design.icon("chevron", tint).paint(
             painter,
             self.width() - metric.PAD - metric.CHEVRON,
             (self.height() - metric.CHEVRON) // 2,
@@ -251,10 +303,8 @@ class _LabelledIcon(_IconButton):
 
 
 class _IconTextButton(_IconButton):
-    """An icon button with a text label beside it -- `_LabelledIcon`
-    without the chevron, for a control whose label just names what the
-    next click does (Pause, then "Resume · 0:12") rather than opening a
-    menu.
+    """An icon button with a text label beside it, for a control whose
+    label names what the next click does (Pause, then "Resume · 0:12").
     """
 
     def __init__(self, icon_name: str, label: str, parent: QWidget | None = None):
@@ -303,6 +353,69 @@ class _IconTextButton(_IconButton):
         painter.end()
 
 
+class _DelayButton(_IconButton):
+    """The timer, carrying its value once one is set -- the chooser's delay
+    flag, on this bar.
+
+    It used to be the bare glyph whatever was set, so a 10s countdown
+    carried over from the chooser was invisible until Record was pressed and
+    nothing happened for ten seconds. A countdown is the one thing here that
+    can surprise you, so it earns width exactly when it is armed.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__("timer", parent)
+        self._value = ""
+        self.set_value("")
+
+    def value(self) -> str:
+        return self._value
+
+    def set_value(self, value: str) -> None:
+        metric = tokens.BarMetric
+        self._value = value
+        width = metric.BTN
+        if value:
+            width = round(
+                2 * metric.FLAG_PAD_H + tokens.FlowMetric.ICON + metric.FLAG_GAP
+                + QFontMetricsF(_font(*tokens.BarFont.DELAY, mono=True)).horizontalAdvance(value)
+            )
+        self.setFixedWidth(width)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if not self._value:
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        metric = tokens.FlowMetric
+        wash = design.flow_color("ACCENT_WASH")
+        if self._hovered and self._enabled:
+            wash = wash.lighter(125)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(wash)
+        painter.drawRoundedRect(QRectF(self.rect()), metric.BTN_RADIUS, metric.BTN_RADIUS)
+
+        foreground = design.flow_color("ACCENT_SOFT")
+        x = tokens.BarMetric.FLAG_PAD_H
+        size = metric.ICON
+        design.icon(self._icon_name, foreground).paint(
+            painter, x, round((self.height() - size) / 2), size, size
+        )
+        x += size + tokens.BarMetric.FLAG_GAP
+        painter.setFont(_font(*tokens.BarFont.DELAY, mono=True))
+        painter.setPen(foreground)
+        painter.drawText(
+            QRectF(x, 0, self.width() - x, self.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self._value,
+        )
+        if self._notch:
+            _paint_notch(painter, self.width(), self.height(), enabled=self._enabled)
+        painter.end()
+
+
 class _TextButton(_IconButton):
     """A bare word. Cancel, where a cross would read as "close the bar"
     rather than "do not record this".
@@ -335,9 +448,10 @@ class _TextButton(_IconButton):
 class _ActionButton(QWidget):
     """The bar's one accent-filled control, at the left end (rule 3).
 
-    Carries its own shortcut hint because the handoff's whole argument for
-    the key map is that a habit should never cost a menu -- a key nobody can
-    see is not a habit anyone forms.
+    Built to the stills bar's split button's face (`overlay._SplitAction`)
+    -- the same padding, glyph box and label face -- so the two bars'
+    primary actions read as one control, which they did not while this one
+    kept the flow handoff's larger face and an inline `↵`.
     """
 
     clicked = pyqtSignal()
@@ -376,17 +490,16 @@ class _ActionButton(QWidget):
         self.update()
 
     def _relayout(self) -> None:
-        metric = tokens.FlowMetric
-        text_w = self._text_width()
-        glyph_w = (metric.ICON + 6) if self._glyph else 0
-        self.setFixedWidth(round(metric.SPLIT_PAD_H * 2 + glyph_w + text_w))
+        metric = tokens.BarMetric
+        glyph_w = (metric.SPLIT_ICON + metric.SPLIT_GAP) if self._glyph else 0
+        # Rounded up: a face a fraction of a pixel narrow clips the label's
+        # last glyph.
+        self.setFixedWidth(math.ceil(metric.SPLIT_PAD_H * 2 + glyph_w + self._text_width()))
         self.updateGeometry()
         self.update()
 
     def _text_width(self) -> float:
-        from PyQt6.QtGui import QFontMetricsF
-
-        width = QFontMetricsF(_font(12.5, 600)).horizontalAdvance(self._label)
+        width = QFontMetricsF(_font(*tokens.BarFont.SPLIT)).horizontalAdvance(self._label)
         if self._shortcut:
             width += QFontMetricsF(_font(11, 500, mono=True)).horizontalAdvance(
                 f"  {self._shortcut}"
@@ -416,7 +529,7 @@ class _ActionButton(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = tokens.FlowMetric
+        metric = tokens.BarMetric
 
         fill = design.flow_color("REC" if self._tone == "rec" else "ACCENT")
         if self._hovered:
@@ -425,9 +538,7 @@ class _ActionButton(QWidget):
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(fill)
-        painter.drawRoundedRect(
-            QRectF(self.rect()), metric.BTN_RADIUS, metric.BTN_RADIUS
-        )
+        painter.drawRoundedRect(QRectF(self.rect()), metric.BTN_RADIUS, metric.BTN_RADIUS)
 
         x = float(metric.SPLIT_PAD_H)
         if self._glyph:
@@ -436,18 +547,20 @@ class _ActionButton(QWidget):
             # circle anyway and a stroked one reads as a radio button. Stop
             # is the matching square: a circle beside the word "Stop" reads
             # as record whatever the label says, which is the shape of
-            # mistake this whole redesign exists to stop making.
+            # mistake this whole redesign exists to stop making. Centred in
+            # the glyph box the stills split's icon sits in.
             diameter = 10
+            left = x + (metric.SPLIT_ICON - diameter) / 2
             top = (self.height() - diameter) / 2
             painter.setBrush(text)
             if self._glyph == "square":
-                painter.drawRect(QRectF(x, top, diameter, diameter))
+                painter.drawRect(QRectF(left, top, diameter, diameter))
             else:
-                painter.drawEllipse(QRectF(x, top, diameter, diameter))
-            x += metric.ICON + 6
+                painter.drawEllipse(QRectF(left, top, diameter, diameter))
+            x += metric.SPLIT_ICON + metric.SPLIT_GAP
 
         painter.setPen(text)
-        painter.setFont(_font(12.5, 600))
+        painter.setFont(_font(*tokens.BarFont.SPLIT))
         rect = QRectF(x, 0, self.width() - x - metric.SPLIT_PAD_H, self.height())
         painter.drawText(
             rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
@@ -598,6 +711,46 @@ class FlowMenu(QWidget):
         self.move(round(x), round(anchor_rect.bottom() + metric.MENU_OFFSET))
         self.show()
 
+    def open_clear_of(self, anchor_rect, within=None) -> None:
+        """Open above `anchor_rect` when it fits inside `within` -- the
+        anchor's screen's available area when not given -- and below when
+        it does not.
+
+        The recording bar sits top-centre, 12px under the top of the
+        usable area, precisely because the region is usually below it. A
+        menu that only ever opened upward went off the top of the screen
+        there, where nothing could reach it.
+        """
+        metric = tokens.FlowMetric
+        if within is None:
+            screen = QGuiApplication.screenAt(anchor_rect.center())
+            within = screen.availableGeometry() if screen is not None else None
+        if within is None or anchor_rect.top() - metric.MENU_OFFSET - self.height() >= within.top():
+            self.open_above(anchor_rect)
+        else:
+            self.open_below(anchor_rect)
+
+    @staticmethod
+    def fitting_width(rows, minimum: int) -> int:
+        """`minimum`, or wider if a row's label or note would not fit in it.
+
+        Measured in the fonts actually in use rather than trusted to a
+        token tuned to Plex (flow/divergences.md 8): a note that overruns
+        is clipped mid-word, not wrapped.
+        """
+        metric = tokens.FlowMetric
+        _pad_v, pad_h = metric.MENU_ROW_PAD
+        label = QFontMetricsF(_font(12.5, 600))
+        note = QFontMetricsF(_font(11, 400))
+        key = QFontMetricsF(_font(11, 500, mono=True))
+        widest = 0.0
+        for _value, text, sub, shortcut, disabled in rows:
+            line = label.horizontalAdvance(text)
+            if shortcut:
+                line += 12 + key.horizontalAdvance(shortcut)
+            widest = max(widest, line, note.horizontalAdvance(disabled or sub))
+        return max(minimum, math.ceil(widest + 2 * (metric.MENU_PAD + pad_h)))
+
     def mouseMoveEvent(self, event) -> None:
         index = self._row_at(event.position().y())
         if index != self._hovered:
@@ -720,12 +873,11 @@ class RecordingBar(QWidget):
     makes a control's identity survive a state change, so a click already in
     flight lands on the thing the user pressed.
 
-    One control the handoff specifies is still deliberately absent, per
-    docs/design/flow/divergences.md 3:
-
-    * **Open**, on the `done` state's destination -- specified as a player
-      with trim and GIF export, which the handoff says is described but not
-      designed, and trimming is separately deferred.
+    One control the handoff specifies is deliberately absent by default,
+    per docs/design/flow/divergences.md 5: the `done` state's destination
+    button. The destination is chosen before recording, so the file lands on
+    Stop; `set_done(destination=...)` puts the button back for a caller that
+    wires it.
 
     **Pause** (#87) is built: a control on the `live` state, beside
     Stop, that always names what a click does next -- "Pause", then
@@ -739,6 +891,8 @@ class RecordingBar(QWidget):
     """
 
     startClicked = pyqtSignal()
+    # The ready stage's destination chip: offer the other endings.
+    destinationMenuRequested = pyqtSignal()
     cancelClicked = pyqtSignal()
     stopClicked = pyqtSignal()
     pauseClicked = pyqtSignal()
@@ -766,20 +920,31 @@ class RecordingBar(QWidget):
         # why `RegionFrame`'s strips were visible all along and this was
         # not. It also keeps the bar out of the task switcher, which is
         # right for a HUD.
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
+        #
+        # A window of its own only without a parent. Where the compositor
+        # will not let an app place its own window (Wayland), `app.py` puts
+        # the ready bar inside the overlay instead, as the stills bar is.
+        if parent is None:
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.Tool
+            )
         # Shown without stealing focus: the overlay underneath owns the
         # keyboard while a recording is armed (Enter starts it, Esc
         # cancels), and a bar that took focus would break both.
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # A top-level window has no parent to find the frozen frame through,
+        # so the caller names the overlay while one is up behind this bar
+        # (`set_backdrop_host`).
+        self.glass = glass.Glass(self)
         self._state = self.READY
-        # Both are read by `set_ready()` below, so they exist before it runs.
+        # All three are read by `set_ready()` below, so they exist before it
+        # runs.
         self._delay_available = True
         self._last_shown: dict[str, bool] = {}
+        self._destination = tokens.RECORD_AFTER_DEFAULT
 
         # ROW_H is "6 pad + 28 control + 6 pad + 2x1px border", so the
         # vertical margin carries the border's pixel as well as the pad --
@@ -801,7 +966,7 @@ class RecordingBar(QWidget):
         self._clock = _Readout(self, token="REC_CLOCK")
         layout.addWidget(self._clock)
 
-        self._action = _ActionButton("Record", glyph="record", shortcut="↵", parent=self)
+        self._action = _ActionButton("Record", glyph="circle", parent=self)
         self._action.clicked.connect(self._on_action)
         layout.addWidget(self._action)
 
@@ -816,15 +981,27 @@ class RecordingBar(QWidget):
         layout.addWidget(self._action_divider)
         layout.addSpacing(metric.GROUP_GAP - metric.GAP)
 
-        # Labelled, because "which audio source" is a question with three
-        # answers and a speaker glyph answers none of them -- the spec
-        # draws "System" beside it. `_LabelledIcon` keeps the chevron, so
-        # it still reads as something that opens.
-        self._audio = _LabelledIcon("mute", "Muted", self)
+        # What Stop will do with the recording, named: the one decision on
+        # this bar a glyph alone would leave the user guessing at. Its own
+        # control rather than a caret on Record, so pressing Record never
+        # risks landing on the menu instead.
+        self._destination_chip = _LabelledIcon("copy", "Copy", self)
+        self._destination_chip.clicked.connect(self.destinationMenuRequested)
+        layout.addWidget(self._destination_chip)
+
+        # A glyph and a notch, not the spec's labelled "System ⌄" chip. The
+        # three sources have three glyphs -- speaker, mic, struck speaker --
+        # so the glyph does answer "which", and the tooltip names it. The
+        # label cost the bar its widest slot for a decision made now and
+        # then, and on Linux, which has no audio route at all, it spent it
+        # on a greyed word that could never change.
+        self._audio = _IconButton("mute", self)
+        self._audio.set_notch(True)
         self._audio.clicked.connect(self.audioClicked)
         layout.addWidget(self._audio)
 
-        self._delay = _IconButton("timer", self)
+        self._delay = _DelayButton(self)
+        self._delay.set_notch(True)
         self._delay.clicked.connect(self.delayClicked)
         layout.addWidget(self._delay)
 
@@ -858,9 +1035,11 @@ class RecordingBar(QWidget):
         which is why the hint says so and why Record is the only accent.
         """
         self._state = self.READY
-        self._action.set_label("Record", shortcut="↵", glyph="circle")
+        self._action.set_label("Record", shortcut="", glyph="circle")
+        self._audio.set_readout(False)
+        self._action.setToolTip("Start recording — Enter")
         self._action.set_tone("accent")
-        self._show(action=True, clock=False, pause=False, audio=True,
+        self._show(action=True, clock=False, pause=False, destination=True, audio=True,
                    delay=self._delay_available,
                    summary=False, cancel=True, discard=False)
 
@@ -871,6 +1050,7 @@ class RecordingBar(QWidget):
         """
         self._state = self.COUNTING
         self._action.set_label(f"Starting in {seconds}", shortcut="", glyph="circle")
+        self._action.setToolTip("")
         self._action.set_tone("accent")
         self._show(action=True, clock=False, pause=False, audio=False, delay=False,
                    summary=False, cancel=True, discard=False)
@@ -898,12 +1078,16 @@ class RecordingBar(QWidget):
         self._clock.set_wash("REC_WASH")
         self._summary.setText(size)
         self._action.set_label("Stop", shortcut="", glyph="square")
+        self._action.setToolTip("")
         self._action.set_tone("rec")
         # Whether this call is a fresh start or a resume from `set_paused`,
         # "recording" always means the Pause control offers to pause --
         # resuming through `set_live` rather than a dedicated method is
         # what makes several pause/resume cycles just work.
         self._pause.set_content("pause", "Pause")
+        # What is being recorded, not a choice: the source is read when the
+        # recorder starts, so a menu here would change nothing it records.
+        self._audio.set_readout(True)
         self._show(action=True, clock=True, pause=True, audio=True, delay=False,
                    summary=bool(size), cancel=False, discard=False)
 
@@ -941,16 +1125,48 @@ class RecordingBar(QWidget):
         self._show(action=destination is not None, clock=False, pause=False, audio=False,
                    delay=False, summary=True, cancel=False, discard=True)
 
+    def set_backdrop_host(self, host: QWidget | None) -> None:
+        """Be glass over `host`'s frozen frame -- the overlay, while the
+        ready stage keeps it up -- or, with None, over nothing this process
+        painted: the live desktop, once the overlay has gone.
+        """
+        self.glass.set_host(host)
+        self.update()
+
+    # -- destination -------------------------------------------------
+    def set_destination(self, destination: str) -> None:
+        """Name what Stop will do on the destination chip -- one of
+        `tokens.RECORD_DESTINATIONS`' ids, or the default for anything
+        else. The bar only says it; the caller owns what the menu offers.
+        """
+        rows = {
+            identifier: (glyph, label)
+            for identifier, glyph, label, _note in tokens.RECORD_DESTINATIONS
+        }
+        if destination not in rows:
+            destination = tokens.RECORD_AFTER_DEFAULT
+        self._destination = destination
+        self._destination_chip.set_content(*rows[destination])
+        self.adjustSize()
+
+    def destination(self) -> str:
+        return self._destination
+
+    def destination_control(self) -> QWidget:
+        """The destination chip, for its menu to anchor against."""
+        return self._destination_chip
+
     # -- audio ---------------------------------------------------------
     def set_audio(self, source: str) -> None:
         """Reflect the chosen source. The bar renders it; whether a source is
         even offerable is the platform's business, not this widget's.
         """
-        chosen = {
+        icon, label = {
             identifier: (icon, label)
             for identifier, icon, label, _note in tokens.AUDIO_SOURCES
         }.get(source, ("mute", "Muted"))
-        self._audio.set_content(*chosen)
+        self._audio.set_icon(icon)
+        self._audio.setToolTip(f"Audio: {label}")
 
     def set_audio_enabled(self, enabled: bool) -> None:
         self._audio.set_enabled(enabled)
@@ -958,6 +1174,13 @@ class RecordingBar(QWidget):
     def delay_control(self) -> QWidget:
         """The delay button, for a menu to anchor itself against."""
         return self._delay
+
+    def set_delay(self, delay: str) -> None:
+        """Show the countdown Record will start with -- one of
+        `tokens.DELAYS`, the first of which is none and shows nothing.
+        """
+        self._delay.set_value("" if delay == tokens.DELAYS[0] else delay)
+        self.adjustSize()
 
     def audio_control(self) -> QWidget:
         """The audio button itself, so a caller can hang the platform's own
@@ -1026,6 +1249,7 @@ class RecordingBar(QWidget):
             "action": self._action,
             "clock": self._clock,
             "pause": self._pause,
+            "destination": self._destination_chip,
             "audio": self._audio,
             "delay": self._delay,
             "summary": self._summary,
@@ -1044,12 +1268,15 @@ class RecordingBar(QWidget):
             or visible.get("pause", False)
         )
         middle = (
-            visible.get("audio", False)
+            visible.get("destination", False)
+            or visible.get("audio", False)
             or visible.get("delay", False)
             or visible.get("summary", False)
         )
         tail = visible.get("cancel", False) or visible.get("discard", False)
-        self._action_divider.setVisible(head and (middle or tail))
+        # With the middle empty the two would meet -- the countdown's
+        # "Starting in 3 | | Cancel" -- so the head's gives way to the tail's.
+        self._action_divider.setVisible(head and middle)
         self._tail_divider.setVisible(tail and (head or middle))
 
         self.adjustSize()
@@ -1058,7 +1285,10 @@ class RecordingBar(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        _glass(painter, rect, tokens.FlowMetric.RADIUS, live=self._state == self.LIVE)
+        _glass(
+            painter, self.glass, rect, tokens.FlowMetric.RADIUS,
+            live=self._state == self.LIVE,
+        )
         painter.end()
 
 
