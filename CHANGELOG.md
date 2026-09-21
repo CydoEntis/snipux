@@ -5,6 +5,12 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **A clearer message when GNOME refuses a screenshot on Wayland.** It now
+  says to allow Snipux when GNOME asks, instead of suggesting the portal
+  is not installed.
+
 ## 0.9.0 — 2026-09-16
 
 ### Added
