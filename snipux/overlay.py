@@ -809,6 +809,8 @@ class _IconButton(QPushButton):
         parent=None,
     ):
         super().__init__(parent)
+        # Keys belong to the overlay -- see _CloseButton.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         metric = design.tokens.BarMetric
         self._icon_name = icon_name
         # What hovering reports. For a family slot that is the sibling it
@@ -958,6 +960,8 @@ class _PillButton(QPushButton):
         parent=None,
     ):
         super().__init__(parent)
+        # Keys belong to the overlay -- see _CloseButton.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         metric = design.tokens.Metric
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         # Qt's tooltip wake-up timer is driven by mouse moves over the
@@ -2584,6 +2588,8 @@ class _SwatchButton(QPushButton):
 
     def __init__(self, name: str, hex_colour: str, key: str, parent=None):
         super().__init__(parent)
+        # Keys belong to the overlay -- see _CloseButton.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._colour = QColor(hex_colour)
         self._selected = False
@@ -2652,6 +2658,8 @@ class _CustomColorButton(QPushButton):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Keys belong to the overlay -- see _CloseButton.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         metric = design.tokens.BarMetric
         _fit_to_the_colour_row(self)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -3162,6 +3170,8 @@ class _CaptureModeRow(QPushButton):
 
     def __init__(self, mode_label: str, icon_name: str, note: str, parent=None):
         super().__init__(parent)
+        # Keys belong to the overlay -- see _CloseButton.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFlat(True)
@@ -3317,6 +3327,8 @@ class _DelayRow(QPushButton):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Keys belong to the overlay -- see _CloseButton.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFlat(True)
@@ -3649,6 +3661,8 @@ class _FamilyRow(QPushButton):
         parent=None,
     ):
         super().__init__(parent)
+        # Keys belong to the overlay -- see _CloseButton.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.tool = tool
         self._glyph = glyph
         self._label = label
@@ -3963,6 +3977,8 @@ class _CornerButton(QPushButton):
 
     def __init__(self, corner: str, name: str, parent=None):
         super().__init__(parent)
+        # Keys belong to the overlay -- see _CloseButton.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.corner = corner
         self._selected = False
         self._hovered = False
@@ -4466,6 +4482,13 @@ class _CloseButton(QPushButton):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # No keyboard focus, for this and every other button over the
+        # overlay: its keys -- Enter, Space, the tool letters -- are the
+        # overlay's own (`keyPressEvent`). A push button that can take
+        # focus is handed it as the window opens, and then Enter and Space
+        # press the button instead. Measured on GNOME 46 Wayland: this
+        # button held focus, so Enter closed the snip rather than copying.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setFixedSize(self._SIZE, self._SIZE)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         # Names Escape by its full word, not the "Esc" abbreviation every
@@ -4731,6 +4754,14 @@ class OverlayWindow(QWidget):
     ):
         super().__init__(parent)
         self._frame = frame
+        # The window itself can take keyboard focus -- the buttons over it
+        # cannot (see _CloseButton) -- so a label the text tool hides hands
+        # focus back here. Hiding a focused field is what commits it
+        # (`editingFinished`), and with nowhere to hand focus on to, it
+        # stayed focused and a callout's body was never committed. Tab
+        # focus, not strong: a click must not take focus from a field in
+        # the middle of the press that places the next label.
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         # Fired by `copy()`/`save()` only -- see `_report_capture`.
         self._on_captured = on_captured
         # SNX-83: fired by `_on_bar_pin`, with the rendered image and the
@@ -7718,8 +7749,20 @@ class OverlayWindow(QWidget):
         of whether this window itself is ever shown -- which is what lets a
         test give a slider focus without a real, visible window.
         """
+        return isinstance(self._focused_child(), (QSlider, QLineEdit))
+
+    def _focused_child(self) -> QWidget | None:
+        """The child holding keyboard focus, or None -- counting a hidden one
+        as none. With no button able to take focus (see `_CloseButton`),
+        a label the text tool hides has nowhere to hand focus on to, and Qt
+        leaves it named as the focus widget; read as focused, it would
+        swallow Escape and suppress every shortcut after the first label.
+        """
+        # `isHidden()`, not `not isVisible()`: a child of a window that was
+        # never shown is not visible either, and the suppression tests give
+        # a slider focus in exactly such a window.
         focus = self.focusWidget()
-        return isinstance(focus, (QSlider, QLineEdit))
+        return focus if focus is not None and not focus.isHidden() else None
 
     def _handle_escape(self) -> None:
         """Two-stage Esc -- the decision the spec leaves to us: "in the real
@@ -7832,7 +7875,7 @@ class OverlayWindow(QWidget):
         # QLineEdit handles Escape, so Qt's normal unhandled-key propagation
         # bubbles it up here exactly as if nothing had focus.
         if key == Qt.Key.Key_Escape:
-            focus = self.focusWidget()
+            focus = self._focused_child()
             if isinstance(focus, QLineEdit):
                 self._abandon_text_entry(focus)
             # A menu that is open is what Esc closes first, and closing it

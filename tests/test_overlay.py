@@ -20,6 +20,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
+    QAbstractButton,
     QApplication,
     QColorDialog,
     QLabel,
@@ -14254,6 +14255,46 @@ class TestTheHighlighterSnapsToText:
         popover.set_tool("pen")
 
         assert "snap" not in popover.sections()
+
+
+class TestKeysReachTheOverlayNotItsButtons:
+    """The overlay's keys -- Enter, Space, the tool letters -- are its own.
+    A button over it that could take focus was handed it as the window
+    opened, and then Enter pressed that button: measured on GNOME 46
+    Wayland, the close button held focus and Enter closed the snip rather
+    than copying it."""
+
+    def test_no_button_over_the_overlay_can_take_focus(self):
+        overlay = _styled_overlay()
+
+        buttons = overlay.findChildren(QAbstractButton)
+
+        assert buttons
+        assert [b for b in buttons if b.focusPolicy() != Qt.FocusPolicy.NoFocus] == []
+
+    def test_enter_where_focus_really_is_copies_the_snip(self):
+        overlay = _styled_overlay(selection=QRect(400, 200, 300, 200))
+        overlay.activateWindow()
+        QApplication.processEvents()
+        QGuiApplication.clipboard().clear()
+
+        QTest.keyClick(QApplication.focusWidget() or overlay, Qt.Key.Key_Return)
+
+        assert QGuiApplication.clipboard().image().size() == QSize(300, 200)
+
+    def test_a_hidden_label_hands_focus_back_to_the_overlay(self):
+        # Hiding a focused field is what commits it; with no button to take
+        # focus on, the overlay itself has to.
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(450, 250))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "kept")
+
+        overlay._text_edit.hide()
+
+        assert overlay._text_edit.isHidden()
+        assert [mark.text for mark in overlay.marks] == ["kept"]
 
 
 class TestTheOpeningTool:

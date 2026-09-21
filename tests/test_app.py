@@ -421,6 +421,55 @@ class TestLoadAppIcon:
         assert not icon.isNull()
 
 
+class TestTheClipboardIsSettledBeforeTheOverlayCloses:
+    """Every copy is followed at once by the overlay closing. On Wayland the
+    compositor only takes a selection from the focused client, and Qt hands
+    it over asynchronously -- measured on GNOME 46, Enter toasted "Copied"
+    and left the clipboard as it was. Each copy ends with a round trip."""
+
+    @staticmethod
+    def _recording(monkeypatch):
+        from snipux import output
+
+        events = []
+        real = QGuiApplication
+
+        class Recorded:
+            @staticmethod
+            def clipboard():
+                events.append("set")
+                return real.clipboard()
+
+            @staticmethod
+            def sync():
+                events.append("sync")
+
+        monkeypatch.setattr(output, "QGuiApplication", Recorded)
+        monkeypatch.setattr(output.shutil, "which", lambda binary: None)
+        return output, events
+
+    def test_an_image(self, monkeypatch):
+        output, events = self._recording(monkeypatch)
+
+        output.copy_image_to_clipboard(make_image())
+
+        assert events == ["set", "sync"]
+
+    def test_text(self, monkeypatch):
+        output, events = self._recording(monkeypatch)
+
+        output.copy_text_to_clipboard("words")
+
+        assert events == ["set", "sync"]
+
+    def test_a_file(self, monkeypatch, tmp_path):
+        output, events = self._recording(monkeypatch)
+
+        output.copy_file_to_clipboard(tmp_path / "rec.webm")
+
+        assert events == ["set", "sync"]
+
+
 class TestCopyImageToClipboard:
     def test_always_places_the_image_on_the_qt_clipboard(self, monkeypatch):
         monkeypatch.setattr(app.shutil, "which", lambda binary: None)
