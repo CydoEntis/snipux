@@ -5,6 +5,11 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.0.0 — 2026-09-21
+
+The first release since 0.8.2. 0.9.0 was prepared but never published,
+so everything it would have carried is here too.
+
 ### Added
 
 - **Choose the tool a snip opens with.** A dropdown in Settings →
@@ -25,58 +30,6 @@ use it; the commit history has the detail.
   works on Linux as it does on Windows -- the paused time is simply left
   out -- and the audio menu records what you hear or your microphone.
   Without ffmpeg both are greyed and say what they need.
-
-### Changed
-
-- **Settings shows just the Snipux version** at the foot of its sidebar,
-  without the Qt version and session type after it.
-- **The recording bar sits under the region, like the screenshot
-  toolbar,** and moves with it while you resize it, instead of staying at
-  the top of the screen. If there is no room below the region, it goes to
-  the top of the screen.
-- **A tidier recording bar.** It matches the screenshot toolbar now. Audio
-  is an icon with a small corner marker instead of a labelled dropdown (on
-  Linux it stays greyed, with the reason as its tooltip). A delay you set
-  shows its seconds on the bar. The desktop no longer shows through the bar
-  behind its buttons.
-
-### Fixed
-
-- **"Remember my last tool instead" does something.** The switch in
-  Settings → Annotation was saved and never read. With it on, a snip opens
-  with the tool the last one ended on.
-- **The recording bar's audio menu opens where you can see it.** It always
-  opened upward, so with the bar at the top of the screen it opened
-  off-screen. It now opens below when there is no room above.
-- **The audio source can't be changed mid-recording any more.** The menu
-  still opened while recording, but the choice only applied to the next
-  recording.
-- **Recording on Wayland no longer films Snipux's own chrome.** GNOME
-  placed the recording bar and the red outline wherever it liked, which
-  could be inside the area being recorded. On Wayland the bar now stays
-  under the region until you press Record. While recording, nothing of
-  Snipux's is on screen. Stop with your shortcut or the tray, whose Snip
-  item reads "Stop recording" while a recording runs.
-- **Enter copies your snip on Wayland.** It closed the snip instead: the
-  close button had the keyboard, so Enter pressed it, and Space would have
-  too. Every button over the snip now leaves the keys to it.
-- **What you copy on Wayland stays on the clipboard** when the snip closes
-  straight after.
-- **A clearer message when GNOME refuses a screenshot on Wayland.** It now
-  says to allow Snipux when GNOME asks, instead of suggesting the portal
-  is not installed.
-- **Snipux says why when it can't start.** If Snipux couldn't open the
-  socket your shortcut talks to, for example because `$TMPDIR` pointed at a
-  folder that doesn't exist, pressing the shortcut did nothing and said
-  nothing. Now it shows a message naming the folder to check.
-- **Keyboard shortcuts work straight away on two monitors under Wayland.**
-  With more than one monitor, Enter, Esc and the tool keys did nothing
-  until you clicked the snip first.
-
-## 0.9.0 — 2026-09-16
-
-### Added
-
 - **Style your watermark.** Settings → Watermark now picks the text's
   colour (a preset or any colour you like), its font, and whether it sits
   on a dark box. Without the box the text gets a thin edge in the opposite
@@ -137,8 +90,52 @@ use it; the commit history has the detail.
   slider sets how strong the dim is. Several spotlights on one snip all
   stay lit together.
 
+### Changed
+
+- **Settings shows just the Snipux version** at the foot of its sidebar,
+  without the Qt version and session type after it.
+- **The recording bar sits under the region, like the screenshot
+  toolbar,** and moves with it while you resize it, instead of staying at
+  the top of the screen. If there is no room below the region, it goes to
+  the top of the screen.
+- **A tidier recording bar.** It matches the screenshot toolbar now. Audio
+  is an icon with a small corner marker instead of a labelled dropdown (on
+  Linux it stays greyed, with the reason as its tooltip). A delay you set
+  shows its seconds on the bar. The desktop no longer shows through the bar
+  behind its buttons.
+
 ### Fixed
 
+- **"Remember my last tool instead" does something.** The switch in
+  Settings → Annotation was saved and never read. With it on, a snip opens
+  with the tool the last one ended on.
+- **The recording bar's audio menu opens where you can see it.** It always
+  opened upward, so with the bar at the top of the screen it opened
+  off-screen. It now opens below when there is no room above.
+- **The audio source can't be changed mid-recording any more.** The menu
+  still opened while recording, but the choice only applied to the next
+  recording.
+- **Recording on Wayland no longer films Snipux's own chrome.** GNOME
+  placed the recording bar and the red outline wherever it liked, which
+  could be inside the area being recorded. On Wayland the bar now stays
+  under the region until you press Record. While recording, nothing of
+  Snipux's is on screen. Stop with your shortcut or the tray, whose Snip
+  item reads "Stop recording" while a recording runs.
+- **Enter copies your snip on Wayland.** It closed the snip instead: the
+  close button had the keyboard, so Enter pressed it, and Space would have
+  too. Every button over the snip now leaves the keys to it.
+- **What you copy on Wayland stays on the clipboard** when the snip closes
+  straight after.
+- **A clearer message when GNOME refuses a screenshot on Wayland.** It now
+  says to allow Snipux when GNOME asks, instead of suggesting the portal
+  is not installed.
+- **Snipux says why when it can't start.** If Snipux couldn't open the
+  socket your shortcut talks to, for example because `$TMPDIR` pointed at a
+  folder that doesn't exist, pressing the shortcut did nothing and said
+  nothing. Now it shows a message naming the folder to check.
+- **Keyboard shortcuts work straight away on two monitors under Wayland.**
+  With more than one monitor, Enter, Esc and the tool keys did nothing
+  until you clicked the snip first.
 - **Settings saves again on Windows.** If Snipux could not claim its own
   shortcut when it started, Save refused with "Shortcut already in use"
   and nothing was kept -- not the watermark, not the hide list, nothing.
