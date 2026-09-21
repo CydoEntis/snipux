@@ -15,7 +15,20 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.12"]
+        scale: ["1"]
+        # Fractional scaling is where a value used in the wrong coordinate
+        # space shows, and a 1.0 run hides it -- so the suite has to stay
+        # green at 1.5 too (CONTRIBUTING.md). Ubuntu only: it is the faster
+        # runner, and the scaling code is the same Qt on both. `scale` has
+        # to be a matrix axis for this to be a job of its own: an include
+        # that only adds a key is merged into the matching job instead.
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+            scale: "1.5"
     runs-on: ${{ matrix.os }}
+    env:
+      QT_SCALE_FACTOR: ${{ matrix.scale }}
 
     steps:
       - uses: actions/checkout@v4

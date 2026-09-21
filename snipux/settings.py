@@ -31,11 +31,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
     QFontDatabase,
+    QIcon,
     QImage,
     QImageReader,
     QKeyEvent,
@@ -54,11 +55,13 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -462,6 +465,433 @@ class SwitchRow(QWidget):
         self.switch = Switch()
         self.switch.setChecked(checked)
         row.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignTop)
+
+
+# Every control on the right of a `_ControlRow` is this wide, so the column
+# of them lines up down the pane.
+_CONTROL_W = 220
+
+# How "each tool's own" colour is drawn: a pie of the colours the tools ship
+# with, since it is not one colour.
+_EACH_TOOLS_OWN = ["#e3ff4f", "#ef4444", "#38bdf8", "#facc15"]
+
+
+class _ControlRow(QWidget):
+    """Label, optional note, and any control pushed to the right -- the
+    general form of `SwitchRow` and `SpinRow`."""
+
+    def __init__(self, label: str, note: str, control: QWidget, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        title = QLabel(label)
+        title.setFont(_ui_font(12.5, 500))
+        title.setStyleSheet(f"color: {tokens.Win.TEXT_BODY};")
+        text.addWidget(title)
+        if note:
+            sub = QLabel(note)
+            sub.setFont(_ui_font(11.5, 400))
+            sub.setWordWrap(True)
+            sub.setStyleSheet(f"color: {tokens.Win.TEXT_NOTE};")
+            text.addWidget(sub)
+        # A bare label centres on its control; one with a note under it
+        # tops out level with the control, as `SwitchRow`'s does.
+        align = Qt.AlignmentFlag.AlignTop if note else Qt.AlignmentFlag.AlignVCenter
+        row.addLayout(text, 1)
+        row.setAlignment(text, align)
+
+        self.control = control
+        row.addWidget(control, 0, align)
+
+
+def _dropdown_style(padding_left: int) -> str:
+    """A button that reads as a field: the text field's own ground, with
+    room at the right for the chevron `paintEvent` draws."""
+    win, metric = tokens.Win, tokens.WinMetric
+    return (
+        f"QPushButton {{ text-align: left; background: {win.FIELD_BG};"
+        f" border: 1px solid {win.FIELD_BORDER};"
+        f" border-radius: {metric.CONTROL_RADIUS}px; color: {win.TEXT_PRIMARY};"
+        f" padding: 0 30px 0 {padding_left}px; }}"
+        f"QPushButton:hover {{ border-color: {win.CONTROL_BORDER_HOVER}; }}"
+    )
+
+
+def _paint_chevron(button: QPushButton) -> None:
+    painter = QPainter(button)
+    size = 12
+    design.icon("chevron", tokens.Win.ICON_IDLE).paint(
+        painter, button.width() - size - 11, (button.height() - size) // 2, size, size
+    )
+    painter.end()
+
+
+def _menu_style() -> str:
+    win, metric = tokens.Win, tokens.WinMetric
+    return (
+        f"QMenu {{ background: {win.CHROME_BG}; border: 1px solid {win.CONTROL_BORDER_HOVER};"
+        f" border-radius: {metric.CONTROL_RADIUS}px; padding: 4px; }}"
+        f"QMenu::item {{ color: {win.TEXT_SECONDARY}; padding: 6px 16px 6px 8px;"
+        f" border-radius: 6px; }}"
+        f"QMenu::item:selected {{ background: {win.ROW_HOVER}; color: {win.TEXT_PRIMARY}; }}"
+        f"QMenu::icon {{ padding-left: 8px; }}"
+    )
+
+
+class Select(QPushButton):
+    """A dropdown in this window's own styling: the choice's glyph and name
+    on a field, a chevron at the end, and a menu of every option.
+
+    Not a `QComboBox`: its arrow and its popup list come from the platform
+    style, which draws a light system list under a dark window.
+
+    `options` are `(value, label, glyph or None)`. `changed` fires on a
+    pick that changes the value, never on `set_value`.
+    """
+
+    changed = pyqtSignal(str)
+
+    def __init__(self, options, current: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._options = list(options)
+        values = [value for value, _label, _glyph in self._options]
+        self._value = current if current in values else values[0]
+        self._menu: QMenu | None = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFont(_ui_font(12.5, 500))
+        self.setFixedSize(_CONTROL_W, tokens.WinMetric.CONTROL_H)
+        self.setIconSize(QSize(15, 15))
+        self.setStyleSheet(_dropdown_style(10))
+        self.clicked.connect(self._open)
+        self._refresh()
+
+    def value(self) -> str:
+        return self._value
+
+    def values(self) -> list[str]:
+        return [value for value, _label, _glyph in self._options]
+
+    def set_value(self, value: str) -> None:
+        if value in self.values():
+            self._value = value
+            self._refresh()
+
+    def menu_widget(self) -> QMenu | None:
+        """The menu the last click opened, or None before one has."""
+        return self._menu
+
+    def _refresh(self) -> None:
+        label, glyph = next(
+            (label, glyph) for value, label, glyph in self._options if value == self._value
+        )
+        self.setText(label)
+        self.setIcon(design.icon(glyph, tokens.Win.TEXT_SECONDARY) if glyph else QIcon())
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        _paint_chevron(self)
+
+    def _open(self) -> None:
+        win = tokens.Win
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        menu.setStyleSheet(_menu_style())
+        menu.setFont(_ui_font(12.5, 500))
+        menu.setMinimumWidth(self.width())
+        for value, label, glyph in self._options:
+            action = menu.addAction(label)
+            current = value == self._value
+            if glyph:
+                action.setIcon(design.icon(glyph, win.ICON_ACTIVE if current else win.ICON_IDLE))
+            if current:
+                # The current choice is the bold one: a tick column would
+                # push every label right for the sake of one row.
+                font = _ui_font(12.5, 600)
+                action.setFont(font)
+            action.triggered.connect(lambda _checked=False, v=value: self._choose(v))
+        self._menu = menu
+        menu.popup(self.mapToGlobal(QPoint(0, self.height() + 4)))
+
+    def _choose(self, value: str) -> None:
+        if value == self._value:
+            return
+        self._value = value
+        self._refresh()
+        self.changed.emit(value)
+
+
+def _swatch_name(colour: str) -> str:
+    """The swatch's own name for `colour`, or the hex where it has none."""
+    for name, hex_colour in tokens.SETTINGS_SWATCHES:
+        if hex_colour == colour:
+            return name
+    return colour.upper()
+
+
+def _paint_dot(painter: QPainter, rect: QRectF, colours: list[str]) -> None:
+    """A colour dot, or -- for more than one colour -- a pie of them, which is
+    how "each tool's own" is drawn: several colours at once, not one."""
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    if len(colours) == 1:
+        painter.setBrush(QColor(colours[0]))
+        painter.drawEllipse(rect)
+    else:
+        span = 360 * 16 // len(colours)
+        for index, colour in enumerate(colours):
+            painter.setBrush(QColor(colour))
+            painter.drawPie(rect, 90 * 16 - index * span, -span)
+    # A hairline ring, so the near-black swatch still has an edge against
+    # the dark field.
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
+    painter.drawEllipse(rect)
+
+
+class _Swatch(QPushButton):
+    """One colour in `_ColourPopup`: a disc, ringed when it is the choice."""
+
+    def __init__(self, name: str, colour: str, selected: bool, parent=None):
+        super().__init__(parent)
+        self.colour = colour
+        self._selected = selected
+        self.setFixedSize(24, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"{name} · {colour.upper()}")
+        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        _paint_dot(painter, QRectF(4, 4, 16, 16), [self.colour])
+        if self._selected or self.underMouse():
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            ring = tokens.Win.ICON_ACTIVE if self._selected else tokens.Win.ICON_IDLE
+            painter.setPen(QPen(QColor(ring), 1.5))
+            painter.drawEllipse(QRectF(1, 1, 22, 22))
+        painter.end()
+
+
+class _ColourPopup(QFrame):
+    """What `ColourPicker` opens: the "no colour of its own" choice, the
+    swatches, and a hex field for anything else."""
+
+    chosen = pyqtSignal(object)
+
+    def __init__(self, current: str | None, inherit_label: str, inherit_colours, parent=None):
+        super().__init__(parent)
+        win, metric = tokens.Win, tokens.WinMetric
+        self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        # Translucent so the corners can be round; the ground is painted by
+        # `paintEvent`, since a translucent top-level paints no stylesheet
+        # background of its own.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(8, 8, 8, 8)
+        column.setSpacing(8)
+
+        self.inherit = QPushButton(inherit_label)
+        self.inherit.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.inherit.setFont(_ui_font(12.5, 600 if current is None else 500))
+        self.inherit.setIcon(QIcon(_dot_pixmap(inherit_colours)))
+        self.inherit.setIconSize(QSize(14, 14))
+        self.inherit.setStyleSheet(
+            f"QPushButton {{ text-align: left; border: none; border-radius: 6px;"
+            f" padding: 6px 8px; color: {win.TEXT_PRIMARY if current is None else win.TEXT_SECONDARY};"
+            f" background: {win.SELECTED_BG if current is None else 'transparent'}; }}"
+            f"QPushButton:hover {{ background: {win.ROW_HOVER}; }}"
+        )
+        self.inherit.clicked.connect(lambda _c=False: self._choose(None))
+        column.addWidget(self.inherit)
+
+        swatches = QHBoxLayout()
+        swatches.setContentsMargins(0, 0, 0, 0)
+        swatches.setSpacing(2)
+        self.swatches: list[_Swatch] = []
+        for name, colour in tokens.SETTINGS_SWATCHES:
+            swatch = _Swatch(name, colour, colour == current)
+            swatch.clicked.connect(lambda _c=False, c=colour: self._choose(c))
+            swatches.addWidget(swatch)
+            self.swatches.append(swatch)
+        column.addLayout(swatches)
+
+        self.hex = QLineEdit(current.upper() if current else "")
+        self.hex.setPlaceholderText("#RRGGBB")
+        self.hex.setMaxLength(7)
+        self.hex.setFont(_mono_font(12))
+        self.hex.setFixedHeight(28)
+        self.hex.setStyleSheet(_field_style())
+        self.hex.returnPressed.connect(self._take_hex)
+        column.addWidget(self.hex)
+
+    def paintEvent(self, event) -> None:
+        win, metric = tokens.Win, tokens.WinMetric
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(win.CONTROL_BORDER_HOVER), 1))
+        painter.setBrush(QColor(win.CHROME_BG))
+        radius = metric.CONTROL_RADIUS
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        painter.end()
+
+    def _take_hex(self) -> None:
+        text = self.hex.text().strip()
+        if not text.startswith("#"):
+            text = f"#{text}"
+        colour = setup_desktop._hex_or_none(text)
+        if colour is None:
+            # Said where it was typed, not in a dialog over a popup.
+            self.hex.setStyleSheet(
+                _field_style() + f"QLineEdit {{ border-color: {tokens.Win.CLOSE_HOVER}; }}"
+            )
+            return
+        self._choose(colour)
+
+    def _choose(self, colour: str | None) -> None:
+        self.chosen.emit(colour)
+        self.close()
+
+
+def _dot_pixmap(colours) -> QPixmap:
+    pixmap = QPixmap(28, 28)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    _paint_dot(painter, QRectF(1, 1, 26, 26), list(colours))
+    painter.end()
+    return pixmap
+
+
+class ColourPicker(QPushButton):
+    """A colour, or no colour of its own (`inherit_label`, drawn with
+    `inherit_colours`), on a field that opens `_ColourPopup`.
+
+    `changed` carries the new value -- a `#rrggbb`, or None -- on a pick
+    that changes it, never on `set_value`.
+    """
+
+    changed = pyqtSignal(object)
+
+    def __init__(
+        self,
+        current: str | None,
+        inherit_label: str,
+        inherit_colours,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._value = current
+        self._inherit_label = inherit_label
+        self._inherit_colours = list(inherit_colours)
+        self._popup: _ColourPopup | None = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFont(_ui_font(12.5, 500))
+        self.setFixedSize(_CONTROL_W, tokens.WinMetric.CONTROL_H)
+        self.setStyleSheet(_dropdown_style(34))
+        self.clicked.connect(self._open)
+        self._refresh()
+
+    def value(self) -> str | None:
+        return self._value
+
+    def set_value(self, value: str | None) -> None:
+        self._value = value
+        self._refresh()
+
+    def set_inherit(self, label: str, colours) -> None:
+        """What choosing no colour of its own means just now -- for a
+        tool's colour, whatever the default ink above it is."""
+        self._inherit_label = label
+        self._inherit_colours = list(colours)
+        self._refresh()
+
+    def popup_widget(self) -> "_ColourPopup | None":
+        """The popup the last click opened, or None before one has."""
+        return self._popup
+
+    def _refresh(self) -> None:
+        self.setText(self._inherit_label if self._value is None else _swatch_name(self._value))
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        colours = self._inherit_colours if self._value is None else [self._value]
+        size = 14
+        _paint_dot(painter, QRectF(12, (self.height() - size) / 2, size, size), colours)
+        painter.end()
+        _paint_chevron(self)
+
+    def _open(self) -> None:
+        popup = _ColourPopup(self._value, self._inherit_label, self._inherit_colours)
+        popup.chosen.connect(self._choose)
+        popup.setFixedWidth(max(self.width(), popup.sizeHint().width()))
+        popup.move(self.mapToGlobal(QPoint(0, self.height() + 4)))
+        popup.show()
+        self._popup = popup
+
+    def _choose(self, colour: str | None) -> None:
+        if colour == self._value:
+            return
+        self._value = colour
+        self._refresh()
+        self.changed.emit(colour)
+
+
+class SliderControl(QWidget):
+    """A bounded number as a slider with its value beside it -- the style
+    popover's own control for stroke and strength, in this window's
+    styling."""
+
+    changed = pyqtSignal(int)
+
+    def __init__(self, value: int, bounds: tuple[int, int], suffix: str = "", parent=None):
+        super().__init__(parent)
+        win = tokens.Win
+        self._suffix = suffix
+        self.setFixedSize(_CONTROL_W, tokens.WinMetric.CONTROL_H)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(*bounds)
+        self.slider.setValue(value)
+        self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.slider.setStyleSheet(
+            f"QSlider::groove:horizontal {{ height: 4px; background: {win.TOGGLE_OFF};"
+            f" border-radius: 2px; }}"
+            f"QSlider::sub-page:horizontal {{ background: {tokens.Color.ACCENT};"
+            f" border-radius: 2px; }}"
+            f"QSlider::handle:horizontal {{ background: {win.TEXT_PRIMARY}; width: 14px;"
+            f" margin: -5px 0; border-radius: 7px; }}"
+        )
+        self.slider.valueChanged.connect(self._on_value)
+        row.addWidget(self.slider, 1)
+        self.readout = QLabel()
+        self.readout.setFont(_mono_font(12))
+        self.readout.setFixedWidth(40)
+        self.readout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.readout.setStyleSheet(f"color: {win.TEXT_SECONDARY};")
+        row.addWidget(self.readout)
+        self._show(value)
+
+    def value(self) -> int:
+        return self.slider.value()
+
+    def set_value(self, value: int) -> None:
+        self.slider.blockSignals(True)
+        self.slider.setValue(value)
+        self.slider.blockSignals(False)
+        self._show(self.slider.value())
+
+    def _show(self, value: int) -> None:
+        self.readout.setText(f"{value}{self._suffix}")
+
+    def _on_value(self, value: int) -> None:
+        self._show(value)
+        self.changed.emit(value)
 
 
 class SpinRow(QWidget):
@@ -1515,20 +1945,45 @@ class SettingsWindow(WinWindow):
         )
 
     def _annotation_pane(self) -> QWidget:
+        win = tokens.Win
         note = QLabel(
             "These set the state the overlay opens in. The tools themselves "
             "are the overlay's own."
         )
         note.setWordWrap(True)
         note.setFont(_ui_font(11.5, 400))
-        note.setStyleSheet(f"color: {tokens.Win.TEXT_NOTE};")
+        note.setStyleSheet(f"color: {win.TEXT_NOTE};")
+
+        self._opening_tool = Select(
+            [
+                (tool, "No tool", "select") if tool == tokens.OPENING_TOOL_NONE
+                else (tool, tokens.TOOL_NAMES[tool], tokens.TOOL_GLYPHS.get(tool, tool))
+                for tool in tokens.OPENING_TOOLS
+            ],
+            setup_desktop.load_default_tool(self._config_dir),
+        )
+        self._opening_tool.changed.connect(lambda _t: self._mark_dirty())
+        opening_row = _ControlRow("Tool the overlay opens with", "", self._opening_tool)
 
         self._remember_tool = SwitchRow(
             "Remember my last tool instead",
-            "When on, the tool above is only the first-run seed.",
+            "Opens with whichever tool your last snip ended on. The tool "
+            "above is used until there is one.",
             setup_desktop.load_remember_tool(self._config_dir),
         )
         self._remember_tool.switch.toggled.connect(lambda _c: self._mark_dirty())
+
+        self._default_ink = ColourPicker(
+            setup_desktop.load_default_ink(self._config_dir),
+            "Each tool's own",
+            _EACH_TOOLS_OWN,
+        )
+        self._default_ink.changed.connect(self._on_default_ink_changed)
+        ink_row = _ControlRow(
+            "Default ink colour",
+            "Every tool that draws in a colour starts with this.",
+            self._default_ink,
+        )
 
         self._show_hints = SwitchRow(
             "Show the hint bar",
@@ -1539,13 +1994,148 @@ class SettingsWindow(WinWindow):
         )
         self._show_hints.switch.toggled.connect(lambda _c: self._mark_dirty())
 
+        # Per-tool defaults: one tool at a time, picked from a dropdown, with
+        # only the rows its style popover has -- thirteen tools' worth of
+        # controls at once would be most of a screen of Settings.
+        self._tool_edits = setup_desktop.load_tool_defaults(self._config_dir)
+        styled = [tool for tool in tokens.TOOLS if tokens.STYLE_SECTIONS.get(tool)]
+        self._custom_tool = Select(
+            [(tool, tokens.TOOL_NAMES[tool], tokens.TOOL_GLYPHS.get(tool, tool)) for tool in styled],
+            styled[0],
+        )
+        self._custom_tool.changed.connect(lambda _t: self._load_tool_editor())
+
+        self._tool_colour = ColourPicker(None, "Default", [])
+        self._tool_colour.changed.connect(lambda colour: self._edit_tool("color", colour))
+        self._tool_size = SliderControl(5, tokens.STROKE_RANGE, "px")
+        self._tool_size.changed.connect(lambda value: self._edit_tool("size", value))
+        self._tool_dash = Select(
+            [(value, label, None) for value, _pattern, label in tokens.DASH_CYCLE], "solid"
+        )
+        self._tool_dash.changed.connect(lambda value: self._edit_tool("dash", value))
+        self._tool_fill = Select(
+            [(value, label, None) for value, label in tokens.FILL_CYCLE], "outline"
+        )
+        self._tool_fill.changed.connect(lambda value: self._edit_tool("fill", value))
+        self._tool_strength = SliderControl(tokens.Metric.BLUR_DEFAULT, tokens.STRENGTH_RANGE)
+        self._tool_strength.changed.connect(lambda value: self._edit_tool("strength", value))
+        self._tool_snap = Select(
+            [(value, label, None) for value, label in tokens.SNAP_CYCLE], "text"
+        )
+        self._tool_snap.changed.connect(lambda value: self._edit_tool("snap", value))
+        # In `tokens.STYLE_SECTIONS`' own names, so a tool's sections are
+        # the rows it shows.
+        self._tool_rows = {
+            "color": _ControlRow("Colour", "", self._tool_colour),
+            "size": _ControlRow("Size", "", self._tool_size),
+            "dash": _ControlRow("Line", "", self._tool_dash),
+            "fill": _ControlRow("Fill", "", self._tool_fill),
+            "strength": _ControlRow("Strength", "", self._tool_strength),
+            "snap": _ControlRow("Sweep", "", self._tool_snap),
+        }
+
+        reset = QPushButton("Reset all tools")
+        reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset.setFont(_ui_font(11.5, 500))
+        reset.setStyleSheet(
+            f"QPushButton {{ border: none; background: transparent; color: {win.TEXT_MUTED}; }}"
+            f"QPushButton:hover {{ color: {win.TEXT_PRIMARY}; }}"
+        )
+        reset.clicked.connect(lambda _c=False: self._reset_tool_defaults())
+        self._reset_tools = reset
+        heading = QWidget()
+        heading_row = QHBoxLayout(heading)
+        heading_row.setContentsMargins(0, 0, 0, 0)
+        heading_row.addWidget(SectionHeading("Per-tool defaults"))
+        heading_row.addStretch()
+        heading_row.addWidget(reset)
+
+        advanced_note = QLabel(
+            "What each tool starts a session with. Anything left alone follows "
+            "the defaults above."
+        )
+        advanced_note.setWordWrap(True)
+        advanced_note.setFont(_ui_font(11.5, 400))
+        advanced_note.setStyleSheet(f"color: {win.TEXT_NOTE};")
+
+        self._load_tool_editor()
         return _pane(
             SectionHeading("Annotation"),
             note,
             None,
+            opening_row,
             self._remember_tool,
+            ink_row,
             self._show_hints,
+            None,
+            heading,
+            advanced_note,
+            _ControlRow("Tool", "", self._custom_tool),
+            *self._tool_rows.values(),
         )
+
+    @staticmethod
+    def _shipped_style(tool: str) -> dict:
+        """What `tool` draws with before anyone sets anything, keyed by
+        `tokens.STYLE_SECTIONS`' names."""
+        seed = tokens.DEFAULT_STYLE.get(tool, tokens.DEFAULT_STYLE_OTHER)
+        return {
+            "color": seed["color"],
+            "size": seed["size"],
+            "dash": seed["dash"],
+            "fill": seed["fill"],
+            "strength": tokens.Metric.BLUR_DEFAULT,
+            "snap": seed.get("snap", "text"),
+        }
+
+    def _inherited_colour(self, tool: str) -> str:
+        """The colour `tool` gets with none of its own: the default ink, or
+        the one it shipped with."""
+        return self._default_ink.value() or self._shipped_style(tool)["color"]
+
+    def _load_tool_editor(self) -> None:
+        """Show the picked tool's rows, holding its values -- its own where
+        it has them, what it shipped with where it does not."""
+        tool = self._custom_tool.value()
+        sections = tokens.STYLE_SECTIONS.get(tool, [])
+        values = {**self._shipped_style(tool), **self._tool_edits.get(tool, {})}
+        self._tool_colour.set_inherit("Default", [self._inherited_colour(tool)])
+        self._tool_colour.set_value(self._tool_edits.get(tool, {}).get("color"))
+        self._tool_size.set_value(values["size"])
+        self._tool_dash.set_value(values["dash"])
+        self._tool_fill.set_value(values["fill"])
+        self._tool_strength.set_value(values["strength"])
+        self._tool_snap.set_value(values["snap"])
+        for section, row in self._tool_rows.items():
+            row.setVisible(section in sections)
+
+    def _edit_tool(self, section: str, value) -> None:
+        """Record one of the picked tool's defaults. Only what differs from
+        how it shipped is kept -- except a colour, which is kept whenever
+        one is chosen: the shipped colour, chosen, is how a tool opts out of
+        the default ink."""
+        tool = self._custom_tool.value()
+        fields = self._tool_edits.setdefault(tool, {})
+        shipped = self._shipped_style(tool)[section]
+        if value is None or (section != "color" and value == shipped):
+            fields.pop(section, None)
+        else:
+            fields[section] = value
+        if not fields:
+            del self._tool_edits[tool]
+        self._mark_dirty()
+
+    def _on_default_ink_changed(self, _colour) -> None:
+        tool = self._custom_tool.value()
+        self._tool_colour.set_inherit("Default", [self._inherited_colour(tool)])
+        self._mark_dirty()
+
+    def _reset_tool_defaults(self) -> None:
+        if not self._tool_edits:
+            return
+        self._tool_edits = {}
+        self._load_tool_editor()
+        self._mark_dirty()
 
     def _watermark_pane(self) -> QWidget:
         """What the stills bar's watermark stamps: a line of text, or an
@@ -2111,6 +2701,9 @@ class SettingsWindow(WinWindow):
         setup_desktop.save_recording_filename_pattern(
             self._recording_filename.text(), self._config_dir
         )
+        setup_desktop.save_default_tool(self._opening_tool.value(), self._config_dir)
+        setup_desktop.save_default_ink(self._default_ink.value(), self._config_dir)
+        setup_desktop.save_tool_defaults(self._tool_edits, self._config_dir)
         setup_desktop.save_remember_tool(
             self._remember_tool.switch.isChecked(), self._config_dir
         )
