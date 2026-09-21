@@ -18,6 +18,22 @@ from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QUrl
 from PyQt6.QtGui import QGuiApplication, QImage
 
 
+def _settle_clipboard() -> None:
+    """Make sure the compositor has taken what was just put on the clipboard
+    before anything else happens -- one round trip, `QGuiApplication.sync()`.
+
+    On Wayland a selection is only accepted from the client with keyboard
+    focus, and Qt hands it over asynchronously. Every copy here is followed
+    at once by the overlay closing, so without the round trip the window
+    could be gone -- and its focus with it -- before the compositor saw the
+    request. Measured on GNOME 46: Enter copied and toasted "Copied to
+    clipboard" while the clipboard kept whatever it held before; a button
+    click happened to win the race. On X11 this is an XSync, and costs
+    nothing.
+    """
+    QGuiApplication.sync()
+
+
 def copy_image_to_clipboard(image: QImage) -> None:
     """Place `image` on the clipboard: the in-process Qt clipboard always,
     and (best-effort) `wl-copy` as well when it's on PATH.
@@ -33,6 +49,7 @@ def copy_image_to_clipboard(image: QImage) -> None:
     this must not raise.
     """
     QGuiApplication.clipboard().setImage(image)
+    _settle_clipboard()
 
     if shutil.which("wl-copy") is None:
         return
@@ -57,6 +74,7 @@ def copy_text_to_clipboard(text: str) -> None:
     reasoning applies here unchanged.
     """
     QGuiApplication.clipboard().setText(text)
+    _settle_clipboard()
 
     if shutil.which("wl-copy") is None:
         return
@@ -104,6 +122,7 @@ def copy_file_to_clipboard(path: Path) -> None:
     # always contains spaces, so every recording copied hit it.
     mime.setData("x-special/gnome-copied-files", b"copy\n" + bytes(url.toEncoded()))
     QGuiApplication.clipboard().setMimeData(mime)
+    _settle_clipboard()
 
     if shutil.which("wl-copy") is None:
         return

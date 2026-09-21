@@ -5,8 +5,63 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **Choose the tool a snip opens with.** A dropdown in Settings →
+  Annotation lists every tool the toolbar can start on, plus "No tool" for
+  a toolbar that arms nothing until you pick. It was always the pen.
+- **A default ink colour.** Also in Settings → Annotation: one colour every
+  tool that draws in a colour starts with, picked from the swatches or
+  typed as a hex. "Each tool's own" keeps the colours they ship with.
+- **Per-tool defaults.** Below that, pick any tool and set what it starts
+  with -- its colour, size, line style, fill, blur strength or highlighter
+  sweep, whichever it has. "Reset all tools" puts them back. A change made
+  mid-snip still lasts only for that session.
+- **Pick what happens to a recording right beside Record.** The recording
+  bar now has a Copy / Save / Open / GIF menu next to the Record button.
+  It shows what Stop will do, and changing it applies to this recording
+  only, without changing your default.
+- **Pause and sound when recording on Linux.** With ffmpeg installed, Pause
+  works on Linux as it does on Windows -- the paused time is simply left
+  out -- and the audio menu records what you hear or your microphone.
+  Without ffmpeg both are greyed and say what they need.
+
+### Changed
+
+- **Settings shows just the Snipux version** at the foot of its sidebar,
+  without the Qt version and session type after it.
+- **The recording bar sits under the region, like the screenshot
+  toolbar,** and moves with it while you resize it, instead of staying at
+  the top of the screen. If there is no room below the region, it goes to
+  the top of the screen.
+- **A tidier recording bar.** It matches the screenshot toolbar now. Audio
+  is an icon with a small corner marker instead of a labelled dropdown (on
+  Linux it stays greyed, with the reason as its tooltip). A delay you set
+  shows its seconds on the bar. The desktop no longer shows through the bar
+  behind its buttons.
+
 ### Fixed
 
+- **"Remember my last tool instead" does something.** The switch in
+  Settings → Annotation was saved and never read. With it on, a snip opens
+  with the tool the last one ended on.
+- **The recording bar's audio menu opens where you can see it.** It always
+  opened upward, so with the bar at the top of the screen it opened
+  off-screen. It now opens below when there is no room above.
+- **The audio source can't be changed mid-recording any more.** The menu
+  still opened while recording, but the choice only applied to the next
+  recording.
+- **Recording on Wayland no longer films Snipux's own chrome.** GNOME
+  placed the recording bar and the red outline wherever it liked, which
+  could be inside the area being recorded. On Wayland the bar now stays
+  under the region until you press Record. While recording, nothing of
+  Snipux's is on screen. Stop with your shortcut or the tray, whose Snip
+  item reads "Stop recording" while a recording runs.
+- **Enter copies your snip on Wayland.** It closed the snip instead: the
+  close button had the keyboard, so Enter pressed it, and Space would have
+  too. Every button over the snip now leaves the keys to it.
+- **What you copy on Wayland stays on the clipboard** when the snip closes
+  straight after.
 - **A clearer message when GNOME refuses a screenshot on Wayland.** It now
   says to allow Snipux when GNOME asks, instead of suggesting the portal
   is not installed.

@@ -310,6 +310,21 @@ class Platform(ABC):
             return ""
         return self.audio_unavailable_reason()
 
+    def places_windows(self) -> bool:
+        """Whether a window of snipux's own lands where snipux puts it.
+
+        Chrome only: it decides whether the recording chrome that has to
+        sit clear of the recorded area -- the bar, the red outline, the
+        countdown -- may be windows of their own. Where it is False they
+        live inside the overlay while it is up, and are not shown once it
+        closes, since a window the compositor placed could land inside the
+        recording. Measured on GNOME 46 Wayland: the outline's four strips
+        cascaded straight across the recorded region.
+
+        Defaults to False; Windows and X11 answer True.
+        """
+        return False
+
     def can_pin(self) -> bool:
         """Whether a pin (SNX-83) can be placed at the selection's exact
         rect and kept on top here.
