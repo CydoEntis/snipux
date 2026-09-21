@@ -2304,9 +2304,20 @@ class _Clock:
 
 
 @pytest.fixture
-def linux_recorder(monkeypatch, tmp_path):
+def shell_dir(monkeypatch, tmp_path) -> str:
+    """`tmp_path` as GNOME Shell names a file: a POSIX absolute path, the
+    only kind `_finish_start` accepts. On the Windows runner that is the
+    path without its drive, which resolves against the current drive -- so
+    the test runs from inside `tmp_path`, which puts it on the right one.
+    """
+    monkeypatch.chdir(tmp_path)
+    return "/" + tmp_path.relative_to(tmp_path.anchor).as_posix()
+
+
+@pytest.fixture
+def linux_recorder(monkeypatch, shell_dir):
     """A GNOME backend over a fake Shell and a fake ffmpeg, recording into
-    `tmp_path`, with a system ffmpeg that can record sound."""
+    `shell_dir`, with a system ffmpeg that can record sound."""
     shell = _FakeShell()
     monkeypatch.setattr(recording, "open_dbus_connection", shell.open)
     monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
@@ -2317,7 +2328,7 @@ def linux_recorder(monkeypatch, tmp_path):
     backend = GnomeScreencastBackend(run=run, popen=popen, clock=_Clock())
     return SimpleNamespace(
         backend=backend, shell=shell, run=run, popen=popen,
-        path=str(tmp_path / "rec.mp4"), rect=QRectF(10, 20, 300, 200),
+        path=f"{shell_dir}/rec.mp4", rect=QRectF(10, 20, 300, 200),
     )
 
 
@@ -2421,14 +2432,14 @@ class TestGnomeStopJoinsThePieces:
         assert Path(final).read_bytes() == b"piece"
 
     def test_a_failed_join_keeps_every_piece_and_hands_them_back_in_order(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, shell_dir
     ):
         shell = _FakeShell()
         monkeypatch.setattr(recording, "open_dbus_connection", shell.open)
         monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
         run = _FakeFfmpeg(shell, fail_on="concat")
         backend = GnomeScreencastBackend(run=run, popen=Mock(), clock=_Clock())
-        path = str(tmp_path / "rec.mp4")
+        path = f"{shell_dir}/rec.mp4"
         final = backend.start(QRectF(0, 0, 10, 10), path)
         backend.pause()
         backend.resume()
@@ -2439,13 +2450,13 @@ class TestGnomeStopJoinsThePieces:
         assert raised.value.parts == [final, f"{path}.part2.webm"]
         assert all(Path(part).read_bytes() == b"piece" for part in raised.value.parts)
 
-    def test_a_join_that_comes_out_short_is_a_failed_join(self, monkeypatch, tmp_path):
+    def test_a_join_that_comes_out_short_is_a_failed_join(self, monkeypatch, shell_dir):
         shell = _FakeShell()
         monkeypatch.setattr(recording, "open_dbus_connection", shell.open)
         monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
         run = _FakeFfmpeg(shell)
         backend = GnomeScreencastBackend(run=run, popen=Mock(), clock=_Clock())
-        path = str(tmp_path / "rec.mp4")
+        path = f"{shell_dir}/rec.mp4"
         backend.start(QRectF(0, 0, 10, 10), path)
         backend.pause()
         backend.resume()
@@ -2462,7 +2473,7 @@ class TestGnomeStopJoinsThePieces:
         with pytest.raises(recording.RecordingPartsError):
             backend.stop()
 
-    def test_a_join_that_reports_longer_than_its_pieces_is_kept(self, monkeypatch, tmp_path):
+    def test_a_join_that_reports_longer_than_its_pieces_is_kept(self, monkeypatch, shell_dir):
         # Shell sends frames only when the screen changes, and a file's
         # reported length counts its last frame as lasting a whole frame
         # interval -- a still screen joins to a file reporting a second or
@@ -2472,7 +2483,7 @@ class TestGnomeStopJoinsThePieces:
         monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
         run = _FakeFfmpeg(shell)
         backend = GnomeScreencastBackend(run=run, popen=Mock(), clock=_Clock())
-        path = str(tmp_path / "rec.mp4")
+        path = f"{shell_dir}/rec.mp4"
         final = backend.start(QRectF(0, 0, 10, 10), path)
         backend.pause()
         backend.resume()
