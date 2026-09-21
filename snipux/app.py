@@ -1999,8 +1999,8 @@ class AppController:
         self._reposition_recording_bar()
 
     def _bar_geometries(self) -> list[QRectF]:
-        """The monitors a recording bar may be placed on -- the same
-        union-of-monitor-geometries source `create_overlays()` uses."""
+        """The monitors a recording bar may be placed on, in absolute
+        logical virtual-desktop coordinates."""
         return (
             self._monitor_geometries
             if self._monitor_geometries is not None
