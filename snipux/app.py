@@ -43,6 +43,7 @@ from PyQt6.QtCore import (
     QEventLoop,
     QMarginsF,
     QObject,
+    QPointF,
     QRect,
     QRectF,
     QSize,
@@ -1918,7 +1919,15 @@ class AppController:
             if self._monitor_geometries is not None
             else self._real_monitor_geometries()
         )
-        bar = RecordingBar()
+        # Where snipux cannot place a window of its own (Wayland), the ready
+        # bar lives inside the overlay, as the stills bar does, and goes
+        # with it when recording starts -- see `Platform.places_windows`.
+        embedded = (
+            not platform.current.places_windows()
+            and self._overlay is not None
+            and self._overlay.isVisible()
+        )
+        bar = RecordingBar(self._overlay if embedded else None)
         bar.set_ready()
         # Audio is the platform's answer, not the bar's: GNOME's screencast
         # has no audio option at all, so the control is offered inert with
@@ -2276,7 +2285,10 @@ class AppController:
 
         # A full-screen recording has no region to sit inside that is not
         # also the whole screen, and a numeral centred on the desktop would
-        # be filmed. The bar's own count carries it in that case.
+        # be filmed. The bar's own count carries it in that case -- and
+        # where a window cannot be placed at all, since the numeral is one.
+        if not platform.current.places_windows():
+            return
         if self._countdown_numeral is None:
             self._countdown_numeral = CountdownNumeral()
         self._countdown_numeral.set_seconds(seconds)
@@ -2300,10 +2312,12 @@ class AppController:
         if bar is None or self._recording_bar_anchor is None:
             return
         bar.adjustSize()
-        bar.move(
-            round(self._recording_bar_anchor.x() - bar.width() / 2),
-            round(self._recording_bar_anchor.y() - bar.height() / 2),
-        )
+        centre = QPointF(self._recording_bar_anchor)
+        host = bar.parentWidget()
+        if host is not None:
+            # Embedded in the overlay: its coordinates, not the desktop's.
+            centre = host.to_local_point(centre)
+        bar.move(round(centre.x() - bar.width() / 2), round(centre.y() - bar.height() / 2))
 
     def _begin_armed_recording(self) -> None:
         """Take an armed recording to the countdown, or straight to
@@ -2405,6 +2419,12 @@ class AppController:
                 reframed = self._overlay.absolute_selection()
                 if reframed is not None:
                     rect = reframed
+            # An embedded ready bar goes down with the overlay; forget it
+            # first, so the recording runs without one, as a full-screen
+            # recording already does.
+            if self._recording_hud is not None and self._recording_hud.parentWidget() is not None:
+                self._recording_hud = None
+                self._recording_bar_anchor = None
             # Down before the backend starts: from here the frozen frame it
             # paints would be what gets filmed.
             self._overlay.close()
@@ -2528,7 +2548,11 @@ class AppController:
                 if self._monitor_geometries is not None
                 else self._real_monitor_geometries()
             )
-            self._region_frame.show_around(rect, within=_screen_for(rect, geometries))
+            # Only where it lands where it is put: the outline and the
+            # scrim are windows of their own, and under Wayland the
+            # compositor cascaded them straight across the recorded region.
+            if platform.current.places_windows():
+                self._region_frame.show_around(rect, within=_screen_for(rect, geometries))
             if self._recording_hud is not None:
                 # The region filmed is the last one reframed, and the bar
                 # was last placed for whatever the drag passed through. Where
@@ -2588,9 +2612,14 @@ class AppController:
             # recording is running, not enough to do anything about it. So
             # the one thing that cannot be worked out by looking is said
             # out loud, once, naming the shortcut the user actually has.
+            why = (
+                "the bar is hidden because it would be in the recording"
+                if platform.current.places_windows()
+                else "this desktop won't let Snipux keep a bar out of the recording"
+            )
             self._report_shortcut(
-                f"Recording. Press {setup_desktop.load_shortcut()} to stop "
-                "-- the bar is hidden because it would be in the recording."
+                f"Recording. Press {setup_desktop.load_shortcut()} or use the tray "
+                f"to stop -- {why}."
             )
 
         # Showing a window maps it; it does not paint it. Both happen when
@@ -2663,6 +2692,10 @@ class AppController:
         # Same "flip it wherever the tray icon flips" reasoning as the icon
         # itself -- see the tray menu's own construction comment.
         self.discard_action.setEnabled(True)
+        # Snip already stops a running recording (`start_capture`), and
+        # where no bar can stay up (Wayland) the tray is the only thing to
+        # click -- so it says what it will do.
+        self.snip_action.setText("Stop recording")
 
         # Ticked once immediately, not just on the timer's first firing a
         # second from now -- a recording stopped inside that first second
@@ -2703,6 +2736,7 @@ class AppController:
         self._tray_icon.setIcon(self._idle_tray_icon)
         self._tray_icon.setToolTip("")
         self.discard_action.setEnabled(False)
+        self.snip_action.setText("Snip")
 
     def _on_recording_tick(self) -> None:
         """Push the current elapsed time to every surface that shows it:

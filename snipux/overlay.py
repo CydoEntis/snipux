@@ -6378,6 +6378,15 @@ class OverlayWindow(QWidget):
         """
         return local_point + self._frame.logical_origin
 
+    def to_local_point(self, absolute_point: QPointF) -> QPointF:
+        """Absolute logical virtual-desktop point -> this window's own logical
+        coordinates, by the frame's origin like every other conversion here
+        (a Wayland client is never told where its window is) -- for chrome
+        `app.py` places inside this window rather than as a window of its
+        own.
+        """
+        return QPointF(absolute_point) - self._frame.logical_origin
+
     def _to_local_rect(self, absolute_rect: QRectF) -> QRectF:
         """Absolute logical virtual-desktop rect -> this widget's own
         window-local logical rect -- the inverse of `_to_absolute`,

@@ -105,6 +105,16 @@ def _assume_setup_already_ran(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _windows_land_where_they_are_put(monkeypatch):
+    """Default every test here to a desktop that places snipux's own windows
+    where it asks -- X11 and Windows -- rather than whatever this machine's
+    session type happens to be: a CI runner has none, and would read as
+    Wayland-like. The Wayland path is its own tests, which say so
+    (`TestRecordingWhereWindowsCannotBePlaced`)."""
+    monkeypatch.setattr(app.platform.current, "places_windows", lambda: True)
+
+
+@pytest.fixture(autouse=True)
 def _recordings_land_in_a_temp_folder(monkeypatch, tmp_path):
     """A stopped recording now lands somewhere real (recording.md ticket
     9's `_land_recording`) -- default that destination to pytest's own
@@ -2854,6 +2864,63 @@ class TestTheReadyBarFollowsTheRegion:
         assert live.top() == ready.top()
 
 
+class TestRecordingWhereWindowsCannotBePlaced:
+    """Wayland: a window of snipux's own lands wherever the compositor puts
+    it -- measured on GNOME 46, the outline's strips cascaded across the
+    recorded region. So the ready bar lives inside the overlay, and once
+    the overlay closes nothing of snipux's is on screen."""
+
+    _controller = TestAppControllerArmingARecording._controller
+
+    @pytest.fixture(autouse=True)
+    def _wayland(self, monkeypatch):
+        monkeypatch.setattr(app.platform.current, "places_windows", lambda: False)
+
+    def _armed(self, make_controller, monkeypatch, delay="No delay"):
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller.start_capture()
+        assert controller._overlay is not None and controller._overlay.isVisible()
+        controller._on_recording_requested(QRectF(250, 50, 200, 150), delay)
+        return controller, backend
+
+    def test_the_ready_bar_is_inside_the_overlay(self, make_controller, monkeypatch):
+        controller, _backend = self._armed(make_controller, monkeypatch)
+
+        assert controller._recording_hud.parentWidget() is controller._overlay
+
+    def test_it_sits_under_the_region_in_the_overlays_own_coordinates(
+        self, make_controller, monkeypatch
+    ):
+        controller, _backend = self._armed(make_controller, monkeypatch)
+        bar = controller._recording_hud
+        local = controller._overlay.to_local_point(QPointF(350, 200 + tokens.FlowMetric.BAR_OFFSET_Y))
+
+        assert abs(bar.geometry().center().x() - local.x()) <= 1
+        assert bar.geometry().top() == round(local.y())
+
+    def test_recording_runs_with_nothing_of_snipuxs_on_screen(
+        self, make_controller, monkeypatch
+    ):
+        controller, backend = self._armed(make_controller, monkeypatch)
+        reports = []
+        monkeypatch.setattr(controller, "_report_shortcut", reports.append)
+
+        controller._recording_hud.startClicked.emit()
+
+        assert len(backend.start_calls) == 1
+        assert controller._recording_hud is None
+        assert not controller._region_frame.is_showing()
+        assert any("tray" in r for r in reports)
+
+    def test_the_countdown_is_the_bars_alone(self, make_controller, monkeypatch):
+        controller, _backend = self._armed(make_controller, monkeypatch, delay="3s")
+
+        controller._begin_armed_recording()
+
+        assert controller._countdown_numeral is None
+        assert "3" in controller._recording_hud._action._label
+
+
 class TestAppControllerRecordingHud:
     """SNX-123 ticket 8: the stop control, elapsed time and tray-icon
     state that come up while a recording is running, and go back down once
@@ -3989,6 +4056,15 @@ class TestAppControllerDiscardRecording:
         controller._stop_recording()
 
         assert controller.discard_action.isEnabled() is False
+
+    def test_snip_reads_stop_recording_while_recording(self, make_controller, monkeypatch):
+        controller, _backend = self._start_a_recording(make_controller, monkeypatch)
+
+        assert controller.snip_action.text() == "Stop recording"
+
+        controller._stop_recording()
+
+        assert controller.snip_action.text() == "Snip"
 
     def test_discard_stops_the_backend_and_deletes_the_temp_file(
         self, make_controller, monkeypatch, tmp_path

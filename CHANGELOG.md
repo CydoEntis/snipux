@@ -47,6 +47,12 @@ use it; the commit history has the detail.
 - **The audio source can't be changed mid-recording any more.** The menu
   still opened while recording, but the choice only applied to the next
   recording.
+- **Recording on Wayland no longer films Snipux's own chrome.** GNOME
+  placed the recording bar and the red outline wherever it liked, which
+  could be inside the area being recorded. On Wayland the bar now stays
+  under the region until you press Record. While recording, nothing of
+  Snipux's is on screen. Stop with your shortcut or the tray, whose Snip
+  item reads "Stop recording" while a recording runs.
 
 ## 0.9.0 — 2026-09-16
 
