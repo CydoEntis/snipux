@@ -4061,7 +4061,7 @@ class TestAppControllerTrayMenu:
             BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
         )
 
-        # The old per-SelectionMode items are gone: OverlayWindow's own
+        # The old per-mode items are gone: OverlayWindow's own
         # capture-mode popover is what picks Region/Window/Full screen/
         # Browser once the overlay is open, per the ticket.
         assert controller.snip_action.text() == "Snip"

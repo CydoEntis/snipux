@@ -217,9 +217,8 @@ def detect_session_type() -> str:
 def _virtual_desktop_geometry() -> QRectF:
     """Union of every screen's logical geometry, in absolute logical coords.
 
-    Same union-of-rects pattern `create_overlays()` uses in overlay.py,
-    extracted once here so the Qt-native and shell-out X11 backends below
-    don't each recompute it independently.
+    Once here, so the Qt-native and shell-out X11 backends below don't each
+    recompute it.
     """
     union: QRectF | None = None
     for screen in QGuiApplication.screens():

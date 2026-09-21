@@ -1,14 +1,15 @@
-"""Frozen-frame selection windows, one per monitor.
+"""The frozen-frame overlay: one window over the whole desktop, where a
+snip is selected, re-framed and annotated in place.
 
 Per CLAUDE.md's one architectural rule, the compositor is only ever asked
 for pixels once (in `capture.py`). Everything here is ordinary painting and
 mouse/key handling on the `Frame` that grab already produced — no code path
 in this module asks for a fresh screen read while the user is dragging.
 
-`Overlay` never re-zeroes a selection to its own monitor: every rect it
-stores or emits is in absolute logical virtual-desktop coordinates, the same
-space `Frame`/`monitor_geometry` use, which is what makes a selection
-spanning two monitors arithmetic rather than a special case.
+`OverlayWindow` keeps its selection and marks in its own window
+coordinates, and converts to absolute logical virtual-desktop coordinates
+(the space `Frame` and `GeometryProvider` use) only at the edges -- see
+`_to_absolute` and `absolute_selection`.
 """
 
 from __future__ import annotations
@@ -88,18 +89,6 @@ from snipux.shapes import (
     next_step_number,
     render_selection,
 )
-
-
-class SelectionMode(Enum):
-    """How the overlay turns mouse input into a selection.
-
-    Chosen once before the overlay is shown (mirrors how the real app offers
-    a mode picker before freezing the screen) — never switched mid-drag.
-    """
-
-    RECTANGLE = "rectangle"
-    WINDOW = "window"
-    FULL_SCREEN = "full_screen"
 
 
 class GeometryProvider(ABC):
@@ -187,336 +176,19 @@ class UnsupportedGeometryProvider(GeometryProvider):
         return None
 
 
-class Overlay(QWidget):
-    """One frameless, always-on-top window covering a single monitor.
+# The eyedropper's loupe. Its source square is in *logical* px, so it covers
+# the same real-world area whatever the monitor's scale factor, and becomes
+# image pixels only at crop time.
+LOUPE_SOURCE_LOGICAL_SIZE = 20.0
+# A fixed logical box, independent of the source's scale factor -- which is
+# what keeps the crosshair on the same logical pixel whatever the scaling.
+LOUPE_BOX_SIZE = 120
+# Off the cursor, so the box never sits on the pixel it is magnifying.
+LOUPE_OFFSET = QPointF(20.0, 20.0)
+LOUPE_CROSSHAIR_COLOR = QColor(255, 0, 0)
 
-    Paints that monitor's slice of the frozen `Frame`, a dimmed veil outside
-    the current selection, a live size readout, and a cursor-centered
-    magnifier. Selection state and the `confirmed`/`cancelled` signals carry
-    absolute logical virtual-desktop rects, never monitor-local ones.
-    """
-
-    confirmed = pyqtSignal(QRectF)
-    cancelled = pyqtSignal()
-
-    VEIL_COLOR = QColor(0, 0, 0, 120)
-    CROSSHAIR_COLOR = QColor(255, 0, 0)
-
-    # Source square is defined in *logical* px so it covers the same
-    # real-world area regardless of the monitor's scale factor; only
-    # converted to image pixels at crop time (see `_paint_magnifier`).
-    MAGNIFIER_SOURCE_LOGICAL_SIZE = 20.0
-    # Display box is a fixed logical size, independent of the source scale
-    # factor — this is what keeps the crosshair centered on the same
-    # logical pixel regardless of the monitor's scaling.
-    MAGNIFIER_BOX_SIZE = 120
-    # Offset from the cursor so the magnifier box never sits directly under
-    # the pixel it is magnifying.
-    MAGNIFIER_OFFSET = QPointF(20.0, 20.0)
-
-    def __init__(
-        self,
-        frame: Frame,
-        monitor_geometry: QRectF,
-        parent=None,
-        mode: SelectionMode = SelectionMode.RECTANGLE,
-        geometry_provider: GeometryProvider | None = None,
-        virtual_desktop_rect: QRectF | None = None,
-    ):
-        super().__init__(parent)
-        self._monitor_geometry = QRectF(monitor_geometry)
-        # Reuses Frame.crop()'s already-tested scaling/negative-origin
-        # logic instead of re-deriving it here.
-        self._monitor_frame = frame.crop(monitor_geometry)
-        self._mode = mode
-        self._geometry_provider = geometry_provider or UnsupportedGeometryProvider()
-
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setGeometry(
-            round(monitor_geometry.x()),
-            round(monitor_geometry.y()),
-            round(monitor_geometry.width()),
-            round(monitor_geometry.height()),
-        )
-        # Needed so mouseMoveEvent fires (for the magnifier) even when no
-        # button is held, not just while dragging a selection.
-        self.setMouseTracking(True)
-
-        self._selection: QRectF | None = None
-        # Local-logical cursor position, or None before the first move.
-        self._cursor_pos: QPointF | None = None
-        # Absolute-logical anchor of an in-progress left-button drag.
-        self._drag_anchor: QPointF | None = None
-        # Window rect a left-press landed on, remembered from press to
-        # release in window mode — a window click is a click, not a drag,
-        # for its entire duration, so this is captured once and only read.
-        self._window_hit_rect: QRectF | None = None
-
-        self._size_label = QLabel(self)
-        self._size_label.setStyleSheet(
-            "background-color: rgba(0, 0, 0, 160); color: white;"
-            " padding: 2px 4px;"
-        )
-        self._size_label.hide()
-
-        if self._mode is SelectionMode.FULL_SCREEN:
-            # Full screen needs no drag: the whole virtual desktop (or, for
-            # an overlay built directly without going through
-            # create_overlays, this monitor alone) is selected from the
-            # first paint. Goes through set_selection (not a raw attribute
-            # write) so the label/veil are consistent immediately instead
-            # of only catching up on the next unrelated repaint.
-            self.set_selection(
-                virtual_desktop_rect
-                if virtual_desktop_rect is not None
-                else self._monitor_geometry
-            )
-
-    # -- coordinate-space helpers -----------------------------------------
-    # Every rect/point this widget touches is explicitly one of: absolute
-    # logical (selection, monitor_geometry), local logical (post
-    # _to_local/_to_absolute, used for painting/hit-testing), or — only for
-    # the magnifier's source crop — local image-pixel. Naming follows suit.
-
-    def _to_local(self, rect: QRectF) -> QRectF:
-        """Absolute logical rect -> this widget's local logical rect."""
-        origin = self._monitor_geometry.topLeft()
-        return QRectF(rect.topLeft() - origin, rect.size())
-
-    def _to_absolute(self, local_point: QPointF) -> QPointF:
-        """Local logical point -> absolute logical point."""
-        return local_point + self._monitor_geometry.topLeft()
-
-    # -- public API ---------------------------------------------------------
-
-    def set_selection(self, rect: QRectF | None) -> None:
-        """Set the current selection (absolute logical coords) and repaint."""
-        self._selection = rect
-        self._update_size_label()
-        self.update()
-
-    # -- painting -------------------------------------------------------
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.drawImage(QRectF(self.rect()), self._monitor_frame.image)
-        self._paint_veil(painter)
-        self._paint_magnifier(painter)
-        painter.end()
-
-    def _paint_veil(self, painter: QPainter) -> None:
-        widget_rect = QRectF(self.rect())
-        # A single even-odd fill dims everywhere except the selection hole
-        # in one call, so there's no separate "dim then punch a hole" step
-        # that could disagree with this one at the edge.
-        path = QPainterPath()
-        path.addRect(widget_rect)
-        if self._selection is not None:
-            local_selection = self._to_local(self._selection).intersected(widget_rect)
-            if not local_selection.isEmpty():
-                path.addRect(local_selection)
-        path.setFillRule(Qt.FillRule.OddEvenFill)
-        painter.fillPath(path, self.VEIL_COLOR)
-
-    def _paint_magnifier(self, painter: QPainter) -> None:
-        if self._cursor_pos is None:
-            return
-        image = self._monitor_frame.image
-        logical_size = self._monitor_frame.logical_size
-        if logical_size.width() <= 0 or logical_size.height() <= 0:
-            return
-
-        # Same per-axis scale Frame.crop() derives, applied here because the
-        # magnifier reads .image pixels directly rather than letting
-        # drawImage stretch implicitly the way the base layer does.
-        scale_x = image.width() / logical_size.width()
-        scale_y = image.height() / logical_size.height()
-
-        image_cursor_x = self._cursor_pos.x() * scale_x
-        image_cursor_y = self._cursor_pos.y() * scale_y
-
-        half_width = (self.MAGNIFIER_SOURCE_LOGICAL_SIZE / 2) * scale_x
-        half_height = (self.MAGNIFIER_SOURCE_LOGICAL_SIZE / 2) * scale_y
-
-        width = min(round(half_width * 2), image.width())
-        height = min(round(half_height * 2), image.height())
-        if width <= 0 or height <= 0:
-            return
-
-        left = round(image_cursor_x - half_width)
-        top = round(image_cursor_y - half_height)
-        left = max(0, min(left, image.width() - width))
-        top = max(0, min(top, image.height() - height))
-
-        source_rect = QRect(left, top, width, height)
-        cropped = image.copy(source_rect)
-        zoomed = cropped.scaled(
-            self.MAGNIFIER_BOX_SIZE,
-            self.MAGNIFIER_BOX_SIZE,
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            # Smoothing would hide the exact pixel this tool exists to show.
-            Qt.TransformationMode.FastTransformation,
-        )
-
-        # Clamped into the widget the same way _update_size_label clamps its
-        # label, so a cursor near a monitor's right/bottom edge still shows
-        # a (repositioned) magnifier instead of one painted off-window and
-        # clipped away entirely. The crosshair still marks the exact cursor
-        # pixel: the source crop above is centered on the cursor regardless
-        # of where the box itself ends up on screen.
-        box_x = self._cursor_pos.x() + self.MAGNIFIER_OFFSET.x()
-        box_y = self._cursor_pos.y() + self.MAGNIFIER_OFFSET.y()
-        box_x = max(0.0, min(box_x, self.width() - self.MAGNIFIER_BOX_SIZE))
-        box_y = max(0.0, min(box_y, self.height() - self.MAGNIFIER_BOX_SIZE))
-        box_rect = QRectF(
-            QPointF(box_x, box_y),
-            QSizeF(self.MAGNIFIER_BOX_SIZE, self.MAGNIFIER_BOX_SIZE),
-        )
-        painter.drawImage(box_rect, zoomed)
-
-        center = box_rect.center()
-        painter.setPen(self.CROSSHAIR_COLOR)
-        painter.drawLine(QPointF(box_rect.left(), center.y()), QPointF(box_rect.right(), center.y()))
-        painter.drawLine(QPointF(center.x(), box_rect.top()), QPointF(center.x(), box_rect.bottom()))
-
-    def _update_size_label(self) -> None:
-        if self._selection is None:
-            self._size_label.hide()
-            return
-
-        widget_rect = QRectF(self.rect())
-        local_selection = self._to_local(self._selection)
-        if local_selection.intersected(widget_rect).isEmpty():
-            self._size_label.hide()
-            return
-
-        # Width/height come from the absolute selection, in logical pixels
-        # per the acceptance criterion — never the (possibly larger)
-        # image-pixel size.
-        width = round(self._selection.width())
-        height = round(self._selection.height())
-        self._size_label.setText(f"{width} × {height}")
-        self._size_label.adjustSize()
-
-        label_x = round(local_selection.left())
-        label_y = round(local_selection.top()) - self._size_label.height() - 4
-        label_x = max(0, min(label_x, self.width() - self._size_label.width()))
-        label_y = max(0, min(label_y, self.height() - self._size_label.height()))
-        self._size_label.move(QPoint(label_x, label_y))
-        self._size_label.show()
-
-    # -- interaction ------------------------------------------------------
-
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.RightButton:
-            # Immediate cancel, matching Escape's semantics; no drag starts,
-            # in every mode.
-            self.cancelled.emit()
-            return
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-
-        anchor = self._to_absolute(event.position())
-        self._drag_anchor = anchor
-
-        if self._mode is SelectionMode.WINDOW:
-            self._window_hit_rect = self._geometry_provider.window_at(anchor)
-            if self._window_hit_rect is not None:
-                # Clicking a window highlights that window's full rect
-                # before the button is even released.
-                self.set_selection(self._window_hit_rect)
-        # Rectangle / full screen: `_drag_anchor` alone is enough for their
-        # release-time logic, nothing else to record here.
-
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        self._cursor_pos = event.position()
-
-        if self._mode is SelectionMode.FULL_SCREEN:
-            # Selection state is never touched here so the veil hole and
-            # size label can't transiently shrink to a drag rect mid-move;
-            # the whole desktop was already selected at construction time.
-            self.update()
-            return
-
-        if self._mode is SelectionMode.WINDOW:
-            absolute_pos = self._to_absolute(event.position())
-            if self._drag_anchor is not None and self._window_hit_rect is not None:
-                # Press hit a window: a window click doesn't track the
-                # mouse, the hit rect is already showing from press time.
-                self.update()
-            elif self._drag_anchor is not None:
-                # Press missed every window: fall back to plain rectangle
-                # tracking, per the acceptance criterion.
-                self.set_selection(
-                    QRectF(self._drag_anchor, absolute_pos).normalized()
-                )
-            else:
-                # Plain hover: a miss actively clears any previously-shown
-                # preview instead of leaving it stuck.
-                self.set_selection(self._geometry_provider.window_at(absolute_pos))
-            return
-
-        # Rectangle.
-        if self._drag_anchor is not None:
-            absolute_pos = self._to_absolute(event.position())
-            self.set_selection(QRectF(self._drag_anchor, absolute_pos).normalized())
-        else:
-            self.update()
-
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() != Qt.MouseButton.LeftButton or self._drag_anchor is None:
-            return
-
-        anchor = self._drag_anchor
-        self._drag_anchor = None
-        absolute_pos = self._to_absolute(event.position())
-
-        if self._mode is SelectionMode.FULL_SCREEN:
-            # No distance/misfire check at all: any release confirms the
-            # whole desktop, which was already selected at construction.
-            self.confirmed.emit(self._selection)
-            return
-
-        if self._mode is SelectionMode.WINDOW and self._window_hit_rect is not None:
-            rect = self._window_hit_rect
-            self._window_hit_rect = None
-            # Unconditional, no distance check, regardless of where the
-            # release happened: a window click is a click, not a drag, for
-            # its entire duration — the hit was captured at press time and
-            # is only read here, never re-queried.
-            self.set_selection(rect)
-            self.confirmed.emit(rect)
-            return
-
-        if self._mode is SelectionMode.WINDOW:
-            # No provider, or the press missed every window: fall through
-            # to the same distance-threshold rectangle logic below, which
-            # *is* the fallback the acceptance criterion asks for.
-            self._window_hit_rect = None
-
-        delta = absolute_pos - anchor
-        distance = math.hypot(delta.x(), delta.y())
-
-        if distance < QApplication.startDragDistance():
-            # A press/release with no meaningful drag is a misfire per
-            # SPEC.md, not a selection of nothing.
-            self.set_selection(None)
-            return
-
-        rect = QRectF(anchor, absolute_pos).normalized()
-        self.set_selection(rect)
-        self.confirmed.emit(rect)
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_Escape:
-            self.cancelled.emit()
-        elif event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
-            if self._selection is not None:
-                self.confirmed.emit(self._selection)
-        else:
-            super().keyPressEvent(event)
+# The flat scrim over a monitor that is not the interactive one.
+VEIL_COLOR = QColor(0, 0, 0, 120)
 
 
 class Handle(Enum):
@@ -4527,8 +4199,8 @@ class DelayCountdown(QWidget):
         # No parent, ever -- see the class docstring.
         super().__init__(None)
         # Frameless/always-on-top so it reads as a HUD rather than a window
-        # a user could accidentally click into and lose focus of, mirroring
-        # `Overlay`/`OverlayWindow`'s own `setWindowFlags` calls.
+        # a user could accidentally click into and lose focus of, as
+        # `OverlayWindow`'s own `setWindowFlags` call does.
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         )
@@ -4594,10 +4266,7 @@ class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
 
-    Unlike `Overlay` above -- one instance per monitor, selection kept in
-    absolute logical virtual-desktop coordinates so per-monitor crops tile
-    correctly -- this is a *single* window covering the whole desktop, and
-    per the spec's state table (`sel: QRect # window coords`) its selection,
+    Per the spec's state table (`sel: QRect # window coords`) its selection,
     and every mark in `_marks`, is kept in window coordinates: local to this
     widget's own top-left, not the virtual desktop's. `frame` is expected to
     be a single capture already spanning every monitor -- what
@@ -4757,11 +4426,10 @@ class OverlayWindow(QWidget):
         self._on_dismissed = on_dismissed
 
         # SNX-48: sourced for Window/Full screen capture-mode handling
-        # below, mirroring `Overlay`'s own constructor args of the same
-        # names. `_geometry_provider` defaults the same way `Overlay`'s
-        # does -- `UnsupportedGeometryProvider` reports no windows
-        # anywhere, which is what makes Window mode degrade instead of
-        # needing a None-check at every call site. `_monitor_geometries`
+        # below. `_geometry_provider` defaults to
+        # `UnsupportedGeometryProvider`, whose reporting no windows anywhere
+        # is what makes Window mode degrade instead of needing a None-check
+        # at every call site. `_monitor_geometries`
         # defaults to the frame's own full span (there is no per-monitor
         # split to make without one) so a single-monitor caller -- every
         # test in this file included -- gets a correct Full screen
@@ -4800,8 +4468,7 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         # The frame's own logical origin/size *is* the virtual desktop's
         # bounds -- a full capture already spans every monitor, so no union
-        # of screen geometries needs computing here the way create_overlays()
-        # does for the per-monitor Overlay above.
+        # of screen geometries needs computing here.
         self.setGeometry(
             round(frame.logical_origin.x()),
             round(frame.logical_origin.y()),
@@ -4833,8 +4500,7 @@ class OverlayWindow(QWidget):
             round(frame.logical_size.height()),
         )
         # Needed for the handle cursors below to update on a plain hover,
-        # not just while a button is held -- mirrors `Overlay.setMouseTracking`
-        # above for the same reason.
+        # not just while a button is held.
         self.setMouseTracking(True)
 
         # Window coordinates, per the class docstring -- None until
@@ -4850,9 +4516,9 @@ class OverlayWindow(QWidget):
         self._chooser_had_selection = False
         # SNX-48: last-known pointer position over the frozen desktop
         # itself (window-local logical coords, the same space `_selection`
-        # lives in) -- tracked from ordinary mouse-move events the same
-        # way `Overlay._cursor_pos` is, so `_active_screen_rect` can answer
-        # "which display is the cursor on" from real moves, and reaches for
+        # lives in) -- tracked from ordinary mouse-move events, so
+        # `_active_screen_rect` can answer "which display is the cursor on"
+        # from real moves, and reaches for
         # `QCursor.pos()` -- global state no test can steer offscreen --
         # only before the first one. None until the first move.
         self._cursor_pos: QPointF | None = None
@@ -5778,9 +5444,8 @@ class OverlayWindow(QWidget):
     # authority: "Window -- hover highlights the window under the cursor
     # (snap the selection to its frame); click accepts it. Then annotation
     # proceeds identically" and "Full screen -- selection = the whole
-    # display." Both mirror `Overlay`'s own WINDOW/FULL_SCREEN handling
-    # above, but hand their result to this window's own `set_selection`
-    # instead of emitting `confirmed` into a separate editor -- the whole
+    # display." Both hand their result to this window's own `set_selection`
+    # rather than confirming it into a separate editor -- the whole
     # point of this ticket is that the result stays open for re-framing
     # and in-place annotation exactly like a dragged selection.
 
@@ -5815,8 +5480,8 @@ class OverlayWindow(QWidget):
         self._picking_window = True
         # Whatever was selected before (if anything) is not a Window-mode
         # preview and must not linger on screen while the user hasn't
-        # hovered a window yet -- mirrors `Overlay`'s own hover branch,
-        # which likewise clears on a miss rather than leaving a stale rect.
+        # hovered a window yet, as a hover that misses clears rather than
+        # leaving a stale rect.
         self.set_selection(None)
 
         self._sync_chooser_visibility()
@@ -6348,9 +6013,7 @@ class OverlayWindow(QWidget):
     def _to_absolute(self, local_point: QPointF) -> QPointF:
         """This widget's own window-local logical point -> absolute
         logical virtual-desktop point -- the space `GeometryProvider`/
-        `_monitor_geometries` both use, the same conversion `Overlay.
-        _to_absolute` performs for its own (differently-anchored) local
-        space.
+        `_monitor_geometries` both use.
         """
         return local_point + self._frame.logical_origin
 
@@ -7677,8 +7340,7 @@ class OverlayWindow(QWidget):
         present, the first press only discards it (`discard()`, which
         toasts "Ink discarded") and leaves the overlay open so re-framing
         can continue; once there is nothing left to discard, the next press
-        closes the overlay without capturing -- `Overlay`'s own Escape
-        above is unconditional cancel because it has no ink to lose first.
+        closes the overlay without capturing.
         """
         if (
             self._selection is not None
@@ -7837,8 +7499,7 @@ class OverlayWindow(QWidget):
                 if self._on_recording_start is not None:
                     self._on_recording_start()
                 return
-            # Mirrors Overlay's own Enter handling above: nothing to copy
-            # (and dismiss) without a selection yet.
+            # Nothing to copy (and dismiss) without a selection yet.
             if self._selection is not None:
                 self.copy()
                 self.close()
@@ -7972,8 +7633,7 @@ class OverlayWindow(QWidget):
                 # SNX-57: Region -- the default mode, armed by nothing above
                 # -- gets no selection at all otherwise: Window and Full screen
                 # each set one before a plain press could ever reach here. A press on the empty overlay starts an
-                # ordinary rectangle drag, the same press-drag-release shape
-                # `Overlay`'s own RECTANGLE mode already uses.
+                # ordinary rectangle drag.
                 #
                 # A press *outside* an existing selection starts a new one
                 # the same way, rather than being the no-op it used to be.
@@ -8162,9 +7822,8 @@ class OverlayWindow(QWidget):
 
         if self._picking_window:
             # Live preview while armed: a hit sets `_selection` to that
-            # window's rect, a miss clears it -- mirrors `Overlay`'s own
-            # "a miss actively clears any previously-shown preview instead
-            # of leaving it stuck." None of the resize/stroke/cursor logic
+            # window's rect, a miss clears it rather than leaving a
+            # previous preview stuck. None of the resize/stroke/cursor logic
             # below applies while picking, so this returns unconditionally.
             found = self._geometry_provider.window_named_at(
                 self._to_absolute(event.position())
@@ -8197,8 +7856,7 @@ class OverlayWindow(QWidget):
             # QRectF's two-point constructor, not QRect's -- QRect(p1, p2)
             # treats both points as inclusive corners and would report one
             # pixel more of width/height than the cursor has actually
-            # travelled. Mirrors `Overlay`'s own RECTANGLE-mode drag above
-            # (`QRectF(self._drag_anchor, absolute_pos).normalized()`).
+            # travelled.
             rect = QRectF(self._region_drag_anchor, event.position()).normalized()
             self.set_selection(rect.toRect())
             self.setCursor(Qt.CursorShape.CrossCursor)
@@ -8594,8 +8252,7 @@ class OverlayWindow(QWidget):
 
     def _window_to_frame_scale(self) -> tuple[float, float]:
         """Ratio of `self._frame.image`'s own pixel size to this widget's
-        window-local (logical) one, along each axis -- the same conversion
-        `Overlay._paint_magnifier` above already uses to map a window/
+        window-local (logical) one, along each axis -- what maps a window/
         logical point into the frozen frame's own pixel space. Above 1 on
         any display with a device pixel ratio above one, where the
         captured frame carries more pixels than the window's logical size.
@@ -9112,10 +8769,9 @@ class OverlayWindow(QWidget):
         painter.drawText(QPointF(text_x, baseline), self._FROZEN_LABEL)
 
     def _paint_eyedropper(self, painter: QPainter) -> None:
-        """The eyedropper's loupe: `Overlay._paint_magnifier`'s own
-        crop-and-blow-up, reusing its box/source-size/offset constants
-        rather than redefining them here, plus a chip under it naming the
-        colour under the crosshair by its hex.
+        """The eyedropper's loupe: the frozen frame around the pointer,
+        cropped and blown up (the `LOUPE_*` constants), plus a chip under it
+        naming the colour under the crosshair by its hex.
 
         Only while the tool is active and the cursor sits inside the
         selection -- the one place `mousePressEvent` actually turns a
@@ -9134,8 +8790,8 @@ class OverlayWindow(QWidget):
         image_cursor_x = self._cursor_pos.x() * scale_x
         image_cursor_y = self._cursor_pos.y() * scale_y
 
-        half_width = (Overlay.MAGNIFIER_SOURCE_LOGICAL_SIZE / 2) * scale_x
-        half_height = (Overlay.MAGNIFIER_SOURCE_LOGICAL_SIZE / 2) * scale_y
+        half_width = (LOUPE_SOURCE_LOGICAL_SIZE / 2) * scale_x
+        half_height = (LOUPE_SOURCE_LOGICAL_SIZE / 2) * scale_y
 
         width = min(round(half_width * 2), image.width())
         height = min(round(half_height * 2), image.height())
@@ -9149,8 +8805,8 @@ class OverlayWindow(QWidget):
 
         cropped = image.copy(QRect(left, top, width, height))
         zoomed = cropped.scaled(
-            Overlay.MAGNIFIER_BOX_SIZE,
-            Overlay.MAGNIFIER_BOX_SIZE,
+            LOUPE_BOX_SIZE,
+            LOUPE_BOX_SIZE,
             Qt.AspectRatioMode.IgnoreAspectRatio,
             # Smoothing would hide the exact pixel this tool exists to read.
             Qt.TransformationMode.FastTransformation,
@@ -9161,7 +8817,7 @@ class OverlayWindow(QWidget):
         painter.drawImage(box_rect, zoomed)
 
         center = box_rect.center()
-        painter.setPen(Overlay.CROSSHAIR_COLOR)
+        painter.setPen(LOUPE_CROSSHAIR_COLOR)
         painter.drawLine(QPointF(box_rect.left(), center.y()), QPointF(box_rect.right(), center.y()))
         painter.drawLine(QPointF(center.x(), box_rect.top()), QPointF(center.x(), box_rect.bottom()))
 
@@ -9187,7 +8843,7 @@ class OverlayWindow(QWidget):
         the bottom of a selection that is exactly where the bar sits -- a
         child widget, so it painted over the loupe the user was reading.
         Now the corners are tried in order -- below-right, below-left,
-        above-right, above-left, each `MAGNIFIER_OFFSET` from the pointer --
+        above-right, above-left, each `LOUPE_OFFSET` from the pointer --
         and the first whose box *and* chip clear every piece of showing
         chrome and fit inside the monitor under the pointer wins. The
         monitor, not this window: the window spans the whole desk, and
@@ -9199,8 +8855,8 @@ class OverlayWindow(QWidget):
         box below it, over a box above it -- so it never sits on the spot
         being read.
         """
-        box_size = Overlay.MAGNIFIER_BOX_SIZE
-        offset = Overlay.MAGNIFIER_OFFSET
+        box_size = LOUPE_BOX_SIZE
+        offset = LOUPE_OFFSET
         readout_size = self._eyedropper_readout_size(colour)
         monitor = self._to_local_rect(self._monitor_at(self._to_absolute(cursor)))
         chrome = self._chrome_to_keep_clear()
@@ -9286,7 +8942,7 @@ class OverlayWindow(QWidget):
         ):
             # At least the pixels the loupe magnifies, and never less room
             # than a stroke gets.
-            half = max(Overlay.MAGNIFIER_SOURCE_LOGICAL_SIZE / 2, reach)
+            half = max(LOUPE_SOURCE_LOGICAL_SIZE / 2, reach)
             spot = QRectF(cursor.x() - half, cursor.y() - half, 2 * half, 2 * half)
             box, readout = self._eyedropper_rects(cursor, self.color_at(cursor))
             return [spot, box, readout]
@@ -9396,11 +9052,10 @@ class _MonitorVeil(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         )
-        # Sized to this monitor alone, exactly like `Overlay` above --
-        # `show_on_screen` below is what fullscreens it onto the matching
-        # real `QScreen`; this resize is what its own paintEvent's
-        # `self.rect()` reads while unscreened (e.g. under the offscreen
-        # platform tests run with).
+        # Sized to this monitor alone -- `show_on_screen` below is what
+        # fullscreens it onto the matching real `QScreen`; this resize is
+        # what its own paintEvent's `self.rect()` reads while unscreened
+        # (e.g. under the offscreen platform tests run with).
         self.resize(
             round(monitor_frame.logical_size.width()),
             round(monitor_frame.logical_size.height()),
@@ -9409,10 +9064,7 @@ class _MonitorVeil(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.drawImage(QRectF(self.rect()), self._image)
-        # The same flat scrim `Overlay.VEIL_COLOR` dims an unselected
-        # monitor with -- reused rather than re-typed, since this widget
-        # never punches a selection hole in it the way `Overlay` does.
-        painter.fillRect(QRectF(self.rect()), Overlay.VEIL_COLOR)
+        painter.fillRect(QRectF(self.rect()), VEIL_COLOR)
         painter.end()
 
     def show_on_screen(self, screen: QScreen | None) -> None:
@@ -9551,8 +9203,7 @@ def open_overlay(
     for why a single window is fullscreened onto one specific `QScreen`
     instead. Fullscreen is inherently one output at a time, so with more
     than one monitor the interactive `OverlayWindow` is cropped
-    (`Frame.crop`, the same helper `Overlay` above already uses) to just
-    the first monitor, and a non-interactive `_MonitorVeil` -- cropped and
+    (`Frame.crop`) to just the first monitor, and a non-interactive `_MonitorVeil` -- cropped and
     fullscreened the same way -- covers each of the rest, so every
     window's own local (0, 0) lines up with the real screen pixels under
     it and none of them paint a stretched or offset copy of another
@@ -9612,38 +9263,3 @@ def open_overlay(
         veil.show_on_screen(_screen_for_geometry(geometry))
         veils.append(veil)
     return overlay
-
-
-def create_overlays(
-    frame: Frame,
-    monitor_geometries: list[QRectF],
-    mode: SelectionMode = SelectionMode.RECTANGLE,
-    geometry_provider: GeometryProvider | None = None,
-) -> list[Overlay]:
-    """Build one `Overlay` per monitor geometry.
-
-    Geometries are absolute logical virtual-desktop rects, the same space
-    `Frame` uses. Does not touch `QApplication.screens()` or show any
-    window — the caller is responsible for sourcing real geometries and
-    showing the windows, which keeps this module testable with synthetic
-    geometries offscreen.
-
-    A single `Overlay` only knows its own monitor's geometry, but "full
-    screen" means the union of every monitor, so that union is computed once
-    here and handed to each `Overlay` as `virtual_desktop_rect`.
-    """
-    virtual_desktop_rect = None
-    for geometry in monitor_geometries:
-        virtual_desktop_rect = (
-            geometry if virtual_desktop_rect is None else virtual_desktop_rect.united(geometry)
-        )
-    return [
-        Overlay(
-            frame,
-            geometry,
-            mode=mode,
-            geometry_provider=geometry_provider,
-            virtual_desktop_rect=virtual_desktop_rect,
-        )
-        for geometry in monitor_geometries
-    ]

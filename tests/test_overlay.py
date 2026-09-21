@@ -72,9 +72,7 @@ from snipux.overlay import (
     GeometryProvider,
     Handle,
     HintHUD,
-    Overlay,
     OverlayWindow,
-    SelectionMode,
     StylePopover,
     Toast,
     UnsupportedGeometryProvider,
@@ -90,7 +88,6 @@ from snipux.overlay import (
     _TOOL_SHORTCUT_KEYS,
     _ToolPill,
     _tool_label,
-    create_overlays,
     open_overlay,
 )
 
@@ -173,239 +170,6 @@ def _blend(base: QColor, fg: QColor) -> QColor:
     )
 
 
-class TestCreateOverlays:
-    def test_create_overlays_returns_one_per_monitor_geometry(self):
-        image = QImage(400, 200, QImage.Format.Format_RGB32)
-        image.fill(QColor(0, 0, 255))
-        painter = QPainter(image)
-        painter.fillRect(QRect(0, 0, 200, 200), QColor(255, 0, 0))
-        painter.end()
-        frame = Frame(
-            image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(400, 200)
-        )
-        left = QRectF(0, 0, 200, 200)
-        right = QRectF(200, 0, 200, 200)
-
-        overlays = create_overlays(frame, [left, right])
-
-        assert len(overlays) == 2
-        assert overlays[0]._monitor_frame.image.pixelColor(
-            10, 10
-        ) == frame.crop(left).image.pixelColor(10, 10)
-        assert overlays[0]._monitor_frame.image.pixelColor(10, 10).red() == 255
-        assert overlays[1]._monitor_frame.image.pixelColor(
-            10, 10
-        ) == frame.crop(right).image.pixelColor(10, 10)
-        assert overlays[1]._monitor_frame.image.pixelColor(10, 10).blue() == 255
-
-
-class TestVeil:
-    def test_veil_dims_outside_selection_and_not_inside(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-        overlay.set_selection(QRectF(50, 50, 50, 50))
-
-        rendered = overlay.grab().toImage()
-        base_color = QColor(10, 20, 30)
-
-        assert pixel(rendered, 70, 70) == base_color
-        outside = pixel(rendered, 10, 10)
-        assert outside != base_color
-        assert outside.red() < base_color.red()
-
-    def test_no_selection_dims_the_whole_monitor(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-
-        rendered = overlay.grab().toImage()
-        base_color = QColor(10, 20, 30)
-
-        for x, y in [(10, 10), (100, 100), (190, 190)]:
-            assert pixel(rendered, x, y) != base_color
-
-    def test_selection_spanning_two_monitors_dims_each_correctly(self):
-        image = QImage(400, 200, QImage.Format.Format_RGB32)
-        image.fill(BASE_COLOR)
-        frame = Frame(
-            image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(400, 200)
-        )
-        overlays = create_overlays(
-            frame, [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
-        )
-        # Absolute selection straddling both monitors' geometries.
-        selection = QRectF(150, 50, 100, 100)
-        for overlay in overlays:
-            overlay.set_selection(selection)
-
-        base_color = QColor(10, 20, 30)
-
-        left_image = overlays[0].grab().toImage()
-        assert pixel(left_image, 170, 70) == base_color  # inside, on the left
-        assert pixel(left_image, 10, 10) != base_color  # outside
-
-        right_image = overlays[1].grab().toImage()
-        assert pixel(right_image, 20, 100) == base_color  # inside, on the right
-        assert pixel(right_image, 190, 190) != base_color  # outside
-
-
-class TestSizeReadout:
-    def test_size_label_shows_width_and_height_while_dragging(self):
-        frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
-        overlay = Overlay(frame, QRectF(0, 0, 300, 300))
-
-        overlay.set_selection(QRectF(10, 10, 40, 60))
-
-        assert overlay._size_label.text() == "40 × 60"
-
-    def test_size_readout_uses_logical_pixels_under_scaling(self):
-        # Image is 2x the logical size (fractional/integer display scaling).
-        frame = make_frame(image_size=(600, 600), logical_size=(300, 300))
-        overlay = Overlay(frame, QRectF(0, 0, 300, 300))
-
-        overlay.set_selection(QRectF(10, 10, 30, 20))
-
-        assert overlay._size_label.text() == "30 × 20"
-
-
-class TestMagnifier:
-    def test_magnifier_draws_without_a_cursor_position(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-
-        overlay.grab()  # must not raise with no mouse move simulated yet
-
-    def test_magnifier_crosshair_centered_on_cursor(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-        overlay._cursor_pos = QPointF(50, 50)
-
-        rendered = overlay.grab().toImage()
-
-        box_rect = QRectF(
-            overlay._cursor_pos + Overlay.MAGNIFIER_OFFSET,
-            QSizeF(Overlay.MAGNIFIER_BOX_SIZE, Overlay.MAGNIFIER_BOX_SIZE),
-        )
-        center = box_rect.center()
-        sampled = pixel(rendered, round(center.x()), round(center.y()))
-
-        assert sampled == Overlay.CROSSHAIR_COLOR
-
-    def test_magnifier_samples_correct_region_under_scaling(self):
-        # Image is 2x logical size, like the size-readout scaling test.
-        image = QImage(400, 400, QImage.Format.Format_RGB32)
-        image.fill(BASE_COLOR)
-        marker_color = QColor(0, 255, 0)
-        painter = QPainter(image)
-        # Image-pixel (90,90)-(110,110): centered on image-pixel (100,100),
-        # which is logical (50,50) at this 2x scale.
-        painter.fillRect(QRect(90, 90, 20, 20), marker_color)
-        painter.end()
-        frame = Frame(
-            image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(200, 200)
-        )
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-        overlay._cursor_pos = QPointF(50, 50)  # logical position over the marker
-
-        rendered = overlay.grab().toImage()
-
-        box_rect = QRectF(
-            overlay._cursor_pos + Overlay.MAGNIFIER_OFFSET,
-            QSizeF(Overlay.MAGNIFIER_BOX_SIZE, Overlay.MAGNIFIER_BOX_SIZE),
-        )
-        # Offset from the exact center so this doesn't sample the
-        # crosshair line itself (covered by the crosshair test above),
-        # while staying inside the magnified marker region.
-        sample_point = box_rect.center() + QPointF(15, 15)
-        sampled = pixel(rendered, round(sample_point.x()), round(sample_point.y()))
-
-        assert sampled == marker_color
-
-    def test_magnifier_clamps_into_view_near_a_monitor_edge(self):
-        # Unclamped, cursor + MAGNIFIER_OFFSET would place the box's left
-        # edge past the widget's right edge, painting it fully off-window
-        # and clipping it away entirely — nothing would show at all.
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-        overlay._cursor_pos = QPointF(195, 195)
-
-        rendered = overlay.grab().toImage()
-
-        box_x = min(
-            overlay._cursor_pos.x() + Overlay.MAGNIFIER_OFFSET.x(),
-            overlay.width() - Overlay.MAGNIFIER_BOX_SIZE,
-        )
-        box_y = min(
-            overlay._cursor_pos.y() + Overlay.MAGNIFIER_OFFSET.y(),
-            overlay.height() - Overlay.MAGNIFIER_BOX_SIZE,
-        )
-        box_rect = QRectF(
-            QPointF(box_x, box_y),
-            QSizeF(Overlay.MAGNIFIER_BOX_SIZE, Overlay.MAGNIFIER_BOX_SIZE),
-        )
-        center = box_rect.center()
-        assert QRectF(overlay.rect()).contains(center)
-        sampled = pixel(rendered, round(center.x()), round(center.y()))
-
-        assert sampled == Overlay.CROSSHAIR_COLOR
-
-
-class TestInteraction:
-    def test_escape_emits_cancelled_and_enter_emits_confirmed(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-        overlay.set_selection(QRectF(10, 10, 20, 20))
-        cancelled = Mock()
-        confirmed = Mock()
-        overlay.cancelled.connect(cancelled)
-        overlay.confirmed.connect(confirmed)
-
-        QTest.keyClick(overlay, Qt.Key.Key_Escape)
-        cancelled.assert_called_once()
-
-        QTest.keyClick(overlay, Qt.Key.Key_Return)
-        confirmed.assert_called_once_with(QRectF(10, 10, 20, 20))
-
-    def test_right_click_emits_cancelled(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-        cancelled = Mock()
-        overlay.cancelled.connect(cancelled)
-
-        QTest.mouseClick(overlay, Qt.MouseButton.RightButton, pos=QPoint(50, 50))
-
-        cancelled.assert_called_once()
-
-    def test_click_without_drag_is_a_misfire(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-        confirmed = Mock()
-        overlay.confirmed.connect(confirmed)
-
-        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
-
-        confirmed.assert_not_called()
-        assert overlay._selection is None
-
-    def test_drag_beyond_threshold_emits_confirmed(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200))
-        confirmed = Mock()
-        overlay.confirmed.connect(confirmed)
-
-        margin = QApplication.startDragDistance() + 10
-        start = QPoint(20, 20)
-        end = QPoint(20 + margin, 20 + margin)
-
-        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=start)
-        QTest.mouseMove(overlay, end)
-        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=end)
-
-        confirmed.assert_called_once()
-        emitted_rect = confirmed.call_args[0][0]
-        assert emitted_rect.width() == margin
-        assert emitted_rect.height() == margin
-
-
 class TestUnsupportedGeometryProvider:
     def test_is_unavailable_and_reports_no_windows(self):
         provider = UnsupportedGeometryProvider()
@@ -425,144 +189,6 @@ class _FakeWindowProvider(GeometryProvider):
 
     def window_at(self, point: QPointF) -> QRectF | None:
         return self._rect if self._rect.contains(point) else None
-
-
-class TestWindowMode:
-    WINDOW_RECT = QRectF(30, 30, 50, 50)  # covers points (30,30)-(80,80)
-    HIT_POINT = QPoint(50, 50)
-    MISS_POINT = QPoint(10, 10)
-
-    def test_click_on_a_window_confirms_it_immediately(self):
-        frame = make_frame()
-        overlay = Overlay(
-            frame,
-            QRectF(0, 0, 200, 200),
-            mode=SelectionMode.WINDOW,
-            geometry_provider=_FakeWindowProvider(self.WINDOW_RECT),
-        )
-        confirmed = Mock()
-        overlay.confirmed.connect(confirmed)
-
-        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
-
-        confirmed.assert_called_once_with(self.WINDOW_RECT)
-
-    @skip_on_windows(
-        "hover-only QTest.mouseMove synthesis depends on the freshly-shown "
-        "overlay being the OS-active window; Windows enforces real window "
-        "activation even under the offscreen QPA platform, so a window left "
-        "active by an earlier test in the same process (there is one shared "
-        "QApplication per run) can swallow the synthetic move. X11/Wayland's "
-        "offscreen backend does not enforce this, which is why it only holds "
-        "on the target platform."
-    )
-    def test_hover_previews_and_clears_on_miss(self):
-        frame = make_frame()
-        overlay = Overlay(
-            frame,
-            QRectF(0, 0, 200, 200),
-            mode=SelectionMode.WINDOW,
-            geometry_provider=_FakeWindowProvider(self.WINDOW_RECT),
-        )
-        # A hover-only move (no button held) is only delivered to a widget
-        # that has actually been shown and exposed; unlike a drag, there is
-        # no preceding press to establish that the widget is receiving
-        # mouse events.
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-
-        QTest.mouseMove(overlay, self.HIT_POINT)
-        assert overlay._selection == self.WINDOW_RECT
-
-        QTest.mouseMove(overlay, self.MISS_POINT)
-        assert overlay._selection is None
-
-    def test_drag_from_a_miss_falls_back_to_rectangle(self):
-        frame = make_frame()
-        overlay = Overlay(
-            frame,
-            QRectF(0, 0, 200, 200),
-            mode=SelectionMode.WINDOW,
-            geometry_provider=_FakeWindowProvider(self.WINDOW_RECT),
-        )
-        confirmed = Mock()
-        overlay.confirmed.connect(confirmed)
-
-        end = QPoint(150, 150)
-        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self.MISS_POINT)
-        QTest.mouseMove(overlay, end)
-        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=end)
-
-        confirmed.assert_called_once_with(
-            QRectF(QPointF(self.MISS_POINT), QPointF(end)).normalized())
-
-    def test_press_on_hit_then_drag_away_still_confirms_the_window(self):
-        frame = make_frame()
-        overlay = Overlay(
-            frame,
-            QRectF(0, 0, 200, 200),
-            mode=SelectionMode.WINDOW,
-            geometry_provider=_FakeWindowProvider(self.WINDOW_RECT),
-        )
-        confirmed = Mock()
-        overlay.confirmed.connect(confirmed)
-
-        drift = QPoint(150, 150)
-        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
-        QTest.mouseMove(overlay, drift)
-        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=drift)
-
-        confirmed.assert_called_once_with(self.WINDOW_RECT)
-
-    def test_without_a_provider_behaves_like_rectangle_mode(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.WINDOW)
-        confirmed = Mock()
-        overlay.confirmed.connect(confirmed)
-
-        margin = QApplication.startDragDistance() + 10
-        start = QPoint(20, 20)
-        end = QPoint(20 + margin, 20 + margin)
-        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=start)
-        QTest.mouseMove(overlay, end)
-        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=end)
-
-        confirmed.assert_called_once_with(
-            QRectF(QPointF(start), QPointF(end)).normalized())
-
-
-class TestX11WindowGeometryProviderIntegration:
-    """Proves the real X11 provider (not just the fake in TestWindowMode
-    above) satisfies Overlay's expectations end to end: a real `wmctrl -lG`
-    call, mocked, feeding straight into window-mode click handling.
-    """
-
-    WMCTRL_STDOUT = "0x1  0 30 30 50 50 host1 Some Window\n"
-    HIT_POINT = QPoint(50, 50)  # inside (30,30)-(80,80)
-
-    def test_click_on_a_listed_window_confirms_its_geometry(self, monkeypatch):
-        monkeypatch.setattr(
-            "snipux.capture.shutil.which", lambda binary: "/usr/bin/wmctrl"
-        )
-        monkeypatch.setattr(
-            "snipux.capture.subprocess.run",
-            lambda *a, **k: Mock(stdout=self.WMCTRL_STDOUT, returncode=0),
-        )
-        provider = X11WindowGeometryProvider()
-
-        frame = make_frame()
-        overlay = Overlay(
-            frame,
-            QRectF(0, 0, 200, 200),
-            mode=SelectionMode.WINDOW,
-            geometry_provider=provider,
-        )
-        confirmed = Mock()
-        overlay.confirmed.connect(confirmed)
-
-        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
-
-        confirmed.assert_called_once_with(QRectF(30, 30, 50, 50))
 
 
 class _FakeWindowsUser32:
@@ -626,117 +252,9 @@ class _FakeWindowsDwmapi:
         return 0
 
 
-class TestWindowsWindowGeometryProviderIntegration:
-    """SNX-90's Windows counterpart to
-    `TestX11WindowGeometryProviderIntegration` above: proves the real
-    `WindowsWindowGeometryProvider` (not just `TestWindowMode`'s fake)
-    satisfies `Overlay`'s expectations end to end -- a real `EnumWindows`/
-    `DwmGetWindowAttribute` call, mocked at the ctypes boundary, feeding
-    straight into window-mode click handling.
-    """
-
-    HIT_POINT = QPoint(50, 50)  # inside (30,30)-(80,80)
-
-    def test_click_on_an_enumerated_window_confirms_its_extended_frame_bounds(
-        self, monkeypatch
-    ):
-        monkeypatch.setattr("sys.platform", "win32")
-        monkeypatch.setattr(
-            "snipux.capture.ctypes.windll",
-            SimpleNamespace(
-                user32=_FakeWindowsUser32(),
-                dwmapi=_FakeWindowsDwmapi(bounds=(30, 30, 80, 80)),
-            ),
-            raising=False,
-        )
-        # ctypes.WINFUNCTYPE is Windows-only in the stdlib itself; CFUNCTYPE
-        # builds an equally callable-from-Python function pointer and is
-        # available everywhere, which is all the enum callback below needs
-        # from it in a test that never crosses into real Win32 code.
-        monkeypatch.setattr(
-            "snipux.capture.ctypes.WINFUNCTYPE", ctypes.CFUNCTYPE, raising=False
-        )
-        provider = WindowsWindowGeometryProvider()
-
-        frame = make_frame()
-        overlay = Overlay(
-            frame,
-            QRectF(0, 0, 200, 200),
-            mode=SelectionMode.WINDOW,
-            geometry_provider=provider,
-        )
-        confirmed = Mock()
-        overlay.confirmed.connect(confirmed)
-
-        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
-
-        confirmed.assert_called_once_with(QRectF(30, 30, 50, 50))
-
-
-class TestFullScreenMode:
-    def test_selection_is_the_full_geometry_before_any_mouse_event(self):
-        frame = make_frame()
-        geometry = QRectF(0, 0, 200, 200)
-
-        overlay = Overlay(frame, geometry, mode=SelectionMode.FULL_SCREEN)
-
-        assert overlay._selection == geometry
-
-    def test_bare_click_confirms_with_no_drag(self):
-        frame = make_frame()
-        overlay = Overlay(frame, QRectF(0, 0, 200, 200), mode=SelectionMode.FULL_SCREEN)
-        confirmed = Mock()
-        overlay.confirmed.connect(confirmed)
-
-        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
-
-        confirmed.assert_called_once_with(QRectF(0, 0, 200, 200))
-
-    def test_selection_does_not_shrink_while_dragging(self):
-        frame = make_frame()
-        geometry = QRectF(0, 0, 200, 200)
-        overlay = Overlay(frame, geometry, mode=SelectionMode.FULL_SCREEN)
-
-        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
-        QTest.mouseMove(overlay, QPoint(100, 100))
-
-        assert overlay._selection == geometry
-        assert overlay._size_label.text() == "200 × 200"
-
-        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
-
-    def test_create_overlays_selects_the_union_of_all_monitors(self):
-        image = QImage(400, 200, QImage.Format.Format_RGB32)
-        image.fill(BASE_COLOR)
-        frame = Frame(
-            image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(400, 200)
-        )
-        left = QRectF(0, 0, 200, 200)
-        right = QRectF(200, 0, 200, 200)
-
-        overlays = create_overlays(
-            frame, [left, right], mode=SelectionMode.FULL_SCREEN
-        )
-
-        union = QRectF(0, 0, 400, 200)
-        assert overlays[0]._selection == union
-        assert overlays[1]._selection == union
-
-        base_color = QColor(10, 20, 30)
-        for overlay in overlays:
-            rendered = overlay.grab().toImage()
-            # Avoids the top-left corner: the size-readout label paints its
-            # own (semi-transparent black) background there, which is
-            # unrelated to what this test is checking — that the veil
-            # itself has no dimmed hole anywhere.
-            for x, y in [(10, 190), (100, 100), (190, 190)]:
-                assert pixel(rendered, x, y) == base_color
-
-
 class TestOverlayWindow:
     """The redesign's shell (SNX-31): a single window over the whole
-    virtual desktop, not one per monitor -- see OverlayWindow's docstring
-    for how this differs from `Overlay` above.
+    virtual desktop, not one per monitor.
     """
 
     def test_frameless_always_on_top_and_covers_the_virtual_desktop(self):
@@ -805,9 +323,9 @@ class TestOverlayWindow:
     def test_selection_is_held_in_window_not_absolute_coordinates(self):
         # logical_origin != (0, 0) simulates a monitor away from the
         # virtual desktop's own top-left. If the selection were (mis)read
-        # as an absolute virtual-desktop rect -- the way `Overlay` above
-        # uses it -- this window-local selection would land nowhere near
-        # (0, 0) inside this widget and the corner would stay dimmed.
+        # as an absolute virtual-desktop rect, this window-local selection
+        # would land nowhere near (0, 0) inside this widget and the corner
+        # would stay dimmed.
         frame = make_frame(
             image_size=(200, 200), logical_size=(200, 200), logical_origin=(500, 300)
         )
@@ -1531,7 +1049,7 @@ class TestEyedropperLoupeClearsTheChrome:
 
         box, readout = self._rects(overlay, cursor)
 
-        assert box.topLeft() == cursor + Overlay.MAGNIFIER_OFFSET
+        assert box.topLeft() == cursor + overlay_module.LOUPE_OFFSET
         assert readout.top() == box.bottom() + overlay._EYEDROPPER_READOUT_GAP
         assert readout.left() == box.left()
 
@@ -1541,7 +1059,7 @@ class TestEyedropperLoupeClearsTheChrome:
 
         box, readout = self._rects(overlay, cursor)
 
-        assert box.right() == cursor.x() - Overlay.MAGNIFIER_OFFSET.x()
+        assert box.right() == cursor.x() - overlay_module.LOUPE_OFFSET.x()
         assert box.top() > cursor.y()
         assert self.MONITOR.contains(readout)
 
@@ -1551,7 +1069,7 @@ class TestEyedropperLoupeClearsTheChrome:
 
         box, readout = self._rects(overlay, cursor)
 
-        assert box.bottom() == cursor.y() - Overlay.MAGNIFIER_OFFSET.y()
+        assert box.bottom() == cursor.y() - overlay_module.LOUPE_OFFSET.y()
         assert readout.bottom() == box.top() - overlay._EYEDROPPER_READOUT_GAP
         assert self.MONITOR.contains(box) and self.MONITOR.contains(readout)
 
@@ -6835,10 +6353,9 @@ def _close_stray_toplevel_windows() -> None:
 class TestCaptureModeWindowIntegration:
     """SNX-48 AC: picking Window in the popover arms hover-preview/click-
     to-snap picking on `OverlayWindow` itself -- sourced from a
-    `GeometryProvider`, the same one `Overlay`'s own WINDOW mode
-    (`TestWindowMode` above) already uses -- producing a `_selection`
-    that stays open for re-framing and in-place annotation instead of
-    being confirmed into a separate editor.
+    `GeometryProvider` -- producing a `_selection` that stays open for
+    re-framing and in-place annotation instead of being confirmed into a
+    separate editor.
     """
 
     @pytest.fixture(autouse=True)
@@ -6970,9 +6487,8 @@ class TestCaptureModeWindowIntegration:
 
     def test_no_provider_toasts_and_falls_back_to_region(self):
         # `geometry_provider=None` -> `UnsupportedGeometryProvider`, per
-        # `OverlayWindow`'s own default -- the same "degrade rather than
-        # raise" fallback `Overlay`'s WINDOW mode already has, but this
-        # ticket also requires telling the user rather than a silent no-op.
+        # `OverlayWindow`'s own default -- degrade rather than raise, and
+        # tell the user rather than a silent no-op.
         overlay = self._overlay(provider=None)
 
         self._pick_window_mode(overlay)
@@ -6999,6 +6515,45 @@ class TestCaptureModeWindowIntegration:
         assert overlay._capture_mode == self.REGION_LABEL
         assert overlay._toast.isVisible()
         provider.window_at.assert_not_called()
+
+
+    def test_the_real_x11_provider_snaps_a_listed_window(self, monkeypatch):
+        # The real provider, not `_FakeWindowProvider`: a `wmctrl -lG` call,
+        # mocked at the subprocess boundary, feeding straight into a click.
+        monkeypatch.setattr("snipux.capture.shutil.which", lambda binary: "/usr/bin/wmctrl")
+        monkeypatch.setattr(
+            "snipux.capture.subprocess.run",
+            lambda *a, **k: Mock(stdout="0x1  0 30 90 50 50 host1 Some Window\n", returncode=0),
+        )
+        overlay = self._overlay(X11WindowGeometryProvider())
+        self._pick_window_mode(overlay)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        assert overlay._selection == self.WINDOW_RECT.toRect()
+
+    def test_the_real_windows_provider_snaps_an_enumerated_window(self, monkeypatch):
+        # The Windows counterpart: `EnumWindows`/`DwmGetWindowAttribute`,
+        # mocked at the ctypes boundary.
+        monkeypatch.setattr("sys.platform", "win32")
+        monkeypatch.setattr(
+            "snipux.capture.ctypes.windll",
+            SimpleNamespace(
+                user32=_FakeWindowsUser32(),
+                dwmapi=_FakeWindowsDwmapi(bounds=(30, 90, 80, 140)),
+            ),
+            raising=False,
+        )
+        # ctypes.WINFUNCTYPE is Windows-only in the stdlib; CFUNCTYPE builds
+        # an equally callable function pointer everywhere, which is all the
+        # enum callback needs in a test that never reaches real Win32.
+        monkeypatch.setattr("snipux.capture.ctypes.WINFUNCTYPE", ctypes.CFUNCTYPE, raising=False)
+        overlay = self._overlay(WindowsWindowGeometryProvider())
+        self._pick_window_mode(overlay)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        assert overlay._selection == self.WINDOW_RECT.toRect()
 
 
 class TestInstantCapture:
@@ -8675,8 +8230,7 @@ class TestKeyboardEnter:
         assert not overlay.isVisible()
 
     def test_enter_without_a_selection_does_nothing(self, monkeypatch):
-        # Mirrors Overlay's own Enter guard above -- nothing to flatten or
-        # copy without a selection yet.
+        # Nothing to flatten or copy without a selection yet.
         calls = []
         monkeypatch.setattr(
             output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
@@ -9225,7 +8779,7 @@ class TestMonitorVeil:
 
         assert veil.size() == QSize(100, 50)
         sampled = pixel(veil.grab().toImage(), 10, 10)
-        expected = _blend(QColor(10, 20, 30), overlay_module.Overlay.VEIL_COLOR)
+        expected = _blend(QColor(10, 20, 30), overlay_module.VEIL_COLOR)
         assert sampled.red() == pytest.approx(expected.red(), abs=2)
         assert sampled.green() == pytest.approx(expected.green(), abs=2)
         assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
