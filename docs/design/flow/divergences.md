@@ -62,22 +62,23 @@ there is nothing to keep.
 
 ---
 
-## 2 · Audio is Windows-only, and says so
+## 2 · Audio depends on the platform, and says so
 
 **The handoff** gives every recording bar an audio dropdown —
 `AUDIO_SOURCES`: System, Mic, Muted — with no platform caveat.
 
-**We build the control as designed**, and on Linux offer only *Muted*,
-with the other two disabled and carrying the reason.
+**We build the control as designed**, and grey a source a platform cannot
+record, carrying the reason.
 
 ### Why
 
 `org.gnome.Shell.Screencast` has no audio at all: there is no option to
-pass and nothing to wire a control to. Audio on Linux would mean capturing
-from PipeWire ourselves and muxing it, which is a different piece of work
-from this redesign and would pull in a dependency the project has so far
-refused (CLAUDE.md: adding a fourth is a decision worth raising in the
-ticket).
+pass and nothing to wire a control to. So on Linux the sound is recorded
+beside it by the system ffmpeg, from PulseAudio (which PipeWire also
+serves) -- the default output's monitor for System, the default input for
+Mic -- and joined to the video on Stop. ffmpeg is optional, as it is for
+export, so without one both sources are greyed and say they need it. No
+new dependency: `snipux/ffmpeg.py` finds it on `PATH` and never requires it.
 
 A control that is visible and does nothing is the failure mode this
 handoff already names elsewhere — "a control that opens a menu it can't act
@@ -110,10 +111,12 @@ shape `starts_off_thread` already takes on that class. Windows answers yes
 on both its paths (the region path holds frames back and shifts later
 timestamps to close the gap; the full-screen path hands off to
 `QMediaRecorder.pause()`/`record()`) and produces one file with the paused
-time simply absent, never a frozen still. `GnomeScreencastBackend` still
-answers no -- `org.gnome.Shell.Screencast` has no pause call at all -- so
-Linux pause is pieces recorded separately and joined with the system
-ffmpeg on stop, and is its own ticket (#93) rather than bundled here.
+time simply absent, never a frozen still. `GnomeScreencastBackend`
+answers yes wherever there is a system ffmpeg (#93):
+`org.gnome.Shell.Screencast` has no pause call at all, so a paused Linux
+recording is pieces -- pause stops Shell's screencast, resume starts another
+over the same area -- joined on Stop, streams copied, into one file with the
+paused time absent. A join that fails keeps every piece, saved separately.
 
 ---
 

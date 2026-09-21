@@ -1,6 +1,8 @@
 import sys
 import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from jeepney import HeaderFields
@@ -11,6 +13,7 @@ from PyQt6.QtWidgets import QApplication
 
 import pytest
 
+import snipux.ffmpeg as ffmpeg_module
 import snipux.recording as recording
 from snipux.recording import (
     GnomeScreencastBackend,
@@ -696,10 +699,10 @@ class TestGnomeScreencastBackendStop:
         with pytest.raises(RuntimeError):
             GnomeScreencastBackend().stop()
 
-    def test_cannot_pause(self):
-        # #87: org.gnome.Shell.Screencast has no pause call at all --
-        # this ticket's answer for Linux is the ABC's own default, not an
-        # override here. #93 is what would change it.
+    def test_cannot_pause_without_a_system_ffmpeg(self):
+        # org.gnome.Shell.Screencast has no pause call at all; pausing is
+        # pieces joined by ffmpeg (TestGnomePauseAndResume), and conftest's
+        # machine has none.
         assert GnomeScreencastBackend().can_pause is False
 
 
@@ -2181,3 +2184,474 @@ class TestRegionCropRunsOffTheDeliveryThread:
         finally:
             thread.quit()
             thread.wait()
+
+
+# -- Linux pause and sound (#93): pieces joined, and sound beside them ------
+
+
+class _FakeShell:
+    """`open_dbus_connection` for a Shell that records: each start writes a
+    piece file Shell-style (".webm" appended), each stop answers True.
+    `lengths` is what a fake `ffmpeg -i` reports for each file."""
+
+    def __init__(self, length: float = 2.0):
+        self.calls: list[tuple[str, tuple]] = []
+        self.connections: list[Mock] = []
+        self.lengths: dict[str, float] = {}
+        self._length = length
+
+    def open(self, bus):
+        connection = Mock()
+        connection.send_and_get_reply = Mock(side_effect=self._reply)
+        self.connections.append(connection)
+        return connection
+
+    def _reply(self, message):
+        member = message.header.fields[HeaderFields.member]
+        self.calls.append((member, message.body))
+        if member in ("ScreencastArea", "Screencast"):
+            requested = message.body[-2]
+            written = requested if requested.endswith(".webm") else f"{requested}.webm"
+            Path(written).write_bytes(b"piece")
+            self.lengths[written] = self._length
+            return Mock(body=(True, written))
+        return Mock(body=(True,))
+
+    def members(self) -> list[str]:
+        return [member for member, _body in self.calls]
+
+
+class _FakeFfmpeg:
+    """`subprocess.run` for the system ffmpeg: answers `-i` with a length
+    and writes whatever a join or a mux asks for."""
+
+    def __init__(self, shell: _FakeShell, *, fail_on: str | None = None, lengths=None):
+        self.shell = shell
+        self.commands: list[list[str]] = []
+        self.fail_on = fail_on
+        self.lengths = lengths if lengths is not None else shell.lengths
+
+    def __call__(self, command, **_kwargs):
+        self.commands.append(command)
+        if command[-2] == "-i":  # a length query: `ffmpeg -i <file>`, no output
+            length = self.lengths.get(command[-1])
+            report = "" if length is None else _duration_report(length)
+            return Mock(returncode=1, stderr=report, stdout="")
+        if self.fail_on and self.fail_on in command:
+            return Mock(returncode=1, stderr="Invalid data found", stdout="")
+        output = command[-1]
+        if "concat" in command:
+            listing = Path(command[command.index("-i") + 1]).read_text()
+            inputs = [line[len("file '"):-1] for line in listing.splitlines()]
+            self.lengths[output] = sum(self.lengths[path] for path in inputs)
+        else:  # a mux: the video's length
+            self.lengths[output] = self.lengths[command[command.index("-i") + 1]]
+        Path(output).write_bytes(b"joined")
+        return Mock(returncode=0, stderr="", stdout="")
+
+    def joins(self) -> list[list[str]]:
+        return [c for c in self.commands if "concat" in c]
+
+    def muxes(self) -> list[list[str]]:
+        return [c for c in self.commands if "-map" in c]
+
+
+def _duration_report(seconds: float) -> str:
+    minutes, rest = divmod(seconds, 60)
+    return f"  Duration: 00:{int(minutes):02d}:{rest:05.2f}, start: 0.000000, bitrate: N/A\n"
+
+
+class _FakeAudioProcess:
+    """What `Popen` hands back for a sound capture: progress on stdout, and
+    the file written when it starts."""
+
+    def __init__(self, command, **_kwargs):
+        self.command = command
+        Path(command[-1]).write_bytes(b"sound")
+        # Two progress reports; the smaller start estimate wins.
+        self.stdout = iter(["out_time_us=300000\n", "progress=continue\n", "out_time_us=500000\n"])
+        self.stderr = iter([])
+        self.signals: list[int] = []
+        self._running = True
+
+    def poll(self):
+        return None if self._running else 0
+
+    def send_signal(self, number):
+        self.signals.append(number)
+        self._running = False
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self._running = False
+
+
+def _ffmpeg_that_records_sound():
+    return ffmpeg_module.Capabilities(binary="/usr/bin/ffmpeg", pulse_input=True, opus=True)
+
+
+class _Clock:
+    """Wall clock for the backend and the sound capture, stepping 0.1s a read."""
+
+    def __init__(self, start: float = 1000.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        self.now += 0.1
+        return self.now
+
+
+@pytest.fixture
+def linux_recorder(monkeypatch, tmp_path):
+    """A GNOME backend over a fake Shell and a fake ffmpeg, recording into
+    `tmp_path`, with a system ffmpeg that can record sound."""
+    shell = _FakeShell()
+    monkeypatch.setattr(recording, "open_dbus_connection", shell.open)
+    monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
+    monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
+    monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
+    run = _FakeFfmpeg(shell)
+    popen = Mock(side_effect=_FakeAudioProcess)
+    backend = GnomeScreencastBackend(run=run, popen=popen, clock=_Clock())
+    return SimpleNamespace(
+        backend=backend, shell=shell, run=run, popen=popen,
+        path=str(tmp_path / "rec.mp4"), rect=QRectF(10, 20, 300, 200),
+    )
+
+
+class TestGnomePauseCapability:
+    def test_cannot_pause_without_ffmpeg_and_says_why(self):
+        backend = GnomeScreencastBackend()
+
+        assert backend.can_pause is False
+        assert "ffmpeg" in backend.pause_unavailable_reason()
+
+    def test_can_pause_with_ffmpeg(self, monkeypatch):
+        monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
+
+        backend = GnomeScreencastBackend()
+
+        assert backend.can_pause is True
+        assert backend.pause_unavailable_reason() is None
+
+
+class TestGnomePauseAndResume:
+    def test_pause_stops_the_piece_and_resume_starts_one_with_the_same_area(
+        self, linux_recorder
+    ):
+        r = linux_recorder
+        r.backend.start(r.rect, r.path)
+
+        assert r.backend.pause() is True
+        r.backend.resume()
+
+        assert r.shell.members() == ["ScreencastArea", "StopScreencast", "ScreencastArea"]
+        first, second = (body for member, body in r.shell.calls if member == "ScreencastArea")
+        assert first[:4] == second[:4] == (10, 20, 300, 200)
+        assert first[5] == second[5]  # frame rate and cursor alike
+        assert second[4] == f"{r.path}.part2"
+
+    def test_a_paused_whole_screen_resumes_as_the_whole_screen(self, linux_recorder):
+        r = linux_recorder
+        r.backend.start(None, r.path)
+        r.backend.pause()
+        r.backend.resume()
+
+        assert r.shell.members() == ["Screencast", "StopScreencast", "Screencast"]
+
+    def test_pause_without_ffmpeg_does_nothing(self, linux_recorder, monkeypatch):
+        r = linux_recorder
+        r.backend.start(r.rect, r.path)
+        monkeypatch.setattr(ffmpeg_module, "probe", lambda: None)
+
+        assert r.backend.pause() is False
+        assert r.shell.members() == ["ScreencastArea"]
+
+
+class TestGnomeStopJoinsThePieces:
+    def test_stop_joins_every_piece_in_order_into_the_first_ones_file(self, linux_recorder):
+        r = linux_recorder
+        final = r.backend.start(r.rect, r.path)
+        r.backend.pause()
+        r.backend.resume()
+        r.backend.pause()
+        r.backend.resume()
+
+        r.backend.stop()
+
+        (join,) = r.run.joins()
+        assert join[join.index("-c") + 1] == "copy"  # streams copied, not re-encoded
+        listing_path = join[join.index("-i") + 1]
+        pieces = [final, f"{r.path}.part2.webm", f"{r.path}.part3.webm"]
+        assert Path(final).read_bytes() == b"joined"
+        # The pieces and the list go once the join is checked.
+        assert not any(Path(p).exists() for p in pieces[1:])
+        assert not Path(listing_path).exists()
+
+    def test_the_join_lists_the_pieces_in_the_order_they_were_recorded(
+        self, linux_recorder, monkeypatch
+    ):
+        r = linux_recorder
+        final = r.backend.start(r.rect, r.path)
+        r.backend.pause()
+        r.backend.resume()
+        listed = []
+        real_write_text = Path.write_text
+
+        def remember(path, text, *args, **kwargs):
+            listed.append(text)
+            return real_write_text(path, text, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", remember)
+
+        r.backend.stop()
+
+        assert listed == [f"file '{final}'\nfile '{r.path}.part2.webm'\n"]
+
+    def test_a_recording_never_paused_or_voiced_never_runs_ffmpeg(self, linux_recorder):
+        r = linux_recorder
+        final = r.backend.start(r.rect, r.path)
+
+        r.backend.stop()
+
+        assert r.run.commands == []
+        assert r.popen.call_count == 0
+        assert Path(final).read_bytes() == b"piece"
+
+    def test_a_failed_join_keeps_every_piece_and_hands_them_back_in_order(
+        self, monkeypatch, tmp_path
+    ):
+        shell = _FakeShell()
+        monkeypatch.setattr(recording, "open_dbus_connection", shell.open)
+        monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
+        run = _FakeFfmpeg(shell, fail_on="concat")
+        backend = GnomeScreencastBackend(run=run, popen=Mock(), clock=_Clock())
+        path = str(tmp_path / "rec.mp4")
+        final = backend.start(QRectF(0, 0, 10, 10), path)
+        backend.pause()
+        backend.resume()
+
+        with pytest.raises(recording.RecordingPartsError) as raised:
+            backend.stop()
+
+        assert raised.value.parts == [final, f"{path}.part2.webm"]
+        assert all(Path(part).read_bytes() == b"piece" for part in raised.value.parts)
+
+    def test_a_join_that_comes_out_short_is_a_failed_join(self, monkeypatch, tmp_path):
+        shell = _FakeShell()
+        monkeypatch.setattr(recording, "open_dbus_connection", shell.open)
+        monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
+        run = _FakeFfmpeg(shell)
+        backend = GnomeScreencastBackend(run=run, popen=Mock(), clock=_Clock())
+        path = str(tmp_path / "rec.mp4")
+        backend.start(QRectF(0, 0, 10, 10), path)
+        backend.pause()
+        backend.resume()
+        real_call = run.__call__
+
+        def short(command, **kwargs):
+            result = real_call(command, **kwargs)
+            if "concat" in command:
+                run.lengths[command[-1]] = 1.0  # 4s of pieces, 1s joined
+            return result
+
+        backend._run = short
+
+        with pytest.raises(recording.RecordingPartsError):
+            backend.stop()
+
+    def test_a_join_that_reports_longer_than_its_pieces_is_kept(self, monkeypatch, tmp_path):
+        # Shell sends frames only when the screen changes, and a file's
+        # reported length counts its last frame as lasting a whole frame
+        # interval -- a still screen joins to a file reporting a second or
+        # so more than its pieces. Nothing is lost, so the join stands.
+        shell = _FakeShell()
+        monkeypatch.setattr(recording, "open_dbus_connection", shell.open)
+        monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
+        run = _FakeFfmpeg(shell)
+        backend = GnomeScreencastBackend(run=run, popen=Mock(), clock=_Clock())
+        path = str(tmp_path / "rec.mp4")
+        final = backend.start(QRectF(0, 0, 10, 10), path)
+        backend.pause()
+        backend.resume()
+        real_call = run.__call__
+
+        def long(command, **kwargs):
+            result = real_call(command, **kwargs)
+            if "concat" in command:
+                run.lengths[command[-1]] = 5.06  # 4.0s of pieces
+            return result
+
+        backend._run = long
+
+        backend.stop()
+
+        assert Path(final).read_bytes() == b"joined"
+
+    def test_discard_while_paused_removes_every_piece_and_joins_nothing(
+        self, linux_recorder
+    ):
+        r = linux_recorder
+        r.backend.set_audio_source(recording.AUDIO_SYSTEM)
+        final = r.backend.start(r.rect, r.path)
+        r.backend.pause()
+        r.backend.resume()
+        r.backend.pause()
+
+        r.backend.discard()
+
+        assert r.run.joins() == [] and r.run.muxes() == []
+        leftovers = [p for p in Path(r.path).parent.iterdir()]
+        assert leftovers == [], leftovers
+        assert not Path(final).exists()
+
+
+class TestGnomeRecordsSound:
+    def test_system_sound_is_the_default_outputs_monitor(self, linux_recorder):
+        r = linux_recorder
+        r.backend.set_audio_source(recording.AUDIO_SYSTEM)
+
+        r.backend.start(r.rect, r.path)
+
+        command = r.popen.call_args[0][0]
+        assert command[command.index("-f") + 1] == "pulse"
+        assert command[command.index("-i") + 1] == "@DEFAULT_MONITOR@"
+
+    def test_the_mic_is_the_default_input(self, linux_recorder):
+        r = linux_recorder
+        r.backend.set_audio_source(recording.AUDIO_MIC)
+
+        r.backend.start(r.rect, r.path)
+
+        command = r.popen.call_args[0][0]
+        assert command[command.index("-i") + 1] == "@DEFAULT_SOURCE@"
+
+    def test_the_sound_starts_before_shell_is_asked(self, linux_recorder, monkeypatch):
+        # Sound caught during Shell's ~400ms start is trimmed at the join;
+        # sound that began after the video would leave a gap at the front.
+        r = linux_recorder
+        order = []
+        r.popen.side_effect = lambda command, **kw: (
+            order.append("sound") or _FakeAudioProcess(command)
+        )
+        monkeypatch.setattr(
+            recording, "open_dbus_connection",
+            lambda bus: order.append("shell") or r.shell.open(bus),
+        )
+        r.backend.set_audio_source(recording.AUDIO_SYSTEM)
+
+        r.backend.start(r.rect, r.path)
+
+        assert order == ["sound", "shell"]
+
+    def test_stop_puts_the_sound_on_the_video_lined_up(self, linux_recorder):
+        r = linux_recorder
+        r.backend.set_audio_source(recording.AUDIO_SYSTEM)
+        final = r.backend.start(r.rect, r.path)
+
+        r.backend.stop()
+
+        (mux,) = r.run.muxes()
+        # Video and sound copied, not re-encoded; the sound trimmed by how
+        # long it ran before the video began.
+        assert mux[mux.index("-c") + 1] == "copy"
+        assert "-ss" in mux
+        assert float(mux[mux.index("-ss") + 1]) > 0
+        assert Path(final).read_bytes() == b"joined"
+        # The sound file goes once it is on the video.
+        assert not Path(f"{r.path}.audio1.mka").exists()
+
+    def test_sound_is_stopped_the_way_ffmpeg_finishes_a_file(self, linux_recorder):
+        r = linux_recorder
+        r.backend.set_audio_source(recording.AUDIO_MIC)
+        r.backend.start(r.rect, r.path)
+        process = r.backend._pieces[0].audio._process
+
+        r.backend.stop()
+
+        assert process.signals == [recording.signal.SIGINT]
+
+    def test_a_paused_recording_with_sound_gets_sound_on_every_piece(self, linux_recorder):
+        r = linux_recorder
+        r.backend.set_audio_source(recording.AUDIO_SYSTEM)
+        r.backend.start(r.rect, r.path)
+        r.backend.pause()
+        r.backend.resume()
+
+        r.backend.stop()
+
+        assert r.popen.call_count == 2
+        assert len(r.run.muxes()) == 2
+        assert len(r.run.joins()) == 1
+
+    def test_without_an_ffmpeg_that_records_sound_the_recording_is_silent(
+        self, linux_recorder, monkeypatch
+    ):
+        r = linux_recorder
+        monkeypatch.setattr(
+            ffmpeg_module, "probe",
+            lambda: ffmpeg_module.Capabilities("/usr/bin/ffmpeg", pulse_input=False, opus=True),
+        )
+        r.backend.set_audio_source(recording.AUDIO_SYSTEM)
+
+        r.backend.start(r.rect, r.path)
+        r.backend.stop()
+
+        assert r.popen.call_count == 0
+        assert r.run.commands == []
+
+
+class TestPulseAudioCaptureStartTime:
+    def test_the_first_sample_is_the_least_buffered_estimate(self):
+        clock = iter([10.50, 10.80]).__next__
+        process = Mock()
+        process.stdout = iter(["out_time_us=200000\n", "out_time_us=450000\n"])
+        process.stderr = iter([])
+        capture = recording._PulseAudioCapture(
+            "/usr/bin/ffmpeg", recording.AUDIO_SYSTEM, "/tmp/a.mka",
+            popen=lambda *a, **k: process, clock=clock,
+        )
+
+        capture.start()
+        for reader in capture._readers:
+            reader.join(timeout=1)
+
+        # 10.50 - 0.20 = 10.30 and 10.80 - 0.45 = 10.35: the smaller.
+        assert capture.started_at() == pytest.approx(10.30)
+
+    def test_ffmpegs_own_first_sample_time_wins_over_the_estimate(self):
+        # Measured: the progress estimate runs late by however long the
+        # pipe held each line; the input's reported start does not.
+        process = Mock()
+        process.stdout = iter(["out_time_us=200000\n"])
+        process.stderr = iter([
+            "Input #0, pulse, from '@DEFAULT_MONITOR@':\n",
+            "  Duration: N/A, start: 1790007196.188887, bitrate: 1536 kb/s\n",
+        ])
+        capture = recording._PulseAudioCapture(
+            "/usr/bin/ffmpeg", recording.AUDIO_SYSTEM, "/tmp/a.mka",
+            popen=lambda *a, **k: process, clock=lambda: 1790007197.0,
+        )
+
+        capture.start()
+        for reader in capture._readers:
+            reader.join(timeout=1)
+
+        assert capture.started_at() == pytest.approx(1790007196.188887)
+
+    def test_no_samples_written_is_no_start_time(self):
+        process = Mock()
+        process.stdout = iter(["out_time_us=0\n", "out_time_us=N/A\n"])
+        process.stderr = iter([])
+        capture = recording._PulseAudioCapture(
+            "/usr/bin/ffmpeg", recording.AUDIO_MIC, "/tmp/a.mka",
+            popen=lambda *a, **k: process, clock=lambda: 5.0,
+        )
+
+        capture.start()
+        for reader in capture._readers:
+            reader.join(timeout=1)
+
+        assert capture.started_at() is None

@@ -93,7 +93,7 @@ from snipux.output import (
     save_image,
 )
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
-from snipux.recording import RecorderRegistry, RecordingError
+from snipux.recording import RecorderRegistry, RecordingError, RecordingPartsError
 from snipux.pin import PinWindow
 from snipux.player import (
     EXPORT_UNAVAILABLE,
@@ -2684,7 +2684,15 @@ class AppController:
             return
         backend, _path, _after = self._active_recording
         if self._recording_paused:
-            backend.resume()
+            try:
+                backend.resume()
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                # On Linux a resume starts a new piece, which can fail like
+                # any start. Everything before the pause is intact, so it is
+                # stopped and kept rather than left paused on nothing.
+                self._report_shortcut(f"Resuming the recording failed: {exc}")
+                self._stop_recording()
+                return
             self._recording_paused_total += time.monotonic() - self._recording_paused_at
             self._recording_paused_at = None
             self._recording_paused = False
@@ -2781,6 +2789,9 @@ class AppController:
         stopped = True
         try:
             backend.stop()
+        except RecordingPartsError as exc:
+            stopped = False
+            self._keep_recording_parts(exc.parts)
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             self._report_shortcut(f"Stopping the recording failed: {exc}")
             stopped = False
@@ -2803,6 +2814,40 @@ class AppController:
             self._close_recording_bar()
         else:
             self._show_finished_bar(landed, elapsed, copied=after == "instant")
+
+    def _keep_recording_parts(self, parts: list[str]) -> None:
+        """A paused recording whose pieces could not be joined: save each
+        into the recordings folder on its own, numbered, rather than lose
+        any. Each piece is a whole, playable recording of its stretch.
+        """
+        folder = setup_desktop.load_recording_folder()
+        kept: list[Path] = []
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            stem = Path(
+                setup_desktop.preview_filename(
+                    folder, setup_desktop.load_recording_filename_pattern(), extension="webm"
+                )
+            ).stem
+            for index, part in enumerate(parts, 1):
+                source = Path(part)
+                if not source.exists():
+                    continue
+                destination = folder / f"{stem} (part {index}){source.suffix}"
+                shutil.move(source, destination)
+                setup_desktop.add_recent_capture(destination)
+                kept.append(destination)
+        except OSError as exc:
+            self._report_shortcut(
+                f"The recording's pieces could not be joined or saved ({exc}). "
+                f"They are in {Path(parts[0]).parent}."
+            )
+            return
+        self._rebuild_recent_menu()
+        self._report_shortcut(
+            f"The recording's pieces could not be joined, so its {len(kept)} "
+            f"parts were saved separately in {folder}."
+        )
 
     def _land_recording(
         self, path: str, after: str, *, reason: str | None = None
@@ -3011,7 +3056,9 @@ class AppController:
         self._teardown_recording_ui()
         backend, path, _after = self._active_recording
         try:
-            backend.stop()
+            # Not `stop()`: a recording made of pieces deletes them all
+            # rather than joining them for the result to be deleted.
+            backend.discard()
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             self._report_shortcut(f"Stopping the recording failed: {exc}")
         finally:
