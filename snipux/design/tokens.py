@@ -795,6 +795,17 @@ RECORDING_AFTER = [
      "filename pattern below. Silent, loops -- big above ~10 seconds."),
 ]
 
+# The ready bar's destination chip, beside Record: what Stop will do with
+# this recording, changeable for this recording alone. The same ids as
+# `RECORDING_AFTER` and the chooser's glyphs for them, with notes cut to one
+# menu line.
+RECORD_DESTINATIONS = [
+    ("instant", "copy",  "Copy", "Onto the clipboard at Stop. No file kept."),
+    ("save",    "save",  "Save", "Into your recordings folder."),
+    ("open",    "pen",   "Open", "Saved, then opened in the player to trim."),
+    ("gif",     "image", "GIF",  "Saved as a GIF. Silent, and it loops."),
+]
+
 # Recordings get their own default name, not the stills one. Sharing
 # FILENAME_DEFAULT meant a video landed called "Screenshot from
 # 2026-08-27 15-54-01.mp4" -- the wrong noun for the thing, in a folder

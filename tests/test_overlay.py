@@ -7186,6 +7186,7 @@ class TestCommitToRecord:
         logical_origin=(0, 0),
         monitor_geometries=None,
         size=(600, 600),
+        on_recording_reframed=None,
     ):
         frame = make_frame(
             image_size=size, logical_size=size, logical_origin=logical_origin
@@ -7194,6 +7195,7 @@ class TestCommitToRecord:
             frame,
             monitor_geometries=monitor_geometries,
             on_recording_requested=on_recording_requested,
+            on_recording_reframed=on_recording_reframed,
         )
         overlay._chooser.set_kind("record")
         overlay.setGeometry(0, 0, *size)
@@ -7317,6 +7319,31 @@ class TestCommitToRecord:
         overlay.set_selection(QRectF(120, 130, 200, 180))
 
         assert overlay.absolute_selection() == QRectF(120, 130, 200, 180)
+
+    def test_reframing_the_armed_region_reports_it_so_the_bar_can_follow(self):
+        # Absolute coordinates, like `on_recording_requested`: the bar is a
+        # window of its own and places itself on the desktop, not in here.
+        reframed = []
+        overlay = self._overlay(
+            on_recording_requested=lambda rect, delay, after: None,
+            logical_origin=(-600, 0),
+            on_recording_reframed=reframed.append,
+        )
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+        assert reframed == []  # arming is `on_recording_requested`'s to say
+
+        overlay.set_selection(QRect(120, 130, 200, 180))
+
+        assert reframed == [QRectF(-480, 130, 200, 180)]
+
+    def test_a_selection_that_is_not_armed_for_recording_reports_nothing(self):
+        reframed = []
+        overlay = self._overlay(on_recording_reframed=reframed.append)
+        overlay._chooser.set_kind("stills")
+
+        overlay.set_selection(QRect(120, 130, 200, 180))
+
+        assert reframed == []
 
     def test_the_armed_delay_reaches_the_callback_unchanged(self):
         # This ticket doesn't own the timer that counts the delay down --

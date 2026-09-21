@@ -17,17 +17,36 @@ use it; the commit history has the detail.
   with -- its colour, size, line style, fill, blur strength or highlighter
   sweep, whichever it has. "Reset all tools" puts them back. A change made
   mid-snip still lasts only for that session.
+- **Pick what happens to a recording right beside Record.** The recording
+  bar now has a Copy / Save / Open / GIF menu next to the Record button.
+  It shows what Stop will do, and changing it applies to this recording
+  only, without changing your default.
 
 ### Changed
 
 - **Settings shows just the Snipux version** at the foot of its sidebar,
   without the Qt version and session type after it.
+- **The recording bar sits under the region, like the screenshot
+  toolbar,** and moves with it while you resize it, instead of staying at
+  the top of the screen. If there is no room below the region, it goes to
+  the top of the screen.
+- **A tidier recording bar.** It matches the screenshot toolbar now. Audio
+  is an icon with a small corner marker instead of a labelled dropdown (on
+  Linux it stays greyed, with the reason as its tooltip). A delay you set
+  shows its seconds on the bar. The desktop no longer shows through the bar
+  behind its buttons.
 
 ### Fixed
 
 - **"Remember my last tool instead" does something.** The switch in
   Settings → Annotation was saved and never read. With it on, a snip opens
   with the tool the last one ended on.
+- **The recording bar's audio menu opens where you can see it.** It always
+  opened upward, so with the bar at the top of the screen it opened
+  off-screen. It now opens below when there is no room above.
+- **The audio source can't be changed mid-recording any more.** The menu
+  still opened while recording, but the choice only applied to the next
+  recording.
 
 ## 0.9.0 — 2026-09-16
 

@@ -326,40 +326,30 @@ def _place_recording_hud(
     hud_size: QSize,
     margin: float = 12.0,
 ) -> QRect | None:
-    """Find a spot for the recording pill: top-centre of the screen the
-    recording is on, moved clear of the recorded area when that is where
-    the recording happens to be.
+    """Find a spot for the recording bar: centred under the region, the
+    way the stills bar sits under its selection, and top-centre of the
+    region's screen when there is no room below it.
 
-    Top-centre because that is where the chooser and the floating bar
-    already sit, so the bar turns up where the user is already looking --
-    and because the handoff's own rule ("centred on the selection, 16px
-    below") assumes the overlay is still drawn around that selection, which
-    it is not by the time a recording is live. See
-    docs/design/flow/divergences.md 4: the overlay paints a frozen frame,
-    so it cannot stay up over a recording, and a bar measured from a
-    selection nobody can see any more is the "floats in the middle of the
-    screen" complaint again.
-    The rule this replaces took the first of below/above/right/left of the
-    recorded rect that fit, each centred on that edge -- which put the pill
-    in the middle of the screen for any region in the middle of the screen,
-    with nothing tying its position to anywhere predictable.
+    Under the region because that is where the stills bar is, and the two
+    are one surface changing state (the flow handoff's rule 1). It spent a
+    while top-centre instead -- docs/design/flow/divergences.md 4 has the
+    history -- on the grounds that once the overlay closed, a bar under a
+    mid-screen region floated with nothing to belong to. But the region
+    stays drawn from arming to Stop: the overlay frames it while it can be
+    reframed, and `RegionFrame` outlines it once it is rolling. And a bar
+    that stayed top-centre while the region it belonged to was dragged
+    around below it was reported as the thing to fix: "the controls should
+    follow the region no like how screenshotting works?"
 
-    Staying clear of `rect` is what keeps the pill out of the recording
-    itself, and is why top-centre is a preference rather than a rule: a
-    region that covers the top of the screen would otherwise be filmed with
-    the pill sitting in it. Below the recorded area is the only fallback,
-    and there is deliberately no "above" one: the fallbacks are reached
-    only when the recorded area covers the top-centre strip, and anything
-    that does leaves no room above itself on the same screen by
-    definition. `None` means nothing fits and the caller shows no pill.
+    Staying clear of `rect` is what keeps the bar out of the recording
+    itself, so every candidate is checked against it, and against the
+    desktop's own chrome. `None` means nothing fits and the caller shows no
+    bar.
 
-    `rect is None` (a full-screen recording) still gets a placement, unlike
-    the previous version, which returned None and made "no pill in a
-    full-screen recording" true by construction. Arming needs a visible
-    Start for a full-screen recording too, so that rule now lives in
-    `_start_recording_ui`, which takes the pill down at the moment
-    recording actually begins -- the first moment it could contaminate
-    anything.
+    `rect is None` (a full-screen recording) still gets a placement:
+    arming needs a visible Start for a full-screen recording too, and
+    `_show_recording_chrome` takes the bar down at the moment recording
+    actually begins -- the first moment it could contaminate anything.
     """
     screen = _screen_for(rect, geometries)
     if screen is None:
@@ -374,13 +364,21 @@ def _place_recording_hud(
     # bottom dock the same way.
     usable = _usable_area_for(screen)
     width, height = hud_size.width(), hud_size.height()
-    x = usable.center().x() - width / 2
-    x = min(max(x, usable.left()), usable.right() - width)
 
-    top = usable.top() + margin
-    candidates = [QRectF(x, top, width, height)]
+    def centred_on(centre_x: float) -> float:
+        # Clamped in from the monitor's edges, as the stills bar is, so a
+        # region against one edge keeps its bar on the screen.
+        x = centre_x - width / 2
+        return min(max(x, usable.left() + margin), usable.right() - margin - width)
+
+    candidates = []
     if rect is not None:
-        candidates.append(QRectF(x, rect.bottom() + margin, width, height))
+        candidates.append(QRectF(
+            centred_on(rect.center().x()),
+            rect.bottom() + design.tokens.FlowMetric.BAR_OFFSET_Y,
+            width, height,
+        ))
+    candidates.append(QRectF(centred_on(usable.center().x()), usable.top() + margin, width, height))
 
     for candidate in candidates:
         if not usable.contains(candidate):
@@ -1652,6 +1650,8 @@ class AppController:
             # is armed that is Record. Without it Enter fell through to the
             # stills path and copied a *screenshot* of the region.
             on_recording_start=self._begin_armed_recording,
+            # The bar follows the armed region as its handles reframe it.
+            on_recording_reframed=self._on_recording_reframed,
         )
         # Stored on self, not left as a local: a parentless widget is fair
         # game for Python's GC to collect out from under the still-open
@@ -1931,6 +1931,14 @@ class AppController:
         if not platform.current.records_audio():
             bar.audio_control().setToolTip(platform.current.audio_unavailable_reason())
         bar.set_delay_available(True)
+        if self._armed_recording is not None:
+            _rect, delay, after, _path = self._armed_recording
+            bar.set_destination(after)
+            bar.set_delay(delay)
+        # Glass over the frozen frame while the overlay holds the region up
+        # for reframing; `_on_overlay_dismissed` takes it away again.
+        if self._overlay is not None and self._overlay.isVisible():
+            bar.set_backdrop_host(self._overlay)
 
         placement = _place_recording_hud(rect, geometries, bar.sizeHint())
         if placement is None:
@@ -1938,6 +1946,7 @@ class AppController:
             return
 
         bar.startClicked.connect(self._begin_armed_recording)
+        bar.destinationMenuRequested.connect(self._open_record_destination_menu)
         bar.delayClicked.connect(self._open_delay_menu)
         bar.audioClicked.connect(self._open_audio_menu)
         bar.cancelClicked.connect(self._cancel_armed_recording)
@@ -1950,7 +1959,7 @@ class AppController:
         # top-left: the bar's width changes with its state, and rule 1 says
         # the centre is what must stay put -- both edges move symmetrically
         # or the bar appears to slide.
-        self._recording_bar_anchor = placement.center()
+        self._recording_bar_anchor = QRectF(placement).center()
         self._reposition_recording_bar()
         bar.show()
         # Above the overlay, which is now still up so the region can be
@@ -1966,6 +1975,38 @@ class AppController:
         # the placement above is what does the job. Called here, after
         # show(), because it needs a realised native window.
         platform.current.exclude_from_capture(bar)
+
+    def _on_recording_reframed(self, rect: QRectF) -> None:
+        """The armed region was reframed on the overlay (`rect`, absolute
+        logical): take the bar with it, the way the stills bar follows its
+        selection.
+
+        Where nothing clear of the new region fits, the bar stays where it
+        was rather than vanishing mid-drag; `_show_recording_chrome` checks
+        again with the region that is actually filmed.
+        """
+        bar = self._recording_hud
+        if bar is None or self._armed_recording is None:
+            return
+        armed_rect, delay, after, path = self._armed_recording
+        if armed_rect is None:
+            # A full-screen recording has no region to follow.
+            return
+        self._armed_recording = (rect, delay, after, path)
+        placement = _place_recording_hud(rect, self._bar_geometries(), bar.sizeHint())
+        if placement is None:
+            return
+        self._recording_bar_anchor = QRectF(placement).center()
+        self._reposition_recording_bar()
+
+    def _bar_geometries(self) -> list[QRectF]:
+        """The monitors a recording bar may be placed on, in absolute
+        logical virtual-desktop coordinates."""
+        return (
+            self._monitor_geometries
+            if self._monitor_geometries is not None
+            else self._real_monitor_geometries()
+        )
 
     def _elapsed_text(self) -> str:
         """The recorded time as the clock shows it, or "0:00" if nothing is
@@ -2094,14 +2135,19 @@ class AppController:
         bar = self._recording_hud
         if bar is None or self._armed_recording is None:
             return
-        rect, current, after, path = self._armed_recording
+        _rect, current, _after, _path = self._armed_recording
         rows = [(value, value, "", "", "") for value in design.tokens.DELAYS]
         menu = FlowMenu(rows, current, design.tokens.FlowMetric.MENU_W_DELAY)
+        menu.glass.set_host(self._overlay)
 
         def choose(value: str) -> None:
             if self._armed_recording is None:
                 return
+            rect, _delay, after, path = self._armed_recording
             self._armed_recording = (rect, value, after, path)
+            if self._recording_hud is not None:
+                self._recording_hud.set_delay(value)
+                self._reposition_recording_bar()
 
         menu.chosen.connect(choose)
         control = bar.delay_control()
@@ -2128,6 +2174,7 @@ class AppController:
         ]
         menu = FlowMenu(rows, self._recording_audio,
                         design.tokens.FlowMetric.MENU_W_AUDIO)
+        menu.glass.set_host(self._overlay)
 
         def choose(value: str) -> None:
             self._recording_audio = value
@@ -2136,8 +2183,52 @@ class AppController:
 
         menu.chosen.connect(choose)
         control = bar.audio_control()
-        menu.open_above(QRect(control.mapToGlobal(control.rect().topLeft()),
-                              control.size()))
+        menu.open_clear_of(QRect(control.mapToGlobal(control.rect().topLeft()),
+                                 control.size()))
+        self._flow_menu = menu
+
+    def _open_record_destination_menu(self) -> None:
+        """The destination chip beside Record: what Stop does with this
+        recording.
+
+        A per-recording override, exactly like the delay menu beside it:
+        choosing rewrites the armed tuple, never the stored preference --
+        the chooser's own rule, that a choice made for one snip must not
+        quietly become the user's setting.
+
+        GIF is greyed with its reason when there is no system ffmpeg. The
+        chooser offers it unconditionally because it is built on the path
+        the snip's timing is measured against; this menu is opened by a
+        click, which is where the player pays for the same probe too.
+        """
+        bar = self._recording_hud
+        if bar is None or self._armed_recording is None:
+            return
+        _rect, _delay, current, _path = self._armed_recording
+        gif_reason = "" if system_ffmpeg() is not None else EXPORT_UNAVAILABLE["gif"]
+        rows = [
+            (identifier, label, note, "", gif_reason if identifier == "gif" else "")
+            for identifier, _glyph, label, note in design.tokens.RECORD_DESTINATIONS
+        ]
+        menu = FlowMenu(
+            rows, current,
+            FlowMenu.fitting_width(rows, design.tokens.FlowMetric.MENU_W_DEST),
+        )
+        menu.glass.set_host(self._overlay)
+
+        def choose(value: str) -> None:
+            if self._armed_recording is None:
+                return
+            rect, delay, _after, path = self._armed_recording
+            self._armed_recording = (rect, delay, value, path)
+            if self._recording_hud is not None:
+                self._recording_hud.set_destination(value)
+                self._reposition_recording_bar()
+
+        menu.chosen.connect(choose)
+        control = bar.destination_control()
+        menu.open_clear_of(QRect(control.mapToGlobal(control.rect().topLeft()),
+                                 control.size()))
         self._flow_menu = menu
 
     def _live_readout(self) -> str:
@@ -2438,6 +2529,20 @@ class AppController:
                 else self._real_monitor_geometries()
             )
             self._region_frame.show_around(rect, within=_screen_for(rect, geometries))
+            if self._recording_hud is not None:
+                # The region filmed is the last one reframed, and the bar
+                # was last placed for whatever the drag passed through. Where
+                # nothing clear of it fits, the bar comes down rather than be
+                # filmed, and the note below says how to stop instead.
+                placement = _place_recording_hud(
+                    rect, geometries, self._recording_hud.sizeHint()
+                )
+                if placement is None:
+                    self._recording_hud.close()
+                    self._recording_hud = None
+                    self._recording_bar_anchor = None
+                else:
+                    self._recording_bar_anchor = QRectF(placement).center()
             # Same as the bar: on Windows the outline and the live scrim
             # are marked out of the capture. They already sit outside the
             # recorded rect, so this changes nothing today -- it is what
@@ -3039,6 +3144,10 @@ class AppController:
         it anyway.
         """
         self._overlay = None
+        if self._recording_hud is not None:
+            # Whatever is behind the bar from here is the live desktop, not
+            # the frame it was blurring.
+            self._recording_hud.set_backdrop_host(None)
         if self._armed_recording is not None or self._countdown_timer is not None:
             self._cancel_armed_recording()
 

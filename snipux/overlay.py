@@ -4727,6 +4727,7 @@ class OverlayWindow(QWidget):
         on_pin_requested: "Callable[[QImage, QRect], None] | None" = None,
         on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
         on_recording_start: "Callable[[], None] | None" = None,
+        on_recording_reframed: "Callable[[QRectF], None] | None" = None,
     ):
         super().__init__(parent)
         self._frame = frame
@@ -4746,6 +4747,10 @@ class OverlayWindow(QWidget):
         # effects).
         self._on_recording_requested = on_recording_requested
         self._on_recording_start = on_recording_start
+        # Fired with the new absolute rect whenever the selection changes
+        # while a recording is armed, so the recording bar can follow the
+        # region the way the stills bar follows its selection.
+        self._on_recording_reframed = on_recording_reframed
         # SNX-58: called once, from closeEvent, when this window is the
         # Wayland-primary of a multi-monitor `open_overlay` group -- the
         # hook that closes the non-interactive `_MonitorVeil` companions
@@ -5310,6 +5315,12 @@ class OverlayWindow(QWidget):
         self._selection = rect
         self._sync_bar_visibility()
         self._sync_chooser_visibility()
+        if (
+            self._armed_for_recording
+            and rect is not None
+            and self._on_recording_reframed is not None
+        ):
+            self._on_recording_reframed(self._to_absolute_rect(rect))
         # Follows the selection onto its monitor, like every other piece of
         # chrome -- see `_reposition_close_button`.
         self._reposition_close_button()
@@ -9556,6 +9567,9 @@ def open_overlay(
     # keyPressEvent, where the alternative was copying a screenshot of the
     # region a recording was being set up around.
     on_recording_start: "Callable[[], None] | None" = None,
+    # The armed region reframed -- see `OverlayWindow.__init__`'s own comment
+    # on the same parameter.
+    on_recording_reframed: "Callable[[QRectF], None] | None" = None,
 ) -> OverlayWindow:
     """Build and show the overlay for one snip, positioned for the
     caller's already-detected session type (`wayland`) rather than assumed
@@ -9624,6 +9638,7 @@ def open_overlay(
         on_pin_requested=on_pin_requested,
         on_recording_requested=on_recording_requested,
         on_recording_start=on_recording_start,
+        on_recording_reframed=on_recording_reframed,
     )
 
     if not wayland:
