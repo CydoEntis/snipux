@@ -1823,6 +1823,111 @@ class TestWatermarkTextStylePersistence:
         assert setup_desktop.load_watermark_color(tmp_path) == "#ef4444"
 
 
+class TestOpeningToolPersistence:
+    """The tool the stills bar opens with: Settings' choice, or the last one
+    a snip ended on when "Remember my last tool" is on."""
+
+    def test_nothing_stored_opens_with_the_pen(self, tmp_path):
+        # What the bar always armed before this was a setting.
+        assert setup_desktop.load_default_tool(tmp_path) == "pen"
+        assert setup_desktop.load_opening_tool(tmp_path) == "pen"
+
+    def test_the_chosen_tool_round_trips(self, tmp_path):
+        setup_desktop.save_default_tool("arrow", tmp_path)
+
+        assert setup_desktop.load_default_tool(tmp_path) == "arrow"
+        assert setup_desktop.load_opening_tool(tmp_path) == "arrow"
+
+    def test_no_tool_is_a_choice_of_its_own(self, tmp_path):
+        setup_desktop.save_default_tool(tokens.OPENING_TOOL_NONE, tmp_path)
+
+        assert setup_desktop.load_opening_tool(tmp_path) == tokens.OPENING_TOOL_NONE
+
+    @pytest.mark.parametrize("stored", ["eraser", "eyedropper", "crop", 7, None])
+    def test_something_the_bar_cannot_open_with_falls_back_to_the_pen(
+        self, tmp_path, stored
+    ):
+        setup_desktop._write_config("default_tool", stored, tmp_path)
+
+        assert setup_desktop.load_default_tool(tmp_path) == "pen"
+        assert setup_desktop.load_opening_tool(tmp_path) == "pen"
+
+    def test_the_last_tool_is_ignored_unless_remembering_is_on(self, tmp_path):
+        setup_desktop.save_default_tool("text", tmp_path)
+        setup_desktop.save_last_tool("blur", tmp_path)
+
+        assert setup_desktop.load_opening_tool(tmp_path) == "text"
+
+    def test_remembering_opens_with_the_last_tool(self, tmp_path):
+        setup_desktop.save_default_tool("text", tmp_path)
+        setup_desktop.save_last_tool("blur", tmp_path)
+        setup_desktop.save_remember_tool(True, tmp_path)
+
+        assert setup_desktop.load_opening_tool(tmp_path) == "blur"
+
+    def test_remembering_with_no_last_tool_yet_uses_the_chosen_one(self, tmp_path):
+        setup_desktop.save_default_tool("text", tmp_path)
+        setup_desktop.save_remember_tool(True, tmp_path)
+
+        assert setup_desktop.load_opening_tool(tmp_path) == "text"
+
+
+class TestStyleDefaultsPersistence:
+    """The default ink and each tool's own defaults, from Settings ->
+    Annotation."""
+
+    def test_nothing_stored_is_each_tools_own(self, tmp_path):
+        assert setup_desktop.load_default_ink(tmp_path) is None
+        assert setup_desktop.load_tool_defaults(tmp_path) == {}
+        assert setup_desktop.load_style_defaults(tmp_path) == (None, {})
+
+    def test_the_default_ink_round_trips_lowercased(self, tmp_path):
+        setup_desktop.save_default_ink("#FF8800", tmp_path)
+
+        assert setup_desktop.load_default_ink(tmp_path) == "#ff8800"
+
+    @pytest.mark.parametrize("stored", ["red", "#ff88", "ff8800", 7, None, ["#ff8800"]])
+    def test_a_default_ink_that_is_not_a_colour_is_none(self, tmp_path, stored):
+        setup_desktop._write_config("default_ink", stored, tmp_path)
+
+        assert setup_desktop.load_default_ink(tmp_path) is None
+
+    def test_tool_defaults_round_trip(self, tmp_path):
+        defaults = {"rect": {"color": "#00ff00", "dash": "dotted", "fill": "both", "size": 9},
+                    "blur": {"strength": 15},
+                    "highlighter": {"snap": "free"}}
+
+        setup_desktop.save_tool_defaults(defaults, tmp_path)
+
+        assert setup_desktop.load_tool_defaults(tmp_path) == defaults
+
+    def test_only_what_a_tools_popover_offers_is_kept(self, tmp_path):
+        # A hand-edited config, or one from before a tool lost a section,
+        # loses what no longer means anything instead of breaking the
+        # overlay that reads it.
+        setup_desktop._write_config("tool_defaults", {
+            "pen": {"size": 12, "fill": "both", "dash": "dotted"},   # pen has no fill or line
+            "blackout": {"color": "#000000"},                        # nothing to set at all
+            "rect": {"size": 400, "dash": "wavy", "color": "blue"},  # all out of range
+            "eraser": {"size": 3},
+            "no-such-tool": {"size": 3},
+            "arrow": "not a dict",
+        }, tmp_path)
+
+        assert setup_desktop.load_tool_defaults(tmp_path) == {"pen": {"size": 12}}
+
+    def test_a_size_that_is_a_bool_is_not_a_size(self, tmp_path):
+        setup_desktop._write_config("tool_defaults", {"pen": {"size": True}}, tmp_path)
+
+        assert setup_desktop.load_tool_defaults(tmp_path) == {}
+
+    def test_style_defaults_read_both_at_once(self, tmp_path):
+        setup_desktop.save_default_ink("#ff8800", tmp_path)
+        setup_desktop.save_tool_defaults({"pen": {"size": 12}}, tmp_path)
+
+        assert setup_desktop.load_style_defaults(tmp_path) == ("#ff8800", {"pen": {"size": 12}})
+
+
 class TestWatermarkContentPersistence:
     """#69: what the stills bar's watermark stamps. Only what the mark is --
     whether it is on, its corner and its opacity last a session and are

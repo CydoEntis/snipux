@@ -101,6 +101,11 @@ INK_SWATCHES = [
     ("Ink",     "#12141a"),
 ]
 
+# Settings' colour picker: the overlay's swatches, plus the highlighter's own
+# yellow, which is a tool default but not one of them -- without it, a
+# highlighter set back to how it shipped would need its hex typed in.
+SETTINGS_SWATCHES = INK_SWATCHES + [("Yellow", "#facc15")]
+
 # ---------------------------------------------------------------- type
 class Font:
     UI    = "IBM Plex Sans"       # all chrome labels
@@ -788,6 +793,17 @@ RECORDING_AFTER = [
     ("gif", "Save as a GIF",
      "Converts the finished recording and saves it as a GIF, under the "
      "filename pattern below. Silent, loops -- big above ~10 seconds."),
+]
+
+# The ready bar's destination chip, beside Record: what Stop will do with
+# this recording, changeable for this recording alone. The same ids as
+# `RECORDING_AFTER` and the chooser's glyphs for them, with notes cut to one
+# menu line.
+RECORD_DESTINATIONS = [
+    ("instant", "copy",  "Copy", "Onto the clipboard at Stop. No file kept."),
+    ("save",    "save",  "Save", "Into your recordings folder."),
+    ("open",    "pen",   "Open", "Saved, then opened in the player to trim."),
+    ("gif",     "image", "GIF",  "Saved as a GIF. Silent, and it loops."),
 ]
 
 # Recordings get their own default name, not the stills one. Sharing
@@ -1556,6 +1572,19 @@ TOOL_NAMES = {
     "spotlight": "Spotlight",
     "eraser": "Eraser", "eyedropper": "Eyedropper",
 }
+
+# What Settings offers as the tool the stills bar opens with, in bar order.
+# The eraser and the eyedropper are left out: both act on something already
+# there -- a mark, a colour on the frame -- so neither is where anyone starts,
+# and opening on the eraser would make the first press on a fresh snip do
+# nothing at all. `OPENING_TOOL_NONE` arms nothing, so a press inside the
+# selection draws nothing until a tool is picked.
+OPENING_TOOL_NONE = "none"
+OPENING_TOOLS = [tool for tool in TOOLS if tool not in ("eraser", "eyedropper")] + [
+    OPENING_TOOL_NONE
+]
+# The pen, as the bar always opened with before this was a setting.
+OPENING_TOOL_DEFAULT = "pen"
 
 # One letter, one tool. Every shape sibling keeps its own letter, so its menu
 # is for discovery rather than for use.

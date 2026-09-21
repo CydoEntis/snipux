@@ -263,9 +263,10 @@ class ToolStyles:
     """Each tool's style, kept apart: setting a dashed red box leaves the pen
     the acid line it was.
 
-    Seeded from `tokens.DEFAULT_STYLE` and never written to disk -- the
-    handoff's state model is explicit that a per-snip override must not
-    silently change the user's preferences.
+    Seeded from `tokens.DEFAULT_STYLE`, under whatever the user saved as
+    their own defaults in Settings (`configure`), and never written to disk
+    -- the handoff's state model is explicit that a per-snip override must
+    not silently change the user's preferences.
 
     A redaction's strength is its own too, rather than one strength the blur
     and pixelate tools share: the same number is a light smudge to one and
@@ -274,21 +275,51 @@ class ToolStyles:
 
     def __init__(self) -> None:
         self._styles: dict[str, ToolStyle] = {}
+        self._default_ink: str | None = None
+        self._overrides: dict[str, dict] = {}
         self.reset()
 
     def reset(self) -> None:
-        """Every tool back to its first-run seed."""
+        """Every tool back to its first-run seed, with no saved defaults."""
+        self._default_ink = None
+        self._overrides = {}
         self._styles = {tool: self._seed(tool) for tool in tokens.TOOLS}
 
-    @staticmethod
-    def _seed(tool: str | None) -> ToolStyle:
+    def configure(self, default_ink: str | None, overrides: dict[str, dict]) -> None:
+        """Seed every tool from the user's saved defaults: `default_ink` for
+        every tool that draws in a colour, or None for each tool's own, and
+        `overrides` -- tool -> the `tokens.STYLE_SECTIONS` fields set for it
+        alone, which win over both (`setup_desktop.load_style_defaults`).
+
+        Only a change re-seeds. Every overlay and review window calls this
+        as it opens, and the same settings again must leave a style set
+        mid-session as it was -- a colour picked on one snip is still
+        picked on the next. New settings are the user saying what tools
+        should start with, so they replace what the session had.
+        """
+        overrides = {tool: dict(fields) for tool, fields in overrides.items()}
+        if (default_ink, overrides) == (self._default_ink, self._overrides):
+            return
+        self._default_ink = default_ink
+        self._overrides = overrides
+        self._styles = {tool: self._seed(tool) for tool in tokens.TOOLS}
+
+    def _seed(self, tool: str | None) -> ToolStyle:
         seed = tokens.DEFAULT_STYLE.get(tool, tokens.DEFAULT_STYLE_OTHER)
+        own = self._overrides.get(tool, {})
+        colour = seed["color"]
+        # Only a tool whose popover offers a colour takes the default ink:
+        # the rest have none to take, and a blur seeded "red" would only
+        # confuse the next thing to read it.
+        if "color" in tokens.STYLE_SECTIONS.get(tool, []):
+            colour = own.get("color") or self._default_ink or colour
         return ToolStyle(
-            colour=seed["color"],
-            size=seed["size"],
-            dash=seed["dash"],
-            fill=seed["fill"],
-            snap=seed.get("snap", "text"),
+            colour=colour,
+            size=own.get("size", seed["size"]),
+            dash=own.get("dash", seed["dash"]),
+            fill=own.get("fill", seed["fill"]),
+            strength=own.get("strength", tokens.Metric.BLUR_DEFAULT),
+            snap=own.get("snap", seed.get("snap", "text")),
         )
 
     def of(self, tool: str | None) -> ToolStyle:

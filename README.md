@@ -446,7 +446,8 @@ that moves mid-recording; there's no window-following in the API to build it on.
 | | Linux (GNOME) | Windows |
 |---|---|---|
 | Container | WebM — GNOME Shell picks it, not us | MP4 |
-| Audio | No — `org.gnome.Shell.Screencast` has no audio option to pass | Yes |
+| Audio | System sound or mic, with a system `ffmpeg` — GNOME's recorder has none of its own | Mic |
+| Pause | Yes, with a system `ffmpeg` to join the pieces | Yes |
 | Frame rate | Up to 30fps | ~30fps ceiling (`QScreenCapture` exposes no rate control) |
 
 **Recording on Linux is GNOME-only.** The route is

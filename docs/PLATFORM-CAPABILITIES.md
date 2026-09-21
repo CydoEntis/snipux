@@ -28,7 +28,8 @@ global hotkey registers one chord; snipux does not see other keystrokes.
 | --- | --- | --- |
 | `org.freedesktop.portal.Screenshot` (D-Bus, via jeepney) | the one-shot grab on Wayland | GNOME may show its own permission prompt the first time. |
 | `org.gnome.Shell.Screenshot` | faster grab where GNOME allows the caller | Nothing; falls back to the portal when refused. |
-| `org.gnome.Shell.Screencast` / `ScreencastArea` | recording | GNOME's recording indicator. WebM, **no audio** -- the interface has no audio option. |
+| `org.gnome.Shell.Screencast` / `ScreencastArea` | recording | GNOME's recording indicator. WebM; the interface has no audio and no pause. |
+| system `ffmpeg` (optional), PulseAudio input | recording sound, and joining a paused recording's pieces | Nothing. Without it, Pause and the System/Mic sources are greyed and say why. |
 | `grim`, `scrot`, ImageMagick `import` | capture backends when present | Nothing. Each is one backend among several. |
 | `xprop` | window geometry on X11 (Window/Browser modes) | Nothing. |
 | `wl-copy` | clipboard on Wayland when Qt's is not enough | Nothing. |

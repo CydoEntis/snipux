@@ -37,7 +37,7 @@ import pytest
 from PyQt6.QtCore import QMargins, QRect, Qt
 
 import snipux.platform as platform_pkg
-from snipux import recording, setup_desktop
+from snipux import ffmpeg, recording, setup_desktop
 from snipux.platform import Platform, UnimplementedPlatformError, darwin, linux, windows
 
 
@@ -467,19 +467,61 @@ class TestStubPlatforms:
         assert isinstance(darwin.DarwinPlatform(), Platform)
 
 
+class TestPlacesWindows:
+    """Whether a window of snipux's own lands where snipux puts it -- what
+    decides if the recording chrome may be windows of their own."""
+
+    def test_x11_does(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "x11")
+        assert linux.LinuxPlatform().places_windows() is True
+
+    def test_wayland_does_not(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "wayland")
+        assert linux.LinuxPlatform().places_windows() is False
+
+    def test_windows_does(self):
+        assert windows.WindowsPlatform().places_windows() is True
+
+    def test_a_platform_that_has_not_said_does_not(self):
+        assert darwin.DarwinPlatform().places_windows() is False
+
+
 class TestAudioSourceAvailability:
     """Which of the recording bar's audio sources each platform lets the
     user pick. The UI greys a source with this reason instead of hiding it.
     """
 
-    def test_linux_greys_both_sources_but_never_muted(self):
+    def test_linux_without_ffmpeg_greys_both_sources_but_never_muted(self):
+        # conftest's machine has no system ffmpeg.
         linux_platform = linux.LinuxPlatform()
         reason = linux_platform.audio_unavailable_reason()
 
-        assert reason
+        assert "ffmpeg" in reason
+        assert linux_platform.records_audio() is False
         assert linux_platform.audio_source_unavailable_reason("system") == reason
         assert linux_platform.audio_source_unavailable_reason("mic") == reason
         assert linux_platform.audio_source_unavailable_reason("off") == ""
+
+    def test_linux_with_an_ffmpeg_that_records_sound_offers_both(self, monkeypatch):
+        monkeypatch.setattr(
+            ffmpeg, "probe",
+            lambda: ffmpeg.Capabilities("/usr/bin/ffmpeg", pulse_input=True, opus=True),
+        )
+        linux_platform = linux.LinuxPlatform()
+
+        assert linux_platform.records_audio() is True
+        assert linux_platform.audio_source_unavailable_reason("system") == ""
+        assert linux_platform.audio_source_unavailable_reason("mic") == ""
+
+    def test_linux_with_an_ffmpeg_that_cannot_says_what_it_lacks(self, monkeypatch):
+        monkeypatch.setattr(
+            ffmpeg, "probe",
+            lambda: ffmpeg.Capabilities("/usr/bin/ffmpeg", pulse_input=False, opus=True),
+        )
+        linux_platform = linux.LinuxPlatform()
+
+        assert linux_platform.records_audio() is False
+        assert "PulseAudio" in linux_platform.audio_source_unavailable_reason("mic")
 
     def test_windows_never_offers_desktop_sound(self):
         assert windows.WindowsPlatform().audio_source_unavailable_reason(
