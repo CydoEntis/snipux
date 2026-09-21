@@ -5,6 +5,14 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **Enter copies your snip on Wayland.** It closed the snip instead: the
+  close button had the keyboard, so Enter pressed it, and Space would have
+  too. Every button over the snip now leaves the keys to it.
+- **What you copy on Wayland stays on the clipboard** when the snip closes
+  straight after.
+
 ## 0.9.0 — 2026-09-16
 
 ### Added
