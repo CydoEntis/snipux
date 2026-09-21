@@ -720,12 +720,11 @@ class RecordingBar(QWidget):
     makes a control's identity survive a state change, so a click already in
     flight lands on the thing the user pressed.
 
-    One control the handoff specifies is still deliberately absent, per
-    docs/design/flow/divergences.md 3:
-
-    * **Open**, on the `done` state's destination -- specified as a player
-      with trim and GIF export, which the handoff says is described but not
-      designed, and trimming is separately deferred.
+    One control the handoff specifies is deliberately absent by default,
+    per docs/design/flow/divergences.md 5: the `done` state's destination
+    button. The destination is chosen before recording, so the file lands on
+    Stop; `set_done(destination=...)` puts the button back for a caller that
+    wires it.
 
     **Pause** (#87) is built: a control on the `live` state, beside
     Stop, that always names what a click does next -- "Pause", then
