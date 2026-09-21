@@ -66,7 +66,12 @@ from snipux.capture import (
 from snipux.overlay import GeometryProvider, OverlayWindow, UnsupportedGeometryProvider
 from snipux.platform import windows as windows_platform
 from snipux.flowbars import FlowMenu, RecordingBar
-from snipux.recording import RecorderRegistry, RecordingBackend, RecordingError
+from snipux.recording import (
+    RecorderRegistry,
+    RecordingBackend,
+    RecordingError,
+    RecordingPartsError,
+)
 from snipux.settings import SettingsDialog
 
 FILL_COLOR = qRgb(10, 20, 30)
@@ -3356,6 +3361,99 @@ class TestAppControllerPauseRecording:
 
         controller._discard_recording()
 
+        assert backend.stop_calls == [True]
+        assert controller._active_recording is None
+
+
+class _PiecesBackend(FakeRecordingBackend):
+    """A recorder whose stop() cannot join what it recorded, as the Linux
+    one's can fail to (#93): it hands the pieces back instead."""
+
+    can_pause = True
+
+    def __init__(self, parts_dir: Path):
+        super().__init__()
+        self.parts_dir = parts_dir
+        self.discard_calls = []
+        self.resume_error: Exception | None = None
+
+    def stop(self):
+        self.stop_calls.append(True)
+        parts = []
+        for index in (1, 2):
+            part = self.parts_dir / f"piece{index}.webm"
+            part.write_bytes(b"piece %d" % index)
+            parts.append(str(part))
+        raise RecordingPartsError("could not join", parts)
+
+    def discard(self):
+        self.discard_calls.append(True)
+
+    def resume(self):
+        if self.resume_error is not None:
+            raise self.resume_error
+        super().resume()
+
+
+class TestARecordingInPieces:
+    """The Linux recorder's pieces: kept when they cannot be joined,
+    deleted as a whole on discard, and a failed resume stops rather than
+    leaving nothing to resume."""
+
+    def _start(self, make_controller, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        parts_dir = tmp_path / "pieces"
+        parts_dir.mkdir()
+        backend = _PiecesBackend(parts_dir)
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "save")
+        return controller, backend
+
+    def test_pieces_that_cannot_be_joined_are_each_kept_in_the_recordings_folder(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._start(make_controller, monkeypatch, tmp_path)
+        reports = []
+        monkeypatch.setattr(controller, "_report_shortcut", reports.append)
+
+        controller._stop_recording()
+
+        kept = sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".webm")
+        assert len(kept) == 2
+        assert kept[0].endswith("(part 1).webm") and kept[1].endswith("(part 2).webm")
+        assert "saved separately" in reports[-1]
+        assert controller._active_recording is None
+
+    def test_discard_asks_the_recorder_to_throw_away_everything(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, backend = self._start(make_controller, monkeypatch, tmp_path)
+        controller._recording_hud.pauseClicked.emit()
+
+        controller._discard_recording()
+
+        assert backend.discard_calls == [True]
+        assert backend.stop_calls == []
+
+    def test_a_resume_that_fails_stops_and_keeps_what_was_recorded(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, backend = self._start(make_controller, monkeypatch, tmp_path)
+        reports = []
+        monkeypatch.setattr(controller, "_report_shortcut", reports.append)
+        controller._recording_hud.pauseClicked.emit()
+        backend.resume_error = RuntimeError("Shell refused")
+
+        controller._recording_hud.pauseClicked.emit()
+
+        assert any("Resuming the recording failed" in r for r in reports)
         assert backend.stop_calls == [True]
         assert controller._active_recording is None
 

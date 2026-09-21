@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import QMargins, Qt
 from PyQt6.QtGui import QGuiApplication
 
-from snipux import capture, recording, setup_desktop
+from snipux import capture, ffmpeg, recording, setup_desktop
 
 from . import Platform
 
@@ -158,21 +158,25 @@ class LinuxPlatform(Platform):
         )
 
     def records_audio(self) -> bool:
-        """False. `org.gnome.Shell.Screencast` takes `draw-cursor` and
-        `framerate` and nothing else -- there is no audio option in the
-        interface, so there is nothing to wire a control to.
-
-        Capturing from PipeWire ourselves and muxing it is a different
-        piece of work from this one, and would pull in a dependency the
-        project has so far refused (CLAUDE.md: a fourth is a decision worth
-        raising in the ticket). See docs/design/flow/divergences.md 2.
+        """Whether the system ffmpeg can record the sound beside GNOME's
+        screencast, which has no audio of its own (`GnomeScreencastBackend`
+        records it alongside and joins the two when the recording stops).
         """
-        return False
+        capabilities = ffmpeg.probe()
+        return capabilities is not None and capabilities.records_sound
 
     def audio_unavailable_reason(self) -> str:
+        capabilities = ffmpeg.probe()
+        if capabilities is None:
+            return (
+                "Recording sound on Linux needs ffmpeg installed -- GNOME's "
+                "screen recorder has no audio of its own."
+            )
+        if capabilities.records_sound:
+            return ""
         return (
-            "GNOME's screen recorder has no audio track. Recording audio on "
-            "Linux needs a capture route Snipux does not have yet."
+            "This ffmpeg cannot record sound: it needs PulseAudio input and "
+            "the Opus encoder."
         )
 
 

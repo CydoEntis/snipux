@@ -62,10 +62,10 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Frame rate, cursor and destination settings
 - [x] `dev` Land a recording as GIF without opening the player
 - [x] `dev` Pause and resume (Windows)
-- [ ] `now` Pause and resume on Linux (#93)
+- [x] `dev` Pause and resume on Linux, with a system ffmpeg (#93)
 - [x] `dev` Microphone audio in recordings (Windows)
 - [ ] `later` Desktop (system) sound on Windows -- Qt cannot capture it without a new dependency
-- [ ] `later` Audio on Linux -- GNOME Screencast has no audio option
+- [x] `dev` System sound and mic on Linux, with a system ffmpeg
 
 ## Desktop integration
 

@@ -21,6 +21,10 @@ use it; the commit history has the detail.
   bar now has a Copy / Save / Open / GIF menu next to the Record button.
   It shows what Stop will do, and changing it applies to this recording
   only, without changing your default.
+- **Pause and sound when recording on Linux.** With ffmpeg installed, Pause
+  works on Linux as it does on Windows -- the paused time is simply left
+  out -- and the audio menu records what you hear or your microphone.
+  Without ffmpeg both are greyed and say what they need.
 
 ### Changed
 
