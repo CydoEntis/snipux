@@ -9135,9 +9135,11 @@ class _MonitorVeil(QWidget):
     already can. This is deliberately not another `OverlayWindow`: only one
     monitor is ever the interactive one for a given snip, so the rest just
     need their own frozen, dimmed pixels and nothing else -- no bar, no
-    tray, no selection of their own. It never seeks focus or reacts to
-    input; `open_overlay` closes every instance of this the moment the
-    real `OverlayWindow` does, via that window's own `on_dismissed`.
+    tray, no selection of their own. It does not react to input, and it
+    must not end up with the keyboard, which a compositor hands to the
+    window it maps last -- so `open_overlay` maps these first. It closes
+    every instance of this the moment the real `OverlayWindow` does, via
+    that window's own `on_dismissed`.
     """
 
     def __init__(self, monitor_frame: Frame, parent=None):
@@ -9348,7 +9350,6 @@ def open_overlay(
         overlay.show_on_screen(None)
         return overlay
 
-    overlay.show_on_screen(_screen_for_geometry(primary_geometry))
     # Every monitor except the interactive one, by identity rather than by
     # slicing off the first entry: `_interactive_geometry` may well have
     # picked something other than `monitor_geometries[0]`, and a `[1:]`
@@ -9360,4 +9361,9 @@ def open_overlay(
         veil = _MonitorVeil(frame.crop(geometry))
         veil.show_on_screen(_screen_for_geometry(geometry))
         veils.append(veil)
+    # The interactive window last. GNOME gives the keyboard to whichever
+    # window it maps last, and shown before its veils this one lost it to
+    # them: on two monitors Enter, Esc and every tool key did nothing until
+    # the snip was clicked.
+    overlay.show_on_screen(_screen_for_geometry(primary_geometry))
     return overlay

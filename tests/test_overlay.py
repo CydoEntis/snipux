@@ -8924,6 +8924,37 @@ class TestOpenOverlay:
 
         assert created and all(veil.closed for veil in created)
 
+    def test_the_interactive_window_is_shown_after_its_veils(self, monkeypatch):
+        # A compositor gives the keyboard to the window it maps last. Shown
+        # first, the overlay lost it to a veil: on two monitors under GNOME
+        # Wayland, Enter and Esc did nothing until the snip was clicked.
+        shown = []
+
+        class FakeVeil:
+            def __init__(self, monitor_frame):
+                pass
+
+            def show_on_screen(self, screen):
+                shown.append("veil")
+
+            def close(self):
+                pass
+
+        real_show = OverlayWindow.show_on_screen
+
+        def recording_show(self, screen):
+            shown.append("overlay")
+            real_show(self, screen)
+
+        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
+        monkeypatch.setattr(OverlayWindow, "show_on_screen", recording_show)
+        frame = make_frame(image_size=(600, 200), logical_size=(600, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200), QRectF(400, 0, 200, 200)]
+
+        open_overlay(frame, geometries, wayland=True)
+
+        assert shown == ["veil", "veil", "overlay"]
+
 
 # ---------------------------------------------------------------------------
 # Chrome on a staggered multi-monitor desktop

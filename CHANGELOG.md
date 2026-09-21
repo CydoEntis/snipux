@@ -69,6 +69,9 @@ use it; the commit history has the detail.
   socket your shortcut talks to, for example because `$TMPDIR` pointed at a
   folder that doesn't exist, pressing the shortcut did nothing and said
   nothing. Now it shows a message naming the folder to check.
+- **Keyboard shortcuts work straight away on two monitors under Wayland.**
+  With more than one monitor, Enter, Esc and the tool keys did nothing
+  until you clicked the snip first.
 
 ## 0.9.0 — 2026-09-16
 
