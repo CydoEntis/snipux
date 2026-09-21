@@ -393,10 +393,32 @@ given), both recording paths land a playable file at the right speed, and
 pill placement question above and the overlay/annotation flow end to end;
 only recording was driven.
 
-**Wayland at all.** Still true, and not checkable from the machine this was
-done on -- it has no Wayland socket. What *is* now known is that the GNOME
-screencast route works, and that route is D-Bus, not session-dependent. The
-overlay and capture path under a real Wayland session remain unwatched.
+**Wayland: driven headless, not yet on a physical desk.** On 2026-09-21
+snipux ran end to end in a real GNOME 46 Wayland session. It was
+`gnome-shell --headless` with one 1280x800 virtual monitor, beside the
+Linux box's X11 desk, driven through `org.gnome.Mutter.RemoteDesktop`.
+What that watched:
+
+- capture through the screenshot portal once permission is granted;
+- selecting, drawing and Copy, with a PNG of the region on the clipboard;
+- a Linux recording paused and resumed with sound, joined with sound and
+  picture within 32ms of each other.
+
+It found four bugs, fixed in the PRs named:
+
+- Enter closed the snip instead of copying it (#125);
+- a copy was lost when the snip closed straight after (#125);
+- Shell's screenshot refusals were read as success (#126);
+- the recording bar and outline were placed by the compositor inside the
+  area being recorded (#127).
+
+Still unwatched on Wayland:
+
+- the portal's first-run permission dialog, which would not render
+  headless;
+- more than one monitor;
+- fractional scaling;
+- a physical session rather than a headless one.
 
 **Pasting into Nautilus or a chat app.** The mime data is now verified
 correct *on the wire* -- read back off a live X11 clipboard with xclip --
