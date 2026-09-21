@@ -6520,6 +6520,9 @@ class TestCaptureModeWindowIntegration:
     def test_the_real_x11_provider_snaps_a_listed_window(self, monkeypatch):
         # The real provider, not `_FakeWindowProvider`: a `wmctrl -lG` call,
         # mocked at the subprocess boundary, feeding straight into a click.
+        # An X11 session too, faked: the provider offers nothing outside
+        # one, and a CI runner has no session at all.
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
         monkeypatch.setattr("snipux.capture.shutil.which", lambda binary: "/usr/bin/wmctrl")
         monkeypatch.setattr(
             "snipux.capture.subprocess.run",
