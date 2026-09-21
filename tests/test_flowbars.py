@@ -13,8 +13,9 @@ only way to assert on it under QT_QPA_PLATFORM=offscreen.
 
 import pytest
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt
+from PyQt6.QtGui import QImage, QRegion
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 from snipux import design
 from snipux.design import tokens
@@ -79,7 +80,7 @@ class TestTheFourStates:
         # surface silently stopped the recording. Naming the action is the
         # point of the shape; a state that shows only a number is the bug.
         bar.set_ready()
-        assert bar._action._label == "Record"
+        assert bar._action._label.startswith("Record")
         bar.set_live("0:12")
         assert bar._action._label == "Stop"
         bar.set_done("00:27", destination="Save")
@@ -298,6 +299,144 @@ class TestPause:
         bar.set_live("0:15")
 
         assert bar._pause._label == "Pause"
+
+
+class TestTheDestinationChip:
+    """What Stop will do with the recording is its own control beside
+    Record, not a caret on it: a press on Record always records."""
+
+    @pytest.mark.parametrize("identifier, glyph, label", [
+        (identifier, glyph, label)
+        for identifier, glyph, label, _note in tokens.RECORD_DESTINATIONS
+    ])
+    def test_the_chip_names_the_destination(self, bar, identifier, glyph, label):
+        bar.set_destination(identifier)
+        bar.set_ready()
+
+        assert bar._destination_chip.label() == label
+        assert bar._destination_chip._icon_name == glyph
+        assert bar.destination() == identifier
+
+    def test_record_says_record_whatever_the_destination(self, bar):
+        bar.set_ready()
+        bar.set_destination("gif")
+
+        assert bar._action._label == "Record"
+
+    def test_an_unknown_destination_falls_back_to_the_default(self, bar):
+        bar.set_destination("review")  # a stills destination, not a recording's
+
+        assert bar.destination() == tokens.RECORD_AFTER_DEFAULT
+
+    def test_the_chip_asks_for_the_menu_and_record_starts(self, bar):
+        bar.set_ready()
+        fired = []
+        bar.startClicked.connect(lambda: fired.append("start"))
+        bar.destinationMenuRequested.connect(lambda: fired.append("menu"))
+
+        _click(bar._destination_chip)
+        _click(bar._action)
+
+        assert fired == ["menu", "start"]
+
+    def test_the_chip_sits_right_after_the_action_group(self, bar):
+        # Rule 3: the action group, a divider, then everything else -- and
+        # the destination is the first of everything else.
+        bar.set_ready()
+        bar.adjustSize()
+
+        assert bar._action.geometry().right() < bar._action_divider.geometry().left()
+        assert bar._action_divider.geometry().right() < bar._destination_chip.geometry().left()
+        assert bar._destination_chip.geometry().right() < bar._audio.geometry().left()
+
+    def test_only_the_ready_stage_offers_it(self, bar):
+        bar.set_ready()
+        assert bar._destination_chip.isHidden() is False
+        bar.set_counting(3)
+        assert bar._destination_chip.isHidden() is True
+        bar.set_live("0:01")
+        assert bar._destination_chip.isHidden() is True
+        bar.set_done("00:27")
+        assert bar._destination_chip.isHidden() is True
+
+    def test_record_names_its_key(self, bar):
+        # No inline "↵", as the stills split carries none; Enter still
+        # starts it, and the tooltip is where that is said.
+        bar.set_ready()
+
+        assert "Enter" in bar._action.toolTip()
+
+
+class TestTheDelayShowsWhatIsSet:
+    def test_no_delay_is_the_bare_glyph(self, bar):
+        bar.set_ready()
+        bar.set_delay(tokens.DELAYS[0])
+
+        assert bar._delay.value() == ""
+        assert bar._delay.width() == tokens.FlowMetric.BTN
+
+    def test_a_set_delay_is_on_the_bar(self, bar):
+        # A countdown carried over from the chooser used to be invisible
+        # here, until Record was pressed and nothing happened.
+        bar.set_ready()
+
+        bar.set_delay("10s")
+
+        assert bar._delay.value() == "10s"
+        assert bar._delay.width() > tokens.FlowMetric.BTN
+
+
+class TestTheLiveAudioIsAReadout:
+    def test_a_live_audio_click_opens_nothing(self, bar):
+        # The source is read when the recorder starts; a menu mid-recording
+        # would change nothing that is being recorded.
+        bar.set_live("0:12")
+        bar.set_audio_enabled(True)
+        fired = []
+        bar.audioClicked.connect(lambda: fired.append(True))
+
+        _click(bar._audio)
+
+        assert bar._audio.isHidden() is False
+        assert fired == []
+
+    def test_ready_again_makes_it_a_control_again(self, bar):
+        bar.set_live("0:12")
+        bar.set_ready()
+        bar.set_audio_enabled(True)
+        fired = []
+        bar.audioClicked.connect(lambda: fired.append(True))
+
+        _click(bar._audio)
+
+        assert fired == [True]
+
+
+class TestTheBarsOwnChrome:
+    def test_the_countdown_does_not_draw_two_dividers_side_by_side(self, bar):
+        bar.set_counting(3)
+
+        shown = [
+            divider for divider in (bar._action_divider, bar._tail_divider)
+            if not divider.isHidden()
+        ]
+
+        assert len(shown) == 1
+
+    def test_with_nothing_to_blur_the_fill_hides_what_is_behind_it(self, bar):
+        # 93% let a window title on the desktop show through the bar as a
+        # ghost of some other control. With no frozen frame to blur, the
+        # fill is the glass fallback's instead.
+        bar.set_ready()
+        bar.adjustSize()
+        image = QImage(bar.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        bar.render(image, QPoint(), QRegion(), QWidget.RenderFlag.DrawWindowBackground)
+
+        # A point of bare fill: past the Record button, on the bar's padding.
+        alpha = image.pixelColor(bar._action.geometry().left() - 3, bar.height() // 2).alphaF()
+
+        assert alpha >= tokens.BarColor.FALLBACK_BG_ALPHA - 0.01
 
 
 class TestTheActionRoutesByState:

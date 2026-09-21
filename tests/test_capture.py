@@ -5,6 +5,8 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from jeepney import HeaderFields
+
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF
 from PyQt6.QtGui import QColor, QImage, QPixmap, qRgb
 from PyQt6.QtWidgets import QApplication
@@ -1215,6 +1217,91 @@ class TestGnomeShellHelperBackend:
             capture.GnomeShellHelperBackend().capture()
 
         assert not os.path.exists(seen_paths[1])
+
+
+class TestGnomeShellHelperBackendAnswers:
+    """What current GNOME Shells actually answer, measured on GNOME 46: the
+    Screenshot service refuses callers not on its allowlist, and the old
+    address has no such method at all."""
+
+    @staticmethod
+    def _error(text):
+        reply = Mock(body=(text,))
+        reply.header.message_type = capture.MessageType.error
+        return reply
+
+    def _backend(self, monkeypatch, replies):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setattr(
+            capture, "QGuiApplication", _FakeQGuiApplication([_FakeScreen(QRect(0, 0, 50, 40))])
+        )
+        sent = []
+
+        def reply(message):
+            sent.append(message)
+            answer = replies[len(sent) - 1]
+            return answer if isinstance(answer, Mock) else answer(message)
+
+        connection = Mock()
+        connection.send_and_get_reply = Mock(side_effect=reply)
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: connection)
+        return capture.GnomeShellHelperBackend(), sent
+
+    def test_a_refusal_is_read_as_one_and_every_answer_is_named(self, monkeypatch):
+        backend, _sent = self._backend(monkeypatch, [
+            self._error("Screenshot is not allowed"),
+            self._error("No such method \u201cScreenshot\u201d"),
+        ])
+
+        with pytest.raises(RuntimeError) as raised:
+            backend.capture()
+
+        message = str(raised.value)
+        assert "Screenshot is not allowed" in message
+        assert "No such method" in message
+        assert "unpack" not in message
+
+    def test_the_current_address_is_asked_first(self, monkeypatch):
+        backend, sent = self._backend(monkeypatch, [
+            self._error("Screenshot is not allowed"),
+            self._error("No such method"),
+        ])
+
+        with pytest.raises(RuntimeError):
+            backend.capture()
+
+        assert sent[0].header.fields[HeaderFields.destination] == "org.gnome.Shell.Screenshot"
+        assert sent[0].header.fields[HeaderFields.path] == "/org/gnome/Shell/Screenshot"
+
+    def test_an_older_shell_that_answers_the_old_address_still_works(self, monkeypatch):
+        def succeed(message):
+            path = message.body[-1]
+            _write_placeholder_png(path)
+            return Mock(body=(True, path))
+
+        backend, _sent = self._backend(
+            monkeypatch, [self._error("The name is not activatable"), succeed]
+        )
+
+        frame = backend.capture()
+
+        assert not frame.image.isNull()
+
+
+class TestPortalRefusalSaysWhatToDo:
+    def test_a_refused_request_points_at_the_permission_prompt_first(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setattr(
+            capture, "QGuiApplication", _FakeQGuiApplication([_FakeScreen(QRect(0, 0, 50, 40))])
+        )
+        connection = Mock(unique_name=":1.23")
+        connection.recv_until_filtered = Mock(return_value=Mock(body=(2, {})))
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: connection)
+
+        with pytest.raises(RuntimeError) as raised:
+            capture.PortalScreenshotBackend().capture()
+
+        assert "allow" in str(raised.value)
 
 
 class TestWaylandRegistryOrdering:

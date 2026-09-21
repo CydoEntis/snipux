@@ -24,7 +24,7 @@ on every OS, forever.
 
 ## Target platform
 
-Linux, Windows and macOS, aimed at full feature parity across all three.
+Linux and Windows, at full feature parity. macOS is out of scope for now.
 
 - **Linux** (Ubuntu 22.04+, GNOME; other desktops expected to work but not
   what we test against) is implemented today. Wayland is the primary session
@@ -38,9 +38,9 @@ Linux, Windows and macOS, aimed at full feature parity across all three.
   the one operation still raising `UnimplementedPlatformError`. What has
   *not* been watched there is listed in TODO.md, "Windows: four jobs" —
   treat that list as current, not the code's apparent completeness.
-- **macOS** is next. The seam (`snipux/platform/darwin.py`) exists and
-  nothing behind it is implemented; it needs a real Mac for the Screen
-  Recording and Accessibility permissions.
+- **macOS** is not being worked on, and 1.0 does not include it. The seam
+  (`snipux/platform/darwin.py`) stays, so a port can slot in later without
+  rework; nothing behind it is implemented.
 
 Development happens on Windows and in an Ubuntu VM. Qt behaves the same on
 all three — everything except the platform seam below is ordinary, portable
@@ -67,7 +67,8 @@ snipux/
                 X11/Wayland ones, and Windows')
   recording.py  the recording twin of capture.py: RecordingBackend /
                 RecorderRegistry, plus GnomeScreencastBackend (D-Bus, the
-                only Linux route -- WebM, no audio) and
+                only Linux route -- WebM; pause and sound through the
+                optional system ffmpeg, snipux/ffmpeg.py) and
                 WindowsRecorderBackend (QScreenCapture -> QMediaRecorder)
   overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
                 (its pre-snip chooser diverges from the handoff -- see

@@ -20,6 +20,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
+    QAbstractButton,
     QApplication,
     QColorDialog,
     QLabel,
@@ -2351,6 +2352,14 @@ class TestHandleCursors:
     """SNX-32: hovering a handle previews the direction it resizes in."""
 
     SEL = QRect(50, 50, 100, 80)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        # These are hover-only moves, which the offscreen platform can route
+        # to a stale same-rect window left open by an earlier test -- see
+        # `_close_stray_toplevel_windows`. Measured: all ten failed when
+        # test_app.py and test_flowbars.py ran first in the same process.
+        _close_stray_toplevel_windows()
 
     def _shown_overlay(self):
         frame = make_frame(image_size=(300, 300), logical_size=(300, 300))
@@ -7178,6 +7187,7 @@ class TestCommitToRecord:
         logical_origin=(0, 0),
         monitor_geometries=None,
         size=(600, 600),
+        on_recording_reframed=None,
     ):
         frame = make_frame(
             image_size=size, logical_size=size, logical_origin=logical_origin
@@ -7186,6 +7196,7 @@ class TestCommitToRecord:
             frame,
             monitor_geometries=monitor_geometries,
             on_recording_requested=on_recording_requested,
+            on_recording_reframed=on_recording_reframed,
         )
         overlay._chooser.set_kind("record")
         overlay.setGeometry(0, 0, *size)
@@ -7309,6 +7320,31 @@ class TestCommitToRecord:
         overlay.set_selection(QRectF(120, 130, 200, 180))
 
         assert overlay.absolute_selection() == QRectF(120, 130, 200, 180)
+
+    def test_reframing_the_armed_region_reports_it_so_the_bar_can_follow(self):
+        # Absolute coordinates, like `on_recording_requested`: the bar is a
+        # window of its own and places itself on the desktop, not in here.
+        reframed = []
+        overlay = self._overlay(
+            on_recording_requested=lambda rect, delay, after: None,
+            logical_origin=(-600, 0),
+            on_recording_reframed=reframed.append,
+        )
+        self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
+        assert reframed == []  # arming is `on_recording_requested`'s to say
+
+        overlay.set_selection(QRect(120, 130, 200, 180))
+
+        assert reframed == [QRectF(-480, 130, 200, 180)]
+
+    def test_a_selection_that_is_not_armed_for_recording_reports_nothing(self):
+        reframed = []
+        overlay = self._overlay(on_recording_reframed=reframed.append)
+        overlay._chooser.set_kind("stills")
+
+        overlay.set_selection(QRect(120, 130, 200, 180))
+
+        assert reframed == []
 
     def test_the_armed_delay_reaches_the_callback_unchanged(self):
         # This ticket doesn't own the timer that counts the delay down --
@@ -14219,3 +14255,163 @@ class TestTheHighlighterSnapsToText:
         popover.set_tool("pen")
 
         assert "snap" not in popover.sections()
+
+
+class TestKeysReachTheOverlayNotItsButtons:
+    """The overlay's keys -- Enter, Space, the tool letters -- are its own.
+    A button over it that could take focus was handed it as the window
+    opened, and then Enter pressed that button: measured on GNOME 46
+    Wayland, the close button held focus and Enter closed the snip rather
+    than copying it."""
+
+    def test_no_button_over_the_overlay_can_take_focus(self):
+        overlay = _styled_overlay()
+
+        buttons = overlay.findChildren(QAbstractButton)
+
+        assert buttons
+        assert [b for b in buttons if b.focusPolicy() != Qt.FocusPolicy.NoFocus] == []
+
+    def test_enter_where_focus_really_is_copies_the_snip(self):
+        overlay = _styled_overlay(selection=QRect(400, 200, 300, 200))
+        overlay.activateWindow()
+        QApplication.processEvents()
+        QGuiApplication.clipboard().clear()
+
+        QTest.keyClick(QApplication.focusWidget() or overlay, Qt.Key.Key_Return)
+
+        assert QGuiApplication.clipboard().image().size() == QSize(300, 200)
+
+    def test_a_hidden_label_hands_focus_back_to_the_overlay(self):
+        # Hiding a focused field is what commits it; with no button to take
+        # focus on, the overlay itself has to.
+        overlay = _styled_overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(450, 250))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "kept")
+
+        overlay._text_edit.hide()
+
+        assert overlay._text_edit.isHidden()
+        assert [mark.text for mark in overlay.marks] == ["kept"]
+
+
+class TestTheOpeningTool:
+    """Which tool the stills bar arms when it first comes up: the one chosen
+    in Settings, none at all, or -- with "Remember my last tool" on -- the
+    one the last snip ended on."""
+
+    def test_nothing_stored_opens_on_the_pen(self):
+        overlay = _styled_overlay()
+
+        assert overlay._bar.active_tool == "pen"
+
+    @pytest.mark.parametrize("tool", ["arrow", "text", "blur", "callout", "spotlight"])
+    def test_the_bar_opens_on_the_tool_settings_chose(self, tool):
+        setup_desktop.save_default_tool(tool)
+
+        overlay = _styled_overlay()
+
+        assert overlay._bar.active_tool == tool
+
+    def test_a_family_tool_is_what_its_slot_shows(self):
+        # Opening on Arrow must also put Arrow on the shapes slot, or the
+        # bar shows a rectangle while an arrow draws.
+        setup_desktop.save_default_tool("arrow")
+
+        overlay = _styled_overlay()
+
+        assert overlay._bar.family_choice("shapes") == "arrow"
+
+    def test_no_tool_arms_nothing(self):
+        setup_desktop.save_default_tool(tokens.OPENING_TOOL_NONE)
+
+        overlay = _styled_overlay()
+
+        assert overlay._bar.active_tool is None
+
+    def test_no_tool_means_a_press_inside_the_selection_draws_nothing(self):
+        setup_desktop.save_default_tool(tokens.OPENING_TOOL_NONE)
+        overlay = _styled_overlay()
+
+        QTest.mousePress(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            QPoint(500, 300),
+        )
+        QTest.mouseMove(overlay, QPoint(600, 380))
+        QTest.mouseRelease(
+            overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            QPoint(600, 380),
+        )
+
+        assert not overlay.marks
+
+    def test_remembering_opens_on_the_tool_the_last_snip_ended_on(self):
+        setup_desktop.save_remember_tool(True)
+        first = _styled_overlay()
+        first._bar.select_tool("step")
+        first.close()
+
+        second = _styled_overlay()
+
+        assert second._bar.active_tool == "step"
+
+    def test_without_remembering_the_last_tool_is_not_kept(self):
+        first = _styled_overlay()
+        first._bar.select_tool("step")
+        first.close()
+
+        second = _styled_overlay()
+
+        assert second._bar.active_tool == "pen"
+
+    @pytest.mark.parametrize("tool", ["eraser", "eyedropper"])
+    def test_ending_on_a_tool_nobody_starts_with_keeps_the_one_before(self, tool):
+        setup_desktop.save_remember_tool(True)
+        first = _styled_overlay()
+        first._bar.select_tool("highlighter")
+        first._bar.select_tool(tool)
+        first.close()
+
+        second = _styled_overlay()
+
+        assert second._bar.active_tool == "highlighter"
+
+    def test_a_snip_that_never_armed_a_tool_leaves_the_remembered_one(self):
+        setup_desktop.save_remember_tool(True)
+        setup_desktop.save_last_tool("text")
+        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
+        untouched = OverlayWindow(frame)
+        untouched.show()
+        QTest.qWaitForWindowExposed(untouched)
+        untouched.close()
+
+        assert setup_desktop.load_opening_tool() == "text"
+
+
+class TestSavedStyleDefaultsReachTheOverlay:
+    """What Settings -> Annotation saves is what the tools draw with."""
+
+    def test_the_default_ink_and_a_tools_own_defaults_seed_the_tools(self):
+        setup_desktop.save_default_ink("#ff8800")
+        setup_desktop.save_tool_defaults({"rect": {"color": "#00ff00", "dash": "dotted"}})
+
+        overlay = _styled_overlay()
+
+        assert overlay._styles.of("pen").colour == "#ff8800"
+        assert (overlay._styles.of("rect").colour, overlay._styles.of("rect").dash) == (
+            "#00ff00", "dotted"
+        )
+        # The style dot shows the armed tool's seeded colour.
+        assert overlay._bar._style_dot.style.colour == "#ff8800"
+
+    def test_the_next_snip_keeps_a_colour_picked_on_this_one(self):
+        setup_desktop.save_default_ink("#ff8800")
+        first = _styled_overlay()
+        first._styles.update("pen", colour="#123456")
+        first.close()
+
+        second = _styled_overlay()
+
+        assert second._styles.of("pen").colour == "#123456"
