@@ -1234,12 +1234,65 @@ class TestQLocalSocketTransportRace:
         # Linux would take: try_claim() must report False, not True, and
         # must not leave `_server` pointing at a server that never actually
         # started listening.
-        monkeypatch.setattr(QLocalSocket, "waitForConnected", lambda self, timeout: False)
+        # The winner answers the loser's second probe, made once its own
+        # listen() has failed.
+        answers = iter([False, True])
+        monkeypatch.setattr(QLocalSocket, "waitForConnected", lambda self, timeout: next(answers))
         monkeypatch.setattr(QLocalServer, "listen", lambda self, name: False)
         transport = QLocalSocketTransport(f"snipux-test-race-{id(self)}")
 
         assert transport.try_claim() is False
         assert transport._server is None
+
+    def test_try_claim_says_why_when_nobody_answers_and_it_cannot_listen(self, monkeypatch):
+        # Neither a resident nor a race: the socket's folder is missing,
+        # read-only or too deep. Reporting False sent the request to
+        # nobody and exited 0 -- a shortcut that silently did nothing.
+        monkeypatch.setattr(QLocalSocket, "waitForConnected", lambda self, timeout: False)
+        monkeypatch.setattr(QLocalServer, "listen", lambda self, name: False)
+        name = f"snipux-test-deaf-{id(self)}"
+        transport = QLocalSocketTransport(name)
+
+        with pytest.raises(app.ClaimError) as raised:
+            transport.try_claim()
+
+        assert handoff.listening_place(name) in str(raised.value)
+        assert transport._server is None
+
+
+class TestTheCannotListenMessage:
+    def test_a_socket_path_names_its_folder_to_check(self, monkeypatch):
+        folder = os.path.join("some", "deep", "tmp")
+        monkeypatch.setattr(
+            app.handoff, "listening_place", lambda name: os.path.join(folder, name)
+        )
+
+        message = app._cannot_listen_message("snipux-resident")
+
+        assert os.path.join(folder, "snipux-resident") in message
+        assert f"Check that {folder} exists" in message
+
+    def test_a_named_pipe_has_no_folder_to_check(self, monkeypatch):
+        monkeypatch.setattr(app.handoff, "listening_place", lambda name: name)
+
+        message = app._cannot_listen_message("snipux-resident")
+
+        assert "snipux-resident" in message
+        assert "Check that" not in message
+
+
+class TestListeningPlace:
+    def test_is_the_socket_path_where_there_are_unix_sockets(self, monkeypatch):
+        monkeypatch.setattr(
+            handoff.socket, "AF_UNIX", getattr(handoff.socket, "AF_UNIX", 1), raising=False
+        )
+
+        assert handoff.listening_place("snipux-x") == handoff.socket_path("snipux-x")
+
+    def test_is_the_bare_name_for_a_named_pipe(self, monkeypatch):
+        monkeypatch.delattr(handoff.socket, "AF_UNIX", raising=False)
+
+        assert handoff.listening_place("snipux-x") == "snipux-x"
 
 
 def _stub_dispatch(monkeypatch, argv, *, relaunched=False):
@@ -1307,6 +1360,22 @@ class TestCli:
 
         assert cli() == 0
         assert "run_resident_app" not in calls
+
+    def test_a_launch_that_cannot_claim_says_so_and_fails(self, monkeypatch, capsys):
+        _stub_dispatch(monkeypatch, ["snipux"])
+
+        def cannot_claim():
+            raise app.ClaimError("Snipux can't start: it could not listen at /x/snipux.")
+
+        monkeypatch.setattr(app, "run_resident_app", cannot_claim)
+        shown = []
+        monkeypatch.setattr(
+            app.QMessageBox, "warning", lambda parent, title, text: shown.append(text)
+        )
+
+        assert cli() == 1
+        assert "could not listen at /x/snipux" in capsys.readouterr().err
+        assert shown == ["Snipux can't start: it could not listen at /x/snipux."]
 
     def test_a_command_is_never_relaunched(self, monkeypatch):
         # `--update`/`--setup`/`--help` print where they were typed. A

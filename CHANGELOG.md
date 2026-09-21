@@ -5,6 +5,13 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **Snipux says why when it can't start.** If Snipux couldn't open the
+  socket your shortcut talks to, for example because `$TMPDIR` pointed at a
+  folder that doesn't exist, pressing the shortcut did nothing and said
+  nothing. Now it shows a message naming the folder to check.
+
 ## 0.9.0 — 2026-09-16
 
 ### Added
