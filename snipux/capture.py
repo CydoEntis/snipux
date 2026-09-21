@@ -21,7 +21,7 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from jeepney import DBusAddress, MatchRule, new_method_call
+from jeepney import DBusAddress, MatchRule, MessageType, new_method_call
 from jeepney.io.blocking import open_dbus_connection
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF, QUrl
@@ -1076,16 +1076,18 @@ class PortalScreenshotBackend(CaptureBackend):
                     "shortcut again and approve the permission prompt"
                 )
             if response_code != 0:
-                # Any other non-zero code (2 = error, and anything the spec
-                # doesn't define) is not something pressing the shortcut
-                # again fixes by itself, so point at the portal
-                # installation instead. Either way `results` has no "uri"
-                # to read, so this must raise here rather than letting a
-                # bare KeyError stand in for it below.
+                # 2 is "other error", and on GNOME it is far more often a
+                # refused or unanswered permission prompt than a missing
+                # portal: xdg-desktop-portal asks once before an app's first
+                # silent screenshot and gives up on the prompt after 25s
+                # (measured, GNOME 46), answering 2 either way. Both causes
+                # are named. `results` has no "uri" to read, so this must
+                # raise here rather than letting a bare KeyError stand in.
                 raise RuntimeError(
-                    f"portal: screenshot request failed (response code {response_code}) "
-                    "— check that xdg-desktop-portal and a Wayland portal "
-                    "backend (e.g. xdg-desktop-portal-gnome) are installed and running"
+                    f"portal: screenshot refused (response code {response_code}) "
+                    "— if GNOME asked whether Snipux may take screenshots, allow "
+                    "it and try again; otherwise check that xdg-desktop-portal and "
+                    "a backend such as xdg-desktop-portal-gnome are installed"
                 )
             uri = results["uri"][1]
             image_path = QUrl(uri).toLocalFile()
@@ -1115,9 +1117,17 @@ class GnomeShellHelperBackend(CaptureBackend):
     tempfile/`finally`-cleanup treatment.
     """
 
-    _BUS_NAME = "org.gnome.Shell"
-    _OBJECT_PATH = "/org/gnome/Shell"
-    _INTERFACE = "org.gnome.Shell"
+    # (bus name, object path, interface): where Shell has answered
+    # Screenshot, newest first. GNOME 41 gave it a bus name of its own and
+    # started refusing any caller not on its allowlist -- measured on
+    # GNOME 46: "AccessDenied: Screenshot is not allowed" there, and "No
+    # such method" at the address this used to call. So on a current GNOME
+    # this backend reports why it cannot help, and the portal is the route;
+    # it still works where Shell is old enough to answer anyone.
+    _ADDRESSES = (
+        ("org.gnome.Shell.Screenshot", "/org/gnome/Shell/Screenshot", "org.gnome.Shell.Screenshot"),
+        ("org.gnome.Shell", "/org/gnome/Shell/Screenshot", "org.gnome.Shell.Screenshot"),
+    )
 
     def name(self) -> str:
         return "gnome-shell-helper"
@@ -1135,24 +1145,7 @@ class GnomeShellHelperBackend(CaptureBackend):
         tmp.close()
         path = tmp.name
         try:
-            connection = open_dbus_connection(bus="SESSION")
-            try:
-                shell = DBusAddress(
-                    self._OBJECT_PATH, bus_name=self._BUS_NAME, interface=self._INTERFACE
-                )
-                message = new_method_call(
-                    shell, "Screenshot", "bbs", (False, False, path)
-                )
-                reply = connection.send_and_get_reply(message)
-            finally:
-                connection.close()
-
-            success, filename = reply.body
-            if not success:
-                # No backend after this one, so this surfaces to the
-                # caller wrapped in BackendRegistry.capture()'s CaptureError.
-                raise RuntimeError("gnome-shell-helper: Screenshot() reported failure")
-
+            filename = self._screenshot(path)
             image = QImage(filename)
             if image.isNull():
                 raise RuntimeError("gnome-shell-helper: produced an unreadable image")
@@ -1164,6 +1157,35 @@ class GnomeShellHelperBackend(CaptureBackend):
             logical_origin=virtual_rect.topLeft(),
             logical_size=virtual_rect.size(),
         )
+
+    def _screenshot(self, path: str) -> str:
+        """Ask each of `_ADDRESSES` in turn for a screenshot at `path`, and
+        return the file Shell wrote; raise with every answer if none did.
+
+        jeepney hands an error back as a reply rather than raising it, and
+        an error's body is one string where a success is two values -- so it
+        is checked for first. Unpacking one as the other is how "Screenshot
+        is not allowed" surfaced as "not enough values to unpack".
+        """
+        answers = []
+        connection = open_dbus_connection(bus="SESSION")
+        try:
+            for bus_name, object_path, interface in self._ADDRESSES:
+                shell = DBusAddress(object_path, bus_name=bus_name, interface=interface)
+                reply = connection.send_and_get_reply(
+                    new_method_call(shell, "Screenshot", "bbs", (False, False, path))
+                )
+                if reply.header.message_type is MessageType.error:
+                    body = reply.body or ("unspecified D-Bus error",)
+                    answers.append(f"{bus_name}: {body[0]}")
+                    continue
+                success, filename = reply.body
+                if success:
+                    return filename
+                answers.append(f"{bus_name}: Screenshot() reported failure")
+        finally:
+            connection.close()
+        raise RuntimeError("gnome-shell-helper: " + "; ".join(answers))
 
 
 def build_wayland_registry() -> BackendRegistry:

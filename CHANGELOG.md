@@ -62,6 +62,9 @@ use it; the commit history has the detail.
   too. Every button over the snip now leaves the keys to it.
 - **What you copy on Wayland stays on the clipboard** when the snip closes
   straight after.
+- **A clearer message when GNOME refuses a screenshot on Wayland.** It now
+  says to allow Snipux when GNOME asks, instead of suggesting the portal
+  is not installed.
 
 ## 0.9.0 — 2026-09-16
 
