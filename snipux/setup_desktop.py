@@ -36,7 +36,6 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from . import platform
 from .design import PACKAGE_DIR, tokens
 
 # PACKAGE_DIR (snipux/design/__init__.py) rather than a second
@@ -372,11 +371,11 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
 
 
 def version_line() -> str:
-    """`Snipux 0.1.0 / Qt 6.7 · X11` for the nav rail's footer.
+    """`Snipux 0.8.2` for the nav rail's footer.
 
-    The trailing field is read, never assumed -- CLAUDE.md's rule -- and a
-    missing Qt (impossible here, but this is also imported by `--setup`,
-    which must not need one) degrades to the version alone.
+    Snipux's own version alone. It used to carry the Qt version and the
+    session type after it, which read as noise to the person looking at it
+    and made the one number that matters harder to find.
     """
     from importlib.metadata import PackageNotFoundError, version as _version
 
@@ -384,24 +383,7 @@ def version_line() -> str:
         ours = _version("snipux")
     except PackageNotFoundError:
         ours = "dev"
-    try:
-        from PyQt6.QtCore import QT_VERSION_STR
-
-        qt = f" / Qt {QT_VERSION_STR}"
-    except Exception:
-        qt = ""
-    return f"Snipux {ours}{qt} · {_platform_field()}"
-
-
-def _platform_field() -> str:
-    """The version line's trailing field: a session type on Linux, where
-    it is a real, runtime-detected fact worth showing -- a platform name
-    everywhere else, where there is no session-type concept to detect and
-    `detect_session_type()` would otherwise report 'unknown' on every run.
-    """
-    if platform.is_linux():
-        return detect_session_type()
-    return platform.os_name()
+    return f"Snipux {ours}"
 
 
 def detect_session_type() -> str:

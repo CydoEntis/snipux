@@ -1554,8 +1554,14 @@ class SettingsWindow(WinWindow):
         metric, win = tokens.WinMetric, tokens.Win
         rail = QWidget()
         rail.setFixedWidth(metric.NAV_W)
+        # Scoped to the rail itself. Unscoped, the border rule reached every
+        # child without a sheet of its own, and the version label drew a
+        # hairline down its own right edge, inside the rail.
+        rail.setObjectName("navRail")
+        rail.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         rail.setStyleSheet(
-            f"background: {win.CHROME_BG}; border-right: 1px solid {win.SEPARATOR};"
+            f"QWidget#navRail {{ background: {win.CHROME_BG};"
+            f" border-right: 1px solid {win.SEPARATOR}; }}"
         )
         column = QVBoxLayout(rail)
         column.setContentsMargins(

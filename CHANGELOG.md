@@ -18,6 +18,11 @@ use it; the commit history has the detail.
   sweep, whichever it has. "Reset all tools" puts them back. A change made
   mid-snip still lasts only for that session.
 
+### Changed
+
+- **Settings shows just the Snipux version** at the foot of its sidebar,
+  without the Qt version and session type after it.
+
 ### Fixed
 
 - **"Remember my last tool instead" does something.** The switch in

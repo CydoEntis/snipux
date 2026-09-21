@@ -1667,35 +1667,24 @@ class TestAnnotationDefaults:
 
 
 class TestVersionLine:
-    """`setup_desktop.version_line()`'s trailing field -- what
-    `TestSettingsWindow`'s footer test above renders, tested here without a
-    `SettingsWindow` in the way.
-    """
+    """`setup_desktop.version_line()`, what the nav rail's footer shows."""
 
-    def test_shows_the_session_type_on_linux(self, monkeypatch):
-        monkeypatch.setattr(setup_desktop.sys, "platform", "linux")
-        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-        monkeypatch.delenv("DISPLAY", raising=False)
-        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    def test_is_snipuxs_own_version_and_nothing_else(self, monkeypatch):
+        # It carried the Qt version and the session type too, which read as
+        # noise: "we shouldnt even show the QT version just snipux version".
+        monkeypatch.setattr(
+            "importlib.metadata.version", lambda name: "1.2.3" if name == "snipux" else "9"
+        )
 
-        assert setup_desktop.version_line().endswith("wayland")
+        assert setup_desktop.version_line() == "Snipux 1.2.3"
 
-    def test_shows_a_platform_name_on_windows_rather_than_an_always_unknown_session_type(
-        self, monkeypatch
-    ):
-        # AC: Windows has no session-type concept, so the field must not be
-        # the "unknown" `detect_session_type()` would always report there.
-        monkeypatch.setattr(setup_desktop.sys, "platform", "win32")
+    def test_the_footer_draws_no_border_of_its_own(self, tmp_path):
+        # The rail's border rule used to reach the label and draw a hairline
+        # down its right edge, inside the rail.
+        window = SettingsWindow(config_dir=tmp_path)
 
-        line = setup_desktop.version_line()
-
-        assert line.endswith("Windows")
-        assert "unknown" not in line
-
-    def test_shows_a_platform_name_on_macos(self, monkeypatch):
-        monkeypatch.setattr(setup_desktop.sys, "platform", "darwin")
-
-        assert setup_desktop.version_line().endswith("macOS")
+        assert "border" not in window._version_label.styleSheet()
+        assert window._version_label.parentWidget().objectName() == "navRail"
 
 
 class TestTheWatermarkPage:
