@@ -65,6 +65,10 @@ use it; the commit history has the detail.
 - **A clearer message when GNOME refuses a screenshot on Wayland.** It now
   says to allow Snipux when GNOME asks, instead of suggesting the portal
   is not installed.
+- **Snipux says why when it can't start.** If Snipux couldn't open the
+  socket your shortcut talks to, for example because `$TMPDIR` pointed at a
+  folder that doesn't exist, pressing the shortcut did nothing and said
+  nothing. Now it shows a message naming the folder to check.
 
 ## 0.9.0 — 2026-09-16
 

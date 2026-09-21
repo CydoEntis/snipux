@@ -66,7 +66,14 @@ from PyQt6.QtGui import (
     QPixmap,
 )
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QSystemTrayIcon,
+    QWidget,
+)
 
 from snipux.flowbars import CountdownNumeral, FlowMenu, RecordingBar, RegionFrame
 from snipux.capture import (
@@ -853,7 +860,8 @@ class Transport(ABC):
         """Attempt to become the primary (resident) instance.
 
         Returns True if this call is now the primary instance, False if
-        another instance already holds that role.
+        another instance already holds that role. Raises `ClaimError` when
+        neither is true: nothing answers, and this call cannot listen.
         """
 
     @abstractmethod
@@ -894,6 +902,26 @@ class Transport(ABC):
         """
 
 
+class ClaimError(RuntimeError):
+    """No snipux answered, and this launch could not listen either, so
+    nothing would ever hear a request. The message is for the user."""
+
+
+def _cannot_listen_message(server_name: str) -> str:
+    """Qt's own reason is "Unknown error 0" whether the folder is missing,
+    read-only or too deep, so the message names the place instead."""
+    place = handoff.listening_place(server_name)
+    message = f"Snipux can't start: it could not listen at {place}."
+    folder = os.path.dirname(place)
+    if folder:
+        message += (
+            f" Check that {folder} exists, can be written to, and has a short"
+            " path: a socket's full path must fit in 107 bytes. Snipux uses"
+            " $TMPDIR for this when it is set."
+        )
+    return message
+
+
 class QLocalSocketTransport(Transport):
     """Real `Transport`, backed by `QtNetwork`'s `QLocalServer`/
     `QLocalSocket` bound to a fixed, well-known server name.
@@ -930,12 +958,9 @@ class QLocalSocketTransport(Transport):
         self._server: QLocalServer | None = None
 
     def try_claim(self) -> bool:
-        probe = QLocalSocket()
-        probe.connectToServer(self._server_name)
-        if probe.waitForConnected(self._CONNECT_TIMEOUT_MS):
+        if self._answers():
             # A live server answered: another instance already owns this
             # name.
-            probe.disconnectFromServer()
             return False
 
         # No live server answered: become it. A stale socket file left
@@ -953,9 +978,24 @@ class QLocalSocketTransport(Transport):
             # running hit exactly this race. Whichever of us binds first
             # wins; the loser must report False, not True, or both would go
             # on to become primary and a second tray icon/overlay would
-            # start.
+            # start. The winner is listening by now, so it answers.
             self._server = None
+            if self._answers():
+                return False
+            # Nobody answered, before or after, and nothing here could
+            # listen either -- a missing or unwritable temp folder, or a
+            # path past a Unix socket's 107 bytes. Reporting False here
+            # sent the request to nobody and exited 0: a shortcut that did
+            # nothing, with nothing said anywhere.
+            raise ClaimError(_cannot_listen_message(self._server_name))
+        return True
+
+    def _answers(self) -> bool:
+        probe = QLocalSocket()
+        probe.connectToServer(self._server_name)
+        if not probe.waitForConnected(self._CONNECT_TIMEOUT_MS):
             return False
+        probe.disconnectFromServer()
         return True
 
     def send_snip_request(self) -> None:
@@ -3511,8 +3551,26 @@ def _dispatch(*, may_relaunch: bool) -> int:
     """
     arguments = sys.argv[1:]
     reattach_console(attach=bool(arguments))
-    if arguments:
-        return main()
-    if may_relaunch and platform.current.relaunch_without_console():
-        return 0
-    return run_resident_app()
+    try:
+        if arguments:
+            return main()
+        if may_relaunch and platform.current.relaunch_without_console():
+            return 0
+        return run_resident_app()
+    except ClaimError as error:
+        _say_snipux_cannot_start(str(error))
+        return 1
+
+
+def _say_snipux_cannot_start(message: str) -> None:
+    """Tell the user this launch is giving up, and why.
+
+    On stderr for a terminal, and in a dialog as well: a launch from the
+    shortcut or the app grid has no terminal, and giving up where nobody
+    can see it is the failure this exists to end. The `QApplication` is
+    already up -- every path builds it before `try_claim()`.
+    """
+    if sys.stderr is not None:
+        print(message, file=sys.stderr)
+    if QApplication.instance() is not None:
+        QMessageBox.warning(None, "Snipux", message)

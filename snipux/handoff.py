@@ -51,6 +51,14 @@ def socket_path(server_name: str = SERVER_NAME) -> str:
     return os.path.join(os.environ.get("TMPDIR") or "/tmp", server_name)
 
 
+def listening_place(server_name: str = SERVER_NAME) -> str:
+    """Where the resident listens, as a person should be told it: the
+    socket's path where there is one, and the bare name where Qt uses a
+    named pipe instead (Windows).
+    """
+    return socket_path(server_name) if hasattr(socket, "AF_UNIX") else server_name
+
+
 def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
     """Send the request `arguments` names to a running resident, and say
     whether it was delivered.
