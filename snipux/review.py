@@ -654,6 +654,9 @@ class ReviewWindow(WinWindow):
         body.setContentsMargins(0, 0, 0, 0)
 
         self._styles = session_styles
+        # A review window can be the first thing a session opens (a file
+        # handed to `snipux`), so it seeds from Settings too.
+        self._styles.configure(*setup_desktop.load_style_defaults())
         self._canvas = ImageCanvas(image, self._store, styles=self._styles)
         self._canvas.marksChanged.connect(self._on_edited)
         body.addWidget(self._canvas)

@@ -5,6 +5,25 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **Choose the tool a snip opens with.** A dropdown in Settings →
+  Annotation lists every tool the toolbar can start on, plus "No tool" for
+  a toolbar that arms nothing until you pick. It was always the pen.
+- **A default ink colour.** Also in Settings → Annotation: one colour every
+  tool that draws in a colour starts with, picked from the swatches or
+  typed as a hex. "Each tool's own" keeps the colours they ship with.
+- **Per-tool defaults.** Below that, pick any tool and set what it starts
+  with -- its colour, size, line style, fill, blur strength or highlighter
+  sweep, whichever it has. "Reset all tools" puts them back. A change made
+  mid-snip still lasts only for that session.
+
+### Fixed
+
+- **"Remember my last tool instead" does something.** The switch in
+  Settings → Annotation was saved and never read. With it on, a snip opens
+  with the tool the last one ended on.
+
 ## 0.9.0 — 2026-09-16
 
 ### Added
