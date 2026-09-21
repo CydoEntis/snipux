@@ -5,6 +5,12 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **Keyboard shortcuts work straight away on two monitors under Wayland.**
+  With more than one monitor, Enter, Esc and the tool keys did nothing
+  until you clicked the snip first.
+
 ## 0.9.0 — 2026-09-16
 
 ### Added
