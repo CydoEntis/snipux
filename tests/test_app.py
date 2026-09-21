@@ -155,7 +155,7 @@ def test_list_backends_reports_name_availability_and_reason(capsys):
         ]
     )
 
-    exit_code = main(["--list-backends"], registry=registry)
+    exit_code = main(["--list-backends"], registry=registry, recorder_registry=RecorderRegistry())
 
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -210,7 +210,9 @@ def test_list_backends_says_so_when_nothing_can_record(capsys):
 def test_list_backends_on_empty_registry_reports_none_registered(capsys):
     registry = BackendRegistry()
 
-    exit_code = main(["--list-backends"], registry=registry)
+    # An empty recorder registry too: left out, `main` builds the real one,
+    # and on a GNOME desk that probes the live session bus's screencast.
+    exit_code = main(["--list-backends"], registry=registry, recorder_registry=RecorderRegistry())
 
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -350,7 +352,9 @@ def test_main_does_not_require_a_display():
     # Guards against snipux.app accidentally importing something that
     # needs a live QApplication at import time; run under
     # QT_QPA_PLATFORM=offscreen like the rest of the suite.
-    exit_code = main(["--list-backends"], registry=BackendRegistry())
+    exit_code = main(
+        ["--list-backends"], registry=BackendRegistry(), recorder_registry=RecorderRegistry()
+    )
     assert exit_code == 0
 
 
