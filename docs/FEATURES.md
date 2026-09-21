@@ -82,7 +82,7 @@ only once its scope, acceptance criteria and how to verify it are clear.
 
 - [x] `done` Linux: Ubuntu 22.04+, GNOME, Wayland and X11
 - [x] `done` Windows 10 2004+ / 11
-- [ ] `next` macOS -- needs a real Mac for Screen Recording and Accessibility permissions
+- [ ] `later` macOS -- out of scope for 1.0; the seam exists, and a port needs a real Mac for Screen Recording and Accessibility permissions
 - [ ] `later` Verified on other Linux desktops (KDE, Sway, Hyprland)
 
 ## Ideas

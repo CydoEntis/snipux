@@ -1837,7 +1837,8 @@ class AppController:
         is the other half.
 
         `after` is `OverlayWindow.outcome` at the moment the selection was
-        committed ("instant" or "save", record's own "then" vocabulary) --
+        committed -- one of `tokens.RECORDING_AFTER`'s ids, record's own
+        "then" vocabulary --
         carried through the armed tuple and into `_active_recording` so
         `_stop_recording()` knows, once the file is finally real, whether
         to land-and-copy or just land (recording.md ticket 9's
@@ -2008,8 +2009,8 @@ class AppController:
         self._reposition_recording_bar()
 
     def _bar_geometries(self) -> list[QRectF]:
-        """The monitors a recording bar may be placed on -- the same
-        union-of-monitor-geometries source `create_overlays()` uses."""
+        """The monitors a recording bar may be placed on, in absolute
+        logical virtual-desktop coordinates."""
         return (
             self._monitor_geometries
             if self._monitor_geometries is not None

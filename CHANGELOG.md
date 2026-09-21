@@ -7,6 +7,16 @@ use it; the commit history has the detail.
 
 ### Added
 
+- **Choose the tool a snip opens with.** A dropdown in Settings →
+  Annotation lists every tool the toolbar can start on, plus "No tool" for
+  a toolbar that arms nothing until you pick. It was always the pen.
+- **A default ink colour.** Also in Settings → Annotation: one colour every
+  tool that draws in a colour starts with, picked from the swatches or
+  typed as a hex. "Each tool's own" keeps the colours they ship with.
+- **Per-tool defaults.** Below that, pick any tool and set what it starts
+  with -- its colour, size, line style, fill, blur strength or highlighter
+  sweep, whichever it has. "Reset all tools" puts them back. A change made
+  mid-snip still lasts only for that session.
 - **Pick what happens to a recording right beside Record.** The recording
   bar now has a Copy / Save / Open / GIF menu next to the Record button.
   It shows what Stop will do, and changing it applies to this recording
@@ -14,6 +24,8 @@ use it; the commit history has the detail.
 
 ### Changed
 
+- **Settings shows just the Snipux version** at the foot of its sidebar,
+  without the Qt version and session type after it.
 - **The recording bar sits under the region, like the screenshot
   toolbar,** and moves with it while you resize it, instead of staying at
   the top of the screen. If there is no room below the region, it goes to
@@ -26,6 +38,9 @@ use it; the commit history has the detail.
 
 ### Fixed
 
+- **"Remember my last tool instead" does something.** The switch in
+  Settings → Annotation was saved and never read. With it on, a snip opens
+  with the tool the last one ended on.
 - **The recording bar's audio menu opens where you can see it.** It always
   opened upward, so with the bar at the top of the screen it opened
   off-screen. It now opens below when there is no room above.

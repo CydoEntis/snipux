@@ -36,7 +36,6 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from . import platform
 from .design import PACKAGE_DIR, tokens
 
 # PACKAGE_DIR (snipux/design/__init__.py) rather than a second
@@ -372,11 +371,11 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
 
 
 def version_line() -> str:
-    """`Snipux 0.1.0 / Qt 6.7 · X11` for the nav rail's footer.
+    """`Snipux 0.8.2` for the nav rail's footer.
 
-    The trailing field is read, never assumed -- CLAUDE.md's rule -- and a
-    missing Qt (impossible here, but this is also imported by `--setup`,
-    which must not need one) degrades to the version alone.
+    Snipux's own version alone. It used to carry the Qt version and the
+    session type after it, which read as noise to the person looking at it
+    and made the one number that matters harder to find.
     """
     from importlib.metadata import PackageNotFoundError, version as _version
 
@@ -384,24 +383,7 @@ def version_line() -> str:
         ours = _version("snipux")
     except PackageNotFoundError:
         ours = "dev"
-    try:
-        from PyQt6.QtCore import QT_VERSION_STR
-
-        qt = f" / Qt {QT_VERSION_STR}"
-    except Exception:
-        qt = ""
-    return f"Snipux {ours}{qt} · {_platform_field()}"
-
-
-def _platform_field() -> str:
-    """The version line's trailing field: a session type on Linux, where
-    it is a real, runtime-detected fact worth showing -- a platform name
-    everywhere else, where there is no session-type concept to detect and
-    `detect_session_type()` would otherwise report 'unknown' on every run.
-    """
-    if platform.is_linux():
-        return detect_session_type()
-    return platform.os_name()
+    return f"Snipux {ours}"
 
 
 def detect_session_type() -> str:
@@ -624,6 +606,117 @@ def load_remember_tool(config_dir: Path | None = None) -> bool:
 
 def save_remember_tool(enabled: bool, config_dir: Path | None = None) -> bool:
     return _write_config("remember_tool", bool(enabled), config_dir)
+
+
+def load_default_tool(config_dir: Path | None = None) -> str:
+    """The tool Settings says the stills bar opens with, or
+    `tokens.OPENING_TOOL_NONE` for none at all."""
+    stored = _read_config(config_dir).get("default_tool")
+    return stored if stored in tokens.OPENING_TOOLS else tokens.OPENING_TOOL_DEFAULT
+
+
+def save_default_tool(tool: str, config_dir: Path | None = None) -> bool:
+    return _write_config("default_tool", tool, config_dir)
+
+
+def save_last_tool(tool: str, config_dir: Path | None = None) -> bool:
+    return _write_config("last_tool", tool, config_dir)
+
+
+def load_opening_tool(config_dir: Path | None = None) -> str:
+    """The tool the stills bar should arm when it first comes up.
+
+    The last tool a snip ended on when "Remember my last tool" is on, and
+    Settings' choice otherwise -- which is also what a remembering user gets
+    before any snip has ended on a tool. One read of the config, because the
+    overlay asks this while it is going up, on the path #76 timed.
+    """
+    document = _read_config(config_dir)
+    last = document.get("last_tool")
+    if document.get("remember_tool") is True and last in tokens.OPENING_TOOLS:
+        return last
+    stored = document.get("default_tool")
+    return stored if stored in tokens.OPENING_TOOLS else tokens.OPENING_TOOL_DEFAULT
+
+
+def _hex_or_none(value) -> str | None:
+    """`value` as a lowercase `#rrggbb`, or None for anything else."""
+    if isinstance(value, str) and _HEX_COLOR.fullmatch(value.strip()):
+        return value.strip().lower()
+    return None
+
+
+def _int_within(value, bounds: tuple[int, int]) -> bool:
+    low, high = bounds
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def load_default_ink(config_dir: Path | None = None) -> str | None:
+    """The colour every coloured tool starts with, or None for each tool's
+    own (`tokens.DEFAULT_STYLE`)."""
+    return _hex_or_none(_read_config(config_dir).get("default_ink"))
+
+
+def save_default_ink(colour: str | None, config_dir: Path | None = None) -> bool:
+    return _write_config("default_ink", _hex_or_none(colour), config_dir)
+
+
+def clean_tool_defaults(raw) -> dict[str, dict]:
+    """Keep only what each tool's style popover offers
+    (`tokens.STYLE_SECTIONS`), each value one it could have picked there.
+
+    Keys are the section names (`color`, `size`, `dash`, `fill`,
+    `strength`, `snap`). A hand-edited config, or one written before a
+    tool lost a section, loses the entries that no longer mean anything
+    rather than breaking the overlay that reads them.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    allowed = {
+        "dash": {value for value, _pattern, _label in tokens.DASH_CYCLE},
+        "fill": {value for value, _label in tokens.FILL_CYCLE},
+        "snap": {value for value, _label in tokens.SNAP_CYCLE},
+    }
+    cleaned: dict[str, dict] = {}
+    for tool, fields in raw.items():
+        sections = tokens.STYLE_SECTIONS.get(tool)
+        if not sections or not isinstance(fields, dict):
+            continue
+        kept = {}
+        for section in sections:
+            value = fields.get(section)
+            if section == "color":
+                value = _hex_or_none(value)
+                if value is not None:
+                    kept[section] = value
+            elif section == "size" and _int_within(value, tokens.STROKE_RANGE):
+                kept[section] = value
+            elif section == "strength" and _int_within(value, tokens.STRENGTH_RANGE):
+                kept[section] = value
+            elif section in allowed and value in allowed[section]:
+                kept[section] = value
+        if kept:
+            cleaned[tool] = kept
+    return cleaned
+
+
+def load_tool_defaults(config_dir: Path | None = None) -> dict[str, dict]:
+    """Each tool's own saved defaults, as `clean_tool_defaults` keeps them."""
+    return clean_tool_defaults(_read_config(config_dir).get("tool_defaults"))
+
+
+def save_tool_defaults(defaults: dict[str, dict], config_dir: Path | None = None) -> bool:
+    return _write_config("tool_defaults", clean_tool_defaults(defaults), config_dir)
+
+
+def load_style_defaults(config_dir: Path | None = None) -> tuple[str | None, dict[str, dict]]:
+    """`(default_ink, tool_defaults)` from one read of the config, for
+    `marks.ToolStyles.configure` as a window opens."""
+    document = _read_config(config_dir)
+    return (
+        _hex_or_none(document.get("default_ink")),
+        clean_tool_defaults(document.get("tool_defaults")),
+    )
 
 
 def load_last_region(config_dir: Path | None = None) -> tuple[int, int, int, int] | None:

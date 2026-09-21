@@ -88,15 +88,14 @@ Windows gets all three.
 
 ---
 
-## 3 · Not built yet, and why
+## 3 · What the handoff left open, and where it went
 
-Listed here rather than silently skipped. Neither is a refusal; both are
-things the handoff itself leaves unresolved.
+Both were things the handoff itself left unresolved.
 
 - **"Open" for a recording** — specified as "player with trim, mute and GIF
   export", which the handoff's "Still open" #3 says is described but not
-  designed. Trim is separately deferred (`recording.md`: v1 records, it
-  does not edit). Until it exists, Open on the record side is not offered.
+  designed. It is built now, to its own handoff (`../player/`): Open lands
+  the recording and opens it in `player.py` to trim and export.
 - **Freeform** — "Still open" #1 says it has no interaction design and
   behaves as a region drag in the prototype. It was removed (#42) rather
   than designed.
