@@ -1217,6 +1217,9 @@ class WindowsPlatform(Platform):
         and set `WindowStaysOnTopHint`, the two things a pin needs."""
         return True
 
+    def places_windows(self) -> bool:
+        return True
+
     def pin_unavailable_reason(self) -> str:
         return ""
 

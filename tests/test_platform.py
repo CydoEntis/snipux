@@ -467,6 +467,25 @@ class TestStubPlatforms:
         assert isinstance(darwin.DarwinPlatform(), Platform)
 
 
+class TestPlacesWindows:
+    """Whether a window of snipux's own lands where snipux puts it -- what
+    decides if the recording chrome may be windows of their own."""
+
+    def test_x11_does(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "x11")
+        assert linux.LinuxPlatform().places_windows() is True
+
+    def test_wayland_does_not(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "wayland")
+        assert linux.LinuxPlatform().places_windows() is False
+
+    def test_windows_does(self):
+        assert windows.WindowsPlatform().places_windows() is True
+
+    def test_a_platform_that_has_not_said_does_not(self):
+        assert darwin.DarwinPlatform().places_windows() is False
+
+
 class TestAudioSourceAvailability:
     """Which of the recording bar's audio sources each platform lets the
     user pick. The UI greys a source with this reason instead of hiding it.

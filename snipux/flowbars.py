@@ -921,11 +921,16 @@ class RecordingBar(QWidget):
         # why `RegionFrame`'s strips were visible all along and this was
         # not. It also keeps the bar out of the task switcher, which is
         # right for a HUD.
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
+        #
+        # A window of its own only without a parent. Where the compositor
+        # will not let an app place its own window (Wayland), `app.py` puts
+        # the ready bar inside the overlay instead, as the stills bar is.
+        if parent is None:
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.Tool
+            )
         # Shown without stealing focus: the overlay underneath owns the
         # keyboard while a recording is armed (Enter starts it, Esc
         # cancels), and a bar that took focus would break both.
