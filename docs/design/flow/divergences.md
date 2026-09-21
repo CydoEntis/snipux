@@ -180,12 +180,15 @@ which is a real complaint this project already had and already fixed:
 > The HUD floats in the middle of the screen. It should sit at the top, the
 > way the chooser and floating bar do.
 
-So the bar is **top-centre of the monitor being recorded**, moved below the
-region only when the region itself covers that strip. That keeps it
-predictable (always the same place, whatever was selected), keeps it out of
-the frame, and keeps it in one place across every stage -- which is what
-rule 1 was protecting. The rule survives; the coordinate it was measured
-from does not.
+So the bar was **top-centre of the monitor being recorded**, moved below
+the region only when the region itself covers that strip.
+
+**Since reversed -- see §9.** The bar is under the region again, as the
+handoff draws it. The complaint above predates the ready stage: the region
+is now drawn from arming to Stop, by the overlay while it can be reframed
+and by `RegionFrame`'s outline once it is rolling, so a bar under it always
+has something to belong to. Top-centre was then the thing that floated --
+the region was reframed below it while it stayed put.
 
 ---
 
@@ -337,3 +340,70 @@ known: text overruns a panel that the token said would hold it.
 
 Build to the tokens, but let anything text-sized grow to its own
 `sizeHint()` rather than pinning it.
+
+---
+
+## 9 · The ready bar picks the ending, follows the region, and is built like the stills bar
+
+**The handoff says** (§3b): *"Record → divider → audio → delay → divider →
+Cancel"*, with Record as *"filled 10px circle + label + `↵`"*, audio as a
+labelled dropdown (`System ⌄`) that opens **upward**, and a bare timer glyph
+for delay. What happens to the recording is chosen in the chooser, before
+the region exists.
+
+**We add a destination chip** after the divider -- `📋 Copy ⌄`, `Save`,
+`Open` or `GIF` (`tokens.RECORD_DESTINATIONS`) -- whose menu changes what
+Stop does, for this recording alone. The rest of the bar follows the bars
+handoff rather than this one:
+
+- **Record is the stills split's face**, not the flow handoff's larger
+  button, and `↵` is in its tooltip rather than on it. Enter still starts it.
+- **Audio is a glyph with a notch**, not a labelled chip. Speaker, mic and
+  struck speaker already say which source; the tooltip names it.
+- **Delay shows its value once one is set** (`⏱ 3s` on an accent wash), as
+  the chooser's delay flag does.
+- **The bar sits centred under the region**, 16px below, and follows it
+  while it is reframed; top-centre of the screen is the fallback when there
+  is no room below (§4 has the history).
+- **Menus open upward only where there is room**, and below otherwise.
+- **The bar is glass over the frozen frame** while the overlay is up, and a
+  97% fill once it has gone, instead of a flat 93% fill throughout.
+- **Live, the audio glyph is a readout**: no notch, no menu.
+
+### Why
+
+The destination was the one decision that could only be made before the
+region was drawn, from a chooser that has collapsed to a tab by the time
+the Record button is in front of the user. Asked for directly: *"record and
+copy to clipboard, record and download or record and open in editor --
+that should be selectable from the same page you are going to click record
+in"*. A choice made there is for that recording alone, like the delay beside
+it; Settings' default is untouched.
+
+It was first built as a caret on Record -- `Record & copy ⌄`, the stills
+bar's own split shape -- and sent back: *"I think record and the changing
+type should be separate"*. On the stills bar the split's face *is* the
+destination, so one press does one thing; on this bar the face starts a
+recording, and a caret on it put "change where this goes" a few pixels from
+"start filming". A separate chip keeps Record a single target.
+
+Top-centre placement was reported the same round: *"in the region the
+controls should follow the region no like how screenshotting works?"*
+
+The flow handoff's recording bar was never restyled when `../bars/`
+replaced its stills bar, so the two primary actions stopped looking like one
+control, which is most of what *"clean up the design of this"* was pointing
+at. The rest are defects the old layout carried:
+
+- A labelled audio chip took the bar's widest slot, and on Linux, where
+  GNOME records no audio at all (§2), it spent it on a greyed word that
+  could never change. The glyph stays, greyed, with the reason as its
+  tooltip -- §2's rule, at a quarter of the width.
+- The bar sat 12px under the top of the screen, so a menu that only opened
+  upward went off it.
+- A 10s countdown carried over from the chooser was invisible on the bar
+  until Record was pressed and nothing happened.
+- At 93% with no blur, a window title on the desktop behind the bar showed
+  through it as a ghost of another control.
+- Live, the audio menu still opened, and changed a source that is only read
+  when the recorder starts.
