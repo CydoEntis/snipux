@@ -4739,8 +4739,8 @@ class OverlayWindow(QWidget):
         self._on_pin_requested = on_pin_requested
         # SNX-122: fired by `_commit_selection`'s record branch, with an
         # absolute-coordinate rect (None for the whole desktop), the armed
-        # delay string, and the chooser's after-capture destination
-        # ("instant" or "save") -- app.py owns starting/stopping the actual
+        # delay string, and the chooser's after-capture destination (one of
+        # `tokens.RECORDING_AFTER`'s ids) -- app.py owns starting/stopping the actual
         # recorder, per CLAUDE.md's split between this file (widget/
         # painting) and app.py (subprocess/filesystem/stateful side
         # effects).
@@ -5882,8 +5882,8 @@ class OverlayWindow(QWidget):
             self._sync_bar_visibility()
             self._sync_chooser_visibility()
             if self._on_recording_requested is not None:
-                # `self.outcome` (== `self._chooser.after`) is "instant" or
-                # "save" here -- ticket 9's `_land_recording` is what
+                # `self.outcome` (== `self._chooser.after`) is one of
+                # `tokens.RECORDING_AFTER`'s ids here -- `_land_recording` is what
                 # actually acts on it, once the file is real; this branch
                 # only ever hands the choice along.
                 self._on_recording_requested(record_rect, self._delay, self.outcome)
@@ -9516,8 +9516,8 @@ def open_overlay(
     on_captured: "Callable[[QImage, Path | None], None] | None" = None,
     # SNX-83: see `OverlayWindow.__init__`'s own comment on the same parameter.
     on_pin_requested: "Callable[[QImage, QRect], None] | None" = None,
-    # rect, delay, and the chooser's after-capture destination ("instant" or
-    # "save") -- see `OverlayWindow.__init__`'s own comment on the same
+    # rect, delay, and the chooser's after-capture destination (one of
+    # `tokens.RECORDING_AFTER`'s ids) -- see `OverlayWindow.__init__`'s own comment on the same
     # parameter.
     on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
     # Enter, while a recording is armed. Fires the stage's primary action,
