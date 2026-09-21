@@ -1,13 +1,12 @@
-# Next: Windows, then the destination model, then Wayland
+# Plan notes and settled decisions
 
-Status lives in Linear, not here. This file holds what Linear cannot: the
-shape of the plan, the decisions already made, and how to pick it up.
+What is queued lives in `docs/IMPLEMENTATION-PHASES.md`, what exists and
+what is next in `docs/FEATURES.md`, and open work is a GitHub issue. This
+file holds what none of those can: why things are the way they are, the
+decisions already made, and how to pick up the parts that need a person.
 
-Everything through **SNX-127** is merged, and so is `fix/recording-flow`.
-The suite is green on Linux -- **1,643 passed at both 1.0 and 1.5 display
-scaling**, measured 2026-09-02 -- and green on Windows at **1,735 passed /
-13 skipped**, measured 2026-09-04 with the capture-flow, player and
-chooser work in.
+**Work lands on `dev` by pull request; `main` moves only on a release.**
+1.0 targets Linux and Windows; macOS is out of scope for now.
 
 One thing is worth knowing before the next red run on Windows: **the
 offscreen QPA plugin enumerates zero fonts there.** Linux finds them
@@ -20,27 +19,14 @@ a fiction. `tests/conftest.py` defaults `QT_QPA_FONTDIR` to
 `C:\Windows\Fonts` on win32 to fix it (and only on win32: on Linux it
 would narrow a working fontconfig database to one directory).
 
-**Next up: browser-aware capture.** SNX-1 captures the focused browser tab's
-page area (no tab strip, no toolbar); SNX-2 is full-page scroll-and-stitch,
-and is the sanctioned exception to the one-shot rule this file's "Out of
-scope" section reserved. SNX-3 came out of planning them: the Windows
-geometry provider returns physical pixels where its contract says logical,
-invisible on a 1.0-scale desk and wrong on a scaled one. Both new features
-read rects from that provider, so SNX-3 goes first. The plan, the spike
-numbers, and what would make each not worth doing:
-`docs/design/browser-capture.md`.
+Three locked handoffs are built: `docs/design/flow/` (the capture flow and
+recording bars), `docs/design/bars/` (the chooser and stills bar, which
+replaced the flow handoff's) and `docs/design/player/` (the recording player
+and trim editor). What was built differently, and why, is in each
+directory's `divergences.md` -- read those before "fixing" anything back to a
+handoff.
 
-Two locked handoffs are now built: `docs/design/flow/` (the capture flow)
-and `docs/design/player/` (the recording player / trim editor). What was
-built differently, and why, is in each directory's `divergences.md` --
-read those before "fixing" anything back to a handoff.
-
-Nothing here is blocked on a decision from you. The export/H.264 question
-is **settled** -- see "Export: decided" below. The *stills* destination
-model is still open, but it is a product question rather than a build one
-and nothing waits on it.
-
-**Work now lands on `dev` by pull request; `main` moves only on a release** (see docs/IMPLEMENTATION-PHASES.md).
+The export/H.264 question is **settled** -- see "Export: decided" below.
 
 ## The repository is public, MIT, and installed with one command
 
@@ -407,10 +393,32 @@ given), both recording paths land a playable file at the right speed, and
 pill placement question above and the overlay/annotation flow end to end;
 only recording was driven.
 
-**Wayland at all.** Still true, and not checkable from the machine this was
-done on -- it has no Wayland socket. What *is* now known is that the GNOME
-screencast route works, and that route is D-Bus, not session-dependent. The
-overlay and capture path under a real Wayland session remain unwatched.
+**Wayland: driven headless, not yet on a physical desk.** On 2026-09-21
+snipux ran end to end in a real GNOME 46 Wayland session. It was
+`gnome-shell --headless` with one 1280x800 virtual monitor, beside the
+Linux box's X11 desk, driven through `org.gnome.Mutter.RemoteDesktop`.
+What that watched:
+
+- capture through the screenshot portal once permission is granted;
+- selecting, drawing and Copy, with a PNG of the region on the clipboard;
+- a Linux recording paused and resumed with sound, joined with sound and
+  picture within 32ms of each other.
+
+It found four bugs, fixed in the PRs named:
+
+- Enter closed the snip instead of copying it (#125);
+- a copy was lost when the snip closed straight after (#125);
+- Shell's screenshot refusals were read as success (#126);
+- the recording bar and outline were placed by the compositor inside the
+  area being recorded (#127).
+
+Still unwatched on Wayland:
+
+- the portal's first-run permission dialog, which would not render
+  headless;
+- more than one monitor;
+- fractional scaling;
+- a physical session rather than a headless one.
 
 **Pasting into Nautilus or a chat app.** The mime data is now verified
 correct *on the wire* -- read back off a live X11 clipboard with xclip --

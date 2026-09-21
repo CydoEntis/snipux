@@ -438,6 +438,62 @@ class TestToolStyles:
 
         assert styles.of("pen") == ToolStyles().of("pen")
 
+    # -- the user's saved defaults (Settings -> Annotation) ---------------
+
+    def test_a_default_ink_colours_every_tool_that_draws_in_one(self):
+        styles = ToolStyles()
+
+        styles.configure("#ff8800", {})
+
+        for tool in tokens.TOOLS:
+            coloured = "color" in tokens.STYLE_SECTIONS.get(tool, [])
+            assert (styles.of(tool).colour == "#ff8800") == coloured, tool
+
+    def test_a_tools_own_default_wins_over_the_default_ink(self):
+        styles = ToolStyles()
+
+        styles.configure("#ff8800", {"rect": {"color": "#00ff00", "dash": "dotted", "size": 9}})
+
+        rect = styles.of("rect")
+        assert (rect.colour, rect.dash, rect.size) == ("#00ff00", "dotted", 9)
+        assert styles.of("pen").colour == "#ff8800"
+
+    def test_what_is_not_set_is_what_the_tool_ships_with(self):
+        styles = ToolStyles()
+
+        styles.configure(None, {"blur": {"strength": 15}})
+
+        assert styles.of("blur").strength == 15
+        assert styles.of("pen") == ToolStyles().of("pen")
+
+    def test_the_same_settings_again_keep_a_style_changed_this_session(self):
+        # Every window configures as it opens; a colour picked on one snip
+        # must still be picked on the next.
+        styles = ToolStyles()
+        styles.configure("#ff8800", {})
+        styles.update("pen", colour="#123456")
+
+        styles.configure("#ff8800", {})
+
+        assert styles.of("pen").colour == "#123456"
+
+    def test_new_settings_replace_what_the_session_had(self):
+        styles = ToolStyles()
+        styles.configure("#ff8800", {})
+        styles.update("pen", colour="#123456")
+
+        styles.configure("#00aaff", {})
+
+        assert styles.of("pen").colour == "#00aaff"
+
+    def test_reset_forgets_the_saved_defaults_too(self):
+        styles = ToolStyles()
+        styles.configure("#ff8800", {"rect": {"size": 9}})
+
+        styles.reset()
+
+        assert styles.of("rect") == ToolStyles().of("rect")
+
     def test_the_session_has_one(self):
         # What the overlay and the review window both draw with, so a style
         # set on one snip is still set on the next.
