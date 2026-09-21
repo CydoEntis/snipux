@@ -5,6 +5,11 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Changed
+
+- **Settings shows just the Snipux version** at the foot of its sidebar,
+  without the Qt version and session type after it.
+
 ## 0.9.0 — 2026-09-16
 
 ### Added
