@@ -88,6 +88,33 @@ you are dragging.
 
 ### Linux
 
+**A file to download, if you would rather not install Python at all.** Both
+artifacts on the
+[latest release](https://github.com/CydoEntis/snipux/releases/latest) carry
+their own Python and Qt:
+
+```sh
+# Ubuntu, Debian, Mint -- anything with apt
+sudo apt install ./snipux_1.0.0_amd64.deb
+
+# or, on any distribution, with no root and no install step at all
+chmod +x Snipux-1.0.0-x86_64.AppImage
+./Snipux-1.0.0-x86_64.AppImage
+```
+
+Either way the first launch writes the same three things `--setup` does —
+the desktop entry, the autostart entry and the Ctrl+Alt+S shortcut — so
+there is no second command to run. Two things worth knowing:
+
+- **Keep the AppImage somewhere it will stay.** The shortcut points at the
+  file itself, so if you move it later, run it once from its new home to
+  re-point the shortcut.
+- **Updating is downloading the newer file**, not `snipux --update`: the
+  `.deb` installs over the old one, and the AppImage replaces it.
+
+The rest of this section installs Snipux as a Python package instead, which
+is what `snipux --update` upgrades in place.
+
 First, the things Ubuntu may not already have — [pipx](https://pipx.pypa.io/)
 and one library Qt needs that nothing else on a stock desktop pulls in:
 

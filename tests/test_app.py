@@ -6617,6 +6617,45 @@ class TestTheUpdateCommand:
         assert calls == [], "pip must not be run in a frozen build"
         assert "standalone build" in capsys.readouterr().out
 
+    def test_an_appimage_is_told_to_download_an_appimage(self, monkeypatch, capsys):
+        # There are three standalone builds now and each is replaced
+        # differently. $APPIMAGE is AppRun's own marker, the same one
+        # find_console_script() reads, and a Linux user sent after
+        # snipux.exe has been told to do something impossible.
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setenv("APPIMAGE", "/home/someone/Snipux-1.0.0-x86_64.AppImage")
+        calls, runner = self._ran(monkeypatch)
+
+        assert app.run_update(runner=runner) == 1
+        assert calls == []
+        out = capsys.readouterr().out
+        assert "AppImage" in out
+        assert "snipux.exe" not in out
+
+    def test_a_frozen_linux_build_is_told_about_the_deb(self, monkeypatch, capsys):
+        # Frozen on Linux with no $APPIMAGE is the .deb -- the one route
+        # that has a package manager to hand the new file to.
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.delenv("APPIMAGE", raising=False)
+        calls, runner = self._ran(monkeypatch)
+
+        assert app.run_update(runner=runner) == 1
+        assert calls == []
+        out = capsys.readouterr().out
+        assert ".deb" in out
+        assert "snipux.exe" not in out
+
+    def test_a_frozen_windows_build_is_still_told_about_the_exe(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("APPIMAGE", raising=False)
+        calls, runner = self._ran(monkeypatch)
+
+        assert app.run_update(runner=runner) == 1
+        assert calls == []
+        assert "snipux.exe" in capsys.readouterr().out
+
     def test_the_flag_reaches_it(self, monkeypatch):
         seen = []
         monkeypatch.setattr(app, "run_update", lambda: seen.append(1) or 0)

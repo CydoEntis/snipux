@@ -658,10 +658,28 @@ def run_update(runner=None) -> int:
     filesystem.
     """
     if getattr(sys, "frozen", False):
-        print(
-            "This is a standalone build, which pip cannot update. Download "
-            "the newest snipux.exe and run it -- it replaces this copy."
-        )
+        # Three standalone builds now, and each is replaced differently --
+        # telling a Linux user to download snipux.exe is worse than saying
+        # nothing. $APPIMAGE is AppRun's own marker for the AppImage case
+        # (setup_desktop.find_console_script() reads it for the same
+        # reason); anything else frozen on Linux came from the .deb, which
+        # is the one route with a package manager to hand the file to.
+        if os.environ.get("APPIMAGE"):
+            replacement = (
+                "Download the newest Snipux AppImage and run it -- it "
+                "replaces this copy."
+            )
+        elif sys.platform.startswith("linux"):
+            replacement = (
+                "Download the newest snipux .deb and install it over this "
+                "one: sudo apt install ./snipux_<version>_amd64.deb"
+            )
+        else:
+            replacement = (
+                "Download the newest snipux.exe and run it -- it replaces "
+                "this copy."
+            )
+        print(f"This is a standalone build, which pip cannot update. {replacement}")
         return 1
 
     command = [sys.executable, "-m", "pip", "install", "--upgrade", UPDATE_TARGET]

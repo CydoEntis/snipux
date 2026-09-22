@@ -9,7 +9,11 @@ are three channels:
    pushed -- see [What the tag does](#what-the-tag-does).
 2. **The GitHub Release** for the same tag, carrying the same wheel and
    sdist. Created by the same workflow.
-3. **The Windows `snipux.exe`**, attached to that GitHub Release by hand.
+3. **The Linux `.deb` and AppImage**, built and attached by the same
+   workflow. Both carry their own Python and Qt, so they are what someone
+   installs who does not have (or want) either -- see
+   [Building the Linux artifacts](#building-the-linux-artifacts).
+4. **The Windows `snipux.exe`**, attached to that GitHub Release by hand.
    The only artifact that is still built on a person's machine.
 
 Work lands on `dev`; `main` moves only when a release is cut, so `main` is
@@ -71,7 +75,8 @@ workflow has created the release:
 gh release upload v0.9.0 dist/snipux.exe
 ```
 
-Linux needs no extra artifact: PyPI covers it.
+Linux needs nothing by hand: the workflow builds the `.deb` and the AppImage
+and attaches both to the same release.
 
 ## What the tag does
 
@@ -83,8 +88,10 @@ Linux needs no extra artifact: PyPI covers it.
    stored anywhere; PyPI checks the workflow's own identity, which is why
    the job needs `id-token: write` and why the PyPI project names that
    workflow file exactly (renaming it breaks publishing);
-4. creates the GitHub Release for the tag (or adds the files to it) with
-   generated notes.
+4. builds the Linux `.deb` and AppImage on an `ubuntu-22.04` runner and
+   smoke-tests the bundle by running `--list-backends` out of it;
+5. creates the GitHub Release for the tag (or adds the files to it) with
+   generated notes, carrying all four files.
 
 PyPI refuses a second upload of a version number that has already been
 published, even if that upload was later deleted. A mistake after the tag
@@ -103,6 +110,55 @@ The `rm -rf` matters: `python -m build` does not prune stale files from
 `dist/`. `twine` wants `__token__` as the username and a PyPI API token as
 the password -- set `TWINE_USERNAME`/`TWINE_PASSWORD` in the shell, and never
 write the token into a file in this repository.
+
+## Building the Linux artifacts
+
+The release workflow does this, and nothing below is needed to cut a
+release. It is here for changing the packaging itself, where the loop is
+build, install, run, rather than tag and hope.
+
+```sh
+./packaging/linux/build_appimage.sh   # dist/Snipux-<version>-x86_64.AppImage
+./packaging/linux/build_deb.sh        # dist/snipux_<version>_amd64.deb
+```
+
+Both run on Linux only — PyInstaller bundles the interpreter and libraries
+of the machine it runs on, so there is no building either of these from
+Windows. Both `source` `build_bundle.sh`, which is what actually produces
+`dist/snipux/` (PyInstaller, `packaging/linux/snipux.spec`, in a build venv
+under `build/venv-linux`); each then packages that same directory. Building
+both in a row builds the bundle twice, which is slower but keeps either
+script runnable on its own.
+
+**The bundle is onedir, not onefile, deliberately.** A onefile build unpacks
+all of Qt into `/tmp` before `main()` runs, on every launch — dead time
+between the keypress and the frozen screen, every single snip. The AppImage
+gets the one-file property back anyway by mounting rather than extracting.
+
+**Build on the oldest Ubuntu we support.** glibc is forward- but not
+backward-compatible, so an artifact built on a newer release fails on 22.04
+with `GLIBC_2.38 not found`. That is why the workflow pins `ubuntu-22.04`
+rather than `ubuntu-latest`, and why a hand-built artifact from a newer VM
+should not be uploaded to a release.
+
+**What each one installs.** The `.deb` puts the bundle in `/opt/snipux`,
+symlinks `/usr/bin/snipux`, and ships a system `.desktop` entry and the
+hicolor icons so Snipux is in the application list before it has ever run.
+The AppImage installs nothing. In both cases the *first launch* is still
+what writes the autostart entry and binds the GNOME shortcut (`app.py`'s
+`run_first_launch_setup`), because neither is something a package can write
+on a user's behalf. The user-level `.desktop` that first launch also writes
+shadows the system one by XDG precedence rather than appearing beside it,
+so the application list shows one launcher either way.
+
+**Why the AppImage needed a code change.** `find_console_script()` returns
+`sys.executable` for a frozen build, which inside an AppImage is the
+squashfs mount for that one run (`/tmp/.mount_snipuxXXXXXX/...`) — a path
+that is gone by the time anything reads the `.desktop` entry or the GNOME
+shortcut written from it. It reads `$APPIMAGE` first now, which AppRun sets
+to the `.AppImage` file itself. Moving that file therefore breaks the
+shortcut until Snipux is run once from the new location, which is why the
+README says to keep it somewhere it will stay.
 
 ## Building the Windows exe
 

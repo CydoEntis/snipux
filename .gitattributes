@@ -1,0 +1,9 @@
+# Shell scripts are LF in the working tree on every platform, whatever a
+# developer's core.autocrlf says. Development happens on Windows as well as
+# in the Ubuntu VM (CLAUDE.md), and a CRLF checkout of packaging/install.sh
+# or packaging/linux/*.sh is not a cosmetic difference there: the shell reads
+# the carriage return as part of the command and the script dies on its first
+# line with "bash\r: No such file or directory". The release workflow runs
+# these files, so that failure would surface as a release that builds no
+# artifacts.
+*.sh text eol=lf

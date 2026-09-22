@@ -117,7 +117,21 @@ def find_console_script(name: str = "snipux") -> Path | None:
     (e.g. the bare word "snipux"), not the PATH-resolved path, so it can't
     be trusted to already be absolute. `shutil.which` is the fallback for a
     layout that guess doesn't fit.
+
+    `$APPIMAGE` is checked ahead of `sys.frozen`, because an AppImage is a
+    frozen build whose `sys.executable` stops being true the moment the
+    process exits: it points inside the squashfs AppRun mounts for that one
+    run (`/tmp/.mount_snipuxXXXXXX/usr/bin/snipux`), a path with a
+    different random suffix on every launch and no existence at all in
+    between. The `.desktop` entry and the GNOME shortcut both outlive the
+    process that writes them, so what they have to name is the `.AppImage`
+    file the user actually keeps -- which is what AppRun exports as
+    `$APPIMAGE`.
     """
+    appimage = os.environ.get("APPIMAGE")
+    if appimage and Path(appimage).is_file():
+        return Path(appimage).resolve()
+
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve()
 
