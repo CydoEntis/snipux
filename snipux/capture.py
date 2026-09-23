@@ -681,11 +681,13 @@ class XwininfoWindowGeometryProvider:
         if shutil.which("xwininfo") is None:
             return []
         try:
+            # timeout, for the reason the wmctrl query above gives: this is
+            # the same hover path on the same thread.
             result = subprocess.run(
                 ["xwininfo", "-root", "-children"],
-                check=True, capture_output=True, text=True,
+                check=True, capture_output=True, text=True, timeout=2,
             )
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.SubprocessError):
             return []
 
         desktop = _virtual_desktop_geometry()
@@ -801,10 +803,17 @@ class X11WindowGeometryProvider:
         if shutil.which("wmctrl") is None:
             return []
         try:
+            # timeout, like every other X11 query in this file: this runs
+            # from mouseMoveEvent while Window mode is armed, on the UI
+            # thread, on every cache miss -- so an X server that stops
+            # answering wedges the pointer mid-drag rather than simply
+            # finding no windows. TimeoutExpired is a SubprocessError, so
+            # the existing except already reads as "no windows here".
             result = subprocess.run(
-                ["wmctrl", "-lG"], check=True, capture_output=True, text=True
+                ["wmctrl", "-lG"],
+                check=True, capture_output=True, text=True, timeout=2,
             )
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.SubprocessError):
             return []
 
         windows = []

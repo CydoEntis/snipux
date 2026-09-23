@@ -8518,11 +8518,14 @@ class OverlayWindow(QWidget):
             return
         painter.save()
         painter.setClipRect(QRectF(self._selection))
-        step_counter = 0
+        # No renumbering here. A StepMarker's number is assigned once, at
+        # creation, by `next_step_number` -- which is what makes "delete step
+        # 2 and 1/3 keep their own numbers" fall out for free, as shapes.py
+        # says in so many words. This loop used to overwrite `.number` by
+        # list order on every repaint, and `Shape` is a plain dataclass, so
+        # the write stuck: `rendered_image()` exported the renumbered badges
+        # and the documented behaviour did not survive its own paint.
         for shape in self._marks:
-            if isinstance(shape, StepMarker):
-                step_counter += 1
-                shape.number = step_counter
             if isinstance(shape, ObscuringShape):
                 # Already baked into Layer 1 by `_base_layer_image` above,
                 # in list order alongside every other obscuring mark --

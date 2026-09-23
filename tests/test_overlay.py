@@ -14097,3 +14097,45 @@ class TestAnInstantSnipShowsNoToolbar:
         overlay.set_selection(QRect(10, 10, 80, 60))
 
         assert overlay._bar.isVisible()
+
+
+class TestPaintingDoesNotRenumberSteps:
+    """`shapes.py` says a StepMarker's number is assigned once, at creation,
+    and never recomputed -- that is what makes "delete step 2, and 1 and 3
+    keep their numbers" work. `_paint_marks` was reassigning every number by
+    list order on each repaint, and `Shape` is a plain dataclass, so the
+    write stuck and `rendered_image()` exported the renumbered badges.
+    """
+
+    def _overlay(self):
+        frame = make_frame(image_size=(120, 90), logical_size=(120, 90))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, 120, 90))
+        return overlay
+
+    def _step(self, number, x):
+        return StepMarker(
+            colour=QColor("#ff0000"), stroke_width=3.0,
+            point=QPointF(x, 20), number=number,
+        )
+
+    def test_a_deleted_step_leaves_the_others_alone(self):
+        overlay = self._overlay()
+        overlay._mark_store.add_all(
+            [self._step(1, 10), self._step(2, 40), self._step(3, 70)]
+        )
+        # Rub out the middle one, the way the eraser does.
+        overlay._mark_store.erase(QPointF(40, 20))
+
+        overlay.grab()   # a full paintEvent, offscreen
+
+        assert [m.number for m in overlay._marks] == [1, 3]
+
+    def test_numbers_survive_repeated_painting(self):
+        overlay = self._overlay()
+        overlay._mark_store.add_all([self._step(4, 10), self._step(7, 40)])
+
+        for _ in range(3):
+            overlay.grab()
+
+        assert [m.number for m in overlay._marks] == [4, 7]

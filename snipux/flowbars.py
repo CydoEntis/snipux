@@ -115,8 +115,13 @@ class _Divider(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        colour = QColor(tokens.FlowMetric.__dict__.get("DIVIDER", "#ffffff"))
-        colour.setAlphaF(0.12)
+        # FlowMetric carries DIVIDER_H, not DIVIDER -- the colour lives on
+        # FlowColor. `__dict__.get` does not search bases either, so this
+        # always fell through to the hardcoded pair and only looked right by
+        # coincidence: retune FlowColor.DIVIDER and every other divider in
+        # the app would follow except this one.
+        colour = design.color("DIVIDER")
+        colour.setAlphaF(tokens.Color.DIVIDER_ALPHA)
         painter.fillRect(self.rect(), colour)
         painter.end()
 

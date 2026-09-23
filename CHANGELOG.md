@@ -5,6 +5,22 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **A recording that fails to start no longer leaves the red outline on
+  screen.** It could sit there over a recording that was not running, with
+  no way to dismiss it, until Snipux was killed.
+- **Pause really pauses when a recording has audio on Windows.** The bar
+  could show paused while the microphone kept recording.
+- **A failed recording start cleans up after itself**, instead of leaving an
+  unplayable part-file where your recording was meant to be.
+- **Step numbers stay put.** Deleting step 2 left 1 and 3 alone on screen but
+  the export renumbered them anyway.
+- **Hovering windows in Window mode cannot freeze the pointer** if the X
+  server stops answering.
+- **A highlighter no longer changes the opacity of marks drawn after it.**
+- **An annotation that fails to draw cannot corrupt the exported image.**
+
 ## 1.0.1 — 2026-09-22
 
 ### Added

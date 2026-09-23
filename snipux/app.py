@@ -2534,14 +2534,30 @@ class AppController:
         self._show_recording_chrome(rect)
         try:
             backend, actual_path = self._start_recorder_responsively(rect, path)
-        except RecordingError as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary: see below
+            # `Exception`, not just `RecordingError`. The chrome went up
+            # before this line, so anything that escapes here without being
+            # caught leaves the red outline and a pill reading "Starting"
+            # on screen for the rest of the session -- over a recording that
+            # is not running, with no way to dismiss either. The registry
+            # raises RecordingError, but `_RecorderStarter.run` catches bare
+            # Exception and re-raises whatever it caught, and the
+            # `available()` probe above runs backend code of its own.
+            #
+            # This is a boundary in CODE-STANDARDS' sense: it keeps the app
+            # alive and it reports, through the same channel a RecordingError
+            # would have used, so nothing is swallowed.
+            #
             # Nothing was ever written to this placeholder path -- an
             # empty file left behind here isn't a discarded recording
             # for ticket 9 to clean up, it's a start that never
             # happened at all.
             Path(path).unlink(missing_ok=True)
             self._teardown_recording_ui()
-            self._report_shortcut(str(exc))
+            self._report_shortcut(
+                str(exc) if isinstance(exc, RecordingError)
+                else f"Could not start recording: {exc}"
+            )
             return
         if actual_path != path:
             # The backend wrote somewhere else -- GNOME renames to
