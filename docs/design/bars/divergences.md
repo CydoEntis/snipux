@@ -797,3 +797,28 @@ What the handoff was protecting -- overlay furniture reading as *on top of*
 the desktop rather than as a window of the app -- is carried by the things
 that actually say it: translucency, the blur behind it, the scrim, the
 shadow. Those are unchanged. Only the tint moved.
+
+## The record side has a pointer flag
+
+**Handoff:** the flag well holds Hide sensitive and Delay. Nothing in it is
+about the pointer, and whether a recording films the cursor is not a row
+decision at all.
+
+**Built:** a third flag, `_CursorFlag`, shown only on the record side --
+where Hide sensitive is shown only on stills, so the well still holds two
+controls at a time and the row is the same width on both sides.
+
+**Why:** the setting already existed, in Settings → Recording, and that is
+the home this document rejected once already, for the Last-region
+preference: "a preference nobody finds is a preference nobody has". It was
+reported the same way -- as a feature that had gone missing -- by the person
+who asked for it, who had it and could not find it.
+
+The stored value is the same one Settings writes, so the row and Settings
+are two surfaces on one preference rather than two preferences.
+
+Greyed with its reason where `Platform.records_cursor()` is False, which is
+Windows: `QScreenCapture` has no cursor option, so the Settings switch there
+moved, saved, and changed nothing about the recording. A control that
+silently does nothing reads as the application being broken; a greyed one
+carrying a sentence reads as the limit it is.

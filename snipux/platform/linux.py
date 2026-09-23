@@ -63,6 +63,11 @@ class LinuxPlatform(Platform):
     def default_save_folder(self) -> Path:
         return setup_desktop.default_save_folder()
 
+    def records_cursor(self) -> bool:
+        """True: GNOME's screencast takes a `draw-cursor` option, which
+        `GnomeScreencastBackend` passes straight through."""
+        return True
+
     def build_capture_registry(self) -> BackendRegistry:
         return capture.build_linux_registry()
 
