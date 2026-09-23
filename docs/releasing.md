@@ -13,8 +13,12 @@ are three channels:
    workflow. Both carry their own Python and Qt, so they are what someone
    installs who does not have (or want) either -- see
    [Building the Linux artifacts](#building-the-linux-artifacts).
-4. **The Windows `snipux.exe`**, attached to that GitHub Release by hand.
-   The only artifact that is still built on a person's machine.
+4. **The Windows `snipux.exe` and `snipux-setup-<version>.exe`**, attached
+   to that GitHub Release by hand -- the only artifacts still built on a
+   person's machine. Both ship: the installer for everyone, the portable exe
+   for the machines Smart App Control refuses to run an unsigned installer
+   on (see [Why the installer is shipped
+   unsigned](#why-the-installer-is-shipped-unsigned-alongside-the-portable-exe)).
 
 Work lands on `dev`; `main` moves only when a release is cut, so `main` is
 always the last released version.
@@ -72,8 +76,11 @@ On a Windows machine or VM -- see
 workflow has created the release:
 
 ```sh
-gh release upload v0.9.0 dist/snipux.exe
+powershell -File packaging\windows\build_installer.ps1
+gh release upload v0.9.0 dist/snipux.exe dist/snipux-setup-0.9.0.exe
 ```
+
+`build_installer.ps1` builds the exe too, so this is one command for both.
 
 Linux needs nothing by hand: the workflow builds the `.deb` and the AppImage
 and attaches both to the same release.
@@ -193,20 +200,75 @@ it), and sets up a Start Menu shortcut, a Startup entry, and the Ctrl+Alt+S
 hotkey binding (SNX-95/103) — the same three things `snipux --setup` writes
 for a pip/pipx install. `snipux --remove` undoes all of it.
 
-### Why there's no installer
+### Building the installer
 
-SNX-97 originally wrapped `snipux.exe` in an Inno Setup installer,
-`snipux-setup.exe`, so a user wouldn't need to know where to put the file.
-SNX-104 removed it: Smart App Control, a Windows 11 feature that is on by
-default on a meaningful share of clean installs, blocked that installer
-outright — no "Run anyway" the way SmartScreen offers, just a message that
-read like the file was corrupt. For those users the installer did not
-merely inconvenience, it did not work at all. The portable exe is not
-blocked by Smart App Control, and since it already sets itself up on first
-run (see above), it delivers what the installer was for without the thing
-that broke it. A build artifact nobody can run is worse than none — someone
-will try it — so the installer was deleted rather than left in the
-repository. Don't re-add one without re-reading this.
+```powershell
+powershell -File packaging\windows\build_installer.ps1
+```
+
+Produces `dist\snipux-setup-<version>.exe`, unsigned. It builds the exe
+first; pass `-SkipExe` to reuse one you have just built. Inno Setup is the
+only extra tool (`winget install --id JRSoftware.InnoSetup`), and the
+script names that command if it is missing.
+
+Three things about the installer are load-bearing and explained at length
+in `packaging/windows/snipux.iss` itself:
+
+- it installs into `%LOCALAPPDATA%\snipux`, which is
+  `platform.windows._portable_exe_path()` — anywhere else and the exe
+  duplicates itself there on first launch;
+- it is per-user, so there is no UAC prompt;
+- it creates no shortcuts, because snipux writes its own on first launch
+  and a second set would be a second thing to keep in step.
+
+It also silently removes SNX-97's old install if it finds one — a
+different AppId and directory that nothing has replaced since SNX-104, so
+without this it stays on the machine forever as an orphaned copy and a
+stale Add/Remove Programs row.
+
+### Why the installer is shipped unsigned, alongside the portable exe
+
+SNX-97 built an installer; SNX-104 removed it because Smart App Control, on
+by default on a meaningful share of clean Windows 11 installs, blocks an
+unsigned installer outright — no "Run anyway" the way SmartScreen offers,
+just a message that reads as if the file is corrupt. That is still true and
+signing is still what fixes it.
+
+What changed is the reasoning, not the fact. SNX-104 removed the installer
+because it was the *only* thing some users could not run; the answer to that
+is to ship both, which is what the Releases page does now. The portable exe
+is not blocked by Smart App Control, so anyone the installer refuses still
+has the route they have always had — and everyone else gets an Add/Remove
+Programs entry, an uninstaller, and `winget install snipux`.
+
+A certificate remains a few hundred a year plus a hardware token (see below)
+for a tool with a handful of users, which is the trade that has not changed.
+
+### Publishing to winget
+
+The installer is the winget target, not the portable exe: winget's promise
+is `winget install` and `winget uninstall` behaving like any other package,
+which needs an Add/Remove Programs entry to remove and a silent switch to
+install with. Inno provides both, and winget knows Inno's switches from
+`InstallerType: inno`.
+
+After the release exists and the installer is attached to it:
+
+```sh
+python packaging/winget/render_manifests.py --version 1.0.1     --installer dist/snipux-setup-1.0.1.exe
+```
+
+That writes the three manifests into `dist/winget/<version>/`, with the
+installer's SHA256 and the URL it will be downloaded from. Submit them
+either with `wingetcreate submit --token <pat> dist/winget/<version>` or as
+a pull request to `microsoft/winget-pkgs` adding them under
+`manifests/c/CydoEntis/Snipux/<version>/`. Microsoft's validation runs the
+installer in a sandbox, so a manifest whose hash or URL is wrong fails there
+rather than on a user's machine.
+
+The manifests are generated rather than kept in this repository: each names
+the version and one carries the installer's digest, so a checked-in copy is
+not a stale document but a manifest pointing at the wrong binary.
 
 ### Why the exe isn't signed
 

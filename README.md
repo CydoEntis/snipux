@@ -46,10 +46,9 @@ free, on Linux too — and a slightly better one back on Windows.
 - **Watermark** — stamp text or an image in a corner of every capture.
 - **One shortcut** — Ctrl+Alt+S, on both platforms.
 
-MIT licensed, and installed with `pip install snipux` — see
-[Install](#install). There is no Windows installer: that is deliberate, and
-explained where it'd be missed. What changed in each release is in
-[CHANGELOG.md](CHANGELOG.md).
+MIT licensed. Install it with `winget install snipux`, a `.deb`, an
+AppImage, or `pip install snipux` — see [Install](#install). What changed in
+each release is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Platform support
 
@@ -95,11 +94,11 @@ their own Python and Qt:
 
 ```sh
 # Ubuntu, Debian, Mint -- anything with apt
-sudo apt install ./snipux_1.0.0_amd64.deb
+sudo apt install ./snipux_1.0.1_amd64.deb
 
 # or, on any distribution, with no root and no install step at all
-chmod +x Snipux-1.0.0-x86_64.AppImage
-./Snipux-1.0.0-x86_64.AppImage
+chmod +x Snipux-1.0.1-x86_64.AppImage
+./Snipux-1.0.1-x86_64.AppImage
 ```
 
 Either way the first launch writes the same three things `--setup` does —
@@ -226,14 +225,47 @@ autostart is for: the Startup entry means Snipux is already running by the time
 you'd want to press the shortcut, from the next login onward. The first time,
 start it yourself with the second command above.
 
-**Nothing here trips Smart App Control or SmartScreen**, which is the point.
-Both react to unrecognised *executables*; this is Python source installed by
-the `python.exe` the user already trusts. An earlier version shipped an Inno
-Setup installer and Smart App Control blocked it outright — the message read
-like the file was corrupt rather than like a policy decision, and unlike
-SmartScreen there was no "More info → Run anyway" to click through. Full
-reasoning in
-[docs/releasing.md](docs/releasing.md#why-theres-no-installer).
+**Nothing in the pip route trips Smart App Control or SmartScreen**, which
+is part of why it exists. Both react to unrecognised *executables*; this is
+Python source installed by the `python.exe` the user already trusts. The two
+downloads below are executables, and both are unsigned — see
+[what that means](#a-word-on-the-warnings).
+
+### Or download it
+
+Neither needs Python.
+
+```powershell
+winget install snipux
+```
+
+Or from the [latest release](https://github.com/CydoEntis/snipux/releases/latest):
+
+- **`snipux-setup-<version>.exe`** — the installer. Installs per-user (no
+  admin prompt), appears in Add/Remove Programs, and starts Snipux when it
+  finishes. This is what `winget install` runs.
+- **`snipux.exe`** — the same app as a single portable file. No installer,
+  no Add/Remove entry: run it and it sets itself up, moving itself somewhere
+  stable first so a tidy-up of Downloads doesn't break it.
+
+### A word on the warnings
+
+Both downloads are unsigned, deliberately: a certificate Windows trusts
+costs a few hundred a year plus a hardware token, which is not a trade worth
+making for a tool this size.
+
+What that means in practice:
+
+- **SmartScreen** shows "Windows protected your PC" on first run. *More
+  info → Run anyway* gets past it. Most people see this one.
+- **Smart App Control**, on some Windows 11 machines, blocks the *installer*
+  outright — no "Run anyway", and the message reads as though the file is
+  corrupt. It does not block the portable exe, which is why both are
+  published: if the installer refuses to run, download `snipux.exe` instead
+  and it will work.
+
+Full reasoning in
+[docs/releasing.md](docs/releasing.md#why-the-installer-is-shipped-unsigned-alongside-the-portable-exe).
 
 ### Updating
 

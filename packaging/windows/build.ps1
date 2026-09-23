@@ -3,11 +3,12 @@
 #
 #   powershell -File packaging\windows\build.ps1
 #
-# Produces dist\snipux.exe -- the sole Windows release artifact (SNX-104:
-# the Inno Setup installer this script used to also build is gone, because
-# Smart App Control blocks it outright on a meaningful share of clean
-# Windows 11 installs with no way to click through; see the README's Smart
-# App Control section and docs/releasing.md). The exe installs itself --
+# Produces dist\snipux.exe, one of the two Windows release artifacts --
+# build_installer.ps1 beside this wraps it in snipux-setup-<version>.exe and
+# ships both, because Smart App Control blocks an unsigned installer
+# outright on a meaningful share of clean Windows 11 installs and the
+# portable exe is what those machines can still run (docs/releasing.md).
+# The exe installs itself --
 # Start Menu/Startup shortcut, hotkey, a stable install location -- the
 # first time it runs (SNX-95/103), which is what let the installer go
 # without losing what it was for. Every path below is resolved relative to

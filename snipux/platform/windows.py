@@ -74,10 +74,10 @@ rather than becoming the tray app itself. `snipux` stays a console script
 so `--update`/`--setup`/`--help` still print where they were typed.
 
 `_ensure_stable_copy()`/`ensure_stable_install()` (SNX-103) are what make
-the portable `snipux.exe` safe to distribute at all: it is the *only*
-Windows distribution route now that the Inno Setup installer is gone
-(SNX-104 -- Smart App Control blocked it outright, with no way to click
-through; see the README's Smart App Control section), and until now
+the portable `snipux.exe` safe to distribute at all: it is the route for
+everyone the installer cannot serve -- Smart App Control blocks an
+unsigned installer outright, with no way to click through, which is why
+both ship (see docs/releasing.md) -- and until now
 nothing stopped its Start Menu/Startup shortcuts from pointing at
 wherever the user happened to double-click it from -- typically
 Downloads, which most people clean out sooner or later.
