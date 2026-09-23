@@ -5,6 +5,15 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **Keyboard shortcuts work again on Windows.** Every shortcut in every
+  window -- the overlay's tool keys, Escape, the arrow-key nudge, the
+  player's transport keys -- did nothing, because the window was on top and
+  visible without ever being the one the keyboard was pointed at. Windows
+  refuses that to an application that was not already in front, which
+  Snipux never is: the hotkey opens it over whatever you were using.
+
 ## 1.0.2 — 2026-09-23
 
 ### Added

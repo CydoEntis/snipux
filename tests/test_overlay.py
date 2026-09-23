@@ -14139,3 +14139,43 @@ class TestPaintingDoesNotRenumberSteps:
             overlay.grab()
 
         assert [m.number for m in overlay._marks] == [4, 7]
+
+
+class TestTheOverlayTakesTheKeyboard:
+    """Every shortcut in the overlay depends on the window actually being
+    the one the keyboard is talking to, which `activateWindow()` only
+    *asks* for -- and which Windows refuses to a process that is not
+    already in front. The overlay is never in front: a global hotkey opens
+    it over whatever the user was using.
+    """
+
+    def test_showing_it_asks_the_seam_for_the_keyboard(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(
+            overlay_module.platform.current, "take_keyboard_focus",
+            lambda widget: asked.append(widget) or True,
+        )
+        frame = make_frame(image_size=(120, 90), logical_size=(120, 90))
+        overlay = OverlayWindow(frame)
+
+        # show_on_screen, not show(): that is the path app.py opens a snip
+        # through, and the one that raises and activates.
+        overlay.show_on_screen(None)
+        QTest.qWaitForWindowExposed(overlay)
+
+        assert asked == [overlay]
+
+    def test_a_platform_that_refuses_does_not_stop_the_snip(self, monkeypatch):
+        # Best-effort: a snip whose keyboard shortcuts are unavailable is
+        # still a snip, and the mouse works either way.
+        monkeypatch.setattr(
+            overlay_module.platform.current, "take_keyboard_focus", lambda widget: False
+        )
+        frame = make_frame(image_size=(120, 90), logical_size=(120, 90))
+        overlay = OverlayWindow(frame)
+
+        overlay.show_on_screen(None)
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(10, 10, 60, 40))
+
+        assert overlay._selection == QRect(10, 10, 60, 40)

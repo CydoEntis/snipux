@@ -7430,6 +7430,15 @@ class OverlayWindow(QWidget):
         # focus, particularly right after a fullscreen state change.
         self.raise_()
         self.activateWindow()
+        # And `activateWindow()` is only a request. On Windows it is one the
+        # system refuses for a process that is not already in front, which
+        # this one never is: the hotkey fires while something else has the
+        # foreground. The overlay then sat on top of everything, visible and
+        # fullscreen, while every keystroke went to the window behind it --
+        # not one shortcut in the application worked. The seam is what
+        # actually takes the keyboard where a platform needs more than the
+        # request; on Linux it is already done and this reports so.
+        platform.current.take_keyboard_focus(self)
 
     # -- keyboard shortcuts (SNX-47) -----------------------------------------
     # docs/design/overlay-redesign.md's "Keyboard" table is the authority: a

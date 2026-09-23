@@ -1441,11 +1441,13 @@ class AppController:
         if self._settings is not None and self._settings.isVisible():
             self._settings.raise_()
             self._settings.activateWindow()
+            platform.current.take_keyboard_focus(self._settings)
             return
         self._settings = SettingsDialog(on_saved=self._on_settings_saved)
         self._settings.show()
         self._settings.raise_()
         self._settings.activateWindow()
+        platform.current.take_keyboard_focus(self._settings)
 
     def _on_settings_saved(self) -> None:
         """Apply what Settings just wrote.
@@ -1783,6 +1785,7 @@ class AppController:
         review.show()
         review.raise_()
         review.activateWindow()
+        platform.current.take_keyboard_focus(review)
 
     def open_image_path(self, path: Path) -> None:
         """Open an image you already have in a fresh review window, with
@@ -1815,6 +1818,7 @@ class AppController:
         review.show()
         review.raise_()
         review.activateWindow()
+        platform.current.take_keyboard_focus(review)
 
     def _on_pin_requested(self, image: QImage, rect: QRect) -> None:
         """SNX-83: build and show the pin `OverlayWindow._on_bar_pin` asked
@@ -1923,6 +1927,7 @@ class AppController:
         player.show()
         player.raise_()
         player.activateWindow()
+        platform.current.take_keyboard_focus(player)
 
     def _forget_player(self, window) -> None:
         if window in self._players:
