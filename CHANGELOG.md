@@ -5,6 +5,14 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Changed
+
+- **One colour for the whole application.** The overlay's bars, menus and
+  hint pills were a warm grey while Settings, review and the player were a
+  cool one, so the two halves read as different applications. They are one
+  family now. Nothing changed weight -- every surface kept the exact
+  lightness it had, so the bars still sit over a screenshot the way they did.
+
 ### Fixed
 
 - **Clicking a menu's own control closes it again.** Every dropdown --

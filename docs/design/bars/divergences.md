@@ -773,3 +773,27 @@ overlay hint bar's preference rather than adding a second toggle.
 session.
 
 **Today's behaviour stands** until that is decided.
+
+## The overlay chrome is cool, not warm glass
+
+**Handoff:** overlay furniture is warm glass, `#1a1c18`. `handoff-windows.md`
+puts it as a rule in both directions: "never use the overlay's warm `#1a1c18`
+in a window, or the windows' cool `#191c21` in the overlay."
+
+**Built:** one cool cast across the whole application. Every overlay neutral
+was rotated to the windows' hue (~218) with its own lightness and saturation
+left exactly as it was, so nothing changed weight -- a token tuned to read
+over a blurred screenshot still has the contrast it was given, and the accent
+is untouched.
+
+**Why:** the rule is sound in the abstract and wrong in use. Two casts side by
+side read as two applications rather than as two surfaces of one, and that is
+not a subtle effect: the chooser row sat green-grey against a blue-grey
+Settings window, and it was the first thing the person using it every day
+noticed about either. "Its inconsistent af" is the report. A distinction a
+user reads as a mistake is not carrying the meaning it was designed to carry.
+
+What the handoff was protecting -- overlay furniture reading as *on top of*
+the desktop rather than as a window of the app -- is carried by the things
+that actually say it: translucency, the blur behind it, the scrim, the
+shadow. Those are unchanged. Only the tint moved.
