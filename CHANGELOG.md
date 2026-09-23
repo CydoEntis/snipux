@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.0.1 — 2026-09-22
+
 ### Added
 
 - **A `.deb` and an AppImage on the Releases page.** Installing Snipux on
