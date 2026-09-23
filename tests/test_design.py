@@ -12,6 +12,9 @@ from PyQt6.QtWidgets import QApplication
 
 import snipux.design as design
 from snipux.design import tokens
+from snipux.design import PACKAGE_DIR
+
+LOGO_DIR = PACKAGE_DIR / "design" / "logo"
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -485,3 +488,77 @@ class TestIconsAreOpticallyCentred:
         _hl_x, hl_y = self._ink_centre("highlighter")
 
         assert abs(pen_y - hl_y) <= 1.0
+
+
+class TestThereIsOneGreen:
+    """There were five, within a few percent of each other: the accent, a
+    success text colour, a success fill, a "Saved" tick, a filename preview
+    -- and the app icon's own. Read together they looked like an imprecise
+    palette rather than five meanings. Success and the primary action are
+    the same green now; weight and alpha are what separate them.
+    """
+
+    ACCENTS = ("ACCENT", "ACCENT_SOFT")
+
+    def test_every_status_green_is_the_accent(self):
+        greens = {
+            "OK_FG": tokens.Win.OK_FG,
+            "OK_BG": tokens.Win.OK_BG,
+            "OK_BORDER": tokens.Win.OK_BORDER,
+            "OK_STRONG": tokens.Win.OK_STRONG,
+            "PATH_FG": tokens.Win.PATH_FG,
+        }
+        allowed = {getattr(tokens.Color, name) for name in self.ACCENTS}
+
+        assert set(greens.values()) <= allowed, greens
+
+    def test_the_overlay_families_share_the_one_soft_accent(self):
+        assert tokens.FlowColor.ACCENT_SOFT == tokens.Color.ACCENT_SOFT
+        assert tokens.BarColor.ACCENT_SOFT == tokens.Color.ACCENT_SOFT
+
+    def test_no_stray_green_hangs_around_in_the_tokens(self):
+        """Any *other* saturated green in the palette is the thing this
+        collapse was about, so a new one has to be a deliberate addition
+        here rather than something that quietly appears."""
+        strays = {}
+        for family in (tokens.Color, tokens.Win, tokens.FlowColor, tokens.BarColor):
+            for name, value in vars(family).items():
+                if not isinstance(value, str) or not value.startswith("#") or len(value) != 7:
+                    continue
+                colour = QColor(value)
+                hue, saturation, brightness, _ = colour.getHsv()
+                if 60 <= hue <= 160 and saturation > 90 and brightness > 120:
+                    if value not in {getattr(tokens.Color, n) for n in self.ACCENTS}:
+                        strays[f"{family.__name__}.{name}"] = value
+
+        assert not strays, f"greens that are not the accent: {strays}"
+
+    def test_the_app_icon_is_painted_in_the_accent(self):
+        """The icon sits beside the window it opens, in the task bar and the
+        title bar at once, so a fifth green is seen there more often than
+        anywhere else in the app."""
+        accent = QColor(tokens.Color.ACCENT)
+        # HSL, not HSV: the artwork was recoloured by taking the accent's
+        # hue and saturation and keeping each pixel's own lightness, which
+        # is what preserves antialiased edges. An HSV saturation reading of
+        # those pixels moves with their lightness and so says nothing about
+        # whether the colour is the accent.
+        accent_hue, accent_sat, _, _ = accent.getHsl()
+
+        for size in (16, 48, 256):
+            image = QImage(str(LOGO_DIR / f"snipux-{size}.png"))
+            hues = []
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    colour = QColor(image.pixel(x, y))
+                    hue, saturation, brightness, _ = colour.getHsv()
+                    if 40 <= hue <= 170 and saturation > 90 and brightness > 100:
+                        hsl_hue, hsl_sat, _hsl_l, _ = colour.getHsl()
+                        hues.append((hsl_hue, hsl_sat))
+            assert hues, f"snipux-{size}.png has no marquee green at all"
+            # Averaged: antialiasing spreads each edge pixel a little either
+            # way, so no single pixel has to be the token exactly.
+            mean_hue = sum(h for h, _ in hues) / len(hues)
+            mean_sat = sum(s for _, s in hues) / len(hues)
+            assert abs(mean_hue - accent_hue) < 6, f"snipux-{size}.png hue {mean_hue}"
+            assert abs(mean_sat - accent_sat) < 25, f"snipux-{size}.png sat {mean_sat}"

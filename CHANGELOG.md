@@ -5,6 +5,14 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Changed
+
+- **One green, not five.** The accent, the "free to register" tick, the
+  "Saved" tick, the filename preview and the app icon were five greens
+  within a few percent of each other, which read as an imprecise palette
+  rather than five meanings. They are all the accent now -- what separates
+  them is weight, not hue -- and the icon matches the app it opens.
+
 ### Fixed
 
 - **A recording that fails to start no longer leaves the red outline on
