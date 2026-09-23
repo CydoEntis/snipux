@@ -103,6 +103,45 @@ jobs:
         run: |
           gh release upload "$GITHUB_REF_NAME" dist/*.AppImage dist/*.deb             --clobber --repo "$GITHUB_REPOSITORY"
 
+  windows_artifacts:
+    # The same shape as linux_artifacts above: after the release exists, and
+    # unable to hold it back. These were built on a person's machine and
+    # uploaded by hand until now, which is the one step of a release that
+    # needed someone to be at a particular computer.
+    needs: [build, github_release]
+    continue-on-error: true
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Both artifacts in one go: build_installer.ps1 runs build.ps1 first,
+      # so the exe inside the installer is always the one this tag produces.
+      # Inno Setup is already on the GitHub Windows image.
+      - name: Build the exe and the installer
+        run: powershell -ExecutionPolicy Bypass -File packaging/windows/build_installer.ps1
+
+      # The same smoke test the Linux bundle gets: a build that cannot start
+      # should fail here rather than on the first person to download it.
+      - name: Check the exe runs
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./dist/snipux.exe --list-backends
+
+      - name: Attach them to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          gh release upload "${{ github.ref_name }}" `
+            dist/snipux.exe "dist/snipux-setup-$version.exe" `
+            --clobber --repo "${{ github.repository }}"
+
   pypi:
     needs: build
     runs-on: ubuntu-latest
