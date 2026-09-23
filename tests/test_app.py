@@ -5492,7 +5492,10 @@ class TestACaptureIsConfirmed:
         controller._overlay.save()
 
         assert len(said) == 1
-        assert said[0].startswith("Saved to snipux/")
+        # The configured save folder -- `_recordings_land_in_a_temp_folder`
+        # points it at tmp_path -- not a hardcoded ~/Pictures/snipux. Save
+        # used to ignore the setting entirely.
+        assert said[0].startswith(f"Saved to {tmp_path.name}/")
         assert said[0].endswith(".png")
 
     def test_a_cancelled_snip_says_nothing(self, make_controller, monkeypatch):

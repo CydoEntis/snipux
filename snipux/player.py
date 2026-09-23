@@ -68,9 +68,9 @@ from PyQt6.QtMultimedia import (
 )
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from . import design
+from . import design, output
 from .design import tokens
-from .flowbars import FlowMenu
+from .flowbars import FlowMenu, MenuReopenGuard
 from .winchrome import WinWindow, _mono_font, _ui_font
 
 _M = tokens.PlayerMetric
@@ -1715,6 +1715,10 @@ class PlayerWindow(WinWindow):
         self._format = tokens.EXPORT_DEFAULT
         self._saved = True
         self._menu: FlowMenu | None = None
+        # One guard for both menus: it blocks only the button the
+        # pointer is actually over, so clicking Export while Speed is
+        # open still swaps them in a single press. See MenuReopenGuard.
+        self._menu_guard = MenuReopenGuard()
         self._exporter = None
         self._source_fps: float = float(tokens.PLAYER_FPS)
 
@@ -1971,8 +1975,16 @@ class PlayerWindow(WinWindow):
         self._sync_transport()
 
     def step_frame(self, direction: int) -> None:
+        """One frame back or forward -- of *this* recording's frames.
+
+        `_source_fps` rather than `tokens.PLAYER_FPS`: that constant is the
+        rate recordings are made at by default, not the rate of the file
+        open in the window. Stepping a 60 fps recording by 1/30 s moved two
+        frames at a time, which makes frame-accurate trimming impossible on
+        exactly the recordings someone would bother trimming precisely.
+        """
         self.player.pause()
-        target = self.state.position + direction / tokens.PLAYER_FPS
+        target = self.state.position + direction / self._source_fps
         target = max(self.state.start, min(target, self.state.end))
         self.player.setPosition(int(target * 1000))
         self.state.position = target
@@ -2048,7 +2060,10 @@ class PlayerWindow(WinWindow):
         detail = []
         if not size.isEmpty():
             detail.append(f"{size.width()} × {size.height()}")
-        detail.append(f"{tokens.PLAYER_FPS} fps")
+        # The file's own rate, read from its metadata (`_on_metadata`), not
+        # the rate Snipux records at: a 60 fps recording labelled "30 fps"
+        # contradicts the exporter, which already honours the real one.
+        detail.append(f"{self._source_fps:g} fps")
         detail.append(format_clock(self.state.duration))
         self.title_detail.setText(" · ".join(detail))
 
@@ -2161,17 +2176,25 @@ class PlayerWindow(WinWindow):
             self._menu = None
 
     def _open_speed_menu(self) -> None:
-        self._close_menu()
-        rows = [(value, f"{value}×", "", "", "") for value in tokens.SPEEDS]
-        self._menu = FlowMenu(rows, self._speed, 110)
-        self._menu.chosen.connect(self.set_speed)
         anchor = self.transport.speed_button
+        self._close_menu()
+        if self._menu_guard.blocks_reopen(anchor):
+            # The press that closed this menu, arriving at the button
+            # underneath -- not a new click. See MenuReopenGuard.
+            return
+        rows = [(value, f"{value}×", "", "", "") for value in tokens.SPEEDS]
+        self._menu = FlowMenu(rows, self._speed, 110, guard=self._menu_guard)
+        self._menu.chosen.connect(self.set_speed)
         self._menu.open_above(
             QRect(anchor.mapToGlobal(anchor.rect().topLeft()), anchor.size())
         )
 
     def _open_export_menu(self) -> None:
         self._close_menu()
+        if self._menu_guard.blocks_reopen(self.export_button):
+            # The press that closed this menu, arriving at the button
+            # underneath -- not a new click. See MenuReopenGuard.
+            return
         unavailable = export_availability(self.state.trimmed)
         real_h264 = system_ffmpeg() is not None
         rows = []
@@ -2190,7 +2213,8 @@ class PlayerWindow(WinWindow):
                 )
             rows.append((fid, label, note, size, reason))
         self._menu = FlowMenu(
-            rows, self._format, 298, footnote=tokens.EXPORT_FOOTNOTE
+            rows, self._format, 298, footnote=tokens.EXPORT_FOOTNOTE,
+            guard=self._menu_guard,
         )
         self._menu.chosen.connect(self._choose_format)
         anchor = self.export_button
@@ -2235,10 +2259,7 @@ class PlayerWindow(WinWindow):
     # -- the footer's three actions ---------------------------------------
 
     def _display_path(self) -> str:
-        try:
-            return "~/" + str(self.path.relative_to(Path.home()))
-        except ValueError:
-            return str(self.path)
+        return output.display_path(self.path)
 
     def _destination_for(self, format_id: str) -> Path:
         suffix = {"frame": ".png", "mp4": ".mp4", "webm": ".webm"}.get(format_id, ".mp4")
@@ -2342,13 +2363,12 @@ class PlayerWindow(WinWindow):
         nothing in an image editor -- the same rule the capture flow's Copy
         follows for a recording.
         """
-        from PyQt6.QtCore import QMimeData
-
-        data = QMimeData()
-        url = QUrl.fromLocalFile(str(self.path))
-        data.setUrls([url])
-        data.setText(str(self.path))
-        QGuiApplication.clipboard().setMimeData(data)
+        # `output.copy_file_to_clipboard`, not a QMimeData built here: that
+        # helper also sets the `x-special/gnome-copied-files` flavour, which
+        # is the only one Nautilus reads for a paste, and percent-encodes
+        # the URI. Every default filename contains spaces, so a hand-built
+        # copy failed to paste into a GNOME file manager every single time.
+        output.copy_file_to_clipboard(self.path)
         self._report(f"Copied {self.path.name}", ok=True)
 
     def show_in_folder(self) -> None:

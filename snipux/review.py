@@ -52,7 +52,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import design, setup_desktop, shapes
+from . import design, output, setup_desktop, shapes
 from .design import tokens
 from .marks import (
     MarkStore,
@@ -1076,21 +1076,15 @@ class ReviewWindow(WinWindow):
 
     @staticmethod
     def _display_path(path: Path | None) -> str:
-        r"""`~`-relative where possible: most of a screenshot's path is the
+        """`~`-relative where possible: most of a screenshot's path is the
         user's own home directory read back at them.
 
-        `os.sep`, not a literal "/": `relative_to()` renders with the
-        platform's own separator, so hardcoding the Unix one produced
-        "~/Pictures\snipux\Screenshot from ....png" on Windows -- one path
-        spelled two ways in the same string, in the label whose whole job
-        is telling the user where their file is.
+        Kept as a method because this window calls it in six places, but the
+        rule itself now lives in `output.display_path` -- the player and the
+        overlay show the same kind of path and each had grown their own
+        copy of it.
         """
-        if path is None:
-            return "Not saved to disk"
-        try:
-            return f"~{os.sep}{path.relative_to(Path.home())}"
-        except ValueError:
-            return str(path)
+        return output.display_path(path)
 
     def copy(self) -> None:
         """Put the snip -- ink included -- on the clipboard, and clear the
@@ -1099,9 +1093,12 @@ class ReviewWindow(WinWindow):
         Useful even for one copied on the way here: anything copied since
         has replaced it.
         """
-        clipboard = QGuiApplication.clipboard()
-        if clipboard is not None:
-            clipboard.setImage(self._canvas.rendered_image())
+        # `output.copy_image_to_clipboard`, not `QClipboard.setImage`
+        # directly: that helper also settles the clipboard and hands the
+        # image to `wl-copy`, which is what makes a copy outlive the process
+        # on Wayland. Copying from here used to be the one Copy in the app
+        # that vanished when Snipux quit.
+        output.copy_image_to_clipboard(self._canvas.rendered_image())
         self._dirty = False
         self._refresh_status()
         self._show_toast("copy", "Copied to clipboard")

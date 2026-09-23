@@ -18,6 +18,8 @@ from PyQt6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
+from snipux import output as output_module
+from snipux import review as review_module
 from snipux import setup_desktop, shapes
 from snipux.design import tokens
 from snipux.marks import session_styles
@@ -1680,3 +1682,28 @@ class TestTheHighlighterSnapsToTextHere:
         # Image pixels: the line of text sits at roughly y=186 to y=205.
         assert 178 <= band.top() <= 190 and 200 <= band.bottom() <= 212
         assert band.left() <= 42
+
+
+class TestCopyGoesThroughOutput:
+    """Copy from this window used to call `QClipboard.setImage` itself.
+
+    That skipped `output.copy_image_to_clipboard`, which also settles the
+    clipboard and hands the image to `wl-copy` -- the only reason a copied
+    snip survives Snipux exiting on Wayland. Every other Copy in the app
+    went through it; this one silently did not.
+    """
+
+    def test_copy_uses_the_shared_clipboard_helper(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(review_module.output, "copy_image_to_clipboard", copied.append)
+        window = ReviewWindow(make_image(40, 30))
+
+        window.copy()
+
+        assert len(copied) == 1
+        assert copied[0].size() == window._canvas.rendered_image().size()
+
+    def test_the_helper_is_the_one_output_defines(self):
+        # Guards the import itself: a module-local rebinding would satisfy
+        # the test above while still bypassing wl-copy in the real app.
+        assert review_module.output is output_module
