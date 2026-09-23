@@ -352,6 +352,30 @@ class Platform(ABC):
         """
         return "Not supported on this platform yet"
 
+    def records_cursor(self) -> bool:
+        """Whether a recording here can be asked to include or leave out the
+        mouse pointer.
+
+        Chrome only, like `can_pin` and `records_audio`: it decides whether
+        the chooser row offers the toggle live or greyed with
+        `cursor_toggle_unavailable_reason()`, never what the recorder then
+        does with the answer.
+
+        Defaults to False, so a platform that has not thought about it does
+        not offer a control that silently does nothing -- which is exactly
+        what Settings did before this existed: a switch that read as
+        universal and only ever reached GNOME.
+        """
+        return False
+
+    def cursor_toggle_unavailable_reason(self) -> str:
+        """Why `records_cursor()` is False, for the greyed control to carry
+        -- the same rule as `pin_unavailable_reason()`: an option that
+        cannot work says why, because a user who cannot see the reason has
+        no way to tell a limit from a bug. Empty where it is available.
+        """
+        return "Not supported on this platform yet"
+
     def recognizes_text(self) -> bool:
         """Whether `recognize_text` can read text out of an image here.
 

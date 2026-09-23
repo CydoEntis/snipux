@@ -2120,3 +2120,26 @@ class TestWindowsKeepsItsOwnChromeOutOfARecording:
         # answer.
         assert linux.LinuxPlatform().exclude_from_capture(_FakeNativeWidget(42)) is False
         assert darwin.DarwinPlatform().exclude_from_capture(_FakeNativeWidget(42)) is False
+
+
+class TestRecordingTheCursorIsACapability:
+    """Whether a recording can be asked to include the pointer is a platform
+    question, so it is a pair on the seam -- can it, and if not, why not --
+    rather than a branch in the chooser. Settings had the switch on every
+    platform and it only ever reached GNOME.
+    """
+
+    def test_the_base_platform_says_no_and_says_why(self):
+        assert Platform.records_cursor(object()) is False
+        assert Platform.cursor_toggle_unavailable_reason(object())
+
+    def test_linux_can_because_gnome_takes_a_draw_cursor_option(self):
+        assert linux.LinuxPlatform().records_cursor() is True
+
+    def test_windows_cannot_and_says_what_it_does_instead(self):
+        windows_platform = windows.WindowsPlatform()
+
+        assert windows_platform.records_cursor() is False
+        # A reason a user can act on, not "unsupported": the pointer still
+        # appears, it just isn't a choice.
+        assert "records" in windows_platform.cursor_toggle_unavailable_reason()

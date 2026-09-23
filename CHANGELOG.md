@@ -7,6 +7,13 @@ use it; the commit history has the detail.
 
 ### Added
 
+- **Record the pointer, or don't -- from the row itself.** The chooser row's
+  record side now carries the flag beside Delay, so it is decided where the
+  recording is being set up rather than in Settings, where it was easy to
+  miss. Settings keeps the switch and the two stay in step. On Windows both
+  are greyed with the reason: its recorder has no cursor option at all, so
+  the switch there never did anything.
+
 - **"Check for updates" in the tray menu.** Snipux never checked before, so
   a new release went unnoticed unless you happened to visit the repository.
   It only ever asks when you pick it -- there is no check at startup, no

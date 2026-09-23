@@ -1715,6 +1715,18 @@ LAST_REGION_OFF_DESK = "Not on these monitors"
 
 HIDE_SENSITIVE_GLYPH = "eyeOff"
 
+# The record side's own flag: whether the pointer is filmed. `select` is the
+# cursor glyph -- the same artwork the app icon draws inside its marquee --
+# rather than a hand or a mouse, because what the toggle governs is the
+# pointer as it appears in the recording.
+RECORD_CURSOR_GLYPH = "select"
+# On/off wording, in the shape HIDE_SENSITIVE_HINT uses: keyed by the state
+# the flag is *in*, not the state clicking it would produce.
+RECORD_CURSOR_HINT = {
+    True: "The mouse pointer is in the recording -- click to leave it out",
+    False: "Leave the mouse pointer out of the recording",
+}
+
 # Tooltips. Qt's tooltips are unreliable on an always-on-top frameless
 # window, so the row also borrows the hint pill for these while hovered.
 MODE_CHIP_TOOLTIP = "What to capture"

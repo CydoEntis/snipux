@@ -1193,6 +1193,13 @@ class WindowsPlatform(Platform):
     def default_save_folder(self) -> Path:
         raise UnimplementedPlatformError(_PLATFORM_NAME, "default_save_folder")
 
+    def cursor_toggle_unavailable_reason(self) -> str:
+        """`records_cursor()` stays False here: `QScreenCapture` exposes no
+        cursor option of any kind, so there is nothing to wire a toggle to.
+        Whether the pointer appears is whatever Windows' own capture does.
+        """
+        return "Windows records whatever the capture shows"
+
     def build_capture_registry(self) -> BackendRegistry:
         return capture.build_windows_registry()
 

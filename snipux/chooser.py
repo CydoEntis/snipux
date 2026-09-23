@@ -507,6 +507,44 @@ class _HideFlag(_Flag):
         painter.end()
 
 
+class _CursorFlag(_Flag):
+    """Record the pointer, or leave it out. The record side's own flag,
+    where Hide sensitive is the stills side's.
+
+    On the row rather than only in Settings for the reason
+    docs/design/pre-snip-chooser.md gives for the Last-region preference:
+    "a preference nobody finds is a preference nobody has", and the row is
+    where the decision is already being made. Settings keeps the switch --
+    this writes the same stored value, so the two are never out of step.
+
+    Greyed rather than hidden where the platform cannot honour it
+    (`Platform.records_cursor`), carrying its reason: a control that
+    silently does nothing is what Settings had, and it reads as the app
+    being broken rather than the platform being limited.
+    """
+
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(tokens.RECORD_CURSOR_GLYPH, parent)
+        self.setFixedWidth(tokens.BarMetric.BTN)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._available and self._released_inside(event):
+            self._armed = not self._armed
+            self.update()
+            self.toggled.emit(self._armed)
+
+    def paintEvent(self, event) -> None:
+        metric = tokens.BarMetric
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._paint_ground(painter)
+        offset = (metric.BTN - metric.ICON) / 2
+        _draw_icon(painter, self._glyph, self._foreground(), offset, offset, metric.ICON)
+        painter.end()
+
+
 class _DelayFlag(_Flag):
     """Delay: a click advances through `tokens.DELAYS`. It shows its value
     only when one is set -- a countdown is the thing here that can surprise
@@ -805,8 +843,11 @@ class ChooserRow(_Surface):
         self.divider = _Divider(self)
         self.destination = _DestinationButton(self)
         self.hide_flag = _HideFlag()
+        self.cursor_flag = _CursorFlag()
         self.delay_flag = _DelayFlag()
-        self.flag_well = _Well(self.hide_flag, self.delay_flag, parent=self)
+        self.flag_well = _Well(
+            self.hide_flag, self.cursor_flag, self.delay_flag, parent=self
+        )
         for widget in (
             self.kind_well, self.mode_chip, self.divider, self.destination, self.flag_well
         ):
@@ -1031,6 +1072,8 @@ class Chooser(QWidget):
     delayChanged = pyqtSignal(str)
     reuseLastRegionChanged = pyqtSignal(bool)
     hideSensitiveChanged = pyqtSignal(bool)
+    # The record side's equivalent: whether the pointer is filmed.
+    recordCursorChanged = pyqtSignal(bool)
 
     def __init__(self, parent=None, *, screen_rect: QRectF | None = None, origin=None):
         super().__init__(parent)
@@ -1080,16 +1123,26 @@ class Chooser(QWidget):
         row.mode_chip.clicked.connect(self._toggle_menu)
         row.destination.clicked.connect(self.cycle_after)
         row.hide_flag.toggled.connect(self._on_hide_toggled)
+        row.cursor_flag.toggled.connect(self._on_cursor_toggled)
         row.delay_flag.clicked.connect(self.cycle_delay)
         self.tab.clicked.connect(self.reopen)
-        for control in (row.stills, row.record, row.destination, row.hide_flag, row.delay_flag):
+        for control in (
+            row.stills, row.record, row.destination,
+            row.hide_flag, row.cursor_flag, row.delay_flag,
+        ):
             control.hovered.connect(self._on_control_hovered)
 
+        self._record_cursor_reason = ""
         self._screen_rect = screen_rect
         self._origin = origin or QPoint(0, 0)
         self._refresh()
 
     # -- state -----------------------------------------------------------
+
+    @property
+    def record_cursor(self) -> bool:
+        """Whether the pointer will be filmed."""
+        return self.row.cursor_flag.is_armed()
 
     @property
     def mode(self) -> str:
@@ -1259,6 +1312,23 @@ class Chooser(QWidget):
         self.row.hide_flag.set_armed(on)
         self._refresh()
 
+    def set_record_cursor(self, on: bool) -> None:
+        """Seed the pointer flag from stored config. Never emits -- the
+        same split every other control here keeps between being told and
+        being clicked."""
+        self.row.cursor_flag.set_armed(on)
+        self._refresh()
+
+    def set_record_cursor_available(self, available: bool, reason: str = "") -> None:
+        """Say whether this platform can honour the flag at all. Greyed
+        with a reason rather than hidden, for the same reason Hide
+        sensitive is: a control that silently does nothing reads as the app
+        being broken, where a greyed one with a sentence reads as a
+        limit."""
+        self._record_cursor_reason = reason
+        self.row.cursor_flag.set_available(available)
+        self._refresh()
+
     def set_hide_sensitive_available(self, available: bool, reason: str = "") -> None:
         """Say whether this machine can read text out of a capture. Greyed
         with a reason rather than hidden, so a missing feature is not taken
@@ -1270,6 +1340,10 @@ class Chooser(QWidget):
     def _on_hide_toggled(self, on: bool) -> None:
         self._refresh()
         self.hideSensitiveChanged.emit(on)
+
+    def _on_cursor_toggled(self, on: bool) -> None:
+        self._refresh()
+        self.recordCursorChanged.emit(on)
 
     def set_record_after_default(self, after: str) -> None:
         """Seed what the record side opens on, from Settings. Applied on the
@@ -1494,6 +1568,11 @@ class Chooser(QWidget):
             return self._hide_sensitive_reason
         return tokens.HIDE_SENSITIVE_HINT[self.hide_sensitive]
 
+    def _cursor_tooltip(self) -> str:
+        if not self.row.cursor_flag.is_available():
+            return self._record_cursor_reason
+        return tokens.RECORD_CURSOR_HINT[self.row.cursor_flag.is_armed()]
+
     def _delay_tooltip(self) -> str:
         if self._delay == tokens.DELAY_DEFAULT:
             return tokens.DELAY_TOOLTIP_OFF
@@ -1508,6 +1587,8 @@ class Chooser(QWidget):
             return row.destination.glyph, self._destination_tooltip()
         if control is row.hide_flag:
             return tokens.HIDE_SENSITIVE_GLYPH, self._hide_tooltip()
+        if control is row.cursor_flag:
+            return tokens.RECORD_CURSOR_GLYPH, self._cursor_tooltip()
         return "timer", self._delay_tooltip()
 
     def _on_control_hovered(self, control: QWidget, hovered: bool) -> None:
@@ -1538,6 +1619,10 @@ class Chooser(QWidget):
         # no frozen frame to read.
         row.hide_flag.setVisible(stills)
         row.hide_flag.setToolTip(self._hide_tooltip())
+        # The mirror of the line above: the pointer flag is a recording
+        # question, and a still has no pointer in it to keep or drop.
+        row.cursor_flag.setVisible(not stills)
+        row.cursor_flag.setToolTip(self._cursor_tooltip())
         armed_delay = self._delay != tokens.DELAY_DEFAULT
         row.delay_flag.set_value(self._delay if armed_delay else "")
         row.delay_flag.setToolTip(self._delay_tooltip())
