@@ -37,6 +37,8 @@ from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import QApplication
 
+from snipux.design import tokens
+
 _HERE = Path(__file__).resolve().parent
 _CURSOR_SVG_PATH = _HERE.parent / "icons" / "select.svg"
 
@@ -47,7 +49,12 @@ SIZES = (16, 24, 32)
 
 # Sampled from snipux.png's own dashed marquee and cursor glow, so the
 # simplified mark reads as the same app rather than a re-invented palette.
-_MARQUEE_GREEN = QColor(96, 250, 70)
+# The app's own accent, not a green of its own: the icon used to be
+# #60fa46, a fifth green in a palette that already had four within a few
+# percent of each other. An icon that does not match the application it
+# opens is the one place the difference is seen side by side, in the task
+# bar and the title bar at once.
+_MARQUEE_GREEN = QColor(tokens.Color.ACCENT)
 _CURSOR_FILL = QColor(23, 22, 37)
 _CURSOR_OUTLINE = QColor(247, 248, 252)
 

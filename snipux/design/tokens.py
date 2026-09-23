@@ -82,6 +82,11 @@ class Color:
     # like.
     ACCENT          = "#a8e05f"
     ACCENT_FG       = "#15170e"   # text on accent
+    # The accent as *text* or a small glyph, where the full-strength fill
+    # would be too heavy to read against. Named here rather than in each
+    # family that wanted it: the overlay's bars, the player and Settings'
+    # status line are all saying the same thing with it.
+    ACCENT_SOFT     = "#c3e399"
 
     # Selection frame
     SEL_STROKE      = "#ffffff"   # at 92% alpha
@@ -418,20 +423,30 @@ class Win:
     TITLEBAR_ICON   = "#7c8494"
     CLOSE_HOVER     = "#c0392b"   # GNOME-ish red, white glyph
 
-    # Status semantics — used by the conflict check and the saved/dirty line
-    OK_FG           = "#a8c86a"
-    OK_BG           = "#a0c85a"   # at 10% alpha
+    # Status semantics — used by the conflict check and the saved/dirty line.
+    #
+    # The accent, not a green of their own. These were #a8c86a, #a0c85a and
+    # #9ec46a: three greens within a few percent of the accent and of each
+    # other, which read as an imprecise palette rather than as three
+    # meanings. "Success" and "the primary action" are the same green here;
+    # what separates them is weight and alpha, which is what the values
+    # below now say. A status that needed its own hue would be a warning or
+    # an error, and both of those have one.
+    OK_FG           = Color.ACCENT_SOFT   # accent as text, on a dark ground
+    OK_BG           = Color.ACCENT        # at 10% alpha
     OK_BG_ALPHA     = 0.10
-    OK_BORDER       = "#a0c85a"   # at 24% alpha
+    OK_BORDER       = Color.ACCENT        # at 24% alpha
     OK_BORDER_ALPHA = 0.24
-    OK_STRONG       = "#9ec46a"   # "Saved" tick
+    OK_STRONG       = Color.ACCENT        # "Saved" tick
     WARN_FG         = "#c8a54a"   # "Unsaved changes", "Edited — not saved"
     ERR_FG          = "#e8a5a5"
     ERR_BG          = "#c85050"   # at 12% alpha
     ERR_BG_ALPHA    = 0.12
     ERR_BORDER      = "#c85050"   # at 28% alpha
     ERR_BORDER_ALPHA = 0.28
-    PATH_FG         = "#c8d96a"   # filename preview, mono
+    # The filename preview under the Saving fields: an accent-coloured
+    # readout, so it is the accent rather than a fourth near-miss green.
+    PATH_FG         = Color.ACCENT_SOFT   # filename preview, mono
 
 
 class Gradient:
@@ -1048,7 +1063,7 @@ class FlowColor:
     # button is just a button that sometimes does something else.
     SPLIT_SEAM           = "#15170e"
     SPLIT_SEAM_ALPHA     = 0.22
-    ACCENT_SOFT          = "#c3e399"   # accent as TEXT or a small glyph
+    ACCENT_SOFT          = Color.ACCENT_SOFT   # accent as TEXT or a small glyph
     # The handoff gives this as "14-18% for an armed segment"; the prototype
     # spends the range on two different things, so it is two tokens here
     # rather than one that has to be right twice. .18 is the armed kind
@@ -1205,7 +1220,7 @@ class PlayerColor:
     TIME_FG          = "#e9edf3"
     TIME_TOTAL_FG    = "#6a6e76"
     ACCENT_ON_BG     = "#a8e05f"        # at 15%, loop/speed when engaged
-    ACCENT_ON_FG     = "#c3e399"
+    ACCENT_ON_FG     = Color.ACCENT_SOFT
     MENU_BG          = Surface.CHROME        # at 98%
 
     PAUSE_SCRIM      = Surface.SCRIM        # at 28%, over the frame while paused
@@ -1474,7 +1489,7 @@ class BarColor:
     ACCENT_FG            = "#15170e"
     SPLIT_SEAM           = "#15170e"
     SPLIT_SEAM_ALPHA     = 0.22
-    ACCENT_SOFT          = "#c3e399"   # accent as text or a small glyph
+    ACCENT_SOFT          = Color.ACCENT_SOFT   # accent as text or a small glyph
     ACCENT_WASH          = "#a8e05f"   # an armed flag's fill
     ACCENT_WASH_ALPHA    = 0.18
 
@@ -1508,8 +1523,8 @@ class BarColor:
     # The glyph a fill or line button draws its state in. The spec's is its
     # accent as a glyph, #eaff7a; this is ours, `FlowColor.ACCENT_SOFT`, for
     # the reason ACCENT above gives.
-    CYCLE_GLYPH          = "#c3e399"
-    CYCLE_GLYPH_WASH     = "#c3e399"   # "Outline and filled": the glyph's fill
+    CYCLE_GLYPH          = Color.ACCENT_SOFT
+    CYCLE_GLYPH_WASH     = Color.ACCENT_SOFT   # "Outline and filled": the glyph's fill
     CYCLE_GLYPH_WASH_ALPHA = 0.30
     SLIDER_TRACK         = "#ffffff"
     SLIDER_TRACK_ALPHA   = 0.20
@@ -1823,9 +1838,9 @@ class WatermarkColor:
 
     ON_BG            = "#a8e05f"   # at 18%
     ON_BG_ALPHA      = 0.18
-    ON_FG            = "#c3e399"
+    ON_FG            = Color.ACCENT_SOFT
     OFF_FG           = "#898e97"
-    NOTCH_ON         = "#c3e399"   # at 70%
+    NOTCH_ON         = Color.ACCENT_SOFT   # at 70%
     NOTCH_ON_ALPHA   = 0.70
     NOTCH_OFF        = "#898e97"   # at 55%
     NOTCH_OFF_ALPHA  = 0.55
@@ -1844,7 +1859,7 @@ class WatermarkColor:
     CORNER_FRAME     = "#ffffff"   # at 22%
     CORNER_FRAME_ALPHA = 0.22
     CORNER_DOT       = "#898e97"
-    CORNER_DOT_ON    = "#c3e399"
+    CORNER_DOT_ON    = Color.ACCENT_SOFT
 
     # The text mark: by default the spec's placeholder chip, light type on
     # a dark plate. The plate stays the default because a watermark lands
