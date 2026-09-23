@@ -33,10 +33,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QMouseEvent, QPainter
-from PyQt6.QtWidgets import QMenu, QPushButton, QWidget
+from PyQt6.QtGui import QCursor, QImage, QMouseEvent, QPainter
+from PyQt6.QtWidgets import QMenu, QPushButton, QToolTip, QWidget
 
-from . import output
+from . import output, setup_desktop
 from .design import tokens
 
 # How far in from an edge still counts as grabbing it, matched to
@@ -175,8 +175,23 @@ class PinWindow(QWidget):
     def copy(self) -> None:
         output.copy_image_to_clipboard(self._image)
 
-    def save(self) -> Path:
-        return output.save_image(self._image, Path.home() / "Pictures" / "snipux")
+    def save(self) -> Path | None:
+        """Write the pinned image into the configured save folder, and
+        return where it went -- or None when the write failed.
+
+        `load_save_folder()` rather than a hardcoded `~/Pictures/snipux`:
+        the two agree until someone changes it in Settings, and a pin that
+        saved somewhere other than every other Save in the app was a
+        surprise with no reason behind it.
+        """
+        try:
+            return output.save_image(self._image, setup_desktop.load_save_folder())
+        except OSError as exc:
+            # No status line and no toast in this window -- it is a bare
+            # pinned image -- so the one place a failure can be said is the
+            # tooltip the pointer is already near.
+            QToolTip.showText(QCursor.pos(), f"Could not save: {exc}", self)
+            return None
 
     # -- hover close affordance -------------------------------------------
 
