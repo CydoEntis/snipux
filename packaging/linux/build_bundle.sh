@@ -10,16 +10,40 @@
 #
 #     ./packaging/linux/build_bundle.sh && ./dist/snipux/snipux --list-backends
 
+set -e
+
 if [ "$(uname -s)" != "Linux" ]; then
     echo "error: this builds the Linux bundle and must run on Linux (found: $(uname -s))" >&2
     echo "Build it in the Ubuntu VM, or let .github/workflows/release.yml do it." >&2
     exit 1
 fi
 
-set -e
-
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$_here/../.." && pwd)"
+
+# PyInstaller bundles binaries for the machine it runs on, so the artifact's
+# architecture is a fact about this build rather than a choice the packagers
+# get to make. Named once here because the two of them spell it differently
+# (dpkg says amd64, AppImage says x86_64): hardcoding either would let a
+# bundle built on an arm64 machine ship labelled x86_64, which dpkg installs
+# happily and which then fails to launch on the user's machine -- an
+# install-time failure, exactly what the preflights below exist to prevent.
+MACHINE_ARCH="$(uname -m)"
+case "$MACHINE_ARCH" in
+    x86_64)
+        DEB_ARCH="amd64"
+        APPIMAGE_ARCH="x86_64"
+        ;;
+    aarch64)
+        DEB_ARCH="arm64"
+        APPIMAGE_ARCH="aarch64"
+        ;;
+    *)
+        echo "error: snipux has no packaging for $MACHINE_ARCH yet." >&2
+        echo "Add it to the case in packaging/linux/build_bundle.sh." >&2
+        exit 1
+        ;;
+esac
 
 # __init__.py, not pyproject.toml: it is the version the running app reports,
 # and read with a regex rather than by importing snipux, which would need

@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
-# Builds dist/snipux_<version>_amd64.deb: the same PyInstaller bundle as the
+# Builds dist/snipux_<version>_<arch>.deb: the same PyInstaller bundle as the
 # AppImage, laid out for dpkg.
 #
 #     ./packaging/linux/build_deb.sh
 #     sudo apt install ./dist/snipux_1.0.0_amd64.deb
+#
+# **Uninstalling wants `snipux --remove` first.** dpkg removes what this
+# package put on disk, and nothing else -- but Snipux's first launch writes
+# a user-level .desktop entry, an autostart entry, hicolor icons and a GNOME
+# keybinding into the user's own home, all pointing at /opt/snipux/snipux.
+# A maintainer script cannot reach into another user's home to clean those
+# up, so `apt remove` on its own leaves a dead launcher and a shortcut that
+# does nothing. `--remove` is the counterpart that clears them (prerm says
+# so too, for anyone who finds out the hard way).
 #
 # The bundle goes under /opt/snipux rather than /usr/lib/snipux because it
 # carries its own copy of Qt: /opt is where the Filesystem Hierarchy Standard
@@ -30,7 +39,7 @@ if ! command -v dpkg-deb >/dev/null 2>&1; then
 fi
 
 STAGE="$REPO_ROOT/build/deb"
-OUTPUT="$REPO_ROOT/dist/snipux_${SNIPUX_VERSION}_amd64.deb"
+OUTPUT="$REPO_ROOT/dist/snipux_${SNIPUX_VERSION}_${DEB_ARCH}.deb"
 
 echo "Staging the package tree in $STAGE..."
 rm -rf "$STAGE"
@@ -50,6 +59,14 @@ ln -s ../../opt/snipux/snipux "$STAGE/usr/bin/snipux"
 # autostart entry, neither of which a package can write for a user.
 sed 's|^Exec=__SNIPUX_LAUNCHER__$|Exec=/usr/bin/snipux|' \
     "$REPO_ROOT/snipux/snipux.desktop" > "$STAGE/usr/share/applications/snipux.desktop"
+
+# sed reports success when it matches nothing, so an unsubstituted template
+# would otherwise ship as a launcher whose Exec line is the literal
+# placeholder -- a package that installs cleanly and cannot start.
+if ! grep -q '^Exec=/usr/bin/snipux$' "$STAGE/usr/share/applications/snipux.desktop"; then
+    echo "error: the Exec placeholder in snipux/snipux.desktop was not substituted." >&2
+    exit 1
+fi
 
 # Icon=snipux is a theme name, so every vendored size goes into the system
 # hicolor tree -- the same sizes and the same destination shape that
@@ -73,7 +90,7 @@ Package: snipux
 Version: $SNIPUX_VERSION
 Section: graphics
 Priority: optional
-Architecture: amd64
+Architecture: $DEB_ARCH
 Maintainer: Cody <cydoentis@gmail.com>
 Homepage: https://github.com/CydoEntis/snipux
 Depends: libc6, libegl1, libgl1, libxkbcommon-x11-0, libxcb-cursor0, libdbus-1-3, libpulse0, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0
@@ -105,6 +122,24 @@ fi
 exit 0
 POSTINST
 chmod 755 "$STAGE/DEBIAN/postinst"
+
+# A package cannot clean another user's home, so the one thing it can do is
+# say so before the files go -- while `snipux --remove` still exists to run.
+# Printed on removal only: an upgrade runs prerm too, and telling someone
+# mid-upgrade to undo their desktop integration would be wrong.
+cat > "$STAGE/DEBIAN/prerm" <<'PRERM'
+#!/bin/sh
+set -e
+
+if [ "$1" = "remove" ]; then
+    echo "Note: run 'snipux --remove' as each user who ran Snipux to clear"
+    echo "their desktop entry, autostart entry, icons and Ctrl+Alt+S shortcut."
+    echo "Removing this package does not reach into a user's home directory."
+fi
+
+exit 0
+PRERM
+chmod 755 "$STAGE/DEBIAN/prerm"
 
 cat > "$STAGE/DEBIAN/postrm" <<'POSTRM'
 #!/bin/sh

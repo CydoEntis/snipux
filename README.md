@@ -111,6 +111,10 @@ there is no second command to run. Two things worth knowing:
   re-point the shortcut.
 - **Updating is downloading the newer file**, not `snipux --update`: the
   `.deb` installs over the old one, and the AppImage replaces it.
+- **Uninstalling the `.deb` wants `snipux --remove` first.** `apt remove`
+  clears what the package installed, but the desktop entry, autostart entry,
+  icons and Ctrl+Alt+S shortcut that the first launch wrote live in your own
+  home directory, where no package can reach them.
 
 The rest of this section installs Snipux as a Python package instead, which
 is what `snipux --update` upgrades in place.

@@ -16,7 +16,24 @@ _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_here/build_bundle.sh"
 
 APPDIR="$REPO_ROOT/build/AppDir"
-OUTPUT="$REPO_ROOT/dist/Snipux-$SNIPUX_VERSION-x86_64.AppImage"
+OUTPUT="$REPO_ROOT/dist/Snipux-$SNIPUX_VERSION-$APPIMAGE_ARCH.AppImage"
+
+# appimagetool is fetched and then executed, so it is build input like any
+# dependency: pinned to a tagged release and checked against a recorded
+# digest rather than tracking `continuous`, which would mean two builds of
+# the same snipux commit could be made by two different tools. The checksum
+# is per architecture; adding one means recording its digest here.
+APPIMAGETOOL_VERSION="1.9.1"
+case "$APPIMAGE_ARCH" in
+    x86_64)
+        APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+        ;;
+    *)
+        echo "error: no recorded appimagetool checksum for $APPIMAGE_ARCH." >&2
+        echo "Record one in packaging/linux/build_appimage.sh before building." >&2
+        exit 1
+        ;;
+esac
 
 echo "Assembling $APPDIR..."
 rm -rf "$APPDIR"
@@ -46,7 +63,14 @@ chmod +x "$APPDIR/AppRun"
 # /tmp/.mount_* path would be wrong by the time anything read it.
 sed 's|^Exec=__SNIPUX_LAUNCHER__$|Exec=snipux|' \
     "$REPO_ROOT/snipux/snipux.desktop" > "$APPDIR/snipux.desktop"
-cp "$APPDIR/snipux.desktop" "$APPDIR/usr/bin/snipux.desktop"
+
+# sed reports success when it matches nothing, so an unsubstituted template
+# would otherwise ship as a launcher whose Exec line is the literal
+# placeholder -- a build that "succeeded" and an app that cannot start.
+if ! grep -q '^Exec=snipux$' "$APPDIR/snipux.desktop"; then
+    echo "error: the Exec placeholder in snipux/snipux.desktop was not substituted." >&2
+    exit 1
+fi
 
 # Icon=snipux in that entry is a *theme* name, so the sized PNGs go into a
 # hicolor tree inside the image as well as the 256px copy appimagetool reads
@@ -63,12 +87,21 @@ done
 # appimagetool itself is an AppImage, fetched once into build/ rather than
 # vendored: it is a build tool, not a dependency of snipux, and nothing about
 # the artifact it writes depends on which build it was made with.
-TOOL="$REPO_ROOT/build/appimagetool-x86_64.AppImage"
+TOOL="$REPO_ROOT/build/appimagetool-$APPIMAGETOOL_VERSION-$APPIMAGE_ARCH.AppImage"
 if [ ! -x "$TOOL" ]; then
-    echo "Fetching appimagetool..."
+    echo "Fetching appimagetool $APPIMAGETOOL_VERSION..."
     mkdir -p "$REPO_ROOT/build"
-    curl -fsSL -o "$TOOL" \
-        https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+    curl -fsSL -o "$TOOL.part" \
+        "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$APPIMAGE_ARCH.AppImage"
+    # Verified before it is made executable, and written under .part until
+    # it passes, so a failed or tampered download cannot be left behind as a
+    # runnable file that the next build would trust.
+    echo "$APPIMAGETOOL_SHA256  $TOOL.part" | sha256sum --check --status || {
+        echo "error: the downloaded appimagetool does not match its recorded checksum." >&2
+        rm -f "$TOOL.part"
+        exit 1
+    }
+    mv "$TOOL.part" "$TOOL"
     chmod +x "$TOOL"
 fi
 
@@ -79,7 +112,7 @@ rm -f "$OUTPUT"
 # normally mount itself through FUSE, which a CI container and a fresh
 # Ubuntu install (no libfuse2 since 22.04) do not have. Extracting instead is
 # slower and needs nothing.
-APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 "$TOOL" "$APPDIR" "$OUTPUT"
+APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$APPIMAGE_ARCH" "$TOOL" "$APPDIR" "$OUTPUT"
 
 echo
 echo "Built $OUTPUT"

@@ -7,3 +7,9 @@
 # these files, so that failure would surface as a release that builds no
 # artifacts.
 *.sh text eol=lf
+
+# The .desktop template is rewritten by the packaging scripts with a sed
+# anchored to a line end (`^Exec=__SNIPUX_LAUNCHER__$`). A CRLF working tree
+# defeats that anchor, and sed reports success when it matches nothing -- so
+# the artifact would ship a launcher whose Exec line is the placeholder.
+*.desktop text eol=lf
