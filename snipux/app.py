@@ -669,7 +669,7 @@ def run_update(runner=None) -> int:
                 "Download the newest Snipux AppImage and run it -- it "
                 "replaces this copy."
             )
-        elif sys.platform.startswith("linux"):
+        elif platform.is_linux():
             replacement = (
                 "Download the newest snipux .deb and install it over this "
                 "one: sudo apt install ./snipux_<version>_amd64.deb"
