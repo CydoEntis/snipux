@@ -75,6 +75,44 @@ class TestFindConsoleScript:
 
         assert found == exe.resolve()
 
+    def test_an_appimage_names_the_file_rather_than_its_mount(self, tmp_path, monkeypatch):
+        # An AppImage is frozen too, but its sys.executable lives inside the
+        # squashfs AppRun mounts for that one run, under a /tmp path with a
+        # fresh random suffix every launch and no existence in between. The
+        # .desktop entry and the GNOME shortcut written from it both outlive
+        # the process, so what they must name is the .AppImage file the user
+        # keeps -- which AppRun exports as $APPIMAGE.
+        mount = tmp_path / ".mount_snipuxAbCdEf" / "usr" / "bin"
+        mount.mkdir(parents=True)
+        inside_the_mount = mount / "snipux"
+        inside_the_mount.write_text("")
+        appimage = tmp_path / "Snipux-1.0.0-x86_64.AppImage"
+        appimage.write_text("")
+        monkeypatch.setattr(setup_desktop.sys, "executable", str(inside_the_mount))
+        monkeypatch.setattr(setup_desktop.sys, "frozen", True, raising=False)
+        monkeypatch.setenv("APPIMAGE", str(appimage))
+
+        found = setup_desktop.find_console_script()
+
+        assert found == appimage.resolve()
+
+    def test_an_appimage_variable_naming_nothing_falls_back(self, tmp_path, monkeypatch):
+        # $APPIMAGE inherited from some other process, or naming a file
+        # since deleted or moved, must lose to the bundle that is
+        # demonstrably running: an entry pointing at a file that is not
+        # there is worse than one pointing at a mount that at least exists
+        # while it is being written.
+        exe = tmp_path / "snipux"
+        exe.write_text("")
+        monkeypatch.setattr(setup_desktop.sys, "executable", str(exe))
+        monkeypatch.setattr(setup_desktop.sys, "frozen", True, raising=False)
+        monkeypatch.setenv("APPIMAGE", str(tmp_path / "moved-away.AppImage"))
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+
+        found = setup_desktop.find_console_script()
+
+        assert found == exe.resolve()
+
     def test_prefers_the_script_next_to_sys_executable(self, tmp_path, monkeypatch):
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()

@@ -25,28 +25,18 @@ from pathlib import Path
 # defined in the namespace a .spec is exec'd in -- used instead of
 # `Path(__file__)` because a .spec is exec'd as a string, not imported as a
 # module, and so has no `__file__` of its own to read.
-_REPO_ROOT = Path(SPECPATH).resolve().parent.parent
+_PACKAGING_DIR = Path(SPECPATH).resolve().parent
+_REPO_ROOT = _PACKAGING_DIR.parent
 _SNIPUX_DIR = _REPO_ROOT / "snipux"
 
 # One (source, destination) pair per asset directory PACKAGE_DIR-based code
 # reads at runtime -- design/__init__.py's icons/fonts, app.py's tray/window
-# logo, and setup_desktop.py's .desktop template (SNX-73), even though only
-# Linux's install_desktop_integration() ever actually renders it; bundling
-# it unconditionally here is simpler and cheaper than teaching this spec
-# which platform it is building for, and it is a handful of bytes of text.
-_datas = [
-    (str(_SNIPUX_DIR / "design" / "icons"), "snipux/design/icons"),
-    (str(_SNIPUX_DIR / "design" / "logo"), "snipux/design/logo"),
-    (str(_SNIPUX_DIR / "snipux.desktop"), "snipux"),
-]
-
-# design/fonts/ is empty in this handoff (see design/__init__.py's own
-# docstring) -- bundling an empty directory is a no-op PyInstaller doesn't
-# need telling about, so this only adds the pair once there is something in
-# it for font_families() to find.
-_fonts_dir = _SNIPUX_DIR / "design" / "fonts"
-if _fonts_dir.is_dir() and any(_fonts_dir.iterdir()):
-    _datas.append((str(_fonts_dir), "snipux/design/fonts"))
+# logo, and setup_desktop.py's .desktop template (SNX-73). That list lives in
+# packaging/bundle_data.py because the Linux spec needs exactly the same one,
+# and an asset that reaches one bundle but not the other fails on a user's
+# machine rather than at build time.
+sys.path.insert(0, str(_PACKAGING_DIR))
+from bundle_data import bundle_datas  # noqa: E402
 
 # build.ps1 writes this from setup_desktop.render_ico() before invoking
 # PyInstaller, the same vendored PNGs install_icons()/_write_icon() already
@@ -62,7 +52,7 @@ a = Analysis(
     [str(_SNIPUX_DIR / "__main__.py")],
     pathex=[str(_REPO_ROOT)],
     binaries=[],
-    datas=_datas,
+    datas=bundle_datas(_REPO_ROOT),
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

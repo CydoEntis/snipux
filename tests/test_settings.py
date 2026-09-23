@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import QAbstractButton, QApplication, QLabel, QMessageBox
 
 from snipux import platform, player, settings, setup_desktop
 from snipux.design import tokens
+from snipux import settings as settings_module
 from snipux.settings import (
     ConflictBanner,
     EntryList,
@@ -1936,3 +1937,55 @@ class TestTheWatermarkPage:
             if (c := image.pixelColor(x, y)).red() > 200 and c.green() < 60 and c.blue() < 60
         )
         assert reds > 10
+
+
+class TestASaveThatCannotWrite:
+    """Every `setup_desktop.save_*` returns False rather than raising when
+    the write fails. Settings discarded all ~24 of those returns, then set
+    itself clean and closed -- so a read-only config directory lost every
+    setting and said "Everything saved" while doing it.
+    """
+
+    @staticmethod
+    def _window(tmp_path, monkeypatch):
+        window = SettingsWindow(config_dir=tmp_path)
+        warned = []
+        monkeypatch.setattr(
+            settings_module.QMessageBox,
+            "warning",
+            lambda *args, **kwargs: warned.append(args[1:3]),
+        )
+        return window, warned
+
+    def test_the_window_stays_open_and_dirty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            settings_module.setup_desktop, "save_save_folder", lambda *a, **k: False
+        )
+        window, warned = self._window(tmp_path, monkeypatch)
+        window._dirty = True
+
+        window._save()
+
+        assert window.isVisible() is False or not window.isHidden()
+        assert window._dirty is True, "a failed save must not look saved"
+        assert warned, "the user has to be told the write failed"
+
+    def test_it_names_the_file_it_could_not_write(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            settings_module.setup_desktop, "save_tray_toggles", lambda *a, **k: False
+        )
+        window, warned = self._window(tmp_path, monkeypatch)
+
+        window._save()
+
+        assert warned
+        assert "config.json" in warned[0][1]
+
+    def test_a_save_that_works_still_closes_and_clears(self, tmp_path, monkeypatch):
+        window, warned = self._window(tmp_path, monkeypatch)
+        window._dirty = True
+
+        window._save()
+
+        assert not warned
+        assert window._dirty is False

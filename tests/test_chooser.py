@@ -14,11 +14,15 @@ Every size here is logical. `grab()` returns physical pixels, so a correct
 import math
 
 import pytest
+import time
+
 from PyQt6.QtCore import QEvent, QPoint, QPointF, QRectF, QSizeF, Qt
 from PyQt6.QtGui import QColor, QEnterEvent, QFontMetricsF, QImage, QPainter, QRegion
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
 
+from snipux import chooser as chooser_module
+from snipux import flowbars as flowbars_module
 from snipux.chooser import (
     _AFTER_ROWS,
     _MenuRow,
@@ -1600,3 +1604,65 @@ class TestPlacement:
 
         row = chooser.row.geometry()
         assert abs(row.x() + row.width() / 2 - 960) <= 1
+
+
+class TestClickingTheChipClosesTheMenu:
+    """Reported from a real Windows session: the mode menu could not be
+    closed by clicking the chip that opened it -- it flickered and came
+    straight back.
+
+    The popup holds the mouse, so the dismissing press never reaches the
+    chip while the menu is up. Qt closes the popup first and the chip sees
+    the press afterwards, by which time the chooser has already forgotten
+    the menu was open -- so the click reads as "open it", not "close it".
+    That order is what these tests reproduce: `closed` fires, and only then
+    does the chip's click arrive.
+    """
+
+    @staticmethod
+    def _over_the_chip(monkeypatch, chooser):
+        chip = chooser.row.mode_chip
+        centre = chip.mapToGlobal(QPoint(chip.width() // 2, chip.height() // 2))
+        monkeypatch.setattr(flowbars_module.QCursor, "pos", staticmethod(lambda: centre))
+
+    def test_the_dismissing_press_does_not_reopen_it(self, monkeypatch):
+        chooser = Chooser(parent=None)
+        chooser._toggle_menu()
+        assert chooser._menu is not None
+        self._over_the_chip(monkeypatch, chooser)
+
+        # What Qt does, in this order: the popup closes itself on the press,
+        # then that same press is delivered to the chip underneath.
+        chooser._on_menu_closed()
+        chooser._toggle_menu()
+
+        assert chooser._menu is None, "the menu reopened instead of staying closed"
+
+    def test_a_later_click_on_the_same_chip_still_opens_it(self, monkeypatch):
+        chooser = Chooser(parent=None)
+        chooser._toggle_menu()
+        self._over_the_chip(monkeypatch, chooser)
+        chooser._on_menu_closed()
+        # Past the guard's window: a deliberate second click, not the press
+        # that closed the menu arriving late.
+        monkeypatch.setattr(
+            chooser._menu_guard, "_closed_at", time.monotonic() - 5.0, raising=False
+        )
+
+        chooser._toggle_menu()
+
+        assert chooser._menu is not None
+
+    def test_a_press_somewhere_else_does_not_block_the_chip(self, monkeypatch):
+        chooser = Chooser(parent=None)
+        chooser._toggle_menu()
+        # Dismissed by a click well away from the chip -- on the frozen
+        # frame, say. The next click on the chip is a real one.
+        monkeypatch.setattr(
+            flowbars_module.QCursor, "pos", staticmethod(lambda: QPoint(4000, 4000))
+        )
+        chooser._on_menu_closed()
+
+        chooser._toggle_menu()
+
+        assert chooser._menu is not None

@@ -173,3 +173,40 @@ class TestContextMenu:
         direct_path = window.save()
 
         assert QImage(str(direct_path)) == image
+
+
+class TestSaveHonoursTheConfiguredFolder:
+    """Pin's Save wrote to a hardcoded ~/Pictures/snipux, so a folder
+    chosen in Settings applied to every Save in the app except this one --
+    and a failed write raised `OSError` straight into the Qt event loop
+    from a context-menu action, with the user told nothing.
+    """
+
+    def test_it_saves_where_settings_says(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            pin_module.setup_desktop, "load_save_folder", lambda cd=None: tmp_path
+        )
+        window = PinWindow(make_image(60, 40), QRect(0, 0, 60, 40))
+
+        path = window.save()
+
+        assert path is not None
+        assert path.parent == tmp_path
+
+    def test_a_failed_write_is_reported_not_raised(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            pin_module.setup_desktop, "load_save_folder", lambda cd=None: tmp_path
+        )
+
+        def refuse(_image, _directory=None):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pin_module.output, "save_image", refuse)
+        said = []
+        monkeypatch.setattr(
+            pin_module.QToolTip, "showText", lambda _pos, text, _w=None: said.append(text)
+        )
+        window = PinWindow(make_image(60, 40), QRect(0, 0, 60, 40))
+
+        assert window.save() is None
+        assert said and "disk full" in said[0]

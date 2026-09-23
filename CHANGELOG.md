@@ -5,6 +5,63 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **A `.deb` and an AppImage on the Releases page.** Installing Snipux on
+  Linux no longer means having Python, pipx or a virtual environment: the
+  `.deb` installs with `sudo apt install ./snipux_<version>_amd64.deb`, and
+  the AppImage runs from wherever you save it after a `chmod +x`. Both carry
+  their own Python and Qt, so neither cares what the distribution ships.
+  Both are built for every release alongside the wheel.
+
+### Changed
+
+- **One colour for the whole application.** The overlay's bars, menus and
+  hint pills were a warm grey while Settings, review and the player were a
+  cool one, so the two halves read as different applications. They are one
+  family now. Nothing changed weight -- every surface kept the exact
+  lightness it had, so the bars still sit over a screenshot the way they did.
+
+### Fixed
+
+- **Clicking a menu's own control closes it again.** Every dropdown --
+  capture mode, recording delay, audio, destination, the player's speed and
+  export menus -- reopened instead of closing when you clicked the control
+  that opened it.
+- **Menus stay on screen.** The recording delay menu opened downward from
+  a bar low on the screen, so its rows ran off the bottom edge and under
+  the taskbar. Every menu now flips to the other side when there is no
+  room, and stays inside the screen's edges.
+- **An instant snip shows no annotation toolbar.** It finishes the moment
+  you let go, so the toolbar only ever appeared for the length of the drag
+  and then disappeared; the capture region is what you see now.
+
+- **A copy from the review window now survives Snipux closing.** On Wayland
+  it went through Qt's clipboard alone, so quitting took the image with it.
+- **"Copy file" in the player pastes into Nautilus.** It was missing the one
+  clipboard flavour GNOME's file manager reads, and left spaces in the
+  filename unencoded -- which every default filename has.
+- **Settings no longer says "Everything saved" when it saved nothing.** If
+  the config file cannot be written, the window stays open and says so
+  instead of closing on a success message.
+- **A snip that cannot be written says why.** A full disk or a read-only
+  folder used to toast "Saved to ..." and list a file that was never there;
+  the image is still handed to Open/Review so it isn't lost with the write.
+- **Save uses the folder you chose in Settings.** The overlay and a pinned
+  snip both wrote to `~/Pictures/snipux` whatever the setting said.
+- **The player shows the recording's real frame rate**, and its arrow keys
+  step one of that recording's frames -- a 60 fps clip was labelled 30 fps
+  and stepped two frames at a time.
+- **Paths read the same way throughout on Windows** -- one of them mixed
+  `/` and `\` in a single line.
+- **`snipux --update` tells you how to update the build you actually
+  have.** Every standalone build was told to download `snipux.exe` — on
+  Linux, a file that does not exist.
+- **An AppImage binds its shortcut to a path that survives the run.** The
+  desktop entry and the Ctrl+Alt+S shortcut named the temporary location the
+  AppImage unpacks itself to, which is gone the moment it exits, so both
+  would have stopped working the first time you closed it.
+
 ## 1.0.0 — 2026-09-21
 
 The first release since 0.8.2. 0.9.0 was prepared but never published,

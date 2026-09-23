@@ -75,7 +75,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from snipux.flowbars import CountdownNumeral, FlowMenu, RecordingBar, RegionFrame
+from snipux.flowbars import (
+    CountdownNumeral,
+    FlowMenu,
+    MenuReopenGuard,
+    RecordingBar,
+    RegionFrame,
+)
 from snipux.capture import (
     XwininfoWindowGeometryProvider,
     BackendRegistry,
@@ -658,10 +664,28 @@ def run_update(runner=None) -> int:
     filesystem.
     """
     if getattr(sys, "frozen", False):
-        print(
-            "This is a standalone build, which pip cannot update. Download "
-            "the newest snipux.exe and run it -- it replaces this copy."
-        )
+        # Three standalone builds now, and each is replaced differently --
+        # telling a Linux user to download snipux.exe is worse than saying
+        # nothing. $APPIMAGE is AppRun's own marker for the AppImage case
+        # (setup_desktop.find_console_script() reads it for the same
+        # reason); anything else frozen on Linux came from the .deb, which
+        # is the one route with a package manager to hand the file to.
+        if os.environ.get("APPIMAGE"):
+            replacement = (
+                "Download the newest Snipux AppImage and run it -- it "
+                "replaces this copy."
+            )
+        elif platform.is_linux():
+            replacement = (
+                "Download the newest snipux .deb and install it over this "
+                "one: sudo apt install ./snipux_<version>_amd64.deb"
+            )
+        else:
+            replacement = (
+                "Download the newest snipux.exe and run it -- it replaces "
+                "this copy."
+            )
+        print(f"This is a standalone build, which pip cannot update. {replacement}")
         return 1
 
     command = [sys.executable, "-m", "pip", "install", "--upgrade", UPDATE_TARGET]
@@ -1202,6 +1226,10 @@ class AppController:
         # The open dropdown, held so Python does not collect a parentless
         # popup out from under the user mid-choice.
         self._flow_menu: FlowMenu | None = None
+        # One guard for all three bar menus: it blocks only the control
+        # the pointer is over, so clicking Audio while Delay is open
+        # still swaps them in one press. See MenuReopenGuard.
+        self._flow_menu_guard = MenuReopenGuard()
         # Per-session, like mode and destination: a snip's own override must
         # not write back to the stored preferences (the handoff's state
         # model says so in as many words).
@@ -2181,8 +2209,15 @@ class AppController:
         if bar is None or self._armed_recording is None:
             return
         _rect, current, _after, _path = self._armed_recording
+        if self._flow_menu_guard.blocks_reopen(bar.delay_control()):
+            # The press that dismissed this menu, arriving at the
+            # control underneath. See MenuReopenGuard.
+            return
         rows = [(value, value, "", "", "") for value in design.tokens.DELAYS]
-        menu = FlowMenu(rows, current, design.tokens.FlowMetric.MENU_W_DELAY)
+        menu = FlowMenu(
+            rows, current, design.tokens.FlowMetric.MENU_W_DELAY,
+            guard=self._flow_menu_guard,
+        )
         menu.glass.set_host(self._overlay)
 
         def choose(value: str) -> None:
@@ -2196,8 +2231,12 @@ class AppController:
 
         menu.chosen.connect(choose)
         control = bar.delay_control()
-        menu.open_below(QRect(control.mapToGlobal(control.rect().topLeft()),
-                              control.size()))
+        # open_clear_of, like the audio and destination menus beside it:
+        # open_below put the rows off the bottom of the screen whenever the
+        # recording bar sat low, which is where it sits for a region near
+        # the bottom edge.
+        menu.open_clear_of(QRect(control.mapToGlobal(control.rect().topLeft()),
+                                 control.size()))
         self._flow_menu = menu
 
     def _open_audio_menu(self) -> None:
@@ -2212,13 +2251,20 @@ class AppController:
         bar = self._recording_hud
         if bar is None:
             return
+        if self._flow_menu_guard.blocks_reopen(bar.audio_control()):
+            # The press that dismissed this menu, arriving at the
+            # control underneath. See MenuReopenGuard.
+            return
         rows = [
             (identifier, label, note, "",
              platform.current.audio_source_unavailable_reason(identifier))
             for identifier, _icon, label, note in design.tokens.AUDIO_SOURCES
         ]
-        menu = FlowMenu(rows, self._recording_audio,
-                        design.tokens.FlowMetric.MENU_W_AUDIO)
+        menu = FlowMenu(
+            rows, self._recording_audio,
+            design.tokens.FlowMetric.MENU_W_AUDIO,
+            guard=self._flow_menu_guard,
+        )
         menu.glass.set_host(self._overlay)
 
         def choose(value: str) -> None:
@@ -2255,9 +2301,14 @@ class AppController:
             (identifier, label, note, "", gif_reason if identifier == "gif" else "")
             for identifier, _glyph, label, note in design.tokens.RECORD_DESTINATIONS
         ]
+        if self._flow_menu_guard.blocks_reopen(bar.destination_control()):
+            # The press that dismissed this menu, arriving at the
+            # control underneath. See MenuReopenGuard.
+            return
         menu = FlowMenu(
             rows, current,
             FlowMenu.fitting_width(rows, design.tokens.FlowMetric.MENU_W_DEST),
+            guard=self._flow_menu_guard,
         )
         menu.glass.set_host(self._overlay)
 

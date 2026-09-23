@@ -22,6 +22,7 @@ from PyQt6.QtCore import QPoint, QPointF, QSize, Qt
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication
 
+from snipux import player as _player_module
 from snipux.design import tokens
 from snipux.player import (
     EXPORT_UNAVAILABLE,
@@ -558,3 +559,84 @@ class TestTheCutClauseOnlyAppearsWhenItHasAFigure:
         label = _TrimReadout()
         label.set_state(TrimState(duration=2.4, start=0.11, end=2.05))
         assert "cut" not in label.text()
+
+
+class TestTheFileSOwnFrameRate:
+    """`tokens.PLAYER_FPS` is the rate Snipux *records* at, not the rate of
+    whatever file is open. `_on_metadata` reads the real one into
+    `_source_fps`, and the exporter already honours it -- but frame stepping
+    used the constant, so arrow keys moved two frames at a time through a
+    60 fps recording, on exactly the files someone would trim precisely.
+    """
+
+    @staticmethod
+    def _stub(source_fps):
+        from snipux import player
+
+        class FakePlayer:
+            def __init__(self):
+                self.position_ms = None
+
+            def pause(self):
+                pass
+
+            def setPosition(self, ms):  # noqa: N802 - Qt spelling
+                self.position_ms = ms
+
+        class Stub:
+            _source_fps = source_fps
+            player = FakePlayer()
+            state = TrimState(duration=10.0, start=0.0, end=10.0, position=1.0)
+            rail = type("Rail", (), {"sync": lambda self: None})()
+            _sync_transport = lambda self: None
+            step_frame = _player_module.PlayerWindow.step_frame
+
+        return Stub()
+
+    def test_a_sixty_fps_recording_steps_one_sixtieth(self):
+        stub = self._stub(60.0)
+
+        stub.step_frame(1)
+
+        assert stub.state.position == pytest.approx(1.0 + 1 / 60)
+
+    def test_a_thirty_fps_recording_steps_one_thirtieth(self):
+        stub = self._stub(30.0)
+
+        stub.step_frame(1)
+
+        assert stub.state.position == pytest.approx(1.0 + 1 / 30)
+
+    def test_stepping_back_stops_at_the_trim_start(self):
+        stub = self._stub(60.0)
+        stub.state.start = 1.0
+
+        stub.step_frame(-1)
+
+        assert stub.state.position == pytest.approx(1.0)
+
+
+class TestCopyFileGoesThroughOutput:
+    """The player built its own QMimeData, which omitted the
+    `x-special/gnome-copied-files` flavour `output.copy_file_to_clipboard`
+    sets -- the only one Nautilus reads for a paste -- and left the URI
+    unencoded. Every default filename has spaces in it, so a copied
+    recording never pasted into a GNOME file manager.
+    """
+
+    def test_copy_file_calls_the_shared_helper(self, tmp_path, monkeypatch):
+        from snipux import player
+
+        recording = tmp_path / "Recording from 2026-08-28 11-40-21.webm"
+        recording.write_bytes(b"stand-in")
+        copied = []
+        monkeypatch.setattr(player.output, "copy_file_to_clipboard", copied.append)
+
+        class Stub:
+            path = recording
+            _report = lambda self, message, ok=False: None
+            copy_file = player.PlayerWindow.copy_file
+
+        Stub().copy_file()
+
+        assert copied == [recording]
