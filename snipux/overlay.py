@@ -4802,6 +4802,19 @@ class OverlayWindow(QWidget):
             platform.current.text_recognition_unavailable_reason(),
         )
         self._chooser.hideSensitiveChanged.connect(setup_desktop.save_hide_sensitive)
+        # The record side's own flag, seeded and persisted identically: the
+        # stored value is the one Settings edits, so the row and Settings can
+        # never disagree about it. Greyed with its reason where the platform
+        # cannot honour it -- Windows records whatever QScreenCapture shows,
+        # which is why the Settings switch there had no effect at all.
+        self._chooser.set_record_cursor(setup_desktop.load_recording_draw_cursor())
+        self._chooser.set_record_cursor_available(
+            platform.current.records_cursor(),
+            platform.current.cursor_toggle_unavailable_reason(),
+        )
+        self._chooser.recordCursorChanged.connect(
+            setup_desktop.save_recording_draw_cursor
+        )
         # Copy text (#82): the same seam, greyed the same way, on the bar
         # rather than the chooser -- see FloatingBar's own docstring.
         self._bar.set_copy_text_available(
@@ -8518,11 +8531,14 @@ class OverlayWindow(QWidget):
             return
         painter.save()
         painter.setClipRect(QRectF(self._selection))
-        step_counter = 0
+        # No renumbering here. A StepMarker's number is assigned once, at
+        # creation, by `next_step_number` -- which is what makes "delete step
+        # 2 and 1/3 keep their own numbers" fall out for free, as shapes.py
+        # says in so many words. This loop used to overwrite `.number` by
+        # list order on every repaint, and `Shape` is a plain dataclass, so
+        # the write stuck: `rendered_image()` exported the renumbered badges
+        # and the documented behaviour did not survive its own paint.
         for shape in self._marks:
-            if isinstance(shape, StepMarker):
-                step_counter += 1
-                shape.number = step_counter
             if isinstance(shape, ObscuringShape):
                 # Already baked into Layer 1 by `_base_layer_image` above,
                 # in list order alongside every other obscuring mark --

@@ -573,9 +573,15 @@ class TestEachControlShowsItsState:
 
 
 def _expected_row_width(label, delay="", hide=True):
-    """The row's width from its tokens and its measured text, worked out
-    apart from the widget's own arithmetic. The label is measured in the
-    face that resolves here, since IBM Plex is not bundled (#63)."""
+    """`hide` now means "one flag beside Delay" -- Hide sensitive on the
+    stills side, Record the pointer on the record side. The two are the same
+    width and only one is ever shown, so the row measures the same either
+    way.
+
+    The width comes from the tokens and the measured text, worked out apart
+    from the widget's own arithmetic. The label is measured in the face that
+    resolves here, since IBM Plex is not bundled (#63).
+    """
     chip = (
         2 * METRIC.BORDER + METRIC.CHIP_PAD_L + METRIC.CHIP_ICON + METRIC.CHIP_GAP
         + QFontMetricsF(_font(FONT.CHIP)).horizontalAdvance(label)
@@ -629,13 +635,21 @@ class TestTheRowsSize:
         width = chooser.row.grab().deviceIndependentSize().width()
         assert 0 <= width - _expected_row_width("Region", delay="10s") < 2
 
-    def test_the_record_side_has_no_hide_flag_to_make_room_for(self):
+    def test_the_record_side_swaps_one_flag_for_the_other(self):
+        """Hide sensitive goes (a recording has no frozen frame to read) and
+        Record the pointer takes its place, so the row is the same width on
+        both sides rather than shrinking as it used to."""
         chooser = Chooser(parent=None)
 
         chooser.set_kind("record")
 
         width = chooser.row.grab().deviceIndependentSize().width()
-        assert 0 <= width - _expected_row_width("Region", hide=False) < 2
+        assert 0 <= width - _expected_row_width("Region") < 2
+        # isVisibleTo, not isVisible: an unshown row's children all report
+        # False, which would make both halves of this pass for the wrong
+        # reason.
+        assert not chooser.row.hide_flag.isVisibleTo(chooser.row)
+        assert chooser.row.cursor_flag.isVisibleTo(chooser.row)
 
 
 class TestEachControlRendersItsState:
@@ -1666,3 +1680,93 @@ class TestClickingTheChipClosesTheMenu:
         chooser._toggle_menu()
 
         assert chooser._menu is not None
+
+
+class TestRecordingThePointer:
+    """The record side's own flag. It was a Settings switch only, which is
+    the home docs/design/pre-snip-chooser.md already rejected once for the
+    Last-region preference: "a preference nobody finds is a preference
+    nobody has". The row is where the decision is being made.
+    """
+
+    def test_it_is_only_on_the_record_side(self):
+        chooser = Chooser(parent=None)
+
+        assert not chooser.row.cursor_flag.isVisibleTo(chooser.row)
+
+        chooser.set_kind("record")
+
+        assert chooser.row.cursor_flag.isVisibleTo(chooser.row)
+
+    def test_hide_sensitive_is_the_stills_sides_equivalent(self):
+        # The two never show at once: one asks about a frozen frame, the
+        # other about a moving one.
+        chooser = Chooser(parent=None)
+        chooser.set_kind("record")
+
+        assert not chooser.row.hide_flag.isVisibleTo(chooser.row)
+
+    def test_clicking_it_reports_the_new_state(self):
+        chooser = Chooser(parent=None)
+        chooser.set_kind("record")
+        chooser.set_record_cursor(True)
+        reported = []
+        chooser.recordCursorChanged.connect(reported.append)
+
+        _click(chooser.row.cursor_flag)
+
+        assert reported == [False]
+        assert chooser.record_cursor is False
+
+    def test_seeding_it_never_reports(self):
+        # Being told what the stored value is is not a change to it -- the
+        # same split every other control on this row keeps.
+        chooser = Chooser(parent=None)
+        reported = []
+        chooser.recordCursorChanged.connect(reported.append)
+
+        chooser.set_record_cursor(True)
+
+        assert reported == []
+        assert chooser.record_cursor is True
+
+    def test_where_the_platform_cannot_honour_it_the_flag_is_greyed(self):
+        chooser = Chooser(parent=None)
+        chooser.set_kind("record")
+
+        chooser.set_record_cursor_available(False, "Windows records whatever it shows")
+
+        assert not chooser.row.cursor_flag.is_available()
+
+    def test_a_greyed_flag_refuses_the_click_rather_than_lying(self):
+        chooser = Chooser(parent=None)
+        chooser.set_kind("record")
+        chooser.set_record_cursor(True)
+        chooser.set_record_cursor_available(False, "Windows records whatever it shows")
+        reported = []
+        chooser.recordCursorChanged.connect(reported.append)
+
+        _click(chooser.row.cursor_flag)
+
+        assert reported == []
+        assert chooser.record_cursor is True
+
+    def test_the_hint_pill_carries_the_reason_it_is_greyed(self):
+        # The handoff's rule: an option that cannot work says why. A switch
+        # that silently does nothing is what Settings had on Windows.
+        chooser = Chooser(parent=None)
+        chooser.set_kind("record")
+        chooser.set_record_cursor_available(False, "Windows records whatever it shows")
+
+        _hover(chooser.row.cursor_flag)
+
+        assert "Windows records whatever it shows" in chooser.hint.text
+
+    def test_the_hint_pill_says_what_a_click_would_do(self):
+        chooser = Chooser(parent=None)
+        chooser.set_kind("record")
+        chooser.set_record_cursor(True)
+
+        _hover(chooser.row.cursor_flag)
+
+        assert chooser.hint.text == tokens.RECORD_CURSOR_HINT[True]

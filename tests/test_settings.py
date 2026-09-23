@@ -1989,3 +1989,30 @@ class TestASaveThatCannotWrite:
 
         assert not warned
         assert window._dirty is False
+
+
+class TestTheCursorSwitchIsHonestAboutThePlatform:
+    """It was a plain switch everywhere and only ever reached GNOME: on
+    Windows it moved, saved, and changed nothing about the recording. The
+    row's own flag (chooser.py) is greyed with a reason there, and this has
+    to say the same thing or the two surfaces disagree.
+    """
+
+    def test_it_is_live_where_the_platform_can_honour_it(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings_module.platform.current, "records_cursor", lambda: True)
+
+        window = SettingsWindow(config_dir=tmp_path)
+
+        assert window._draw_cursor.switch.isEnabled()
+
+    def test_it_is_greyed_where_it_cannot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings_module.platform.current, "records_cursor", lambda: False)
+        monkeypatch.setattr(
+            settings_module.platform.current,
+            "cursor_toggle_unavailable_reason",
+            lambda: "Windows records whatever the capture shows",
+        )
+
+        window = SettingsWindow(config_dir=tmp_path)
+
+        assert not window._draw_cursor.switch.isEnabled()

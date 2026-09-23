@@ -1851,12 +1851,19 @@ class SettingsWindow(WinWindow):
         )
         self._frame_rate.spin.valueChanged.connect(lambda _v: self._mark_dirty())
 
+        # The same flag the chooser row now carries, reading and writing the
+        # same stored value -- so the two can never disagree. Greyed here
+        # where the platform cannot honour it, rather than left as a switch
+        # that moves and changes nothing, which is what this was on Windows.
+        records_cursor = platform.current.records_cursor()
         self._draw_cursor = SwitchRow(
             "Show the cursor in recordings",
-            "Composites the mouse pointer into the video. Windows has no "
-            "such toggle, so this only affects GNOME recordings.",
+            "Composites the mouse pointer into the video."
+            if records_cursor
+            else platform.current.cursor_toggle_unavailable_reason(),
             setup_desktop.load_recording_draw_cursor(self._config_dir),
         )
+        self._draw_cursor.switch.setEnabled(records_cursor)
         self._draw_cursor.switch.toggled.connect(lambda _c: self._mark_dirty())
 
         # Recording's destination, folder and filename. None of these had a

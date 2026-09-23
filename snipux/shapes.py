@@ -304,17 +304,25 @@ class Highlighter(Shape):
         return path.simplified()
 
     def draw(self, painter: QPainter) -> None:
-        if self.bands:
-            painter.setOpacity(design.tokens.Metric.HIGHLIGHT_ALPHA)
-            painter.fillPath(self._band_path(), self.colour)
-            painter.setOpacity(1.0)
+        # save()/restore(), not setOpacity(1.0) on the way out: resetting to
+        # 1.0 asserts what the painter's opacity *was*, and a caller that had
+        # set its own -- `Watermark.paint` multiplies into one -- lost it for
+        # every shape drawn after the first highlighter. Restoring hands back
+        # whatever was there, which is what this docstring already claimed.
+        if len(self.points) < 2 and not self.bands:
             return
-        if len(self.points) < 2:
-            return
-        painter.setPen(self._pen())
-        painter.setOpacity(design.tokens.Metric.HIGHLIGHT_ALPHA)
-        painter.drawPolyline(QPolygonF(self.points))
-        painter.setOpacity(1.0)
+        painter.save()
+        try:
+            painter.setOpacity(
+                painter.opacity() * design.tokens.Metric.HIGHLIGHT_ALPHA
+            )
+            if self.bands:
+                painter.fillPath(self._band_path(), self.colour)
+            else:
+                painter.setPen(self._pen())
+                painter.drawPolyline(QPolygonF(self.points))
+        finally:
+            painter.restore()
 
     def hit_test(self, point: QPointF) -> bool:
         if self.bands:
@@ -1377,24 +1385,36 @@ def render(base_image: QImage, shapes: list[Shape]) -> QImage:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     spotlights = [shape for shape in shapes if isinstance(shape, Spotlight)]
     spotlights_done = False
-    for shape in shapes:
-        if isinstance(shape, Spotlight):
-            if spotlights_done:
+    # try/finally, not a plain sequence: one shape raising out of draw() --
+    # ObscuringShape.draw() does so by design, and a shape built by replace()
+    # can dodge _check_style -- would otherwise leave this painter open on
+    # `result`, and the caller reads `result` straight back. CLAUDE.md names
+    # that as the rule which has already cost one bug: a pixmap read while a
+    # painter is still active is not guaranteed to show what was painted.
+    try:
+        for shape in shapes:
+            if isinstance(shape, Spotlight):
+                if spotlights_done:
+                    continue
+                painter.end()
+                result = Spotlight.apply_all(result, spotlights)
+                painter = QPainter(result)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                spotlights_done = True
                 continue
+            if isinstance(shape, ObscuringShape):
+                painter.end()
+                result = shape.apply(result)
+                painter = QPainter(result)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                continue
+            shape.draw(painter)
+    finally:
+        # `painter` is rebound by the branches above, so this ends whichever
+        # one is live -- and isActive() because those branches end it before
+        # rebinding, so an exception between the two leaves nothing to close.
+        if painter.isActive():
             painter.end()
-            result = Spotlight.apply_all(result, spotlights)
-            painter = QPainter(result)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            spotlights_done = True
-            continue
-        if isinstance(shape, ObscuringShape):
-            painter.end()
-            result = shape.apply(result)
-            painter = QPainter(result)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            continue
-        shape.draw(painter)
-    painter.end()
     return result
 
 

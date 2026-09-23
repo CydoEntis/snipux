@@ -4581,10 +4581,15 @@ class TestAppControllerTrayMenu:
         # tray menu for, and it must not be below Quit. Discard recording
         # (recording.md ticket 9) sits after it, disabled until a
         # recording is actually active -- see TestAppControllerDiscard.
+        # "Check for updates" sits directly above Quit: it is the least
+        # frequent thing in this menu and the only one that is not about
+        # the snip in front of you, so it belongs at the bottom -- but
+        # above Quit, which stays last.
         assert [action.text() for action in controller._tray_icon.contextMenu().actions()] == [
             "Snip",
             "Settings...",
             "Discard recording",
+            "Check for updates",
             "Quit",
         ]
 
@@ -6672,3 +6677,189 @@ class TestTheUpdateCommand:
         # not quietly become the exception.
         with pytest.raises(SystemExit):
             app.main(["--update", "--setup"])
+
+
+class TestAFailedStartAlwaysClearsTheChrome:
+    """The red outline and the "Starting" pill go up *before* the backend is
+    asked to record, because starting one is a blocking round trip and the
+    screen was otherwise blank for a third of a second.
+
+    Only `RecordingError` was caught around that call, so anything else
+    escaping left the outline and the pill on screen for the rest of the
+    session, over a recording that was not running, with no way to dismiss
+    either. `_RecorderStarter.run` catches bare `Exception` and re-raises
+    whatever it caught, so "anything else" is reachable.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    def _fail_with(self, controller, monkeypatch, error):
+        def boom(_rect, _path):
+            raise error
+
+        monkeypatch.setattr(controller, "_start_recorder_responsively", boom)
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        return said
+
+    def test_an_unexpected_error_still_takes_the_outline_down(
+        self, make_controller, monkeypatch
+    ):
+        controller = self._controller(make_controller)
+        said = self._fail_with(controller, monkeypatch, RuntimeError("the encoder died"))
+
+        controller._on_recording_requested(QRectF(10, 20, 120, 90), "No delay")
+        controller._start_armed_recording()
+
+        assert not controller._region_frame.is_exposed(), "the red outline was left up"
+        assert controller._recording_hud is None, "the Starting pill was left up"
+        assert said and "the encoder died" in said[0]
+
+    def test_a_recording_error_still_reads_as_its_own_message(
+        self, make_controller, monkeypatch
+    ):
+        controller = self._controller(make_controller)
+        said = self._fail_with(
+            controller, monkeypatch, RecordingError("the display is locked")
+        )
+
+        controller._on_recording_requested(QRectF(10, 20, 120, 90), "No delay")
+        controller._start_armed_recording()
+
+        # A RecordingError is already a sentence written for the user, so it
+        # is reported as-is rather than wrapped in "Could not start".
+        assert said == ["the display is locked"]
+
+
+class TestCheckingForUpdates:
+    """Nothing checks on a timer or at startup -- this only ever runs
+    because someone picked it from the tray. Before it existed there was no
+    way to learn a release had happened short of visiting the repository,
+    which is how everyone on 1.0.0 would have stayed there.
+    """
+
+    def _controller(self, make_controller, monkeypatch):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        return controller, said
+
+    def _answer(self, controller, said, latest):
+        """Drive the reply the worker thread would deliver, without one."""
+        controller._on_update_checked(latest)
+        return said[-1]
+
+    def test_a_newer_version_says_how_to_get_it(self, make_controller, monkeypatch):
+        controller, said = self._controller(make_controller, monkeypatch)
+
+        message = self._answer(controller, said, "99.0.0")
+
+        assert "99.0.0" in message
+        assert "--update" in message
+
+    def test_a_frozen_build_is_sent_to_the_releases_page(self, make_controller, monkeypatch):
+        # pip cannot upgrade an exe, an AppImage or a .deb, so telling that
+        # user to run `snipux --update` would be useless -- the same split
+        # run_update already makes.
+        controller, said = self._controller(make_controller, monkeypatch)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+        message = self._answer(controller, said, "99.0.0")
+
+        assert "Releases" in message
+        assert "--update" not in message
+
+    def test_being_up_to_date_says_so(self, make_controller, monkeypatch):
+        controller, said = self._controller(make_controller, monkeypatch)
+
+        message = self._answer(controller, said, app.__version__)
+
+        assert app.__version__ in message
+        assert "newest" in message
+
+    def test_an_older_release_is_not_reported_as_an_update(self, make_controller, monkeypatch):
+        controller, said = self._controller(make_controller, monkeypatch)
+
+        message = self._answer(controller, said, "0.0.1")
+
+        assert "newest" in message
+
+    def test_a_check_that_could_not_run_says_that_instead(self, make_controller, monkeypatch):
+        controller, said = self._controller(make_controller, monkeypatch)
+
+        message = self._answer(controller, said, None)
+
+        assert "Could not check" in message
+
+    def test_the_tray_item_is_wired_to_it(self, make_controller, monkeypatch):
+        controller, _said = self._controller(make_controller, monkeypatch)
+        action = getattr(controller, "update_action", None)
+        if action is None:
+            # No system tray on this machine, so there is no menu at all --
+            # the same condition every other tray test here skips on.
+            pytest.skip("no system tray, so no menu to click")
+        # The menu connected the bound method when it was built, so
+        # replacing the attribute now would not intercept it -- what proves
+        # the wiring is that triggering the action gets as far as saying it
+        # is checking.
+        started = []
+
+        class FakeCheck:
+            class finished:
+                @staticmethod
+                def connect(_slot):
+                    pass
+
+            def __init__(self, opener=None):
+                started.append(opener)
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(app.updates, "UpdateCheck", FakeCheck)
+
+        action.trigger()
+
+        assert started, "the tray item did not reach check_for_updates"
+        assert _said[0].startswith("Checking")
+
+    def test_the_check_never_reaches_the_network_here(self, make_controller, monkeypatch):
+        """The injected opener is the whole point: a test that asked GitHub
+        would answer differently on every run and fail without a
+        connection."""
+        controller, said = self._controller(make_controller, monkeypatch)
+        started = []
+
+        class FakeCheck:
+            def __init__(self, opener=None):
+                started.append(opener)
+
+            finished = None
+
+            def start(self):
+                pass
+
+        # The real UpdateCheck starts a thread; what this test is about is
+        # that the opener it was handed is the one that would reach the
+        # network, never the module's own.
+        class _Signal:
+            @staticmethod
+            def connect(_slot):
+                pass
+
+        FakeCheck.finished = _Signal()
+        monkeypatch.setattr(app.updates, "UpdateCheck", FakeCheck)
+        sentinel = lambda _url: b"{}"
+
+        controller.check_for_updates(opener=sentinel)
+
+        assert started == [sentinel]
+        assert said[0].startswith("Checking")

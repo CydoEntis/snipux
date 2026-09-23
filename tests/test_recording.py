@@ -2666,3 +2666,63 @@ class TestPulseAudioCaptureStartTime:
             reader.join(timeout=1)
 
         assert capture.started_at() is None
+
+
+class TestWindowsRecorderUnwindsAFailedStart:
+    """A start that raises had already set a capture running, told a
+    recorder to record, and left the file it opened behind. Only the worker
+    thread was being stopped, so the rest survived the failure: frames still
+    arriving, and a sizeable file at the path the user was told their
+    recording would be -- unfinalised, so unplayable.
+    """
+
+    def test_a_failed_region_start_stops_the_capture(self, tmp_path):
+        path = tmp_path / "recording.mp4"
+        path.write_bytes(b"partially written")
+        backend = _windows_backend(
+            recorder_factory=lambda: FakeRecorder(fail_message="could not start")
+        )
+
+        with pytest.raises(RuntimeError):
+            backend.start(QRectF(0, 0, 40, 30), str(path))
+
+        assert not path.exists(), "the unfinalised file was left behind"
+
+    def test_a_failed_full_screen_start_stops_the_capture(self, tmp_path):
+        path = tmp_path / "recording.mp4"
+        path.write_bytes(b"partially written")
+        backend = _windows_backend(
+            recorder_factory=lambda: FakeRecorder(fail_message="could not start")
+        )
+
+        with pytest.raises(RuntimeError):
+            backend.start(None, str(path))
+
+        assert not path.exists()
+
+
+class TestWindowsPauseIsVerifiedOnBothPaths:
+    """`QMediaRecorder.pause()` is documented as best-effort and may
+    silently do nothing. The full-screen path read `recorderState()` back;
+    the region path returned True unchecked even when it had also paused a
+    real recorder for the audio track -- so the bar showed paused while the
+    microphone kept recording.
+    """
+
+    def test_a_refused_pause_with_audio_reports_failure(self, monkeypatch, tmp_path):
+        backend = _windows_backend(
+            recorder_factory=lambda: FakeRecorder(can_pause=False),
+            audio_input_factory=FakeAudioInput,
+        )
+        backend.set_audio_source(recording.AUDIO_MIC)
+        backend.start(QRectF(0, 0, 40, 30), str(tmp_path / "r.mp4"))
+
+        assert backend.pause() is False, "a refused pause must not report success"
+
+    def test_a_pause_with_no_audio_still_succeeds(self, tmp_path):
+        backend = _windows_backend(recorder_factory=lambda: FakeRecorder(can_pause=False))
+        backend.start(QRectF(0, 0, 40, 30), str(tmp_path / "r.mp4"))
+
+        # No recorder pause is involved without audio: the worker simply
+        # stops forwarding frames, which cannot be refused.
+        assert backend.pause() is True

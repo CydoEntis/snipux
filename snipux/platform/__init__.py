@@ -141,10 +141,11 @@ class Platform(ABC):
         platform inherits unless it overrides this.
 
         `WindowsPlatform` is the one override today: a portable, single-
-        file `snipux.exe` (the only Windows distribution route -- SNX-104
-        dropped the Inno Setup installer that Smart App Control was
-        blocking outright) has no package manager behind it at all, so it
-        has to make that guarantee about itself. `app._become_resident()`
+        file `snipux.exe` -- the route for everyone the installer cannot
+        serve, since Smart App Control blocks an unsigned one outright --
+        has no package manager behind it at all, so it has to make that
+        guarantee about itself. Run *from* the installer it is a no-op,
+        because that installs to the very path this would copy to. `app._become_resident()`
         calls this once, on every launch
         that becomes the resident instance, before it does anything that
         might point a shortcut at this process's own, possibly-about-to-
@@ -349,6 +350,30 @@ class Platform(ABC):
         why, the same as `audio_unavailable_reason()` and
         `text_recognition_unavailable_reason()`. Empty when pinning is
         available.
+        """
+        return "Not supported on this platform yet"
+
+    def records_cursor(self) -> bool:
+        """Whether a recording here can be asked to include or leave out the
+        mouse pointer.
+
+        Chrome only, like `can_pin` and `records_audio`: it decides whether
+        the chooser row offers the toggle live or greyed with
+        `cursor_toggle_unavailable_reason()`, never what the recorder then
+        does with the answer.
+
+        Defaults to False, so a platform that has not thought about it does
+        not offer a control that silently does nothing -- which is exactly
+        what Settings did before this existed: a switch that read as
+        universal and only ever reached GNOME.
+        """
+        return False
+
+    def cursor_toggle_unavailable_reason(self) -> str:
+        """Why `records_cursor()` is False, for the greyed control to carry
+        -- the same rule as `pin_unavailable_reason()`: an option that
+        cannot work says why, because a user who cannot see the reason has
+        no way to tell a limit from a bug. Empty where it is available.
         """
         return "Not supported on this platform yet"
 

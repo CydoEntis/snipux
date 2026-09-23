@@ -17,6 +17,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QApplication
 
+from snipux import shapes
 from snipux.capture import Frame
 from snipux.design.tokens import (
     DASH_CYCLE,
@@ -2388,3 +2389,71 @@ class TestSnappedHighlighter:
         # The band's middle, (50, 27) on screen, is (80, 34) in the export.
         assert result.pixel(80, 34) != BACKGROUND
         assert result.pixel(4, 4) == BACKGROUND
+
+
+class TestRenderNeverLeavesAPainterOpen:
+    """CLAUDE.md's one Qt rule, and the one that has already cost a bug: a
+    pixmap read while a painter is still active is not guaranteed to show
+    what was painted. `render()` rebinds its painter several times and had
+    no try/finally, so a shape raising out of draw() left one open on the
+    image the caller then reads.
+    """
+
+    def _base(self):
+        image = QImage(40, 30, QImage.Format.Format_RGB32)
+        image.fill(0xFF202020)
+        return image
+
+    def test_a_raising_shape_does_not_leave_the_painter_active(self):
+        @dataclass
+        class Exploding(Shape):
+            def draw(self, painter):
+                raise RuntimeError("boom")
+
+            def hit_test(self, point):
+                return False
+
+        base = self._base()
+        with pytest.raises(RuntimeError):
+            render(base, [Exploding(colour=QColor("#ffffff"), stroke_width=1.0)])
+
+        # The proof: a fresh painter can claim the image. Qt refuses a
+        # second painter on a device that already has an active one.
+        probe = QPainter()
+        assert probe.begin(base), "a painter was left open on the image"
+        probe.end()
+
+    def test_a_normal_render_still_returns_a_finished_image(self):
+        base = self._base()
+        pen = Pen(colour=QColor("#ff0000"), stroke_width=3.0,
+                  points=[QPointF(2, 2), QPointF(20, 20)])
+
+        out = render(base, [pen])
+
+        probe = QPainter()
+        assert probe.begin(out)
+        probe.end()
+
+
+class TestHighlighterRestoresOpacity:
+    """The class docstring promised opacity never bleeds past its own
+    draw(). It set 1.0 on the way out instead of restoring, so a caller that
+    had its own opacity -- Watermark.paint multiplies into one -- lost it
+    for every shape after the first highlighter.
+    """
+
+    def test_the_callers_opacity_survives(self):
+        image = QImage(40, 30, QImage.Format.Format_RGB32)
+        image.fill(0xFF000000)
+        painter = QPainter(image)
+        painter.setOpacity(0.5)
+        highlighter = Highlighter(
+            colour=QColor("#ffff00"), stroke_width=4.0,
+            points=[QPointF(2, 2), QPointF(20, 20)],
+        )
+
+        highlighter.draw(painter)
+        left_with = painter.opacity()
+        painter.end()
+
+        assert left_with == pytest.approx(0.5)

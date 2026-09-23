@@ -1528,6 +1528,35 @@ class WindowsRecorderBackend(RecordingBackend):
             self._start_region(rect, path)
         return path
 
+    def _unwind_failed_start(self, screen_capture, recorder, path: str) -> None:
+        """Put back what a failed start had already set in motion.
+
+        A start that raises leaves three things behind if nobody unwinds
+        them: a QScreenCapture still active and delivering frames, a
+        QMediaRecorder that was told to record, and the file it had already
+        opened at `path`. That file is the worst of the three -- Media
+        Foundation writes its moov atom on stop, so an abandoned one is a
+        sizeable unplayable stub sitting exactly where the user was told
+        their recording would be.
+
+        Every step is best-effort and reported rather than raised: this
+        runs on the failure path, and a cleanup that raises would replace
+        the real error with its own. `RecorderRegistry.start()` is waiting
+        to try the next backend with the first error in hand.
+        """
+        for label, step in (
+            ("stop the capture", lambda: screen_capture.setActive(False)),
+            ("stop the recorder", lambda: recorder.stop()),
+        ):
+            try:
+                step()
+            except (RuntimeError, AttributeError) as exc:  # pragma: no cover - Qt teardown
+                print(f"Note: could not {label} after a failed start: {exc}")
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"Note: could not remove the unfinished recording at {path}: {exc}")
+
     def _start_full_screen(self, path: str) -> None:
         session = self._capture_session_factory()
         screen_capture = self._screen_capture_factory()
@@ -1548,6 +1577,7 @@ class WindowsRecorderBackend(RecordingBackend):
         recorder.record()
 
         if errors:
+            self._unwind_failed_start(screen_capture, recorder, path)
             raise RuntimeError(f"qt-native: {errors[0]}")
 
         self._audio_input = audio_input
@@ -1648,6 +1678,14 @@ class WindowsRecorderBackend(RecordingBackend):
         recorder.record()
 
         if errors:
+            # Everything this method started, unwound in reverse -- the
+            # worker thread was the only one being stopped, which left an
+            # active QScreenCapture delivering frames to a recorder nobody
+            # would stop, and a file at `path` that Media Foundation had
+            # opened and never finalised: no moov atom, so unplayable and
+            # zero use to anyone who found it. GnomeScreencastBackend's
+            # _start_piece already unwinds this way.
+            self._unwind_failed_start(screen_capture, recorder, path)
             worker_thread.quit()
             worker_thread.wait()
             raise RuntimeError(f"qt-native: {errors[0]}")
@@ -1679,7 +1717,17 @@ class WindowsRecorderBackend(RecordingBackend):
         if self._worker is not None:
             self._worker.pause()
             if self._audio_input is not None:
+                # Verified for the same reason the full-screen path below
+                # verifies: with audio the recorder is genuinely paused, not
+                # merely starved of frames, and Qt's pause() is documented as
+                # best-effort. Returning True unchecked showed the bar as
+                # paused while the microphone kept recording -- which is the
+                # one thing worse than a pause that refuses.
                 self._recorder.pause()
+                return (
+                    self._recorder.recorderState()
+                    == QMediaRecorder.RecorderState.PausedState
+                )
             return True
         if self._recorder is not None:
             self._recorder.pause()

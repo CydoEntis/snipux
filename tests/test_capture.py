@@ -2569,3 +2569,41 @@ class TestWindowsActiveWindow:
         monkeypatch.setattr(sys, "platform", "linux")
 
         assert capture.WindowsWindowGeometryProvider().active_window() is None
+
+
+class TestTheHoverPathQueriesCannotHang:
+    """`window_at`/`window_named_at` run from mouseMoveEvent while Window
+    mode is armed -- on the UI thread, on every cache miss. Without a
+    timeout an X server that stops answering wedges the pointer mid-drag
+    rather than merely finding no windows. Every other X11 query in the
+    module already passed one.
+    """
+
+    def _run_recording(self, monkeypatch):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command[0], kwargs.get("timeout")))
+            raise OSError("not really running this")
+
+        monkeypatch.setattr(capture.subprocess, "run", fake_run)
+        monkeypatch.setattr(capture.shutil, "which", lambda name: f"/usr/bin/{name}")
+        return calls
+
+    def test_wmctrl_is_given_a_timeout(self, monkeypatch):
+        calls = self._run_recording(monkeypatch)
+        provider = capture.X11WindowGeometryProvider()
+
+        provider.list_windows()
+
+        assert calls, "wmctrl was never run"
+        assert all(timeout is not None for _name, timeout in calls), calls
+
+    def test_xwininfo_is_given_a_timeout(self, monkeypatch):
+        calls = self._run_recording(monkeypatch)
+        provider = capture.XwininfoWindowGeometryProvider()
+
+        provider.list_windows()
+
+        assert calls, "xwininfo was never run"
+        assert all(timeout is not None for _name, timeout in calls), calls

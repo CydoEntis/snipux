@@ -5,6 +5,53 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **A Windows installer, and `winget install snipux`.** Download
+  `snipux-setup-<version>.exe` from the Releases page: it installs without an
+  admin prompt, shows up in Add/Remove Programs, and starts Snipux when it
+  finishes. The portable `snipux.exe` is still there and still works -- it is
+  what to use if Smart App Control refuses the installer, since both are
+  unsigned. An old 0.1.0 install from the installer Snipux used to ship is
+  removed automatically if you still have one.
+
+- **Record the pointer, or don't -- from the row itself.** The chooser row's
+  record side now carries the flag beside Delay, so it is decided where the
+  recording is being set up rather than in Settings, where it was easy to
+  miss. Settings keeps the switch and the two stay in step. On Windows both
+  are greyed with the reason: its recorder has no cursor option at all, so
+  the switch there never did anything.
+
+- **"Check for updates" in the tray menu.** Snipux never checked before, so
+  a new release went unnoticed unless you happened to visit the repository.
+  It only ever asks when you pick it -- there is no check at startup, no
+  timer, and no traffic of any kind otherwise -- and it tells you how to
+  update the build you are actually running.
+
+### Changed
+
+- **One green, not five.** The accent, the "free to register" tick, the
+  "Saved" tick, the filename preview and the app icon were five greens
+  within a few percent of each other, which read as an imprecise palette
+  rather than five meanings. They are all the accent now -- what separates
+  them is weight, not hue -- and the icon matches the app it opens.
+
+### Fixed
+
+- **A recording that fails to start no longer leaves the red outline on
+  screen.** It could sit there over a recording that was not running, with
+  no way to dismiss it, until Snipux was killed.
+- **Pause really pauses when a recording has audio on Windows.** The bar
+  could show paused while the microphone kept recording.
+- **A failed recording start cleans up after itself**, instead of leaving an
+  unplayable part-file where your recording was meant to be.
+- **Step numbers stay put.** Deleting step 2 left 1 and 3 alone on screen but
+  the export renumbered them anyway.
+- **Hovering windows in Window mode cannot freeze the pointer** if the X
+  server stops answering.
+- **A highlighter no longer changes the opacity of marks drawn after it.**
+- **An annotation that fails to draw cannot corrupt the exported image.**
+
 ## 1.0.1 — 2026-09-22
 
 ### Added
