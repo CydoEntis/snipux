@@ -16,9 +16,11 @@ and only for something the user just asked for.
 | Files | saving captures, `config.json` and friends | Only the save/recording folders, the config folder, and a file the user opened. |
 | `pip` (subprocess) | `snipux --update` | Only when the user runs it. Refused in the standalone exe. |
 | `ffmpeg` (subprocess) | H.264 and GIF export | Optional, found on `PATH`, never installed by us. |
+| GitHub Releases API (`urllib`, HTTPS) | tray -> Check for updates | One unauthenticated GET, only when the user picks it. No token, no identifiers, nothing sent about the machine. Never automatic. |
 
-**Not used anywhere:** network requests, telemetry, crash upload, automatic
-updates, accounts, camera, location, keylogging. The microphone is used
+**Not used anywhere:** telemetry, crash upload, automatic updates, accounts,
+camera, location, keylogging. The one network request is the update check in
+the row above, and only when the user asks for it. The microphone is used
 only on Windows, only when the user picks Mic for a recording. The
 global hotkey registers one chord; snipux does not see other keystrokes.
 
@@ -45,7 +47,7 @@ top there. Copy text is greyed on Linux until a system OCR route exists
 | Facility | Used for | What the user sees |
 | --- | --- | --- |
 | `QScreenCapture` (QtMultimedia) | the one-shot grab | Nothing. |
-| `QScreenCapture` -> `QMediaRecorder` | recording, pause/resume | Windows' own recording indicator. H.264 video. |
+| `QScreenCapture` -> `QMediaRecorder` | recording, pause/resume | Windows' own recording indicator. H.264 video. No cursor option -- the pointer is never in the file, so the chooser row's pointer flag and the Settings switch are both greyed with that reason. |
 | `QAudioInput` (default input device) | Mic audio in a recording | Only when the user picks Mic; each recording starts Muted. Windows may ask for microphone access. System (desktop) sound is greyed: Qt cannot capture it. |
 | `user32.RegisterHotKey` / `UnregisterHotKey` | the global shortcut | One chord (`MOD_NOREPEAT`). |
 | `user32.SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` | keeping snipux's own bars out of a recording | Nothing. Windows 10 2004+. |
