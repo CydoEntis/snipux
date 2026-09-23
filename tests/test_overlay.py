@@ -1,4 +1,5 @@
 import ctypes
+import os
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -5251,7 +5252,12 @@ class TestOverlayWindowToasts:
         overlay.save()
 
         assert overlay._toast.isVisible()
-        assert overlay._toast._text_label.text() == "Saved to ~/Pictures/snipux"
+        # os.sep, not a literal "/": the toast renders the folder through
+        # `output.display_path`, which uses the platform's own separator so
+        # one path is never spelled two ways in a single string.
+        assert overlay._toast._text_label.text() == (
+            f"Saved to ~{os.sep}Pictures{os.sep}snipux"
+        )
 
     def test_pick_color_at_shows_what_was_copied(self, monkeypatch):
         monkeypatch.setattr(output_module, "copy_text_to_clipboard", lambda text: None)
@@ -14003,3 +14009,48 @@ class TestSavedStyleDefaultsReachTheOverlay:
         second = _styled_overlay()
 
         assert second._styles.of("pen").colour == "#123456"
+
+
+class TestASaveThatCannotBeWritten:
+    """`output.save_image` raises `OSError` when Qt refuses the write -- a
+    full disk, a folder made read-only. The overlay used to be handed a
+    path to a file that was never written and toast "Saved to ...", and
+    app.py added the missing file to the Recent list.
+    """
+
+    def _overlay(self, size=(120, 90)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(QRect(0, 0, *size))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_it_says_what_went_wrong(self, monkeypatch):
+        def refuse(_image, _directory=None):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(overlay_module.output, "save_image", refuse)
+        overlay = self._overlay()
+
+        assert overlay.save() is None
+        assert overlay._toast.isVisible()
+        assert "no space left on device" in overlay._toast._text_label.text()
+
+    def test_the_snip_is_still_reported_so_it_is_not_lost(self, monkeypatch):
+        def refuse(_image, _directory=None):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(overlay_module.output, "save_image", refuse)
+        captured = []
+        overlay = self._overlay()
+        overlay._on_captured = lambda image, path: captured.append((image, path))
+
+        overlay.save()
+
+        # Reported with no path: the image is good even though the file is
+        # not, so Open/Review still have something to work with rather than
+        # the capture disappearing along with the failed write.
+        assert len(captured) == 1
+        assert captured[0][1] is None
+        assert not captured[0][0].isNull()

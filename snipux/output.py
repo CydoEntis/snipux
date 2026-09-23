@@ -10,6 +10,7 @@ them for its own callers.
 from __future__ import annotations
 
 import datetime
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -140,6 +141,26 @@ def copy_file_to_clipboard(path: Path) -> None:
         pass  # Qt clipboard already holds the file reference; best-effort sink
 
 
+def display_path(path: Path | None) -> str:
+    r"""A path as a person should read it: `~`-relative where it sits under
+    their home directory, whole where it doesn't.
+
+    Here rather than in each window, because all three of them show a
+    written-to path and had grown their own copy. The player's copy built
+    `"~/" + ...`, which on Windows produced
+    `~/Pictures\snipux\Screenshot from ....png` -- one path spelled two ways
+    in a single string, in the label whose whole job is saying where the
+    file went. `os.sep` is what `relative_to()` renders with, so it is what
+    the prefix has to use.
+    """
+    if path is None:
+        return "Not saved to disk"
+    try:
+        return f"~{os.sep}{Path(path).relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
+
+
 def save_image(image: QImage, directory: Path | str | None = None) -> Path:
     """Write `image` as a PNG into `directory` (or `~/Pictures` by default)
     under a filename derived from the current date and time, and return the
@@ -156,5 +177,13 @@ def save_image(image: QImage, directory: Path | str | None = None) -> Path:
 
     filename = datetime.datetime.now().strftime("Screenshot from %Y-%m-%d %H-%M-%S.png")
     path = directory / filename
-    image.save(str(path), "PNG")
+    # QImage.save() reports failure by returning False, not by raising, and a
+    # disk that is full or a folder that has been made read-only both land
+    # here. Ignoring it returned a path to a file that was never written, and
+    # every caller believed it: the overlay toasted "Saved to ~/Pictures",
+    # and app.py added the missing file to the Recent list. Raising is what
+    # gives the caller something to tell the user -- `review.py` already
+    # checks the same boolean for its own writes.
+    if not image.save(str(path), "PNG"):
+        raise OSError(f"could not write {path}")
     return path

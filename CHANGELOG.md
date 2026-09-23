@@ -5,6 +5,27 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **A copy from the review window now survives Snipux closing.** On Wayland
+  it went through Qt's clipboard alone, so quitting took the image with it.
+- **"Copy file" in the player pastes into Nautilus.** It was missing the one
+  clipboard flavour GNOME's file manager reads, and left spaces in the
+  filename unencoded -- which every default filename has.
+- **Settings no longer says "Everything saved" when it saved nothing.** If
+  the config file cannot be written, the window stays open and says so
+  instead of closing on a success message.
+- **A snip that cannot be written says why.** A full disk or a read-only
+  folder used to toast "Saved to ..." and list a file that was never there;
+  the image is still handed to Open/Review so it isn't lost with the write.
+- **Save uses the folder you chose in Settings.** The overlay and a pinned
+  snip both wrote to `~/Pictures/snipux` whatever the setting said.
+- **The player shows the recording's real frame rate**, and its arrow keys
+  step one of that recording's frames -- a 60 fps clip was labelled 30 fps
+  and stepped two frames at a time.
+- **Paths read the same way throughout on Windows** -- one of them mixed
+  `/` and `\` in a single line.
+
 ## 1.0.0 — 2026-09-21
 
 The first release since 0.8.2. 0.9.0 was prepared but never published,

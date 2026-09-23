@@ -2673,65 +2673,92 @@ class SettingsWindow(WinWindow):
             )
             return
 
-        setup_desktop.save_shortcut(shortcut, self._config_dir)
-        setup_desktop.save_after_capture(
-            tokens.AFTER_CAPTURE[self._after_group.checkedId()][0], self._config_dir
-        )
-        setup_desktop.save_instant_saves(
-            self._instant_saves.switch.isChecked(), self._config_dir
-        )
-        setup_desktop.save_save_folder(self._folder.text(), self._config_dir)
-        setup_desktop.save_filename_pattern(self._filename.text(), self._config_dir)
-        setup_desktop.save_native_resolution(
-            self._native.switch.isChecked(), self._config_dir
-        )
-        setup_desktop.save_recording_frame_rate(
-            self._frame_rate.spin.value(), self._config_dir
-        )
-        setup_desktop.save_recording_draw_cursor(
-            self._draw_cursor.switch.isChecked(), self._config_dir
-        )
-        setup_desktop.save_recording_after(
-            tokens.RECORDING_AFTER[self._recording_after_group.checkedId()][0],
-            self._config_dir,
-        )
-        setup_desktop.save_recording_folder(
-            self._recording_folder.text(), self._config_dir
-        )
-        setup_desktop.save_recording_filename_pattern(
-            self._recording_filename.text(), self._config_dir
-        )
-        setup_desktop.save_default_tool(self._opening_tool.value(), self._config_dir)
-        setup_desktop.save_default_ink(self._default_ink.value(), self._config_dir)
-        setup_desktop.save_tool_defaults(self._tool_edits, self._config_dir)
-        setup_desktop.save_remember_tool(
-            self._remember_tool.switch.isChecked(), self._config_dir
-        )
-        setup_desktop.save_hints_enabled(
-            self._show_hints.switch.isChecked(), self._config_dir
-        )
-        setup_desktop.save_watermark_kind(
-            tokens.WATERMARK_KINDS[self._watermark_kind_group.checkedId()][0],
-            self._config_dir,
-        )
-        setup_desktop.save_watermark_text(self._watermark_text.text(), self._config_dir)
-        setup_desktop.save_watermark_color(self._watermark_color, self._config_dir)
-        setup_desktop.save_watermark_font(self._watermark_font.currentData() or "", self._config_dir)
-        setup_desktop.save_watermark_backing(
-            self._watermark_backing.switch.isChecked(), self._config_dir
-        )
+        # Every save_* returns False rather than raising when the write
+        # fails -- a read-only config directory, a full disk. Discarding
+        # those returns meant Settings closed on "Everything saved" having
+        # saved nothing, which is the one outcome worse than an error.
+        written = [
+            setup_desktop.save_shortcut(shortcut, self._config_dir),
+            setup_desktop.save_after_capture(
+                tokens.AFTER_CAPTURE[self._after_group.checkedId()][0], self._config_dir
+            ),
+            setup_desktop.save_instant_saves(
+                self._instant_saves.switch.isChecked(), self._config_dir
+            ),
+            setup_desktop.save_save_folder(self._folder.text(), self._config_dir),
+            setup_desktop.save_filename_pattern(self._filename.text(), self._config_dir),
+            setup_desktop.save_native_resolution(
+                self._native.switch.isChecked(), self._config_dir
+            ),
+            setup_desktop.save_recording_frame_rate(
+                self._frame_rate.spin.value(), self._config_dir
+            ),
+            setup_desktop.save_recording_draw_cursor(
+                self._draw_cursor.switch.isChecked(), self._config_dir
+            ),
+            setup_desktop.save_recording_after(
+                tokens.RECORDING_AFTER[self._recording_after_group.checkedId()][0],
+                self._config_dir,
+            ),
+            setup_desktop.save_recording_folder(
+                self._recording_folder.text(), self._config_dir
+            ),
+            setup_desktop.save_recording_filename_pattern(
+                self._recording_filename.text(), self._config_dir
+            ),
+            setup_desktop.save_default_tool(self._opening_tool.value(), self._config_dir),
+            setup_desktop.save_default_ink(self._default_ink.value(), self._config_dir),
+            setup_desktop.save_tool_defaults(self._tool_edits, self._config_dir),
+            setup_desktop.save_remember_tool(
+                self._remember_tool.switch.isChecked(), self._config_dir
+            ),
+            setup_desktop.save_hints_enabled(
+                self._show_hints.switch.isChecked(), self._config_dir
+            ),
+            setup_desktop.save_watermark_kind(
+                tokens.WATERMARK_KINDS[self._watermark_kind_group.checkedId()][0],
+                self._config_dir,
+            ),
+            setup_desktop.save_watermark_text(self._watermark_text.text(), self._config_dir),
+            setup_desktop.save_watermark_color(self._watermark_color, self._config_dir),
+            setup_desktop.save_watermark_font(self._watermark_font.currentData() or "", self._config_dir),
+            setup_desktop.save_watermark_backing(
+                self._watermark_backing.switch.isChecked(), self._config_dir
+            ),
+        ]
         if self._watermark_image_source is not None:
-            setup_desktop.save_watermark_image(self._watermark_image_source, self._config_dir)
+            written.append(
+                setup_desktop.save_watermark_image(
+                    self._watermark_image_source, self._config_dir
+                )
+            )
         elif self._watermark_image_removed:
-            setup_desktop.clear_watermark_image(self._config_dir)
+            written.append(setup_desktop.clear_watermark_image(self._config_dir))
         entries = self._hide_list_entries()
-        setup_desktop.save_hide_list(
-            entries["words"], entries["labels"], entries["patterns"], self._config_dir
+        written.append(
+            setup_desktop.save_hide_list(
+                entries["words"], entries["labels"], entries["patterns"], self._config_dir
+            )
         )
-        setup_desktop.save_tray_toggles(
-            {key: row.switch.isChecked() for key, row in self._tray_rows.items()},
-            self._config_dir,
+        written.append(
+            setup_desktop.save_tray_toggles(
+                {key: row.switch.isChecked() for key, row in self._tray_rows.items()},
+                self._config_dir,
+            )
         )
+        if not all(written):
+            # Stays open and stays dirty: the window closing is what tells
+            # the user their settings are somewhere safe, so a window that
+            # closes on a failed write is the app lying about it. Every
+            # value is still in the controls, so a fixed permission and a
+            # second Save loses nothing.
+            QMessageBox.warning(
+                self,
+                "Could not save your settings",
+                f"Snipux could not write to {setup_desktop.config_path(self._config_dir)}.\n\n"
+                "Check the folder still exists and is writable, then try again.",
+            )
+            return
         self._dirty = False
         self._refresh_dirty()
         if self._on_saved is not None:

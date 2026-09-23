@@ -7025,16 +7025,31 @@ class OverlayWindow(QWidget):
     # changed there.
     SAVE_SUBDIRECTORY = "snipux"
 
-    def save(self) -> Path:
+    def save(self) -> "Path | None":
         """Flatten the marks present *right now* onto the selection's crop
-        and write it as a timestamped PNG under ~/Pictures/snipux, creating
-        that directory if it doesn't exist yet. Returns the path written,
-        and toasts `Saved to ~/Pictures/snipux`.
+        and write it as a timestamped PNG into the configured save folder,
+        creating that directory if it doesn't exist yet. Returns the path
+        written, and toasts where it went -- or None, and toasts why not,
+        if the write failed.
+
+        The folder comes from `load_save_folder()` rather than a hardcoded
+        `~/Pictures/snipux`: the two agree until someone changes it in
+        Settings, and a setting a view ignores is worse than one that isn't
+        offered.
         """
-        directory = Path.home() / "Pictures" / self.SAVE_SUBDIRECTORY
+        directory = setup_desktop.load_save_folder()
         image = self.rendered_image()
-        path = output.save_image(image, directory)
-        self._show_toast("save", f"Saved to ~/Pictures/{self.SAVE_SUBDIRECTORY}")
+        try:
+            path = output.save_image(image, directory)
+        except OSError as exc:
+            # A full disk or a read-only folder. The snip itself is still
+            # good, so it is reported as a capture with no path -- that
+            # keeps Open/Review working on an image that could not be
+            # written, rather than losing it along with the file.
+            self._show_toast("save", f"Could not save: {exc}")
+            self._report_capture(image, None)
+            return None
+        self._show_toast("save", f"Saved to {output.display_path(directory)}")
         self._report_capture(image, path)
         return path
 
