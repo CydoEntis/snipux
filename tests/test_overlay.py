@@ -14054,3 +14054,46 @@ class TestASaveThatCannotBeWritten:
         assert len(captured) == 1
         assert captured[0][1] is None
         assert not captured[0][0].isNull()
+
+
+class TestAnInstantSnipShowsNoToolbar:
+    """Reported: "if its gonna just instantly capture ... it should just
+    show the capture region".
+
+    `instant` finishes the snip on the release that ends the drag, so the
+    annotation bar was appearing for the length of the drag and then
+    vanishing -- offering a pen for a snip already on its way to the
+    clipboard. The recording side was gated off the bar for the same
+    complaint ("i shouldnt see the whole screenshooting tools") two reports
+    ago; this is the stills half of it.
+    """
+
+    def _overlay(self, after, size=(160, 120)):
+        frame = make_frame(image_size=size, logical_size=size)
+        overlay = OverlayWindow(frame)
+        overlay._chooser.set_after(after)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_the_bar_stays_down_while_dragging(self):
+        overlay = self._overlay("instant")
+
+        overlay.set_selection(QRect(10, 10, 80, 60))
+
+        assert not overlay._bar.isVisible()
+
+    def test_the_selection_itself_is_still_there(self):
+        overlay = self._overlay("instant")
+
+        overlay.set_selection(QRect(10, 10, 80, 60))
+
+        # The region is the whole point -- only the toolbar goes.
+        assert overlay._selection == QRect(10, 10, 80, 60)
+
+    def test_a_destination_with_a_bar_still_shows_one(self):
+        overlay = self._overlay("edit")
+
+        overlay.set_selection(QRect(10, 10, 80, 60))
+
+        assert overlay._bar.isVisible()

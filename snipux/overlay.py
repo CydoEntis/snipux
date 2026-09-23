@@ -6459,7 +6459,17 @@ class OverlayWindow(QWidget):
         # -- so gating on "armed" showed the whole screenshot toolbar for
         # the length of every recording drag and only hid it on release.
         # Reported twice as "i shouldnt see the whole screenshooting tools".
-        if self._armed_for_recording or self._chooser.kind == "record":
+        # `instant` is the same case one step further on: the snip finishes
+        # on the release that ends the drag (`_commit_selection`), so a
+        # toolbar shown while dragging exists only to disappear -- offering
+        # a pen for a snip that is already on its way to the clipboard. What
+        # the user asked to see is the region they are cutting, which is
+        # what is left once the bar goes.
+        if (
+            self._armed_for_recording
+            or self._chooser.kind == "record"
+            or self.outcome == "instant"
+        ):
             self._bar.hide()
             self._style_popover.hide()
             self._popover.hide()

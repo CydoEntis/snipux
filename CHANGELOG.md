@@ -7,6 +7,14 @@ use it; the commit history has the detail.
 
 ### Fixed
 
+- **Clicking a menu's own control closes it again.** Every dropdown --
+  capture mode, recording delay, audio, destination, the player's speed and
+  export menus -- reopened instead of closing when you clicked the control
+  that opened it.
+- **An instant snip shows no annotation toolbar.** It finishes the moment
+  you let go, so the toolbar only ever appeared for the length of the drag
+  and then disappeared; the capture region is what you see now.
+
 - **A copy from the review window now survives Snipux closing.** On Wayland
   it went through Qt's clipboard alone, so quitting took the image with it.
 - **"Copy file" in the player pastes into Nautilus.** It was missing the one
