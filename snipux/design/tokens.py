@@ -5,11 +5,41 @@ design reference (reference/Snipux Overlay.dc.html) resolves to a value here.
 Import these rather than re-typing hex codes in widget code.
 """
 
+# ---------------------------------------------------------------- surfaces
+class Surface:
+    """The application's neutral ramp: one set of greys, every surface.
+
+    There used to be two -- warm glass for overlay furniture, cool chrome
+    for windows -- and unifying the *hue* alone was not enough, because the
+    two sets also carried different saturations. The overlay's greys were
+    about half as tinted as the windows', so a bar still read as plain
+    charcoal beside a blue-grey Settings window even once both were nominally
+    the same hue. Naming the ramp once is what makes them the same colour
+    rather than merely the same family.
+
+    What still separates the two surfaces is how they are composited, which
+    is the part that was always doing the work: overlay furniture is
+    translucent with a blur behind it and sits on a dimming scrim; a window
+    is opaque. See docs/design/bars/divergences.md.
+    """
+
+    # Window bodies, and the small dark grounds the overlay stamps on top of
+    # its own glass (HUD readouts, dark chips).
+    DEEP    = "#14161a"
+    # Title bars, nav rails, footers, inset fields -- and every bar and menu
+    # the overlay paints.
+    CHROME  = "#191c21"
+    # Selected rows and raised fills.
+    RAISED  = "#1e2229"
+    # The dimming laid over a frozen desktop.
+    SCRIM   = "#0a0c0e"
+
+
 # ---------------------------------------------------------------- colour
 class Color:
     # Overlay chrome (floating bar, tray, popover) — glass over a frozen desktop.
-    BAR_BG          = "#18191c"   # painted at 93% alpha
-    BAR_BG_ALPHA    = 0.93
+    BAR_BG          = Surface.CHROME   # painted at 97% alpha
+    BAR_BG_ALPHA    = 0.97
     BAR_BORDER      = "#ffffff"   # at 10% alpha
     BAR_BORDER_ALPHA = 0.10
     DIVIDER         = "#ffffff"   # at 12% alpha
@@ -58,7 +88,7 @@ class Color:
     SEL_STROKE_ALPHA = 0.92
     SEL_ANTS        = "#16181c"   # dark dashes over the white stroke
     HANDLE          = "#ffffff"
-    DIM             = "#0a0c0e"   # scrim outside the selection, 62% alpha
+    DIM             = Surface.SCRIM   # scrim outside the selection, 62% alpha
     DIM_ALPHA       = 0.62
 
     # Chips floating above the selection
@@ -66,12 +96,12 @@ class Color:
     CHIP_LIGHT_FG   = "#12141a"
     CHIP_LIGHT_MUTE = "#4b5563"
     CHIP_DOT        = "#9ca3af"   # the middot between size and mark count
-    CHIP_DARK_BG    = "#121416"
+    CHIP_DARK_BG    = Surface.DEEP
     CHIP_DARK_BG_ALPHA = 0.78
     CHIP_DARK_FG    = "#d9dee7"
 
     # Top hint HUD
-    HUD_BG          = "#121416"   # at 50% alpha
+    HUD_BG          = Surface.DEEP   # at 50% alpha
     HUD_BG_ALPHA    = 0.50
     HUD_TEXT        = "#cdd2db"   # surrounding prose
     HUD_KEY         = "#ffffff"   # key names -- pure white, mono
@@ -343,8 +373,8 @@ DELAYS = ["No delay", "3s", "5s", "10s"]
 class Win:
     """Settings and review window chrome. Opaque — no alpha compositing."""
     # Surfaces, back to front
-    WINDOW_BG       = "#14161a"   # window body / content pane
-    CHROME_BG       = "#191c21"   # title bar, nav rail, footer, inset fields
+    WINDOW_BG       = Surface.DEEP     # window body / content pane
+    CHROME_BG       = Surface.CHROME   # title bar, nav rail, footer, inset fields
     BORDER          = "#2a2e36"   # window outline
     SEPARATOR       = "#23262d"   # title-bar and footer rules
     HAIRLINE        = "#22252c"   # rules inside a content pane
@@ -358,7 +388,7 @@ class Win:
     CONTROL_BG_HOVER = "#252931"
     CONTROL_BORDER  = "#2f333b"
     CONTROL_BORDER_HOVER = "#3a3f49"
-    FIELD_BG        = "#191c21"   # text input, inset well
+    FIELD_BG        = Surface.CHROME   # text input, inset well
     FIELD_BORDER    = "#2b2f36"
     SEGMENT_BORDER  = "#262a31"   # segmented-control well
     SELECTED_BG     = "#2c313c"   # active nav row, active segment
@@ -367,7 +397,7 @@ class Win:
     SCROLL_THUMB    = "#2f333b"   # scrollbar handle, idle -- same weight as a control border
     SCROLL_THUMB_HOVER = "#3a3f49"
     SCROLL_THUMB_ACTIVE = "#454b56"
-    TOGGLE_KNOB     = "#14161a"   # the window's own dark, so the knob reads
+    TOGGLE_KNOB     = Surface.DEEP     # the window's own dark, so the knob reads
                                   # as a hole punched through the switch
                                   # rather than a second colour laid on it.
                                   # Off is still legible: TOGGLE_OFF above is
@@ -981,14 +1011,14 @@ class FlowColor:
     rgba() string that then drifts from the token.
     """
 
-    BAR_BG               = "#18191c"
-    BAR_BG_ALPHA         = 0.93
+    BAR_BG               = Surface.CHROME
+    BAR_BG_ALPHA         = 0.97
     BAR_BORDER           = "#ffffff"
     BAR_BORDER_ALPHA     = 0.10
     BAR_BORDER_LIVE      = "#ff5a52"
     BAR_BORDER_LIVE_ALPHA = 0.34
 
-    MENU_BG              = "#18191c"
+    MENU_BG              = Surface.CHROME
     MENU_BG_ALPHA        = 0.98
     MENU_BORDER          = "#ffffff"
     MENU_BORDER_ALPHA    = 0.12
@@ -1036,7 +1066,7 @@ class FlowColor:
     REC_WASH             = "#ff5a52"
     REC_WASH_ALPHA       = 0.14
 
-    SCRIM                = "#0a0c0e"
+    SCRIM                = Surface.SCRIM
     SCRIM_ALPHA          = 0.62
     SCRIM_LIVE_ALPHA     = 0.28        # drops so you can see what you are filming
 
@@ -1134,7 +1164,7 @@ class PlayerMetric:
 
 
 class PlayerColor:
-    RAIL_BG          = "#14161a"
+    RAIL_BG          = Surface.DEEP
     RAIL_BORDER      = "#262a31"
     RULER_RULE       = "#1f2229"
     TICK             = "#2f333b"
@@ -1165,7 +1195,7 @@ class PlayerColor:
     DIRTY_FG         = "#c8a54a"
 
     # Transport shell + controls, over the canvas
-    BAR_BG           = "#18191c"        # at 94%
+    BAR_BG           = Surface.CHROME        # at 94%
     BAR_BORDER       = "#ffffff"        # at 10%
     BAR_SEP          = "#ffffff"        # at 12%
     BTN_IDLE_FG      = "#a0a6b0"
@@ -1176,10 +1206,10 @@ class PlayerColor:
     TIME_TOTAL_FG    = "#6a6e76"
     ACCENT_ON_BG     = "#a8e05f"        # at 15%, loop/speed when engaged
     ACCENT_ON_FG     = "#c3e399"
-    MENU_BG          = "#18191c"        # at 98%
+    MENU_BG          = Surface.CHROME        # at 98%
 
-    PAUSE_SCRIM      = "#0a0c0e"        # at 28%, over the frame while paused
-    PAUSE_BADGE_BG   = "#121316"        # at 82%
+    PAUSE_SCRIM      = Surface.SCRIM        # at 28%, over the frame while paused
+    PAUSE_BADGE_BG   = Surface.DEEP        # at 82%
     PAUSE_BADGE_EDGE = "#ffffff"        # at 16%
     PAUSE_BADGE_FG   = "#e9edf3"
 
@@ -1407,13 +1437,13 @@ class BarColor:
     this file follows.
     """
 
-    BAR_BG               = "#18191c"
-    BAR_BG_ALPHA         = 0.94
+    BAR_BG               = Surface.CHROME
+    BAR_BG_ALPHA         = 0.97
     BAR_BORDER           = "#ffffff"
     BAR_BORDER_ALPHA     = 0.10
     DIVIDER              = "#ffffff"
     DIVIDER_ALPHA        = 0.12
-    MENU_BG              = "#18191c"
+    MENU_BG              = Surface.CHROME
     MENU_BG_ALPHA        = 0.98
     MENU_BORDER          = "#ffffff"
     MENU_BORDER_ALPHA    = 0.12
@@ -1513,7 +1543,7 @@ class BarColor:
     HINT_BORDER          = "#ffffff"
     HINT_BORDER_ALPHA    = 0.07
     HINT_FG              = "#787c84"
-    TAB_BG               = "#18191c"
+    TAB_BG               = Surface.CHROME
     TAB_BG_ALPHA         = 0.88
     TAB_SEP              = "#ffffff"
     TAB_SEP_ALPHA        = 0.16
@@ -1822,7 +1852,7 @@ class WatermarkColor:
     # plate are the user's to change since divergences.md 29, and with the
     # plate off a halo of the opposite lightness does its job.
     MARK_TEXT        = "#e9edf3"
-    MARK_PLATE       = "#0a0c0e"   # at 42%
+    MARK_PLATE       = Surface.SCRIM   # at 42%
     MARK_PLATE_ALPHA = 0.42
     MARK_HALO_DARK   = "#000000"   # at 45%, under light type
     MARK_HALO_DARK_ALPHA = 0.45
