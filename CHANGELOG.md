@@ -7,6 +7,14 @@ use it; the commit history has the detail.
 
 ### Added
 
+- **A Windows installer, and `winget install snipux`.** Download
+  `snipux-setup-<version>.exe` from the Releases page: it installs without an
+  admin prompt, shows up in Add/Remove Programs, and starts Snipux when it
+  finishes. The portable `snipux.exe` is still there and still works -- it is
+  what to use if Smart App Control refuses the installer, since both are
+  unsigned. An old 0.1.0 install from the installer Snipux used to ship is
+  removed automatically if you still have one.
+
 - **Record the pointer, or don't -- from the row itself.** The chooser row's
   record side now carries the flag beside Delay, so it is decided where the
   recording is being set up rather than in Settings, where it was easy to
