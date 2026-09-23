@@ -88,10 +88,17 @@ and attaches both to the same release.
    stored anywhere; PyPI checks the workflow's own identity, which is why
    the job needs `id-token: write` and why the PyPI project names that
    workflow file exactly (renaming it breaks publishing);
-4. builds the Linux `.deb` and AppImage on an `ubuntu-22.04` runner and
-   smoke-tests the bundle by running `--list-backends` out of it;
-5. creates the GitHub Release for the tag (or adds the files to it) with
-   generated notes, carrying all four files.
+4. creates the GitHub Release for the tag (or adds the files to it) with
+   generated notes;
+5. builds the Linux `.deb` and AppImage on an `ubuntu-22.04` runner,
+   smoke-tests the bundle by running `--list-backends` out of it, and
+   attaches both to that release.
+
+Step 5 is `continue-on-error` and runs *after* the release exists, on
+purpose: a packaging step that fails must not hold back a release whose
+wheel, sdist and notes are already good. When it does fail, the release is
+complete apart from those two files -- build them with the scripts below and
+`gh release upload` them, or re-run the job.
 
 PyPI refuses a second upload of a version number that has already been
 published, even if that upload was later deleted. A mistake after the tag

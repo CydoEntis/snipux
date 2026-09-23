@@ -44,7 +44,15 @@ jobs:
           path: dist/
 
   linux_artifacts:
-    needs: build
+    # After the release exists, and unable to stop it: this job builds the
+    # two Linux artifacts on a runner, and a release that is otherwise
+    # complete must not be held back by a packaging step failing. A failure
+    # here leaves the wheel, the sdist and the GitHub release in place, with
+    # the .deb and the AppImage to add by hand or on a re-run.
+    needs: [build, github_release]
+    continue-on-error: true
+    permissions:
+      contents: write        # to attach the artifacts to the release
     # 22.04, not ubuntu-latest, and deliberately: PyInstaller links whatever
     # glibc the build machine has, and glibc is forward- but not
     # backward-compatible. An artifact built on a newer runner refuses to
@@ -89,12 +97,11 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: ./dist/snipux/snipux --list-backends
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux
-          path: |
-            dist/*.AppImage
-            dist/*.deb
+      - name: Attach them to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" dist/*.AppImage dist/*.deb             --clobber --repo "$GITHUB_REPOSITORY"
 
   pypi:
     needs: build
@@ -110,7 +117,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   github_release:
-    needs: [build, linux_artifacts]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write        # to attach the files to the release
@@ -118,13 +125,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist/
-      # Into the same directory, so the upload below stays one `dist/*`:
-      # the wheel and sdist for pip, the AppImage and .deb for everyone who
-      # should not have to know what pip is.
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux
           path: dist/
       - name: Publish the release with the files on it
         env:
