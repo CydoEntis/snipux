@@ -29,10 +29,12 @@ of three.
 from __future__ import annotations
 
 import math
+import time
 
-from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QCursor,
     QFont,
     QFontMetrics,
     QFontMetricsF,
@@ -615,6 +617,52 @@ class _Readout(QLabel):
         self.setStyleSheet(" ".join(rules))
 
 
+class MenuReopenGuard:
+    """Why a menu does not reopen when the chip that opened it is clicked
+    again.
+
+    A popup takes the mouse for as long as it is up, so the press that
+    dismisses it never reaches the chip underneath -- until the popup has
+    closed, at which point that same press arrives at the chip, which opens
+    the menu it just closed. What the user sees is a menu that cannot be
+    shut by clicking the control that opened it: it flickers and comes
+    straight back. `WA_NoMouseReplay` is Qt's answer and does not cover
+    this, because the chip is a widget in another top-level window rather
+    than under the popup's own replay.
+
+    Elapsed time alone cannot tell that press apart from a deliberate
+    second click, so this also asks *where the pointer is*: only the chip
+    the pointer is actually over is blocked, which is what lets clicking a
+    different chip close one menu and open the other in a single press --
+    the behaviour the bars are supposed to have.
+
+    One guard per opener. Shared by the chooser row and every bar menu,
+    which all have the same chip-opens-a-popup shape.
+    """
+
+    # Long enough to cover the popup closing and the press being delivered,
+    # short enough that a person clicking the same chip twice on purpose is
+    # never refused: a deliberate reopen is hundreds of milliseconds away.
+    WINDOW_MS = 250
+
+    def __init__(self) -> None:
+        self._closed_at: float | None = None
+
+    def note_closed(self) -> None:
+        """Called when the menu closes, however it closed."""
+        self._closed_at = time.monotonic()
+
+    def blocks_reopen(self, opener: QWidget) -> bool:
+        """Whether an open request from `opener` is that dismissing press
+        arriving late, rather than a new click."""
+        if self._closed_at is None:
+            return False
+        if (time.monotonic() - self._closed_at) * 1000 > self.WINDOW_MS:
+            return False
+        origin = opener.mapToGlobal(QPoint(0, 0))
+        return QRect(origin, opener.size()).contains(QCursor.pos())
+
+
 class FlowMenu(QWidget):
     """A dropdown for one of the bars.
 
@@ -633,6 +681,13 @@ class FlowMenu(QWidget):
 
     chosen = pyqtSignal(str)
 
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """Every way this closes -- a pick, a press outside, Escape -- ends
+        in a hide, so this is the one place the guard has to be told."""
+        if self._guard is not None:
+            self._guard.note_closed()
+        super().hideEvent(event)
+
     def __init__(
         self,
         rows,
@@ -640,8 +695,14 @@ class FlowMenu(QWidget):
         width: int,
         parent: QWidget | None = None,
         footnote: str = "",
+        *,
+        guard: "MenuReopenGuard | None" = None,
     ):
         super().__init__(parent)
+        # Told here rather than wired by every caller: a menu knows when it
+        # closes, and the chip that opened it has to know too or it reopens
+        # on the press that dismissed this. See MenuReopenGuard.
+        self._guard = guard
         self.setWindowFlags(
             Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
         )

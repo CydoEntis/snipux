@@ -75,7 +75,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from snipux.flowbars import CountdownNumeral, FlowMenu, RecordingBar, RegionFrame
+from snipux.flowbars import (
+    CountdownNumeral,
+    FlowMenu,
+    MenuReopenGuard,
+    RecordingBar,
+    RegionFrame,
+)
 from snipux.capture import (
     XwininfoWindowGeometryProvider,
     BackendRegistry,
@@ -1202,6 +1208,10 @@ class AppController:
         # The open dropdown, held so Python does not collect a parentless
         # popup out from under the user mid-choice.
         self._flow_menu: FlowMenu | None = None
+        # One guard for all three bar menus: it blocks only the control
+        # the pointer is over, so clicking Audio while Delay is open
+        # still swaps them in one press. See MenuReopenGuard.
+        self._flow_menu_guard = MenuReopenGuard()
         # Per-session, like mode and destination: a snip's own override must
         # not write back to the stored preferences (the handoff's state
         # model says so in as many words).
@@ -2181,8 +2191,15 @@ class AppController:
         if bar is None or self._armed_recording is None:
             return
         _rect, current, _after, _path = self._armed_recording
+        if self._flow_menu_guard.blocks_reopen(bar.delay_control()):
+            # The press that dismissed this menu, arriving at the
+            # control underneath. See MenuReopenGuard.
+            return
         rows = [(value, value, "", "", "") for value in design.tokens.DELAYS]
-        menu = FlowMenu(rows, current, design.tokens.FlowMetric.MENU_W_DELAY)
+        menu = FlowMenu(
+            rows, current, design.tokens.FlowMetric.MENU_W_DELAY,
+            guard=self._flow_menu_guard,
+        )
         menu.glass.set_host(self._overlay)
 
         def choose(value: str) -> None:
@@ -2212,13 +2229,20 @@ class AppController:
         bar = self._recording_hud
         if bar is None:
             return
+        if self._flow_menu_guard.blocks_reopen(bar.audio_control()):
+            # The press that dismissed this menu, arriving at the
+            # control underneath. See MenuReopenGuard.
+            return
         rows = [
             (identifier, label, note, "",
              platform.current.audio_source_unavailable_reason(identifier))
             for identifier, _icon, label, note in design.tokens.AUDIO_SOURCES
         ]
-        menu = FlowMenu(rows, self._recording_audio,
-                        design.tokens.FlowMetric.MENU_W_AUDIO)
+        menu = FlowMenu(
+            rows, self._recording_audio,
+            design.tokens.FlowMetric.MENU_W_AUDIO,
+            guard=self._flow_menu_guard,
+        )
         menu.glass.set_host(self._overlay)
 
         def choose(value: str) -> None:
@@ -2255,9 +2279,14 @@ class AppController:
             (identifier, label, note, "", gif_reason if identifier == "gif" else "")
             for identifier, _glyph, label, note in design.tokens.RECORD_DESTINATIONS
         ]
+        if self._flow_menu_guard.blocks_reopen(bar.destination_control()):
+            # The press that dismissed this menu, arriving at the
+            # control underneath. See MenuReopenGuard.
+            return
         menu = FlowMenu(
             rows, current,
             FlowMenu.fitting_width(rows, design.tokens.FlowMetric.MENU_W_DEST),
+            guard=self._flow_menu_guard,
         )
         menu.glass.set_host(self._overlay)
 

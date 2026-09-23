@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import design, glass
+from .flowbars import MenuReopenGuard
 from .design import tokens
 
 
@@ -1063,6 +1064,10 @@ class Chooser(QWidget):
         self._after_by_kind: dict[str, str] = {}
         self._phase = "choosing"
         self._menu: _Menu | None = None
+        # See MenuReopenGuard: without it, clicking the chip to close
+        # this menu reopens it, because the press that dismissed the
+        # popup reaches the chip only once the popup has gone.
+        self._menu_guard = MenuReopenGuard()
         # The control whose explanation the hint pill is borrowed for.
         self._explaining: QWidget | None = None
 
@@ -1433,6 +1438,8 @@ class Chooser(QWidget):
     def _toggle_menu(self) -> None:
         if self._close_menu():
             return
+        if self._menu_guard.blocks_reopen(self.row.mode_chip):
+            return
         rows, last_region = self._mode_rows()
         menu = _Menu(rows, last_region, self._mode, self.row)
         # The press that closes the menu does nothing else, as in the spec:
@@ -1453,8 +1460,11 @@ class Chooser(QWidget):
 
     def _on_menu_closed(self) -> None:
         # A popup also closes itself -- a click elsewhere, Escape -- and the
-        # chip has to stop showing it as open when it does.
+        # chip has to stop showing it as open when it does. When that click
+        # was on the chip, the press is still on its way here, which is what
+        # the guard is for.
         self._menu = None
+        self._menu_guard.note_closed()
         self.row.mode_chip.set_open(False)
 
     def _close_menu(self) -> bool:
