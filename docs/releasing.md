@@ -13,9 +13,8 @@ are three channels:
    workflow. Both carry their own Python and Qt, so they are what someone
    installs who does not have (or want) either -- see
    [Building the Linux artifacts](#building-the-linux-artifacts).
-4. **The Windows `snipux.exe` and `snipux-setup-<version>.exe`**, attached
-   to that GitHub Release by hand -- the only artifacts still built on a
-   person's machine. Both ship: the installer for everyone, the portable exe
+4. **The Windows `snipux.exe` and `snipux-setup-<version>.exe`**, built and
+   attached by the same workflow on a Windows runner. Both ship: the installer for everyone, the portable exe
    for the machines Smart App Control refuses to run an unsigned installer
    on (see [Why the installer is shipped
    unsigned](#why-the-installer-is-shipped-unsigned-alongside-the-portable-exe)).
@@ -69,21 +68,15 @@ git tag -a v0.9.0 -m "v0.9.0"
 git push origin v0.9.0
 ```
 
-### 5. Build the Windows exe and attach it
+### 5. Watch the workflow finish
 
-On a Windows machine or VM -- see
-[Building the Windows exe](#building-the-windows-exe) below. Once the
-workflow has created the release:
+Nothing else is needed by hand. The tag builds and attaches every artifact:
+the wheel and sdist, the `.deb` and AppImage on an Ubuntu runner, and the
+Windows exe and installer on a Windows one.
 
-```sh
-powershell -File packaging\windows\build_installer.ps1
-gh release upload v0.9.0 dist/snipux.exe dist/snipux-setup-0.9.0.exe
-```
-
-`build_installer.ps1` builds the exe too, so this is one command for both.
-
-Linux needs nothing by hand: the workflow builds the `.deb` and the AppImage
-and attaches both to the same release.
+Both packaging jobs are `continue-on-error`, so a failure leaves a release
+that is complete apart from that platform's files. Build the missing ones
+with the scripts below and `gh release upload` them, or re-run the job.
 
 ## What the tag does
 
@@ -99,13 +92,15 @@ and attaches both to the same release.
    generated notes;
 5. builds the Linux `.deb` and AppImage on an `ubuntu-22.04` runner,
    smoke-tests the bundle by running `--list-backends` out of it, and
-   attaches both to that release.
+   attaches both to that release;
+6. builds the Windows exe and installer on a `windows-latest` runner,
+   smoke-tests the exe the same way, and attaches both.
 
-Step 5 is `continue-on-error` and runs *after* the release exists, on
+Steps 5 and 6 are `continue-on-error` and run *after* the release exists, on
 purpose: a packaging step that fails must not hold back a release whose
-wheel, sdist and notes are already good. When it does fail, the release is
-complete apart from those two files -- build them with the scripts below and
-`gh release upload` them, or re-run the job.
+wheel, sdist and notes are already good. When one does fail, the release is
+complete apart from that platform's files -- build them with the scripts
+below and `gh release upload` them, or re-run the job.
 
 PyPI refuses a second upload of a version number that has already been
 published, even if that upload was later deleted. A mistake after the tag
