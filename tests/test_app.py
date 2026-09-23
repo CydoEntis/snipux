@@ -6672,3 +6672,60 @@ class TestTheUpdateCommand:
         # not quietly become the exception.
         with pytest.raises(SystemExit):
             app.main(["--update", "--setup"])
+
+
+class TestAFailedStartAlwaysClearsTheChrome:
+    """The red outline and the "Starting" pill go up *before* the backend is
+    asked to record, because starting one is a blocking round trip and the
+    screen was otherwise blank for a third of a second.
+
+    Only `RecordingError` was caught around that call, so anything else
+    escaping left the outline and the pill on screen for the rest of the
+    session, over a recording that was not running, with no way to dismiss
+    either. `_RecorderStarter.run` catches bare `Exception` and re-raises
+    whatever it caught, so "anything else" is reachable.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    def _fail_with(self, controller, monkeypatch, error):
+        def boom(_rect, _path):
+            raise error
+
+        monkeypatch.setattr(controller, "_start_recorder_responsively", boom)
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        return said
+
+    def test_an_unexpected_error_still_takes_the_outline_down(
+        self, make_controller, monkeypatch
+    ):
+        controller = self._controller(make_controller)
+        said = self._fail_with(controller, monkeypatch, RuntimeError("the encoder died"))
+
+        controller._on_recording_requested(QRectF(10, 20, 120, 90), "No delay")
+        controller._start_armed_recording()
+
+        assert not controller._region_frame.is_exposed(), "the red outline was left up"
+        assert controller._recording_hud is None, "the Starting pill was left up"
+        assert said and "the encoder died" in said[0]
+
+    def test_a_recording_error_still_reads_as_its_own_message(
+        self, make_controller, monkeypatch
+    ):
+        controller = self._controller(make_controller)
+        said = self._fail_with(
+            controller, monkeypatch, RecordingError("the display is locked")
+        )
+
+        controller._on_recording_requested(QRectF(10, 20, 120, 90), "No delay")
+        controller._start_armed_recording()
+
+        # A RecordingError is already a sentence written for the user, so it
+        # is reported as-is rather than wrapped in "Could not start".
+        assert said == ["the display is locked"]

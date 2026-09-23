@@ -370,20 +370,6 @@ def _write_config(key: str, value, config_dir: Path | None = None) -> bool:
     return True
 
 
-def load_review_window(config_dir: Path | None = None) -> bool:
-    """Whether a snip opens in a review window after capture.
-
-    Off unless explicitly turned on: the overlay already annotates in place,
-    and a window that appears after every capture is a change to the core
-    flow, not a default to inherit by accident.
-    """
-    return _read_config(config_dir).get("review_window") is True
-
-
-def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
-    return _write_config("review_window", bool(enabled), config_dir)
-
-
 def version_line() -> str:
     """`Snipux 0.8.2` for the nav rail's footer.
 
@@ -398,15 +384,6 @@ def version_line() -> str:
     except PackageNotFoundError:
         ours = "dev"
     return f"Snipux {ours}"
-
-
-def detect_session_type() -> str:
-    """`wayland`, `x11`, or `unknown` -- detected, never assumed."""
-    if os.environ.get("WAYLAND_DISPLAY"):
-        return "wayland"
-    if os.environ.get("DISPLAY"):
-        return "x11"
-    return os.environ.get("XDG_SESSION_TYPE", "unknown")
 
 
 # The two destinations that turned out to be one behaviour. `clip` and
@@ -1353,50 +1330,6 @@ _BINDING_SCHEMAS = (
 _SETTING_LINE_RE = re.compile(r"^(\S+)\s+(\S+)\s+(.*)$")
 
 
-def find_shortcut_conflicts(shortcut: str) -> list[tuple[str, str]]:
-    """Every GNOME setting already bound to `shortcut`, as (schema, key).
-
-    This is the check that would have saved the trouble that prompted the
-    whole feature: GNOME accepts a duplicate binding without a word and
-    then fires whichever owner it likes, which from the losing app's side
-    is indistinguishable from being broken.
-
-    snipux's own slot is excluded -- rebinding to what is already bound is
-    not a conflict.
-
-    Blind to anything that is not a GNOME setting. An application that
-    grabs a key directly (many do) owns it just as effectively and cannot
-    be seen from here, so an empty list means "nothing in GNOME claims
-    this", never "this key is definitely free". Returns empty rather than
-    raising on any failure: no gsettings, an unreadable schema, output in
-    an unexpected shape.
-    """
-    if shutil.which("gsettings") is None:
-        return []
-
-    conflicts: list[tuple[str, str]] = []
-    for schema in _BINDING_SCHEMAS:
-        try:
-            output = subprocess.run(
-                ["gsettings", "list-recursively", schema],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-        except (OSError, subprocess.CalledProcessError):
-            continue
-        for line in output.splitlines():
-            match = _SETTING_LINE_RE.match(line.strip())
-            if match is None:
-                continue
-            found_schema, key, value = match.groups()
-            # Quoted whole-word match: '<Super>n' must not be found inside
-            # '<Super><Shift>n', and 'Print' must not match 'Print_Screen'.
-            if f"'{shortcut}'" in value:
-                conflicts.append((found_schema, key))
-    return conflicts
-
-
 # Human names for the GNOME settings people actually collide with. A key
 # absent from here still reports as a conflict -- it just names the schema
 # key instead of a sentence, which is worse copy but never a missed clash.
@@ -1494,16 +1427,6 @@ def _custom_keybinding_value(path: str, key: str) -> str:
     except (OSError, subprocess.CalledProcessError):
         return ""
     return raw.strip("'")
-
-
-def describe_conflicts(conflicts: list[tuple[str, str]]) -> str:
-    """One human sentence for `find_shortcut_conflicts`' result."""
-    if not conflicts:
-        return ""
-    names = ", ".join(key.replace("-", " ") for _, key in conflicts[:3])
-    if len(conflicts) > 3:
-        names += f", and {len(conflicts) - 3} more"
-    return f"Already used by GNOME for: {names}"
 
 
 def _append_slot(current_keybindings: str) -> str:
