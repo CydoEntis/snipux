@@ -588,3 +588,68 @@ class TestFlowMenu:
             assert menu.y() >= anchor.bottom()
         finally:
             menu.close()
+
+
+class TestAMenuNeverLeavesTheScreen:
+    """Reported with a screenshot: the recording delay menu opened downward
+    from a bar low on the screen, so "3s" and "5s" ran off the bottom edge
+    and under the taskbar, where they could not be clicked.
+
+    `within` is passed explicitly here rather than left to
+    `QGuiApplication.screenAt`: the offscreen platform's screen is not the
+    one the assertion is about, and a placement test that depends on the
+    runner's monitor answers differently on every machine.
+    """
+
+    SCREEN = QRect(0, 0, 1920, 1040)
+
+    def _menu(self):
+        rows = [(value, value, "", "", "") for value in ("No delay", "3s", "5s", "10s")]
+        menu = FlowMenu(rows, "No delay", 160)
+        menu.adjustSize()
+        return menu
+
+    def test_it_flips_above_a_control_near_the_bottom(self):
+        menu = self._menu()
+        # A bar sitting just above the taskbar: there is no room under it.
+        anchor = QRect(900, 1000, 90, 32)
+
+        menu.open_below(anchor, self.SCREEN)
+
+        assert menu.geometry().bottom() <= self.SCREEN.bottom()
+        assert menu.geometry().bottom() <= anchor.top()
+
+    def test_it_flips_below_a_control_near_the_top(self):
+        menu = self._menu()
+        # The recording bar's own home: 12px under the top of the screen.
+        anchor = QRect(900, 12, 90, 32)
+
+        menu.open_above(anchor, self.SCREEN)
+
+        assert menu.geometry().top() >= self.SCREEN.top()
+        assert menu.geometry().top() >= anchor.bottom()
+
+    def test_it_stays_on_screen_at_the_right_edge(self):
+        menu = self._menu()
+        anchor = QRect(self.SCREEN.right() - 40, 400, 32, 32)
+
+        menu.open_below(anchor, self.SCREEN)
+
+        assert menu.geometry().right() <= self.SCREEN.right()
+        assert menu.geometry().left() >= self.SCREEN.left()
+
+    def test_it_stays_on_screen_at_the_left_edge(self):
+        menu = self._menu()
+        anchor = QRect(self.SCREEN.left() + 4, 400, 32, 32)
+
+        menu.open_below(anchor, self.SCREEN)
+
+        assert menu.geometry().left() >= self.SCREEN.left()
+
+    def test_it_still_opens_where_asked_when_there_is_room(self):
+        menu = self._menu()
+        anchor = QRect(900, 500, 90, 32)
+
+        menu.open_below(anchor, self.SCREEN)
+
+        assert menu.geometry().top() >= anchor.bottom()

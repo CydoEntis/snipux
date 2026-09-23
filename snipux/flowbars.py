@@ -29,10 +29,12 @@ of three.
 from __future__ import annotations
 
 import math
+import time
 
-from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QCursor,
     QFont,
     QFontMetrics,
     QFontMetricsF,
@@ -615,6 +617,52 @@ class _Readout(QLabel):
         self.setStyleSheet(" ".join(rules))
 
 
+class MenuReopenGuard:
+    """Why a menu does not reopen when the chip that opened it is clicked
+    again.
+
+    A popup takes the mouse for as long as it is up, so the press that
+    dismisses it never reaches the chip underneath -- until the popup has
+    closed, at which point that same press arrives at the chip, which opens
+    the menu it just closed. What the user sees is a menu that cannot be
+    shut by clicking the control that opened it: it flickers and comes
+    straight back. `WA_NoMouseReplay` is Qt's answer and does not cover
+    this, because the chip is a widget in another top-level window rather
+    than under the popup's own replay.
+
+    Elapsed time alone cannot tell that press apart from a deliberate
+    second click, so this also asks *where the pointer is*: only the chip
+    the pointer is actually over is blocked, which is what lets clicking a
+    different chip close one menu and open the other in a single press --
+    the behaviour the bars are supposed to have.
+
+    One guard per opener. Shared by the chooser row and every bar menu,
+    which all have the same chip-opens-a-popup shape.
+    """
+
+    # Long enough to cover the popup closing and the press being delivered,
+    # short enough that a person clicking the same chip twice on purpose is
+    # never refused: a deliberate reopen is hundreds of milliseconds away.
+    WINDOW_MS = 250
+
+    def __init__(self) -> None:
+        self._closed_at: float | None = None
+
+    def note_closed(self) -> None:
+        """Called when the menu closes, however it closed."""
+        self._closed_at = time.monotonic()
+
+    def blocks_reopen(self, opener: QWidget) -> bool:
+        """Whether an open request from `opener` is that dismissing press
+        arriving late, rather than a new click."""
+        if self._closed_at is None:
+            return False
+        if (time.monotonic() - self._closed_at) * 1000 > self.WINDOW_MS:
+            return False
+        origin = opener.mapToGlobal(QPoint(0, 0))
+        return QRect(origin, opener.size()).contains(QCursor.pos())
+
+
 class FlowMenu(QWidget):
     """A dropdown for one of the bars.
 
@@ -633,6 +681,13 @@ class FlowMenu(QWidget):
 
     chosen = pyqtSignal(str)
 
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """Every way this closes -- a pick, a press outside, Escape -- ends
+        in a hide, so this is the one place the guard has to be told."""
+        if self._guard is not None:
+            self._guard.note_closed()
+        super().hideEvent(event)
+
     def __init__(
         self,
         rows,
@@ -640,8 +695,14 @@ class FlowMenu(QWidget):
         width: int,
         parent: QWidget | None = None,
         footnote: str = "",
+        *,
+        guard: "MenuReopenGuard | None" = None,
     ):
         super().__init__(parent)
+        # Told here rather than wired by every caller: a menu knows when it
+        # closes, and the chip that opened it has to know too or it reopens
+        # on the press that dismissed this. See MenuReopenGuard.
+        self._guard = guard
         self.setWindowFlags(
             Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
         )
@@ -694,22 +755,73 @@ class FlowMenu(QWidget):
         index = int((y - metric.MENU_PAD) // self._row_height())
         return index if 0 <= index < len(self._rows) else -1
 
-    def open_above(self, anchor_rect) -> None:
+    def _usable_area(self, anchor_rect):
+        """The available area of the screen `anchor_rect` sits on, or None
+        when there is no screen to ask (the offscreen platform).
+
+        `anchor_rect` is in absolute logical virtual-desktop coordinates --
+        every caller maps its control through `mapToGlobal` first -- which
+        is the same space `availableGeometry()` answers in, so the two are
+        comparable without conversion.
+        """
+        screen = QGuiApplication.screenAt(anchor_rect.center())
+        return screen.availableGeometry() if screen is not None else None
+
+    def _open_at(self, anchor_rect, *, above: bool, within=None) -> None:
+        """Place this menu on the wanted side of `anchor_rect`, flip to the
+        other side when it would not fit, and keep it inside `within`
+        whatever happens.
+
+        Both the flip and the clamp are why this exists. The delay menu
+        opened downward unconditionally, so with the recording bar low on
+        the screen its rows ran off the bottom edge and under the taskbar,
+        where "5s" could not be clicked at all. And nothing ever looked at
+        the left and right edges, so a menu anchored to a control near a
+        screen edge ran off sideways for the same reason.
+
+        Every rect here is absolute logical virtual-desktop coordinates.
+        """
+        metric = tokens.FlowMetric
+        if within is None:
+            within = self._usable_area(anchor_rect)
+
+        top_if_above = anchor_rect.top() - metric.MENU_OFFSET - self.height()
+        top_if_below = anchor_rect.bottom() + metric.MENU_OFFSET
+        y = top_if_above if above else top_if_below
+        if within is not None:
+            fits_above = top_if_above >= within.top()
+            fits_below = top_if_below + self.height() <= within.bottom()
+            if above and not fits_above and fits_below:
+                y = top_if_below
+            elif not above and not fits_below and fits_above:
+                y = top_if_above
+
+        x = anchor_rect.center().x() - self.width() / 2
+        if within is not None:
+            # Clamped last, and to the left edge if the menu is somehow
+            # wider than the screen: a menu whose left edge is off-screen
+            # has lost its first column of text, which is the one carrying
+            # the labels.
+            x = min(x, within.right() - self.width())
+            x = max(x, within.left())
+            y = min(y, within.bottom() - self.height())
+            y = max(y, within.top())
+        self.move(round(x), round(y))
+        self.show()
+
+    def open_above(self, anchor_rect, within=None) -> None:
         """Open with the menu's bottom edge above `anchor_rect`'s top.
 
         The audio menu opens upward so it never covers the region being
         recorded -- the one thing on screen the user is trying to look at.
+        Flips below rather than leaving the screen when there is no room.
         """
-        metric = tokens.FlowMetric
-        x = anchor_rect.center().x() - self.width() / 2
-        self.move(round(x), round(anchor_rect.top() - metric.MENU_OFFSET - self.height()))
-        self.show()
+        self._open_at(anchor_rect, above=True, within=within)
 
-    def open_below(self, anchor_rect) -> None:
-        metric = tokens.FlowMetric
-        x = anchor_rect.center().x() - self.width() / 2
-        self.move(round(x), round(anchor_rect.bottom() + metric.MENU_OFFSET))
-        self.show()
+    def open_below(self, anchor_rect, within=None) -> None:
+        """Open under `anchor_rect`, flipping above when there is no room
+        below -- which is what a bar low on the screen leaves."""
+        self._open_at(anchor_rect, above=False, within=within)
 
     def open_clear_of(self, anchor_rect, within=None) -> None:
         """Open above `anchor_rect` when it fits inside `within` -- the
@@ -721,14 +833,7 @@ class FlowMenu(QWidget):
         menu that only ever opened upward went off the top of the screen
         there, where nothing could reach it.
         """
-        metric = tokens.FlowMetric
-        if within is None:
-            screen = QGuiApplication.screenAt(anchor_rect.center())
-            within = screen.availableGeometry() if screen is not None else None
-        if within is None or anchor_rect.top() - metric.MENU_OFFSET - self.height() >= within.top():
-            self.open_above(anchor_rect)
-        else:
-            self.open_below(anchor_rect)
+        self.open_above(anchor_rect, within)
 
     @staticmethod
     def fitting_width(rows, minimum: int) -> int:

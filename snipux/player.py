@@ -70,7 +70,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from . import design, output
 from .design import tokens
-from .flowbars import FlowMenu
+from .flowbars import FlowMenu, MenuReopenGuard
 from .winchrome import WinWindow, _mono_font, _ui_font
 
 _M = tokens.PlayerMetric
@@ -1715,6 +1715,10 @@ class PlayerWindow(WinWindow):
         self._format = tokens.EXPORT_DEFAULT
         self._saved = True
         self._menu: FlowMenu | None = None
+        # One guard for both menus: it blocks only the button the
+        # pointer is actually over, so clicking Export while Speed is
+        # open still swaps them in a single press. See MenuReopenGuard.
+        self._menu_guard = MenuReopenGuard()
         self._exporter = None
         self._source_fps: float = float(tokens.PLAYER_FPS)
 
@@ -2172,17 +2176,25 @@ class PlayerWindow(WinWindow):
             self._menu = None
 
     def _open_speed_menu(self) -> None:
-        self._close_menu()
-        rows = [(value, f"{value}×", "", "", "") for value in tokens.SPEEDS]
-        self._menu = FlowMenu(rows, self._speed, 110)
-        self._menu.chosen.connect(self.set_speed)
         anchor = self.transport.speed_button
+        self._close_menu()
+        if self._menu_guard.blocks_reopen(anchor):
+            # The press that closed this menu, arriving at the button
+            # underneath -- not a new click. See MenuReopenGuard.
+            return
+        rows = [(value, f"{value}×", "", "", "") for value in tokens.SPEEDS]
+        self._menu = FlowMenu(rows, self._speed, 110, guard=self._menu_guard)
+        self._menu.chosen.connect(self.set_speed)
         self._menu.open_above(
             QRect(anchor.mapToGlobal(anchor.rect().topLeft()), anchor.size())
         )
 
     def _open_export_menu(self) -> None:
         self._close_menu()
+        if self._menu_guard.blocks_reopen(self.export_button):
+            # The press that closed this menu, arriving at the button
+            # underneath -- not a new click. See MenuReopenGuard.
+            return
         unavailable = export_availability(self.state.trimmed)
         real_h264 = system_ffmpeg() is not None
         rows = []
@@ -2201,7 +2213,8 @@ class PlayerWindow(WinWindow):
                 )
             rows.append((fid, label, note, size, reason))
         self._menu = FlowMenu(
-            rows, self._format, 298, footnote=tokens.EXPORT_FOOTNOTE
+            rows, self._format, 298, footnote=tokens.EXPORT_FOOTNOTE,
+            guard=self._menu_guard,
         )
         self._menu.chosen.connect(self._choose_format)
         anchor = self.export_button

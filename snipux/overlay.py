@@ -56,7 +56,7 @@ from PyQt6.QtWidgets import (
 from snipux import design, glass, output, platform, sensitive, setup_desktop
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
-from snipux.flowbars import FlowMenu
+from snipux.flowbars import FlowMenu, MenuReopenGuard
 from snipux.marks import (
     MarkStore,
     TextLabelEditor,
@@ -4923,6 +4923,13 @@ class OverlayWindow(QWidget):
         # window's own many pixel-sampling tests, none of which call
         # `.show()`, the same reason `_sync_bar_visibility` gates `_bar`.
         self._toast = Toast(self)
+        # The caret's destination menu, and the guard that stops the
+        # press which dismissed it from reopening it (MenuReopenGuard).
+        # Both named here rather than sprung into being on first use:
+        # `_chrome_to_keep_clear` used to reach for the menu through
+        # getattr precisely because it might not exist yet.
+        self._destination_menu: FlowMenu | None = None
+        self._menu_guard = MenuReopenGuard()
         for widget in self._fading_chrome():
             widget.installEventFilter(self)
 
@@ -6452,7 +6459,17 @@ class OverlayWindow(QWidget):
         # -- so gating on "armed" showed the whole screenshot toolbar for
         # the length of every recording drag and only hid it on release.
         # Reported twice as "i shouldnt see the whole screenshooting tools".
-        if self._armed_for_recording or self._chooser.kind == "record":
+        # `instant` is the same case one step further on: the snip finishes
+        # on the release that ends the drag (`_commit_selection`), so a
+        # toolbar shown while dragging exists only to disappear -- offering
+        # a pen for a snip that is already on its way to the clipboard. What
+        # the user asked to see is the region they are cutting, which is
+        # what is left once the bar goes.
+        if (
+            self._armed_for_recording
+            or self._chooser.kind == "record"
+            or self.outcome == "instant"
+        ):
             self._bar.hide()
             self._style_popover.hide()
             self._popover.hide()
@@ -7151,6 +7168,11 @@ class OverlayWindow(QWidget):
         -- it has to paint above the hint pill below the bar, and a parent
         carrying an effect would trap it.
         """
+        if self._menu_guard.blocks_reopen(self._bar._action):
+            # The press that dismissed this menu, reaching the caret only
+            # now that the popup has gone -- clicking the caret again has
+            # to close the menu, not reopen it. See MenuReopenGuard.
+            return
         current = self._bar.destination()
         rows = [
             (name, name, note, key, "")
@@ -7171,7 +7193,10 @@ class OverlayWindow(QWidget):
             "P",
             "" if platform.current.can_pin() else platform.current.pin_unavailable_reason(),
         ))
-        menu = FlowMenu(rows, current, design.tokens.FlowMetric.MENU_W_DEST, None)
+        menu = FlowMenu(
+            rows, current, design.tokens.FlowMetric.MENU_W_DEST, None,
+            guard=self._menu_guard,
+        )
         # No parent to find this window through, so its glass is told.
         menu.glass.set_host(self)
         menu.chosen.connect(self._on_destination_chosen)
@@ -9020,7 +9045,7 @@ class OverlayWindow(QWidget):
             *self._family_menus.values(),
         ]
         rects = [QRectF(widget.geometry()) for widget in widgets if widget.isVisible()]
-        menu = getattr(self, "_destination_menu", None)
+        menu = self._destination_menu
         try:
             if menu is not None and menu.isVisible():
                 top_left = self.mapFromGlobal(menu.geometry().topLeft())
