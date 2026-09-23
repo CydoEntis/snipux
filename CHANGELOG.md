@@ -11,6 +11,10 @@ use it; the commit history has the detail.
   capture mode, recording delay, audio, destination, the player's speed and
   export menus -- reopened instead of closing when you clicked the control
   that opened it.
+- **Menus stay on screen.** The recording delay menu opened downward from
+  a bar low on the screen, so its rows ran off the bottom edge and under
+  the taskbar. Every menu now flips to the other side when there is no
+  room, and stays inside the screen's edges.
 - **An instant snip shows no annotation toolbar.** It finishes the moment
   you let go, so the toolbar only ever appeared for the length of the drag
   and then disappeared; the capture region is what you see now.

@@ -2213,8 +2213,12 @@ class AppController:
 
         menu.chosen.connect(choose)
         control = bar.delay_control()
-        menu.open_below(QRect(control.mapToGlobal(control.rect().topLeft()),
-                              control.size()))
+        # open_clear_of, like the audio and destination menus beside it:
+        # open_below put the rows off the bottom of the screen whenever the
+        # recording bar sat low, which is where it sits for a region near
+        # the bottom edge.
+        menu.open_clear_of(QRect(control.mapToGlobal(control.rect().topLeft()),
+                                 control.size()))
         self._flow_menu = menu
 
     def _open_audio_menu(self) -> None:

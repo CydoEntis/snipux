@@ -755,22 +755,73 @@ class FlowMenu(QWidget):
         index = int((y - metric.MENU_PAD) // self._row_height())
         return index if 0 <= index < len(self._rows) else -1
 
-    def open_above(self, anchor_rect) -> None:
+    def _usable_area(self, anchor_rect):
+        """The available area of the screen `anchor_rect` sits on, or None
+        when there is no screen to ask (the offscreen platform).
+
+        `anchor_rect` is in absolute logical virtual-desktop coordinates --
+        every caller maps its control through `mapToGlobal` first -- which
+        is the same space `availableGeometry()` answers in, so the two are
+        comparable without conversion.
+        """
+        screen = QGuiApplication.screenAt(anchor_rect.center())
+        return screen.availableGeometry() if screen is not None else None
+
+    def _open_at(self, anchor_rect, *, above: bool, within=None) -> None:
+        """Place this menu on the wanted side of `anchor_rect`, flip to the
+        other side when it would not fit, and keep it inside `within`
+        whatever happens.
+
+        Both the flip and the clamp are why this exists. The delay menu
+        opened downward unconditionally, so with the recording bar low on
+        the screen its rows ran off the bottom edge and under the taskbar,
+        where "5s" could not be clicked at all. And nothing ever looked at
+        the left and right edges, so a menu anchored to a control near a
+        screen edge ran off sideways for the same reason.
+
+        Every rect here is absolute logical virtual-desktop coordinates.
+        """
+        metric = tokens.FlowMetric
+        if within is None:
+            within = self._usable_area(anchor_rect)
+
+        top_if_above = anchor_rect.top() - metric.MENU_OFFSET - self.height()
+        top_if_below = anchor_rect.bottom() + metric.MENU_OFFSET
+        y = top_if_above if above else top_if_below
+        if within is not None:
+            fits_above = top_if_above >= within.top()
+            fits_below = top_if_below + self.height() <= within.bottom()
+            if above and not fits_above and fits_below:
+                y = top_if_below
+            elif not above and not fits_below and fits_above:
+                y = top_if_above
+
+        x = anchor_rect.center().x() - self.width() / 2
+        if within is not None:
+            # Clamped last, and to the left edge if the menu is somehow
+            # wider than the screen: a menu whose left edge is off-screen
+            # has lost its first column of text, which is the one carrying
+            # the labels.
+            x = min(x, within.right() - self.width())
+            x = max(x, within.left())
+            y = min(y, within.bottom() - self.height())
+            y = max(y, within.top())
+        self.move(round(x), round(y))
+        self.show()
+
+    def open_above(self, anchor_rect, within=None) -> None:
         """Open with the menu's bottom edge above `anchor_rect`'s top.
 
         The audio menu opens upward so it never covers the region being
         recorded -- the one thing on screen the user is trying to look at.
+        Flips below rather than leaving the screen when there is no room.
         """
-        metric = tokens.FlowMetric
-        x = anchor_rect.center().x() - self.width() / 2
-        self.move(round(x), round(anchor_rect.top() - metric.MENU_OFFSET - self.height()))
-        self.show()
+        self._open_at(anchor_rect, above=True, within=within)
 
-    def open_below(self, anchor_rect) -> None:
-        metric = tokens.FlowMetric
-        x = anchor_rect.center().x() - self.width() / 2
-        self.move(round(x), round(anchor_rect.bottom() + metric.MENU_OFFSET))
-        self.show()
+    def open_below(self, anchor_rect, within=None) -> None:
+        """Open under `anchor_rect`, flipping above when there is no room
+        below -- which is what a bar low on the screen leaves."""
+        self._open_at(anchor_rect, above=False, within=within)
 
     def open_clear_of(self, anchor_rect, within=None) -> None:
         """Open above `anchor_rect` when it fits inside `within` -- the
@@ -782,14 +833,7 @@ class FlowMenu(QWidget):
         menu that only ever opened upward went off the top of the screen
         there, where nothing could reach it.
         """
-        metric = tokens.FlowMetric
-        if within is None:
-            screen = QGuiApplication.screenAt(anchor_rect.center())
-            within = screen.availableGeometry() if screen is not None else None
-        if within is None or anchor_rect.top() - metric.MENU_OFFSET - self.height() >= within.top():
-            self.open_above(anchor_rect)
-        else:
-            self.open_below(anchor_rect)
+        self.open_above(anchor_rect, within)
 
     @staticmethod
     def fitting_width(rows, minimum: int) -> int:
