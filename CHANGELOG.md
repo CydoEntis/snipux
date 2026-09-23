@@ -5,6 +5,15 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **A `.deb` and an AppImage on the Releases page.** Installing Snipux on
+  Linux no longer means having Python, pipx or a virtual environment: the
+  `.deb` installs with `sudo apt install ./snipux_<version>_amd64.deb`, and
+  the AppImage runs from wherever you save it after a `chmod +x`. Both carry
+  their own Python and Qt, so neither cares what the distribution ships.
+  Both are built for every release alongside the wheel.
+
 ### Changed
 
 - **One colour for the whole application.** The overlay's bars, menus and
@@ -45,6 +54,13 @@ use it; the commit history has the detail.
   and stepped two frames at a time.
 - **Paths read the same way throughout on Windows** -- one of them mixed
   `/` and `\` in a single line.
+- **`snipux --update` tells you how to update the build you actually
+  have.** Every standalone build was told to download `snipux.exe` — on
+  Linux, a file that does not exist.
+- **An AppImage binds its shortcut to a path that survives the run.** The
+  desktop entry and the Ctrl+Alt+S shortcut named the temporary location the
+  AppImage unpacks itself to, which is gone the moment it exits, so both
+  would have stopped working the first time you closed it.
 
 ## 1.0.0 — 2026-09-21
 

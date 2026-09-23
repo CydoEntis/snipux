@@ -71,6 +71,12 @@ dependencies = [
 # `pip install -r requirements.txt` the test suite runs never pull it in --
 # only `packaging/windows/build.ps1` does, via `pip install .[build-windows]`.
 build-windows = ["pyinstaller>=6.5"]
+# The same tool for the same reason on the other side: packaging/linux/
+# build_bundle.sh installs this to build the bundle that both the AppImage
+# and the .deb carry. Separate from build-windows so neither platform's
+# builder installs a toolchain it has no use for, even though the pin
+# happens to be identical today.
+build-linux = ["pyinstaller>=6.5"]
 
 [project.urls]
 Homepage = "https://github.com/CydoEntis/snipux"
