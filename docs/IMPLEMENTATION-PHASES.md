@@ -39,9 +39,13 @@ Run it again with `QT_SCALE_FACTOR=1.5`; CI runs 1.5 on Ubuntu only. Don't run t
 suites at once from different worktrees: the single-instance socket tests
 share one server name and will trip over each other.
 
+**The queue as of 1.0.2 is #105, #92 and #107, plus #81 under "Needs a
+person".** Everything above them has shipped.
+
 ## Phase 1: done -- the 2026-09-16 Tugboat run
 
-Merged to `dev` (#94-#103), not yet released:
+Released in 1.0.0 (#94-#103). 0.9.0 was prepared and never published, so
+everything it would have carried went out as 1.0.0 instead:
 
 1. #82 Copy the text out of a snip
 2. #83 Pin a snip on top of the screen
@@ -54,22 +58,24 @@ Merged to `dev` (#94-#103), not yet released:
 9. #90 Spotlight
 10. #91 Open an image you already have
 
-**Pause here for a hands-on review on Windows and on Linux**, then release
-as 0.9.0.
+That hands-on review happened on Windows on 2026-08-27 -- see TODO.md,
+"Windows has now been watched" -- and 1.0.0 followed on 2026-09-21.
 
 ## Phase 2: follow-ups from Phase 1
 
 Small, and they touch the same code Phase 1 just changed, so do them before
 anything new lands on top.
 
-1. #106 Keep the eyedropper's loupe clear of the bar (bug)
-2. #105 Point a callout at something, then place its words
+1. #105 Point a callout at something, then place its words
+
+(#106, the eyedropper's loupe, shipped in 1.0.0.)
 
 ## Phase 3: Linux parity
 
-1. #93 Pause and resume a recording on Linux
-2. #92 Read text on Linux with a system tesseract -- adds an optional
+1. #92 Read text on Linux with a system tesseract -- adds an optional
    system tool; the same rules as `ffmpeg` apply (found, never required)
+
+(#93, pause and resume on Linux, shipped in 1.0.0.)
 
 Pause for a review in the Ubuntu VM, on both Wayland and X11.
 

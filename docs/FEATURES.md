@@ -24,8 +24,8 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Browser mode: the page area of the browser in front, and full-page scroll-and-stitch
 - [x] `done` Delay before capture, chosen on the chooser row
 - [x] `done` Hide sensitive: black out passwords and keys found by OCR (Windows)
-- [x] `dev` Nudge the selection with the arrow keys
-- [x] `dev` Open an image you already have (`snipux shot.png`, or drop it on the review window)
+- [x] `done` Nudge the selection with the arrow keys
+- [x] `done` Open an image you already have (`snipux shot.png`, or drop it on the review window)
 - [ ] `now` Find the page inside a browser window on Linux X11 (#81, needs a real desktop)
 - [ ] `later` Scrolling capture beyond the browser -- the capture layer must not assume one frame per session
 
@@ -35,22 +35,22 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Per-tool style: colour, fill, solid/dashed/dotted
 - [x] `done` Blur, pixelate and solid redaction
 - [x] `done` Watermark, text or image
-- [x] `dev` Watermark text colour, font, and an optional background box
+- [x] `done` Watermark text colour, font, and an optional background box
 - [x] `done` Undo/redo shared by overlay and review
-- [x] `dev` Callout: a box with a tail and words in it
-- [x] `dev` Spotlight: dim everything but one region
-- [x] `dev` Eyedropper: pick a colour off the frozen frame
+- [x] `done` Callout: a box with a tail and words in it
+- [x] `done` Spotlight: dim everything but one region
+- [x] `done` Eyedropper: pick a colour off the frozen frame
 - [ ] `now` Point a callout at something, then place its words (#105)
-- [ ] `now` Keep the eyedropper's loupe clear of the bar (#106)
+- [x] `done` Keep the eyedropper's loupe clear of the bar
 - [x] `declined` Crop as a shape -- it only drew a dashed box; crop by reselecting
 
 ## After a snip
 
 - [x] `done` Copy, Save, Open (review window), with the choice remembered
 - [x] `done` Instant saves, filename patterns, save folder
-- [x] `dev` Copy text: OCR the selection to the clipboard (Windows)
-- [x] `dev` Pin a snip on top of the screen (not on Wayland)
-- [x] `dev` Recent captures in the tray menu
+- [x] `done` Copy text: OCR the selection to the clipboard (Windows)
+- [x] `done` Pin a snip on top of the screen (not on Wayland)
+- [x] `done` Recent captures in the tray menu
 - [ ] `now` Read text on Linux with a system tesseract (#92)
 - [ ] `now` Recent captures as thumbnails in a window (#107)
 - [ ] `idea` The stills destination model -- open product question, see TODO.md
@@ -60,12 +60,14 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Record a region, window or screen (GNOME Screencast on Linux, QtMultimedia on Windows)
 - [x] `done` Player with trim, and export to MP4, WebM, GIF or a single frame (H.264 via a system `ffmpeg` when present)
 - [x] `done` Frame rate, cursor and destination settings
-- [x] `dev` Land a recording as GIF without opening the player
-- [x] `dev` Pause and resume (Windows)
-- [x] `dev` Pause and resume on Linux, with a system ffmpeg (#93)
-- [x] `dev` Microphone audio in recordings (Windows)
+- [x] `done` Land a recording as GIF without opening the player
+- [x] `done` Pause and resume (Windows)
+- [x] `done` Pause and resume on Linux, with a system ffmpeg (#93)
+- [x] `done` Record the pointer, or not, from the chooser row as well as
+      Settings (Linux; Windows' recorder has no cursor option)
+- [x] `done` Microphone audio in recordings (Windows)
 - [ ] `later` Desktop (system) sound on Windows -- Qt cannot capture it without a new dependency
-- [x] `dev` System sound and mic on Linux, with a system ffmpeg
+- [x] `done` System sound and mic on Linux, with a system ffmpeg
 
 ## Desktop integration
 
@@ -75,7 +77,11 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Standalone Windows exe that installs itself on first run
 - [x] `done` `snipux --update`
 - [x] `done` Crash log instead of a silent exit
-- [x] `declined` Windows installer -- Smart App Control blocked it outright (docs/releasing.md)
+- [x] `done` Windows installer, shipped beside the portable exe rather than
+      instead of it (docs/releasing.md)
+- [x] `done` `winget install snipux`
+- [x] `done` A `.deb` and an AppImage, built and attached for every release
+- [x] `done` "Check for updates" in the tray -- asked for, never automatic
 - [x] `declined` Code signing -- recurring cost out of proportion for a free tool, for now (docs/releasing.md)
 
 ## Platforms
