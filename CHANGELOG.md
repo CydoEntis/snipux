@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.0.2 — 2026-09-23
+
 ### Added
 
 - **A Windows installer, and `winget install snipux`.** Download
