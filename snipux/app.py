@@ -97,7 +97,7 @@ from snipux.overlay import (
     open_overlay,
     other_screens_nearest_first,
 )
-from snipux import __version__, design, handoff, platform, setup_desktop
+from snipux import __version__, design, handoff, platform, setup_desktop, updates
 # Re-exported: the controller calls these by bare name, and tests patch them
 # here to intercept the controller's own calls.
 from snipux.output import (
@@ -564,7 +564,7 @@ def _build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--update",
         action="store_true",
-        help="fetch and install the newest Snipux from GitHub, then report "
+        help="fetch and install the newest Snipux from PyPI, then report "
         "what to restart -- the same pip command the README gives, without "
         "anyone having to keep a URL",
     )
@@ -1226,6 +1226,8 @@ class AppController:
         # The open dropdown, held so Python does not collect a parentless
         # popup out from under the user mid-choice.
         self._flow_menu: FlowMenu | None = None
+        # The update check in flight, if any -- see check_for_updates.
+        self._update_check: updates.UpdateCheck | None = None
         # One guard for all three bar menus: it blocks only the control
         # the pointer is over, so clicking Audio while Delay is open
         # still swaps them in one press. See MenuReopenGuard.
@@ -1314,6 +1316,13 @@ class AppController:
         self.discard_action = menu.addAction("Discard recording")
         self.discard_action.triggered.connect(self._discard_recording)
         self.discard_action.setEnabled(False)
+        # Asked for, never automatic: nothing here checks on a timer or at
+        # startup (see updates.py). Without this item there is no way at all
+        # to find out a release happened short of visiting the repository,
+        # which is how 1.0.1 could have gone unnoticed by everyone already
+        # running 1.0.0.
+        self.update_action = menu.addAction("Check for updates")
+        self.update_action.triggered.connect(self.check_for_updates)
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         # #85: rebuilds on `aboutToShow`, but that alone is not trusted --
@@ -1858,6 +1867,48 @@ class AppController:
         else:
             message = f"Saved to {path.parent.name}/{path.name}"
         self._report_shortcut(message)
+
+    def check_for_updates(self, opener=None) -> None:
+        """Ask GitHub whether there is a newer release, and say so.
+
+        Off the UI thread (`updates.UpdateCheck`), because this is a network
+        request and the tray menu must not hang on a proxy that is not
+        answering. The reply comes back through a signal, so
+        `_on_update_checked` runs here, on the thread that owns the tray.
+
+        `opener` is passed only by tests, which must never reach the
+        network.
+        """
+        self._report_shortcut("Checking for updates…")
+        # No parent: AppController is a plain object, not a QObject, so
+        # there is nothing here for Qt to own this. Held in an attribute
+        # instead, for the same reason every window is -- a QObject with a
+        # signal still to deliver is otherwise fair game for the collector,
+        # and collecting it mid-emit is a crash rather than a missed
+        # message.
+        check = updates.UpdateCheck(opener)
+        check.finished.connect(self._on_update_checked)
+        self._update_check = check
+        check.start()
+
+    def _on_update_checked(self, latest) -> None:
+        """Report what the check found, in the terms of the build that is
+        actually running -- a frozen build cannot pip-upgrade itself, so
+        telling its user to run `snipux --update` would be useless."""
+        self._update_check = None
+        if latest is None:
+            self._report_shortcut(
+                "Could not check for updates. Try again when you are online."
+            )
+            return
+        if not updates.is_newer(latest, __version__):
+            self._report_shortcut(f"Snipux {__version__} is the newest version.")
+            return
+        if getattr(sys, "frozen", False):
+            how = "Download it from the Releases page."
+        else:
+            how = "Run `snipux --update` to install it."
+        self._report_shortcut(f"Snipux {latest} is available. {how}")
 
     def _open_player(self, path: Path) -> None:
         """Open a landed recording in the trim editor.

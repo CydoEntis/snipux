@@ -5,6 +5,14 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **"Check for updates" in the tray menu.** Snipux never checked before, so
+  a new release went unnoticed unless you happened to visit the repository.
+  It only ever asks when you pick it -- there is no check at startup, no
+  timer, and no traffic of any kind otherwise -- and it tells you how to
+  update the build you are actually running.
+
 ### Changed
 
 - **One green, not five.** The accent, the "free to register" tick, the
