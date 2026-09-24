@@ -44,6 +44,8 @@ free, on Linux too — and a slightly better one back on Windows.
 - **Trim and export** — a player with a filmstrip and waveform, exporting MP4,
   WebM, GIF or a single frame.
 - **Watermark** — stamp text or an image in a corner of every capture.
+- **Keep the pointer out of a recording** — or in it, decided on the same row
+  you pick the region on *(Linux; Windows' recorder has no cursor option)*.
 - **One shortcut** — Ctrl+Alt+S, on both platforms.
 
 MIT licensed. Install it with `winget install snipux`, a `.deb`, an
@@ -94,11 +96,11 @@ their own Python and Qt:
 
 ```sh
 # Ubuntu, Debian, Mint -- anything with apt
-sudo apt install ./snipux_1.0.1_amd64.deb
+sudo apt install ./snipux_<version>_amd64.deb
 
 # or, on any distribution, with no root and no install step at all
-chmod +x Snipux-1.0.1-x86_64.AppImage
-./Snipux-1.0.1-x86_64.AppImage
+chmod +x Snipux-<version>-x86_64.AppImage
+./Snipux-<version>-x86_64.AppImage
 ```
 
 On Arch, Omarchy and other Arch-based systems, install FUSE 2 before running
@@ -349,7 +351,7 @@ Nothing else to run: the shortcut and hotkey point at a location that does not
 change between versions.
 
 **Check it worked:** tray → Settings, bottom-left, e.g.
-`Snipux 0.7.2 / Qt 6.11.0 · Windows`.
+`Snipux 1.0.2 / Qt 6.11.0 · Windows`.
 
 > `--upgrade` compares versions, so **every release needs a new version
 > number** in `pyproject.toml`. Left the same, pip decides the requirement is
@@ -360,13 +362,14 @@ change between versions.
 > can get wrong. (`--force-reinstall` overrides the comparison, but it also
 > re-downloads Qt, so it is not what to tell people.)
 
-**There is no update check.** Snipux never phones home, so nobody is told a new
-version exists — they update when they choose to. One is buildable now that
-this repository is public:
-`api.github.com/repos/CydoEntis/snipux/releases/latest` answers an
-unauthenticated request, and comparing that tag against
-`importlib.metadata.version("snipux")` is the whole of the logic. What it needs
-first is tagged releases to compare against.
+**Checking is something you ask for.** Tray → **Check for updates** asks GitHub
+whether there is a newer release, and says how to update the build you are
+actually running — `snipux --update` for a pip install, the Releases page for
+the exe, the `.deb` or the AppImage, since pip cannot upgrade any of those.
+
+That request is the only time Snipux touches the network. There is no check at
+startup, no timer, and nothing is sent but the request itself: no token, no
+identifiers, nothing about the machine.
 
 ### Installing a specific version, or offline
 
@@ -390,7 +393,7 @@ python -m build --wheel
 ```
 
 That writes `dist/snipux-<version>-py3-none-any.whl`, which installs the same
-way — `py -m pip install snipux-0.7.2-py3-none-any.whl`. Every release
+way — `py -m pip install snipux-1.0.2-py3-none-any.whl`. Every release
 also carries its wheel and sdist on
 [its GitHub release page](https://github.com/CydoEntis/snipux/releases), so
 there is nothing to build for this.

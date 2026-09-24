@@ -40,10 +40,16 @@ The install story was the git install until 0.6.0; since then it is
 `.github/workflows/release.yml` with trusted publishing -- no token stored.
 `docs/releasing.md` has the procedure.
 
-Windows still ships `snipux.exe` on the Releases page. No installer, unsigned,
-both for reasons already recorded in `docs/releasing.md` -- Smart App Control
-blocks unsigned installers outright, and a trusted certificate is a few
-hundred a year plus a hardware token.
+Windows ships both `snipux.exe` and `snipux-setup-<version>.exe` on the
+Releases page, both unsigned, and the installer is what `winget install
+snipux` fetches. Smart App Control still blocks unsigned installers outright,
+which is why the portable exe is published alongside rather than retired; a
+trusted certificate is still a few hundred a year plus a hardware token.
+`docs/releasing.md` has the reasoning.
+
+Since 1.0.1 the same tag also builds a `.deb` and an AppImage on an Ubuntu
+runner and the exe and installer on a Windows one, and attaches all of them --
+nothing is built by hand any more.
 
 **A drift found while doing this, worth knowing:** the default shortcut has
 been `Control+Alt+S` on *both* platforms since the Settings handoff landed
@@ -474,8 +480,24 @@ H264/H265/MPEG4/MotionJPEG here. **GIF is not in that list**, so the
 player handoff's GIF export is the one row that still needs something
 else; the other three do not.
 
-**No Windows installer**, same reason -- SAC refuses unsigned installers. The
-portable exe is not blocked and installs itself on first run.
+**Both Windows artifacts ship, and both are unsigned.** SNX-104 deleted the
+installer because Smart App Control blocks an unsigned one outright, with no
+way to click through. 1.0.2 brought it back *beside* the portable exe rather
+than instead of it: the machines SAC refuses still have the route they always
+had, and everyone else gets an Add/Remove Programs entry and
+`winget install snipux`. Do not delete either one to solve the other's
+problem -- `docs/releasing.md` has the reasoning in full.
+
+**The update check is never automatic.** There is no check at startup and no
+timer; the tray item is the only thing that makes the request. A screenshot
+tool that phones home unasked is one people stop trusting, and checking
+automatically would buy nothing but hearing about a release a few days sooner.
+
+**One palette, one accent.** The overlay's warm glass and the windows' cool
+chrome were two casts side by side, read as two applications, and were
+unified into the `Surface` ramp in tokens.py; five near-identical greens became
+`Color.ACCENT` and `Color.ACCENT_SOFT`. Both departures from locked handoffs
+are recorded in `docs/design/bars/divergences.md` and `flow/divergences.md`.
 
 **Non-GNOME Linux cannot record.** `ffmpeg -f x11grab` was that route, and
 `QScreenCapture` does not work on Wayland. Acceptable while GNOME is the target.

@@ -31,7 +31,14 @@ import math
 from typing import NamedTuple
 
 from PyQt6.QtCore import QPoint, QRectF, QSizeF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+)
 from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
@@ -792,6 +799,40 @@ class _Menu(QWidget):
         row.clicked.connect(self.picked)
         self._rows[spec.value] = row
         column.addWidget(row)
+
+    def keyPressEvent(self, event) -> None:
+        """Pick the row whose shortcut was pressed.
+
+        A popup holds the keyboard for as long as it is open, so while this
+        is up the overlay's own `keyPressEvent` -- and through it the
+        chooser's `handle_key` -- never runs. Every row in this menu prints
+        its shortcut down the right-hand side, so the keys were advertised
+        and then did nothing: reported as "cant do it from when this is
+        open", with a screenshot of R, W, F, A and B sitting there.
+
+        Matched against the rows' own `spec.shortcut` rather than a second
+        table of letters, so what is drawn and what works cannot disagree. A
+        disabled row ignores its key exactly as it ignores its click.
+        """
+        pressed = QKeySequence(
+            event.keyCombination() if hasattr(event, "keyCombination")
+            else event.key() | event.modifiers().value
+        ).toString()
+        for value, row in self._rows.items():
+            if not row.spec.shortcut:
+                continue
+            if QKeySequence(row.spec.shortcut).toString().lower() != pressed.lower():
+                continue
+            if row.spec.disabled:
+                event.accept()
+                return
+            self.picked.emit(value)
+            event.accept()
+            return
+        # Escape and anything else stay Qt's: a popup already closes itself
+        # on Escape, and swallowing the rest would make this menu the only
+        # thing in the app that eats keys it has no use for.
+        super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:
         self.closed.emit()

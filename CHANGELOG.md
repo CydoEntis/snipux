@@ -45,6 +45,18 @@ use it; the commit history has the detail.
 - **The GNOME Shell screenshot fallback no longer claims to be available on
   every Wayland desktop.** It now checks that GNOME Shell actually owns its
   session-bus name.
+- **The mode menu's own shortcuts work.** Every row prints its key down the
+  right-hand side -- R, W, F, A, B -- and none of them did anything while the
+  menu was open.
+- **Mode shortcuts work again once a selection exists.** Space reopens the
+  row over your selection and its letters pick a capture mode again; with the
+  row collapsed they stay the toolbar's tools.
+- **Keyboard shortcuts work again on Windows.** Every shortcut in every
+  window -- the overlay's tool keys, Escape, the arrow-key nudge, the
+  player's transport keys -- did nothing, because the window was on top and
+  visible without ever being the one the keyboard was pointed at. Windows
+  refuses that to an application that was not already in front, which
+  Snipux never is: the hotkey opens it over whatever you were using.
 
 ## 1.0.2 — 2026-09-23
 
