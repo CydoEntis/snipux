@@ -1,6 +1,6 @@
 # Maintainer: CydoEntis
 pkgname=snipux-bin
-pkgver=1.1.1
+pkgver=1.1.2
 pkgrel=1
 pkgdesc="Snip, annotate and record your screen"
 arch=('x86_64')
