@@ -14179,3 +14179,53 @@ class TestTheOverlayTakesTheKeyboard:
         overlay.set_selection(QRect(10, 10, 60, 40))
 
         assert overlay._selection == QRect(10, 10, 60, 40)
+
+
+class TestModeLettersFollowTheRow:
+    """With the row collapsed the letters are the bar's tools; with it
+    reopened over a selection they are the row's capture modes again.
+
+    They used to be dead in that second state -- the row sat there printing
+    R, W, F and A while none of them did anything, because the gate asked
+    only whether a selection existed. Reported as "if i make a selection i
+    cant hot key to switch to another method".
+    """
+
+    def _overlay_with_a_selection(self):
+        frame = make_frame(image_size=(400, 300), logical_size=(400, 300))
+        overlay = OverlayWindow(frame)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(20, 20, 120, 90))
+        return overlay
+
+    def test_reopening_the_row_makes_its_letters_work_again(self):
+        overlay = self._overlay_with_a_selection()
+        QTest.keyClick(overlay, Qt.Key.Key_Space)      # reopen the row
+        assert overlay._chooser.phase == "choosing"
+
+        QTest.keyClick(overlay, Qt.Key.Key_F)          # Full screen
+
+        assert overlay._chooser.mode == "Full screen"
+
+    def test_with_the_row_collapsed_the_letters_are_still_the_tools(self):
+        overlay = self._overlay_with_a_selection()
+        assert overlay._chooser.phase == "collapsed"
+        mode_before = overlay._chooser.mode
+
+        QTest.keyClick(overlay, Qt.Key.Key_R)          # the rectangle tool
+
+        assert overlay._chooser.mode == mode_before, "the row was not on screen"
+
+    def test_escape_still_folds_the_row_rather_than_cancelling(self):
+        # The chooser reads a bare Escape as cancelling the snip outright,
+        # so it is deliberately not forwarded while a selection exists.
+        overlay = self._overlay_with_a_selection()
+        selection = overlay._selection
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._chooser.phase == "collapsed"
+        assert overlay._selection == selection
+        assert overlay.isVisible()

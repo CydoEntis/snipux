@@ -7,6 +7,12 @@ use it; the commit history has the detail.
 
 ### Fixed
 
+- **The mode menu's own shortcuts work.** Every row prints its key down the
+  right-hand side -- R, W, F, A, B -- and none of them did anything while the
+  menu was open.
+- **Mode shortcuts work again once a selection exists.** Space reopens the
+  row over your selection and its letters pick a capture mode again; with the
+  row collapsed they stay the toolbar's tools.
 - **Keyboard shortcuts work again on Windows.** Every shortcut in every
   window -- the overlay's tool keys, Escape, the arrow-key nudge, the
   player's transport keys -- did nothing, because the window was on top and
