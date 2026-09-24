@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.1.1 — 2026-09-24
+
 ### Fixed
 
 - Linux `.deb` packaging now substitutes the launcher in every desktop action,

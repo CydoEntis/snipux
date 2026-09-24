@@ -96,11 +96,11 @@ their own Python and Qt:
 
 ```sh
 # Ubuntu, Debian, Mint -- anything with apt
-sudo apt install ./snipux_1.1.0_amd64.deb
+sudo apt install ./snipux_1.1.1_amd64.deb
 
 # or, on any distribution, with no root and no install step at all
-chmod +x Snipux-1.1.0-x86_64.AppImage
-./Snipux-1.1.0-x86_64.AppImage
+chmod +x Snipux-1.1.1-x86_64.AppImage
+./Snipux-1.1.1-x86_64.AppImage
 ```
 
 On Arch, Omarchy and other Arch-based systems, install FUSE 2 before running
