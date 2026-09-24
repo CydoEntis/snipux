@@ -824,6 +824,58 @@ class _MSG(ctypes.Structure):
     ]
 
 
+def _take_foreground(hwnd: int) -> bool:
+    """Make `hwnd` the foreground window, working around the rule that
+    normally forbids it, and report whether Windows agreed.
+
+    `SetForegroundWindow` is refused for a process that neither owns the
+    foreground nor received the last input event -- the rule that stops a
+    background application stealing your typing mid-sentence. Snipux meets
+    neither condition at the moment it matters: it is woken by a global
+    hotkey while another application is in front, and Qt's
+    `activateWindow()` is a request that simply does not land. Measured
+    before this existed: with the overlay up and filling the screen,
+    `GetForegroundWindow()` still returned the chat window behind it, so
+    every keystroke went there and not one shortcut in snipux worked.
+
+    `AttachThreadInput` is the way through, and it is not a trick played on
+    the user: for as long as two threads share an input queue, they count as
+    one for that rule, so the foreground window's own thread grants the
+    permission and it is given back immediately afterwards. The alternatives
+    are worse -- turning the system-wide foreground lock off changes a
+    setting that is not ours, and synthesising a keystroke to fake "recent
+    input" puts a key event into whatever is in front.
+
+    Every call is checked and the result is read back from
+    `GetForegroundWindow()` rather than trusted: this is best-effort, and
+    the caller has to be able to say so.
+    """
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    if user32.GetForegroundWindow() == hwnd:
+        return True
+
+    foreground = user32.GetForegroundWindow()
+    ours = kernel32.GetCurrentThreadId()
+    theirs = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+
+    attached = False
+    if theirs and theirs != ours:
+        attached = bool(user32.AttachThreadInput(theirs, ours, True))
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetFocus(hwnd)
+    finally:
+        # In a finally: leaving two input queues attached outlives this call
+        # and makes the other application's typing our problem too.
+        if attached:
+            user32.AttachThreadInput(theirs, ours, False)
+
+    return user32.GetForegroundWindow() == hwnd
+
+
 class HotkeyEventFilter(QAbstractNativeEventFilter):
     """Watches every native Windows message Qt's event loop pumps for the
     one thing this process actually cares about: the `WM_HOTKEY` that fires
@@ -1199,6 +1251,19 @@ class WindowsPlatform(Platform):
         Whether the pointer appears is whatever Windows' own capture does.
         """
         return "Windows records whatever the capture shows"
+
+    def take_keyboard_focus(self, widget) -> bool:
+        """Windows refuses `activateWindow()` from a process that is not
+        already in front -- see `_take_foreground`, which is where the whole
+        explanation lives."""
+        try:
+            handle = int(widget.winId())
+        except (RuntimeError, TypeError, ValueError) as exc:
+            # No native window yet, or its C++ side has gone. Reported
+            # rather than raised, like every other best-effort step here.
+            print(f"Note: could not read the window handle for focus: {exc}")
+            return False
+        return _take_foreground(handle)
 
     def build_capture_registry(self) -> BackendRegistry:
         return capture.build_windows_registry()

@@ -236,6 +236,30 @@ class Platform(ABC):
         the app from its own entry (Linux's `.desktop` file).
         """
 
+    def take_keyboard_focus(self, widget) -> bool:
+        """Make `widget` the window the keyboard is actually talking to, and
+        say whether it worked. Called straight after `raise_()` and
+        `activateWindow()`, on a widget that is already shown.
+
+        Chrome only, but not cosmetic: every keyboard shortcut in the
+        application depends on it. Qt's `activateWindow()` is a *request*,
+        and on Windows it is one the system is allowed to refuse -- a
+        process that does not own the foreground and did not receive the
+        last input event cannot simply take it, which is the rule that stops
+        background applications stealing your typing. Snipux runs into it
+        from the front: it is woken by a global hotkey while another
+        application is in front, puts a fullscreen window up, and that
+        window is on top, visible, and not the one the keyboard is pointed
+        at. Measured: with the overlay up, `GetForegroundWindow()` still
+        returned the chat window behind it.
+
+        True by default -- on Linux `activateWindow()` is honoured and there
+        is nothing more to do, so the overlay's existing call already did
+        the job and this reports it. A platform that needs more than that
+        overrides this and says whether its own attempt worked.
+        """
+        return True
+
     def skip_map_animation(self, widget) -> bool:
         """Ask the desktop to show `widget` without its window-opening
         animation, and say whether it will. Called before `widget` is first

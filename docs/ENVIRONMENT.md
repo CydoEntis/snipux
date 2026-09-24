@@ -1,6 +1,7 @@
 # Environment
 
-snipux needs **no secrets, no API keys and no network**. There is no `.env`
+snipux needs **no secrets and no API keys**, and its only network request
+is the update check the user asks for. There is no `.env`
 file and there should not be one. User preferences belong in `config.json`
 (see `docs/STORAGE.md`), not in environment variables.
 

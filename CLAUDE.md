@@ -31,7 +31,7 @@ Linux and Windows, at full feature parity. macOS is out of scope for now.
   type and X11 must also work; the session type is detected at runtime,
   never assumed.
 - **Windows** (10 2004+ / 11) is implemented and has been driven for real
-  (SNX-85/86 and after). `snipux/platform/windows.py` is ~985 lines of
+  (SNX-85/86 and after). `snipux/platform/windows.py` is ~1,270 lines of
   real implementation: desktop integration through COM `IShellLinkW`
   shortcuts, `RegisterHotKey` for the global hotkey, and the
   `QScreenCapture` capture/recording registries. `default_save_folder` is
@@ -95,6 +95,13 @@ snipux/
   handoff.py    forwards `snipux --snip` / `--settings` to the running snipux
                 over its socket without loading Qt; anything else goes on to
                 app.py's CLI
+  updates.py    "Check for updates": one GET to the GitHub Releases API, and
+                only when the user picks it from the tray. No startup check,
+                no timer -- the only network request snipux makes
+  pin.py        a snip kept on top of everything else, where it was cut
+  sensitive.py  finding passwords, keys and card numbers in recognised text
+  textsnap.py   grouping recognised words into lines a mark can snap to
+  ffmpeg.py     the optional system ffmpeg: found if present, never required
   app.py        controller, tray, CLI
 tests/          pytest, mirroring the module names
 ```
@@ -115,7 +122,8 @@ preferred way to test painting code.
 This holds on every platform snipux supports, not just Linux: as Windows and
 macOS gain real implementations behind the `platform/` seam, their tests must
 pass headless too, the same way `tests/test_platform.py` already runs against
-`windows.py`/`darwin.py`'s stubs without a display today.
+`windows.py`'s real implementation and `darwin.py`'s stubs without a display
+today.
 
 A passing local run proves one platform. CI runs the suite on Ubuntu, which
 has only DejaVu Sans, and on Windows, whose text rasteriser is different. So:
