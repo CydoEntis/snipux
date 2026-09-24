@@ -1770,3 +1770,67 @@ class TestRecordingThePointer:
         _hover(chooser.row.cursor_flag)
 
         assert chooser.hint.text == tokens.RECORD_CURSOR_HINT[True]
+
+
+class TestTheMenuHonoursTheShortcutsItPrints:
+    """Every row in the mode menu prints its shortcut down the right-hand
+    side. A popup holds the keyboard while it is open, so the overlay's own
+    keyPressEvent -- and through it the chooser's handle_key -- never runs,
+    and every one of those letters did nothing. Reported with a screenshot
+    of R, W, F, A and B sitting there.
+    """
+
+    @staticmethod
+    def _press(menu, key, text, modifiers=Qt.KeyboardModifier.NoModifier):
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtGui import QKeyEvent
+
+        menu.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, key, modifiers, text))
+
+    def _open(self):
+        chooser = Chooser(parent=None)
+        _every_mode_available(chooser)
+        chooser._toggle_menu()
+        return chooser, chooser._menu
+
+    def test_a_rows_letter_picks_it(self):
+        chooser, menu = self._open()
+        picked = []
+        menu.picked.connect(picked.append)
+
+        self._press(menu, Qt.Key.Key_W, "w")
+
+        assert picked == ["Window"]
+
+    def test_every_letter_the_menu_prints_works(self):
+        chooser, menu = self._open()
+        picked = []
+        menu.picked.connect(picked.append)
+
+        for key, text in (
+            (Qt.Key.Key_R, "r"), (Qt.Key.Key_W, "w"),
+            (Qt.Key.Key_F, "f"), (Qt.Key.Key_A, "a"),
+        ):
+            self._press(menu, key, text)
+
+        assert picked == ["Region", "Window", "Full screen", "Active window"]
+
+    def test_a_greyed_row_ignores_its_key_as_it_ignores_its_click(self):
+        chooser = Chooser(parent=None)
+        chooser.set_browser_available(False)     # Browser has nothing to capture
+        chooser._toggle_menu()
+        picked = []
+        chooser._menu.picked.connect(picked.append)
+
+        self._press(chooser._menu, Qt.Key.Key_B, "b")
+
+        assert picked == []
+
+    def test_a_key_the_menu_does_not_print_is_left_alone(self):
+        chooser, menu = self._open()
+        picked = []
+        menu.picked.connect(picked.append)
+
+        self._press(menu, Qt.Key.Key_Z, "z")
+
+        assert picked == []

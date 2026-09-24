@@ -7430,6 +7430,15 @@ class OverlayWindow(QWidget):
         # focus, particularly right after a fullscreen state change.
         self.raise_()
         self.activateWindow()
+        # And `activateWindow()` is only a request. On Windows it is one the
+        # system refuses for a process that is not already in front, which
+        # this one never is: the hotkey fires while something else has the
+        # foreground. The overlay then sat on top of everything, visible and
+        # fullscreen, while every keystroke went to the window behind it --
+        # not one shortcut in the application worked. The seam is what
+        # actually takes the keyboard where a platform needs more than the
+        # request; on Linux it is already done and this reports so.
+        platform.current.take_keyboard_focus(self)
 
     # -- keyboard shortcuts (SNX-47) -----------------------------------------
     # docs/design/overlay-redesign.md's "Keyboard" table is the authority: a
@@ -7555,12 +7564,32 @@ class OverlayWindow(QWidget):
             self._leave_monitor_mode()
             return
 
-        # The chooser's shortcuts are live while nothing is selected -- the
-        # mode letters, Shift+R for Last region, Esc to close its menu. It
-        # gets first refusal then, and returns False for anything that is
-        # not its own.
+        # The chooser's shortcuts are live whenever its row is: while
+        # nothing is selected, and again if Space reopens the row over a
+        # selection. The letters belong to whichever is actually on screen
+        # -- with the row up they pick a capture mode, and with it collapsed
+        # they are the bar's tools.
+        #
+        # Reopening used to leave them dead: the row sat there printing R,
+        # W, F and A down its menu while none of them did anything, because
+        # this asked only whether a selection existed. Reported as "if i
+        # make a selection i cant hot key to switch to another method" --
+        # and the row is the one thing on screen claiming you can.
         if (
             self._selection is None
+            and not self._shortcuts_suppressed()
+            and self._chooser.handle_key(key, event.text(), modifiers)
+        ):
+            return
+
+        # Escape is deliberately not forwarded here: with a selection it
+        # folds the row and keeps the snip (below), where the chooser reads
+        # a bare Escape as cancelling outright. Everything else the row
+        # advertises is its own again for as long as it is on screen.
+        if (
+            self._selection is not None
+            and self._chooser.phase == "choosing"
+            and key != Qt.Key.Key_Escape
             and not self._shortcuts_suppressed()
             and self._chooser.handle_key(key, event.text(), modifiers)
         ):

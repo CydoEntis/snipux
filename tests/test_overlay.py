@@ -14139,3 +14139,93 @@ class TestPaintingDoesNotRenumberSteps:
             overlay.grab()
 
         assert [m.number for m in overlay._marks] == [4, 7]
+
+
+class TestTheOverlayTakesTheKeyboard:
+    """Every shortcut in the overlay depends on the window actually being
+    the one the keyboard is talking to, which `activateWindow()` only
+    *asks* for -- and which Windows refuses to a process that is not
+    already in front. The overlay is never in front: a global hotkey opens
+    it over whatever the user was using.
+    """
+
+    def test_showing_it_asks_the_seam_for_the_keyboard(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(
+            overlay_module.platform.current, "take_keyboard_focus",
+            lambda widget: asked.append(widget) or True,
+        )
+        frame = make_frame(image_size=(120, 90), logical_size=(120, 90))
+        overlay = OverlayWindow(frame)
+
+        # show_on_screen, not show(): that is the path app.py opens a snip
+        # through, and the one that raises and activates.
+        overlay.show_on_screen(None)
+        QTest.qWaitForWindowExposed(overlay)
+
+        assert asked == [overlay]
+
+    def test_a_platform_that_refuses_does_not_stop_the_snip(self, monkeypatch):
+        # Best-effort: a snip whose keyboard shortcuts are unavailable is
+        # still a snip, and the mouse works either way.
+        monkeypatch.setattr(
+            overlay_module.platform.current, "take_keyboard_focus", lambda widget: False
+        )
+        frame = make_frame(image_size=(120, 90), logical_size=(120, 90))
+        overlay = OverlayWindow(frame)
+
+        overlay.show_on_screen(None)
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(10, 10, 60, 40))
+
+        assert overlay._selection == QRect(10, 10, 60, 40)
+
+
+class TestModeLettersFollowTheRow:
+    """With the row collapsed the letters are the bar's tools; with it
+    reopened over a selection they are the row's capture modes again.
+
+    They used to be dead in that second state -- the row sat there printing
+    R, W, F and A while none of them did anything, because the gate asked
+    only whether a selection existed. Reported as "if i make a selection i
+    cant hot key to switch to another method".
+    """
+
+    def _overlay_with_a_selection(self):
+        frame = make_frame(image_size=(400, 300), logical_size=(400, 300))
+        overlay = OverlayWindow(frame)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(20, 20, 120, 90))
+        return overlay
+
+    def test_reopening_the_row_makes_its_letters_work_again(self):
+        overlay = self._overlay_with_a_selection()
+        QTest.keyClick(overlay, Qt.Key.Key_Space)      # reopen the row
+        assert overlay._chooser.phase == "choosing"
+
+        QTest.keyClick(overlay, Qt.Key.Key_F)          # Full screen
+
+        assert overlay._chooser.mode == "Full screen"
+
+    def test_with_the_row_collapsed_the_letters_are_still_the_tools(self):
+        overlay = self._overlay_with_a_selection()
+        assert overlay._chooser.phase == "collapsed"
+        mode_before = overlay._chooser.mode
+
+        QTest.keyClick(overlay, Qt.Key.Key_R)          # the rectangle tool
+
+        assert overlay._chooser.mode == mode_before, "the row was not on screen"
+
+    def test_escape_still_folds_the_row_rather_than_cancelling(self):
+        # The chooser reads a bare Escape as cancelling the snip outright,
+        # so it is deliberately not forwarded while a selection exists.
+        overlay = self._overlay_with_a_selection()
+        selection = overlay._selection
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._chooser.phase == "collapsed"
+        assert overlay._selection == selection
+        assert overlay.isVisible()

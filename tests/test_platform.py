@@ -2143,3 +2143,135 @@ class TestRecordingTheCursorIsACapability:
         # A reason a user can act on, not "unsupported": the pointer still
         # appears, it just isn't a choice.
         assert "records" in windows_platform.cursor_toggle_unavailable_reason()
+
+
+class _FakeUser32:
+    """Just enough of user32 to watch what `_take_foreground` does with it.
+
+    `foreground` is what GetForegroundWindow reports; `grants` decides
+    whether SetForegroundWindow is allowed to change it, which is the whole
+    behaviour being worked around.
+    """
+
+    def __init__(self, foreground=4242, owner_thread=99, grants=True):
+        self.foreground = foreground
+        self.owner_thread = owner_thread
+        self.grants = grants
+        self.attached = []
+        self.calls = []
+
+    def GetForegroundWindow(self):  # noqa: N802 - Win32 spelling
+        return self.foreground
+
+    def GetWindowThreadProcessId(self, hwnd, _pid):  # noqa: N802
+        return self.owner_thread
+
+    def AttachThreadInput(self, theirs, ours, attach):  # noqa: N802
+        self.attached.append((theirs, ours, bool(attach)))
+        return 1
+
+    def BringWindowToTop(self, hwnd):  # noqa: N802
+        self.calls.append(("BringWindowToTop", hwnd))
+        return 1
+
+    def SetForegroundWindow(self, hwnd):  # noqa: N802
+        self.calls.append(("SetForegroundWindow", hwnd))
+        if self.grants:
+            self.foreground = hwnd
+        return 1 if self.grants else 0
+
+    def SetFocus(self, hwnd):  # noqa: N802
+        self.calls.append(("SetFocus", hwnd))
+        return hwnd
+
+
+class _FakeKernel32:
+    def GetCurrentThreadId(self):  # noqa: N802
+        return 7
+
+
+class _FakeWindll:
+    def __init__(self, user32):
+        self.user32 = user32
+        self.kernel32 = _FakeKernel32()
+
+
+class TestTakingTheKeyboard:
+    """Qt's `activateWindow()` is a request, and Windows refuses it from a
+    process that is neither in front nor the one that received the last
+    input -- which snipux never is, because a global hotkey wakes it while
+    something else has the foreground.
+
+    Measured before this existed: the overlay was fullscreen and on top,
+    and `GetForegroundWindow()` still named the window behind it, so every
+    keystroke went there and no shortcut in the application worked.
+    """
+
+    def _with_user32(self, monkeypatch, user32):
+        # raising=False: `ctypes.windll` only exists on Windows, so without
+        # it every test here passes on the Windows runner and dies on the
+        # Ubuntu one with AttributeError -- which is precisely the shape
+        # CLAUDE.md's "fake the platform so the test answers the same on
+        # both runners" exists to stop. The fake supplies the attribute on
+        # the platform that has none, and monkeypatch removes it again.
+        monkeypatch.setattr(windows.ctypes, "windll", _FakeWindll(user32), raising=False)
+        return user32
+
+    def test_the_default_is_that_nothing_more_is_needed(self):
+        # Linux honours activateWindow(), so the caller's own call already
+        # did it and the seam reports so rather than pretending to act.
+        assert Platform.take_keyboard_focus(object(), object()) is True
+
+    def test_it_asks_for_the_foreground_and_says_it_got_it(self, monkeypatch):
+        user32 = self._with_user32(monkeypatch, _FakeUser32())
+
+        assert windows._take_foreground(1234) is True
+        assert ("SetForegroundWindow", 1234) in user32.calls
+
+    def test_a_refusal_is_reported_rather_than_assumed(self, monkeypatch):
+        # The point of reading GetForegroundWindow back: SetForegroundWindow
+        # can return without having changed anything.
+        self._with_user32(monkeypatch, _FakeUser32(grants=False))
+
+        assert windows._take_foreground(1234) is False
+
+    def test_it_borrows_the_other_threads_input_queue_and_gives_it_back(
+        self, monkeypatch
+    ):
+        # Attached for the duration and detached afterwards: two input
+        # queues left joined outlive the call and make the other
+        # application's typing this process's problem too.
+        user32 = self._with_user32(monkeypatch, _FakeUser32())
+
+        windows._take_foreground(1234)
+
+        assert user32.attached == [(99, 7, True), (99, 7, False)]
+
+    def test_it_detaches_even_when_a_call_raises(self, monkeypatch):
+        user32 = _FakeUser32()
+
+        def boom(_hwnd):
+            raise OSError("SetForegroundWindow exploded")
+
+        user32.SetForegroundWindow = boom
+        self._with_user32(monkeypatch, user32)
+
+        with pytest.raises(OSError):
+            windows._take_foreground(1234)
+
+        assert user32.attached == [(99, 7, True), (99, 7, False)]
+
+    def test_already_in_front_is_left_alone(self, monkeypatch):
+        user32 = self._with_user32(monkeypatch, _FakeUser32(foreground=1234))
+
+        assert windows._take_foreground(1234) is True
+        assert user32.attached == [], "nothing to borrow when it is already ours"
+        assert user32.calls == []
+
+    def test_a_window_with_no_handle_yet_is_a_note_not_a_crash(self, monkeypatch, capsys):
+        class NoHandle:
+            def winId(self):
+                raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        assert windows.WindowsPlatform().take_keyboard_focus(NoHandle()) is False
+        assert "could not read the window handle" in capsys.readouterr().out
