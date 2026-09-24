@@ -57,13 +57,14 @@ ln -s ../../opt/snipux/snipux "$STAGE/usr/bin/snipux"
 # two never show as duplicate launchers, and the later, more specific one
 # wins. That first run is still what binds the GNOME shortcut and the
 # autostart entry, neither of which a package can write for a user.
-sed 's|^Exec=__SNIPUX_LAUNCHER__$|Exec=/usr/bin/snipux|' \
+sed 's|__SNIPUX_LAUNCHER__|/usr/bin/snipux|g' \
     "$REPO_ROOT/snipux/snipux.desktop" > "$STAGE/usr/share/applications/snipux.desktop"
 
 # sed reports success when it matches nothing, so an unsubstituted template
 # would otherwise ship as a launcher whose Exec line is the literal
 # placeholder -- a package that installs cleanly and cannot start.
-if ! grep -q '^Exec=/usr/bin/snipux$' "$STAGE/usr/share/applications/snipux.desktop"; then
+if grep -q '__SNIPUX_LAUNCHER__' "$STAGE/usr/share/applications/snipux.desktop" || \
+        ! grep -q '^Exec=/usr/bin/snipux --settings$' "$STAGE/usr/share/applications/snipux.desktop"; then
     echo "error: the Exec placeholder in snipux/snipux.desktop was not substituted." >&2
     exit 1
 fi

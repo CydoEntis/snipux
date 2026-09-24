@@ -7,6 +7,8 @@ use it; the commit history has the detail.
 
 ### Fixed
 
+- Linux `.deb` packaging now substitutes the launcher in every desktop action,
+  restoring the Debian artifact after launcher actions were added in 1.1.0.
 - **The mode menu's own shortcuts work.** Every row prints its key down the
   right-hand side -- R, W, F, A, B -- and none of them did anything while the
   menu was open.
