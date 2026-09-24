@@ -2208,7 +2208,13 @@ class TestTakingTheKeyboard:
     """
 
     def _with_user32(self, monkeypatch, user32):
-        monkeypatch.setattr(windows.ctypes, "windll", _FakeWindll(user32))
+        # raising=False: `ctypes.windll` only exists on Windows, so without
+        # it every test here passes on the Windows runner and dies on the
+        # Ubuntu one with AttributeError -- which is precisely the shape
+        # CLAUDE.md's "fake the platform so the test answers the same on
+        # both runners" exists to stop. The fake supplies the attribute on
+        # the platform that has none, and monkeypatch removes it again.
+        monkeypatch.setattr(windows.ctypes, "windll", _FakeWindll(user32), raising=False)
         return user32
 
     def test_the_default_is_that_nothing_more_is_needed(self):
