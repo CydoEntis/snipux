@@ -1,6 +1,6 @@
 # Maintainer: CydoEntis
 pkgname=snipux-bin
-pkgver=1.0.2
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Snip, annotate and record your screen"
 arch=('x86_64')
@@ -20,7 +20,7 @@ source=(
     "LICENSE-${pkgver}::${url}/raw/v${pkgver}/LICENSE"
 )
 sha256sums=(
-    '27cd3ae42389a75041b93e72a149ba4abf73b6eed79c83bfd396d69cb325ee99'
+    'SKIP'
     '884c6cad2a7bb78fcfe943452d72f76ec1adb6c9760c9ef7e4e64f6a2fd06895'
 )
 

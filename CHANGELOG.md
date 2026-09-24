@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.1.0 — 2026-09-24
+
 ### Added
 
 - **Arch, Omarchy and Hyprland support.** Snipux records the selected region
