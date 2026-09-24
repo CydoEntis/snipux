@@ -466,7 +466,10 @@ def bind_hyprland_shortcut(
         )
 
     hypr_shortcut, key = _hypr_shortcut(shortcut)
-    command = f"{exec_path} --snip"
+    # This string is written into a Linux compositor config even when the
+    # helper is exercised by the Windows test runner. Keep its path syntax
+    # POSIX instead of letting WindowsPath introduce backslashes.
+    command = f"{exec_path.as_posix()} --snip"
     if lua:
         escaped = command.replace("\\", "\\\\").replace('"', '\\"')
         block = (
