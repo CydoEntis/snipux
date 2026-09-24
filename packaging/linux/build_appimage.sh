@@ -40,6 +40,21 @@ rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin"
 cp -a "$BUNDLE_DIR/." "$APPDIR/usr/bin/"
 
+# Fontconfig's configuration language and its library have to come from the
+# same host release. PyInstaller otherwise bundles Ubuntu's libfontconfig and
+# points it at Arch's newer /etc/fonts/conf.d, producing dozens of parser
+# errors before the application opens. Freetype is removed with it so the
+# host font stack stays a matched set; Qt and Snipux themselves remain bundled.
+find "$APPDIR/usr/bin" -type f \( \
+    -name 'libfontconfig.so*' -o -name 'libfreetype.so*' \
+\) -delete
+if find "$APPDIR/usr/bin" -type f \( \
+    -name 'libfontconfig.so*' -o -name 'libfreetype.so*' \
+\) | grep -q .; then
+    echo "error: bundled fontconfig/freetype libraries remain in the AppDir." >&2
+    exit 1
+fi
+
 # AppRun is what the mounted image executes. `readlink -f` because $0 here is
 # the mount point AppRun was invoked through, and the bundle beside it has to
 # be found relative to the real path, not through whatever symlink chain the
@@ -61,13 +76,14 @@ chmod +x "$APPDIR/AppRun"
 # template's placeholder becomes a bare "snipux" here rather than an absolute
 # path: inside the image the only snipux there is is ours, and an absolute
 # /tmp/.mount_* path would be wrong by the time anything read it.
-sed 's|^Exec=__SNIPUX_LAUNCHER__$|Exec=snipux|' \
+sed 's|__SNIPUX_LAUNCHER__|snipux|g' \
     "$REPO_ROOT/snipux/snipux.desktop" > "$APPDIR/snipux.desktop"
 
 # sed reports success when it matches nothing, so an unsubstituted template
 # would otherwise ship as a launcher whose Exec line is the literal
 # placeholder -- a build that "succeeded" and an app that cannot start.
-if ! grep -q '^Exec=snipux$' "$APPDIR/snipux.desktop"; then
+if grep -q '__SNIPUX_LAUNCHER__' "$APPDIR/snipux.desktop" || \
+        ! grep -q '^Exec=snipux --settings$' "$APPDIR/snipux.desktop"; then
     echo "error: the Exec placeholder in snipux/snipux.desktop was not substituted." >&2
     exit 1
 fi

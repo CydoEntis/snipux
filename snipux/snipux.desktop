@@ -2,7 +2,18 @@
 Type=Application
 Name=Snipux
 Comment=A Windows Snipping Tool workalike for Linux
-Exec=__SNIPUX_LAUNCHER__
+Exec=__SNIPUX_LAUNCHER__ --settings
 Icon=snipux
 Categories=Graphics;Utility;
 Terminal=false
+Actions=Snip;Settings;
+
+[Desktop Action Snip]
+Name=New capture
+Exec=__SNIPUX_LAUNCHER__ --snip
+Icon=snipux
+
+[Desktop Action Settings]
+Name=Settings
+Exec=__SNIPUX_LAUNCHER__ --settings
+Icon=snipux

@@ -5,6 +5,47 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **Arch, Omarchy and Hyprland support.** Snipux records the selected region
+  with `gpu-screen-recorder`, installs and removes Ctrl+Alt+S in either
+  Hyprland's Lua or classic config without disturbing other bindings, and
+  reports package-manager-specific install hints when capture tools are absent.
+- **Useful Linux launcher actions without a system tray.** The application
+  menu now exposes New capture and Settings directly.
+
+### Changed
+
+- Finished recording summaries now move to the top-centre of their monitor,
+  while the live Stop controls remain attached to the recorded region.
+
+### Fixed
+
+- Starting a recording on Hyprland no longer makes the workspace jump while
+  the live controls and red boundary change from tiled to floating windows,
+  or flash as the dimmed selection surface closes.
+- The red recording boundary and controls remain visible and stoppable after
+  the frozen selection overlay closes.
+- Saving Settings now keeps the window open and confirms the save in its
+  footer, so further changes do not require reopening it.
+- Hyprland capture surfaces are now placed with retained output-specific
+  rules instead of true fullscreen, so opening and closing a snip no longer
+  hides and restores the desktop underneath it or plays a compositor zoom.
+- Capture startup on large Wayland desktops is substantially faster by using
+  uncompressed PNG only for grim's short-lived in-memory source frame.
+- Capture controls now respect Hyprland's per-output reserved edges, keeping
+  the top rail below Omarchy's bar without cropping the captured pixels.
+- Saving Settings on Hyprland now rebinds the Hyprland shortcut instead of
+  incorrectly trying GNOME's custom-keybindings service.
+- **Monitor and window picking now work across Hyprland outputs.** Qt hides
+  the global pointer position on this Wayland compositor, so Snipux asks
+  Hyprland for its focused output, keeps one stationary interactive surface
+  on every display with a shared capture session, and uses Hyprland's client
+  geometry for Window mode. Escape from any display closes the whole snip.
+- **The GNOME Shell screenshot fallback no longer claims to be available on
+  every Wayland desktop.** It now checks that GNOME Shell actually owns its
+  session-bus name.
+
 ## 1.0.2 — 2026-09-23
 
 ### Added

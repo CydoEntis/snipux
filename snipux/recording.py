@@ -6,19 +6,21 @@ backends in order, collect every failure, report them together, never let
 one failure stop the next (CLAUDE.md's "a backend that fails must not stop
 the next one" applies here too). Recording is stateful -- started and
 stopped, not produced in one call -- so `start()`/`stop()` replace
-`capture()`, but the try/collect/raise shape is unchanged. `GnomeScreencastBackend`
-(SNX-117) is the Linux backend; `WindowsRecorderBackend` (SNX-118) is
-Windows's, registered behind `build_windows_registry()` the same way
-`build_linux_registry()` registers the GNOME one.
+`capture()`, but the try/collect/raise shape is unchanged. Linux tries
+`GpuScreenRecorderBackend` and `GnomeScreencastBackend`; Windows registers
+`WindowsRecorderBackend` behind the same platform seam.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import posixpath
 import re
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -426,6 +428,190 @@ _PULSE_INPUT_START = re.compile(r"Duration: N/A, start: (\d{9,}\.\d+)")
 # `ffmpeg -i`'s own report of a file's length, read without ffprobe, which
 # is not always installed beside it.
 _DURATION = re.compile(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
+def _linux_install_hint(package: str) -> str:
+    """A package-manager-specific command, with a portable fallback."""
+    if shutil.which("pacman"):
+        return f"sudo pacman -S {package}"
+    if shutil.which("apt-get"):
+        return f"sudo apt install {package}"
+    if shutil.which("dnf"):
+        return f"sudo dnf install {package}"
+    return f"install the {package} package"
+
+
+class GpuScreenRecorderBackend(RecordingBackend):
+    """Record a Wayland region with gpu-screen-recorder.
+
+    The selected rectangle is already in compositor-logical coordinates,
+    exactly the coordinate space gpu-screen-recorder's region target consumes.
+    No second picker is opened after Snipux's frozen-frame choice.
+    """
+
+    starts_off_thread = True
+
+    def __init__(
+        self,
+        *,
+        popen=subprocess.Popen,
+        run=subprocess.run,
+        which=None,
+        clock=time.monotonic,
+    ):
+        self._popen = popen
+        self._run = run
+        self._which = which or shutil.which
+        self._clock = clock
+        self._process = None
+        self._path: str | None = None
+        self._stderr = None
+
+    def name(self) -> str:
+        return "gpu-screen-recorder"
+
+    def is_available(self) -> bool:
+        return (
+            os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+            and self._which("gpu-screen-recorder") is not None
+        )
+
+    def unavailable_reason(self) -> str | None:
+        if os.environ.get("XDG_SESSION_TYPE", "").lower() != "wayland":
+            return "not a Wayland session"
+        if self._which("gpu-screen-recorder") is None:
+            return (
+                "gpu-screen-recorder not found; install it with `"
+                + _linux_install_hint("gpu-screen-recorder")
+                + "`"
+            )
+        return None
+
+    @staticmethod
+    def _region(rect: QRectF) -> str:
+        left = round(rect.left())
+        top = round(rect.top())
+        right = round(rect.left() + rect.width())
+        bottom = round(rect.top() + rect.height())
+        return f"{right - left}x{bottom - top}+{left}+{top}"
+
+    def _hyprland_focused_monitor(self) -> str | None:
+        """The output Omarchy records for its full-screen action."""
+        if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            return None
+        try:
+            result = self._run(
+                ["hyprctl", "monitors", "-j"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if result.returncode != 0:
+                return None
+            monitors = json.loads(result.stdout)
+            for monitor in monitors:
+                if monitor.get("focused") and monitor.get("name"):
+                    return str(monitor["name"])
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            return None
+        return None
+
+    def _target_arguments(self, rect: QRectF | None) -> list[str]:
+        if rect is None:
+            monitor = self._hyprland_focused_monitor()
+            if monitor is not None:
+                return ["-w", monitor]
+            # Other Wayland compositors expose no common monitor geometry API.
+            return ["-w", "portal"]
+        return ["-w", self._region(rect)]
+
+    def start(self, rect: QRectF | None, path: str) -> str:
+        binary = self._which("gpu-screen-recorder")
+        if binary is None:
+            raise RuntimeError("gpu-screen-recorder disappeared from PATH")
+        if self._process is not None:
+            raise RuntimeError("gpu-screen-recorder: a recording is already running")
+
+        command = [
+            binary,
+            *self._target_arguments(rect),
+            "-k", "auto",
+            "-f", str(setup_desktop.load_recording_frame_rate()),
+            "-fm", "cfr",
+            "-fallback-cpu-encoding", "yes",
+            "-cursor", "yes" if setup_desktop.load_recording_draw_cursor() else "no",
+        ]
+        if self.audio_source in (AUDIO_SYSTEM, AUDIO_MIC):
+            device = "default_output" if self.audio_source == AUDIO_SYSTEM else "default_input"
+            command += ["-a", device, "-ac", "aac"]
+        command += ["-o", path]
+
+        # AppController reserves the name as an empty tempfile. Removing that
+        # placeholder lets file creation prove the recorder really started.
+        Path(path).unlink(missing_ok=True)
+        stderr = tempfile.TemporaryFile(mode="w+")
+        process = self._popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr,
+            text=True,
+        )
+        deadline = self._clock() + 5
+        while self._clock() < deadline:
+            returncode = process.poll()
+            if returncode is not None:
+                stderr.seek(0)
+                detail = stderr.read().strip()
+                stderr.close()
+                raise RuntimeError(
+                    "gpu-screen-recorder exited before recording started"
+                    + (f": {detail[-500:]}" if detail else "")
+                )
+            if Path(path).exists():
+                self._process = process
+                self._path = path
+                self._stderr = stderr
+                return path
+            time.sleep(0.05)
+        process.send_signal(signal.SIGINT)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        stderr.close()
+        raise RuntimeError("gpu-screen-recorder did not create its output file")
+
+    def stop(self) -> None:
+        process, self._process = self._process, None
+        path, self._path = self._path, None
+        stderr, self._stderr = self._stderr, None
+        if process is None:
+            raise RuntimeError("gpu-screen-recorder: stop() called with no recording in progress")
+        try:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                    raise RuntimeError(
+                        "gpu-screen-recorder did not stop cleanly; the video may be incomplete"
+                    )
+        finally:
+            if stderr is not None:
+                stderr.close()
+        if path is None or not Path(path).is_file() or Path(path).stat().st_size == 0:
+            raise RuntimeError("gpu-screen-recorder produced no playable output")
+
+    def discard(self) -> None:
+        path = self._path
+        try:
+            self.stop()
+        finally:
+            if path is not None:
+                Path(path).unlink(missing_ok=True)
 
 
 class GnomeScreencastBackend(RecordingBackend):
@@ -989,15 +1175,9 @@ def _concat_quoted(path: str) -> str:
 
 
 def build_linux_registry() -> RecorderRegistry:
-    """The real Linux `RecorderRegistry`.
-
-    One backend today; the shape exists so ticket 4's
-    `Platform.build_recording_registry()` has something to call, mirroring
-    `capture.build_linux_registry()`, and so this ticket's "does the
-    registry actually pick this backend" behaviour has somewhere to be
-    asserted without waiting on the platform seam.
-    """
+    """Linux recorders in preference order: Wayland tool, then GNOME."""
     registry = RecorderRegistry()
+    registry.add(GpuScreenRecorderBackend())
     registry.add(GnomeScreencastBackend())
     return registry
 

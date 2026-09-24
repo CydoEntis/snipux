@@ -55,7 +55,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QMargins
+from PyQt6.QtCore import QPoint, QMargins, QRect, QSize
 
 if TYPE_CHECKING:
     from snipux.capture import BackendRegistry
@@ -210,6 +210,17 @@ class Platform(ABC):
             max(0, geometry.bottom() - available.bottom()),
         )
 
+    def active_screen_geometry(self) -> QRect | None:
+        """The screen the desktop considers active, when it can tell us.
+
+        Qt normally exposes this through the global cursor position. Some
+        Wayland compositors deliberately report a useless cursor position to
+        clients, though, so their platform implementation may provide the
+        compositor's own answer. ``None`` keeps the portable primary-screen
+        fallback used everywhere else.
+        """
+        return None
+
     def reserved_top(self, screen) -> int:
         """The top edge of `reserved_margins`, for the callers that hang
         from it and need nothing else.
@@ -240,6 +251,15 @@ class Platform(ABC):
 
         False by default: nothing is known to skip it on Windows or macOS,
         and neither has been measured.
+        """
+        return False
+
+    def place_capture_overlay(self, widget, screen) -> bool:
+        """Prepare ``widget`` to cover ``screen`` without real fullscreen.
+
+        Called before the widget's native window exists. False keeps the
+        portable Wayland fullscreen path; a compositor-specific platform may
+        install a pre-map placement rule and return True.
         """
         return False
 
@@ -324,6 +344,45 @@ class Platform(ABC):
 
         Defaults to False; Windows and X11 answer True.
         """
+        return False
+
+    def place_recording_controls(
+        self, widget, top_left: QPoint, size: QSize
+    ) -> bool:
+        """Place the live recording bar at ``top_left`` if this desktop can.
+
+        This is narrower than :meth:`places_windows`: a Wayland compositor
+        may expose a compositor-specific command for one small control window
+        while still refusing ordinary client positioning.  The recording
+        flow uses this only after its fullscreen selection surface has gone,
+        never for overlays or monitor-sized windows.
+
+        The portable answer is the ordinary Qt move on platforms which
+        honour it.  Other platforms return False so the caller can remove a
+        bar that might otherwise be placed inside the recording.
+        """
+        if not self.places_windows():
+            return False
+        widget.resize(size)
+        widget.move(top_left)
+        return True
+
+    def show_recording_frame(self, widgets) -> bool:
+        """Map the windows forming the live recording boundary.
+
+        The widgets already carry their requested absolute geometries.  This
+        operation is separate from :meth:`place_recording_controls` because
+        four border strips can have duplicate sizes, so a compositor-specific
+        implementation may need to map and identify them one at a time.
+        """
+        if not self.places_windows():
+            return False
+        for widget in widgets:
+            widget.show()
+        return True
+
+    def uses_single_recording_frame_window(self) -> bool:
+        """Whether the live boundary should use one transparent surface."""
         return False
 
     def can_pin(self) -> bool:

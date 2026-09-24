@@ -2770,7 +2770,11 @@ class SettingsWindow(WinWindow):
         self._refresh_dirty()
         if self._on_saved is not None:
             self._on_saved()
-        self.close()
+        # Keep Settings open so Save is an action, not an accidental Done
+        # button.  The explicit confirmation remains until the next edit,
+        # when `_mark_dirty()` replaces it with "Unsaved changes".
+        self._dirty_label.setText("Settings saved")
+        self._dirty_label.setStyleSheet(f"color: {tokens.Win.OK_FG};")
 
 
 # `app.py` imports this name; the class was a QDialog before the redesign.

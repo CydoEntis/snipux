@@ -2,7 +2,7 @@
 cannot do (or undo) on its own.
 
 A built wheel is 37 files of importable code and nothing else -- no
-`.desktop` entry, no autostart entry, no GNOME shortcut -- so `pip install
+`.desktop` entry, no autostart entry, no desktop shortcut -- so `pip install
 snipux` (or `pipx install snipux`) leaves a working import and no working
 app (SNX-73). `packaging/install.sh` used to do all of this by hand, with a
 copy of the `.desktop` file living only under `packaging/` and a second,
@@ -18,8 +18,8 @@ outside it, which otherwise leaves a dead autostart entry, a dead keyboard
 shortcut, and a ghost application-list entry behind (SNX-83). Running
 `--remove` first is what makes an uninstall actually clean.
 
-Every step -- desktop entry, autostart entry, hicolor icon theme, GNOME
-shortcut -- is attempted and reported independently, in both directions.
+Every step -- desktop entry, autostart entry, hicolor icon theme, GNOME or
+Hyprland shortcut -- is attempted and reported independently, in both directions.
 One failing (no `gsettings`, a read-only `~/.config`) must not stop the
 rest, the same "a failure must not stop the next one" rule CLAUDE.md states
 for capture backends, applied here.
@@ -43,7 +43,7 @@ from .design import PACKAGE_DIR, tokens
 # source checkout/pip install and a PyInstaller bundle (SNX-96), and this
 # template ships inside the bundle the same way the design assets do.
 _TEMPLATE_PATH = PACKAGE_DIR / "snipux.desktop"
-_LAUNCHER_PLACEHOLDER = "Exec=__SNIPUX_LAUNCHER__"
+_LAUNCHER_PLACEHOLDER = "__SNIPUX_LAUNCHER__"
 
 _MEDIA_KEYS_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
 _SLOT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/"
@@ -79,6 +79,11 @@ _GSETTINGS_MODIFIERS = {
 # gsettings stores happily and then never fires), an empty string, and
 # anything with whitespace in it.
 _SHORTCUT_RE = re.compile(r"^(<[A-Za-z]+>)*[A-Za-z0-9_]+$")
+
+_HYPR_LUA_BEGIN = "-- snipux shortcut begin"
+_HYPR_LUA_END = "-- snipux shortcut end"
+_HYPR_CONF_BEGIN = "# snipux shortcut begin"
+_HYPR_CONF_END = "# snipux shortcut end"
 
 # Same reasoning as _TEMPLATE_PATH above: derived from PACKAGE_DIR so this
 # resolves correctly inside a PyInstaller bundle too, not just a checkout.
@@ -157,10 +162,28 @@ def render_desktop_entry(exec_path: Path) -> str:
     the console script's actual location.
     """
     template = _TEMPLATE_PATH.read_text(encoding="utf-8")
-    lines = [
-        f"Exec={exec_path}" if line == _LAUNCHER_PLACEHOLDER else line
-        for line in template.splitlines()
-    ]
+    return template.replace(_LAUNCHER_PLACEHOLDER, str(exec_path)).rstrip() + "\n"
+
+
+def render_autostart_entry(exec_path: Path) -> str:
+    """Render the quiet login entry, without the launcher's visible actions.
+
+    Clicking Snipux in an application launcher should open something useful,
+    so the normal desktop entry opens Settings.  Login startup must remain a
+    resident background process instead, and desktop actions have no meaning
+    in an autostart file.
+    """
+    lines = []
+    for line in _TEMPLATE_PATH.read_text(encoding="utf-8").splitlines():
+        if line.startswith("[Desktop Action "):
+            break
+        if line.startswith("Actions="):
+            continue
+        if line.startswith("Exec="):
+            line = f"Exec={exec_path}"
+        lines.append(line)
+    while lines and not lines[-1]:
+        lines.pop()
     return "\n".join(lines) + "\n"
 
 
@@ -318,6 +341,208 @@ def to_gsettings(shortcut: str) -> str:
 def human_shortcut(shortcut: str) -> str:
     """The readable form, for messages. Already canonical in most cases."""
     return normalise_shortcut(shortcut) or shortcut
+
+
+def is_hyprland_session() -> bool:
+    desktops = os.environ.get("XDG_CURRENT_DESKTOP", "").lower().split(":")
+    return "hyprland" in desktops or bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+
+
+def _hyprland_config_dir(config_dir: Path | None = None) -> Path:
+    if config_dir is not None:
+        return config_dir
+    return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "hypr"
+
+
+def _hyprland_binding_path(config_dir: Path) -> tuple[Path, bool]:
+    lua_main = config_dir / "hyprland.lua"
+    lua_bindings = config_dir / "bindings.lua"
+    if lua_main.exists() or lua_bindings.exists():
+        return lua_bindings, True
+    return config_dir / "hyprland.conf", False
+
+
+def _without_marked_block(text: str, begin: str, end: str) -> tuple[str, bool]:
+    pattern = re.compile(
+        rf"(?m)^\s*{re.escape(begin)}\s*$.*?^\s*{re.escape(end)}\s*$\n?",
+        re.DOTALL,
+    )
+    cleaned, count = pattern.subn("", text)
+    return cleaned.rstrip() + ("\n" if cleaned.strip() else ""), bool(count)
+
+
+def _hypr_shortcut(shortcut: str) -> tuple[str, str]:
+    normalised = normalise_shortcut(shortcut) or shortcut
+    fields = normalised.split("+")
+    modifiers = {
+        "Control": "CTRL",
+        "Alt": "ALT",
+        "Shift": "SHIFT",
+        "Super": "SUPER",
+    }
+    return " + ".join(modifiers.get(field, field.upper()) for field in fields), fields[-1].upper()
+
+
+def _hypr_binding_conflict(text: str, shortcut: str, *, lua: bool) -> str | None:
+    wanted_mods, wanted_key = _hypr_shortcut(shortcut)
+    wanted = {part.strip() for part in wanted_mods.split("+")[:-1]}
+    if lua:
+        matches = re.finditer(r'o\.bind\(\s*["\']([^"\']+)["\']', text)
+        candidates = ((match.group(1), match.group(0)) for match in matches)
+    else:
+        matches = re.finditer(
+            r"(?mi)^\s*bind\s*=\s*([^,]+),\s*([^,]+),[^\n]*$", text
+        )
+        candidates = (
+            (f"{match.group(1).strip().replace(' ', ' + ')} + {match.group(2).strip()}", match.group(0))
+            for match in matches
+        )
+    for candidate, line in candidates:
+        parts = [part.strip().upper() for part in candidate.split("+")]
+        if not parts:
+            continue
+        if parts[-1] == wanted_key and set(parts[:-1]) == wanted:
+            return line.strip()
+    return None
+
+
+def _backup_before_edit(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    backup = path.with_name(path.name + ".snipux.bak")
+    suffix = 1
+    while backup.exists():
+        backup = path.with_name(path.name + f".snipux.bak.{suffix}")
+        suffix += 1
+    shutil.copy2(path, backup)
+    return backup
+
+
+def _reload_hyprland(run=subprocess.run) -> str:
+    if shutil.which("hyprctl") is None:
+        return " Hyprland will load it at the next reload."
+    try:
+        reloaded = run(
+            ["hyprctl", "reload"], capture_output=True, text=True, timeout=5
+        )
+        checked = run(
+            ["hyprctl", "configerrors"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f" Note: could not reload Hyprland: {exc}"
+    errors = (checked.stdout or checked.stderr or "").strip()
+    if reloaded.returncode != 0:
+        detail = (reloaded.stderr or reloaded.stdout or "reload failed").strip()
+        return f" Note: hyprctl reload failed: {detail}"
+    if checked.returncode != 0 or errors:
+        return f" Note: Hyprland reports config errors: {errors or 'unknown error'}"
+    return " Hyprland reloaded with no config errors."
+
+
+def bind_hyprland_shortcut(
+    exec_path: Path,
+    shortcut: str | None = None,
+    *,
+    config_dir: Path | None = None,
+    run=subprocess.run,
+) -> str:
+    shortcut = shortcut or load_shortcut()
+    config_root = _hyprland_config_dir(config_dir)
+    path, lua = _hyprland_binding_path(config_root)
+    begin, end = (
+        (_HYPR_LUA_BEGIN, _HYPR_LUA_END)
+        if lua else (_HYPR_CONF_BEGIN, _HYPR_CONF_END)
+    )
+    try:
+        original = path.read_text() if path.exists() else ""
+    except OSError as exc:
+        return f"Note: could not read {path}: {exc}"
+    without_ours, _had_ours = _without_marked_block(original, begin, end)
+    conflict = _hypr_binding_conflict(without_ours, shortcut, lua=lua)
+    if conflict is not None:
+        return (
+            f"{human_shortcut(shortcut)} is already bound in {path}; "
+            "Snipux left it unchanged."
+        )
+
+    hypr_shortcut, key = _hypr_shortcut(shortcut)
+    command = f"{exec_path} --snip"
+    if lua:
+        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+        block = (
+            f'{begin}\n'
+            f'o.bind("{hypr_shortcut}", "Snipux snip", "{escaped}")\n'
+            f'{end}\n'
+        )
+    else:
+        modifiers = " ".join(part.strip() for part in hypr_shortcut.split("+")[:-1])
+        block = f"{begin}\nbind = {modifiers}, {key}, exec, {command}\n{end}\n"
+    updated = without_ours + ("\n" if without_ours else "") + block
+    if updated == original:
+        return f"{human_shortcut(shortcut)} is already bound by Snipux in {path}."
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        backup = _backup_before_edit(path)
+        path.write_text(updated)
+    except OSError as exc:
+        return f"Note: could not write the Hyprland shortcut to {path}: {exc}"
+    backed_up = f" (backup: {backup})" if backup is not None else ""
+    return (
+        f"Bound {human_shortcut(shortcut)} to run: {command} in {path}{backed_up}."
+        + _reload_hyprland(run)
+    )
+
+
+def unbind_hyprland_shortcut(
+    *, config_dir: Path | None = None, run=subprocess.run
+) -> str:
+    config_root = _hyprland_config_dir(config_dir)
+    candidates = [
+        (config_root / "bindings.lua", _HYPR_LUA_BEGIN, _HYPR_LUA_END),
+        (config_root / "hyprland.conf", _HYPR_CONF_BEGIN, _HYPR_CONF_END),
+    ]
+    changed = []
+    backups = []
+    for path, begin, end in candidates:
+        if not path.exists():
+            continue
+        try:
+            original = path.read_text()
+            updated, found = _without_marked_block(original, begin, end)
+            if not found:
+                continue
+            backup = _backup_before_edit(path)
+            path.write_text(updated)
+        except OSError as exc:
+            return f"Note: could not remove the Hyprland shortcut from {path}: {exc}"
+        changed.append(path)
+        if backup is not None:
+            backups.append(backup)
+    if not changed:
+        return "The Snipux Hyprland shortcut was not set -- nothing to remove."
+    message = "Removed the Snipux shortcut from " + ", ".join(map(str, changed)) + "."
+    if backups:
+        message += " Backups: " + ", ".join(map(str, backups)) + "."
+    return message + _reload_hyprland(run)
+
+
+def bind_linux_shortcut(
+    exec_path: Path,
+    shortcut: str | None = None,
+    *,
+    hypr_config_dir: Path | None = None,
+) -> str:
+    if is_hyprland_session():
+        return bind_hyprland_shortcut(
+            exec_path, shortcut, config_dir=hypr_config_dir
+        )
+    return bind_gnome_shortcut(exec_path, shortcut)
+
+
+def unbind_linux_shortcut(*, hypr_config_dir: Path | None = None) -> str:
+    if is_hyprland_session():
+        return unbind_hyprland_shortcut(config_dir=hypr_config_dir)
+    return unbind_gnome_shortcut()
 
 
 def config_path(config_dir: Path | None = None) -> Path:
@@ -1702,9 +1927,10 @@ def run_setup(
     autostart_dir: Path | None = None,
     hicolor_dir: Path | None = None,
     config_dir: Path | None = None,
+    hypr_config_dir: Path | None = None,
     shortcut: str | None = None,
 ) -> int:
-    """The body of `snipux --setup`: desktop entry, autostart entry, GNOME
+    """The body of `snipux --setup`: desktop entry, autostart entry, desktop
     shortcut -- everything `packaging/install.sh` used to do by hand after
     building its venv, now runnable straight from an installed copy of
     snipux with no repository checkout present.
@@ -1762,12 +1988,20 @@ def run_setup(
                 file=sys.stderr,
             )
 
-    contents = render_desktop_entry(exec_path)
-
-    _write_entry(applications_dir, contents, exec_path, "desktop")
-    _write_entry(autostart_dir, contents, exec_path, "autostart")
+    _write_entry(
+        applications_dir, render_desktop_entry(exec_path), exec_path, "desktop"
+    )
+    _write_entry(
+        autostart_dir, render_autostart_entry(exec_path), exec_path, "autostart"
+    )
     install_icons(hicolor_dir)
-    print(bind_gnome_shortcut(exec_path, load_shortcut(config_dir)))
+    print(
+        bind_linux_shortcut(
+            exec_path,
+            load_shortcut(config_dir),
+            hypr_config_dir=hypr_config_dir,
+        )
+    )
 
     return 0
 
@@ -1778,10 +2012,11 @@ def run_remove(
     autostart_dir: Path | None = None,
     hicolor_dir: Path | None = None,
     config_dir: Path | None = None,
+    hypr_config_dir: Path | None = None,
 ) -> int:
     """The body of `snipux --remove`: the exact counterpart to
     `run_setup()` -- deletes the desktop entry, the autostart entry, the
-    installed icons, and the GNOME shortcut slot, so
+    installed icons, and the GNOME or Hyprland shortcut, so
     `pipx uninstall snipux` afterwards leaves nothing behind (SNX-83).
 
     `applications_dir`/`autostart_dir`/`hicolor_dir` default to the same
@@ -1817,7 +2052,7 @@ def run_remove(
     _remove_entry(applications_dir, "desktop")
     _remove_entry(autostart_dir, "autostart")
     remove_icons(hicolor_dir)
-    print(unbind_gnome_shortcut())
+    print(unbind_linux_shortcut(hypr_config_dir=hypr_config_dir))
     # The remembered shortcut is something --setup wrote outside the
     # package too, so leaving it behind would be the same "dead leftover"
     # SNX-83 exists to prevent.

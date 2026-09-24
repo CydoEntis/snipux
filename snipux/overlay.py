@@ -21,7 +21,22 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QEvent, QMargins, QMarginsF, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QElapsedTimer,
+    QEvent,
+    QEventLoop,
+    QMargins,
+    QMarginsF,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    QSizeF,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
     QColor,
     QCursor,
@@ -4420,6 +4435,9 @@ class OverlayWindow(QWidget):
         on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
         on_recording_start: "Callable[[], None] | None" = None,
         on_recording_reframed: "Callable[[QRectF], None] | None" = None,
+        interaction_gate: "Callable[[OverlayWindow, bool], bool] | None" = None,
+        on_session_hide: "Callable[[OverlayWindow], None] | None" = None,
+        on_session_restore: "Callable[[OverlayWindow, Frame | None], Frame | None] | None" = None,
     ):
         super().__init__(parent)
         self._frame = frame
@@ -4451,14 +4469,18 @@ class OverlayWindow(QWidget):
         # while a recording is armed, so the recording bar can follow the
         # region the way the stills bar follows its selection.
         self._on_recording_reframed = on_recording_reframed
-        # SNX-58: called once, from closeEvent, when this window is the
-        # Wayland-primary of a multi-monitor `open_overlay` group -- the
-        # hook that closes the non-interactive `_MonitorVeil` companions
-        # covering the other monitors the moment this one does, so ending
-        # the session on the primary never leaves a dimmed veil stuck on
-        # another screen. None (the default, and the only value X11 or a
-        # single-monitor session ever passes) means there is nothing to
-        # close alongside this window.
+        # A multi-output Wayland session owns one stationary OverlayWindow
+        # per output. The gate makes those windows one interaction session:
+        # entering another output adopts the uncommitted chooser state,
+        # while a committed selection leaves every other surface inert.
+        self._interaction_gate = interaction_gate
+        self._session_active = True
+        self._on_session_hide = on_session_hide
+        self._on_session_restore = on_session_restore
+        # Called once from closeEvent. In a multi-output Wayland group the
+        # hook closes every stationary peer surface, so Escape or capture
+        # on any output ends one session rather than leaving frozen windows
+        # behind. A single-window session receives the caller's hook as-is.
         self._on_dismissed = on_dismissed
 
         # SNX-48: sourced for Window/Full screen capture-mode handling
@@ -4849,6 +4871,11 @@ class OverlayWindow(QWidget):
         # the backend: the window stays up so the region can still be
         # reframed, with the stills bar suppressed. See `_commit_selection`.
         self._armed_for_recording = False
+        # None during normal interaction. Recording startup briefly fades
+        # the painted selection chrome away while the frozen desktop stays
+        # put, so closing this monitor-sized surface cannot look like a
+        # full-screen brightness flash.
+        self._recording_handoff_progress: float | None = None
         # Latch for `_arm_default_tool`: the opening tool is armed once, the
         # first time this snip's toolbar appears, and never again -- see there.
         self._armed_default_tool = False
@@ -5430,6 +5457,8 @@ class OverlayWindow(QWidget):
         """
         self._pending_capture_mode = mode
         self._delay_remaining = int(self._delay.rstrip("s"))
+        if self._on_session_hide is not None:
+            self._on_session_hide(self)
         self.hide()
 
         if self._countdown is None:
@@ -5485,9 +5514,16 @@ class OverlayWindow(QWidget):
         try:
             frame = self._registry.capture()
         except CaptureError as exc:
+            if self._on_session_restore is not None:
+                self._on_session_restore(self, None)
             self.show()
             self._show_toast("timer", str(exc))
             return
+
+        if self._on_session_restore is not None:
+            restored = self._on_session_restore(self, frame)
+            if restored is not None:
+                frame = restored
 
         if mode == design.tokens.ACTIVE_WINDOW_MODE:
             # A delay exists so the screen can change before the shot, and
@@ -5500,6 +5536,12 @@ class OverlayWindow(QWidget):
                 self._geometry_provider.active_window() or self._active_window
             )
 
+        self.replace_frame(frame)
+        self.show()
+        self._dispatch_capture_mode(mode)
+
+    def replace_frame(self, frame: Frame) -> None:
+        """Replace the frozen pixels while preserving this surface's state."""
         self._frame = frame
         self.setGeometry(
             round(frame.logical_origin.x()),
@@ -5511,8 +5553,6 @@ class OverlayWindow(QWidget):
         # Last region is measured against the frame, and this is a new one.
         self._seed_last_region()
         self.set_selection(None)
-        self.show()
-        self._dispatch_capture_mode(mode)
 
     # -- Window / Full screen capture modes (SNX-48) -------------------------
     # docs/design/overlay-redesign.md's "Capture modes" section is the
@@ -6325,7 +6365,11 @@ class OverlayWindow(QWidget):
         elif not selected and self._chooser.phase != "choosing":
             self._chooser.reopen()
         self._chooser_had_selection = selected
-        if not self.isVisible() or self._armed_for_recording:
+        if (
+            not self.isVisible()
+            or not self._session_active
+            or self._armed_for_recording
+        ):
             self._chooser.hide_all()
             return
         monitor = self._chrome_monitor() if selected else self._active_screen_rect()
@@ -6446,6 +6490,8 @@ class OverlayWindow(QWidget):
         """A mode armed from the chooser. One piece of state, two surfaces:
         the bar's own chip is seeded from the same value.
         """
+        if not self._accept_session_interaction(replace_selection=True):
+            return
         self._on_capture_mode_selected(mode)
 
     def _on_chooser_immediate(self, mode: str) -> None:
@@ -6453,7 +6499,70 @@ class OverlayWindow(QWidget):
         arming: Browser, and Full screen on a desk with one monitor
         (`Chooser._fires_immediately`).
         """
+        if not self._accept_session_interaction(replace_selection=True):
+            return
         self._on_capture_mode_selected(mode)
+
+    def _accept_session_interaction(self, *, replace_selection: bool = False) -> bool:
+        """Ask a multi-output owner whether this surface may act."""
+        return self._interaction_gate is None or self._interaction_gate(
+            self, replace_selection
+        )
+
+    def set_session_active(self, active: bool) -> None:
+        """Show chrome only on the surface handling this shared session."""
+        self._session_active = bool(active)
+        if not active:
+            self._ants_timer.stop()
+            self._bar.hide()
+            self._style_popover.hide()
+            self._tool_hint.hide()
+            self._popover.hide()
+            for menu in self._family_menus.values():
+                menu.hide()
+            self._watermark_menu.hide()
+            self._toast.hide()
+            self._hud.hide()
+            self._close_button.hide()
+            self._chooser.hide_all()
+            return
+        if not self.isVisible():
+            return
+        self._ants_timer.start()
+        self._sync_bar_visibility()
+        self._sync_hud_visibility()
+        self._reposition_close_button()
+        self._close_button.show()
+        self._sync_chooser_visibility()
+
+    def adopt_preselection_state(self, other: "OverlayWindow") -> None:
+        """Continue ``other``'s uncommitted chooser state on this output.
+
+        Wayland cannot move one fullscreen surface across outputs. Each
+        output therefore keeps its own surface, and the surface under the
+        pointer adopts the shared mode before it handles that pointer. No
+        pixels are recaptured and no window is remapped.
+        """
+        if self is other:
+            return
+        self._capture_mode = other._capture_mode
+        self._delay = other._delay
+        self._chooser.set_kind(other._chooser.kind)
+        self._chooser.set_after(other._chooser.after)
+        self._chooser.set_delay(other._chooser.delay)
+        self._chooser.set_mode(other._chooser.mode, announce=False)
+        self._chooser.set_hide_sensitive(other._chooser.hide_sensitive)
+        self._chooser.set_record_cursor(other._chooser.record_cursor)
+        self._bar.set_capture_mode(other._capture_mode)
+        self._popover.set_delay(other._delay)
+        self._picking_window = other._picking_window
+        self._picking_monitor = other._picking_monitor
+        self._hovered_window = None
+        self._hovered_monitor = None
+        self.set_selection(None)
+        self._chooser.reopen()
+        self._sync_chooser_visibility()
+        self._apply_idle_cursor()
 
     def _sync_bar_visibility(self) -> None:
         """Show/hide and reposition the floating bar to match `_selection`.
@@ -6479,7 +6588,8 @@ class OverlayWindow(QWidget):
         # the user asked to see is the region they are cutting, which is
         # what is left once the bar goes.
         if (
-            self._armed_for_recording
+            not self._session_active
+            or self._armed_for_recording
             or self._chooser.kind == "record"
             or self.outcome == "instant"
         ):
@@ -7274,6 +7384,9 @@ class OverlayWindow(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        if not self._session_active:
+            self.set_session_active(False)
+            return
         # The ants only cost frames while actually on screen -- the
         # acceptance criterion is explicit that the timer must not keep
         # ticking (and scheduling repaints) once the overlay is hidden.
@@ -7327,14 +7440,13 @@ class OverlayWindow(QWidget):
         # close that only takes effect a few milliseconds later would let a
         # second shortcut press inside that gap be refused as "an overlay is
         # already open".
-        self.setWindowOpacity(0.0)
+        if not self._map_animation_skipped:
+            self.setWindowOpacity(0.0)
 
         # Deliberately not hideEvent: `_start_delayed_capture` (SNX-50)
         # also plain-hides this same window mid-countdown and re-shows it
-        # in place a moment later, which must not tear down this window's
-        # own `_MonitorVeil` companions (if any) -- only an actual close()
-        # (today, only the second stage of Esc) means the session itself
-        # is over.
+        # in place a moment later. Only an actual close() means the session
+        # itself is over.
         self._remember_last_tool()
         super().closeEvent(event)
         if self._on_dismissed is not None:
@@ -7352,6 +7464,50 @@ class OverlayWindow(QWidget):
         tool = self._last_opening_tool
         if tool is not None and setup_desktop.load_remember_tool():
             setup_desktop.save_last_tool(tool)
+
+    _RECORDING_HANDOFF_MS = 34
+
+    def prepare_recording_handoff(self) -> None:
+        """Fade only overlay chrome before recording removes the surface.
+
+        The frozen pixels remain fully opaque throughout.  By the time the
+        Wayland surface closes, its last committed frame is therefore the
+        same clean desktop Hyprland reveals beneath it, instead of a dimmed
+        selection frame disappearing across a whole monitor at once.
+        """
+        if self._on_session_hide is not None:
+            self._on_session_hide(self)
+        for child in self.findChildren(
+            QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly
+        ):
+            child.hide()
+
+        elapsed = QElapsedTimer()
+        elapsed.start()
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(8)
+        final_frame_committed = False
+
+        def advance() -> None:
+            nonlocal final_frame_committed
+            if final_frame_committed:
+                timer.stop()
+                loop.quit()
+                return
+            self._recording_handoff_progress = min(
+                1.0, elapsed.elapsed() / self._RECORDING_HANDOFF_MS
+            )
+            self.repaint()
+            if self._recording_handoff_progress >= 1.0:
+                # Leave the clean backing-store commit alive for one refresh
+                # interval before close() withdraws the surface.
+                final_frame_committed = True
+
+        timer.timeout.connect(advance)
+        advance()
+        timer.start()
+        loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     # How long to stay invisible while the compositor plays its map
     # animation. GNOME's is in this range; erring slightly long costs a few
@@ -7417,13 +7573,21 @@ class OverlayWindow(QWidget):
                 self.show()
                 QTimer.singleShot(self._REVEAL_DELAY_MS, self._reveal)
         else:
+            placed_without_fullscreen = platform.current.place_capture_overlay(
+                self, screen
+            )
             self.winId()
             handle = self.windowHandle()
             if handle is not None:
                 handle.setScreen(screen)
-            self.setWindowOpacity(0.0)
-            self.showFullScreen()
-            QTimer.singleShot(self._REVEAL_DELAY_MS, self._reveal)
+            if placed_without_fullscreen:
+                self.show()
+            elif self._map_animation_skipped:
+                self.showFullScreen()
+            else:
+                self.setWindowOpacity(0.0)
+                self.showFullScreen()
+                QTimer.singleShot(self._REVEAL_DELAY_MS, self._reveal)
         # Above every other window and focused the moment it opens, per
         # the acceptance criterion -- WindowStaysOnTopHint alone (set in
         # __init__) keeps it on top but doesn't itself force keyboard
@@ -7545,6 +7709,8 @@ class OverlayWindow(QWidget):
         self._text_editor.abandon()
 
     def keyPressEvent(self, event) -> None:
+        if not self._accept_session_interaction(replace_selection=True):
+            return
         key = event.key()
         modifiers = event.modifiers()
 
@@ -7701,6 +7867,8 @@ class OverlayWindow(QWidget):
         self.update()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if not self._accept_session_interaction(replace_selection=True):
+            return
         # A press while a drag is still open means that drag's release never
         # arrived. It ends here, as it stands, before this press can start
         # anything of its own.
@@ -7941,6 +8109,8 @@ class OverlayWindow(QWidget):
         )
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if not self._accept_session_interaction():
+            return
         if self._dragging() and not event.buttons() & Qt.MouseButton.LeftButton:
             # Nothing is held, so the drag lost its release somewhere --
             # outside the window, to a grab, to anything. Without this,
@@ -8276,6 +8446,8 @@ class OverlayWindow(QWidget):
         # compositing a second one, so the hole shows precisely these
         # pixels, obscuring marks included, untouched.
         painter.drawImage(QRectF(self.rect()), self._base_layer_image())
+        if self._recording_handoff_progress is not None:
+            painter.setOpacity(1.0 - self._recording_handoff_progress)
         self._paint_scrim(painter)
         if self._selection is not None:
             # Ink before the stroke/handles, matching the design's layer
@@ -9178,68 +9350,12 @@ class OverlayWindow(QWidget):
         painter.drawText(QPointF(text_x, baseline), hex_text)
 
 
-class _MonitorVeil(QWidget):
-    """SNX-58: the non-interactive Wayland companion `open_overlay` shows
-    on every monitor besides the one the real, interactive `OverlayWindow`
-    covers.
-
-    A Wayland client cannot span two outputs with one surface -- a
-    fullscreen request is inherently a single `wl_output`'s, per
-    `OverlayWindow.show_on_screen`'s own docstring -- so covering a
-    multi-monitor virtual desktop there takes one fullscreen surface per
-    monitor rather than one big window the way X11's single `OverlayWindow`
-    already can. This is deliberately not another `OverlayWindow`: only one
-    monitor is ever the interactive one for a given snip, so the rest just
-    need their own frozen, dimmed pixels and nothing else -- no bar, no
-    tray, no selection of their own. It does not react to input, and it
-    must not end up with the keyboard, which a compositor hands to the
-    window it maps last -- so `open_overlay` maps these first. It closes
-    every instance of this the moment the real `OverlayWindow` does, via
-    that window's own `on_dismissed`.
-    """
-
-    def __init__(self, monitor_frame: Frame, parent=None):
-        super().__init__(parent)
-        self._image = monitor_frame.image
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
-        )
-        # Sized to this monitor alone -- `show_on_screen` below is what
-        # fullscreens it onto the matching real `QScreen`; this resize is
-        # what its own paintEvent's `self.rect()` reads while unscreened
-        # (e.g. under the offscreen platform tests run with).
-        self.resize(
-            round(monitor_frame.logical_size.width()),
-            round(monitor_frame.logical_size.height()),
-        )
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.drawImage(QRectF(self.rect()), self._image)
-        painter.fillRect(QRectF(self.rect()), VEIL_COLOR)
-        painter.end()
-
-    def show_on_screen(self, screen: QScreen | None) -> None:
-        """Same contract as `OverlayWindow.show_on_screen` -- see its
-        docstring; this window is only ever shown from the Wayland branch
-        of `open_overlay`, so unlike that method there is no plain-`show()`
-        case to fall back to other than a missing `screen` itself.
-        """
-        if screen is not None:
-            self.winId()
-            handle = self.windowHandle()
-            if handle is not None:
-                handle.setScreen(screen)
-        self.showFullScreen()
-
-
 def _screen_for_geometry(geometry: QRectF) -> QScreen | None:
     """The real `QScreen` whose own geometry matches `geometry` exactly, or
     None if none does -- e.g. under the offscreen platform tests run with,
     which reports no real screens a synthetic `monitor_geometries` entry
-    could ever match. `OverlayWindow.show_on_screen`/`_MonitorVeil.
-    show_on_screen` both already treat a None screen as "nothing more
-    specific to target."
+    could ever match. `OverlayWindow.show_on_screen` already treats a None
+    screen as "nothing more specific to target."
     """
     for screen in QApplication.screens():
         if QRectF(screen.geometry()) == geometry:
@@ -9281,23 +9397,19 @@ def other_screens_nearest_first(
 def _interactive_geometry(monitor_geometries: list[QRectF]) -> QRectF:
     """Which monitor gets the one interactive window on Wayland.
 
-    `monitor_geometries[0]` is whatever `QGuiApplication.screens()` happened
-    to list first, which Qt does not promise is the primary screen -- on a
-    three-monitor desktop that is a one-in-three chance of opening the only
-    usable overlay on a monitor off to the side while the user watches the
-    middle one do nothing. The primary screen is the deterministic answer,
-    and the same one GNOME's own screenshot UI opens on.
-
-    Not `QCursor.pos()`, tempting though "the monitor being pointed at" is:
-    this file already refuses global cursor state on purpose -- see
-    `_cursor_pos`, tracked from real move events precisely so no test has
-    to control a system-wide pointer -- and `open_overlay` runs before any
-    window exists to have seen a move. The old first-entry behaviour stays
-    as the last resort so a caller passing synthetic geometries (every test
-    of this function) still gets a deterministic answer.
+    On Hyprland/Wayland Qt reports the cursor at (0, 0), so the Linux
+    platform asks Hyprland which output is focused and returns that output's
+    Qt geometry. This is exactly the monitor the shortcut was invoked from.
+    Other desktops retain the primary-screen answer, then the old first-entry
+    fallback for synthetic/headless callers.
     """
     if not monitor_geometries:
         return QRectF()
+    active = platform.current.active_screen_geometry()
+    if active is not None:
+        geometry = QRectF(active)
+        if geometry in monitor_geometries:
+            return geometry
     primary = QApplication.primaryScreen()
     if primary is not None:
         geometry = QRectF(primary.geometry())
@@ -9332,37 +9444,33 @@ def open_overlay(
     # The armed region reframed -- see `OverlayWindow.__init__`'s own comment
     # on the same parameter.
     on_recording_reframed: "Callable[[QRectF], None] | None" = None,
+    on_recording_reselect: "Callable[[], None] | None" = None,
+    # A multi-output Wayland group reports which stationary surface the
+    # pointer chose so app.py always parents recording chrome to the active
+    # widget and reads the outcome from the right chooser.
+    on_active_changed: "Callable[[OverlayWindow], None] | None" = None,
 ) -> OverlayWindow:
     """Build and show the overlay for one snip, positioned for the
     caller's already-detected session type (`wayland`) rather than assumed
-    here, per CLAUDE.md. Returns the single interactive `OverlayWindow` --
-    the only widget a caller (`app.py`) needs to keep a reference to; any
-    `_MonitorVeil` companions this creates are owned by a closure wired
-    through `OverlayWindow`'s own `on_dismissed` and close themselves the
-    moment the returned window does, so a caller's bookkeeping never has
-    to know they exist.
+    here, per CLAUDE.md. Returns the currently interactive
+    `OverlayWindow`, and reports a later cross-output change through
+    `on_active_changed`.
 
-    `on_dismissed` (SNX-62) is the caller's own hook for that same moment
-    -- composed with the veil-closing closure below rather than handed to
-    `OverlayWindow` in its place, so a caller (`AppController`, to drop its
-    stale `_overlay` reference the instant the session actually ends)
-    doesn't have to know whether this particular snip has veils to close at
-    all.
+    `on_dismissed` (SNX-62) is the caller's hook for that same moment. The
+    Wayland group composes it with peer cleanup so AppController does not
+    need to know how many surfaces represent the session.
 
     X11 (`wayland=False`): unchanged from before this ticket -- one
     `OverlayWindow` sized to the whole virtual desktop (every entry in
     `monitor_geometries`), shown via `show_on_screen(None)`, which is
     exactly the plain `setGeometry`-then-`show()` this window already did.
 
-    Wayland: `OverlayWindow.show_on_screen`'s docstring is the authority
-    for why a single window is fullscreened onto one specific `QScreen`
-    instead. Fullscreen is inherently one output at a time, so with more
-    than one monitor the interactive `OverlayWindow` is cropped
-    (`Frame.crop`) to just the first monitor, and a non-interactive `_MonitorVeil` -- cropped and
-    fullscreened the same way -- covers each of the rest, so every
-    window's own local (0, 0) lines up with the real screen pixels under
-    it and none of them paint a stretched or offset copy of another
-    monitor's content.
+    Wayland: fullscreen is inherently one output at a time, so every output
+    gets a stationary interactive `OverlayWindow` cropped from the same
+    frozen virtual-desktop frame. The group shares pre-selection state and
+    closes as one session. No surface is ever moved or remapped when the
+    pointer crosses an output boundary; doing that can make Hyprland loop
+    between fullscreen mappings and visibly black-flash an output.
     """
     primary_geometry = (
         _interactive_geometry(monitor_geometries)
@@ -9370,56 +9478,130 @@ def open_overlay(
         else QRectF(frame.logical_origin, frame.logical_size)
     )
 
-    veils: list[_MonitorVeil] = []
+    multi_monitor_wayland = wayland and len(monitor_geometries) > 1
+    if not multi_monitor_wayland:
+        overlay = OverlayWindow(
+            frame,
+            hints_enabled=hints_enabled,
+            geometry_provider=geometry_provider,
+            monitor_geometries=monitor_geometries,
+            registry=registry,
+            on_dismissed=on_dismissed,
+            on_captured=on_captured,
+            on_pin_requested=on_pin_requested,
+            on_recording_requested=on_recording_requested,
+            on_recording_start=on_recording_start,
+            on_recording_reframed=on_recording_reframed,
+        )
+        overlay.show_on_screen(
+            _screen_for_geometry(primary_geometry) if wayland else None
+        )
+        return overlay
 
-    def _on_overlay_dismissed() -> None:
-        for veil in veils:
-            veil.close()
+    overlays: list[OverlayWindow] = []
+    active: OverlayWindow | None = None
+    closing = False
+
+    def _may_interact(
+        candidate: OverlayWindow, replace_selection: bool = False
+    ) -> bool:
+        nonlocal active
+        if candidate is active:
+            return True
+        if active is not None and (
+            active._selection is not None
+            and not active._picking_window
+            and not active._picking_monitor
+        ):
+            if not replace_selection or bool(active._marks):
+                return False
+            if active._armed_for_recording:
+                if on_recording_reselect is None:
+                    return False
+                on_recording_reselect()
+                active._armed_for_recording = False
+        if active is not None:
+            candidate.adopt_preselection_state(active)
+            active.set_selection(None)
+            active.set_session_active(False)
+        active = candidate
+        candidate.set_session_active(True)
+        if on_active_changed is not None:
+            on_active_changed(candidate)
+        return True
+
+    def _on_group_dismissed() -> None:
+        nonlocal closing
+        if closing:
+            return
+        closing = True
+        for member in overlays:
+            if member.isVisible():
+                member.close()
         if on_dismissed is not None:
             on_dismissed()
 
-    multi_monitor_wayland = wayland and len(monitor_geometries) > 1
-    overlay_monitor_geometries = (
-        [primary_geometry] if multi_monitor_wayland else monitor_geometries
-    )
-    # None (not the closure above) whenever neither half of it would do
-    # anything -- no veils to close *and* no caller-supplied hook -- so
-    # OverlayWindow._on_dismissed stays exactly None for a plain
-    # single-window session, same as before this ticket's `on_dismissed`
-    # parameter existed.
-    needs_dismissal_hook = multi_monitor_wayland or on_dismissed is not None
-    overlay = OverlayWindow(
-        frame.crop(primary_geometry) if multi_monitor_wayland else frame,
-        hints_enabled=hints_enabled,
-        geometry_provider=geometry_provider,
-        monitor_geometries=overlay_monitor_geometries,
-        registry=registry,
-        on_dismissed=_on_overlay_dismissed if needs_dismissal_hook else None,
-        on_captured=on_captured,
-        on_pin_requested=on_pin_requested,
-        on_recording_requested=on_recording_requested,
-        on_recording_start=on_recording_start,
-        on_recording_reframed=on_recording_reframed,
-    )
+    def _hide_group(active_member: OverlayWindow) -> None:
+        for member in overlays:
+            if member is not active_member:
+                member.hide()
 
-    if not wayland:
-        overlay.show_on_screen(None)
-        return overlay
+    def _restore_group(
+        active_member: OverlayWindow, captured: Frame | None
+    ) -> Frame | None:
+        for member in overlays:
+            if member is active_member:
+                continue
+            if captured is not None:
+                geometry = QRectF(
+                    member._frame.logical_origin, member._frame.logical_size
+                )
+                member.replace_frame(captured.crop(geometry))
+                member.adopt_preselection_state(active_member)
+            member.show()
+        if captured is None:
+            return None
+        active_geometry = QRectF(
+            active_member._frame.logical_origin, active_member._frame.logical_size
+        )
+        return captured.crop(active_geometry)
 
-    # Every monitor except the interactive one, by identity rather than by
-    # slicing off the first entry: `_interactive_geometry` may well have
-    # picked something other than `monitor_geometries[0]`, and a `[1:]`
-    # slice would then leave the chosen monitor double-covered and one
-    # other monitor bare.
     for geometry in monitor_geometries:
-        if geometry == primary_geometry:
+        member = OverlayWindow(
+            frame.crop(geometry),
+            hints_enabled=hints_enabled,
+            geometry_provider=geometry_provider,
+            monitor_geometries=monitor_geometries,
+            registry=registry,
+            on_dismissed=_on_group_dismissed,
+            on_captured=on_captured,
+            on_pin_requested=on_pin_requested,
+            on_recording_requested=on_recording_requested,
+            on_recording_start=on_recording_start,
+            on_recording_reframed=on_recording_reframed,
+            interaction_gate=_may_interact,
+            on_session_hide=_hide_group,
+            on_session_restore=_restore_group,
+        )
+        overlays.append(member)
+
+    overlay = next(
+        member
+        for member in overlays
+        if QRectF(member._frame.logical_origin, member._frame.logical_size)
+        == primary_geometry
+    )
+    active = overlay
+
+    for member in overlays:
+        member.set_session_active(member is overlay)
+
+    # Map the initially active surface last so it receives keyboard focus.
+    # Every surface stays mapped to the same QScreen for the whole session.
+    for member in overlays:
+        if member is overlay:
             continue
-        veil = _MonitorVeil(frame.crop(geometry))
-        veil.show_on_screen(_screen_for_geometry(geometry))
-        veils.append(veil)
-    # The interactive window last. GNOME gives the keyboard to whichever
-    # window it maps last, and shown before its veils this one lost it to
-    # them: on two monitors Enter, Esc and every tool key did nothing until
-    # the snip was clicked.
+        geometry = QRectF(member._frame.logical_origin, member._frame.logical_size)
+        member.show_on_screen(_screen_for_geometry(geometry))
     overlay.show_on_screen(_screen_for_geometry(primary_geometry))
     return overlay

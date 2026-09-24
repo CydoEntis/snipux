@@ -763,6 +763,64 @@ class TestX11RegistryFailover:
         assert isinstance(frame, Frame)
 
 
+class TestHyprlandWindowGeometryProvider:
+    CLIENTS = """[
+      {"mapped":true,"hidden":false,"at":[1920,38],"size":[1200,800],
+       "title":"Terminal","class":"ghostty","focusHistoryID":0},
+      {"mapped":true,"hidden":false,"at":[4480,180],"size":[900,700],
+       "title":"Browser","class":"chromium","focusHistoryID":1},
+      {"mapped":true,"hidden":false,"at":[0,0],"size":[100,100],
+       "title":"snipux","class":"snipux","focusHistoryID":2},
+      {"mapped":true,"hidden":false,"visible":false,"at":[0,0],"size":[100,100],
+       "title":"Hidden","class":"hidden","focusHistoryID":3},
+      {"mapped":true,"hidden":false,"visible":true,"at":[0,0],"size":[1920,1080],
+       "title":"omarchy-screensaver","class":"org.omarchy.screensaver","focusHistoryID":4}
+    ]"""
+
+    def _provider(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "Hyprland")
+        monkeypatch.setattr(capture.shutil, "which", lambda name: "/usr/bin/hyprctl")
+        return capture.HyprlandWindowGeometryProvider()
+
+    def test_lists_real_clients_in_stacking_order_and_excludes_snipux(self, monkeypatch):
+        provider = self._provider(monkeypatch)
+        monkeypatch.setattr(
+            capture.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(stdout=self.CLIENTS, returncode=0),
+        )
+
+        assert provider.list_windows() == [
+            ("Terminal", QRectF(1920, 38, 1200, 800)),
+            ("Browser", QRectF(4480, 180, 900, 700)),
+        ]
+        assert provider.window_named_at(QPointF(2000, 100)) == (
+            "Terminal",
+            QRectF(1920, 38, 1200, 800),
+        )
+
+    def test_reads_the_active_window(self, monkeypatch):
+        provider = self._provider(monkeypatch)
+        monkeypatch.setattr(
+            capture.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                stdout='{"at":[10,20],"size":[800,600],"title":"Editor"}',
+                returncode=0,
+            ),
+        )
+
+        assert provider.active_window() == ("Editor", QRectF(10, 20, 800, 600))
+
+    def test_is_only_available_in_a_hyprland_wayland_session(self, monkeypatch):
+        provider = self._provider(monkeypatch)
+        assert provider.is_available()
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
+        monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
+        assert not provider.is_available()
+
+
 class TestX11WindowGeometryProvider:
     WMCTRL_STDOUT = (
         "0x02c00003  0 1920 0   1024 768 host1 Firefox\n"
@@ -930,6 +988,7 @@ class TestGrimBackend:
         frame = capture.GrimBackend().capture()
 
         assert recorded_argv[0][0] == "grim"
+        assert recorded_argv[0][1:3] == ["-l", "0"]
         assert recorded_argv[0][-1] != "grim"  # a real path argument, not just the binary
         assert frame.logical_origin == QPointF(0, 0)
         assert frame.logical_size == QSizeF(50, 40)
@@ -1131,8 +1190,18 @@ class TestPortalScreenshotBackend:
 
 
 class TestGnomeShellHelperBackend:
+    @staticmethod
+    def _shell_owner_connection(monkeypatch, owned=True):
+        reply = Mock(body=(owned,))
+        reply.header.message_type = capture.MessageType.method_return
+        connection = Mock()
+        connection.send_and_get_reply.return_value = reply
+        monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: connection)
+        return connection
+
     def test_is_available_only_under_wayland(self, monkeypatch):
         backend = capture.GnomeShellHelperBackend()
+        self._shell_owner_connection(monkeypatch)
 
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
         assert backend.is_available() is True
@@ -1142,12 +1211,22 @@ class TestGnomeShellHelperBackend:
 
     def test_unavailable_reason_matches_availability(self, monkeypatch):
         backend = capture.GnomeShellHelperBackend()
+        self._shell_owner_connection(monkeypatch)
 
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
         assert backend.unavailable_reason() is None
 
         monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
         assert backend.unavailable_reason() == "not a Wayland session"
+
+    def test_unavailable_when_gnome_shell_has_no_session_bus_owner(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        self._shell_owner_connection(monkeypatch, owned=False)
+
+        backend = capture.GnomeShellHelperBackend()
+
+        assert backend.is_available() is False
+        assert "not running" in backend.unavailable_reason()
 
     def test_capture_returns_a_frame_when_screenshot_succeeds(self, monkeypatch):
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
@@ -1330,6 +1409,9 @@ class TestWaylandRegistryFailover:
         )
         monkeypatch.setattr(
             capture.GnomeShellHelperBackend, "capture", Mock(return_value=good_frame)
+        )
+        monkeypatch.setattr(
+            capture.GnomeShellHelperBackend, "is_available", lambda self: True
         )
 
         registry = capture.build_wayland_registry()

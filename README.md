@@ -54,13 +54,13 @@ each release is in [CHANGELOG.md](CHANGELOG.md).
 
 | Platform | State | How it captures |
 |----------|-------|-----------------|
-| **Linux** (Ubuntu 22.04+, GNOME) | Supported | Wayland via `xdg-desktop-portal`; X11 directly. Session type detected at runtime, never assumed. |
+| **Linux** (Ubuntu 22.04+ GNOME; Arch/Omarchy Hyprland) | Supported | Wayland via `grim`/the screenshot portal; recording via GNOME Shell or `gpu-screen-recorder`. X11 captures directly. |
 | **Windows** (10 2004+ / 11) | Supported | Qt's `QScreenCapture`, plus Win32 for the hotkey and shortcuts. |
 | **macOS** | Not yet | The platform seam exists; nothing behind it is implemented. Every operation raises `UnimplementedPlatformError`. |
 
-Linux is tested against Ubuntu with GNOME. Other desktops are expected to work
-for snipping but are not what the tool is tested against — and **recording on
-Linux is GNOME-only** (see [Recording](#recording)).
+Linux is tested against Ubuntu/GNOME and Arch/Omarchy/Hyprland. Other desktops
+can use the same Wayland capture tools; recording needs either GNOME Shell or
+`gpu-screen-recorder` (see [Recording](#recording)).
 
 ## Why
 
@@ -101,6 +101,13 @@ chmod +x Snipux-1.0.1-x86_64.AppImage
 ./Snipux-1.0.1-x86_64.AppImage
 ```
 
+On Arch, Omarchy and other Arch-based systems, install FUSE 2 before running
+the AppImage:
+
+```sh
+sudo pacman -S fuse2
+```
+
 Either way the first launch writes the same three things `--setup` does —
 the desktop entry, the autostart entry and the Ctrl+Alt+S shortcut — so
 there is no second command to run. Two things worth knowing:
@@ -136,6 +143,14 @@ sudo apt install pipx libxcb-cursor0
 pipx ensurepath      # only needed once, and only if pipx was just installed
 ```
 
+On Arch/Omarchy the equivalent prerequisites, plus the native Hyprland capture
+and recording tools, are:
+
+```sh
+sudo pacman -S python-pipx xcb-util-cursor grim slurp gpu-screen-recorder
+pipx ensurepath
+```
+
 `libxcb-cursor0` is not optional: without it Snipux installs cleanly and then
 crashes on launch, behind four lines of Qt plugin text that name the library
 but not the package. Then:
@@ -154,7 +169,10 @@ where a later `apt upgrade` of PyQt6 can leave two versions disagreeing
 about which one is loaded. pipx gives Snipux and its dependencies an
 environment of their own and puts a `snipux` launcher on `PATH`. `--setup`
 writes the pieces pipx can't — the `.desktop` entry, the autostart entry, and
-the GNOME shortcut — and is safe to re-run.
+the GNOME or Hyprland shortcut — and is safe to re-run. On Omarchy it adds a
+delimited block to `~/.config/hypr/bindings.lua`; classic Hyprland uses
+`hyprland.conf`. Existing bindings are left alone and `--remove` removes only
+Snipux's marked block.
 
 **The third line is not optional the first time.** The shortcut runs
 `snipux --snip`, which needs a resident Snipux to talk to, and `--setup` only
@@ -506,18 +524,19 @@ that moves mid-recording; there's no window-following in the API to build it on.
 
 **What you get, per platform:**
 
-| | Linux (GNOME) | Windows |
-|---|---|---|
-| Container | WebM — GNOME Shell picks it, not us | MP4 |
-| Audio | System sound or mic, with a system `ffmpeg` — GNOME's recorder has none of its own | Mic |
-| Pause | Yes, with a system `ffmpeg` to join the pieces | Yes |
-| Frame rate | Up to 30fps | ~30fps ceiling (`QScreenCapture` exposes no rate control) |
+| | Linux (GNOME) | Linux (Hyprland/wlroots) | Windows |
+|---|---|---|---|
+| Backend | GNOME Shell D-Bus | `gpu-screen-recorder` | Qt `QScreenCapture` |
+| Container | WebM — GNOME Shell picks it | MP4 | MP4 |
+| Audio | System sound or mic with system `ffmpeg` | System sound or mic directly | Mic |
+| Pause | Yes, with system `ffmpeg` to join pieces | Not yet | Yes |
+| Frame rate | Up to 30fps | Configured frame rate | ~30fps ceiling |
 
-**Recording on Linux is GNOME-only.** The route is
-`org.gnome.Shell.Screencast` over D-Bus. `QScreenCapture` does not work under
-Wayland at all, so there is no fallback for other desktops. Snipping works
-everywhere; recording does not. `snipux --list-backends` tells you which of the
-two this machine can do.
+On GNOME the route is `org.gnome.Shell.Screencast`; on Hyprland and other
+wlroots compositors it is `gpu-screen-recorder`, using the exact region chosen
+on Snipux's frozen frame and SIGINT on Stop so the video is finalized. Run
+`snipux --list-backends` to see which route is available and an install command
+when an optional recorder is missing.
 
 ### Where a recording goes
 
@@ -735,7 +754,8 @@ mystery.
   desktop pulls it in. Without it Snipux installs cleanly and then crashes on
   launch; `packaging/install.sh` checks for it before doing anything.
 - **`python3-venv`** on Debian/Ubuntu if you use `packaging/install.sh`
-- **Ubuntu 22.04+** (Wayland or X11), or **Windows 10 2004+ / 11**
+- **Ubuntu 22.04+** (Wayland or X11), **Arch/Omarchy with Hyprland**, or
+  **Windows 10 2004+ / 11**
 - **`ffmpeg`** — genuinely optional, never installed. See
   [About ffmpeg](#about-ffmpeg).
 

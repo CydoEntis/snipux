@@ -940,7 +940,23 @@ class TestSettingsWindow:
 
         window._save()
 
-        assert "Everything saved" in window._dirty_label.text()
+        assert window._dirty_label.text() == "Settings saved"
+
+    def test_saving_keeps_the_window_open(self, tmp_path):
+        window = self._window(tmp_path)
+        window.show()
+
+        window._save()
+
+        assert window.isVisible()
+
+    def test_editing_after_a_save_replaces_the_confirmation(self, tmp_path):
+        window = self._window(tmp_path)
+        window._save()
+
+        window._mark_dirty()
+
+        assert window._dirty_label.text() == "Unsaved changes"
 
     def test_the_nav_rail_footer_wraps_rather_than_clips_the_version_line(self, tmp_path):
         # AC: not clipped at the width the panel gives it. The nav rail is
@@ -1981,14 +1997,16 @@ class TestASaveThatCannotWrite:
         assert warned
         assert "config.json" in warned[0][1]
 
-    def test_a_save_that_works_still_closes_and_clears(self, tmp_path, monkeypatch):
+    def test_a_save_that_works_stays_open_and_clears(self, tmp_path, monkeypatch):
         window, warned = self._window(tmp_path, monkeypatch)
         window._dirty = True
+        window.show()
 
         window._save()
 
         assert not warned
         assert window._dirty is False
+        assert window.isVisible()
 
 
 class TestTheCursorSwitchIsHonestAboutThePlatform:

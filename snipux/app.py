@@ -43,6 +43,7 @@ from PyQt6.QtCore import (
     QEventLoop,
     QMarginsF,
     QObject,
+    QPoint,
     QPointF,
     QRect,
     QRectF,
@@ -83,6 +84,7 @@ from snipux.flowbars import (
     RegionFrame,
 )
 from snipux.capture import (
+    HyprlandWindowGeometryProvider,
     XwininfoWindowGeometryProvider,
     BackendRegistry,
     CaptureError,
@@ -468,6 +470,7 @@ def geometry_provider_classes() -> tuple[type, ...]:
     one of these names is still the class that gets tried.
     """
     return (
+        HyprlandWindowGeometryProvider,
         X11WindowGeometryProvider,
         XwininfoWindowGeometryProvider,
         WindowsWindowGeometryProvider,
@@ -477,7 +480,8 @@ def geometry_provider_classes() -> tuple[type, ...]:
 def build_default_geometry_provider() -> GeometryProvider:
     """Construct the `GeometryProvider` the real app uses for window mode.
 
-    Tried in order, the same way capture backends are: `wmctrl` first for
+    Tried in order, the same way capture backends are: Hyprland IPC on its
+    Wayland session, then `wmctrl` first for
     its curated window list, then `xwininfo` (x11-utils, which a GNOME
     session already has) so a stock Ubuntu without `wmctrl` still gets
     Window mode instead of silently falling back to Region, then
@@ -1223,6 +1227,9 @@ class AppController:
         self._countdown_numeral: CountdownNumeral | None = None
         # Where the bar's centre stays while its width changes with state.
         self._recording_bar_anchor = None
+        # True only when a whole-monitor recording's Hyprland bar was
+        # successfully placed on a different, therefore unrecorded, output.
+        self._recording_hud_clear_of_full_screen = False
         # The open dropdown, held so Python does not collect a parentless
         # popup out from under the user mid-choice.
         self._flow_menu: FlowMenu | None = None
@@ -1454,27 +1461,11 @@ class AppController:
         stored value is what survives the next `--setup` (Linux) or process
         restart (Windows), but neither GNOME nor a still-running
         `RegisterHotKey` registration knows about a change to it on their
-        own. On Windows this goes through the platform seam for real
-        (SNX-91's own acceptance criterion: changing the shortcut re-registers
-        it without restarting the app) -- `HotkeyEventFilter.is_available()`
-        is what tells the two paths apart, the same capability check
-        `install_hotkey_listener()` uses, rather than this method branching
-        on `sys.platform` itself. On Linux this still calls setup_desktop
-        directly rather than through the seam, the same reasoning as
-        `main()`'s `--setup`/`--remove` above: harmless (a printed note, not
-        an exception) during Windows-hosted development.
+        own. The platform seam chooses Windows' live `RegisterHotKey`, GNOME's
+        custom keybinding, or Hyprland's config binding. Bypassing it on Linux
+        made Settings try GNOME even in a Hyprland session.
         """
-        if HotkeyEventFilter.is_available():
-            message = platform.current.bind_shortcut()
-        else:
-            exec_path = setup_desktop.find_console_script()
-            if exec_path is None:
-                message = (
-                    "Settings saved, but the snipux console script could not be "
-                    "found, so the shortcut was not re-bound."
-                )
-            else:
-                message = setup_desktop.bind_gnome_shortcut(exec_path)
+        message = platform.current.bind_shortcut()
         self._report_shortcut(message)
 
     def _report_shortcut(self, message: str) -> None:
@@ -1729,6 +1720,13 @@ class AppController:
             on_recording_start=self._begin_armed_recording,
             # The bar follows the armed region as its handles reframe it.
             on_recording_reframed=self._on_recording_reframed,
+            # Choosing a fresh region on another Wayland output abandons
+            # only the ready recording, not the whole capture session.
+            on_recording_reselect=self._on_recording_reselect,
+            # On multi-output Wayland the pointer may choose any one of the
+            # stationary per-output surfaces. Keep the controller pointed
+            # at that widget for outcome, recording chrome and cleanup.
+            on_active_changed=self._on_overlay_activated,
         )
         # Stored on self, not left as a local: a parentless widget is fair
         # game for Python's GC to collect out from under the still-open
@@ -1739,6 +1737,18 @@ class AppController:
         # any Wayland multi-monitor veil companions), so there's no
         # separate .show() to call here.
         self._overlay = overlay
+
+    def _on_overlay_activated(self, overlay: OverlayWindow) -> None:
+        """Track the surface currently handling a Wayland capture session."""
+        self._overlay = overlay
+
+    def _on_recording_reselect(self) -> None:
+        """Abandon an armed region so the same overlay can choose another."""
+        if self._armed_recording is not None:
+            _rect, _delay, _after, path = self._armed_recording
+            Path(path).unlink(missing_ok=True)
+            self._armed_recording = None
+        self._teardown_recording_ui()
 
     def _on_captured(self, image, path) -> None:
         """Open the review window for a finished snip, when it is turned on.
@@ -2029,6 +2039,7 @@ class AppController:
         jumped between those states would be harder to track than one that
         simply changes what it says.
         """
+        self._recording_hud_clear_of_full_screen = False
         geometries = (
             self._monitor_geometries
             if self._monitor_geometries is not None
@@ -2042,41 +2053,13 @@ class AppController:
             and self._overlay is not None
             and self._overlay.isVisible()
         )
-        bar = RecordingBar(self._overlay if embedded else None)
-        bar.set_ready()
-        # Audio is the platform's answer, not the bar's: GNOME's screencast
-        # has no audio option at all, so the control is offered inert with
-        # the reason on it rather than hidden (divergences.md 2).
-        # Each recording starts muted, so the icon and what gets recorded
-        # never disagree about a choice left over from the last one.
-        self._recording_audio = design.tokens.AUDIO_DEFAULT
-        bar.set_audio(design.tokens.AUDIO_DEFAULT)
-        bar.set_audio_enabled(platform.current.records_audio())
-        if not platform.current.records_audio():
-            bar.audio_control().setToolTip(platform.current.audio_unavailable_reason())
-        bar.set_delay_available(True)
-        if self._armed_recording is not None:
-            _rect, delay, after, _path = self._armed_recording
-            bar.set_destination(after)
-            bar.set_delay(delay)
-        # Glass over the frozen frame while the overlay holds the region up
-        # for reframing; `_on_overlay_dismissed` takes it away again.
-        if self._overlay is not None and self._overlay.isVisible():
-            bar.set_backdrop_host(self._overlay)
-
+        bar = self._build_recording_bar(
+            self._overlay if embedded else None, reset_audio=True
+        )
         placement = _place_recording_hud(rect, geometries, bar.sizeHint())
         if placement is None:
             bar.deleteLater()
             return
-
-        bar.startClicked.connect(self._begin_armed_recording)
-        bar.destinationMenuRequested.connect(self._open_record_destination_menu)
-        bar.delayClicked.connect(self._open_delay_menu)
-        bar.audioClicked.connect(self._open_audio_menu)
-        bar.cancelClicked.connect(self._cancel_armed_recording)
-        bar.stopClicked.connect(self._stop_recording)
-        bar.pauseClicked.connect(self._on_pause_clicked)
-        bar.discardClicked.connect(self._on_discard_clicked)
 
         self._recording_hud = bar
         # The anchor is the centre of the spot found for the bar, not its
@@ -2099,6 +2082,51 @@ class AppController:
         # the placement above is what does the job. Called here, after
         # show(), because it needs a realised native window.
         platform.current.exclude_from_capture(bar)
+
+    def _build_recording_bar(
+        self, parent: QWidget | None, *, reset_audio: bool
+    ) -> RecordingBar:
+        """Build and wire one recording bar without showing or placing it.
+
+        Hyprland needs two widgets across one recording flow: an embedded
+        ready bar while the frozen overlay owns the screen, then a small
+        compositor-placed top-level bar once that overlay closes.  Keeping
+        their setup here makes that handoff preserve every control and the
+        chosen destination/audio state.
+        """
+        bar = RecordingBar(parent)
+        bar.set_ready()
+        # Audio is the platform's answer, not the bar's: GNOME's screencast
+        # has no audio option at all, so the control is offered inert with
+        # the reason on it rather than hidden (divergences.md 2).
+        # Each recording starts muted, so the icon and what gets recorded
+        # never disagree about a choice left over from the last one.
+        if reset_audio:
+            self._recording_audio = design.tokens.AUDIO_DEFAULT
+        bar.set_audio(self._recording_audio)
+        bar.set_audio_enabled(platform.current.records_audio())
+        if not platform.current.records_audio():
+            bar.audio_control().setToolTip(platform.current.audio_unavailable_reason())
+        bar.set_delay_available(True)
+        if self._armed_recording is not None:
+            _rect, delay, after, _path = self._armed_recording
+            bar.set_destination(after)
+            bar.set_delay(delay)
+        # Glass over the frozen frame while the overlay holds the region up
+        # for reframing; `_on_overlay_dismissed` takes it away again.
+        if self._overlay is not None and self._overlay.isVisible():
+            bar.set_backdrop_host(self._overlay)
+
+        bar.startClicked.connect(self._begin_armed_recording)
+        bar.destinationMenuRequested.connect(self._open_record_destination_menu)
+        bar.delayClicked.connect(self._open_delay_menu)
+        bar.audioClicked.connect(self._open_audio_menu)
+        bar.cancelClicked.connect(self._cancel_armed_recording)
+        bar.stopClicked.connect(self._stop_recording)
+        bar.pauseClicked.connect(self._on_pause_clicked)
+        bar.discardClicked.connect(self._on_discard_clicked)
+
+        return bar
 
     def _on_recording_reframed(self, rect: QRectF) -> None:
         """The armed region was reframed on the overlay (`rect`, absolute
@@ -2171,8 +2199,8 @@ class AppController:
     def _show_finished_bar(
         self, landed: Path, elapsed: str, *, copied: bool = False
     ) -> None:
-        """Leave the bar up for a moment saying what was produced, with a
-        way to bin it.
+        """Show a top-centred summary of what was produced, with a way to
+        bin it.
 
         The handoff's stage 6 asks the user to confirm a destination here.
         This does not: the destination was chosen in the chooser before
@@ -2184,11 +2212,15 @@ class AppController:
         What is worth keeping from stage 6 is the other half: seeing what
         you got, and being able to throw away a bad take without going to
         find the file. So the file lands as it always did, and the bar
-        stays for `DONE_LINGER_MS` carrying the summary and Discard.
+        stays for `DONE_LINGER_MS` carrying the summary and Discard. It
+        moves away from the recorded region first: once Stop has been
+        pressed it is a completion notification, not region controls, and
+        top-centre is both predictable and clear of the captured content.
         """
         bar = self._recording_hud
         if bar is None:
             return
+        screen = _screen_for(QRectF(bar.geometry()), self._bar_geometries())
         try:
             megabytes = landed.stat().st_size / (1024 * 1024)
             size = f"{megabytes:.1f} MB"
@@ -2206,6 +2238,13 @@ class AppController:
         tail = "copied" if copied else container
         self._landed_recording = landed
         bar.set_done(f"{elapsed} · {size} · {tail}")
+        bar.adjustSize()
+        if screen is not None:
+            usable = _usable_area_for(screen)
+            self._recording_bar_anchor = QPointF(
+                usable.center().x(),
+                usable.top() + 12 + bar.height() / 2,
+            )
         self._reposition_recording_bar()
 
         self._done_timer = QTimer()
@@ -2450,12 +2489,93 @@ class AppController:
         if bar is None or self._recording_bar_anchor is None:
             return
         bar.adjustSize()
+        desired_size = QSize(bar.size())
         centre = QPointF(self._recording_bar_anchor)
         host = bar.parentWidget()
         if host is not None:
             # Embedded in the overlay: its coordinates, not the desktop's.
             centre = host.to_local_point(centre)
-        bar.move(round(centre.x() - bar.width() / 2), round(centre.y() - bar.height() / 2))
+        top_left = QPoint(
+            round(centre.x() - desired_size.width() / 2),
+            round(centre.y() - desired_size.height() / 2),
+        )
+        bar.resize(desired_size)
+        bar.move(top_left)
+        if host is None and bar.isVisible() and not platform.current.places_windows():
+            platform.current.place_recording_controls(bar, top_left, desired_size)
+
+    def _promote_embedded_recording_bar(self, rect: QRectF | None) -> None:
+        """Replace the overlay-owned ready bar with live Hyprland controls.
+
+        The old widget cannot survive its parent overlay closing.  A new
+        top-level bar is only retained when the platform confirms it can
+        place that exact window outside the recorded area.
+        """
+        bar = self._build_recording_bar(None, reset_audio=False)
+        geometries = self._bar_geometries()
+        placement_rect = rect
+        if rect is None:
+            focused = platform.current.active_screen_geometry()
+            placement_rect = (
+                QRectF(focused)
+                if focused is not None
+                else _screen_for(None, geometries)
+            )
+        placement = _place_recording_hud(
+            placement_rect, geometries, bar.sizeHint()
+        )
+        if placement is None:
+            bar.deleteLater()
+            return
+        self._recording_hud = bar
+        self._recording_bar_anchor = QRectF(placement).center()
+        self._reposition_recording_bar()
+        desired_size = QSize(bar.size())
+        top_left = QPoint(bar.x(), bar.y())
+        if not platform.current.place_recording_controls(
+            bar, top_left, desired_size
+        ):
+            bar.close()
+            self._recording_hud = None
+            self._recording_bar_anchor = None
+            return
+        bar.show()
+        bar.raise_()
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        if rect is None:
+            # `_place_recording_hud` was given the focused monitor as the
+            # recorded rect, so a successful result is on another output.
+            self._recording_hud_clear_of_full_screen = True
+        platform.current.exclude_from_capture(bar)
+
+    def _prepare_recording_frame(self, rect: QRectF) -> bool:
+        """Build and map the live boundary at its final position."""
+        if self._region_frame.is_showing():
+            return True
+        geometries = (
+            self._monitor_geometries
+            if self._monitor_geometries is not None
+            else self._real_monitor_geometries()
+        )
+        single_frame = platform.current.uses_single_recording_frame_window()
+        within = (
+            _screen_for(rect, geometries)
+            if platform.current.places_windows()
+            else None
+        )
+        self._region_frame.prepare_around(
+            rect,
+            within=within,
+            single_window=single_frame,
+        )
+        if not platform.current.show_recording_frame(
+            self._region_frame.widgets()
+        ):
+            self._region_frame.close()
+            return False
+        for strip in self._region_frame.widgets():
+            platform.current.exclude_from_capture(strip)
+        return True
 
     def _begin_armed_recording(self) -> None:
         """Take an armed recording to the countdown, or straight to
@@ -2557,12 +2677,25 @@ class AppController:
                 reframed = self._overlay.absolute_selection()
                 if reframed is not None:
                     rect = reframed
-            # An embedded ready bar goes down with the overlay; forget it
-            # first, so the recording runs without one, as a full-screen
-            # recording already does.
-            if self._recording_hud is not None and self._recording_hud.parentWidget() is not None:
+            promote_controls = (
+                self._recording_hud is not None
+                and self._recording_hud.parentWidget() is not None
+            )
+            if promote_controls:
+                # Closing the overlay destroys its child bar immediately.
+                # Forget that wrapper and map its live replacement before
+                # the handoff fade.  The two overlap at the same anchor for
+                # those few frames, so there is always a visible Stop and
+                # the replacement cannot be lost in the overlay's close.
                 self._recording_hud = None
                 self._recording_bar_anchor = None
+                self._promote_embedded_recording_bar(rect)
+            # The overlay is a frozen, dimmed copy of this monitor. Fade its
+            # chrome while leaving those pixels in place, then close the now
+            # clean surface; removing the dimmed surface directly reads as a
+            # whole-screen flash even when Hyprland maps every live control
+            # at its final geometry.
+            self._overlay.prepare_recording_handoff()
             # Down before the backend starts: from here the frozen frame it
             # paints would be what gets filmed.
             self._overlay.close()
@@ -2575,10 +2708,10 @@ class AppController:
         # That reads exactly as reported: a stall, then a flash as
         # everything arrives at once.
         #
-        # Safe because none of it is inside the recorded area: `show_around`
-        # draws its edges from `left - thickness` outwards and dims the
-        # screen *minus* the rect, and `_place_recording_hud` put the pill
-        # outside the frame to begin with. The one thing that would be
+        # Safe because none of it is inside the recorded area: the boundary
+        # draws from `left - thickness` outwards, and `_place_recording_hud`
+        # put the pill outside the frame to begin with. The one thing that
+        # would be
         # filmed -- the pill during a full-screen recording -- is closed
         # here too, which is a frame earlier than it used to be rather than
         # later.
@@ -2692,21 +2825,13 @@ class AppController:
         # screen, and a red border around the whole display would be both
         # useless and, on the edges, in the recording.
         if rect is not None:
-            # The screen the recording is on, so everything else on it can
-            # be dimmed -- what is *not* being filmed, which an outline
-            # alone only implies. Other monitors are left alone: the bar is
-            # deliberately on one of them, and so is whatever the user is
-            # still working with.
             geometries = (
                 self._monitor_geometries
                 if self._monitor_geometries is not None
                 else self._real_monitor_geometries()
             )
-            # Only where it lands where it is put: the outline and the
-            # scrim are windows of their own, and under Wayland the
-            # compositor cascaded them straight across the recorded region.
-            if platform.current.places_windows():
-                self._region_frame.show_around(rect, within=_screen_for(rect, geometries))
+            if self._region_frame.is_showing() or self._prepare_recording_frame(rect):
+                self._region_frame.reveal()
             if self._recording_hud is not None:
                 # The region filmed is the last one reframed, and the bar
                 # was last placed for whatever the drag passed through. Where
@@ -2721,13 +2846,6 @@ class AppController:
                     self._recording_bar_anchor = None
                 else:
                     self._recording_bar_anchor = QRectF(placement).center()
-            # Same as the bar: on Windows the outline and the live scrim
-            # are marked out of the capture. They already sit outside the
-            # recorded rect, so this changes nothing today -- it is what
-            # stops a later change that moves either of them inside it from
-            # being a silent regression on the one platform that can say so.
-            for strip in self._region_frame.widgets():
-                platform.current.exclude_from_capture(strip)
             if self._recording_hud is not None:
                 # "Starting", not "0:00". The button has been pressed and a
                 # control still offering to do the thing it is doing invites
@@ -2744,7 +2862,11 @@ class AppController:
                 self._recording_hud.set_pause_enabled(False)
                 self._reposition_recording_bar()
 
-        if rect is None and self._recording_hud is not None:
+        if (
+            rect is None
+            and self._recording_hud is not None
+            and not self._recording_hud_clear_of_full_screen
+        ):
             # A full-screen recording has no "outside the recorded area"
             # for the pill to sit in, so from here on it would film
             # itself. It is shown while armed and counting -- nothing is
@@ -2754,6 +2876,11 @@ class AppController:
             # elapsed time from here, as it always did for this case.
             self._recording_hud.close()
             self._recording_hud = None
+
+        if rect is None and self._recording_hud is not None:
+            self._recording_hud.set_live(_STARTING_LABEL, size="")
+            self._recording_hud.set_pause_enabled(False)
+            self._reposition_recording_bar()
 
         if self._recording_hud is None:
             # No room for the bar, so no visible Stop. That happens when the
@@ -2882,6 +3009,7 @@ class AppController:
             self._recording_hud.close()
             self._recording_hud = None
             self._recording_bar_anchor = None
+        self._recording_hud_clear_of_full_screen = False
         self._hide_countdown()
         self._recording_started_at = None
         self._recording_paused = False
@@ -3104,7 +3232,11 @@ class AppController:
 
         if stopped and after == "gif":
             self._land_recording_as_gif(Path(path), elapsed, reason=reason)
-        elif landed is None:
+        elif landed is None or after == "open":
+            # The player/editor is already the visible completion state for
+            # Open.  Leaving the compact Done bar behind it added a second
+            # temporary popup whose only control could delete the file the
+            # editor had just opened.
             self._close_recording_bar()
         else:
             self._show_finished_bar(landed, elapsed, copied=after == "instant")

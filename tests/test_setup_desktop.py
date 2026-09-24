@@ -17,6 +17,7 @@ import json
 import shutil
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -46,6 +47,8 @@ def _never_touch_the_real_desktop(tmp_path, monkeypatch):
     `which` itself, and that overrides this.
     """
     real_which = shutil.which
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
+    monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
     monkeypatch.setattr(
         setup_desktop.shutil, "which",
         lambda name: None if name == "gsettings" else real_which(name),
@@ -194,6 +197,20 @@ class TestRenderDesktopEntry:
         # hicolor theme), not org.gnome.Screenshot -- GNOME's own
         # screenshot tool's icon.
         assert "Icon=snipux" in rendered
+        assert f"Exec={exec_path} --settings" in rendered
+        assert f"Exec={exec_path} --snip" in rendered
+        assert "Actions=Snip;Settings;" in rendered
+
+    def test_autostart_stays_silent_and_has_no_launcher_actions(self):
+        exec_path = Path("/opt/snipux/bin/snipux")
+
+        rendered = setup_desktop.render_autostart_entry(exec_path)
+
+        assert f"Exec={exec_path}\n" in rendered
+        assert "--settings" not in rendered
+        assert "--snip" not in rendered
+        assert "Desktop Action" not in rendered
+        assert "Actions=" not in rendered
 
 
 class TestRunSetup:
@@ -212,8 +229,9 @@ class TestRunSetup:
         assert exit_code == 0
         desktop_file = applications_dir / "snipux.desktop"
         autostart_file = autostart_dir / "snipux.desktop"
-        assert desktop_file.read_text() == autostart_file.read_text()
-        assert f"Exec={exec_path}" in desktop_file.read_text()
+        assert f"Exec={exec_path} --settings" in desktop_file.read_text()
+        assert f"Exec={exec_path}\n" in autostart_file.read_text()
+        assert desktop_file.read_text() != autostart_file.read_text()
 
         out = capsys.readouterr().out
         assert f"Desktop entry written to {desktop_file}" in out
@@ -1139,6 +1157,121 @@ class TestRunSetupWithAShortcut:
         )
 
         assert setup_desktop.load_setup_complete(tmp_path / "config") is False
+
+
+class TestHyprlandShortcut:
+    @staticmethod
+    def _run_ok():
+        return Mock(return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
+
+    def test_lua_setup_writes_a_delimited_block_and_backup(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: "/usr/bin/hyprctl")
+        (tmp_path / "hyprland.lua").write_text('require("hypr.bindings")\n')
+        bindings = tmp_path / "bindings.lua"
+        bindings.write_text('o.bind("SUPER + B", "Browser", "chromium")\n')
+
+        message = setup_desktop.bind_hyprland_shortcut(
+            Path("/home/me/Applications/Snipux.AppImage"),
+            "Control+Alt+S",
+            config_dir=tmp_path,
+            run=self._run_ok(),
+        )
+
+        text = bindings.read_text()
+        assert setup_desktop._HYPR_LUA_BEGIN in text
+        assert 'o.bind("CTRL + ALT + S", "Snipux snip", ' in text
+        assert "/home/me/Applications/Snipux.AppImage --snip" in text
+        assert 'o.bind("SUPER + B"' in text
+        assert list(tmp_path.glob("bindings.lua.snipux.bak*"))
+        assert "no config errors" in message
+
+    def test_lua_setup_is_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+        (tmp_path / "hyprland.lua").write_text("")
+        run = self._run_ok()
+
+        setup_desktop.bind_hyprland_shortcut(
+            Path("/opt/snipux"), config_dir=tmp_path, run=run
+        )
+        setup_desktop.bind_hyprland_shortcut(
+            Path("/opt/snipux"), config_dir=tmp_path, run=run
+        )
+
+        text = (tmp_path / "bindings.lua").read_text()
+        assert text.count(setup_desktop._HYPR_LUA_BEGIN) == 1
+        assert text.count('o.bind("CTRL + ALT + S"') == 1
+
+    def test_existing_user_binding_is_reported_and_untouched(self, tmp_path):
+        (tmp_path / "hyprland.lua").write_text("")
+        bindings = tmp_path / "bindings.lua"
+        original = 'o.bind("CTRL + ALT + S", "My snip", "other --snip")\n'
+        bindings.write_text(original)
+
+        message = setup_desktop.bind_hyprland_shortcut(
+            Path("/opt/snipux"), config_dir=tmp_path, run=self._run_ok()
+        )
+
+        assert "already bound" in message
+        assert bindings.read_text() == original
+        assert list(tmp_path.glob("*.snipux.bak*")) == []
+
+    def test_classic_config_uses_hyprland_conf_syntax(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+        config = tmp_path / "hyprland.conf"
+        config.write_text("$terminal = kitty\n")
+
+        setup_desktop.bind_hyprland_shortcut(
+            Path("/usr/bin/snipux"),
+            "Super+Shift+X",
+            config_dir=tmp_path,
+            run=self._run_ok(),
+        )
+
+        assert "bind = SHIFT SUPER, X, exec, /usr/bin/snipux --snip" in config.read_text()
+
+    def test_remove_deletes_only_its_marked_block_and_keeps_user_bindings(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+        (tmp_path / "hyprland.lua").write_text("")
+        bindings = tmp_path / "bindings.lua"
+        bindings.write_text('o.bind("SUPER + B", "Browser", "chromium")\n')
+        setup_desktop.bind_hyprland_shortcut(
+            Path("/opt/snipux"), config_dir=tmp_path, run=self._run_ok()
+        )
+
+        message = setup_desktop.unbind_hyprland_shortcut(
+            config_dir=tmp_path, run=self._run_ok()
+        )
+
+        text = bindings.read_text()
+        assert "Browser" in text
+        assert "snipux shortcut" not in text
+        assert "Removed" in message
+
+    def test_run_setup_dispatches_to_hyprland(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "Hyprland")
+        seen = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "bind_hyprland_shortcut",
+            lambda path, shortcut=None, config_dir=None: seen.append(
+                (path, shortcut, config_dir)
+            ) or "bound",
+        )
+
+        setup_desktop.run_setup(
+            exec_path=Path("/opt/snipux"),
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+            config_dir=tmp_path / "snipux-config",
+            hypr_config_dir=tmp_path / "hypr",
+        )
+
+        assert seen == [
+            (Path("/opt/snipux"), "Control+Alt+S", tmp_path / "hypr")
+        ]
 
 
 class TestAfterCaptureRenames:

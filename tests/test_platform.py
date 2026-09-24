@@ -29,12 +29,15 @@ reaches the real mechanism, which has its own tests" split
 
 import ctypes
 import importlib
+import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
-from PyQt6.QtCore import QMargins, QRect, Qt
+from PyQt6.QtCore import QPoint, QMargins, QRect, QSize, Qt
 
 import snipux.platform as platform_pkg
 from snipux import ffmpeg, recording, setup_desktop
@@ -128,6 +131,7 @@ class TestLinuxPlatform:
         assert calls == ["called"]
 
     def test_bind_shortcut_binds_via_the_located_console_script(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
         exec_path = tmp_path / "snipux"
         monkeypatch.setattr(setup_desktop, "find_console_script", lambda: exec_path)
         calls = []
@@ -143,6 +147,7 @@ class TestLinuxPlatform:
         assert calls == [(exec_path, "Alt+Print")]
 
     def test_bind_shortcut_defaults_to_the_remembered_shortcut(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
         # No shortcut passed in -- bind_gnome_shortcut's own None default
         # (fall back to load_shortcut()) must reach it untouched.
         exec_path = tmp_path / "snipux"
@@ -169,6 +174,7 @@ class TestLinuxPlatform:
         assert "not re-bound" in result
 
     def test_unbind_shortcut_delegates_to_unbind_gnome_shortcut(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
         monkeypatch.setattr(setup_desktop, "unbind_gnome_shortcut", lambda: "removed it")
 
         assert linux.LinuxPlatform().unbind_shortcut() == "removed it"
@@ -177,6 +183,304 @@ class TestLinuxPlatform:
         monkeypatch.setattr(setup_desktop, "default_save_folder", lambda: tmp_path)
 
         assert linux.LinuxPlatform().default_save_folder() == tmp_path
+
+    def test_active_screen_uses_hyprlands_focused_output(self, monkeypatch):
+        left = SimpleNamespace(name=lambda: "DP-2", geometry=lambda: QRect(0, 180, 1920, 1080))
+        middle = SimpleNamespace(
+            name=lambda: "HDMI-A-2", geometry=lambda: QRect(1920, 0, 2560, 1440)
+        )
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(linux.QGuiApplication, "screens", lambda: [left, middle])
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout='[{"name":"DP-2","focused":false},'
+                '{"name":"HDMI-A-2","focused":true}]',
+            ),
+        )
+
+        assert linux.LinuxPlatform().active_screen_geometry() == QRect(
+            1920, 0, 2560, 1440
+        )
+
+    def test_active_screen_does_not_query_hyprctl_off_hyprland(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
+        monkeypatch.setattr(
+            linux.subprocess, "run", Mock(side_effect=AssertionError("must not run"))
+        )
+
+        assert linux.LinuxPlatform().active_screen_geometry() is None
+
+    def test_active_screen_degrades_when_hyprctl_fails(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=""),
+        )
+
+        assert linux.LinuxPlatform().active_screen_geometry() is None
+
+    def test_recording_controls_use_hyprlands_typed_dispatchers(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(linux.os, "getpid", lambda: 1234)
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if argv[1:3] == ["clients", "-j"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        '[{"address":"0xabc","pid":1234,"floating":true,'
+                        '"size":[420,52],"title":""}]'
+                    ),
+                )
+            return SimpleNamespace(returncode=0, stdout="ok\n")
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+        widget = SimpleNamespace(
+            windowTitle=lambda: "snipux-recording-controls",
+            width=lambda: 420,
+            height=lambda: 52,
+        )
+
+        placed = linux.LinuxPlatform().place_recording_controls(
+            widget, QPoint(2120, 36), QSize(420, 52)
+        )
+
+        assert placed is True
+        assert calls[0][0] == ["hyprctl", "clients", "-j"]
+        argv, kwargs = calls[1]
+        assert argv[:2] == ["hyprctl", "eval"]
+        assert "hl.dsp.window.set_prop" in argv[2]
+        assert "prop='no_anim'" in argv[2]
+        assert "prop='no_blur'" in argv[2]
+        assert "prop='no_shadow'" in argv[2]
+        assert "prop='decorate'" in argv[2]
+        assert "prop='rounding'" in argv[2]
+        assert "prop='dim_around'" not in argv[2]
+        assert "hl.dsp.window.float" in argv[2]
+        assert "hl.dsp.window.pin" in argv[2]
+        assert "hl.dsp.window.resize" in argv[2]
+        assert "x=420, y=52" in argv[2]
+        assert "x=2120, y=36" in argv[2]
+        assert "address:0xabc" in argv[2]
+        assert kwargs["timeout"] == 2
+
+    def test_recording_control_placement_degrades_when_hyprctl_fails(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            Mock(side_effect=subprocess.TimeoutExpired("hyprctl", 2)),
+        )
+        widget = SimpleNamespace(
+            windowTitle=lambda: "snipux-recording-controls",
+            width=lambda: 420,
+            height=lambda: 52,
+        )
+
+        assert (
+            linux.LinuxPlatform().place_recording_controls(
+                widget, QPoint(10, 20), QSize(420, 52)
+            )
+            is False
+        )
+
+    def test_recording_controls_wait_for_the_tool_window_to_map(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(linux.os, "getpid", lambda: 44)
+        sleeps = []
+        replies = iter(
+            [
+                SimpleNamespace(returncode=0, stdout="[]"),
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        '[{"address":"0x44","pid":44,"floating":true,'
+                        '"size":[300,42]}]'
+                    ),
+                ),
+                SimpleNamespace(returncode=0, stdout="ok\n"),
+            ]
+        )
+        monkeypatch.setattr(linux.subprocess, "run", lambda *a, **k: next(replies))
+        monkeypatch.setattr(linux.time, "sleep", sleeps.append)
+        widget = SimpleNamespace(windowTitle=lambda: "ignored-on-wayland")
+
+        assert linux.LinuxPlatform().place_recording_controls(
+            widget, QPoint(9, 10), QSize(300, 42)
+        )
+        assert sleeps == [0.025]
+
+    def test_recording_controls_follow_their_title_after_their_size_changes(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(linux.os, "getpid", lambda: 44)
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv[1:3] == ["clients", "-j"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps([
+                        {
+                            "address": "0xdone",
+                            "pid": 44,
+                            "floating": True,
+                            "size": [420, 52],
+                            "title": "snipux-recording-controls-DP-1",
+                            "initialTitle": "snipux-recording-controls-DP-1",
+                        }
+                    ]),
+                )
+            return SimpleNamespace(returncode=0, stdout="ok\n")
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+        widget = SimpleNamespace(
+            windowTitle=lambda: "snipux-recording-controls-DP-1"
+        )
+
+        assert linux.LinuxPlatform().place_recording_controls(
+            widget, QPoint(810, 38), QSize(240, 42)
+        )
+        code = calls[1][2]
+        assert "address:0xdone" in code
+        assert "x=810, y=38" in code
+        assert "x=240, y=42" in code
+
+    def test_unmapped_recording_controls_get_their_rule_before_show(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        screen = SimpleNamespace(
+            name=lambda: "HDMI-A-2",
+            geometry=lambda: QRect(1920, 0, 2560, 1440),
+        )
+        monkeypatch.setattr(linux.QGuiApplication, "screenAt", lambda point: screen)
+        calls = []
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda argv, **kwargs: calls.append((argv, kwargs))
+            or SimpleNamespace(returncode=0),
+        )
+
+        class Controls:
+            flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+
+            def isVisible(self):
+                return False
+
+            def windowFlags(self):
+                return self.flags
+
+            def setWindowFlags(self, flags):
+                self.flags = flags
+
+            def setWindowTitle(self, title):
+                self.title = title
+
+        widget = Controls()
+
+        assert linux.LinuxPlatform().place_recording_controls(
+            widget, QPoint(2120, 36), QSize(420, 52)
+        )
+        code = calls[0][0][2]
+        assert "hl.window_rule" in code
+        assert "float = true" in code
+        assert "pin = true" in code
+        assert "no_initial_focus = true" in code
+        assert 'monitor = "HDMI-A-2 silent"' in code
+        assert "move = { 200, 36 }" in code
+        assert "size = { 420, 52 }" in code
+        assert Qt.WindowType.Tool not in widget.flags
+        assert Qt.WindowType.Window in widget.flags
+        assert widget.title.startswith("snipux-recording-controls-")
+
+    def test_recording_frame_is_floated_before_each_edge_maps(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        screen = SimpleNamespace(
+            name=lambda: "DP-1",
+            geometry=lambda: QRect(0, 0, 1920, 1080),
+        )
+        monkeypatch.setattr(linux.QGuiApplication, "screenAt", lambda point: screen)
+        calls = []
+        mapped = []
+
+        class Edge:
+            def __init__(self, rect):
+                self._rect = rect
+
+            def pos(self):
+                return self._rect.topLeft()
+
+            def size(self):
+                return self._rect.size()
+
+            def show(self):
+                mapped.append(len(mapped) + 1)
+
+            def windowFlags(self):
+                return Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+
+            def setWindowFlags(self, flags):
+                self.flags = flags
+
+            def setWindowTitle(self, title):
+                self.title = title
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="ok\n")
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+        edges = [Edge(QRect(97, 197, 206, 3)), Edge(QRect(97, 350, 206, 3))]
+
+        assert linux.LinuxPlatform().show_recording_frame(edges) is True
+
+        evaluations = [
+            argv[2]
+            for argv in calls
+            if argv[1] == "eval" and "hl.window_rule" in argv[2]
+        ]
+        assert len(evaluations) == 2
+        assert mapped == [1, 2]
+        assert all("no_anim = true" in code for code in evaluations)
+        assert all("float = true" in code for code in evaluations)
+        assert all("monitor = \"DP-1 silent\"" in code for code in evaluations)
+        assert "move = { 97, 197 }" in evaluations[0]
+        assert "size = { 206, 3 }" in evaluations[0]
+        assert "move = { 97, 350 }" in evaluations[1]
+
+    def test_recording_frame_degrades_when_the_static_rule_fails(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        screen = SimpleNamespace(
+            name=lambda: "DP-1",
+            geometry=lambda: QRect(0, 0, 1920, 1080),
+        )
+        monkeypatch.setattr(linux.QGuiApplication, "screenAt", lambda point: screen)
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda *a, **k: SimpleNamespace(returncode=1),
+        )
+        edge = SimpleNamespace(
+            pos=lambda: QPoint(10, 20),
+            size=lambda: QSize(100, 3),
+            show=lambda: None,
+        )
+
+        assert linux.LinuxPlatform().show_recording_frame([edge]) is False
 
     def test_build_recording_registry_delegates_to_recording(self, monkeypatch):
         sentinel = object()
@@ -201,15 +505,19 @@ class TestLinuxPlatform:
 class _FakeScreen:
     """Just the two rects `reserved_top` reads off a `QScreen`."""
 
-    def __init__(self, geometry, available=None):
+    def __init__(self, geometry, available=None, name=""):
         self._geometry = geometry
         self._available = available if available is not None else geometry
+        self._name = name
 
     def geometry(self):
         return self._geometry
 
     def availableGeometry(self):
         return self._available
+
+    def name(self):
+        return self._name
 
 
 class TestReservedTop:
@@ -298,6 +606,32 @@ class TestReservedTop:
         screen = _FakeScreen(QRect(0, 0, 1920, 1080), QRect(0, 32, 1920, 1048))
 
         assert platform_impl.reserved_top(screen) == 32
+
+    def test_hyprland_wayland_reads_each_outputs_reserved_edges(self, monkeypatch):
+        platform_impl = self._linux(
+            monkeypatch, session="wayland", qt_platform="wayland"
+        )
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        calls = []
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda argv, **kwargs: calls.append(argv)
+            or SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    '[{"name":"DP-2","reserved":[0,26,0,0]},'
+                    '{"name":"HDMI-A-2","reserved":[0,30,0,4]}]'
+                ),
+            ),
+        )
+
+        left = _FakeScreen(QRect(0, 180, 1920, 1080), name="DP-2")
+        middle = _FakeScreen(QRect(1920, 0, 2560, 1440), name="HDMI-A-2")
+
+        assert platform_impl.reserved_margins(left) == QMargins(0, 26, 0, 0)
+        assert platform_impl.reserved_margins(middle) == QMargins(0, 30, 0, 4)
+        assert calls == [["hyprctl", "monitors", "-j"]]
 
     def test_an_offscreen_qt_platform_asks_nothing(self, monkeypatch):
         # The headless suite runs inside a real X11 login session, so
@@ -410,10 +744,100 @@ class TestSkipMapAnimation:
     @pytest.mark.parametrize("session,qt_platform", [("wayland", "wayland"), ("x11", "offscreen")])
     def test_anywhere_else_on_linux_the_reveal_stays(self, monkeypatch, session, qt_platform):
         platform_impl = self._linux(monkeypatch, session=session, qt_platform=qt_platform)
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
         widget = self._widget()
 
         assert platform_impl.skip_map_animation(widget) is False
         assert not widget.testAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash)
+
+    def test_hyprland_installs_an_exact_runtime_overlay_rule(self, monkeypatch):
+        platform_impl = self._linux(
+            monkeypatch, session="wayland", qt_platform="wayland"
+        )
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        calls = []
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda argv, **kwargs: calls.append((argv, kwargs))
+            or SimpleNamespace(returncode=0),
+        )
+        widget = self._widget()
+
+        assert platform_impl.skip_map_animation(widget) is True
+        assert widget.windowTitle() == "snipux-capture-overlay"
+        assert calls[0][0][:2] == ["hyprctl", "eval"]
+        assert "_G.snipux_capture_overlay_rule" in calls[0][0][2]
+        assert " or hl.window_rule" in calls[0][0][2]
+        assert "title = '^snipux-capture-overlay$'" in calls[0][0][2]
+        assert "no_anim = true" in calls[0][0][2]
+
+        # One resident process installs one rule, not one duplicate per snip.
+        assert platform_impl.skip_map_animation(self._widget()) is True
+        assert len(calls) == 1
+
+    def test_hyprland_keeps_the_opacity_fallback_when_the_rule_fails(
+        self, monkeypatch
+    ):
+        platform_impl = self._linux(
+            monkeypatch, session="wayland", qt_platform="wayland"
+        )
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=1),
+        )
+
+        assert platform_impl.skip_map_animation(self._widget()) is False
+
+    def test_hyprland_places_an_overlay_with_an_output_specific_static_rule(
+        self, monkeypatch
+    ):
+        platform_impl = self._linux(
+            monkeypatch, session="wayland", qt_platform="wayland"
+        )
+        platform_impl._hyprland_overlay_rule_ready = True
+        calls = []
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda argv, **kwargs: calls.append((argv, kwargs))
+            or SimpleNamespace(returncode=0),
+        )
+        widget = self._widget()
+        screen = SimpleNamespace(name=lambda: "HDMI-A-2")
+
+        assert platform_impl.place_capture_overlay(widget, screen) is True
+        assert widget.windowTitle() == "snipux-capture-overlay-HDMI_A_2"
+        code = calls[0][0][2]
+        assert "_G.snipux_capture_overlay_rule_HDMI_A_2" in code
+        assert "monitor = \"HDMI-A-2 silent\"" in code
+        assert "float = true" in code
+        assert "move = { 0, 0 }" in code
+        assert "size = { 'monitor_w', 'monitor_h' }" in code
+
+    def test_capture_overlay_placement_leaves_fullscreen_as_the_fallback(
+        self, monkeypatch
+    ):
+        platform_impl = self._linux(
+            monkeypatch, session="wayland", qt_platform="wayland"
+        )
+        platform_impl._hyprland_overlay_rule_ready = True
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=1),
+        )
+        widget = self._widget()
+
+        assert (
+            platform_impl.place_capture_overlay(
+                widget, SimpleNamespace(name=lambda: "DP-1")
+            )
+            is False
+        )
+        assert widget.windowTitle() == ""
 
 
 class TestStubPlatforms:
@@ -485,14 +909,27 @@ class TestPlacesWindows:
     def test_a_platform_that_has_not_said_does_not(self):
         assert darwin.DarwinPlatform().places_windows() is False
 
+    def test_hyprland_wayland_uses_one_recording_frame_window(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "wayland")
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+
+        assert linux.LinuxPlatform().uses_single_recording_frame_window() is True
+
+    def test_x11_keeps_the_portable_four_edge_frame(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "x11")
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+
+        assert linux.LinuxPlatform().uses_single_recording_frame_window() is False
+
 
 class TestAudioSourceAvailability:
     """Which of the recording bar's audio sources each platform lets the
     user pick. The UI greys a source with this reason instead of hiding it.
     """
 
-    def test_linux_without_ffmpeg_greys_both_sources_but_never_muted(self):
+    def test_linux_without_ffmpeg_greys_both_sources_but_never_muted(self, monkeypatch):
         # conftest's machine has no system ffmpeg.
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "x11")
         linux_platform = linux.LinuxPlatform()
         reason = linux_platform.audio_unavailable_reason()
 
@@ -503,6 +940,7 @@ class TestAudioSourceAvailability:
         assert linux_platform.audio_source_unavailable_reason("off") == ""
 
     def test_linux_with_an_ffmpeg_that_records_sound_offers_both(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "x11")
         monkeypatch.setattr(
             ffmpeg, "probe",
             lambda: ffmpeg.Capabilities("/usr/bin/ffmpeg", pulse_input=True, opus=True),
@@ -514,6 +952,7 @@ class TestAudioSourceAvailability:
         assert linux_platform.audio_source_unavailable_reason("mic") == ""
 
     def test_linux_with_an_ffmpeg_that_cannot_says_what_it_lacks(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "x11")
         monkeypatch.setattr(
             ffmpeg, "probe",
             lambda: ffmpeg.Capabilities("/usr/bin/ffmpeg", pulse_input=False, opus=True),
@@ -522,6 +961,19 @@ class TestAudioSourceAvailability:
 
         assert linux_platform.records_audio() is False
         assert "PulseAudio" in linux_platform.audio_source_unavailable_reason("mic")
+
+    def test_gpu_screen_recorder_offers_both_sources_without_ffmpeg(self, monkeypatch):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "wayland")
+        monkeypatch.setattr(
+            linux.shutil, "which", lambda name: "/usr/bin/gpu-screen-recorder"
+        )
+        monkeypatch.setattr(ffmpeg, "probe", lambda: None)
+
+        linux_platform = linux.LinuxPlatform()
+
+        assert linux_platform.records_audio() is True
+        assert linux_platform.audio_source_unavailable_reason("system") == ""
+        assert linux_platform.audio_source_unavailable_reason("mic") == ""
 
     def test_windows_never_offers_desktop_sound(self):
         assert windows.WindowsPlatform().audio_source_unavailable_reason(

@@ -16,6 +16,7 @@ import pytest
 import snipux.ffmpeg as ffmpeg_module
 import snipux.recording as recording
 from snipux.recording import (
+    GpuScreenRecorderBackend,
     GnomeScreencastBackend,
     RecorderRegistry,
     RecordingBackend,
@@ -707,10 +708,129 @@ class TestGnomeScreencastBackendStop:
 
 
 class TestBuildLinuxRegistry:
-    def test_registers_the_gnome_screencast_backend(self):
+    def test_registers_gpu_screen_recorder_before_gnome(self):
         registry = recording.build_linux_registry()
 
-        assert [backend.name() for backend in registry] == ["gnome-screencast"]
+        assert [backend.name() for backend in registry] == [
+            "gpu-screen-recorder",
+            "gnome-screencast",
+        ]
+
+
+class _GpuRecorderProcess:
+    def __init__(self, command):
+        self.command = command
+        Path(command[command.index("-o") + 1]).write_bytes(b"video")
+        self.signals = []
+        self.running = True
+
+    def poll(self):
+        return None if self.running else 0
+
+    def send_signal(self, number):
+        self.signals.append(number)
+        self.running = False
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self.running = False
+
+    def communicate(self):
+        return "", ""
+
+
+class TestGpuScreenRecorderBackend:
+    @staticmethod
+    def _backend(commands, run=None):
+        def popen(command, **_kwargs):
+            commands.append(command)
+            return _GpuRecorderProcess(command)
+
+        return GpuScreenRecorderBackend(
+            popen=popen,
+            run=run or Mock(),
+            which=lambda name: f"/usr/bin/{name}",
+        )
+
+    def test_available_only_on_wayland_with_the_binary(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        backend = GpuScreenRecorderBackend(which=lambda name: "/usr/bin/gpu-screen-recorder")
+        assert backend.is_available() is True
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+        assert backend.is_available() is False
+
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        assert GpuScreenRecorderBackend(which=lambda name: None).is_available() is False
+
+    def test_missing_binary_names_pacman_on_arch(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setattr(
+            recording.shutil,
+            "which",
+            lambda name: "/usr/bin/pacman" if name == "pacman" else None,
+        )
+
+        reason = GpuScreenRecorderBackend(which=lambda name: None).unavailable_reason()
+
+        assert "sudo pacman -S gpu-screen-recorder" in reason
+
+    def test_region_uses_snipux_geometry_and_recording_options(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
+        monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: False)
+        commands = []
+        backend = self._backend(commands)
+        backend.set_audio_source(recording.AUDIO_SYSTEM)
+        path = str(tmp_path / "recording.mp4")
+
+        assert backend.start(QRectF(-10.4, 20.4, 300.8, 200.8), path) == path
+
+        command = commands[0]
+        assert command[command.index("-w") + 1] == "300x201+-10+20"
+        assert command[command.index("-f") + 1] == "30"
+        assert command[command.index("-cursor") + 1] == "no"
+        assert command[command.index("-a") + 1] == "default_output"
+
+    def test_full_screen_uses_hyprlands_focused_monitor(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "instance")
+        monitors = (
+            '[{"name":"DP-1","focused":false},'
+            '{"name":"DP-2","focused":true}]'
+        )
+        run = Mock(return_value=SimpleNamespace(returncode=0, stdout=monitors))
+        commands = []
+        backend = self._backend(commands, run=run)
+
+        backend.start(None, str(tmp_path / "recording.mp4"))
+
+        command = commands[0]
+        assert command[command.index("-w") + 1] == "DP-2"
+
+    def test_stop_sends_sigint_so_the_container_is_finalized(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        commands = []
+        process = None
+
+        def popen(command, **_kwargs):
+            nonlocal process
+            commands.append(command)
+            process = _GpuRecorderProcess(command)
+            return process
+
+        backend = GpuScreenRecorderBackend(
+            popen=popen,
+            run=Mock(),
+            which=lambda name: f"/usr/bin/{name}",
+        )
+        backend.start(QRectF(0, 0, 20, 10), str(tmp_path / "recording.mp4"))
+
+        backend.stop()
+
+        assert process.signals == [recording.signal.SIGINT]
 
 
 # --- WindowsRecorderBackend -------------------------------------------------

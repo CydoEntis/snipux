@@ -8752,12 +8752,11 @@ class TestEscapeAndUndoRedoBypassSuppression:
 
 
 class TestOverlayWindowOnDismissed:
-    """SNX-58: `on_dismissed` is how a Wayland multi-monitor group's
-    `_MonitorVeil` companions get told to close once the real, interactive
-    `OverlayWindow` does -- wired through `closeEvent`, deliberately not
-    `hideEvent`, since `_start_delayed_capture` (SNX-50) also plain-hides
-    this same window mid-countdown and re-shows it moments later, which
-    must not tear the veils down.
+    """`on_dismissed` ends the whole multi-output Wayland session.
+
+    It is wired through `closeEvent`, deliberately not `hideEvent`, since
+    `_start_delayed_capture` also plain-hides a surface mid-countdown and
+    re-shows it moments later.
     """
 
     def test_close_calls_on_dismissed(self):
@@ -8807,29 +8806,6 @@ class TestOverlayWindowShowOnScreen:
         assert overlay.isFullScreen()
 
 
-class TestMonitorVeil:
-    """SNX-58: the non-interactive companion `open_overlay` shows on every
-    monitor besides the one the real `OverlayWindow` covers, on Wayland
-    with more than one monitor.
-    """
-
-    def test_paints_its_own_monitor_frame_dimmed(self):
-        image = QImage(100, 50, QImage.Format.Format_RGB32)
-        image.fill(BASE_COLOR)
-        monitor_frame = Frame(
-            image=image, logical_origin=QPointF(200, 0), logical_size=QSizeF(100, 50)
-        )
-
-        veil = overlay_module._MonitorVeil(monitor_frame)
-
-        assert veil.size() == QSize(100, 50)
-        sampled = pixel(veil.grab().toImage(), 10, 10)
-        expected = _blend(QColor(10, 20, 30), overlay_module.VEIL_COLOR)
-        assert sampled.red() == pytest.approx(expected.red(), abs=2)
-        assert sampled.green() == pytest.approx(expected.green(), abs=2)
-        assert sampled.blue() == pytest.approx(expected.blue(), abs=2)
-
-
 class TestOpenOverlay:
     """SNX-58: `open_overlay` is where the session type app.py already
     detected (never assumed, per CLAUDE.md) turns into either a single
@@ -8837,12 +8813,7 @@ class TestOpenOverlay:
     Wayland multi-monitor group -- see its own docstring for the split.
     """
 
-    def test_x11_shows_one_overlay_window_spanning_every_monitor(self, monkeypatch):
-        # A `_MonitorVeil` constructed here would mean the X11 path started
-        # building a group it has no business building -- X11's single
-        # OverlayWindow already covers every monitor on its own, unchanged
-        # from before this ticket.
-        monkeypatch.setattr(overlay_module, "_MonitorVeil", Mock(side_effect=AssertionError))
+    def test_x11_shows_one_overlay_window_spanning_every_monitor(self):
         frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
         geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
 
@@ -8872,25 +8843,10 @@ class TestOpenOverlay:
 
         assert result._frame.logical_origin == geometries[0].topLeft()
         assert result._frame.logical_size == geometries[0].size()
-        assert result._monitor_geometries == [geometries[0]]
+        assert result._monitor_geometries == geometries
         assert result._on_dismissed is not None
 
-    def test_wayland_multi_monitor_covers_the_remaining_monitors_with_veils(self, monkeypatch):
-        created = []
-
-        class FakeVeil:
-            def __init__(self, monitor_frame):
-                self.monitor_frame = monitor_frame
-                self.closed = False
-                created.append(self)
-
-            def show_on_screen(self, screen):
-                pass
-
-            def close(self):
-                self.closed = True
-
-        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
+    def test_wayland_multi_monitor_builds_one_stationary_overlay_per_output(self):
         frame = make_frame(image_size=(600, 200), logical_size=(600, 200))
         geometries = [
             QRectF(0, 0, 200, 200),
@@ -8898,68 +8854,229 @@ class TestOpenOverlay:
             QRectF(400, 0, 200, 200),
         ]
 
-        open_overlay(frame, geometries, wayland=True)
-
-        # One veil per monitor but the primary, each cropped to its own.
-        assert [veil.monitor_frame.logical_origin for veil in created] == [
-            geometries[1].topLeft(),
-            geometries[2].topLeft(),
+        result = open_overlay(frame, geometries, wayland=True)
+        members = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow) and widget._on_dismissed is result._on_dismissed
         ]
-        assert all(not veil.closed for veil in created)
 
-    def test_closing_the_primary_overlay_closes_its_veil_companions(self, monkeypatch):
-        created = []
+        assert sorted(
+            (
+                member._frame.logical_origin.x(),
+                member._frame.logical_origin.y(),
+                member._frame.logical_size.width(),
+                member._frame.logical_size.height(),
+            )
+            for member in members
+        ) == sorted(
+            (rect.x(), rect.y(), rect.width(), rect.height()) for rect in geometries
+        )
+        assert all(member.isVisible() for member in members)
 
-        class FakeVeil:
-            def __init__(self, monitor_frame):
-                self.closed = False
-                created.append(self)
-
-            def show_on_screen(self, screen):
-                pass
-
-            def close(self):
-                self.closed = True
-
-        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
+    def test_closing_any_wayland_surface_closes_the_whole_session(self):
+        dismissed = []
         frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
         geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
 
-        result = open_overlay(frame, geometries, wayland=True)
-        result.close()
+        result = open_overlay(
+            frame, geometries, wayland=True, on_dismissed=lambda: dismissed.append(True)
+        )
+        members = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow) and widget._on_dismissed is result._on_dismissed
+        ]
+        next(member for member in members if member is not result).close()
 
-        assert created and all(veil.closed for veil in created)
+        assert members and all(not member.isVisible() for member in members)
+        assert dismissed == [True]
 
-    def test_the_interactive_window_is_shown_after_its_veils(self, monkeypatch):
+    def test_the_initially_interactive_window_is_shown_last(self, monkeypatch):
         # A compositor gives the keyboard to the window it maps last. Shown
-        # first, the overlay lost it to a veil: on two monitors under GNOME
-        # Wayland, Enter and Esc did nothing until the snip was clicked.
+        # first, the initial surface can lose it to a peer: on two monitors
+        # under Wayland, Enter and Esc then do nothing until it is clicked.
         shown = []
-
-        class FakeVeil:
-            def __init__(self, monitor_frame):
-                pass
-
-            def show_on_screen(self, screen):
-                shown.append("veil")
-
-            def close(self):
-                pass
 
         real_show = OverlayWindow.show_on_screen
 
         def recording_show(self, screen):
-            shown.append("overlay")
+            shown.append(QRectF(self._frame.logical_origin, self._frame.logical_size))
             real_show(self, screen)
 
-        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
         monkeypatch.setattr(OverlayWindow, "show_on_screen", recording_show)
         frame = make_frame(image_size=(600, 200), logical_size=(600, 200))
         geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200), QRectF(400, 0, 200, 200)]
 
         open_overlay(frame, geometries, wayland=True)
 
-        assert shown == ["veil", "veil", "overlay"]
+        assert shown == [geometries[1], geometries[2], geometries[0]]
+
+    def test_moving_to_another_surface_continues_window_mode_without_remapping(self):
+        activated = []
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+        result = open_overlay(
+            frame,
+            geometries,
+            wayland=True,
+            geometry_provider=_FakeWindowProvider(QRectF(0, 0, 400, 200)),
+            on_active_changed=activated.append,
+        )
+        members = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow) and widget._on_dismissed is result._on_dismissed
+        ]
+        other = next(member for member in members if member is not result)
+        assert result._chooser.row.isVisible()
+        assert not other._chooser.row.isVisible()
+        result._on_chooser_mode("Window")
+
+        other.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                QPointF(10, 10),
+                QPointF(210, 10),
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        assert activated == [other]
+        assert other._picking_window is True
+        assert other._chooser.row.isVisible()
+        assert not result._chooser.row.isVisible()
+        assert other._frame.logical_origin == geometries[1].topLeft()
+        assert result._frame.logical_origin == geometries[0].topLeft()
+
+    def test_a_press_on_another_output_replaces_an_unannotated_region(self):
+        activated = []
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+        result = open_overlay(
+            frame, geometries, wayland=True, on_active_changed=activated.append
+        )
+        members = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow) and widget._on_dismissed is result._on_dismissed
+        ]
+        other = next(member for member in members if member is not result)
+        result.set_selection(QRect(20, 20, 100, 80))
+
+        other.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                QPointF(10, 10),
+                QPointF(210, 10),
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        assert activated == []
+        assert result._selection == QRect(20, 20, 100, 80)
+        assert not other._chooser.row.isVisible()
+
+        other.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                QPointF(10, 10),
+                QPointF(210, 10),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        assert activated == [other]
+        assert result._selection is None
+        assert other._selection == QRect(10, 10, 0, 0)
+        assert other._chooser.tab.isVisible()
+        assert not result._chooser.tab.isVisible()
+
+    def test_an_armed_recording_can_be_redrawn_on_another_output(self):
+        requested = []
+        reselections = []
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+        result = open_overlay(
+            frame,
+            geometries,
+            wayland=True,
+            on_recording_requested=lambda *args: requested.append(args),
+            on_recording_reselect=lambda: reselections.append(True),
+        )
+        members = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow) and widget._on_dismissed is result._on_dismissed
+        ]
+        other = next(member for member in members if member is not result)
+        result._chooser.set_kind("record")
+        result._commit_selection(QRect(20, 20, 100, 80))
+        assert result._armed_for_recording is True
+
+        other.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                QPointF(10, 10),
+                QPointF(210, 10),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        other.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                QPointF(50, 50),
+                QPointF(250, 50),
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        other.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                QPointF(50, 50),
+                QPointF(250, 50),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        assert reselections == [True]
+        assert result._armed_for_recording is False
+        assert other._armed_for_recording is True
+        assert len(requested) == 2
+        assert requested[-1][0] == QRectF(210, 10, 40, 40)
+
+    def test_a_delayed_capture_hides_and_restores_every_output(self):
+        frame = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        geometries = [QRectF(0, 0, 200, 200), QRectF(200, 0, 200, 200)]
+        result = open_overlay(frame, geometries, wayland=True)
+        members = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow) and widget._on_dismissed is result._on_dismissed
+        ]
+        result._delay = "3s"
+
+        result._start_delayed_capture("Region")
+
+        assert all(not member.isVisible() for member in members)
+        result._delay_timer.stop()
+        refreshed = make_frame(image_size=(400, 200), logical_size=(400, 200))
+        active_crop = result._on_session_restore(result, refreshed)
+        result.replace_frame(active_crop)
+        result.show()
+        assert all(member.isVisible() for member in members)
+        assert sorted(member._frame.image.width() for member in members) == [200, 200]
 
 
 # ---------------------------------------------------------------------------
@@ -10701,42 +10818,44 @@ class TestWaylandPicksTheInteractiveMonitor:
     first, which Qt does not promise is the primary screen.
     """
 
-    def test_prefers_the_primary_screen_over_the_first_entry(self):
+    def test_prefers_the_hyprland_active_screen_over_the_primary(self, monkeypatch):
         primary = QRectF(QApplication.primaryScreen().geometry())
         elsewhere = QRectF(primary.right() + 100, 0, 640, 480)
-        # Primary deliberately second, the case the old `[0]` got wrong.
+        monkeypatch.setattr(
+            overlay_module.platform.current,
+            "active_screen_geometry",
+            lambda: elsewhere.toRect(),
+        )
+
+        assert overlay_module._interactive_geometry([primary, elsewhere]) == elsewhere
+
+    def test_prefers_the_primary_screen_when_the_platform_has_no_active_answer(
+        self, monkeypatch
+    ):
+        primary = QRectF(QApplication.primaryScreen().geometry())
+        elsewhere = QRectF(primary.right() + 100, 0, 640, 480)
+        monkeypatch.setattr(
+            overlay_module.platform.current, "active_screen_geometry", lambda: None
+        )
+
         assert overlay_module._interactive_geometry([elsewhere, primary]) == primary
 
-    def test_falls_back_to_the_first_entry_when_no_entry_is_the_primary(self):
+    def test_falls_back_to_the_first_entry_when_no_active_or_primary_matches(
+        self, monkeypatch
+    ):
         # Synthetic geometries matching no real screen -- every other test
         # in this file, and the offscreen platform generally.
         first = QRectF(0, 0, 200, 200)
         second = QRectF(200, 0, 200, 200)
+        monkeypatch.setattr(
+            overlay_module.platform.current, "active_screen_geometry", lambda: None
+        )
         assert overlay_module._interactive_geometry([first, second]) == first
 
     def test_handles_an_empty_geometry_list(self):
         assert overlay_module._interactive_geometry([]) == QRectF()
 
-    def test_veils_cover_every_monitor_except_the_interactive_one(self, monkeypatch):
-        # The `[1:]` slice this replaced was only correct while the
-        # interactive monitor was always the first entry: once it can be
-        # any entry, slicing leaves the chosen monitor veiled *and* one
-        # other monitor uncovered.
-        veiled: list[QRectF] = []
-
-        class FakeVeil:
-            def __init__(self, monitor_frame):
-                veiled.append(
-                    QRectF(monitor_frame.logical_origin, monitor_frame.logical_size)
-                )
-
-            def show_on_screen(self, screen):
-                pass
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(overlay_module, "_MonitorVeil", FakeVeil)
+    def test_returns_the_active_monitor_but_builds_every_output(self, monkeypatch):
         first = QRectF(0, 0, 200, 200)
         chosen = QRectF(200, 0, 200, 200)
         third = QRectF(400, 0, 200, 200)
@@ -10746,9 +10865,22 @@ class TestWaylandPicksTheInteractiveMonitor:
         frame = make_frame(image_size=(600, 200), logical_size=(600, 200))
 
         result = open_overlay(frame, [first, chosen, third], wayland=True)
-        result.close()
+        members = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow) and widget._on_dismissed is result._on_dismissed
+        ]
 
-        assert veiled == [first, third]
+        assert QRectF(result._frame.logical_origin, result._frame.logical_size) == chosen
+        assert sorted(
+            (
+                member._frame.logical_origin.x(),
+                member._frame.logical_origin.y(),
+                member._frame.logical_size.width(),
+                member._frame.logical_size.height(),
+            )
+            for member in members
+        ) == sorted((rect.x(), rect.y(), rect.width(), rect.height()) for rect in [first, chosen, third])
 
 
 class TestPressOutsideStartsANewSelection:
@@ -11083,6 +11215,44 @@ class TestOverlayIsRevealedNotAnimatedOpen:
         overlay.show_on_screen(None)
 
         assert overlay.windowOpacity() == 1.0
+
+    def test_wayland_skips_the_unsupported_opacity_workaround_when_noanim_is_set(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            overlay_module.platform.current, "skip_map_animation", lambda widget: True
+        )
+        overlay = self._overlay()
+        screen = QApplication.primaryScreen()
+        opacity_calls = []
+        monkeypatch.setattr(
+            overlay, "setWindowOpacity", opacity_calls.append
+        )
+
+        overlay.show_on_screen(screen)
+        overlay.close()
+
+        assert opacity_calls == []
+
+    def test_wayland_uses_platform_placement_without_requesting_fullscreen(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            overlay_module.platform.current, "skip_map_animation", lambda widget: True
+        )
+        monkeypatch.setattr(
+            overlay_module.platform.current,
+            "place_capture_overlay",
+            lambda widget, screen: True,
+        )
+        overlay = self._overlay()
+        fullscreen_calls = []
+        monkeypatch.setattr(overlay, "showFullScreen", lambda: fullscreen_calls.append(True))
+
+        overlay.show_on_screen(QApplication.primaryScreen())
+
+        assert overlay.isVisible()
+        assert fullscreen_calls == []
 
     def test_the_platform_is_asked_before_the_window_exists(self, monkeypatch):
         # A window type is read when the native window is created, so asking

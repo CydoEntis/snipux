@@ -42,6 +42,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QRegion,
 )
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
@@ -111,6 +112,10 @@ class _Divider(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        # Hyprland's recording-control placement hook targets this exact
+        # frameless window after the fullscreen selection overlay closes.
+        # Keep it stable and regex-safe; it is not user-facing chrome.
+        self.setWindowTitle("snipux-recording-controls")
         self.setFixedSize(1, tokens.FlowMetric.DIVIDER_H)
 
     def paintEvent(self, event) -> None:
@@ -1476,7 +1481,9 @@ class _Panel(QWidget):
 
     def __init__(self, colour: QColor):
         super().__init__(None)
-        self._colour = colour
+        self._revealed_colour = QColor(colour)
+        self._colour = QColor(colour)
+        self._colour.setAlpha(0)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -1485,8 +1492,15 @@ class _Panel(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        if colour.alphaF() < 1.0:
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # Recording-frame surfaces are mapped transparent and revealed only
+        # after a compositor-specific platform has placed every edge.  This
+        # prevents Wayland from showing four tool windows opening one by one
+        # at their compositor-chosen staging positions.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def reveal(self) -> None:
+        self._colour = QColor(self._revealed_colour)
+        self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -1494,16 +1508,52 @@ class _Panel(QWidget):
         painter.end()
 
 
+class _OutlinePanel(_Panel):
+    """One transparent surface whose paint lives outside the capture rect."""
+
+    def __init__(self, colour: QColor, thickness: int):
+        super().__init__(colour)
+        self._thickness = thickness
+
+    def resizeEvent(self, event) -> None:
+        """Make the centre absent, not merely transparent.
+
+        Hyprland may occlude the client beneath an alpha-zero part of a
+        regular Wayland surface.  A native window mask gives the compositor
+        only the four border strips, so the recorded region is not a window
+        at all and cannot hide anything beneath it.
+        """
+        t = self._thickness
+        width, height = self.width(), self.height()
+        border = QRegion(0, 0, width, t)
+        border = border.united(QRegion(0, height - t, width, t))
+        border = border.united(QRegion(0, t, t, max(0, height - 2 * t)))
+        border = border.united(
+            QRegion(width - t, t, t, max(0, height - 2 * t))
+        )
+        self.setMask(border)
+        super().resizeEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        t = self._thickness
+        width, height = self.width(), self.height()
+        painter.fillRect(0, 0, width, t, self._colour)
+        painter.fillRect(0, height - t, width, t, self._colour)
+        painter.fillRect(0, t, t, max(0, height - 2 * t), self._colour)
+        painter.fillRect(width - t, t, t, max(0, height - 2 * t), self._colour)
+        painter.end()
+
+
 class RegionFrame:
     """A red outline around the region being recorded.
 
-    Not a widget: **four** thin always-on-top strips, one per edge, sitting
-    entirely *outside* the recorded rectangle. One window covering the
-    region with a transparent middle would be simpler and is the obvious
-    thing to reach for -- and it puts a window over the very pixels being
-    filmed, which is a question about compositing this project cannot yet
-    answer on Wayland. Four strips make it a non-question: nothing this
-    draws is ever inside the frame.
+    Usually four thin always-on-top strips, one per edge, sitting entirely
+    outside the recorded rectangle.  Hyprland uses one transparent surface
+    instead: four separately configured Wayland surfaces visibly jumped as
+    their configure events arrived, even with compositor animation disabled.
+    Its one surface paints only those same outside pixels; the centre remains
+    transparent and click-through.
 
     It exists because taking the overlay down at the moment recording
     starts (docs/design/flow/divergences.md 4) took the scrim, the frame
@@ -1543,8 +1593,16 @@ class RegionFrame:
             paint.setAlphaF(alpha)
         return _Panel(paint)
 
-    def show_around(self, rect, within=None) -> None:
-        """Outline `rect` (absolute logical coordinates), drawn outside it.
+    def prepare_around(self, rect, within=None, *, single_window=False) -> None:
+        """Build an outline around `rect` without mapping its windows.
+
+        Separating construction from mapping lets a Wayland platform map one
+        strip at a time and identify the compositor window it created before
+        the next identically-sized strip appears.  ``show_around`` remains
+        the portable convenience used where Qt can place its own windows.
+
+        `rect` uses absolute logical coordinates and the outline is drawn
+        outside it.
 
         `within` is the screen the recording is on. Given one, the rest of
         that screen is dimmed to `SCRIM_LIVE_ALPHA` -- the handoff's live
@@ -1555,6 +1613,9 @@ class RegionFrame:
         Only that screen. Dimming the whole virtual desktop would grey out
         the monitor the bar was deliberately placed on, and every other
         window the user still has to work with while recording.
+
+        `single_window` deliberately ignores `within`: Hyprland gets one
+        border-only surface, never screen-sized dimming windows.
         """
         self.close()
         t = self._thickness
@@ -1566,6 +1627,15 @@ class RegionFrame:
             (left - t, top, t, height),                      # left
             (left + width, top, t, height),                  # right
         ]
+        if single_window:
+            # Hyprland must configure one compositor surface, not a stack
+            # of screen-sized dim panels.  Those panels can cover controls,
+            # steal focus and make the selected region appear to move.
+            outline = _OutlinePanel(design.flow_color("REC"), t)
+            outline.setGeometry(left - t, top - t, width + 2 * t, height + 2 * t)
+            self._strips.append(outline)
+            return
+
         if within is not None:
             # Four panels covering `within` minus `rect`, so the recorded
             # area is the one part of that screen at full brightness.
@@ -1582,14 +1652,24 @@ class RegionFrame:
                     continue
                 panel = self._strip("SCRIM", tokens.FlowColor.SCRIM_LIVE_ALPHA)
                 panel.setGeometry(x, y, w, h)
-                panel.show()
                 self._strips.append(panel)
 
         for x, y, w, h in edges:
             strip = self._strip()
             strip.setGeometry(x, y, w, h)
-            strip.show()
             self._strips.append(strip)
+
+    def show_around(self, rect, within=None) -> None:
+        """Build and show the outline where Qt honours window placement."""
+        self.prepare_around(rect, within=within)
+        self.reveal()
+        for strip in self._strips:
+            strip.show()
+
+    def reveal(self) -> None:
+        """Paint every prepared edge after all its windows are in place."""
+        for strip in self._strips:
+            strip.reveal()
 
     def widgets(self) -> list[QWidget]:
         """The strips currently on screen.

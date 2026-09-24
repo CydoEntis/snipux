@@ -66,9 +66,9 @@ snipux/
                 build_capture_registry() chooses between (Linux's
                 X11/Wayland ones, and Windows')
   recording.py  the recording twin of capture.py: RecordingBackend /
-                RecorderRegistry, plus GnomeScreencastBackend (D-Bus, the
-                only Linux route -- WebM; pause and sound through the
-                optional system ffmpeg, snipux/ffmpeg.py) and
+                RecorderRegistry, plus GnomeScreencastBackend (D-Bus/WebM;
+                pause and sound through optional system ffmpeg),
+                GpuScreenRecorderBackend (Wayland/Hyprland), and
                 WindowsRecorderBackend (QScreenCapture -> QMediaRecorder)
   overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
                 (its pre-snip chooser diverges from the handoff -- see

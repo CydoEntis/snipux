@@ -11,6 +11,7 @@ tickets register real backends into. No real backend lives here yet.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import re
 import shutil
@@ -134,12 +135,20 @@ def _missing_backend_advice() -> str:
     """
     if platform.is_windows():
         return "check that this build of Snipux includes Windows capture support"
+    if shutil.which("pacman"):
+        install = "sudo pacman -S"
+    elif shutil.which("apt-get"):
+        install = "sudo apt install"
+    elif shutil.which("dnf"):
+        install = "sudo dnf install"
+    else:
+        install = "install"
     session_type = detect_session_type()
     if session_type == "wayland":
-        return "install grim (e.g. `sudo apt install grim`)"
+        return f"install grim (e.g. `{install} grim`)"
     if session_type == "x11":
-        return "install maim (e.g. `sudo apt install maim`)"
-    return "install grim for Wayland or maim for X11 (e.g. `sudo apt install grim maim`)"
+        return f"install maim (e.g. `{install} maim`)"
+    return f"install grim for Wayland or maim for X11 (e.g. `{install} grim maim`)"
 
 
 class CaptureError(Exception):
@@ -754,6 +763,93 @@ class XwininfoWindowGeometryProvider:
         return _x11_active_window()
 
 
+class HyprlandWindowGeometryProvider:
+    """Window geometry from Hyprland's IPC on its Wayland session."""
+
+    _CACHE_SECONDS = 0.2
+
+    def __init__(self):
+        self._cache: list[tuple[str, QRectF]] | None = None
+        self._cache_time: float | None = None
+
+    def is_available(self) -> bool:
+        desktops = os.environ.get("XDG_CURRENT_DESKTOP", "").lower().split(":")
+        return (
+            detect_session_type() == "wayland"
+            and ("hyprland" in desktops or bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")))
+            and shutil.which("hyprctl") is not None
+        )
+
+    @staticmethod
+    def _query(command: str):
+        try:
+            result = subprocess.run(
+                ["hyprctl", command, "-j"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            return json.loads(result.stdout)
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            return None
+
+    @staticmethod
+    def _entry(entry) -> tuple[str, QRectF] | None:
+        try:
+            if (
+                not entry.get("mapped", True)
+                or entry.get("hidden", False)
+                or entry.get("visible") is False
+                or entry.get("class") in {"snipux", "org.omarchy.screensaver"}
+            ):
+                return None
+            x, y = entry["at"]
+            width, height = entry["size"]
+            if width <= 0 or height <= 0:
+                return None
+            return str(entry.get("title") or entry.get("class") or "Window"), QRectF(
+                float(x), float(y), float(width), float(height)
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def list_windows(self) -> list[tuple[str, QRectF]]:
+        now = time.monotonic()
+        if (
+            self._cache is not None
+            and self._cache_time is not None
+            and now - self._cache_time < self._CACHE_SECONDS
+        ):
+            return self._cache
+        entries = self._query("clients")
+        windows = [] if not isinstance(entries, list) else [
+            found
+            for entry in sorted(entries, key=lambda item: item.get("focusHistoryID", 999999))
+            if (found := self._entry(entry)) is not None
+        ]
+        self._cache = windows
+        self._cache_time = now
+        return windows
+
+    def window_at(self, point: QPointF) -> QRectF | None:
+        found = self.window_named_at(point)
+        return None if found is None else found[1]
+
+    def window_named_at(self, point: QPointF):
+        for title, rect in self.list_windows():
+            if rect.contains(point):
+                return title, rect
+        return None
+
+    def active_window(self) -> "tuple[str, QRectF] | None":
+        entry = self._query("activewindow")
+        return self._entry(entry) if isinstance(entry, dict) and entry else None
+
+    def browser_viewport(self) -> "tuple[str, QRectF] | None":
+        return None
+
+
 class X11WindowGeometryProvider:
     """Real per-window geometry source for X11's window-selection mode.
 
@@ -940,7 +1036,12 @@ class GrimBackend(CaptureBackend):
             # grim owns nothing after the call returns; the tempfile is
             # ours to create and remove, same as every X11 shell-out
             # backend.
-            subprocess.run(["grim", path], check=True)
+            # This file only lives long enough for QImage to decode it, so
+            # spending most of capture startup compressing it is pure delay.
+            # On the measured 6400x1440 Omarchy desktop grim's default level
+            # 6 took ~0.73s; level 0 took ~0.06s with identical pixels. Final
+            # user-facing saves still use output.save_image's normal encoder.
+            subprocess.run(["grim", "-l", "0", path], check=True)
             image = QImage(path)
             if image.isNull():
                 raise RuntimeError("grim: produced an unreadable image")
@@ -1141,10 +1242,36 @@ class GnomeShellHelperBackend(CaptureBackend):
         return "gnome-shell-helper"
 
     def is_available(self) -> bool:
-        return detect_session_type() == "wayland"
+        return self._availability() is None
 
     def unavailable_reason(self) -> str | None:
-        return None if self.is_available() else "not a Wayland session"
+        return self._availability()
+
+    def _availability(self) -> str | None:
+        if detect_session_type() != "wayland":
+            return "not a Wayland session"
+        try:
+            connection = open_dbus_connection(bus="SESSION")
+        except Exception as exc:  # noqa: BLE001 - availability is reported
+            return f"cannot reach the session bus: {type(exc).__name__}: {exc}"
+        try:
+            dbus = DBusAddress(
+                "/org/freedesktop/DBus",
+                bus_name="org.freedesktop.DBus",
+                interface="org.freedesktop.DBus",
+            )
+            reply = connection.send_and_get_reply(
+                new_method_call(dbus, "NameHasOwner", "s", ("org.gnome.Shell",))
+            )
+            if reply.header.message_type is MessageType.error:
+                body = reply.body or ("unspecified D-Bus error",)
+                return f"cannot query GNOME Shell: {body[0]}"
+            (owned,) = reply.body
+            return None if owned else "GNOME Shell is not running on the session bus"
+        except Exception as exc:  # noqa: BLE001 - availability is reported
+            return f"cannot query GNOME Shell: {type(exc).__name__}: {exc}"
+        finally:
+            connection.close()
 
     def capture(self) -> Frame:
         virtual_rect = _virtual_desktop_geometry()

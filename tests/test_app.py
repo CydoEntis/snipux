@@ -17,6 +17,7 @@ from PyQt6.QtCore import (
     QMargins,
     QMimeData,
     QObject,
+    QPoint,
     QPointF,
     QRect,
     QRectF,
@@ -56,6 +57,7 @@ from snipux.app import (
     save_image,
 )
 from snipux.capture import (
+    HyprlandWindowGeometryProvider,
     XwininfoWindowGeometryProvider,
     BackendRegistry,
     CaptureBackend,
@@ -274,6 +276,14 @@ class TestBuildDefaultGeometryProvider:
     # under them whenever the suite happens to run on Windows. Forcing it
     # unavailable here is what keeps those tests' verdicts about X11/xwininfo
     # priority, not about which OS happened to run them.
+    @pytest.fixture(autouse=True)
+    def _force_hyprland_provider_unavailable(self, monkeypatch):
+        class NoHyprland(HyprlandWindowGeometryProvider):
+            def is_available(self):
+                return False
+
+        monkeypatch.setattr(app, "HyprlandWindowGeometryProvider", NoHyprland)
+
     def _force_windows_provider_unavailable(self, monkeypatch):
         class NoWindows(WindowsWindowGeometryProvider):
             def is_available(self):
@@ -2662,6 +2672,19 @@ class TestAppControllerArmingARecording:
         # Legible without being told: the label says what a click does.
         assert "Record" in controller._recording_hud._action._label
 
+    def test_reselecting_removes_only_the_ready_recording(self, make_controller, monkeypatch):
+        controller, backend = self._controller(make_controller, monkeypatch)
+        controller._on_recording_requested(QRectF(50, 50, 200, 150), "No delay")
+        path = Path(controller._armed_recording[3])
+        assert path.exists()
+
+        controller._on_recording_reselect()
+
+        assert backend.start_calls == []
+        assert controller._armed_recording is None
+        assert controller._recording_hud is None
+        assert not path.exists()
+
     def test_clicking_the_pill_starts_an_armed_recording(
         self, make_controller, monkeypatch
     ):
@@ -2998,6 +3021,9 @@ class TestRecordingWhereWindowsCannotBePlaced:
     @pytest.fixture(autouse=True)
     def _wayland(self, monkeypatch):
         monkeypatch.setattr(app.platform.current, "places_windows", lambda: False)
+        monkeypatch.setattr(
+            app.platform.current, "show_recording_frame", lambda widgets: False
+        )
 
     def _armed(self, make_controller, monkeypatch, delay="No delay"):
         controller, backend = self._controller(make_controller, monkeypatch)
@@ -3034,6 +3060,126 @@ class TestRecordingWhereWindowsCannotBePlaced:
         assert controller._recording_hud is None
         assert not controller._region_frame.is_showing()
         assert any("tray" in r for r in reports)
+
+    def test_hyprland_promotes_the_embedded_bar_to_live_controls(
+        self, make_controller, monkeypatch
+    ):
+        placements = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "place_recording_controls",
+            lambda widget, point, size: (
+                placements.append((widget, QPoint(point), QSize(size))) or True
+            ),
+        )
+        controller, backend = self._armed(make_controller, monkeypatch)
+        embedded = controller._recording_hud
+
+        embedded.startClicked.emit()
+
+        assert len(backend.start_calls) == 1
+        assert controller._recording_hud is not None
+        assert controller._recording_hud is not embedded
+        assert controller._recording_hud.parentWidget() is None
+        assert controller._recording_hud.state() == RecordingBar.LIVE
+        assert placements
+        assert placements[-1][1].y() >= 0
+        assert placements[-1][2].height() > 0
+
+    def test_hyprland_maps_live_controls_before_the_overlay_handoff(
+        self, make_controller, monkeypatch
+    ):
+        overlay_visible_at_placement = []
+
+        def place(widget, point, size):
+            overlay_visible_at_placement.append(
+                controller._overlay is not None
+                and controller._overlay.isVisible()
+            )
+            return True
+
+        monkeypatch.setattr(
+            app.platform.current, "place_recording_controls", place
+        )
+        controller, _backend = self._armed(make_controller, monkeypatch)
+
+        controller._recording_hud.startClicked.emit()
+
+        assert overlay_visible_at_placement[0] is True
+        assert controller._recording_hud is not None
+        assert controller._recording_hud.isVisible()
+
+    def test_hyprland_keeps_one_stable_boundary_while_recording(
+        self, make_controller, monkeypatch
+    ):
+        frames = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "place_recording_controls",
+            lambda widget, point, size: True,
+        )
+        monkeypatch.setattr(
+            app.platform.current,
+            "show_recording_frame",
+            lambda widgets: frames.append(list(widgets)) or True,
+        )
+        monkeypatch.setattr(
+            app.platform.current,
+            "uses_single_recording_frame_window",
+            lambda: True,
+        )
+        controller, backend = self._armed(make_controller, monkeypatch)
+
+        controller._recording_hud.startClicked.emit()
+
+        assert len(backend.start_calls) == 1
+        assert len(frames) == 1
+        assert len(frames[0]) == 1
+        assert all(edge._colour.alpha() > 0 for edge in frames[0])
+        assert controller._region_frame.is_showing()
+
+    def test_hyprland_live_stop_reaches_the_backend(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            app.platform.current,
+            "place_recording_controls",
+            lambda widget, point, size: True,
+        )
+        controller, backend = self._armed(make_controller, monkeypatch)
+
+        controller._recording_hud.startClicked.emit()
+        controller._recording_hud.stopClicked.emit()
+
+        assert backend.stop_calls == [True]
+
+    def test_full_monitor_controls_move_to_an_unrecorded_output(
+        self, make_controller, monkeypatch
+    ):
+        left = QRectF(0, 0, 800, 600)
+        right = QRectF(800, 0, 800, 600)
+        monkeypatch.setattr(
+            app.platform.current, "active_screen_geometry", lambda: left.toRect()
+        )
+        placements = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "place_recording_controls",
+            lambda widget, point, size: placements.append(QPoint(point)) or True,
+        )
+        controller, backend = self._controller(
+            make_controller, monkeypatch, geometries=[left, right]
+        )
+        controller.start_capture()
+        controller._on_recording_requested(None, "No delay")
+
+        controller._recording_hud.startClicked.emit()
+
+        assert len(backend.start_calls) == 1
+        assert backend.start_calls[0][0] is None
+        assert controller._recording_hud is not None
+        assert controller._recording_hud.state() == RecordingBar.LIVE
+        assert placements[-1].x() >= right.left()
 
     def test_the_countdown_is_the_bars_alone(self, make_controller, monkeypatch):
         controller, _backend = self._armed(make_controller, monkeypatch, delay="3s")
@@ -4185,6 +4331,44 @@ class TestTheBarStaysUpAfterARecordingLands:
         assert "2.1 MB" in summary
         assert "mp4" in summary or "webm" in summary
 
+    def test_the_finished_bar_moves_to_the_monitors_top_centre(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _backend = self._stopped_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+
+        bar = controller._recording_hud
+        usable = app._usable_area_for(QRectF(0, 0, 800, 600))
+        assert abs(bar.geometry().center().x() - usable.center().x()) <= 1
+        assert bar.geometry().top() == round(usable.top() + 12)
+
+    def test_open_uses_the_editor_as_the_only_finished_ui(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([FakeRecordingBackend()]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        _record(controller, QRectF(0, 0, 100, 100), "No delay", "open")
+        _backend, path, _after = controller._active_recording
+        Path(path).write_bytes(b"video")
+
+        controller._stop_recording()
+
+        assert len(opened) == 1
+        assert opened[0].exists()
+        assert controller._recording_hud is None
+        assert controller._done_timer is None
+        assert controller._landed_recording is None
+
     def test_discard_after_landing_removes_the_file_it_named(
         self, make_controller, monkeypatch, tmp_path
     ):
@@ -5311,6 +5495,28 @@ class TestWindowsHotkeyIntegration:
         assert bind_calls == [None]
         assert gnome_calls == []
 
+    def test_settings_saved_rebinds_through_the_platform_seam_on_linux(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: False))
+        bind_calls = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: bind_calls.append(shortcut)
+            or "Bound Control+Alt+S in Hyprland.",
+        )
+        monkeypatch.setattr(
+            app.setup_desktop,
+            "bind_gnome_shortcut",
+            lambda *a, **k: pytest.fail("Settings bypassed the platform seam"),
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller._on_settings_saved()
+
+        assert bind_calls == [None]
+
 
 class TestRunFirstLaunchSetup:
     """SNX-95: `AppController.run_first_launch_setup()` is what lets a bare
@@ -6144,6 +6350,10 @@ class TestWindowsShapedMultiMonitorSelection:
     code `start_capture()` wires a real capture through.
     """
 
+    @pytest.fixture(autouse=True)
+    def _windows_uses_one_virtual_desktop_surface(self, monkeypatch):
+        monkeypatch.setattr(app, "detect_session_type", lambda: "x11")
+
     def test_selection_on_a_negative_origin_monitor_does_not_drift(self, make_controller):
         # Same three-monitor layout as TestRealMonitorGeometries above and
         # TestQtNativeWindowsBackend (test_capture.py): virtual desktop
@@ -6348,6 +6558,35 @@ class TestRegionFrameExposure:
         from snipux.flowbars import RegionFrame
 
         assert RegionFrame().is_exposed() is False
+
+    def test_a_prepared_frame_is_transparent_until_revealed(self):
+        from snipux.flowbars import RegionFrame
+
+        frame = RegionFrame()
+        frame.prepare_around(QRectF(10, 20, 100, 80))
+
+        assert all(edge._colour.alpha() == 0 for edge in frame.widgets())
+
+        frame.reveal()
+
+        assert all(edge._colour.alpha() > 0 for edge in frame.widgets())
+
+    def test_the_single_window_paints_only_outside_the_recorded_area(self):
+        from snipux.flowbars import RegionFrame
+
+        frame = RegionFrame(thickness=3)
+        frame.prepare_around(QRectF(10, 20, 100, 80), single_window=True)
+        frame.reveal()
+        image = frame.widgets()[0].grab().toImage()
+
+        assert image.pixelColor(1, 1).alpha() > 0
+        assert image.pixelColor(
+            image.width() // 2, image.height() // 2
+        ).alpha() == 0
+        assert frame.widgets()[0].mask().contains(QPoint(1, 1))
+        assert not frame.widgets()[0].mask().contains(
+            QPoint(image.width() // 2, image.height() // 2)
+        )
 
 
 class TestRecordingErrorAcceptsAPlainMessage:
