@@ -4534,7 +4534,7 @@ class TestAppControllerOverlayDismissal:
     def test_copy_dismisses_the_overlay_and_a_later_snip_is_not_refused(
         self, make_controller, monkeypatch
     ):
-        monkeypatch.setattr(app, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(app, "copy_image_to_clipboard", lambda image, **_kwargs: None)
         controller, first_overlay = self._start_capture_with_selection(make_controller)
 
         # The overlay's bar leads with a split action now, not a pair of

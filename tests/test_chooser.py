@@ -572,11 +572,11 @@ class TestEachControlShowsItsState:
         assert chooser.row.delay_flag.toolTip() == tokens.DELAY_TOOLTIP_ON.format(delay="3s")
 
 
-def _expected_row_width(label, delay="", hide=True):
-    """`hide` now means "one flag beside Delay" -- Hide sensitive on the
-    stills side, Record the pointer on the record side. The two are the same
-    width and only one is ever shown, so the row measures the same either
-    way.
+def _expected_row_width(label, delay="", flags=2):
+    """`flags` is how many controls sit beside Delay in the flag well, which
+    differs by side: stills shows Hide sensitive and Copy for terminal,
+    record shows Record the pointer. They are all one BTN wide, so the count
+    is the only thing that changes.
 
     The width comes from the tokens and the measured text, worked out apart
     from the widget's own arithmetic. The label is measured in the face that
@@ -592,14 +592,12 @@ def _expected_row_width(label, delay="", hide=True):
         delay_flag += METRIC.FLAG_GAP + QFontMetricsF(
             _font(FONT.DELAY, mono=True)
         ).horizontalAdvance(delay)
-    flags = 2 * METRIC.WELL_PAD + delay_flag
-    if hide:
-        flags += METRIC.BTN + METRIC.WELL_GAP
+    well = 2 * METRIC.WELL_PAD + delay_flag + flags * (METRIC.BTN + METRIC.WELL_GAP)
     kinds = 2 * METRIC.WELL_PAD + 2 * METRIC.BTN + METRIC.WELL_GAP
     divider = 2 * METRIC.DIVIDER_MARGIN + 1
     return (
         2 * (METRIC.BORDER + METRIC.PAD)
-        + kinds + chip + divider + METRIC.BTN + flags
+        + kinds + chip + divider + METRIC.BTN + well
         + 4 * METRIC.GAP
     )
 
@@ -644,7 +642,7 @@ class TestTheRowsSize:
         chooser.set_kind("record")
 
         width = chooser.row.grab().deviceIndependentSize().width()
-        assert 0 <= width - _expected_row_width("Region") < 2
+        assert 0 <= width - _expected_row_width("Region", flags=1) < 2
         # isVisibleTo, not isVisible: an unshown row's children all report
         # False, which would make both halves of this pass for the wrong
         # reason.
@@ -1834,3 +1832,54 @@ class TestTheMenuHonoursTheShortcutsItPrints:
         self._press(menu, Qt.Key.Key_Z, "z")
 
         assert picked == []
+
+
+class TestCopyingForATerminal:
+    """The stills side's second flag. A clipboard cannot cross an SSH
+    connection -- what a terminal receives is keystrokes -- so pasting a
+    snip into one did nothing at all: there was nothing there it could
+    take.
+    """
+
+    def test_it_is_only_on_the_stills_side(self):
+        chooser = Chooser(parent=None)
+
+        assert chooser.row.terminal_flag.isVisibleTo(chooser.row)
+
+        chooser.set_kind("record")
+
+        # A recording is a file from the start, and scp is what moves a file.
+        assert not chooser.row.terminal_flag.isVisibleTo(chooser.row)
+
+    def test_it_is_off_until_asked_for(self):
+        # A terminal is not the only thing that takes text: a plain text box
+        # would take the rebuild command too, which is why this is a flag
+        # and not simply how Copy behaves.
+        assert Chooser(parent=None).copy_for_terminal is False
+
+    def test_clicking_it_reports_the_new_state(self):
+        chooser = Chooser(parent=None)
+        reported = []
+        chooser.copyForTerminalChanged.connect(reported.append)
+
+        _click(chooser.row.terminal_flag)
+
+        assert reported == [True]
+        assert chooser.copy_for_terminal is True
+
+    def test_seeding_it_never_reports(self):
+        chooser = Chooser(parent=None)
+        reported = []
+        chooser.copyForTerminalChanged.connect(reported.append)
+
+        chooser.set_copy_for_terminal(True)
+
+        assert reported == []
+        assert chooser.copy_for_terminal is True
+
+    def test_the_hint_pill_says_what_it_does(self):
+        chooser = Chooser(parent=None)
+
+        _hover(chooser.row.terminal_flag)
+
+        assert chooser.hint.text == tokens.COPY_TERMINAL_HINT[False]

@@ -9,6 +9,7 @@ them for its own callers.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import os
 import shutil
@@ -35,9 +36,70 @@ def _settle_clipboard() -> None:
     QGuiApplication.sync()
 
 
-def copy_image_to_clipboard(image: QImage) -> None:
+# How many characters of base64 go on one line of the rebuild command.
+# Not cosmetic: a terminal in canonical mode stops accepting a single line
+# somewhere around 4 KB, and the rest is dropped *silently* -- the paste
+# looks fine and the file on the far end is truncated. 76 is the width
+# `base64` itself wraps at, so what is pasted looks like what that command
+# would have written.
+_TERMINAL_LINE_WIDTH = 76
+
+# Above this, the paste is the problem rather than the solution: tens of
+# thousands of lines take long enough that a terminal looks hung, and some
+# refuse a paste that size outright. A snip of a window is about 90 KB
+# encoded, so this leaves a lot of room before it bites.
+_TERMINAL_MAX_BYTES = 1_000_000
+
+
+def terminal_paste_command(image: QImage, filename: str | None = None) -> str | None:
+    """`image` as a shell command that writes it to a file, or None when it
+    would be too big to paste.
+
+    For pasting into a terminal on another machine -- an SSH session, a
+    container, a serial console. A clipboard cannot cross that boundary:
+    what a terminal receives is keystrokes, so the only thing that travels
+    is text. This is the image *as* text, in a form the far end can turn
+    back into a file with nothing installed on it -- `base64` is in both
+    coreutils and busybox.
+
+    A quoted heredoc (`<<'SNIPUX'`), so nothing in the data is expanded by
+    the shell it lands in, and a quoted filename so a space cannot split it.
+    Bracketed paste -- on by default in current bash and zsh -- means the
+    whole thing arrives as one input and waits for Return rather than
+    running a line at a time.
+    """
+    buffer = QBuffer()
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    image.save(buffer, "PNG")
+    encoded = base64.b64encode(bytes(buffer.data())).decode("ascii")
+    if len(encoded) > _TERMINAL_MAX_BYTES:
+        return None
+
+    if filename is None:
+        filename = datetime.datetime.now().strftime("snip-%Y-%m-%d-%H%M%S.png")
+    lines = [
+        encoded[at:at + _TERMINAL_LINE_WIDTH]
+        for at in range(0, len(encoded), _TERMINAL_LINE_WIDTH)
+    ]
+    body = "\n".join(lines)
+    return f"base64 -d > '{filename}' <<'SNIPUX'\n{body}\nSNIPUX\n"
+
+
+def copy_image_to_clipboard(image: QImage, *, also_as_text: str = "") -> None:
     """Place `image` on the clipboard: the in-process Qt clipboard always,
     and (best-effort) `wl-copy` as well when it's on PATH.
+
+    `also_as_text` puts a second form on the same clipboard entry, which is
+    how one Copy serves both an image editor and a terminal. A clipboard
+    carries several formats at once and the *receiving* application picks
+    the one it understands: anything that takes pictures asks for the image
+    and never sees the text, and a terminal can only take text, so it gets
+    that. Without it a paste into a terminal does nothing at all, which is
+    what it did -- there was simply nothing there it could accept.
+
+    Empty by default. The text is not free: a plain text box is not a
+    terminal, and pasting a rebuild command into one is a wall of base64,
+    so this is on only when the row's flag says so.
 
     Wayland's Qt clipboard is owned by the process that set it and dies the
     instant it exits, per CLAUDE.md — piping the same image to `wl-copy`
@@ -49,7 +111,16 @@ def copy_image_to_clipboard(image: QImage) -> None:
     between the check and the call, or runs but exits non-zero — either way
     this must not raise.
     """
-    QGuiApplication.clipboard().setImage(image)
+    if also_as_text:
+        # One QMimeData carrying both, rather than two calls: the second
+        # would replace the first, since setting the clipboard replaces
+        # what is on it rather than adding to it.
+        mime = QMimeData()
+        mime.setImageData(image)
+        mime.setText(also_as_text)
+        QGuiApplication.clipboard().setMimeData(mime)
+    else:
+        QGuiApplication.clipboard().setImage(image)
     _settle_clipboard()
 
     if shutil.which("wl-copy") is None:
@@ -61,6 +132,11 @@ def copy_image_to_clipboard(image: QImage) -> None:
     png_bytes = buffer.data().data()
 
     try:
+        # The image, even when text was offered too: one `wl-copy` serves one
+        # type, and this call exists to make a copy survive snipux exiting.
+        # What survives should be the picture -- the text form can always be
+        # produced again by copying again, and a terminal paste is something
+        # done in the moment rather than an hour later.
         subprocess.run(
             ["wl-copy", "--type", "image/png"], input=png_bytes, check=True
         )

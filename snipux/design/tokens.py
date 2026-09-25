@@ -1719,6 +1719,19 @@ HIDE_SENSITIVE_GLYPH = "eyeOff"
 # cursor glyph -- the same artwork the app icon draws inside its marquee --
 # rather than a hand or a mouse, because what the toggle governs is the
 # pointer as it appears in the recording.
+# The stills side's second flag: Copy also carries a command that rebuilds
+# the image on whatever machine it is pasted into. `text` is the glyph
+# because that is literally what it adds to the clipboard -- the picture as
+# text, for somewhere that can only take text.
+COPY_TERMINAL_GLYPH = "text"
+COPY_TERMINAL_HINT = {
+    True: "Copy also carries a command a terminal can paste -- click to stop",
+    False: "Also copy a command that rebuilds this on a machine you SSH into",
+}
+# Said once, when a snip is too big to paste as text rather than silently
+# copying only the picture.
+COPY_TERMINAL_TOO_BIG = "Too big to paste as text -- copied the image only"
+
 RECORD_CURSOR_GLYPH = "select"
 # On/off wording, in the shape HIDE_SENSITIVE_HINT uses: keyed by the state
 # the flag is *in*, not the state clicking it would produce.

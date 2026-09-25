@@ -822,3 +822,36 @@ Windows: `QScreenCapture` has no cursor option, so the Settings switch there
 moved, saved, and changed nothing about the recording. A control that
 silently does nothing reads as the application being broken; a greyed one
 carrying a sentence reads as the limit it is.
+
+## Copy can carry a paste-into-a-terminal command
+
+**Handoff:** Copy puts the picture on the clipboard. Nothing in the flag
+well is about what a paste target can accept.
+
+**Built:** a second stills-side flag. With it armed, one Copy puts *two*
+forms on the same clipboard entry -- the image, and a `base64 -d` heredoc
+that rebuilds the image as a file wherever it is pasted.
+
+**Why:** a clipboard does not cross an SSH connection. What a terminal
+receives is keystrokes, so the only thing that can travel is text, and a
+snip pasted into one did nothing at all -- there was nothing on the
+clipboard it could accept. Reported exactly that way: "i just screen
+shotted with snipux and then tried to paste into a terminal im ssh'd into
+and nothing happened".
+
+Both forms at once rather than a mode, because the *receiving* application
+is what picks: anything that takes pictures asks for the image and never
+sees the text.
+
+**Why a flag and not simply how Copy behaves:** a terminal is not the only
+thing that takes text. A plain text box would take the rebuild command too,
+and a wall of base64 pasted into a chat message is worse than nothing. Off
+by default, and on the row rather than in Settings because which one you
+want is decided by what you are about to paste into -- a terminal today,
+Discord tomorrow -- which is the same argument this document already makes
+for the Last-region preference.
+
+**What it refuses:** a snip whose text form would run past 1 MB. Tens of
+thousands of lines take long enough that a terminal looks hung, and some
+refuse a paste that size outright, so the copy carries the image alone and
+says so rather than putting something on the clipboard that will not work.

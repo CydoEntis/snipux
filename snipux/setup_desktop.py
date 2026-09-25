@@ -424,6 +424,22 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
     return save_after_capture("review" if enabled else tokens.AFTER_DEFAULT, config_dir)
 
 
+def load_copy_for_terminal(config_dir: Path | None = None) -> bool:
+    """Whether Copy also puts a paste-into-a-terminal command on the
+    clipboard beside the image (`output.terminal_paste_command`).
+
+    Off unless asked for. The text costs nothing where it is wanted -- a
+    terminal cannot take a picture, so without it a paste into an SSH
+    session does nothing at all -- but a plain text box is not a terminal,
+    and pasting a wall of base64 into one is worse than pasting nothing.
+    """
+    return _read_config(config_dir).get("copy_for_terminal") is True
+
+
+def save_copy_for_terminal(enabled: bool, config_dir: Path | None = None) -> bool:
+    return _write_config("copy_for_terminal", bool(enabled), config_dir)
+
+
 def load_instant_saves(config_dir: Path | None = None) -> bool:
     """Whether `instant` (`tokens.AFTER_CAPTURE`) writes the file instead
     of copying to the clipboard -- the one thing `overlay.py`'s

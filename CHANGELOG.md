@@ -5,6 +5,15 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **Paste a snip into a terminal you are SSH'd into.** A new flag on the
+  chooser row: with it on, Copy puts the picture *and* a one-line command on
+  the clipboard. Paste into Discord and you get the picture; paste into an
+  SSH session and you get a command that writes the image as a file on that
+  machine. Nothing to install on the far end. Off by default, because a
+  plain text box would take the command too.
+
 ### Fixed
 
 - **The mode menu's own shortcuts work.** Every row prints its key down the

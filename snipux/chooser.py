@@ -552,6 +552,44 @@ class _CursorFlag(_Flag):
         painter.end()
 
 
+class _TerminalFlag(_Flag):
+    """Copy also carries a command that rebuilds the snip on another
+    machine. The stills side's second flag, beside Hide sensitive.
+
+    On the row rather than only in Settings for the reason the pointer flag
+    is (docs/design/pre-snip-chooser.md): the row is where the decision is
+    being made, and this one is decided by what you are about to paste into
+    rather than by a standing preference -- a terminal today, Discord
+    tomorrow.
+
+    Off by default, and deliberately not always-on: a clipboard carries both
+    forms at once and the receiving application picks, so a terminal takes
+    the text and an image editor never sees it -- but a plain text box is
+    not a terminal, and it would take the text too.
+    """
+
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(tokens.COPY_TERMINAL_GLYPH, parent)
+        self.setFixedWidth(tokens.BarMetric.BTN)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._available and self._released_inside(event):
+            self._armed = not self._armed
+            self.update()
+            self.toggled.emit(self._armed)
+
+    def paintEvent(self, event) -> None:
+        metric = tokens.BarMetric
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._paint_ground(painter)
+        offset = (metric.BTN - metric.ICON) / 2
+        _draw_icon(painter, self._glyph, self._foreground(), offset, offset, metric.ICON)
+        painter.end()
+
+
 class _DelayFlag(_Flag):
     """Delay: a click advances through `tokens.DELAYS`. It shows its value
     only when one is set -- a countdown is the thing here that can surprise
@@ -885,9 +923,11 @@ class ChooserRow(_Surface):
         self.destination = _DestinationButton(self)
         self.hide_flag = _HideFlag()
         self.cursor_flag = _CursorFlag()
+        self.terminal_flag = _TerminalFlag()
         self.delay_flag = _DelayFlag()
         self.flag_well = _Well(
-            self.hide_flag, self.cursor_flag, self.delay_flag, parent=self
+            self.hide_flag, self.cursor_flag, self.terminal_flag,
+            self.delay_flag, parent=self,
         )
         for widget in (
             self.kind_well, self.mode_chip, self.divider, self.destination, self.flag_well
@@ -1115,6 +1155,8 @@ class Chooser(QWidget):
     hideSensitiveChanged = pyqtSignal(bool)
     # The record side's equivalent: whether the pointer is filmed.
     recordCursorChanged = pyqtSignal(bool)
+    # Whether Copy also carries the paste-into-a-terminal command.
+    copyForTerminalChanged = pyqtSignal(bool)
 
     def __init__(self, parent=None, *, screen_rect: QRectF | None = None, origin=None):
         super().__init__(parent)
@@ -1165,11 +1207,12 @@ class Chooser(QWidget):
         row.destination.clicked.connect(self.cycle_after)
         row.hide_flag.toggled.connect(self._on_hide_toggled)
         row.cursor_flag.toggled.connect(self._on_cursor_toggled)
+        row.terminal_flag.toggled.connect(self._on_terminal_toggled)
         row.delay_flag.clicked.connect(self.cycle_delay)
         self.tab.clicked.connect(self.reopen)
         for control in (
             row.stills, row.record, row.destination,
-            row.hide_flag, row.cursor_flag, row.delay_flag,
+            row.hide_flag, row.cursor_flag, row.terminal_flag, row.delay_flag,
         ):
             control.hovered.connect(self._on_control_hovered)
 
@@ -1179,6 +1222,11 @@ class Chooser(QWidget):
         self._refresh()
 
     # -- state -----------------------------------------------------------
+
+    @property
+    def copy_for_terminal(self) -> bool:
+        """Whether Copy will also carry the rebuild command."""
+        return self.row.terminal_flag.is_armed()
 
     @property
     def record_cursor(self) -> bool:
@@ -1353,6 +1401,11 @@ class Chooser(QWidget):
         self.row.hide_flag.set_armed(on)
         self._refresh()
 
+    def set_copy_for_terminal(self, on: bool) -> None:
+        """Seed the terminal flag from stored config. Never emits."""
+        self.row.terminal_flag.set_armed(on)
+        self._refresh()
+
     def set_record_cursor(self, on: bool) -> None:
         """Seed the pointer flag from stored config. Never emits -- the
         same split every other control here keeps between being told and
@@ -1385,6 +1438,10 @@ class Chooser(QWidget):
     def _on_cursor_toggled(self, on: bool) -> None:
         self._refresh()
         self.recordCursorChanged.emit(on)
+
+    def _on_terminal_toggled(self, on: bool) -> None:
+        self._refresh()
+        self.copyForTerminalChanged.emit(on)
 
     def set_record_after_default(self, after: str) -> None:
         """Seed what the record side opens on, from Settings. Applied on the
@@ -1609,6 +1666,9 @@ class Chooser(QWidget):
             return self._hide_sensitive_reason
         return tokens.HIDE_SENSITIVE_HINT[self.hide_sensitive]
 
+    def _terminal_tooltip(self) -> str:
+        return tokens.COPY_TERMINAL_HINT[self.row.terminal_flag.is_armed()]
+
     def _cursor_tooltip(self) -> str:
         if not self.row.cursor_flag.is_available():
             return self._record_cursor_reason
@@ -1630,6 +1690,8 @@ class Chooser(QWidget):
             return tokens.HIDE_SENSITIVE_GLYPH, self._hide_tooltip()
         if control is row.cursor_flag:
             return tokens.RECORD_CURSOR_GLYPH, self._cursor_tooltip()
+        if control is row.terminal_flag:
+            return tokens.COPY_TERMINAL_GLYPH, self._terminal_tooltip()
         return "timer", self._delay_tooltip()
 
     def _on_control_hovered(self, control: QWidget, hovered: bool) -> None:
@@ -1664,6 +1726,10 @@ class Chooser(QWidget):
         # question, and a still has no pointer in it to keep or drop.
         row.cursor_flag.setVisible(not stills)
         row.cursor_flag.setToolTip(self._cursor_tooltip())
+        # Stills only, like Hide sensitive: a recording is a file from the
+        # start, and `scp` is what moves a file to another machine.
+        row.terminal_flag.setVisible(stills)
+        row.terminal_flag.setToolTip(self._terminal_tooltip())
         armed_delay = self._delay != tokens.DELAY_DEFAULT
         row.delay_flag.set_value(self._delay if armed_delay else "")
         row.delay_flag.setToolTip(self._delay_tooltip())

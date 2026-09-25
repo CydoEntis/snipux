@@ -1695,7 +1695,7 @@ class TestCopyGoesThroughOutput:
 
     def test_copy_uses_the_shared_clipboard_helper(self, monkeypatch):
         copied = []
-        monkeypatch.setattr(review_module.output, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(review_module.output, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         window = ReviewWindow(make_image(40, 30))
 
         window.copy()

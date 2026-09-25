@@ -2456,7 +2456,7 @@ class TestCopy:
     def test_copy_puts_the_flattened_selection_on_the_clipboard(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay()
         overlay.add_mark(
@@ -2477,7 +2477,7 @@ class TestCopy:
         # whatever was on the clipboard when the overlay first opened.
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay()
 
@@ -4169,7 +4169,7 @@ class TestFloatingBarIntegration:
     def test_copy_button_click_copies_the_current_marks(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay(size=(200, 200))
         overlay.set_selection(QRect(0, 0, 200, 200))
@@ -4194,7 +4194,7 @@ class TestFloatingBarIntegration:
         # later Snip request for the rest of the session. Mirrors
         # TestKeyboardEnter's own "and closes" test above for Enter's
         # copy-and-dismiss, but through the bar's actual button.
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: None)
         overlay = self._overlay(size=(200, 200))
         overlay.show()
         QTest.qWaitForWindowExposed(overlay)
@@ -5237,7 +5237,7 @@ class TestOverlayWindowToasts:
         return overlay
 
     def test_copy_shows_the_copied_to_clipboard_toast(self, monkeypatch):
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: None)
         overlay = self._overlay()
 
         overlay.copy()
@@ -5314,7 +5314,7 @@ class TestOverlayWindowToasts:
         # above: none of this file's other OverlayWindow pixel tests call
         # .show() before grab()ing, so a toast triggered by any of the four
         # actions below must not become a real, paintable child widget.
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: None)
         frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
         overlay = OverlayWindow(frame)
         overlay.set_selection(QRect(0, 0, 200, 200))
@@ -5330,7 +5330,7 @@ class TestToastExcludedFromExport:
     """SNX-45 AC: 'a toast never appears in the exported image.'"""
 
     def test_rendered_image_is_unaffected_by_a_toast_shown_over_it(self, monkeypatch):
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: None)
         size = (600, 600)
         frame = make_frame(image_size=size, logical_size=size)
         overlay = OverlayWindow(frame)
@@ -6608,7 +6608,7 @@ class TestInstantCapture:
 
     def test_a_region_drag_copies_and_closes_on_release(self, monkeypatch):
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         overlay = self._overlay()
 
         self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
@@ -6621,7 +6621,7 @@ class TestInstantCapture:
         # The whole reason this hangs off a commit funnel and not
         # `set_selection`, which runs on every move of a live drag.
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         overlay = self._overlay()
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
@@ -6636,7 +6636,7 @@ class TestInstantCapture:
         # a misfire that copied the screen and vanished would be the worst
         # possible reading of "instant".
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         overlay = self._overlay()
 
         self._drag(overlay, QPoint(100, 100), QPoint(105, 104))
@@ -6646,7 +6646,7 @@ class TestInstantCapture:
 
     def test_picking_a_window_copies_it_immediately(self, monkeypatch):
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         overlay = self._overlay()
         overlay._chooser.set_mode("Window")
 
@@ -6657,7 +6657,7 @@ class TestInstantCapture:
 
     def test_full_screen_copies_without_a_click_at_all(self, monkeypatch):
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         overlay = self._overlay()
 
         overlay._chooser.set_mode("Full screen")
@@ -6668,7 +6668,7 @@ class TestInstantCapture:
     def test_edit_leaves_the_frame_up_with_the_bar_on_it(self, monkeypatch):
         # The default, and the behaviour every version before this had.
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         overlay = self._overlay(outcome="edit")
 
         self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
@@ -6681,7 +6681,7 @@ class TestInstantCapture:
         # `review` is about what opens *after* the overlay, so the overlay
         # itself behaves exactly as `edit` does.
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         overlay = self._overlay(outcome="review")
 
         self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
@@ -6692,7 +6692,7 @@ class TestInstantCapture:
     def test_it_reports_the_capture_the_same_way_copy_always_has(self, monkeypatch):
         # `app.py` opens the review window off this hook; instant is the
         # ordinary Copy path, so it reports like one.
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: None)
         reported = []
         frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
         overlay = OverlayWindow(
@@ -6716,7 +6716,7 @@ class TestInstantCapture:
         monkeypatch.setattr(overlay_module.setup_desktop, "load_instant_saves", lambda *a, **k: True)
         monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         overlay = self._overlay()
 
         self._drag(overlay, QPoint(100, 100), QPoint(400, 350))
@@ -8253,7 +8253,7 @@ class TestKeyboardEnter:
     def test_enter_copies_the_flattened_selection_and_closes(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay()
         overlay.add_mark(
@@ -8267,7 +8267,7 @@ class TestKeyboardEnter:
         assert not overlay.isVisible()
 
     def test_enter_key_variant_also_dismisses(self, monkeypatch):
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: None)
         overlay = self._overlay()
 
         QTest.keyClick(overlay, Qt.Key.Key_Enter)
@@ -8278,7 +8278,7 @@ class TestKeyboardEnter:
         # Nothing to flatten or copy without a selection yet.
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay(with_selection=False)
 
@@ -8321,7 +8321,7 @@ class TestLabelEnterDoesNotDismissOverlay:
     def test_enter_commits_the_label_and_leaves_the_overlay_open(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay()
         overlay._bar.select_tool("text")
@@ -8358,7 +8358,7 @@ class TestLabelEnterDoesNotDismissOverlay:
     def test_enter_with_no_label_being_edited_still_copies_and_closes(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay()
 
@@ -8401,7 +8401,7 @@ class TestKeyboardEscapeTwoStage:
     def test_second_escape_with_nothing_left_closes_without_capturing(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay()
         overlay.add_mark(
@@ -8487,7 +8487,7 @@ class TestCloseButton:
     def test_click_discards_ink_and_closes_without_capturing(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay()
         overlay.add_mark(
@@ -8583,7 +8583,7 @@ class TestKeyboardShortcutSuppression:
     def test_enter_does_not_copy_or_close_while_a_slider_has_focus(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            output_module, "copy_image_to_clipboard", lambda image: calls.append(image)
+            output_module, "copy_image_to_clipboard", lambda image, **_kwargs: calls.append(image)
         )
         overlay = self._overlay()
         overlay.show()
@@ -9079,7 +9079,7 @@ class TestHideSensitiveText:
 
     def test_an_instant_copy_already_has_the_value_blacked_out(self, recognizer, monkeypatch):
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
         overlay = self._overlay()
         overlay._on_captured = lambda image, path: None
@@ -9522,7 +9522,7 @@ class TestTheTabModeCapturesTheBrowsersPage:
         # had to be held back until that was answered. With that question
         # gone, holding back would just mean a mode that never finishes.
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
         overlay = self._overlay(QRectF(-1720, 300, 1280, 700))
         overlay._on_captured = lambda image, path: None
@@ -9793,7 +9793,7 @@ class TestActiveWindowTakesTheWindowTheUserWasIn:
 
     def test_instant_finishes_the_moment_it_is_chosen(self, monkeypatch):
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
         overlay = self._overlay(_FakeFocusedWindowProvider(self.NOTES))
         overlay._on_captured = lambda image, path: None
@@ -9959,7 +9959,7 @@ class TestReuseLastRegionPreselectsIt:
 
     def test_choosing_it_with_instant_finishes_on_it(self, monkeypatch):
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
         setup_desktop.save_last_region((-1720, 300, 640, 480))
         overlay = self._overlay()
@@ -10265,7 +10265,7 @@ class TestTheDestinationIsRemembered:
 
     def test_the_carets_choice_is_stored_too(self, monkeypatch):
         # The control actually reached for in the report.
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: None)
         overlay = self._overlay()
         overlay._chooser.set_after("review")
         overlay.set_selection(QRect(100, 100, 300, 250))
@@ -12115,7 +12115,7 @@ class TestFullScreenFollowsThePointerBeforeItCommits:
 
     def test_picking_it_arms_rather_than_captures(self, monkeypatch):
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
         overlay = self._overlay(monkeypatch, after="instant")
 
@@ -12176,7 +12176,7 @@ class TestFullScreenFollowsThePointerBeforeItCommits:
 
     def test_instant_finishes_on_the_click_not_on_the_pick(self, monkeypatch):
         copied = []
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: copied.append(image))
         monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
         overlay = self._overlay(monkeypatch, after="instant")
         overlay._on_captured = lambda image, path: None
@@ -12465,7 +12465,7 @@ class TestTheDestinationMenuChangesTheDestination:
         _close_stray_toplevel_windows()
 
     def _overlay(self, monkeypatch, tmp_path, after: str) -> OverlayWindow:
-        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image: None)
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", lambda image, **_kwargs: None)
         monkeypatch.setattr(app_module.Path, "home", lambda: tmp_path)
         frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
         overlay = OverlayWindow(frame)
@@ -14229,3 +14229,61 @@ class TestModeLettersFollowTheRow:
         assert overlay._chooser.phase == "collapsed"
         assert overlay._selection == selection
         assert overlay.isVisible()
+
+
+class TestCopyForATerminal:
+    """With the row's flag armed, one Copy carries both forms: the picture
+    for anything that takes pictures, and a command that rebuilds it for a
+    terminal, which cannot take a picture at all.
+    """
+
+    def _overlay(self, armed):
+        frame = make_frame(image_size=(120, 90), logical_size=(120, 90))
+        overlay = OverlayWindow(frame)
+        # Shown, because a toast is only raised on a visible window -- and
+        # one of these tests is about what the toast says.
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(10, 10, 60, 40))
+        overlay._chooser.set_copy_for_terminal(armed)
+        return overlay
+
+    def _copied(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            output_module, "copy_image_to_clipboard",
+            lambda image, **kwargs: calls.append((image, kwargs.get("also_as_text", ""))),
+        )
+        return calls
+
+    def test_armed_it_carries_the_rebuild_command_too(self, monkeypatch):
+        calls = self._copied(monkeypatch)
+        overlay = self._overlay(armed=True)
+
+        overlay.copy()
+
+        _image, as_text = calls[0]
+        assert as_text.startswith("base64 -d > '")
+
+    def test_off_it_is_the_picture_alone(self, monkeypatch):
+        # The text is not free: a plain text box is not a terminal.
+        calls = self._copied(monkeypatch)
+        overlay = self._overlay(armed=False)
+
+        overlay.copy()
+
+        _image, as_text = calls[0]
+        assert as_text == ""
+
+    def test_a_snip_too_big_to_paste_says_so(self, monkeypatch):
+        calls = self._copied(monkeypatch)
+        overlay = self._overlay(armed=True)
+        monkeypatch.setattr(
+            overlay_module.output, "terminal_paste_command", lambda image, name=None: None
+        )
+
+        overlay.copy()
+
+        _image, as_text = calls[0]
+        assert as_text == "", "nothing that would not work is put on the clipboard"
+        assert design.tokens.COPY_TERMINAL_TOO_BIG in overlay._toast._text_label.text()

@@ -4815,6 +4815,13 @@ class OverlayWindow(QWidget):
         self._chooser.recordCursorChanged.connect(
             setup_desktop.save_recording_draw_cursor
         )
+        # Copy for a terminal: seeded and persisted the same way, and not
+        # gated on any platform -- the machine that has to understand the
+        # text is the one being pasted into, not this one.
+        self._chooser.set_copy_for_terminal(setup_desktop.load_copy_for_terminal())
+        self._chooser.copyForTerminalChanged.connect(
+            setup_desktop.save_copy_for_terminal
+        )
         # Copy text (#82): the same seam, greyed the same way, on the bar
         # rather than the chooser -- see FloatingBar's own docstring.
         self._bar.set_copy_text_available(
@@ -7003,10 +7010,26 @@ class OverlayWindow(QWidget):
     def copy(self) -> None:
         """Flatten the marks present *right now* onto the selection's crop,
         place the result on the clipboard, and toast `Copied to clipboard`.
+
+        With the row's terminal flag armed the clipboard carries a second
+        form as well: a command that rebuilds the image wherever it is
+        pasted. Both at once, because the application receiving a paste is
+        what picks between them -- an editor takes the picture and never
+        sees the text, and a terminal, which cannot take a picture at all,
+        takes the text.
         """
         image = self.rendered_image()
-        output.copy_image_to_clipboard(image)
-        self._show_toast("copy", "Copied to clipboard")
+        as_text = ""
+        if self._chooser.copy_for_terminal:
+            as_text = output.terminal_paste_command(image) or ""
+        output.copy_image_to_clipboard(image, also_as_text=as_text)
+        if self._chooser.copy_for_terminal and not as_text:
+            # Said, not swallowed: the flag is armed and this copy did not
+            # honour it, so a paste into a terminal is about to do nothing
+            # and the user would have no way to know why.
+            self._show_toast("copy", design.tokens.COPY_TERMINAL_TOO_BIG)
+        else:
+            self._show_toast("copy", "Copied to clipboard")
         self._report_capture(image, None)
 
     def copy_text(self) -> None:
