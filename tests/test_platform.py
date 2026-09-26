@@ -31,6 +31,7 @@ import ctypes
 import importlib
 import json
 import subprocess
+import pathlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -2727,3 +2728,69 @@ class TestTakingTheKeyboard:
 
         assert windows.WindowsPlatform().take_keyboard_focus(NoHandle()) is False
         assert "could not read the window handle" in capsys.readouterr().out
+
+
+class TestUpdatingItself:
+    """Which file a build updates from, and how it applies it. Default is
+    "this build does not update itself", so a platform with no answer keeps
+    pointing at the release page rather than guessing.
+    """
+
+    def test_the_base_platform_updates_nothing(self):
+        assert Platform.update_asset_name(object(), "1.2.0") is None
+        assert Platform.install_update(object(), pathlib.Path("x.exe")) is False
+
+    def test_a_pip_install_has_no_asset(self, monkeypatch):
+        # `snipux --update` already upgrades it, and there is no file on the
+        # release that would.
+        monkeypatch.setattr(windows.sys, "frozen", False, raising=False)
+
+        assert windows.WindowsPlatform().update_asset_name("1.2.0") is None
+
+    def test_an_installed_build_updates_from_the_installer(self, monkeypatch, tmp_path):
+        exe = tmp_path / "snipux.exe"
+        exe.write_text("")
+        (tmp_path / "unins000.exe").write_text("")   # what the installer leaves
+        monkeypatch.setattr(windows.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(windows.sys, "executable", str(exe))
+
+        assert windows.WindowsPlatform().update_asset_name("1.2.0") == "snipux-setup-1.2.0.exe"
+
+    def test_the_portable_build_does_not_update_itself_yet(self, monkeypatch, tmp_path):
+        # No uninstaller beside it, so it was not installed -- replacing a
+        # running file is its own piece of work.
+        exe = tmp_path / "snipux.exe"
+        exe.write_text("")
+        monkeypatch.setattr(windows.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(windows.sys, "executable", str(exe))
+
+        assert windows.WindowsPlatform().update_asset_name("1.2.0") is None
+
+    def test_applying_runs_the_installer_silently_and_asks_it_to_relaunch(
+        self, monkeypatch, tmp_path
+    ):
+        started = []
+        monkeypatch.setattr(
+            windows.subprocess, "Popen",
+            lambda command, **kwargs: started.append(command),
+        )
+        setup = tmp_path / "snipux-setup-1.2.0.exe"
+
+        assert windows.WindowsPlatform().install_update(setup) is True
+
+        command = started[0]
+        assert command[0] == str(setup)
+        # Silent because the user already agreed by clicking Update, and
+        # /LAUNCHAPP=1 because Inno skips its post-install launch in silent
+        # mode -- without it the update would end with snipux simply gone.
+        assert "/VERYSILENT" in command
+        assert "/LAUNCHAPP=1" in command
+
+    def test_an_installer_that_will_not_start_is_reported(self, monkeypatch, tmp_path, capsys):
+        def refuse(command, **kwargs):
+            raise OSError("access is denied")
+
+        monkeypatch.setattr(windows.subprocess, "Popen", refuse)
+
+        assert windows.WindowsPlatform().install_update(tmp_path / "setup.exe") is False
+        assert "could not start the update installer" in capsys.readouterr().out

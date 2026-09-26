@@ -16,11 +16,12 @@ and only for something the user just asked for.
 | Files | saving captures, `config.json` and friends | Only the save/recording folders, the config folder, and a file the user opened. |
 | `pip` (subprocess) | `snipux --update` | Only when the user runs it. Refused in the standalone exe. |
 | `ffmpeg` (subprocess) | H.264 and GIF export | Optional, found on `PATH`, never installed by us. |
-| GitHub Releases API (`urllib`, HTTPS) | tray -> Check for updates | One unauthenticated GET, only when the user picks it. No token, no identifiers, nothing sent about the machine. Never automatic. |
+| GitHub Releases API (`urllib`, HTTPS) | the update check, and the download behind Update | One unauthenticated GET, at most once a day plus whenever the tray asks; a second GET of the release file only if the user clicks Update. No token, no identifiers, nothing sent about the machine. |
 
-**Not used anywhere:** telemetry, crash upload, automatic updates, accounts,
-camera, location, keylogging. The one network request is the update check in
-the row above, and only when the user asks for it. The microphone is used only
+**Not used anywhere:** telemetry, crash upload, accounts, camera, location,
+keylogging. The only network is the row above: a daily check for a newer
+release, and a download only if the user clicks Update. Nothing installs
+itself. The microphone is used only
 when the user picks Mic for a recording. The
 global hotkey registers one chord; snipux does not see other keystrokes.
 

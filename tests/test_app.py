@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import datetime
+
 import pytest
 from PyQt6.QtCore import (
     QCoreApplication,
@@ -37,6 +39,7 @@ from conftest import skip_on_windows
 from snipux import app
 from snipux import handoff
 from snipux import overlay as overlay_module
+from snipux import updates
 from snipux import __version__, setup_desktop
 from snipux.design import tokens
 from snipux.app import (
@@ -109,6 +112,29 @@ def _assume_setup_already_ran(monkeypatch):
     exercise the real "nothing has run yet" branch.
     """
     monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+
+
+@pytest.fixture(autouse=True)
+def _assume_updates_checked_today(monkeypatch):
+    """Default every test to "the daily update check already ran today",
+    the same way `_assume_setup_already_ran` above defaults desktop
+    integration to done.
+
+    `main()`/`run_resident_app()` calls `check_for_updates_daily()` on the
+    launch that becomes resident, and any test that lets that happen for
+    real would make an HTTPS request to GitHub -- answering a different
+    question on every run, failing on a machine with no connection, and
+    leaving a daemon thread to deliver its reply into a controller the test
+    has already finished with. CLAUDE.md: a test must never call the real
+    network, and this is the one thing in snipux that can.
+
+    `TestCheckingForUpdates` overrides it to exercise the check itself,
+    with an opener of its own.
+    """
+    monkeypatch.setattr(
+        app.setup_desktop, "load_update_checked_on",
+        lambda cd=None: datetime.date.today().isoformat(),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -6992,8 +7018,14 @@ class TestCheckingForUpdates:
         return controller, said
 
     def _answer(self, controller, said, latest):
-        """Drive the reply the worker thread would deliver, without one."""
-        controller._on_update_checked(latest)
+        """Drive the reply the worker thread would deliver, without one.
+
+        `latest` is a version string for brevity; the handler takes the
+        whole release, because what it does next depends on which file that
+        release carries for this build.
+        """
+        release = updates.Release(version=latest) if latest is not None else None
+        controller._on_update_checked(release)
         return said[-1]
 
     def test_a_newer_version_says_how_to_get_it(self, make_controller, monkeypatch):
@@ -7102,3 +7134,207 @@ class TestCheckingForUpdates:
 
         assert started == [sentinel]
         assert said[0].startswith("Checking")
+
+
+class TestTheDailyCheck:
+    """Once a day, on the launch that becomes resident. A stored date and
+    not a timer: snipux is open while it is being used and shut the rest of
+    the time, so a timer set for every twenty-four hours would fire
+    mid-session or never.
+    """
+
+    def _controller(self, make_controller, monkeypatch):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        return controller, said
+
+    def _checked_on(self, monkeypatch, day):
+        written = []
+        monkeypatch.setattr(app.setup_desktop, "load_update_checked_on", lambda cd=None: day)
+        monkeypatch.setattr(
+            app.setup_desktop, "save_update_checked_on",
+            lambda value, cd=None: written.append(value) or True,
+        )
+        return written
+
+    def _never_reaches_the_network(self, monkeypatch):
+        started = []
+
+        class FakeCheck:
+            class finished:
+                @staticmethod
+                def connect(_slot):
+                    pass
+
+            def __init__(self, opener=None):
+                started.append(opener)
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(app.updates, "UpdateCheck", FakeCheck)
+        return started
+
+    def test_it_runs_on_the_first_launch_of_a_new_day(self, make_controller, monkeypatch):
+        controller, _said = self._controller(make_controller, monkeypatch)
+        written = self._checked_on(monkeypatch, "2020-01-01")
+        started = self._never_reaches_the_network(monkeypatch)
+
+        assert controller.check_for_updates_daily() is True
+        assert started, "the check never ran"
+        assert written == [datetime.date.today().isoformat()]
+
+    def test_a_second_launch_the_same_day_does_not(self, make_controller, monkeypatch):
+        controller, _said = self._controller(make_controller, monkeypatch)
+        self._checked_on(monkeypatch, datetime.date.today().isoformat())
+        started = self._never_reaches_the_network(monkeypatch)
+
+        assert controller.check_for_updates_daily() is False
+        assert started == []
+
+    def test_it_says_nothing_when_there_is_nothing_to_say(self, make_controller, monkeypatch):
+        # A notification every morning reading "you are up to date" is how a
+        # useful notice becomes one people dismiss unread.
+        controller, said = self._controller(make_controller, monkeypatch)
+
+        controller._on_update_checked(updates.Release(version=app.__version__), quiet=True)
+
+        assert said == []
+
+    def test_a_quiet_check_that_fails_stays_quiet(self, make_controller, monkeypatch):
+        controller, said = self._controller(make_controller, monkeypatch)
+
+        controller._on_update_checked(None, quiet=True)
+
+        assert said == []
+
+    def test_but_a_new_version_is_always_worth_saying(self, make_controller, monkeypatch):
+        controller, said = self._controller(make_controller, monkeypatch)
+
+        controller._on_update_checked(updates.Release(version="99.0.0"), quiet=True)
+
+        assert said and "99.0.0" in said[0]
+
+
+class TestOneClickUpdate:
+    """The tray item is a check until a check has found something, and an
+    install after that -- its label says which.
+    """
+
+    RELEASE = None  # set per test
+
+    def _controller(self, make_controller, monkeypatch, *, asset=None, url=None):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        monkeypatch.setattr(
+            app.platform.current, "update_asset_name", lambda version: asset
+        )
+        assets = {asset: url} if asset and url else {}
+        release = updates.Release(version="99.0.0", assets=assets)
+        return controller, said, release
+
+    def test_a_build_that_can_update_itself_is_offered_the_install(
+        self, make_controller, monkeypatch
+    ):
+        controller, said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="snipux-setup-99.0.0.exe", url="https://example/setup.exe",
+        )
+
+        controller._on_update_checked(release)
+
+        assert "pick Update in the tray menu" in said[0]
+        if controller.update_action is not None:
+            assert controller.update_action.text() == "Update to 99.0.0"
+
+    def test_a_build_that_cannot_is_told_where_to_go_instead(
+        self, make_controller, monkeypatch
+    ):
+        # A .deb needs root and a pip install has no file on the release at
+        # all, so for those the honest answer is the page or `--update`.
+        controller, said, release = self._controller(make_controller, monkeypatch)
+
+        controller._on_update_checked(release)
+
+        assert "--update" in said[0] or "Releases page" in said[0]
+
+    def test_the_menu_item_installs_once_something_is_found(
+        self, make_controller, monkeypatch
+    ):
+        controller, _said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="snipux-setup-99.0.0.exe", url="https://example/setup.exe",
+        )
+        controller._on_update_checked(release)
+        asked = []
+        monkeypatch.setattr(
+            controller, "install_available_update", lambda: asked.append(1)
+        )
+
+        controller._on_update_action()
+
+        assert asked == [1]
+
+    def test_downloading_hands_the_file_to_the_platform(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="snipux-setup-99.0.0.exe", url="https://example/setup.exe",
+        )
+        controller._available_update = release
+        applied = []
+        monkeypatch.setattr(
+            app.platform.current, "install_update",
+            lambda path: applied.append(path) or True,
+        )
+        monkeypatch.setattr(controller, "_quit", lambda: None)
+
+        controller._on_update_downloaded(str(tmp_path / "setup.exe"))
+
+        assert applied == [tmp_path / "setup.exe"]
+
+    def test_applying_it_quits_so_the_installer_can_replace_the_exe(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _said, _release = self._controller(make_controller, monkeypatch)
+        monkeypatch.setattr(app.platform.current, "install_update", lambda path: True)
+        quit_calls = []
+        monkeypatch.setattr(controller, "_quit", lambda: quit_calls.append(1))
+
+        controller._on_update_downloaded(str(tmp_path / "setup.exe"))
+
+        assert quit_calls == [1], "an installer cannot write over a running exe"
+
+    def test_a_failed_download_says_so_and_stays_running(
+        self, make_controller, monkeypatch
+    ):
+        controller, said, _release = self._controller(make_controller, monkeypatch)
+        quit_calls = []
+        monkeypatch.setattr(controller, "_quit", lambda: quit_calls.append(1))
+
+        controller._on_update_downloaded(None)
+
+        assert "Could not download" in said[-1]
+        assert quit_calls == []
+
+    def test_a_platform_that_refuses_leaves_snipux_alone(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, said, _release = self._controller(make_controller, monkeypatch)
+        monkeypatch.setattr(app.platform.current, "install_update", lambda path: False)
+        quit_calls = []
+        monkeypatch.setattr(controller, "_quit", lambda: quit_calls.append(1))
+
+        controller._on_update_downloaded(str(tmp_path / "setup.exe"))
+
+        assert "Could not start the update" in said[-1]
+        assert quit_calls == [], "nothing was replaced, so nothing should close"

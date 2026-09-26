@@ -95,9 +95,11 @@ snipux/
   handoff.py    forwards `snipux --snip` / `--settings` to the running snipux
                 over its socket without loading Qt; anything else goes on to
                 app.py's CLI
-  updates.py    "Check for updates": one GET to the GitHub Releases API, and
-                only when the user picks it from the tray. No startup check,
-                no timer -- the only network request snipux makes
+  updates.py    the update check and the download behind it: one GET to the
+                GitHub Releases API, at most once a day plus whenever the
+                tray asks, and a second GET only if the user then clicks
+                Update. The only network snipux uses. Installing is never
+                automatic -- the check can only put a sentence in the tray
   pin.py        a snip kept on top of everything else, where it was cut
   sensitive.py  finding passwords, keys and card numbers in recognised text
   textsnap.py   grouping recognised words into lines a mark can snap to
