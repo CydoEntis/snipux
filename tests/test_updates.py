@@ -140,3 +140,74 @@ class TestUpdateCheckRunsOffTheCallingThread:
             loop_guard += 1
 
         assert seen == [None]
+
+
+class TestTheReleaseItself:
+    def test_it_carries_every_asset_by_name(self):
+        payload = json.dumps({
+            "tag_name": "v1.2.0",
+            "assets": [
+                {"name": "snipux-setup-1.2.0.exe",
+                 "browser_download_url": "https://example/setup.exe"},
+                {"name": "snipux_1.2.0_amd64.deb",
+                 "browser_download_url": "https://example/deb"},
+            ],
+        }).encode()
+
+        release = updates.fetch_latest_release(lambda _url: payload)
+
+        assert release.version == "1.2.0"
+        assert release.asset("snipux-setup-1.2.0.exe") == "https://example/setup.exe"
+        assert release.asset("nothing-like-this") is None
+
+    def test_one_malformed_asset_does_not_lose_the_rest(self):
+        payload = json.dumps({
+            "tag_name": "v1.2.0",
+            "assets": [
+                {"name": "good", "browser_download_url": "https://example/good"},
+                {"name": "no url here"},
+            ],
+        }).encode()
+
+        release = updates.fetch_latest_release(lambda _url: payload)
+
+        assert release.asset("good") == "https://example/good"
+
+    def test_a_release_with_no_assets_is_still_a_release(self):
+        payload = json.dumps({"tag_name": "v1.2.0"}).encode()
+
+        assert updates.fetch_latest_release(lambda _url: payload).assets == {}
+
+    def test_a_failed_request_is_an_answer(self):
+        def refuse(_url):
+            raise OSError("no route to host")
+
+        assert updates.fetch_latest_release(refuse) is None
+
+
+class TestDownloading:
+    def test_it_writes_the_file_and_says_so(self, tmp_path):
+        target = tmp_path / "setup.exe"
+
+        assert updates.download("https://example/x", target, lambda _url: b"payload") is True
+        assert target.read_bytes() == b"payload"
+
+    def test_a_cut_download_leaves_nothing_that_looks_finished(self, tmp_path):
+        # Written to a .part and renamed only once it is all there: half an
+        # installer that looks like an installer is worse than none.
+        target = tmp_path / "setup.exe"
+
+        def die_midway(_url):
+            raise OSError("connection reset")
+
+        assert updates.download("https://example/x", target, die_midway) is False
+        assert not target.exists()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_it_reports_rather_than_raises(self, tmp_path, capsys):
+        def refuse(_url):
+            raise OSError("connection reset")
+
+        updates.download("https://example/x", tmp_path / "setup.exe", refuse)
+
+        assert "could not download the update" in capsys.readouterr().out.lower()

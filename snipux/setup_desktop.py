@@ -652,6 +652,22 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
     return save_after_capture("review" if enabled else tokens.AFTER_DEFAULT, config_dir)
 
 
+def load_update_checked_on(config_dir: Path | None = None) -> str:
+    """The date of the last update check, as `YYYY-MM-DD`, or empty.
+
+    A date and not a timestamp: the check runs on the first launch after
+    the day turns over, so the only question ever asked of this is "was
+    that today", and a date answers it without any arithmetic about
+    timezones or clocks that moved.
+    """
+    stored = _read_config(config_dir).get("update_checked_on")
+    return stored if isinstance(stored, str) else ""
+
+
+def save_update_checked_on(day: str, config_dir: Path | None = None) -> bool:
+    return _write_config("update_checked_on", day, config_dir)
+
+
 def load_instant_saves(config_dir: Path | None = None) -> bool:
     """Whether `instant` (`tokens.AFTER_CAPTURE`) writes the file instead
     of copying to the clipboard -- the one thing `overlay.py`'s
