@@ -1235,6 +1235,10 @@ class AppController:
         self._flow_menu: FlowMenu | None = None
         # The update check in flight, if any -- see check_for_updates.
         self._update_check: updates.UpdateCheck | None = None
+        # What the last check found once it found something newer, and
+        # the download of it while one is running.
+        self._available_update: updates.Release | None = None
+        self._update_download: updates.Download | None = None
         # One guard for all three bar menus: it blocks only the control
         # the pointer is over, so clicking Audio while Delay is open
         # still swaps them in one press. See MenuReopenGuard.
@@ -1329,7 +1333,7 @@ class AppController:
         # which is how 1.0.1 could have gone unnoticed by everyone already
         # running 1.0.0.
         self.update_action = menu.addAction("Check for updates")
-        self.update_action.triggered.connect(self.check_for_updates)
+        self.update_action.triggered.connect(self._on_update_action)
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         # #85: rebuilds on `aboutToShow`, but that alone is not trusted --
@@ -1882,7 +1886,17 @@ class AppController:
             message = f"Saved to {path.parent.name}/{path.name}"
         self._report_shortcut(message)
 
-    def check_for_updates(self, opener=None) -> None:
+    def _on_update_action(self) -> None:
+        """One menu item doing two jobs: it checks until a check has found
+        something, and installs after that. Its label says which -- "Check
+        for updates", then "Update to 1.2.0" -- so neither is a surprise.
+        """
+        if self._available_update is not None:
+            self.install_available_update()
+            return
+        self.check_for_updates()
+
+    def check_for_updates(self, opener=None, *, quiet: bool = False) -> None:
         """Ask GitHub whether there is a newer release, and say so.
 
         Off the UI thread (`updates.UpdateCheck`), because this is a network
@@ -1893,7 +1907,8 @@ class AppController:
         `opener` is passed only by tests, which must never reach the
         network.
         """
-        self._report_shortcut("Checking for updates…")
+        if not quiet:
+            self._report_shortcut("Checking for updates…")
         # No parent: AppController is a plain object, not a QObject, so
         # there is nothing here for Qt to own this. Held in an attribute
         # instead, for the same reason every window is -- a QObject with a
@@ -1901,28 +1916,113 @@ class AppController:
         # and collecting it mid-emit is a crash rather than a missed
         # message.
         check = updates.UpdateCheck(opener)
-        check.finished.connect(self._on_update_checked)
+        check.finished.connect(
+            lambda release: self._on_update_checked(release, quiet=quiet)
+        )
         self._update_check = check
         check.start()
 
-    def _on_update_checked(self, latest) -> None:
+    def check_for_updates_daily(self, opener=None) -> bool:
+        """The once-a-day check, run when this process becomes resident.
+
+        A stored date rather than a timer: snipux is open while it is being
+        used and closed the rest of the time, so a timer set to fire every
+        twenty-four hours would go off mid-session or never. The first
+        launch after the day turns over is the moment that actually exists.
+
+        Quiet, so it says nothing unless there is something to say. A
+        notification every morning reading "you are up to date" is how a
+        useful notice becomes one people learn to dismiss unread.
+        """
+        today = datetime.date.today().isoformat()
+        if setup_desktop.load_update_checked_on() == today:
+            return False
+        setup_desktop.save_update_checked_on(today)
+        self.check_for_updates(opener, quiet=True)
+        return True
+
+    def _on_update_checked(self, release, *, quiet: bool = False) -> None:
         """Report what the check found, in the terms of the build that is
-        actually running -- a frozen build cannot pip-upgrade itself, so
-        telling its user to run `snipux --update` would be useless."""
+        actually running: a pip install upgrades itself, an installed build
+        can download and run the new installer, and one that can do neither
+        is told where to go instead.
+        """
         self._update_check = None
-        if latest is None:
-            self._report_shortcut(
-                "Could not check for updates. Try again when you are online."
-            )
+        if release is None:
+            if not quiet:
+                self._report_shortcut(
+                    "Could not check for updates. Try again when you are online."
+                )
             return
-        if not updates.is_newer(latest, __version__):
-            self._report_shortcut(f"Snipux {__version__} is the newest version.")
+        if not updates.is_newer(release.version, __version__):
+            if not quiet:
+                self._report_shortcut(f"Snipux {__version__} is the newest version.")
+            return
+
+        self._available_update = release
+        asset = platform.current.update_asset_name(release.version)
+        if asset and release.asset(asset):
+            # The one case where snipux can finish the job itself, so the
+            # menu item stops asking a question and offers the answer.
+            if self.update_action is not None:
+                self.update_action.setText(f"Update to {release.version}")
+            self._report_shortcut(
+                f"Snipux {release.version} is available -- pick Update in the "
+                "tray menu to install it."
+            )
             return
         if getattr(sys, "frozen", False):
             how = "Download it from the Releases page."
         else:
             how = "Run `snipux --update` to install it."
-        self._report_shortcut(f"Snipux {latest} is available. {how}")
+        self._report_shortcut(f"Snipux {release.version} is available. {how}")
+
+    def install_available_update(self, opener=None) -> None:
+        """Download the release the check found, and hand it to the
+        platform to apply.
+
+        Off the UI thread, for the same reason the check is: this is tens of
+        megabytes, and a tray menu frozen for the length of a download looks
+        like a crash.
+        """
+        release = self._available_update
+        asset = (
+            platform.current.update_asset_name(release.version) if release else None
+        )
+        url = release.asset(asset) if (release and asset) else None
+        if url is None:
+            # Nothing to install after all -- fall back to asking.
+            self.check_for_updates(opener)
+            return
+
+        self._report_shortcut(f"Downloading Snipux {release.version}…")
+        destination = Path(tempfile.gettempdir()) / asset
+        download = updates.Download(url, destination, opener)
+        download.finished.connect(self._on_update_downloaded)
+        self._update_download = download
+        download.start()
+
+    def _on_update_downloaded(self, path) -> None:
+        """Apply what was downloaded, and then get out of its way.
+
+        `install_update` returning True means this process is about to be
+        replaced -- an installer cannot write over an exe that is still
+        running -- so quitting is the last step of the update rather than
+        something left for the user to work out.
+        """
+        self._update_download = None
+        if path is None:
+            self._report_shortcut(
+                "Could not download the update. Try again when you are online."
+            )
+            return
+        if not platform.current.install_update(Path(path)):
+            self._report_shortcut(
+                "Could not start the update. Install it from the Releases page."
+            )
+            return
+        self._report_shortcut("Updating Snipux…")
+        self._quit()
 
     def _open_player(self, path: Path) -> None:
         """Open a landed recording in the trim editor.
@@ -3718,6 +3818,11 @@ def _become_resident(
     controller = AppController(registry, transport)
     controller.install_hotkey_listener()
     controller.run_first_launch_setup()
+    # Once a day, on the launch that becomes resident -- so at most one
+    # request per day however many snips are taken, and none at all on a
+    # day snipux is not opened. Says nothing unless there is something to
+    # say (`check_for_updates_daily`).
+    controller.check_for_updates_daily()
     if start_capture_immediately:
         controller.start_capture()
     if open_settings_immediately:

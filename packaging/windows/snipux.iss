@@ -82,6 +82,13 @@ Source: "..\..\dist\snipux.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; the icon and the hotkey are all written by snipux itself on first launch,
 ; so there is nothing for [Icons] to duplicate here.
 Filename: "{app}\snipux.exe"; Description: "Start Snipux"; Flags: nowait postinstall skipifsilent
+; And the same launch for a silent install started *by snipux updating
+; itself*: the line above is skipped in silent mode, which is right for
+; someone scripting an install and wrong for an update, where the
+; application was running a moment ago and has just been closed so its own
+; file could be written. `/LAUNCHAPP=1` is what tells the two apart --
+; snipux passes it, a scripted install does not.
+Filename: "{app}\snipux.exe"; Flags: nowait; Check: LaunchAfterSilentInstall
 
 [UninstallRun]
 ; `--remove` undoes exactly what that first launch wrote -- the shortcuts,
@@ -136,6 +143,14 @@ begin
      (CompareText(Location, RemoveBackslashUnlessRoot(ExpandConstant('{app}'))) <> 0) then
     DelTree(Location, True, True, True);
   RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, OldAppKey);
+end;
+
+function LaunchAfterSilentInstall(): Boolean;
+begin
+  // Only for a silent install that asked for it: the visible wizard has
+  // its own "Start Snipux" checkbox above, and running both would start
+  // two.
+  Result := WizardSilent and (ExpandConstant('{param:LAUNCHAPP|0}') = '1');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

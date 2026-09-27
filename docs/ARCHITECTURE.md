@@ -10,7 +10,7 @@ point. `CLAUDE.md` has the short version; this is the long one.
 - Everything platform-specific in one package, `snipux/platform/`, so a new
   OS is a port and not a rewrite.
 - Local by default. No accounts, no telemetry; the only network traffic is
-  an update check the user asks for.
+  a daily update check, and a download if the user chooses to update.
 - Three runtime dependencies: PyQt6, jeepney, and the standard library.
 
 ## The one rule
@@ -129,11 +129,13 @@ packaging/          the one-line installers, the Linux .deb and AppImage, the
 
 ## Security and privacy
 
-- **No network except when asked.** The only socket in normal operation is a
-  local `QLocalServer`, so a second `snipux --snip` hands its request to the
-  running one. Two things reach the internet, both started by the user: the
-  tray's Check for updates (`updates.py`, one GET to the GitHub Releases
-  API) and `snipux --update` (which runs `pip`).
+- **Almost no network.** The only socket in normal operation is a local
+  `QLocalServer`, so a second `snipux --snip` hands its request to the
+  running one. What reaches the internet is `updates.py`: a check against
+  the GitHub Releases API, at most once a day plus whenever the tray asks,
+  and the release file itself only after the user clicks Update. Plus
+  `snipux --update`, which runs `pip`. Nothing is installed without a
+  click.
 - Pixels leave memory only when the user chooses Copy, Save, Pin or Record.
 - OCR (Copy text, Hide sensitive) runs on the device. On Windows the image
   goes to a temp file that PowerShell reads through `Windows.Media.Ocr`, and
