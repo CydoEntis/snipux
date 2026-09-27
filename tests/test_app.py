@@ -138,6 +138,26 @@ def _assume_updates_checked_today(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _assume_integration_points_here(monkeypatch):
+    """Default every test to "the desktop entries already name this build",
+    the third of the same family as the two fixtures above.
+
+    `run_first_launch_setup()` re-runs `install_desktop_integration()` when
+    the recorded target disagrees with the running one, and
+    `_isolated_config` gives every test an empty config -- so without this,
+    every test that reaches a resident launch would disagree, and write
+    this developer's real Start Menu/autostart entries for whatever
+    interpreter pytest happens to be running under. The stale-target tests
+    below override it with a target of their own.
+    """
+    monkeypatch.setattr(
+        app.setup_desktop,
+        "load_integration_target",
+        lambda cd=None: app.AppController._integration_target(),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _windows_land_where_they_are_put(monkeypatch):
     """Default every test here to a desktop that places snipux's own windows
     where it asks -- X11 and Windows -- rather than whatever this machine's
@@ -5600,10 +5620,23 @@ class TestRunFirstLaunchSetup:
         )
         controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
 
+        recorded = []
+        monkeypatch.setattr(
+            app.setup_desktop,
+            "save_integration_target",
+            lambda target, cd=None: recorded.append(target) or True,
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/opt/snipux")
+        )
+
         controller.run_first_launch_setup()
 
         assert install_calls == [{}]
         assert save_calls == [True]
+        # Recorded alongside "setup ran", so a later launch of a *different*
+        # build can tell that the entries are no longer its own.
+        assert recorded == [str(Path("/opt/snipux"))]
 
     def test_reports_what_it_set_up_and_how_to_change_it(self, make_controller, monkeypatch):
         monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: False)
@@ -5665,6 +5698,148 @@ class TestRunFirstLaunchSetup:
         # re-report) this on every single startup -- see
         # run_first_launch_setup()'s own docstring.
         assert save_calls == [True]
+
+    def test_repoints_the_entries_when_they_name_a_different_build(
+        self, make_controller, monkeypatch
+    ):
+        # The bug: installing the Windows installer over a pip install (or
+        # the .deb over a pipx one) leaves the Start Menu and autostart
+        # entries naming the *old* binary, which is still on disk and still
+        # runs -- so the next login silently brings back the version the
+        # user just replaced. Setup has run, so the "already complete"
+        # record alone can never notice.
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(
+            app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/old/snipux"))
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/new/snipux")
+        )
+        install_calls = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: install_calls.append(kwargs) or 0,
+        )
+        recorded = []
+        monkeypatch.setattr(
+            app.setup_desktop,
+            "save_integration_target",
+            lambda target, cd=None: recorded.append(target) or True,
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+        report_calls = []
+        monkeypatch.setattr(controller, "_report_shortcut", report_calls.append)
+
+        controller.run_first_launch_setup()
+
+        assert install_calls == [{}]
+        assert recorded == [str(Path("/new/snipux"))]
+        # Silent: the user installed a version and got it. Nothing to say.
+        assert report_calls == []
+
+    def test_repoints_entries_written_before_the_target_was_ever_recorded(
+        self, make_controller, monkeypatch
+    ):
+        # Everyone upgrading from a build that predates this record has an
+        # empty one, and no way to know whether their entries are stale --
+        # so they get the one rewrite that makes them right, once.
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(app.setup_desktop, "load_integration_target", lambda cd=None: "")
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/new/snipux")
+        )
+        install_calls = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: install_calls.append(kwargs) or 0,
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "save_integration_target", lambda target, cd=None: True
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()
+
+        assert install_calls == [{}]
+
+    def test_leaves_the_entries_alone_when_they_already_name_this_build(
+        self, make_controller, monkeypatch
+    ):
+        # The overwhelmingly common launch. Rewriting shortcuts and icons on
+        # every startup would be work nobody asked for, on the path that
+        # decides how fast snipux is there after login.
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/here/snipux")
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/here/snipux"))
+        )
+
+        def install_must_not_be_called(**kwargs):
+            raise AssertionError("install_desktop_integration() must not re-run for the same build")
+
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", install_must_not_be_called
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()  # must not raise
+
+    def test_a_build_that_cannot_locate_itself_repoints_nothing(
+        self, make_controller, monkeypatch
+    ):
+        # `find_console_script()` returning None means we cannot say where
+        # this build lives -- which is not evidence that the entries are
+        # wrong, and rewriting them with a guess would be worse than the
+        # stale entry it is trying to fix.
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(app.setup_desktop, "find_console_script", lambda name="snipux": None)
+        monkeypatch.setattr(
+            app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/old/snipux"))
+        )
+
+        def install_must_not_be_called(**kwargs):
+            raise AssertionError("install_desktop_integration() must not run on a guess")
+
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", install_must_not_be_called
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()  # must not raise
+
+    def test_an_unimplemented_platform_repoints_nothing_and_does_not_stop_the_app(
+        self, make_controller, monkeypatch
+    ):
+        # macOS (SNX-85) never wrote an entry to re-point, and a stale
+        # record must not turn that into a crash on the resident launch --
+        # the same "a step that cannot run does not stop the app" rule the
+        # first-run branch above already follows.
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/new/snipux")
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/old/snipux"))
+        )
+
+        def raise_unimplemented(**kwargs):
+            raise app.platform.UnimplementedPlatformError("macOS", "install_desktop_integration")
+
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", raise_unimplemented
+        )
+
+        def save_must_not_be_called(target, cd=None):
+            raise AssertionError("nothing was re-pointed, so there is nothing to record")
+
+        monkeypatch.setattr(app.setup_desktop, "save_integration_target", save_must_not_be_called)
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()  # must not raise
 
 
 class TestACaptureIsConfirmed:

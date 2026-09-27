@@ -1529,13 +1529,22 @@ class AppController:
         step anyone has to remember to run before the app is actually
         usable.
 
-        `setup_desktop.load_setup_complete()` is the record: once it says
-        setup already ran, this returns immediately without rewriting
-        anything. `--setup` (`main()`'s own dispatch, untouched by this)
-        stays the explicit way to redo it after a move or an upgrade, and
-        `--remove` deletes the same config file this record lives in, so a
-        later launch sees no record and sets up again rather than assuming
-        the install is still there.
+        `setup_desktop.load_setup_complete()` is the record that it ran at
+        all, and `load_integration_target()` is the record of *which build
+        it ran for*. The second exists because the first is not enough:
+        install the Windows installer over a pip install, or the .deb over
+        a pipx one, and setup has certainly run -- for a binary that is
+        still sitting on disk and is no longer the one you just installed.
+        The Start Menu entry and the autostart entry both keep launching
+        the old one, which is how an upgrade silently un-upgrades itself at
+        the next login. Measured on a real machine doing exactly that.
+
+        So a launch whose own path is not the one the entries name rewrites
+        them, quietly, and says nothing: the user did not ask for a report,
+        they asked for the version they installed. `--setup` stays the
+        explicit way to redo it by hand, and `--remove` deletes the config
+        file both records live in, so a later launch sets up from scratch
+        rather than assuming the install is still there.
 
         Called once by `_become_resident()`, the same place
         `install_hotkey_listener()` is and for the same reason: this is the
@@ -1554,6 +1563,7 @@ class AppController:
         there is nothing left for this method to catch.
         """
         if setup_desktop.load_setup_complete():
+            self._repoint_integration_if_stale()
             return
 
         try:
@@ -1567,11 +1577,44 @@ class AppController:
             return
 
         setup_desktop.save_setup_complete(True)
+        setup_desktop.save_integration_target(self._integration_target())
         shortcut = setup_desktop.human_shortcut(setup_desktop.load_shortcut())
         self._report_shortcut(
             f"Snipux is set up: it starts at login, and {shortcut} starts a "
             "snip. Change the shortcut any time in Settings."
         )
+
+    @staticmethod
+    def _integration_target() -> str:
+        """The path the desktop entries would be written with right now.
+
+        `find_console_script()` and not `sys.executable`, because it already
+        answers this question per build: the AppImage file rather than the
+        squashfs mount it is running from, the frozen exe rather than an
+        interpreter, and pip's own console script rather than python.exe --
+        which is what makes this comparable across launches of the *same*
+        install while still differing between two different ones.
+        """
+        found = setup_desktop.find_console_script()
+        return str(found) if found is not None else ""
+
+    def _repoint_integration_if_stale(self) -> None:
+        """Rewrite the desktop entries when they name a different build.
+
+        Silent on the happy path, which is nearly every launch: the record
+        matches and there is nothing to do. An empty record is the same
+        answer -- it means the entries predate this record existing, and
+        rewriting them to the build that is running is right either way.
+        """
+        target = self._integration_target()
+        if not target or target == setup_desktop.load_integration_target():
+            return
+        try:
+            platform.current.install_desktop_integration()
+        except platform.UnimplementedPlatformError:
+            # Nothing to re-point on a platform that never pointed anywhere.
+            return
+        setup_desktop.save_integration_target(target)
 
     def _quit(self) -> None:
         QApplication.instance().quit()
