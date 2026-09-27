@@ -1252,6 +1252,56 @@ class WindowsPlatform(Platform):
         """
         return "Windows records whatever the capture shows"
 
+    def _installed_by_the_installer(self) -> bool:
+        """Whether this exe was put here by snipux-setup, rather than being
+        the portable one.
+
+        The uninstaller sitting beside it is the tell, and it is a better
+        one than the install path: both builds live in the same %LOCALAPPDATA% directory
+        (the installer puts them there precisely so the portable build does
+        not duplicate itself), so the directory says nothing. Only the
+        installer writes unins000.exe.
+        """
+        return (Path(sys.executable).parent / "unins000.exe").is_file()
+
+    def update_asset_name(self, version: str) -> str | None:
+        """The installer for `version`, for a build that came from one.
+
+        Nothing for the portable exe yet: replacing a running file means
+        renaming it out of the way first, which is its own piece of work
+        (see the update ticket) rather than something to half-do here.
+        """
+        if not getattr(sys, "frozen", False):
+            return None            # pip install: `snipux --update` already works
+        if not self._installed_by_the_installer():
+            return None
+        return f"snipux-setup-{version}.exe"
+
+    def install_update(self, downloaded: Path) -> bool:
+        """Run the downloaded installer silently and let it replace this
+        process's own exe.
+
+        `/VERYSILENT` because the user already agreed by clicking Update --
+        a wizard at that point is a second answer to the same question.
+        `/LAUNCHAPP=1` is snipux.iss's own switch, which is what brings the
+        application back afterwards: Inno skips its normal post-install
+        launch in silent mode, so without it the update would end with
+        snipux simply gone.
+
+        Started detached and then True: the installer has to close this
+        process to write over its file, and the caller quits on True so it
+        happens in the right order rather than being killed mid-snip.
+        """
+        try:
+            subprocess.Popen(
+                [str(downloaded), "/VERYSILENT", "/NORESTART", "/LAUNCHAPP=1"],
+                close_fds=True,
+            )
+        except OSError as exc:
+            print(f"Note: could not start the update installer: {exc}")
+            return False
+        return True
+
     def take_keyboard_focus(self, widget) -> bool:
         """Windows refuses `activateWindow()` from a process that is not
         already in front -- see `_take_foreground`, which is where the whole

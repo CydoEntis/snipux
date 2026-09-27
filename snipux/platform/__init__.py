@@ -236,6 +236,28 @@ class Platform(ABC):
         the app from its own entry (Linux's `.desktop` file).
         """
 
+    def update_asset_name(self, version: str) -> str | None:
+        """Which file on the release this build updates itself from, or
+        None when it cannot -- which is the default.
+
+        None is not a failure: a pip install updates with `snipux --update`
+        and a `.deb` needs root, so for those the honest answer is that the
+        release page is where the user goes. A platform that returns a name
+        is promising `install_update` knows what to do with that file.
+        """
+        return None
+
+    def install_update(self, downloaded: "Path") -> bool:
+        """Apply the file `update_asset_name` named, and say whether it is
+        going ahead. Called only after the user has clicked Update.
+
+        True means the application is about to be replaced and should stop:
+        every route here ends with this process exiting so its own file can
+        be written, and with the new one started in its place. False means
+        nothing happened and snipux carries on as it was.
+        """
+        return False
+
     def take_keyboard_focus(self, widget) -> bool:
         """Make `widget` the window the keyboard is actually talking to, and
         say whether it worked. Called straight after `raise_()` and

@@ -488,10 +488,19 @@ had, and everyone else gets an Add/Remove Programs entry and
 `winget install snipux`. Do not delete either one to solve the other's
 problem -- `docs/releasing.md` has the reasoning in full.
 
-**The update check is never automatic.** There is no check at startup and no
-timer; the tray item is the only thing that makes the request. A screenshot
-tool that phones home unasked is one people stop trusting, and checking
-automatically would buy nothing but hearing about a release a few days sooner.
+**Checking is daily; installing is never automatic.** The check runs on the
+first launch after the day turns over, and otherwise when the tray asks. That
+reverses the original entry here, which said it should only ever happen on
+request -- the reasoning was about a tool phoning home unasked, and it holds
+for *sending* something, which this does not: one GET to a public API,
+carrying nothing but the request. What it bought in exchange for that was a
+tool that knew an update existed only if you thought to ask, on a machine
+where snipux is used daily.
+
+Installing is the line that stays. A check can put a sentence in the tray and
+relabel one menu item; replacing the application is a click, every time. A
+snipux that replaced itself mid-snip, or that pulled in a bad release with no
+gate, would be worse than one that needs a click.
 
 **One palette, one accent.** The overlay's warm glass and the windows' cool
 chrome were two casts side by side, read as two applications, and were

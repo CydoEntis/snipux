@@ -362,14 +362,20 @@ change between versions.
 > can get wrong. (`--force-reinstall` overrides the comparison, but it also
 > re-downloads Qt, so it is not what to tell people.)
 
-**Checking is something you ask for.** Tray → **Check for updates** asks GitHub
-whether there is a newer release, and says how to update the build you are
-actually running — `snipux --update` for a pip install, the Releases page for
-the exe, the `.deb` or the AppImage, since pip cannot upgrade any of those.
+**Snipux checks once a day and offers one click.** The first time you open it
+on a new day it asks GitHub whether there is a newer release. If there is, the
+tray says so and its menu item becomes **Update to 1.2.0** — which downloads
+the new installer, runs it, and starts Snipux again.
 
-That request is the only time Snipux touches the network. There is no check at
-startup, no timer, and nothing is sent but the request itself: no token, no
-identifiers, nothing about the machine.
+Nothing installs itself. The check can only put a sentence in the tray; every
+update is a click.
+
+Where that one click is not possible, it tells you what is: `snipux --update`
+for a pip install, and the Releases page for a `.deb` (installing a package
+needs root, which a tray app should not be asking for).
+
+Those are the only times Snipux touches the network, and nothing is sent but
+the request: no token, no identifiers, nothing about the machine.
 
 ### Installing a specific version, or offline
 
