@@ -5,10 +5,12 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.1.3 — 2026-09-27
+
 ### Added
 
 - **One-click updating.** Snipux now checks for a new release once a day, and
-  when there is one the tray menu offers **Update to 1.2.0** — it downloads
+  when there is one the tray menu offers to install it by name — it downloads
   the installer, runs it, and starts Snipux again. Nothing installs itself:
   every update is still a click. On builds that cannot update themselves --
   a pip install, a `.deb` — it says what to do instead.
