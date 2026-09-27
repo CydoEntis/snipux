@@ -5,6 +5,13 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- Installing over a different copy of Snipux — the Windows installer on top of
+  a `pip install`, say — left the Start Menu and login entries starting the old
+  copy, so the next sign-in quietly put you back on the version you replaced.
+  Snipux now notices its shortcuts point somewhere else and repairs them.
+
 ## 1.1.3 — 2026-09-27
 
 ### Added
