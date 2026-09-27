@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.1.4 — 2026-09-27
+
 ### Fixed
 
 - Installing over a different copy of Snipux — the Windows installer on top of
