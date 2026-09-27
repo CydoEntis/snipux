@@ -30,16 +30,18 @@ everything. `setup_desktop.config_path()` is the one function that knows it.
 One flat JSON object. Keys in use today:
 
 ```text
-after_capture               native_resolution           setup_complete
-bar_position                recent_captures             shortcut
-default_ink                 recording_after             tool_defaults
-default_tool                recording_draw_cursor       tray_toggles
-filename_pattern            recording_filename_pattern  watermark_backing
-hide_sensitive              recording_folder            watermark_color
-hints_enabled               recording_frame_rate        watermark_font
-instant_saves               remember_tool               watermark_image
-last_region                 reuse_last_region           watermark_kind
-last_tool                   save_folder                 watermark_text
+after_capture               last_tool                   save_folder
+bar_position                native_resolution           setup_complete
+default_ink                 recent_captures             shortcut
+default_tool                recording_after             tool_defaults
+filename_pattern            recording_draw_cursor       tray_toggles
+hide_sensitive              recording_filename_pattern  update_checked_on
+hints_enabled               recording_folder            watermark_backing
+instant_saves               recording_frame_rate        watermark_color
+integration_target          remember_tool               watermark_font
+last_region                 reuse_last_region           watermark_image
+                                                        watermark_kind
+                                                        watermark_text
 ```
 
 ### Rules

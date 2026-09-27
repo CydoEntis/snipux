@@ -652,6 +652,25 @@ def save_review_window(enabled: bool, config_dir: Path | None = None) -> bool:
     return save_after_capture("review" if enabled else tokens.AFTER_DEFAULT, config_dir)
 
 
+def load_integration_target(config_dir: Path | None = None) -> str:
+    """Which snipux the desktop entries currently point at, as
+    `find_console_script()` reported it when they were written.
+
+    Kept because "setup has run" is not the same question as "setup points
+    at *this* build". Someone who installs the Windows installer over a pip
+    install, or the .deb over a pipx one, has shortcuts naming a binary
+    that is still on disk and is no longer the one they just installed --
+    so the app they launch from the Start Menu, and the one autostart
+    brings back at login, is the old one. Silently.
+    """
+    stored = _read_config(config_dir).get("integration_target")
+    return stored if isinstance(stored, str) else ""
+
+
+def save_integration_target(target: str, config_dir: Path | None = None) -> bool:
+    return _write_config("integration_target", target, config_dir)
+
+
 def load_update_checked_on(config_dir: Path | None = None) -> str:
     """The date of the last update check, as `YYYY-MM-DD`, or empty.
 
