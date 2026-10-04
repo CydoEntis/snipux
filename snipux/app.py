@@ -100,7 +100,7 @@ from snipux.overlay import (
     open_overlay,
     other_screens_nearest_first,
 )
-from snipux import __version__, design, handoff, output, platform, setup_desktop, updates
+from snipux import __version__, design, handoff, history, output, platform, setup_desktop, updates
 # Re-exported: the controller calls these by bare name, and tests patch them
 # here to intercept the controller's own calls.
 from snipux.output import (
@@ -1266,6 +1266,7 @@ class AppController:
         # Held for the same reason `_overlay` is: a parentless widget is
         # fair game for the GC while its window is still on screen.
         self._settings: SettingsDialog | None = None
+        self._history_panel: history.HistoryPanel | None = None
         self._reviews: list[ReviewWindow] = []
         self._pins: list[PinWindow] = []
         self._players: list[PlayerWindow] = []
@@ -1310,15 +1311,19 @@ class AppController:
         # pair couldn't change mode once a selection was already open.
         self.snip_action = menu.addAction("Snip")
         self.snip_action.triggered.connect(self.start_capture)
+        # The history panel is also a double-click on the icon, but GNOME's
+        # indicator passes no clicks on, so it needs a menu row as well.
+        self.history_action = menu.addAction("Show history")
+        self.history_action.triggered.connect(self.open_history)
         # #85: the Recent section. A submenu, not a batch of top-level rows,
         # so an empty list costs the top-level menu nothing at all --
         # `_rebuild_recent_menu` inserts and removes its one menu action
         # rather than leaving it in place disabled, which is the "greyed
         # placeholder" the ticket rules out.
-        self._recent_menu = QMenu("Recent")
+        self._recent_menu = QMenu("Recent saves")
         # The last few things snipux copied, to copy again. Shown and hidden
         # the same way Recent is; output.py holds the list, in memory only.
-        self._copy_history_menu = QMenu("Copy history")
+        self._copy_history_menu = QMenu("Recent copies")
         # The two editors, reachable without taking a snip or recording
         # first -- for something taken earlier, or by another tool.
         self.edit_image_action = menu.addAction("Edit an image...")
@@ -1411,6 +1416,9 @@ class AppController:
         self._recent_menu.clear()
         for path in survivors:
             action = self._recent_menu.addAction(path.name)
+            thumbnail = history.saved_thumbnail(path)
+            if thumbnail is not None:
+                action.setIcon(self._menu_thumbnail(thumbnail))
             action.triggered.connect(lambda checked=False, p=path: self._open_recent_capture(p))
 
         menu_action = self._recent_menu.menuAction()
@@ -1439,12 +1447,7 @@ class AppController:
         for item in items:
             action = self._copy_history_menu.addAction(self._copy_history_label(item))
             if item.kind == "image":
-                action.setIcon(QIcon(QPixmap.fromImage(item.value.scaled(
-                    self._COPY_HISTORY_THUMBNAIL,
-                    self._COPY_HISTORY_THUMBNAIL,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                ))))
+                action.setIcon(self._menu_thumbnail(item.value))
             action.triggered.connect(lambda checked=False, i=item: self._recopy(i))
         if items:
             self._copy_history_menu.addSeparator()
@@ -1457,6 +1460,68 @@ class AppController:
                 self._tray_menu.insertMenu(self.edit_image_action, self._copy_history_menu)
         elif menu_action in self._tray_menu.actions():
             self._tray_menu.removeAction(menu_action)
+        self._refresh_history_panel()
+
+    def _menu_thumbnail(self, image: QImage) -> QIcon:
+        return QIcon(QPixmap.fromImage(image.scaled(
+            self._COPY_HISTORY_THUMBNAIL,
+            self._COPY_HISTORY_THUMBNAIL,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )))
+
+    def open_history(self) -> None:
+        """Show the history panel, or bring back the one already open."""
+        if self._history_panel is not None and self._history_panel.isVisible():
+            self._history_panel.raise_()
+            self._history_panel.activateWindow()
+            return
+        panel = history.HistoryPanel(output.copy_history(), self._existing_recent_captures())
+        panel.copy_requested.connect(self._on_history_copy)
+        panel.open_requested.connect(self._on_history_open)
+        panel.destroyed.connect(lambda *_: self._forget_history_panel(panel))
+        self._history_panel = panel
+        panel.show_beside_tray()
+        platform.current.take_keyboard_focus(panel)
+
+    def _forget_history_panel(self, panel) -> None:
+        if self._history_panel is panel:
+            self._history_panel = None
+
+    def _existing_recent_captures(self) -> list[Path]:
+        return [path for path in setup_desktop.load_recent_captures() if path.exists()]
+
+    def _refresh_history_panel(self) -> None:
+        panel = getattr(self, "_history_panel", None)
+        if panel is not None:
+            panel.refresh(output.copy_history(), self._existing_recent_captures())
+
+    def _on_history_copy(self, entry) -> None:
+        """A click in the panel: a copy goes back on the clipboard as it
+        was; a saved file goes on as its picture, or as the file itself for
+        a recording -- the same two shapes a fresh one would have had."""
+        if isinstance(entry, Path):
+            if not entry.exists():
+                self._report_shortcut(f"{entry.name} is gone -- it was moved, renamed or deleted.")
+                self._rebuild_recent_menu()
+                return
+            image = QImage()
+            if entry.suffix.lower() not in history.VIDEO_SUFFIXES:
+                image = QImageReader(str(entry)).read()
+            if image.isNull():
+                output.copy_file_to_clipboard(entry)
+            else:
+                output.copy_image_to_clipboard(image)
+        else:
+            output.recopy(entry)
+        if self._history_panel is not None:
+            self._history_panel.close()
+        self._report_shortcut("Copied to clipboard")
+
+    def _on_history_open(self, path: Path) -> None:
+        if self._history_panel is not None:
+            self._history_panel.close()
+        self._open_recent_capture(path)
 
     def _copy_history_label(self, item) -> str:
         when = item.copied_at.strftime("%H:%M")
@@ -1518,22 +1583,32 @@ class AppController:
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-    # Windows sends `Trigger` for a single click and both `Trigger` and
-    # `DoubleClick` for a double one; GNOME's indicator sends neither and
-    # only opens the menu. Acting on both is what makes one click and two
-    # clicks agree -- `open_settings` raises the window it already opened
-    # rather than opening a second, so the extra event costs nothing.
-    #
-    # `MiddleClick` is deliberately not here: it pastes on X11, and a paste
+    # GNOME's indicator sends no clicks at all and only opens the menu,
+    # which is why Settings and Show history are both menu rows too.
+    # `MiddleClick` is deliberately ignored: it pastes on X11, and a paste
     # gesture that opened a window would be a surprise.
-    _TRAY_OPENS_SETTINGS = (
-        QSystemTrayIcon.ActivationReason.Trigger,
-        QSystemTrayIcon.ActivationReason.DoubleClick,
-    )
-
     def _on_tray_activated(self, reason) -> None:
-        if reason in self._TRAY_OPENS_SETTINGS:
-            self.open_settings()
+        """One click opens Settings, two open the history panel.
+
+        Windows reports a double click as `Trigger` then `DoubleClick`, so
+        Settings waits out the double-click interval first: opened at once,
+        it would appear under every history panel too."""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._settings_click_timer().stop()
+            self.open_history()
+        elif reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._settings_click_timer().start(
+                QGuiApplication.styleHints().mouseDoubleClickInterval()
+            )
+
+    def _settings_click_timer(self) -> QTimer:
+        timer = getattr(self, "_settings_click", None)
+        if timer is None:
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self.open_settings())
+            self._settings_click = timer
+        return timer
 
     def open_settings(self) -> None:
         """Show the Settings window, or raise the one already open.

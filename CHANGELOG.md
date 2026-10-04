@@ -7,13 +7,22 @@ use it; the commit history has the detail.
 
 ### Added
 
-- **Copy history.** The tray menu now lists the last 10 things you copied
-  with Snipux (pictures, text and recordings), so a snip you copied but
-  never saved can be copied again. Click one to put it back on the
-  clipboard. Nothing is written to disk: the list is cleared when Snipux
-  quits, and you can clear it yourself sooner.
+- **History panel.** Double-click the tray icon (or choose Show history)
+  for a column down the right of the screen with big previews of what you
+  recently copied and saved, on two tabs. Click one to copy it again;
+  saved snips also have Open.
+- **Recent copies.** The tray menu now lists the last 10 things you copied
+  with Snipux (pictures, text and recordings), next to Recent saves, each
+  with a small preview, so a snip you copied but never saved can be copied
+  again. Nothing is written to disk: the list is cleared when Snipux quits,
+  and you can clear it yourself sooner.
 - **Edit an image / Edit a recording** in the tray menu. Pick a file and
   it opens in Snipux's editor, without taking a new snip or recording first.
+
+### Changed
+
+- A single click on the tray icon now waits a moment before opening
+  Settings, so a double-click can open the history panel instead.
 
 ## 1.1.4 — 2026-09-27
 

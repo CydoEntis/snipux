@@ -32,7 +32,7 @@ and grab more than once (`docs/design/browser-capture.md`).
 entry        handoff.py  ->  app.py (CLI, tray, controller)
                |
 views        chooser.py  overlay.py  flowbars.py  review.py  player.py
-             pin.py  settings.py  winchrome.py  glass.py
+             pin.py  history.py  settings.py  winchrome.py  glass.py
                |
 model        shapes.py  marks.py  sensitive.py  textsnap.py
                |
@@ -103,6 +103,7 @@ snipux/
   review.py         the optional post-capture window
   player.py         recording player, trim and export
   pin.py            a snip pinned on top of the screen
+  history.py        the history panel of recent copies and saves
   settings.py       the Settings window
   setup_desktop.py  config.json, desktop entries, icons, the GNOME shortcut
   glass.py          cached blur behind bars and menus

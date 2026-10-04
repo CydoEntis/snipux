@@ -992,26 +992,39 @@ class TestSnipFlag:
 class TestClickingTheTrayIcon:
     """Nothing listened to the icon itself before, so clicking it did
     nothing -- and the menu's Settings item is a right-click plus a click
-    away."""
+    away. One click opens Settings; two open the history panel."""
 
     def _controller(self):
         # Built without running __init__: this is about one signal handler,
         # not about a tray, a hotkey or a capture registry.
         controller = AppController.__new__(AppController)
         opened = []
-        controller.open_settings = lambda: opened.append(True)
+        controller.open_settings = lambda: opened.append("settings")
+        controller.open_history = lambda: opened.append("history")
         return controller, opened
 
-    @pytest.mark.parametrize("reason", [
-        QSystemTrayIcon.ActivationReason.Trigger,       # one click
-        QSystemTrayIcon.ActivationReason.DoubleClick,   # two
-    ])
-    def test_a_click_opens_settings(self, reason):
+    def _wait_out_double_click(self):
+        QTest.qWait(QGuiApplication.styleHints().mouseDoubleClickInterval() + 50)
+
+    def test_a_click_opens_settings_once_it_is_not_a_double_click(self):
         controller, opened = self._controller()
 
-        controller._on_tray_activated(reason)
+        controller._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+        assert opened == []
+        self._wait_out_double_click()
 
-        assert opened == [True]
+        assert opened == ["settings"]
+
+    def test_a_double_click_opens_history_and_not_settings(self):
+        # How Windows reports it: Trigger for the first click, then
+        # DoubleClick.
+        controller, opened = self._controller()
+
+        controller._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+        controller._on_tray_activated(QSystemTrayIcon.ActivationReason.DoubleClick)
+        self._wait_out_double_click()
+
+        assert opened == ["history"]
 
     @pytest.mark.parametrize("reason", [
         QSystemTrayIcon.ActivationReason.Context,       # the right-click menu
@@ -1045,6 +1058,7 @@ class TestClickingTheTrayIcon:
             controller._settings = None
 
             controller._tray_icon.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
+            QTest.qWait(QGuiApplication.styleHints().mouseDoubleClickInterval() + 50)
 
             assert isinstance(controller._settings, SettingsDialog)
         finally:
@@ -4818,6 +4832,7 @@ class TestAppControllerTrayMenu:
         # set off from Settings and below by a separator (the "" row).
         assert [action.text() for action in controller._tray_icon.contextMenu().actions()] == [
             "Snip",
+            "Show history",
             "Edit an image...",
             "Edit a recording...",
             "",
@@ -4936,6 +4951,94 @@ class TestAppControllerCopyHistory:
 
         assert app.output.copy_history() == []
         assert controller._copy_history_menu.menuAction() not in controller._tray_menu.actions()
+
+
+class TestAppControllerHistoryPanel:
+    """Double-click (or Show history): the panel of recent copies and
+    saves. The panel itself is tested in test_history.py."""
+
+    @pytest.fixture(autouse=True)
+    def _no_wl_copy(self, monkeypatch):
+        monkeypatch.setattr(app.output.shutil, "which", lambda name: None)
+
+    def _make(self, make_controller):
+        return make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+    def _saved(self, tmp_path, name="snip.png"):
+        path = tmp_path / name
+        image = QImage(40, 30, QImage.Format.Format_RGB32)
+        image.fill(0xFF00FF00)
+        image.save(str(path), "PNG")
+        return path
+
+    def test_show_history_opens_one_panel_with_both_lists(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        app.output.copy_text_to_clipboard("copied text")
+        controller._on_captured(make_image(), self._saved(tmp_path))
+
+        controller.history_action.trigger()
+        first = controller._history_panel
+        controller.history_action.trigger()
+
+        assert controller._history_panel is first
+        assert len(first.cards) == 1
+        first.show_tab("Saved")
+        assert len(first.cards) == 1
+        first.close()
+
+    def test_a_copy_while_it_is_open_shows_up_in_it(self, make_controller):
+        controller = self._make(make_controller)
+        controller.open_history()
+
+        app.output.copy_text_to_clipboard("arrived later")
+
+        assert controller._history_panel.cards[0].preview.text() == "arrived later"
+        controller._history_panel.close()
+
+    def test_clicking_a_saved_image_copies_its_picture(self, make_controller, qapp, tmp_path):
+        controller = self._make(make_controller)
+        path = self._saved(tmp_path)
+        controller.open_history()
+
+        controller._history_panel.copy_requested.emit(path)
+
+        assert qapp.clipboard().image().pixel(0, 0) == 0xFF00FF00
+        assert controller._history_panel is None or not controller._history_panel.isVisible()
+
+    def test_clicking_a_saved_recording_copies_the_file(self, make_controller, monkeypatch, tmp_path):
+        controller = self._make(make_controller)
+        path = tmp_path / "clip.mp4"
+        path.write_bytes(b"x")
+        copied = []
+        monkeypatch.setattr(app.output, "copy_file_to_clipboard", copied.append)
+        controller.open_history()
+
+        controller._history_panel.copy_requested.emit(path)
+
+        assert copied == [path]
+
+    def test_clicking_a_copy_puts_it_back(self, make_controller, qapp):
+        controller = self._make(make_controller)
+        app.output.copy_text_to_clipboard("wanted")
+        app.output.copy_text_to_clipboard("later")
+        controller.open_history()
+
+        controller._history_panel.copy_requested.emit(app.output.copy_history()[1])
+
+        assert qapp.clipboard().text() == "wanted"
+
+    def test_open_goes_to_the_default_app(self, make_controller, monkeypatch, tmp_path):
+        controller = self._make(make_controller)
+        path = self._saved(tmp_path)
+        opened = []
+        monkeypatch.setattr(app.QDesktopServices, "openUrl", lambda url: opened.append(url))
+        controller.open_history()
+
+        controller._history_panel.open_requested.emit(path)
+
+        assert [Path(url.toLocalFile()) for url in opened] == [path]
 
 
 class TestAppControllerTrayEditors:

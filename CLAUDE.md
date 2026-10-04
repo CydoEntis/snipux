@@ -101,6 +101,8 @@ snipux/
                 Update. The only network snipux uses. Installing is never
                 automatic -- the check can only put a sentence in the tray
   pin.py        a snip kept on top of everything else, where it was cut
+  history.py    the history panel: recent copies and saves with big previews,
+                opened from the tray. A view; app.py does the copying
   sensitive.py  finding passwords, keys and card numbers in recognised text
   textsnap.py   grouping recognised words into lines a mark can snap to
   ffmpeg.py     the optional system ffmpeg: found if present, never required
