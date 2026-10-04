@@ -185,6 +185,23 @@ def _fresh_watermark_session():
             overlay.watermark_session = overlay.WatermarkChoice()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_copy_history():
+    """Start every test with an empty copy history and no one listening.
+
+    Like the watermark above, the history lasts the process, which in a
+    test run is every test -- and the listener is whichever controller was
+    built last, which by the next test is one nobody is holding any more.
+    """
+    try:
+        yield
+    finally:
+        output = sys.modules.get("snipux.output")
+        if output is not None:
+            output.set_copy_history_listener(None)
+            output._copy_history.clear()
+
+
 # The suite runs under a single shared QApplication per process (each test
 # module's own autouse fixture reuses whatever instance already exists), so
 # window-activation state leaks across files the same way it would in a real

@@ -80,3 +80,69 @@ class TestDisplayPath:
 
     def test_nothing_written_says_so(self):
         assert output.display_path(None) == "Not saved to disk"
+
+
+class TestCopyHistory:
+    """The last few copies, held in memory so one can be copied again."""
+
+    @pytest.fixture(autouse=True)
+    def _clipboard_without_wl_copy(self, qapp_for_clipboard, monkeypatch):
+        # The clipboard needs an application, and a runner that happens to
+        # have wl-copy must not have these tests start it.
+        monkeypatch.setattr(output.shutil, "which", lambda name: None)
+
+    def test_newest_first_across_all_three_kinds(self, tmp_path):
+        output.copy_text_to_clipboard("hello")
+        output.copy_image_to_clipboard(make_image())
+        output.copy_file_to_clipboard(tmp_path / "clip.webm")
+
+        assert [item.kind for item in output.copy_history()] == ["file", "image", "text"]
+
+    def test_only_the_last_ten_are_kept(self):
+        for index in range(output.COPY_HISTORY_MAX + 3):
+            output.copy_text_to_clipboard(f"copy {index}")
+
+        values = [item.value for item in output.copy_history()]
+        assert len(values) == output.COPY_HISTORY_MAX
+        assert values[0] == f"copy {output.COPY_HISTORY_MAX + 2}"
+        assert "copy 0" not in values
+
+    def test_the_kept_image_is_not_the_callers(self):
+        # The caller's image may be backed by a buffer it is about to free.
+        image = make_image()
+        output.copy_image_to_clipboard(image)
+        image.fill(0xFF000000)
+
+        assert output.copy_history()[0].value.pixel(0, 0) == 0xFF3366CC
+
+    def test_recopying_puts_it_back_and_moves_it_to_the_top(self, qapp_for_clipboard):
+        output.copy_text_to_clipboard("first")
+        output.copy_text_to_clipboard("second")
+
+        output.recopy(output.copy_history()[1])
+
+        assert qapp_for_clipboard.clipboard().text() == "first"
+        assert [item.value for item in output.copy_history()] == ["first", "second"]
+
+    def test_clearing_empties_it(self):
+        output.copy_text_to_clipboard("gone")
+
+        output.clear_copy_history()
+
+        assert output.copy_history() == []
+
+    def test_the_listener_hears_every_change(self):
+        heard = []
+        output.set_copy_history_listener(lambda: heard.append(len(output.copy_history())))
+
+        output.copy_text_to_clipboard("one")
+        output.clear_copy_history()
+
+        assert heard == [1, 0]
+
+
+@pytest.fixture
+def qapp_for_clipboard():
+    from PyQt6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])

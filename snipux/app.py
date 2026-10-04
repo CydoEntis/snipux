@@ -69,6 +69,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QLabel,
     QMenu,
     QMessageBox,
@@ -99,7 +100,7 @@ from snipux.overlay import (
     open_overlay,
     other_screens_nearest_first,
 )
-from snipux import __version__, design, handoff, platform, setup_desktop, updates
+from snipux import __version__, design, handoff, output, platform, setup_desktop, updates
 # Re-exported: the controller calls these by bare name, and tests patch them
 # here to intercept the controller's own calls.
 from snipux.output import (
@@ -1315,6 +1316,16 @@ class AppController:
         # rather than leaving it in place disabled, which is the "greyed
         # placeholder" the ticket rules out.
         self._recent_menu = QMenu("Recent")
+        # The last few things snipux copied, to copy again. Shown and hidden
+        # the same way Recent is; output.py holds the list, in memory only.
+        self._copy_history_menu = QMenu("Copy history")
+        # The two editors, reachable without taking a snip or recording
+        # first -- for something taken earlier, or by another tool.
+        self.edit_image_action = menu.addAction("Edit an image...")
+        self.edit_image_action.triggered.connect(self._choose_image_to_edit)
+        self.edit_recording_action = menu.addAction("Edit a recording...")
+        self.edit_recording_action.triggered.connect(self._choose_recording_to_edit)
+        menu.addSeparator()
         self.settings_action = menu.addAction("Settings...")
         self.settings_action.triggered.connect(self.open_settings)
         # Disabled by default and only ever enabled while a recording is
@@ -1342,12 +1353,17 @@ class AppController:
         # not been confirmed, so a capture landing is the rebuild
         # `_on_captured`/`_land_recording` can each count on for real.
         menu.aboutToShow.connect(self._rebuild_recent_menu)
+        # A copy can come from the overlay, a review window or a pin, none
+        # of which go through this controller, so output.py tells us
+        # instead of the menu relying on `aboutToShow` alone.
+        output.set_copy_history_listener(self._rebuild_copy_history_menu)
         self._tray_icon.setContextMenu(menu)
         # A click on the icon itself opens Settings. Nothing listened to
         # the icon before, so clicking it did nothing at all -- and the
         # menu's own Settings item is a right-click plus a click away.
         self._tray_icon.activated.connect(self._on_tray_activated)
         self._rebuild_recent_menu()
+        self._rebuild_copy_history_menu()
 
         if self._tray_available:
             self._tray_icon.show()
@@ -1400,9 +1416,87 @@ class AppController:
         menu_action = self._recent_menu.menuAction()
         if survivors:
             if menu_action not in self._tray_menu.actions():
-                self._tray_menu.insertMenu(self.settings_action, self._recent_menu)
+                # Right above Copy history when that is showing, so the two
+                # lists of past things sit together under Snip.
+                history_action = self._copy_history_menu.menuAction()
+                if history_action in self._tray_menu.actions():
+                    before = history_action
+                else:
+                    before = self.edit_image_action
+                self._tray_menu.insertMenu(before, self._recent_menu)
         elif menu_action in self._tray_menu.actions():
             self._tray_menu.removeAction(menu_action)
+
+    _COPY_HISTORY_LABEL_CHARS = 40
+    _COPY_HISTORY_THUMBNAIL = 48
+
+    def _rebuild_copy_history_menu(self) -> None:
+        """Refresh the tray's Copy history section: newest first, a click
+        copies that entry again. Shown only while it has rows, the same
+        as Recent, and placed just below it."""
+        items = output.copy_history()
+        self._copy_history_menu.clear()
+        for item in items:
+            action = self._copy_history_menu.addAction(self._copy_history_label(item))
+            if item.kind == "image":
+                action.setIcon(QIcon(QPixmap.fromImage(item.value.scaled(
+                    self._COPY_HISTORY_THUMBNAIL,
+                    self._COPY_HISTORY_THUMBNAIL,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                ))))
+            action.triggered.connect(lambda checked=False, i=item: self._recopy(i))
+        if items:
+            self._copy_history_menu.addSeparator()
+            clear = self._copy_history_menu.addAction("Clear history")
+            clear.triggered.connect(output.clear_copy_history)
+
+        menu_action = self._copy_history_menu.menuAction()
+        if items:
+            if menu_action not in self._tray_menu.actions():
+                self._tray_menu.insertMenu(self.edit_image_action, self._copy_history_menu)
+        elif menu_action in self._tray_menu.actions():
+            self._tray_menu.removeAction(menu_action)
+
+    def _copy_history_label(self, item) -> str:
+        when = item.copied_at.strftime("%H:%M")
+        if item.kind == "image":
+            return f"Picture {item.value.width()}×{item.value.height()}  ·  {when}"
+        if item.kind == "file":
+            return f"{item.value.name}  ·  {when}"
+        # The first line only, and not all of that: a menu row is not the
+        # place to read a paragraph of recognised text.
+        text = " ".join(item.value.split())
+        if len(text) > self._COPY_HISTORY_LABEL_CHARS:
+            text = text[: self._COPY_HISTORY_LABEL_CHARS - 1] + "…"
+        return f"“{text}”  ·  {when}"
+
+    def _recopy(self, item) -> None:
+        output.recopy(item)
+        self._report_shortcut("Copied to clipboard")
+
+    def _choose_image_to_edit(self) -> None:
+        """Tray: pick an image and open it in the review window, the same
+        place `snipux PATH` opens one."""
+        path, _ = QFileDialog.getOpenFileName(
+            None,
+            "Edit an image",
+            str(setup_desktop.load_save_folder()),
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)",
+        )
+        if path:
+            self.open_image_path(Path(path))
+
+    def _choose_recording_to_edit(self) -> None:
+        """Tray: pick a recording and open it in the player/trim editor."""
+        path, _ = QFileDialog.getOpenFileName(
+            None,
+            "Edit a recording",
+            str(setup_desktop.load_recording_folder()),
+            "Recordings (*.mp4 *.webm *.mkv *.mov)",
+        )
+        if path:
+            self._open_player(Path(path))
 
     def _open_recent_capture(self, path: Path) -> None:
         """Open a Recent-section row in the system's default app for it

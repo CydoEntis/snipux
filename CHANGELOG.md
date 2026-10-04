@@ -5,6 +5,16 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **Copy history.** The tray menu now lists the last 10 things you copied
+  with Snipux (pictures, text and recordings), so a snip you copied but
+  never saved can be copied again. Click one to put it back on the
+  clipboard. Nothing is written to disk: the list is cleared when Snipux
+  quits, and you can clear it yourself sooner.
+- **Edit an image / Edit a recording** in the tray menu. Pick a file and
+  it opens in Snipux's editor, without taking a new snip or recording first.
+
 ## 1.1.4 — 2026-09-27
 
 ### Fixed

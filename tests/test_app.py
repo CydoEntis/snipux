@@ -4814,9 +4814,13 @@ class TestAppControllerTrayMenu:
         # "Check for updates" sits directly above Quit: it is the least
         # frequent thing in this menu and the only one that is not about
         # the snip in front of you, so it belongs at the bottom -- but
-        # above Quit, which stays last.
+        # above Quit, which stays last. The two editors sit under Snip,
+        # set off from Settings and below by a separator (the "" row).
         assert [action.text() for action in controller._tray_icon.contextMenu().actions()] == [
             "Snip",
+            "Edit an image...",
+            "Edit a recording...",
+            "",
             "Settings...",
             "Discard recording",
             "Check for updates",
@@ -4856,6 +4860,135 @@ class TestAppControllerTrayMenu:
         )
 
         controller.quit_action.trigger()
+
+
+class TestAppControllerCopyHistory:
+    """The tray's Copy history: the last few copies, a click copying one
+    again. The list itself is output.py's and tested in test_output.py."""
+
+    @pytest.fixture(autouse=True)
+    def _no_wl_copy(self, monkeypatch):
+        monkeypatch.setattr(app.output.shutil, "which", lambda name: None)
+
+    def _make(self, make_controller):
+        return make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+    def _rows(self, controller):
+        return [
+            action for action in controller._copy_history_menu.actions()
+            if not action.isSeparator()
+        ]
+
+    def test_hidden_until_something_is_copied(self, make_controller):
+        controller = self._make(make_controller)
+
+        assert controller._copy_history_menu.menuAction() not in controller._tray_menu.actions()
+
+    def test_a_copy_anywhere_shows_up_without_the_menu_asking(self, make_controller):
+        controller = self._make(make_controller)
+
+        app.output.copy_text_to_clipboard("some recognised text")
+        app.output.copy_image_to_clipboard(make_image())
+
+        texts = [action.text() for action in self._rows(controller)]
+        assert texts[0].startswith("Picture ")
+        assert "some recognised text" in texts[1]
+        assert texts[2] == "Clear history"
+        assert controller._copy_history_menu.menuAction() in controller._tray_menu.actions()
+
+    def test_it_sits_below_recent_and_above_the_editors(self, make_controller, tmp_path):
+        controller = self._make(make_controller)
+        path = tmp_path / "snip.png"
+        path.write_bytes(b"x")
+        app.output.copy_text_to_clipboard("copied")
+        controller._on_captured(make_image(), path)
+
+        actions = controller._tray_menu.actions()
+        recent = actions.index(controller._recent_menu.menuAction())
+        history = actions.index(controller._copy_history_menu.menuAction())
+        assert recent + 1 == history
+        assert actions[history + 1] is controller.edit_image_action
+
+    def test_long_text_is_cut_short_in_its_row(self, make_controller):
+        controller = self._make(make_controller)
+
+        app.output.copy_text_to_clipboard("word " * 50)
+
+        assert "…" in self._rows(controller)[0].text()
+
+    def test_clicking_a_row_copies_it_again(self, make_controller, qapp):
+        controller = self._make(make_controller)
+        app.output.copy_text_to_clipboard("the one I wanted")
+        app.output.copy_text_to_clipboard("something later")
+
+        self._rows(controller)[1].trigger()
+
+        assert qapp.clipboard().text() == "the one I wanted"
+        assert "the one I wanted" in self._rows(controller)[0].text()
+
+    def test_clear_history_empties_and_hides_it(self, make_controller):
+        controller = self._make(make_controller)
+        app.output.copy_text_to_clipboard("gone")
+
+        self._rows(controller)[-1].trigger()
+
+        assert app.output.copy_history() == []
+        assert controller._copy_history_menu.menuAction() not in controller._tray_menu.actions()
+
+
+class TestAppControllerTrayEditors:
+    """Edit an image... / Edit a recording...: a file picker, then the
+    same window a fresh snip or recording would open in."""
+
+    def _make(self, make_controller):
+        return make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+    def _pick(self, monkeypatch, path):
+        monkeypatch.setattr(
+            app.QFileDialog, "getOpenFileName", staticmethod(lambda *args: (path, ""))
+        )
+
+    def test_edit_an_image_opens_the_picked_file_for_review(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = self._make(make_controller)
+        picked = tmp_path / "old snip.png"
+        opened = []
+        monkeypatch.setattr(controller, "open_image_path", opened.append)
+        self._pick(monkeypatch, str(picked))
+
+        controller.edit_image_action.trigger()
+
+        assert opened == [picked]
+
+    def test_edit_a_recording_opens_the_picked_file_in_the_player(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = self._make(make_controller)
+        picked = tmp_path / "clip.mp4"
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        self._pick(monkeypatch, str(picked))
+
+        controller.edit_recording_action.trigger()
+
+        assert opened == [picked]
+
+    def test_cancelling_the_picker_opens_nothing(self, make_controller, monkeypatch):
+        controller = self._make(make_controller)
+        opened = []
+        monkeypatch.setattr(controller, "open_image_path", opened.append)
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        self._pick(monkeypatch, "")
+
+        controller.edit_image_action.trigger()
+        controller.edit_recording_action.trigger()
+
+        assert opened == []
 
 
 class TestAppControllerRecentCaptures:

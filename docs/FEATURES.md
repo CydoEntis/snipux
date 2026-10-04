@@ -51,6 +51,8 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Copy text: OCR the selection to the clipboard (Windows)
 - [x] `done` Pin a snip on top of the screen (not on Wayland)
 - [x] `done` Recent captures in the tray menu
+- [x] `done` Copy history in the tray: the last 10 copies, in memory only
+- [x] `done` Edit an image or a recording from the tray
 - [ ] `now` Read text on Linux with a system tesseract (#92)
 - [ ] `now` Recent captures as thumbnails in a window (#107)
 - [ ] `idea` The stills destination model -- open product question, see TODO.md

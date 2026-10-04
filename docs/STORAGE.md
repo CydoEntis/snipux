@@ -25,6 +25,12 @@ The settings folder is `$XDG_CONFIG_HOME/snipux`, falling back to
 `~/.config/snipux` -- on every OS, Windows included, so one folder backs up
 everything. `setup_desktop.config_path()` is the one function that knows it.
 
+**Not stored anywhere:** the tray's Copy history -- the last 10 things snipux
+copied -- lives in memory only (`output.copy_history()`) and is gone when
+snipux quits. That is deliberate: a copied snip can show a password or a
+private message, and saving every copy to disk without asking would keep it
+after the user thought it was gone.
+
 ## config.json
 
 One flat JSON object. Keys in use today:
