@@ -7,7 +7,7 @@ use it; the commit history has the detail.
 
 ### Added
 
-- **History panel.** Double-click the tray icon (or choose Show history)
+- **History panel.** Click the tray icon (or choose Show history)
   for a column down the right of the screen with big previews of what you
   recently copied and saved, on two tabs. Click one to copy it again;
   saved snips also have Open.
@@ -21,8 +21,8 @@ use it; the commit history has the detail.
 
 ### Changed
 
-- A single click on the tray icon now waits a moment before opening
-  Settings, so a double-click can open the history panel instead.
+- Settings now opens with a double-click on the tray icon; a single click
+  opens the history panel.
 
 ## 1.1.4 — 2026-09-27
 

@@ -1311,7 +1311,7 @@ class AppController:
         # pair couldn't change mode once a selection was already open.
         self.snip_action = menu.addAction("Snip")
         self.snip_action.triggered.connect(self.start_capture)
-        # The history panel is also a double-click on the icon, but GNOME's
+        # The history panel is also a click on the icon, but GNOME's
         # indicator passes no clicks on, so it needs a menu row as well.
         self.history_action = menu.addAction("Show history")
         self.history_action.triggered.connect(self.open_history)
@@ -1588,26 +1588,26 @@ class AppController:
     # `MiddleClick` is deliberately ignored: it pastes on X11, and a paste
     # gesture that opened a window would be a surprise.
     def _on_tray_activated(self, reason) -> None:
-        """One click opens Settings, two open the history panel.
+        """One click opens the history panel, two open Settings.
 
         Windows reports a double click as `Trigger` then `DoubleClick`, so
-        Settings waits out the double-click interval first: opened at once,
-        it would appear under every history panel too."""
+        the panel waits out the double-click interval first: opened at
+        once, it would appear under every Settings window too."""
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self._settings_click_timer().stop()
-            self.open_history()
+            self._single_click_timer().stop()
+            self.open_settings()
         elif reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self._settings_click_timer().start(
+            self._single_click_timer().start(
                 QGuiApplication.styleHints().mouseDoubleClickInterval()
             )
 
-    def _settings_click_timer(self) -> QTimer:
-        timer = getattr(self, "_settings_click", None)
+    def _single_click_timer(self) -> QTimer:
+        timer = getattr(self, "_single_click", None)
         if timer is None:
             timer = QTimer()
             timer.setSingleShot(True)
-            timer.timeout.connect(lambda: self.open_settings())
-            self._settings_click = timer
+            timer.timeout.connect(lambda: self.open_history())
+            self._single_click = timer
         return timer
 
     def open_settings(self) -> None:

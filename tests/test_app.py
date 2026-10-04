@@ -992,7 +992,7 @@ class TestSnipFlag:
 class TestClickingTheTrayIcon:
     """Nothing listened to the icon itself before, so clicking it did
     nothing -- and the menu's Settings item is a right-click plus a click
-    away. One click opens Settings; two open the history panel."""
+    away. One click opens the history panel; two open Settings."""
 
     def _controller(self):
         # Built without running __init__: this is about one signal handler,
@@ -1006,16 +1006,16 @@ class TestClickingTheTrayIcon:
     def _wait_out_double_click(self):
         QTest.qWait(QGuiApplication.styleHints().mouseDoubleClickInterval() + 50)
 
-    def test_a_click_opens_settings_once_it_is_not_a_double_click(self):
+    def test_a_click_opens_history_once_it_is_not_a_double_click(self):
         controller, opened = self._controller()
 
         controller._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
         assert opened == []
         self._wait_out_double_click()
 
-        assert opened == ["settings"]
+        assert opened == ["history"]
 
-    def test_a_double_click_opens_history_and_not_settings(self):
+    def test_a_double_click_opens_settings_and_not_history(self):
         # How Windows reports it: Trigger for the first click, then
         # DoubleClick.
         controller, opened = self._controller()
@@ -1024,7 +1024,7 @@ class TestClickingTheTrayIcon:
         controller._on_tray_activated(QSystemTrayIcon.ActivationReason.DoubleClick)
         self._wait_out_double_click()
 
-        assert opened == ["history"]
+        assert opened == ["settings"]
 
     @pytest.mark.parametrize("reason", [
         QSystemTrayIcon.ActivationReason.Context,       # the right-click menu
@@ -1057,8 +1057,7 @@ class TestClickingTheTrayIcon:
             controller._settings.close()
             controller._settings = None
 
-            controller._tray_icon.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
-            QTest.qWait(QGuiApplication.styleHints().mouseDoubleClickInterval() + 50)
+            controller._tray_icon.activated.emit(QSystemTrayIcon.ActivationReason.DoubleClick)
 
             assert isinstance(controller._settings, SettingsDialog)
         finally:

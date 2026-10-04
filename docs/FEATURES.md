@@ -52,7 +52,7 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Pin a snip on top of the screen (not on Wayland)
 - [x] `done` Recent captures in the tray menu
 - [x] `done` Recent copies in the tray: the last 10 copies, in memory only
-- [x] `done` History panel: copies and saves with big previews (double-click the tray)
+- [x] `done` History panel: copies and saves with big previews (click the tray icon)
 - [x] `done` Edit an image or a recording from the tray
 - [ ] `now` Read text on Linux with a system tesseract (#92)
 - [ ] `now` Recent captures as thumbnails in a window (#107)

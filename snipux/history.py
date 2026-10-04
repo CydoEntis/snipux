@@ -2,7 +2,7 @@
 what snipux recently copied and saved, large enough to recognise a snip by
 its picture rather than its filename, and a click away from the clipboard.
 
-Opened by double-clicking the tray icon (and from the tray menu, since
+Opened by clicking the tray icon (and from the tray menu, since
 GNOME's indicator passes no clicks on). A view only: it reports a click as
 `copy_requested`/`open_requested` and `app.py` decides what that means --
 the same split flowbars.py keeps.
