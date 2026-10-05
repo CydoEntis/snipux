@@ -24,6 +24,12 @@ use it; the commit history has the detail.
 - Settings now opens with a double-click on the tray icon; a single click
   opens the history panel.
 
+### Fixed
+
+- The bottom edge of a snip can now be dragged all the way to the bottom of
+  the screen. When there is no room for the toolbar below a tall snip, it sits
+  inside the snip's bottom instead.
+
 ## 1.1.4 — 2026-09-27
 
 ### Fixed

@@ -2025,27 +2025,19 @@ class TestReframing:
         sel = overlay._selection
         assert sel.x() + sel.width() <= overlay.width()
         assert sel.y() + sel.height() <= overlay.height()
-        # The floating-bar clamp is the tighter of the two bottom bounds
-        # here, so it's the one actually reached.
-        assert sel.y() + sel.height() == overlay.height() - overlay._BAR_ROOM
 
-    def test_bar_room_clamp_gives_way_to_the_minimum_rather_than_the_reverse(self):
-        # A selection already pinned near the bottom of a short window: the
-        # floating-bar clamp alone would force the selection below the
-        # minimum height. Per the ticket, the minimum wins -- the bar-room
-        # clamp is skipped rather than shrinking the selection further.
-        overlay = self._overlay(size=(200, 200))
-        overlay.set_selection(QRect(20, 170, 100, 16))
-        bar_limit = overlay.height() - overlay._BAR_ROOM
-        assert bar_limit < 170 + tokens.Metric.SEL_MIN_H  # the clamp would conflict
+    def test_the_bottom_edge_reaches_the_bottom_of_the_window(self):
+        # It used to stop 130px short, holding room for the floating bar
+        # below -- so a snip could never reach the bottom of the screen.
+        # The bar now moves inside or above the selection instead.
+        overlay = self._overlay(size=(400, 400))
+        overlay.set_selection(QRect(100, 100, 150, 100))
         press = overlay._edge_handle_rect(Handle.BOTTOM).center().toPoint()
 
-        self._drag(overlay, press, QPoint(70, 195))
+        self._drag(overlay, press, QPoint(175, 399))
 
         sel = overlay._selection
-        assert sel.y() == 170  # anchor (top) never moved
-        assert sel.height() == 25  # 195 - 170, not clamped down to bar_limit
-        assert sel.y() + sel.height() > bar_limit
+        assert sel.y() + sel.height() >= overlay.height() - 1
 
 
 class TestHandlePressDoesNotStartAStroke:
@@ -3078,16 +3070,18 @@ class TestFloatingBarPositioning:
         assert not QRectF(bar.geometry()).intersects(QRectF(selection))
         assert bounds.contains(QRectF(bar.geometry()))
 
-    def test_a_tall_selection_ending_low_gets_the_same_answer(self):
-        # Height is not what decides this -- distance from the monitor's
-        # bottom edge is.
+    def test_a_tall_selection_ending_low_gets_it_inside_its_foot(self):
+        # Above a tall selection is far from where the user is working;
+        # inside its foot covers only a sliver of it.
         bounds = QRectF(0, 0, 2560, 1440)
         selection = QRect(700, 300, 1123, 1104)  # bottom at 1404
         bar = FloatingBar()
 
         bar.reposition(selection, bounds)
 
-        assert not QRectF(bar.geometry()).intersects(QRectF(selection))
+        geometry = QRectF(bar.geometry())
+        assert QRectF(selection).contains(geometry)
+        assert geometry.bottom() > selection.bottom() - 2 * geometry.height()
 
     def test_a_selection_filling_the_monitor_still_lands_inside_its_margins(self):
         # Neither side has room, so overlap is unavoidable -- but the bar
@@ -3141,10 +3135,10 @@ class TestFloatingBarPositioning:
         bar.reposition(QRect(-1915, -900, 40, 40), bounds)
         assert bar.geometry().left() == -1920 + self.MARGIN
 
-        # Bottom at -40: no room below, so above.
-        bar.reposition(QRect(-1200, -300, 400, 260), bounds)
+        # Bottom at -40: no room below, and a short strip, so above.
+        bar.reposition(QRect(-1200, -120, 400, 80), bounds)
         geometry = QRectF(bar.geometry())
-        assert geometry.bottom() == -300 - self.OFFSET
+        assert geometry.bottom() == -120 - self.OFFSET
         assert bounds.contains(geometry)
 
     def test_through_the_overlay_on_a_monitor_left_of_the_origin(self):
@@ -5982,8 +5976,9 @@ class TestFamilyMenuRowsStayClickable:
         if placement == "below":
             overlay.set_selection(QRect(margin, margin, width - 2 * margin, height // 3))
         else:
-            top = height // 3
-            overlay.set_selection(QRect(margin, top, width - 2 * margin, height - top - 4))
+            # A short strip at the bottom: a tall selection there now gets
+            # the bar inside its foot rather than above it.
+            overlay.set_selection(QRect(margin, height - 104, width - 2 * margin, 100))
         QApplication.processEvents()
         bar, selection = overlay._bar.geometry(), overlay._selection
         if placement == "below":
@@ -7060,10 +7055,6 @@ class TestCaptureModeFullScreenIntegration:
         overlay = self._overlay()
         self._pick_full_screen(overlay)
         press = overlay._edge_handle_rect(Handle.BOTTOM).center().toPoint()
-        # Comfortably clear of the `_BAR_ROOM` clamp (window height 600
-        # minus 130 = 470) so the result is the plain dragged value, not
-        # that clamp's own floor -- `_resize_selection`'s docstring is the
-        # authority for why that clamp exists at all.
         target = QPoint(300, 300)
 
         QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=press)
@@ -13834,8 +13825,9 @@ class TestWatermarkMenuStaysClickable:
         if placement == "below":
             overlay.set_selection(QRect(margin, margin, width - 2 * margin, height // 3))
         else:
-            top = height // 3
-            overlay.set_selection(QRect(margin, top, width - 2 * margin, height - top - 4))
+            # A short strip at the bottom: a tall selection there now gets
+            # the bar inside its foot rather than above it.
+            overlay.set_selection(QRect(margin, height - 104, width - 2 * margin, 100))
         QApplication.processEvents()
         bar, selection = overlay._bar.geometry(), overlay._selection
         if placement == "below":

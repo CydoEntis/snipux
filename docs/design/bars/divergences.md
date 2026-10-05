@@ -143,14 +143,17 @@ where it went, and the slot count did not move.
 
 ---
 
-## 8 · The stills bar goes above the selection when there is no room below
+## 8 · With no room below, the stills bar goes above a short selection or inside a tall one
 
 **The handoff says**: centred on the selection, 16px below it, clamped 12px
 from any monitor edge and to `monitor_h − 108` (`BAR_OFFSET_Y`,
 `BAR_EDGE_MARGIN`, `BAR_BOTTOM_ROOM`).
 
 **We centre it 16px below, as written, when it fits.** When it does not, it
-goes above the selection instead of being clamped back up over it.
+goes above a short selection instead of being clamped back up over it, and
+inside the foot of a tall one (at least three bar-heights), 12px clear of its
+bottom edge. Nothing holds room below the selection: resizing reaches the
+bottom of the screen.
 
 ### Why
 
@@ -160,6 +163,12 @@ in `snipux/overlay.py` record: "when u select a small region the controls are
 in the region so u cant edit anything", on a 1123x74 strip. A short selection
 is the usual way to hit it, but distance to the monitor's bottom edge is what
 decides it.
+
+A tall selection is the other case. It used to be stopped 130px short of the
+screen's bottom to leave the bar room below it, so a snip could not reach the
+bottom of the screen, and the bar sent above a tall one is far from where the
+user is working. Inside its foot covers only a sliver of it, and leaves the
+bottom edge free to drag.
 
 ---
 

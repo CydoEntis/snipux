@@ -1966,23 +1966,24 @@ class FloatingBar(_Chrome):
         Centred on the selection, `BAR_OFFSET_Y` below it, and at least
         `BAR_EDGE_MARGIN` inside `bounds` on every side.
 
-        Where there is no room below, the bar goes above the selection
-        rather than being clamped back up over it, as the handoff's
-        `BAR_BOTTOM_ROOM` would put it (divergences.md 8). That clamp covers
-        the very pixels the user framed in order to mark them up -- reported
-        as "when u select a small region the controls are in the region so
-        u cant edit anything", on a 1123x74 strip. Height is not what
-        decides it; distance from the monitor's bottom edge is.
+        Where there is no room below, the bar goes inside the foot of a
+        tall selection, or above a short one rather than being clamped back
+        up over it, as the handoff's `BAR_BOTTOM_ROOM` would put it
+        (divergences.md 8). That clamp covers the very pixels the user
+        framed in order to mark them up -- reported as "when u select a
+        small region the controls are in the region so u cant edit
+        anything", on a 1123x74 strip. See `_beside`.
 
-        With room on neither side the selection is essentially the whole
+        With room on none of those the selection is essentially the whole
         monitor, and anywhere on it covers some of it (#50). Then, in turn:
 
         - A `remembered` drag wins, on the monitor it names (`resolve`) --
           `elsewhere`, when that drag ended on another monitor. Were the
           placement below allowed to override it, the user's correction and
           the rule would take turns on every snip.
-        - Otherwise the bar is held inside `bounds` against its bottom
-          margin, centred on the selection, over the foot of the selection.
+        - Otherwise the bar is held inside the foot of the selection, just
+          clear of its bottom edge so the edge can still be dragged, and
+          inside `bounds`.
           It once went to `elsewhere` on its own, just across the bezel
           (#50), and that put the controls a monitor away from the work they
           were for (#79). Only a drag takes it there now.
@@ -2001,7 +2002,11 @@ class FloatingBar(_Chrome):
             return own, QPoint(round(left), round(top))
         if remembered is not None:
             return FloatingBar.resolve(remembered, bounds, elsewhere, size)
-        top = max(bounds.top() + margin, bounds.bottom() - margin - size.height())
+        # Inside the selection's foot, clear of its bottom edge so that edge
+        # can still be dragged -- or the monitor's foot, when the selection
+        # runs on under the taskbar.
+        top = min(bounds.bottom(), selection.bottom()) - margin - size.height()
+        top = max(bounds.top() + margin, top)
         return own, QPoint(round(left), round(top))
 
     @staticmethod
@@ -2024,16 +2029,29 @@ class FloatingBar(_Chrome):
             return monitor, FloatingBar.from_spot(spot, elsewhere, size)
         return setup_desktop.BAR_ON_OWN_MONITOR, FloatingBar.from_spot(spot, bounds, size)
 
+    # How many bar-heights tall a selection must be before the bar may sit
+    # inside it: at three, the bar covers at most a third of it.
+    _INSIDE_MIN_BARS = 3
+
     @staticmethod
     def _beside(selection: QRectF, bounds: QRectF, size: QSize) -> "float | None":
         """The top that puts a bar of `size` beside `selection` inside
-        `bounds` -- below it, or above it when below does not fit -- or None
-        when neither side has room.
+        `bounds` -- below it, or above it when below does not fit and the
+        selection is short -- or None otherwise.
+
+        A tall selection never sends the bar above it: with no room below
+        it reaches the bottom of the screen, and above it puts the bar far
+        from where the user is working. It gets `placement`'s no-room
+        answer instead -- inside its own foot, or where the user dragged
+        the bar last time. Above is for a short strip, which the bar inside
+        it would cover.
         """
         metric = design.tokens.BarMetric
         below = selection.bottom() + metric.BAR_OFFSET_Y
         if below <= bounds.bottom() - metric.BAR_EDGE_MARGIN - size.height():
             return below
+        if selection.height() >= FloatingBar._INSIDE_MIN_BARS * size.height():
+            return None
         above = selection.top() - metric.BAR_OFFSET_Y - size.height()
         if above >= bounds.top() + metric.BAR_EDGE_MARGIN:
             return above
@@ -4394,7 +4412,6 @@ class OverlayWindow(QWidget):
     # minimum size itself *is* tokenized (SEL_MIN_W/H below), since that one
     # the ticket explicitly overrides from the spec's default.
     _TOP_CLEARANCE = 52  # keeps the selection clear of the top hint HUD
-    _BAR_ROOM = 130  # keeps room below the selection for the floating bar
 
     # Close button (SNX-80): fixed distance from the window's own top-right
     # corner, given as a literal same as every other pixel value above that
@@ -8450,16 +8467,10 @@ class OverlayWindow(QWidget):
             right = min(right, self.width())
         if free_bottom:
             bottom = min(bottom, self.height())
-        # 5. Room for the floating bar below. height <= window_height - y -
-        # BAR_ROOM is, since height is always bottom - top, the same bound
-        # as bottom <= window_height - BAR_ROOM regardless of y -- but only
-        # tightens the bottom edge when doing so wouldn't undercut the
-        # minimum height step 1 already established (the ticket's
-        # deliberate reordering of the spec's clamps).
-        if free_bottom:
-            bar_limit = self.height() - self._BAR_ROOM
-            if bar_limit >= top + metric.SEL_MIN_H:
-                bottom = min(bottom, bar_limit)
+        # There is no clamp keeping room for the floating bar below: it
+        # once stopped the bottom edge 130px short of the screen, so a
+        # snip could not reach the bottom. The bar moves inside or above
+        # the selection instead (`FloatingBar._beside`).
 
         self.set_selection(
             QRect(round(left), round(top), round(right - left), round(bottom - top))
