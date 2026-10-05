@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.0 — 2026-10-05
+
 ### Added
 
 - **History panel.** Click the tray icon (or choose Show history)
