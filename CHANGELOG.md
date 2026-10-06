@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.1 — 2026-10-06
+
 ### Fixed
 
 - On Hyprland (Omarchy), the capture bar could sit behind the top bar for a
