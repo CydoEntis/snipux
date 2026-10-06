@@ -5,6 +5,12 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- On Hyprland (Omarchy), the capture bar could sit behind the top bar for a
+  whole session when Snipux started at login before the bar did. Snipux now
+  checks the space the bar takes on every snip.
+
 ## 1.2.0 — 2026-10-05
 
 ### Added

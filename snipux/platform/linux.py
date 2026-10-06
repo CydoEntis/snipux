@@ -163,11 +163,28 @@ class LinuxPlatform(Platform):
             return portable
         return _x11_reserved_margins(screen)
 
+    # How long one `hyprctl monitors -j` answer is trusted. Long enough that
+    # one snip asking for every monitor runs it once; short enough that the
+    # next snip asks again. It was cached for the life of the process, and
+    # Omarchy starts snipux at login alongside Waybar -- so a snipux that
+    # asked before Waybar had reserved its strip kept "nothing reserved"
+    # all day, and the chooser hung behind the bar.
+    _HYPRLAND_RESERVED_TTL = 2.0
+
     def _hyprland_reserved_margins(self, screen) -> QMargins:
-        """Return Hyprland's cached ``left, top, right, bottom`` extents."""
+        """Hyprland's ``left, top, right, bottom`` reservation for `screen`.
+
+        Matched by output name, then by position: Qt only learns the
+        compositor's name for an output from xdg-output or wl_output v4,
+        and without either `screen.name()` matches nothing. Positions are
+        both logical layout coordinates, so they agree whenever names do
+        not.
+        """
+        now = time.monotonic()
         cached = getattr(self, "_hyprland_reserved_cache", None)
-        if cached is None:
-            cached = {}
+        if cached is None or now - cached[0] > self._HYPRLAND_RESERVED_TTL:
+            by_name: dict[str, QMargins] = {}
+            by_origin: dict[tuple[int, int], QMargins] = {}
             try:
                 result = subprocess.run(
                     ["hyprctl", "monitors", "-j"],
@@ -177,19 +194,28 @@ class LinuxPlatform(Platform):
                 )
                 monitors = json.loads(result.stdout) if result.returncode == 0 else []
                 for monitor in monitors:
-                    name = monitor.get("name")
                     reserved = monitor.get("reserved")
-                    if (
-                        name
-                        and isinstance(reserved, list)
+                    if not (
+                        isinstance(reserved, list)
                         and len(reserved) == 4
                         and all(isinstance(value, int) for value in reserved)
                     ):
-                        cached[str(name)] = QMargins(*reserved)
-            except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                        continue
+                    margins = QMargins(*reserved)
+                    if monitor.get("name"):
+                        by_name[str(monitor["name"])] = margins
+                    x, y = monitor.get("x"), monitor.get("y")
+                    if isinstance(x, int) and isinstance(y, int):
+                        by_origin[(x, y)] = margins
+            except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
                 pass
+            cached = (now, by_name, by_origin)
             self._hyprland_reserved_cache = cached
-        return cached.get(screen.name(), QMargins())
+        _, by_name, by_origin = cached
+        if screen.name() in by_name:
+            return by_name[screen.name()]
+        origin = screen.geometry().topLeft()
+        return by_origin.get((origin.x(), origin.y()), QMargins())
 
     def skip_map_animation(self, widget) -> bool:
         """Arrange for the capture overlay to map without animation.

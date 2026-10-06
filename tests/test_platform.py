@@ -634,6 +634,50 @@ class TestReservedTop:
         assert platform_impl.reserved_margins(middle) == QMargins(0, 30, 0, 4)
         assert calls == [["hyprctl", "monitors", "-j"]]
 
+    def _hyprctl(self, monkeypatch, answers):
+        """Make `hyprctl monitors -j` answer each of `answers` in turn."""
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout=answers[min(len(calls), len(answers)) - 1])
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+        return calls
+
+    def test_hyprland_asks_again_once_its_answer_is_old(self, monkeypatch):
+        # Omarchy starts snipux at login beside Waybar. Asked before Waybar
+        # had reserved its strip, the first answer is "nothing", and it must
+        # not be kept for the rest of the session.
+        platform_impl = self._linux(monkeypatch, session="wayland", qt_platform="wayland")
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        calls = self._hyprctl(monkeypatch, [
+            '[{"name":"eDP-1","x":0,"y":0,"reserved":[0,0,0,0]}]',
+            '[{"name":"eDP-1","x":0,"y":0,"reserved":[0,26,0,0]}]',
+        ])
+        clock = [100.0]
+        monkeypatch.setattr(linux.time, "monotonic", lambda: clock[0])
+        screen = _FakeScreen(QRect(0, 0, 1920, 1080), name="eDP-1")
+
+        assert platform_impl.reserved_top(screen) == 0
+        assert platform_impl.reserved_top(screen) == 0     # same snip: not asked again
+        clock[0] += 10
+        assert platform_impl.reserved_top(screen) == 26
+
+        assert len(calls) == 2
+
+    def test_hyprland_matches_by_position_when_qt_has_no_output_name(self, monkeypatch):
+        platform_impl = self._linux(monkeypatch, session="wayland", qt_platform="wayland")
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        self._hyprctl(monkeypatch, [
+            '[{"name":"DP-1","x":0,"y":0,"reserved":[0,30,0,0]},'
+            '{"name":"DP-2","x":1920,"y":0,"reserved":[0,26,0,0]}]',
+        ])
+
+        screen = _FakeScreen(QRect(1920, 0, 2560, 1440), name="")
+
+        assert platform_impl.reserved_top(screen) == 26
+
     def test_an_offscreen_qt_platform_asks_nothing(self, monkeypatch):
         # The headless suite runs inside a real X11 login session, so
         # `XDG_SESSION_TYPE` says x11 while nothing is painting over
