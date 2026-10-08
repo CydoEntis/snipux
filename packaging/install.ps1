@@ -99,12 +99,51 @@ function Python-Run {
     if ($LASTEXITCODE -ne 0) { Fail "command failed: python $($args -join ' ')" }
 }
 
+# --- a running copy -----------------------------------------------------------
+# Matched by launcher name as well as by command line: a copy started from
+# the Start Menu or Startup entry is snipuxw.exe with pythonw.exe under it,
+# one started by an older version of this script is `pythonw -m snipux`,
+# and the portable build is a snipux.exe of its own.
+function Find-RunningSnipux {
+    Get-CimInstance Win32_Process | Where-Object {
+        ($_.Name -in 'snipux.exe', 'snipuxw.exe') -or
+        (($_.Name -in 'python.exe', 'pythonw.exe') -and $_.CommandLine -like '*snipux*')
+    }
+}
+
+# Closed before pip runs, not after: Windows will not let pip delete a
+# launcher or module that is in use, and an upgrade over a running copy
+# leaves a half-removed `~nipux` folder that pip then warns about on every
+# run after ("Ignoring invalid distribution ~nipux"). It is started again
+# below, so the only thing lost is the moment it takes.
+$running = Find-RunningSnipux
+if ($running) {
+    Step 'Closing the running Snipux so it can be updated...'
+    $running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 1
+}
+
+# What an earlier upgrade over a running copy left behind. Only our own
+# name: pip's `~`-prefixed leftovers of anything else are not ours to touch.
+# Both the interpreter's site-packages and the per-user one, since either is
+# where pip may have put Snipux. (No quotes in the snippet, for the reason
+# Find-Python gives.)
+$sitePackages = & $python.Source @($python.Arguments + @('-c', 'import site;[print(p) for p in site.getsitepackages()+[site.getusersitepackages()]]'))
+foreach ($folder in $sitePackages) {
+    if ($folder -and (Test-Path -LiteralPath $folder)) {
+        Get-ChildItem -LiteralPath $folder -Filter '~nipux*' -Directory -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # --- Snipux itself -----------------------------------------------------------
 # --upgrade, so this doubles as the update route and so an install made from
 # the old GitHub archive URL is replaced in place: same package name, so pip
-# removes the old copy itself.
+# removes the old copy itself. Scripts landing off PATH is expected and
+# warned about for nothing -- the shortcuts below point at them directly --
+# and a newer pip is not this script's business.
 Step 'Installing Snipux from PyPI...'
-Python-Run -m pip install --upgrade --quiet snipux
+Python-Run -m pip install --upgrade --quiet --disable-pip-version-check --no-warn-script-location snipux
 
 $version = & $python.Source @($python.Arguments + @('-c', 'import snipux; print(snipux.__version__)'))
 Say "Installed Snipux $version"
@@ -117,14 +156,8 @@ Step 'Setting up the shortcut and Start Menu entry...'
 Python-Run -m snipux --setup
 
 # --- start it ----------------------------------------------------------------
-# Matched by launcher name as well as by command line: a copy started from
-# the Start Menu or Startup entry is snipuxw.exe with pythonw.exe under it,
-# one started by an older version of this script is `pythonw -m snipux`,
-# and the portable build is a snipux.exe of its own.
-$running = Get-CimInstance Win32_Process | Where-Object {
-    ($_.Name -in 'snipux.exe', 'snipuxw.exe') -or
-    (($_.Name -in 'python.exe', 'pythonw.exe') -and $_.CommandLine -like '*snipux*')
-}
+# Still running only if the copy closed above would not close.
+$running = Find-RunningSnipux
 if ($running) {
     Say ''
     Say 'Snipux is already running. Quit it from the tray and press Ctrl+Alt+S'
@@ -154,5 +187,6 @@ if ($running) {
 
 Say ''
 Say 'Done. Press Ctrl+Alt+S to take a snip.'
-Say 'Snipux sits in the system tray -- click it for Settings.'
+Say 'Snipux sits in the system tray -- click it for your recent snips,'
+Say 'double-click it for Settings.'
 Say 'To update later: snipux --update'

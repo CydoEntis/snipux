@@ -5,6 +5,13 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- The Windows one-line installer no longer prints "Ignoring invalid
+  distribution ~nipux" warnings. It now closes a running Snipux before
+  updating it, cleans up what an earlier update over a running copy left
+  behind, and starts Snipux again afterwards.
+
 ## 1.2.1 — 2026-10-06
 
 ### Fixed
