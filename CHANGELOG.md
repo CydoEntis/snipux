@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.2 — 2026-10-23
+
 ### Fixed
 
 - The Windows one-line installer no longer prints "Ignoring invalid
