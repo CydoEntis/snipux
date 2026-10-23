@@ -27,7 +27,16 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QCoreApplication, QEventLoop, QPoint, QMargins, QRect, QSize, Qt
+from PyQt6.QtCore import (
+    QCoreApplication,
+    QEventLoop,
+    QMargins,
+    QPoint,
+    QRect,
+    QSize,
+    Qt,
+    QTimer,
+)
 from PyQt6.QtGui import QGuiApplication
 
 from snipux import capture, ffmpeg, recording, setup_desktop
@@ -68,6 +77,39 @@ class LinuxPlatform(Platform):
     def default_save_folder(self) -> Path:
         return setup_desktop.default_save_folder()
 
+    # Opening a snip builds one overlay per screen, and each asked Hyprland
+    # which output has focus: five identical `hyprctl monitors -j` spawns
+    # (~4ms each) before the first window could show. The answer cannot
+    # change inside one open, but it must be fresh for the next snip, which
+    # is seconds away at the soonest -- so a fraction of a second is the
+    # whole lifetime.
+    _HYPRLAND_MONITORS_MAX_AGE_S = 0.5
+
+    def _hyprland_monitors(self) -> list:
+        """``hyprctl monitors -j`` parsed, shared by every caller within
+        `_HYPRLAND_MONITORS_MAX_AGE_S`. Raises nothing: any failure is an
+        empty list, which every caller already treats as "no answer"."""
+        now = time.monotonic()
+        cached = getattr(self, "_hyprland_monitors_cache", None)
+        if cached is not None and now - cached[0] < self._HYPRLAND_MONITORS_MAX_AGE_S:
+            return cached[1]
+        monitors: list = []
+        try:
+            result = subprocess.run(
+                ["hyprctl", "monitors", "-j"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if result.returncode == 0:
+                parsed = json.loads(result.stdout)
+                if isinstance(parsed, list):
+                    monitors = parsed
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            pass
+        self._hyprland_monitors_cache = (now, monitors)
+        return monitors
+
     def active_screen_geometry(self) -> QRect | None:
         """The focused Hyprland output, matched back to Qt's geometry.
 
@@ -80,20 +122,12 @@ class LinuxPlatform(Platform):
         if not setup_desktop.is_hyprland_session():
             return None
         try:
-            result = subprocess.run(
-                ["hyprctl", "monitors", "-j"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-            if result.returncode != 0:
-                return None
             focused_name = next(
                 str(monitor["name"])
-                for monitor in json.loads(result.stdout)
+                for monitor in self._hyprland_monitors()
                 if monitor.get("focused") and monitor.get("name")
             )
-        except (OSError, StopIteration, ValueError, TypeError, subprocess.SubprocessError):
+        except (StopIteration, TypeError, AttributeError):
             return None
 
         for screen in QGuiApplication.screens():
@@ -186,14 +220,7 @@ class LinuxPlatform(Platform):
             by_name: dict[str, QMargins] = {}
             by_origin: dict[tuple[int, int], QMargins] = {}
             try:
-                result = subprocess.run(
-                    ["hyprctl", "monitors", "-j"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                )
-                monitors = json.loads(result.stdout) if result.returncode == 0 else []
-                for monitor in monitors:
+                for monitor in self._hyprland_monitors():
                     reserved = monitor.get("reserved")
                     if not (
                         isinstance(reserved, list)
@@ -207,7 +234,7 @@ class LinuxPlatform(Platform):
                     x, y = monitor.get("x"), monitor.get("y")
                     if isinstance(x, int) and isinstance(y, int):
                         by_origin[(x, y)] = margins
-            except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+            except (ValueError, TypeError, AttributeError):
                 pass
             cached = (now, by_name, by_origin)
             self._hyprland_reserved_cache = cached
@@ -290,20 +317,38 @@ class LinuxPlatform(Platform):
         output = screen.name()
         if not output:
             return False
-        suffix = re.sub(r"[^A-Za-z0-9_]", "_", output)
-        title = f"snipux-capture-overlay-{suffix}"
-        variable = f"snipux_capture_overlay_rule_{suffix}"
-        rule_name = f"snipux-capture-overlay-{output}"
-        title_pattern = f"^{re.escape(title)}$"
-        code = (
-            f"_G.{variable} = _G.{variable} or hl.window_rule({{ "
-            f"name = {json.dumps(rule_name)}, "
-            f"match = {{ title = {json.dumps(title_pattern)} }}, "
-            "no_anim = true, animation = 'none', float = true, "
-            f"monitor = {json.dumps(output + ' silent')}, "
-            "move = { 0, 0 }, size = { 'monitor_w', 'monitor_h' }, "
-            "border_size = 0, rounding = 0 })"
+        title = self._overlay_title(output)
+        # One snip builds an overlay per screen, and each used to send its
+        # own `hyprctl eval` (~4ms a spawn, three screens) before the first
+        # window could show. The first one now registers the rule for every
+        # screen in a single call and the rest reuse it. This is deliberately
+        # per snip rather than per process: a Hyprland reload drops the rules,
+        # and the next snip must put them back.
+        outputs = [name for name in (s.name() for s in QGuiApplication.screens()) if name]
+        if output not in outputs:
+            outputs.append(output)
+        if not self._install_overlay_rules(outputs):
+            return False
+        # Static rule matching reads the initial title. Set it only after the
+        # rule exists, and still before show_on_screen creates the native
+        # window with winId().
+        widget.setWindowTitle(title)
+        return True
+
+    def _install_overlay_rules(self, outputs: list[str]) -> bool:
+        """Register the overlay rule for every one of `outputs` in one
+        ``hyprctl eval``, unless that was done a moment ago for all of them.
+        True when the rules are in place."""
+        now = time.monotonic()
+        installed_at = getattr(self, "_hyprland_overlay_rules_at", None)
+        fresh = (
+            installed_at is not None
+            and now - installed_at < self._HYPRLAND_RULES_MAX_AGE_S
+            and set(outputs) <= self._hyprland_overlay_rule_outputs
         )
+        if fresh:
+            return True
+        code = "\n".join(self._overlay_rule_code(name) for name in outputs)
         try:
             result = subprocess.run(
                 ["hyprctl", "eval", code],
@@ -315,11 +360,122 @@ class LinuxPlatform(Platform):
             return False
         if result.returncode != 0:
             return False
-        # Static rule matching reads the initial title. Set it only after the
-        # rule exists, and still before show_on_screen creates the native
-        # window with winId().
-        widget.setWindowTitle(title)
+        self._hyprland_overlay_rules_at = now
+        self._hyprland_overlay_rule_outputs = set(outputs)
         return True
+
+    def prefetch_snip_state(self, screen_names: list[str], geometry_provider) -> None:
+        """Hyprland: have the three answers the overlay needs ready before
+        the screenshot is back. Each is a ~4ms `hyprctl` spawn, and asked in
+        turn after the screenshot they were ~15ms of waiting with nothing on
+        screen; `grim` takes 55ms or more, so asked beside it they cost
+        nothing. Each answer lands in the cache its ordinary caller reads."""
+        try:
+            if not (
+                capture.detect_session_type() == "wayland"
+                and QGuiApplication.platformName() == "wayland"
+                and setup_desktop.is_hyprland_session()
+            ):
+                return
+            self._hyprland_monitors()
+            if getattr(self, "_hyprland_overlay_rule_ready", False):
+                self._install_overlay_rules([n for n in screen_names if n])
+            active_window = getattr(geometry_provider, "active_window", None)
+            if callable(active_window):
+                active_window()
+        except Exception:  # noqa: BLE001 - a head start, never worth failing a snip for
+            pass
+
+    # Longer than building every overlay in one snip, far shorter than the
+    # gap to the next one.
+    _HYPRLAND_RULES_MAX_AGE_S = 1.0
+    _hyprland_overlay_rule_outputs: set = frozenset()
+
+    @staticmethod
+    def _overlay_title(output: str) -> str:
+        return "snipux-capture-overlay-" + re.sub(r"[^A-Za-z0-9_]", "_", output)
+
+    @classmethod
+    def _overlay_rule_code(cls, output: str) -> str:
+        suffix = re.sub(r"[^A-Za-z0-9_]", "_", output)
+        variable = f"snipux_capture_overlay_rule_{suffix}"
+        rule_name = f"snipux-capture-overlay-{output}"
+        title_pattern = f"^{re.escape(cls._overlay_title(output))}$"
+        return (
+            f"_G.{variable} = _G.{variable} or hl.window_rule({{ "
+            f"name = {json.dumps(rule_name)}, "
+            f"match = {{ title = {json.dumps(title_pattern)} }}, "
+            "no_anim = true, animation = 'none', float = true, "
+            f"monitor = {json.dumps(output + ' silent')}, "
+            "move = { 0, 0 }, size = { 'monitor_w', 'monitor_h' }, "
+            "border_size = 0, rounding = 0 })"
+        )
+
+    # How long to wait for Hyprland to map the overlay before asking for
+    # focus again, and how many times to ask. The window exists only once Qt
+    # has committed its first frame, a few milliseconds after `show()`.
+    _FOCUS_RETRY_MS = 12
+    _FOCUS_MAX_TRIES = 15
+
+    def take_keyboard_focus(self, widget) -> bool:
+        """Hyprland: focus the overlay, because asking nicely does not.
+
+        Qt's ``activateWindow()`` becomes an xdg-activation request, which
+        Hyprland answers by flagging the window urgent and leaving focus
+        where it was (``misc:focus_on_activate`` is off by default); the
+        overlay's rule opens it ``silent`` as well. Measured on Omarchy: in
+        3 of 6 snips the browser behind the overlay kept the keyboard, so
+        Esc, Enter and every tool letter went to the page underneath.
+        Whether the overlay won depended on whether the pointer happened to
+        be over it.
+
+        Every overlay of a snip calls this as it is shown, the one on the
+        pointer's monitor last, so only the last widget asked is focused,
+        once, when control is back in the event loop.
+        """
+        if not self._is_hyprland_capture_overlay(widget):
+            return True
+        self._focus_widget = widget
+        if not getattr(self, "_focus_scheduled", False):
+            self._focus_scheduled = True
+            self._focus_tries = 0
+            QTimer.singleShot(self._FOCUS_RETRY_MS, self._focus_overlay_step)
+        return True
+
+    def _is_hyprland_capture_overlay(self, widget) -> bool:
+        return (
+            capture.detect_session_type() == "wayland"
+            and QGuiApplication.platformName() == "wayland"
+            and setup_desktop.is_hyprland_session()
+            and widget.windowTitle().startswith("snipux-capture-overlay")
+        )
+
+    def _focus_overlay_step(self) -> None:
+        widget = getattr(self, "_focus_widget", None)
+        if widget is None or not widget.isVisible():
+            self._focus_scheduled = False
+            return
+        selector = json.dumps(f"title:^{re.escape(widget.windowTitle())}$")
+        try:
+            result = subprocess.run(
+                ["hyprctl", "eval", f"hl.dispatch(hl.dsp.focus({{window={selector}}}))"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            # A window that is not mapped yet is not an error to Hyprland:
+            # it exits 0 and prints "window not found".
+            missing = result.returncode == 0 and "not found" in (
+                result.stdout + result.stderr
+            )
+        except (OSError, subprocess.SubprocessError):
+            missing = False
+        self._focus_tries += 1
+        if missing and self._focus_tries < self._FOCUS_MAX_TRIES:
+            QTimer.singleShot(self._FOCUS_RETRY_MS, self._focus_overlay_step)
+            return
+        self._focus_scheduled = False
+        self._focus_widget = None
 
     def places_windows(self) -> bool:
         """True under X11. Under Wayland a client cannot place its own

@@ -92,6 +92,32 @@ class TestIcon:
             assert not result.pixmap(24, 24).isNull()
 
 
+class TestIconCache:
+    def test_the_same_icon_in_the_same_colour_is_rendered_once(
+        self, solid_icon_dir, monkeypatch
+    ):
+        renders = []
+        real_renderer = design.QSvgRenderer
+        monkeypatch.setattr(
+            design,
+            "QSvgRenderer",
+            lambda *a: renders.append(1) or real_renderer(*a),
+        )
+
+        first = design.icon("swatch", QColor(255, 0, 0))
+        again = design.icon("swatch", "#ff0000")  # same colour, spelled differently
+
+        assert again is first
+        assert len(renders) == 1
+
+    def test_a_different_colour_is_a_different_icon(self, solid_icon_dir):
+        red = design.icon("swatch", QColor(255, 0, 0)).pixmap(24, 24).toImage()
+        blue = design.icon("swatch", QColor(0, 0, 255)).pixmap(24, 24).toImage()
+
+        assert red.pixelColor(12, 12).red() == 255
+        assert blue.pixelColor(12, 12).blue() == 255
+
+
 class TestColor:
     def test_resolves_hex_and_alpha_together(self):
         result = design.color("BAR_BG")
@@ -248,6 +274,20 @@ class _FakeQFont:
 
 
 class TestFontFamilies:
+    def test_the_font_database_is_read_once_per_application(self, monkeypatch):
+        monkeypatch.setattr(design, "_FONT_DIR", design._FONT_DIR.parent / "no-such-dir")
+        database = _FakeFontDatabase(installed=[])
+        calls = []
+        real_families = database.families
+        database.families = lambda: calls.append(1) or real_families()
+        monkeypatch.setattr(design, "QFontDatabase", database)
+
+        first = design.font_families()
+        for _ in range(50):
+            assert design.font_families() is first
+
+        assert len(calls) == 1
+
     def test_falls_back_to_a_system_family_when_plex_is_not_installed(self, monkeypatch):
         monkeypatch.setattr(design, "_FONT_DIR", design._FONT_DIR.parent / "no-such-dir")
         monkeypatch.setattr(design, "QFontDatabase", _FakeFontDatabase(installed=[]))

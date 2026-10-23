@@ -30,12 +30,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
 
+from . import handoff
 from .design import PACKAGE_DIR, tokens
 
 # PACKAGE_DIR (snipux/design/__init__.py) rather than a second
@@ -439,6 +441,35 @@ def _reload_hyprland(run=subprocess.run) -> str:
     return " Hyprland reloaded with no config errors."
 
 
+def _hyprland_snip_command(exec_path: Path) -> str:
+    """What Hyprland runs when the snip shortcut fires.
+
+    The obvious command, ``<AppImage> --snip``, starts the whole AppImage
+    (mount, bundled interpreter, imports) just to pass one byte to the
+    snipux that is already running: ~90ms of a snip that takes ~330ms from
+    key press to first paint, measured on Omarchy. This writes that byte to
+    the resident's socket directly, which is what `handoff.forward` does,
+    and takes ~3ms.
+
+    ``nc`` failing for any reason -- not installed, a netcat without ``-U``,
+    no resident listening, a stale socket -- falls through to the full
+    command, which finds or becomes the resident exactly as before, so the
+    shortcut can never do less than it used to.
+
+    The socket's path is resolved here rather than left to ``$TMPDIR`` at
+    press time: ``$`` means something to hyprland.conf, and the resident
+    listens where `handoff.socket_path` says for the environment it started
+    in, which a Hyprland session shares.
+    """
+    request = handoff.SNIP_REQUEST.decode("ascii")
+    script = (
+        f"printf {shlex.quote(request)} | "
+        f"nc -U {shlex.quote(handoff.socket_path())} 2>/dev/null"
+        f" || exec {shlex.quote(exec_path.as_posix())} --snip"
+    )
+    return f"sh -c {shlex.quote(script)}"
+
+
 def bind_hyprland_shortcut(
     exec_path: Path,
     shortcut: str | None = None,
@@ -469,7 +500,7 @@ def bind_hyprland_shortcut(
     # This string is written into a Linux compositor config even when the
     # helper is exercised by the Windows test runner. Keep its path syntax
     # POSIX instead of letting WindowsPath introduce backslashes.
-    command = f"{exec_path.as_posix()} --snip"
+    command = _hyprland_snip_command(exec_path)
     if lua:
         escaped = command.replace("\\", "\\\\").replace('"', '\\"')
         block = (

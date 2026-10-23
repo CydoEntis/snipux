@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from abc import ABC, abstractmethod
@@ -100,7 +101,17 @@ from snipux.overlay import (
     open_overlay,
     other_screens_nearest_first,
 )
-from snipux import __version__, design, handoff, history, output, platform, setup_desktop, updates
+from snipux import (
+    __version__,
+    design,
+    handoff,
+    history,
+    hostenv,
+    output,
+    platform,
+    setup_desktop,
+    updates,
+)
 # Re-exported: the controller calls these by bare name, and tests patch them
 # here to intercept the controller's own calls.
 from snipux.output import (
@@ -1870,6 +1881,17 @@ class AppController:
             self._overlay.activateWindow()
             return
 
+        # While the screenshot is being taken, ask the desktop the things the
+        # overlay will want to know the moment it has the picture.
+        threading.Thread(
+            target=platform.current.prefetch_snip_state,
+            args=(
+                [screen.name() for screen in QGuiApplication.screens()],
+                self._geometry_provider,
+            ),
+            name="snipux-prefetch",
+            daemon=True,
+        ).start()
         try:
             frame = self._registry.capture()
         except CaptureError as exc:
@@ -4119,6 +4141,9 @@ def _dispatch(*, may_relaunch: bool) -> int:
     """
     arguments = sys.argv[1:]
     reattach_console(attach=bool(arguments))
+    # Before anything starts a program: from inside a bundle they would
+    # inherit its libraries and fail -- see snipux/hostenv.py.
+    hostenv.install()
     try:
         if arguments:
             return main()

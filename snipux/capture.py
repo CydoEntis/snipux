@@ -768,9 +768,16 @@ class HyprlandWindowGeometryProvider:
 
     _CACHE_SECONDS = 0.2
 
+    # One snip builds an overlay per screen and each asked for the active
+    # window -- three identical `hyprctl activewindow` spawns. They all run
+    # within a few tens of milliseconds, before snipux is on screen, so one
+    # answer is shared for a moment; the next snip is seconds away.
+    _ACTIVE_CACHE_SECONDS = 0.25
+
     def __init__(self):
         self._cache: list[tuple[str, QRectF]] | None = None
         self._cache_time: float | None = None
+        self._active_cache: tuple[float, object] | None = None
 
     def is_available(self) -> bool:
         desktops = os.environ.get("XDG_CURRENT_DESKTOP", "").lower().split(":")
@@ -843,8 +850,16 @@ class HyprlandWindowGeometryProvider:
         return None
 
     def active_window(self) -> "tuple[str, QRectF] | None":
+        now = time.monotonic()
+        if (
+            self._active_cache is not None
+            and now - self._active_cache[0] < self._ACTIVE_CACHE_SECONDS
+        ):
+            return self._active_cache[1]
         entry = self._query("activewindow")
-        return self._entry(entry) if isinstance(entry, dict) and entry else None
+        found = self._entry(entry) if isinstance(entry, dict) and entry else None
+        self._active_cache = (now, found)
+        return found
 
     def browser_viewport(self) -> "tuple[str, QRectF] | None":
         return None
@@ -1029,24 +1044,16 @@ class GrimBackend(CaptureBackend):
     def capture(self) -> Frame:
         virtual_rect = _virtual_desktop_geometry()
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        tmp.close()
-        path = tmp.name
-        try:
-            # grim owns nothing after the call returns; the tempfile is
-            # ours to create and remove, same as every X11 shell-out
-            # backend.
-            # This file only lives long enough for QImage to decode it, so
-            # spending most of capture startup compressing it is pure delay.
-            # On the measured 6400x1440 Omarchy desktop grim's default level
-            # 6 took ~0.73s; level 0 took ~0.06s with identical pixels. Final
-            # user-facing saves still use output.save_image's normal encoder.
-            subprocess.run(["grim", "-l", "0", path], check=True)
-            image = QImage(path)
-            if image.isNull():
-                raise RuntimeError("grim: produced an unreadable image")
-        finally:
-            os.remove(path)
+        # Raw PPM straight down a pipe: this frame only lives long enough to
+        # be decoded, so any compression or temp file is pure delay. Measured
+        # on a 6400x1440 Omarchy desktop: grim writing a level-0 PNG and Qt
+        # reading it back took ~117ms; PPM over stdout took ~80ms, with
+        # identical pixels and no 37MB file written and deleted per snip.
+        # Final user-facing saves still use output.save_image's encoder.
+        result = subprocess.run(["grim", "-t", "ppm", "-"], check=True, capture_output=True)
+        image = QImage.fromData(result.stdout, "PPM")
+        if image.isNull():
+            raise RuntimeError("grim: produced an unreadable image")
 
         return Frame(
             image=image,

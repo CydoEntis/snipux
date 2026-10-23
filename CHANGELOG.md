@@ -11,6 +11,33 @@ use it; the commit history has the detail.
   distribution ~nipux" warnings. It now closes a running Snipux before
   updating it, cleans up what an earlier update over a running copy left
   behind, and starts Snipux again afterwards.
+- **On Hyprland, the whole desktop shrank and sprang back open every time a
+  snip started (AppImage).** Snipux turns off Hyprland's window-open
+  animation for the snip by running `hyprctl`, but from inside the AppImage
+  every `hyprctl` call failed on the AppImage's own libraries, so the
+  animation played. Programs Snipux starts now get a clean environment. The
+  same fault also stopped `snipux --setup` reloading Hyprland.
+- **On Hyprland, Esc, Enter and the tool letters went to the window behind a
+  snip.** Snipux asked for the keyboard but Hyprland does not hand it over
+  on request, so whether the snip had it depended on where the pointer
+  happened to be. In testing the snip held the keyboard in none of 8 tries
+  before and all 8 after. It now takes focus on the screen you are working
+  on as soon as it appears.
+- **Update notices never appeared.** The daily check for a new version
+  failed every time it found one, so Snipux never told you an update was
+  available.
+
+### Changed
+
+- **Snips open faster on Hyprland** — roughly 330ms down to about 125ms
+  from pressing the shortcut to seeing the frozen screen on a quiet
+  machine. Taking the screenshot skips a 37MB temporary file, Snipux asks
+  the desktop where the focused monitor and window are once per snip (while
+  the screenshot is still being taken) instead of several times afterwards,
+  icons and fonts are no longer looked up again for every screen, and the
+  shortcut now reaches the running Snipux directly instead of starting the
+  whole AppImage first. Run `snipux --setup` to pick up the faster
+  shortcut; the old one keeps working.
 
 ## 1.2.1 — 2026-10-06
 

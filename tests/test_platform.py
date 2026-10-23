@@ -206,6 +206,33 @@ class TestLinuxPlatform:
             1920, 0, 2560, 1440
         )
 
+    def test_active_screen_shares_one_hyprctl_query_within_a_snip(self, monkeypatch):
+        screen = SimpleNamespace(name=lambda: "DP-2", geometry=lambda: QRect(0, 0, 1920, 1080))
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(linux.QGuiApplication, "screens", lambda: [screen])
+        clock = [100.0]
+        monkeypatch.setattr(linux.time, "monotonic", lambda: clock[0])
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(
+                returncode=0, stdout='[{"name":"DP-2","focused":true}]'
+            )
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+        platform_impl = linux.LinuxPlatform()
+
+        # One overlay per screen all ask in the same instant: one spawn.
+        for _ in range(5):
+            assert platform_impl.active_screen_geometry() == QRect(0, 0, 1920, 1080)
+        assert len(calls) == 1
+
+        # The next snip must see where the pointer is now, not a stale answer.
+        clock[0] += 5.0
+        platform_impl.active_screen_geometry()
+        assert len(calls) == 2
+
     def test_active_screen_does_not_query_hyprctl_off_hyprland(self, monkeypatch):
         monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
         monkeypatch.setattr(
@@ -861,6 +888,179 @@ class TestSkipMapAnimation:
         assert "float = true" in code
         assert "move = { 0, 0 }" in code
         assert "size = { 'monitor_w', 'monitor_h' }" in code
+
+    def test_hyprland_installs_every_screens_rule_in_one_call_per_snip(
+        self, monkeypatch
+    ):
+        platform_impl = self._linux(
+            monkeypatch, session="wayland", qt_platform="wayland"
+        )
+        platform_impl._hyprland_overlay_rule_ready = True
+        screens = [SimpleNamespace(name=lambda n=n: n) for n in ("HDMI-A-2", "DP-2", "DP-1")]
+        monkeypatch.setattr(linux.QGuiApplication, "screens", lambda: screens)
+        clock = [50.0]
+        monkeypatch.setattr(linux.time, "monotonic", lambda: clock[0])
+        calls = []
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda argv, **kwargs: calls.append(argv) or SimpleNamespace(returncode=0),
+        )
+
+        widgets = [self._widget() for _ in screens]
+        for widget, screen in zip(widgets, screens):
+            assert platform_impl.place_capture_overlay(widget, screen) is True
+
+        # Three overlays, one `hyprctl eval`, a rule for each output...
+        assert len(calls) == 1
+        for name in ("HDMI_A_2", "DP_2", "DP_1"):
+            assert f"_G.snipux_capture_overlay_rule_{name}" in calls[0][2]
+        # ...and every window still carries its own output's title.
+        assert [w.windowTitle() for w in widgets] == [
+            "snipux-capture-overlay-HDMI_A_2",
+            "snipux-capture-overlay-DP_2",
+            "snipux-capture-overlay-DP_1",
+        ]
+
+        # A later snip re-sends them: a Hyprland reload in between drops the
+        # rules, and a stale cache would bring the fullscreen flash back.
+        clock[0] += 30.0
+        assert platform_impl.place_capture_overlay(self._widget(), screens[0]) is True
+        assert len(calls) == 2
+
+    def _focus_rig(self, monkeypatch, replies):
+        """A Hyprland platform whose timers are queued, not waited for, and
+        whose `hyprctl` answers come from `replies` in order."""
+        platform_impl = self._linux(
+            monkeypatch, session="wayland", qt_platform="wayland"
+        )
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        timers = []
+        monkeypatch.setattr(
+            linux.QTimer, "singleShot", staticmethod(lambda ms, fn: timers.append(fn))
+        )
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout=replies.pop(0), stderr="")
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+        return platform_impl, timers, calls
+
+    def _overlay_widget(self, title):
+        widget = self._widget()
+        widget.setWindowTitle(title)
+        widget.show()
+        return widget
+
+    def test_hyprland_focuses_only_the_last_overlay_shown(self, monkeypatch):
+        platform_impl, timers, calls = self._focus_rig(monkeypatch, ["ok"])
+        others = [
+            self._overlay_widget("snipux-capture-overlay-DP_1"),
+            self._overlay_widget("snipux-capture-overlay-DP_2"),
+        ]
+        active = self._overlay_widget("snipux-capture-overlay-HDMI_A_2")
+
+        # Every overlay asks as it is shown; the one on the pointer's
+        # monitor is shown last and is the one that must end up focused.
+        for widget in (*others, active):
+            assert platform_impl.take_keyboard_focus(widget) is True
+        assert len(timers) == 1 and calls == []
+        timers.pop()()
+
+        assert len(calls) == 1
+        code = calls[0][2]
+        assert calls[0][:2] == ["hyprctl", "eval"]
+        assert "hl.dsp.focus" in code
+        # The title is a regex for Hyprland, so its hyphens arrive escaped.
+        assert "HDMI_A_2$" in code and "DP_1" not in code and "DP_2" not in code
+
+    def test_hyprland_keeps_asking_until_the_overlay_is_mapped(self, monkeypatch):
+        platform_impl, timers, calls = self._focus_rig(
+            monkeypatch,
+            ["warning: hl.focus: window not found", "warning: hl.focus: window not found", "ok"],
+        )
+        platform_impl.take_keyboard_focus(self._overlay_widget("snipux-capture-overlay-DP_1"))
+
+        timers.pop()()  # first try: Qt has not committed a frame yet
+        assert len(timers) == 1
+        timers.pop()()
+        assert len(timers) == 1
+        timers.pop()()  # mapped: focused, so no further retry
+
+        assert len(calls) == 3 and timers == []
+
+    def test_hyprland_gives_up_asking_for_a_window_that_never_maps(self, monkeypatch):
+        replies = ["warning: hl.focus: window not found"] * 40
+        platform_impl, timers, calls = self._focus_rig(monkeypatch, replies)
+        platform_impl.take_keyboard_focus(self._overlay_widget("snipux-capture-overlay-DP_1"))
+
+        while timers:
+            timers.pop()()
+
+        assert len(calls) == linux.LinuxPlatform._FOCUS_MAX_TRIES
+
+    def test_keyboard_focus_is_left_alone_off_hyprland(self, monkeypatch):
+        platform_impl = self._linux(monkeypatch, session="wayland", qt_platform="wayland")
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
+        monkeypatch.setattr(
+            linux.subprocess, "run", Mock(side_effect=AssertionError("must not run"))
+        )
+
+        assert platform_impl.take_keyboard_focus(
+            self._overlay_widget("snipux-capture-overlay-DP_1")
+        ) is True
+
+    def test_prefetch_answers_the_overlays_questions_before_the_screenshot(
+        self, monkeypatch
+    ):
+        platform_impl = self._linux(
+            monkeypatch, session="wayland", qt_platform="wayland"
+        )
+        platform_impl._hyprland_overlay_rule_ready = True
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(
+                returncode=0,
+                stdout='[{"name":"DP-1","focused":true}]' if argv[1] == "monitors" else "ok",
+                stderr="",
+            )
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+        asked = []
+        provider = SimpleNamespace(active_window=lambda: asked.append(1))
+
+        platform_impl.prefetch_snip_state(["DP-1", "DP-2"], provider)
+
+        assert [c[1] for c in calls] == ["monitors", "eval"]
+        assert asked == [1]
+
+        # What the overlay then asks for is already there: no more spawns.
+        monkeypatch.setattr(linux.QGuiApplication, "screens", lambda: [
+            SimpleNamespace(name=lambda: "DP-1", geometry=lambda: QRect(0, 0, 10, 10)),
+            SimpleNamespace(name=lambda: "DP-2"),
+        ])
+        assert platform_impl.active_screen_geometry() == QRect(0, 0, 10, 10)
+        assert platform_impl.place_capture_overlay(
+            self._widget(), SimpleNamespace(name=lambda: "DP-2")
+        ) is True
+        assert len(calls) == 2
+
+    def test_prefetch_does_nothing_off_hyprland_and_never_raises(self, monkeypatch):
+        platform_impl = self._linux(monkeypatch, session="wayland", qt_platform="wayland")
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
+        monkeypatch.setattr(
+            linux.subprocess, "run", Mock(side_effect=AssertionError("must not run"))
+        )
+        platform_impl.prefetch_snip_state(["DP-1"], SimpleNamespace())
+
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(linux.subprocess, "run", Mock(side_effect=RuntimeError("boom")))
+        platform_impl.prefetch_snip_state(["DP-1"], SimpleNamespace())  # swallowed
 
     def test_capture_overlay_placement_leaves_fullscreen_as_the_fallback(
         self, monkeypatch

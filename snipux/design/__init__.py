@@ -45,7 +45,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, Qt
+from PyQt6.QtCore import QByteArray, QCoreApplication, Qt
 from PyQt6.QtGui import QColor, QFontDatabase, QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -69,6 +69,22 @@ _ICON_DIR = _DESIGN_DIR / "icons"
 _FONT_DIR = _DESIGN_DIR / "fonts"
 
 
+# An overlay builds one chrome per screen and each asks for the same few
+# dozen icons in the same few colours: 114 renders (SVG parse, pixmap,
+# paint) per snip on a three-monitor desktop, ~10ms. A QIcon is a value, so
+# the result is shared. Pixmaps must not outlive the application, so the
+# cache empties itself on the way out.
+_ICON_CACHE: dict[tuple[str, int], QIcon] = {}
+_icon_cache_cleanup_connected = False
+
+
+def clear_caches() -> None:
+    """Forget cached icons and the resolved fonts. For shutdown, and for
+    tests that change what a lookup would find."""
+    _ICON_CACHE.clear()
+    _FONT_CACHE.clear()
+
+
 def icon(name: str, color: QColor | str) -> QIcon:
     """Return a QIcon for design icon `name`, recoloured to `color`.
 
@@ -81,6 +97,12 @@ def icon(name: str, color: QColor | str) -> QIcon:
     recolouring the pixmap after would need a colour-replace pass anyway,
     and would lose antialiasing at the glyph's edges in the process.
     """
+    qcolor = color if isinstance(color, QColor) else QColor(color)
+    key = (name, qcolor.rgba())
+    cached = _ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     path = _ICON_DIR / f"{name}.svg"
     if not path.is_file():
         # A missing icon is a programming error (a typo'd name, or a glyph
@@ -89,7 +111,6 @@ def icon(name: str, color: QColor | str) -> QIcon:
         # a blank button instead of failing the build/test that exercises it.
         raise ValueError(f"no such design icon: {name!r}")
 
-    qcolor = color if isinstance(color, QColor) else QColor(color)
     svg_text = path.read_text(encoding="utf-8").replace("currentColor", qcolor.name())
 
     renderer = QSvgRenderer(QByteArray(svg_text.encode("utf-8")))
@@ -103,7 +124,14 @@ def icon(name: str, color: QColor | str) -> QIcon:
     # CLAUDE.md.
     painter.end()
 
-    return QIcon(pixmap)
+    result = QIcon(pixmap)
+    global _icon_cache_cleanup_connected
+    application = QCoreApplication.instance()
+    if application is not None and not _icon_cache_cleanup_connected:
+        application.aboutToQuit.connect(clear_caches)
+        _icon_cache_cleanup_connected = True
+    _ICON_CACHE[key] = result
+    return result
 
 
 def win_color(token_name: str) -> QColor:
@@ -221,6 +249,13 @@ def _first_installed(names, installed, system_font) -> str:
     return QFontDatabase.systemFont(system_font).family()
 
 
+# Resolved once per application: every widget that sets a font asked again,
+# 258 times in one snip (~17ms), and each ask copied the whole font database
+# into a set. Fonts do not appear mid-run -- the bundled ones are registered
+# by the first call -- so the answer cannot change under the cache.
+_FONT_CACHE: dict[int, "FontFamilies"] = {}
+
+
 def font_families() -> FontFamilies:
     """Resolve the UI and mono font families to use.
 
@@ -229,10 +264,15 @@ def font_families() -> FontFamilies:
     database is what is checked, not the filesystem, so a corrupt bundled
     font degrades the same way a missing one does rather than raising.
     """
+    application_key = id(QCoreApplication.instance())
+    cached = _FONT_CACHE.get(application_key)
+    if cached is not None:
+        return cached
+
     _load_bundled_fonts()
     installed = set(QFontDatabase.families())
 
-    return FontFamilies(
+    resolved = FontFamilies(
         ui=_first_installed(
             (tokens.Font.UI, *tokens.Font.UI_FALLBACKS),
             installed,
@@ -244,3 +284,5 @@ def font_families() -> FontFamilies:
             QFontDatabase.SystemFont.FixedFont,
         ),
     )
+    _FONT_CACHE[application_key] = resolved
+    return resolved

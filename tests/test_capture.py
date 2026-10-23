@@ -977,32 +977,31 @@ class TestGrimBackend:
         screens = [_FakeScreen(QRect(0, 0, 50, 40))]
         monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
 
-        recorded_argv = []
+        recorded = []
 
         def fake_run(argv, **kwargs):
-            recorded_argv.append(argv)
-            return _placeholder_png_writer()(argv, **kwargs)
+            recorded.append((argv, kwargs))
+            # 2x2 raw PPM: the header, then three bytes per pixel.
+            return Mock(returncode=0, stdout=b"P6\n2 2\n255\n" + bytes(range(12)))
 
         monkeypatch.setattr(capture.subprocess, "run", fake_run)
 
         frame = capture.GrimBackend().capture()
 
-        assert recorded_argv[0][0] == "grim"
-        assert recorded_argv[0][1:3] == ["-l", "0"]
-        assert recorded_argv[0][-1] != "grim"  # a real path argument, not just the binary
+        argv, kwargs = recorded[0]
+        # Raw PPM to stdout: no PNG compression and no temp file per snip.
+        assert argv == ["grim", "-t", "ppm", "-"]
+        assert kwargs["capture_output"] is True
         assert frame.logical_origin == QPointF(0, 0)
         assert frame.logical_size == QSizeF(50, 40)
-        assert not frame.image.isNull()
+        assert frame.image.size().width() == 2 and frame.image.size().height() == 2
 
-    def test_capture_cleans_up_its_temp_file_even_on_failure(self, monkeypatch):
+    def test_capture_reports_a_failing_grim(self, monkeypatch):
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
         screens = [_FakeScreen(QRect(0, 0, 50, 40))]
         monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
 
-        seen_paths = []
-
         def raising_run(argv, **kwargs):
-            seen_paths.append(argv[-1])
             raise subprocess.CalledProcessError(1, argv)
 
         monkeypatch.setattr(capture.subprocess, "run", raising_run)
@@ -1010,7 +1009,40 @@ class TestGrimBackend:
         with pytest.raises(subprocess.CalledProcessError):
             capture.GrimBackend().capture()
 
-        assert not os.path.exists(seen_paths[0])
+    def test_capture_rejects_output_qt_cannot_read(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        screens = [_FakeScreen(QRect(0, 0, 50, 40))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        monkeypatch.setattr(
+            capture.subprocess, "run", lambda argv, **kw: Mock(returncode=0, stdout=b"junk")
+        )
+
+        with pytest.raises(RuntimeError, match="unreadable"):
+            capture.GrimBackend().capture()
+
+
+class TestHyprlandActiveWindowCache:
+    def test_overlays_built_together_share_one_hyprctl_query(self, monkeypatch):
+        provider = capture.HyprlandWindowGeometryProvider()
+        clock = [10.0]
+        monkeypatch.setattr(capture.time, "monotonic", lambda: clock[0])
+        calls = []
+
+        def query(command):
+            calls.append(command)
+            return {"title": "term", "class": "kitty", "at": [0, 0], "size": [100, 50]}
+
+        monkeypatch.setattr(provider, "_query", query)
+
+        # One overlay per screen, all built before snipux is on screen.
+        answers = [provider.active_window() for _ in range(3)]
+        assert calls == ["activewindow"]
+        assert answers[0] == ("term", QRectF(0, 0, 100, 50))
+
+        # The next snip asks again: focus will have moved by then.
+        clock[0] += 3.0
+        provider.active_window()
+        assert calls == ["activewindow", "activewindow"]
 
 
 class TestPortalScreenshotBackend:

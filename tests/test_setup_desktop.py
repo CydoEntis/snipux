@@ -15,13 +15,15 @@ install.sh put it back.
 
 import json
 import shutil
+import subprocess
+import sys
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from snipux import setup_desktop
+from snipux import handoff, setup_desktop
 from snipux.design import tokens
 
 
@@ -1180,7 +1182,9 @@ class TestHyprlandShortcut:
         text = bindings.read_text()
         assert setup_desktop._HYPR_LUA_BEGIN in text
         assert 'o.bind("CTRL + ALT + S", "Snipux snip", ' in text
-        assert "/home/me/Applications/Snipux.AppImage --snip" in text
+        # The fast path to the resident, then the full AppImage as fallback.
+        assert "nc -U /tmp/snipux-resident" in text
+        assert "exec /home/me/Applications/Snipux.AppImage --snip" in text
         assert 'o.bind("SUPER + B"' in text
         assert list(tmp_path.glob("bindings.lua.snipux.bak*"))
         assert "no config errors" in message
@@ -1227,7 +1231,71 @@ class TestHyprlandShortcut:
             run=self._run_ok(),
         )
 
-        assert "bind = SHIFT SUPER, X, exec, /usr/bin/snipux --snip" in config.read_text()
+        line = next(
+            l for l in config.read_text().splitlines() if l.startswith("bind = SHIFT SUPER, X")
+        )
+        assert "exec /usr/bin/snipux --snip" in line
+        # hyprland.conf reads `$` as a variable, so the command must not have one.
+        assert "$" not in line
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs /bin/sh stand-ins")
+    def test_snip_command_writes_one_byte_to_the_resident_when_nc_works(self, tmp_path):
+        record = tmp_path / "record"
+        nc = tmp_path / "bin" / "nc"
+        nc.parent.mkdir()
+        nc.write_text(f'#!/bin/sh\necho "nc $*" >> {record}\ncat >> {record}\n')
+        appimage = tmp_path / "Snipux.AppImage"
+        appimage.write_text(f'#!/bin/sh\necho "appimage $*" >> {record}\n')
+        nc.chmod(0o755)
+        appimage.chmod(0o755)
+
+        command = setup_desktop._hyprland_snip_command(appimage)
+        subprocess.run(
+            command, shell=True, check=True, env={"PATH": f"{nc.parent}:/usr/bin:/bin"}
+        )
+
+        text = record.read_text()
+        assert f"nc -U {handoff.socket_path()}" in text
+        assert text.rstrip().endswith("S")  # the resident's snip request byte
+        assert "appimage" not in text  # nothing was launched
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs /bin/sh stand-ins")
+    def test_snip_command_falls_back_to_the_appimage_when_nc_fails(self, tmp_path):
+        record = tmp_path / "record"
+        nc = tmp_path / "bin" / "nc"
+        nc.parent.mkdir()
+        nc.write_text("#!/bin/sh\nexit 1\n")  # no resident listening
+        appimage = tmp_path / "My Apps" / "Snipux.AppImage"
+        appimage.parent.mkdir()
+        appimage.write_text(f'#!/bin/sh\necho "appimage $*" >> {record}\n')
+        nc.chmod(0o755)
+        appimage.chmod(0o755)
+
+        command = setup_desktop._hyprland_snip_command(appimage)
+        subprocess.run(
+            command, shell=True, check=True, env={"PATH": f"{nc.parent}:/usr/bin:/bin"}
+        )
+
+        assert record.read_text() == "appimage --snip\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs /bin/sh stand-ins")
+    def test_snip_command_falls_back_when_nc_is_not_installed(self, tmp_path):
+        record = tmp_path / "record"
+        appimage = tmp_path / "Snipux.AppImage"
+        appimage.write_text(f'#!/bin/sh\necho "appimage $*" >> {record}\n')
+        appimage.chmod(0o755)
+        # A PATH holding `sh` (the command is `sh -c ...`) and nothing else,
+        # so `nc` cannot be found. printf is a shell builtin.
+        only_sh = tmp_path / "only_sh"
+        only_sh.mkdir()
+        (only_sh / "sh").symlink_to(shutil.which("sh"))
+
+        subprocess.run(
+            setup_desktop._hyprland_snip_command(appimage),
+            shell=True, check=True, env={"PATH": str(only_sh)},
+        )
+
+        assert record.read_text() == "appimage --snip\n"
 
     def test_remove_deletes_only_its_marked_block_and_keeps_user_bindings(
         self, tmp_path, monkeypatch

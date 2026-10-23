@@ -2047,6 +2047,38 @@ class TestAppControllerCapture:
         # the overlay rather than some default of OverlayWindow's own.
         assert controller._overlay._geometry_provider is provider
 
+    def test_start_capture_prefetches_desktop_state_beside_the_screenshot(
+        self, make_controller, monkeypatch
+    ):
+        order = []
+        done = threading.Event()
+
+        def prefetch(names, provider):
+            order.append(("prefetch", provider))
+            done.set()
+
+        class OrderedBackend(FakeCaptureBackend):
+            def capture(self):
+                order.append(("capture", None))
+                return super().capture()
+
+        monkeypatch.setattr(app.platform.current, "prefetch_snip_state", prefetch)
+        provider = FakeGeometryProvider()
+        controller = make_controller(
+            BackendRegistry([OrderedBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+            geometry_provider=provider,
+        )
+
+        controller.start_capture()
+
+        assert done.wait(timeout=5)
+        # Started with the controller's own provider, and before the capture
+        # returned -- that is the whole point of asking early.
+        assert ("prefetch", provider) in order
+        assert any(kind == "capture" for kind, _ in order)
+
     def test_start_capture_defaults_to_the_controllers_own_geometry_provider(
         self, make_controller
     ):

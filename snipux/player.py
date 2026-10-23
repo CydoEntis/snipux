@@ -68,7 +68,7 @@ from PyQt6.QtMultimedia import (
 )
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from . import design, output
+from . import design, hostenv, output
 from .design import tokens
 from .flowbars import FlowMenu, MenuReopenGuard
 from .winchrome import WinWindow, _mono_font, _ui_font
@@ -1262,6 +1262,7 @@ class FfmpegExporter(QObject):
         from PyQt6.QtCore import QProcess
 
         self._process = QProcess(self)
+        hostenv.apply_to_qprocess(self._process)
         self._process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
         self._process.readyReadStandardOutput.connect(self._read_progress)
         self._process.readyReadStandardError.connect(self._read_errors)
