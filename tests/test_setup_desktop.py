@@ -1167,6 +1167,7 @@ class TestHyprlandShortcut:
         return Mock(return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
 
     def test_lua_setup_writes_a_delimited_block_and_backup(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TMPDIR", "/tmp")
         monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: "/usr/bin/hyprctl")
         (tmp_path / "hyprland.lua").write_text('require("hypr.bindings")\n')
         bindings = tmp_path / "bindings.lua"
@@ -1239,7 +1240,11 @@ class TestHyprlandShortcut:
         assert "$" not in line
 
     @pytest.mark.skipif(sys.platform == "win32", reason="runs /bin/sh stand-ins")
-    def test_snip_command_writes_one_byte_to_the_resident_when_nc_works(self, tmp_path):
+    def test_snip_command_writes_one_byte_to_the_resident_when_nc_works(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        nc_socket = f"{tmp_path.as_posix()}/{handoff.SERVER_NAME}"
         record = tmp_path / "record"
         nc = tmp_path / "bin" / "nc"
         nc.parent.mkdir()
@@ -1255,7 +1260,7 @@ class TestHyprlandShortcut:
         )
 
         text = record.read_text()
-        assert f"nc -U {handoff.socket_path()}" in text
+        assert f"nc -U {nc_socket}" in text
         assert text.rstrip().endswith("S")  # the resident's snip request byte
         assert "appimage" not in text  # nothing was launched
 

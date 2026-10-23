@@ -32,9 +32,10 @@ class TestHostEnv:
         assert env["HOME"] == "/home/me"
 
     def test_the_users_own_entries_survive(self, bundled):
-        env = hostenv.host_env({"LD_LIBRARY_PATH": f"/opt/cuda/lib:{BUNDLE}:/opt/x"})
+        joined = os.pathsep.join(["/opt/cuda/lib", BUNDLE, "/opt/x"])
+        env = hostenv.host_env({"LD_LIBRARY_PATH": joined})
 
-        assert env["LD_LIBRARY_PATH"] == "/opt/cuda/lib:/opt/x"
+        assert env["LD_LIBRARY_PATH"] == os.pathsep.join(["/opt/cuda/lib", "/opt/x"])
 
     def test_pyinstallers_saved_value_is_restored(self, bundled):
         env = hostenv.host_env(

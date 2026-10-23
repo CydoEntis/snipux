@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -459,12 +460,15 @@ def _hyprland_snip_command(exec_path: Path) -> str:
     The socket's path is resolved here rather than left to ``$TMPDIR`` at
     press time: ``$`` means something to hyprland.conf, and the resident
     listens where `handoff.socket_path` says for the environment it started
-    in, which a Hyprland session shares.
+    in, which a Hyprland session shares. It is joined with POSIX rules on
+    purpose: this string is written into a Linux compositor config even
+    when the helper runs on a Windows test runner.
     """
     request = handoff.SNIP_REQUEST.decode("ascii")
+    socket = posixpath.join(os.environ.get("TMPDIR") or "/tmp", handoff.SERVER_NAME)
     script = (
         f"printf {shlex.quote(request)} | "
-        f"nc -U {shlex.quote(handoff.socket_path())} 2>/dev/null"
+        f"nc -U {shlex.quote(socket)} 2>/dev/null"
         f" || exec {shlex.quote(exec_path.as_posix())} --snip"
     )
     return f"sh -c {shlex.quote(script)}"
