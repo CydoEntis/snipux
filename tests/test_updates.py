@@ -107,7 +107,12 @@ class TestUpdateCheckRunsOffTheCallingThread:
     def test_the_result_arrives_through_the_signal(self):
         from PyQt6.QtCore import QCoreApplication, QEventLoop
 
-        payload = json.dumps({"tag_name": "v9.9.9"}).encode()
+        payload = json.dumps(
+            {
+                "tag_name": "v9.9.9",
+                "assets": [{"name": "snipux.exe", "browser_download_url": "https://x/y"}],
+            }
+        ).encode()
         check = updates.UpdateCheck(lambda _url: payload)
         seen = []
         check.finished.connect(seen.append)
@@ -121,7 +126,9 @@ class TestUpdateCheckRunsOffTheCallingThread:
             QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 10)
             loop_guard += 1
 
-        assert seen == ["9.9.9"]
+        # A Release, not a bare string: the app reads `.version` and the
+        # asset URLs off whatever this signal carries.
+        assert seen == [updates.Release("9.9.9", {"snipux.exe": "https://x/y"})]
 
     def test_a_failed_check_reports_none(self):
         from PyQt6.QtCore import QCoreApplication, QEventLoop

@@ -199,8 +199,10 @@ class UpdateCheck(QObject):
     the only thing needed from Qt is the signal, which marshals the result
     back to the thread this object lives in.
 
-    `finished` carries the newest version, or None when the check could not
-    be made -- the same two outcomes `fetch_latest_version` has.
+    `finished` carries the newest `Release`, or None when the check could
+    not be made -- the same two outcomes `fetch_latest_release` has. It is a
+    `Release` and not just a version string because `AppController` reads
+    `.version` and the download URLs off it.
     """
 
     finished = pyqtSignal(object)
@@ -217,7 +219,7 @@ class UpdateCheck(QObject):
         thread.start()
 
     def _run(self) -> None:
-        self.finished.emit(fetch_latest_version(self._opener))
+        self.finished.emit(fetch_latest_release(self._opener))
 
 
 class Download(QObject):
