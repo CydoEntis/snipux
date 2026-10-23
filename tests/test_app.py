@@ -1605,6 +1605,13 @@ class TestHandoff:
         name = f"snipux-handoff-{tmp_path.name}"
         server = app.QLocalSocketTransport(name)
         assert server.try_claim()
+        # Held for the whole test. Nothing else references it except a cycle
+        # through its own signal connections, so it lived only until the next
+        # garbage collection -- which then deleted its socket file, and
+        # `handoff.forward` found nothing to connect to. Whether that fell
+        # between this and the forward was luck, and a change elsewhere that
+        # merely allocated a few more objects moved it onto CI.
+        self._server = server
         heard = []
         server.listen(
             lambda: heard.append("snip"),
@@ -1644,21 +1651,7 @@ class TestHandoff:
         name, heard = self._resident(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        delivered = handoff.forward(["shot.png"], server_name=name)
-        if not delivered:  # TEMP-DIAGNOSTIC
-            import socket as _s, os as _o
-            path = handoff.socket_path(name)
-            try:
-                with _s.socket(_s.AF_UNIX, _s.SOCK_STREAM) as c:
-                    c.settimeout(0.5)
-                    c.connect(path)
-                    reason = "reconnect ok"
-            except OSError as exc:
-                reason = f"{type(exc).__name__}: {exc}"
-            raise AssertionError(
-                f"forward False; path={path!r} exists={_o.path.exists(path)} "
-                f"TMPDIR={_o.environ.get('TMPDIR')!r} cwd={_o.getcwd()!r} reason={reason}"
-            )
+        assert handoff.forward(["shot.png"], server_name=name) is True
         self._settle()
 
         assert heard == [("open", tmp_path / "shot.png")]
