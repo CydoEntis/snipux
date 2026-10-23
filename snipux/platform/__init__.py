@@ -282,6 +282,19 @@ class Platform(ABC):
         """
         return True
 
+    def prefetch_snip_state(self, screen_names: list[str], geometry_provider) -> None:
+        """Ask the desktop, ahead of time, what the overlay will need to ask.
+
+        Called on a worker thread at the start of a snip, so the answers are
+        in hand by the time the screenshot comes back instead of being waited
+        for one after another while the user watches. Nothing may be returned
+        or raised: a platform that has nothing to ask does nothing, and one
+        whose questions fail leaves the overlay to ask again itself.
+
+        Qt objects are not touched here -- it runs off the GUI thread -- so
+        the screens' names are passed in, already read.
+        """
+
     def skip_map_animation(self, widget) -> bool:
         """Ask the desktop to show `widget` without its window-opening
         animation, and say whether it will. Called before `widget` is first

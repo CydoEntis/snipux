@@ -88,6 +88,18 @@ def _fresh_tool_styles():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_design_caches():
+    """Icons and resolved fonts are cached for the life of the application,
+    which is the life of the whole run here; a test that swaps the font
+    database or an icon file must not inherit the previous test's answer."""
+    from snipux import design
+
+    design.clear_caches()
+    yield
+    design.clear_caches()
+
+
+@pytest.fixture(autouse=True)
 def _no_system_ffmpeg():
     """Every test starts on a machine with no system ffmpeg.
 
