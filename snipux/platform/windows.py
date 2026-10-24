@@ -799,6 +799,24 @@ def _register_open_with(exec_path: Path, icon_path: Path | None) -> bool:
     return True
 
 
+def _delete_if_empty(key: str) -> bool:
+    """Delete `key` when it holds no values and no subkeys -- left behind
+    once Snipux's value is gone. An empty key is no app's data, whoever
+    created it, so this can never take another app's association with it.
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
+            subkeys, values, _modified = winreg.QueryInfoKey(handle)
+        if subkeys == 0 and values == 0:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        print(f"Note: could not tidy up HKCU\\{key}: {exc}")
+        return False
+    return True
+
+
 def _unregister_open_with() -> bool:
     """The counterpart to `_register_open_with()`. Whatever is already gone
     is skipped; any other failure is a note, and the rest still runs."""
@@ -814,6 +832,8 @@ def _unregister_open_with() -> bool:
             except OSError as exc:
                 print(f"Note: could not remove Snipux from Open with for {suffix}: {exc}")
                 ok = False
+            ok = _delete_if_empty(key) and ok
+            ok = _delete_if_empty(rf"{_CLASSES_KEY}\{suffix}") and ok
     for exec_name in _LAUNCHER_NAMES:
         for key in _owned_keys(exec_name):
             try:

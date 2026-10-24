@@ -2442,6 +2442,22 @@ class TestWindowsEditorIntegration:
         # Another app's Open with entry on the same suffix is untouched.
         assert fake_registry.value(other_app, "Paint.Picture") == ""
 
+    def test_remove_tidies_away_suffix_keys_left_empty(self, monkeypatch, tmp_path, fake_registry):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+        kept = r"Software\Classes\.mp4"
+        with fake_registry.CreateKeyEx(fake_registry.HKEY_CURRENT_USER, kept) as handle:
+            fake_registry.SetValueEx(handle, "", 0, fake_registry.REG_SZ, "VLC.mp4")
+        windows.WindowsPlatform().install_desktop_integration()
+
+        windows.WindowsPlatform().remove_desktop_integration()
+
+        assert r"software\classes\.png" not in fake_registry.keys
+        assert r"software\classes\.png\openwithprogids" not in fake_registry.keys
+        # Another app's default stays, and so does the key holding it.
+        assert fake_registry.value(kept, "") == "VLC.mp4"
+        assert r"software\classes\.mp4\openwithprogids" not in fake_registry.keys
+
     def test_remove_deletes_the_editors_shortcuts(self, monkeypatch, tmp_path):
         self._use_tmp_dirs(monkeypatch, tmp_path)
         start_menu = tmp_path / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs"

@@ -198,6 +198,15 @@ class FakeRegistry:
             raise FileNotFoundError(path)
         return self._Handle(path.lower())
 
+    def QueryInfoKey(self, handle):
+        depth = handle.path.count("\\") + 1
+        subkeys = sum(
+            1
+            for key in self.keys
+            if key.startswith(handle.path + "\\") and key.count("\\") == depth
+        )
+        return subkeys, len(self.keys[handle.path]), 0
+
     def SetValueEx(self, handle, name, reserved, kind, data):
         self.keys[handle.path][name] = data
 
