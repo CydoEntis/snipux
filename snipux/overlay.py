@@ -311,15 +311,6 @@ _SHORTCUT_KEY_CODES = {
 }
 _REDACTION_KEY_CODE = getattr(Qt.Key, f"Key_{design.tokens.REDACTION_KEY}")
 
-# Copy text's own key. Not in tokens.SHORTCUTS -- that map feeds
-# handle_tool_key, and Copy text is not a tool a drag arms -- so it is
-# wired straight into OverlayWindow.keyPressEvent instead. Clear of every
-# tool letter and of C/S/O, the destination menu's own (unwired) badges,
-# so a habit formed for one key is never confused for another.
-_COPY_TEXT_KEY = "X"
-_COPY_TEXT_TOOLTIP = f"Copy text — {_COPY_TEXT_KEY}"
-_COPY_TEXT_KEY_CODE = getattr(Qt.Key, f"Key_{_COPY_TEXT_KEY}")
-
 # Arrow keys nudge the selection one logical pixel per press; Alt+arrow
 # resizes it from the bottom-right corner instead -- see
 # OverlayWindow._nudge_selection. One (dx, dy) logical-pixel step per key,
@@ -1144,54 +1135,11 @@ class _WatermarkSlot(_IconButton):
         return (self._hover_bg if hovered else None), self._idle_color
 
 
-class _CopyTextButton(_IconButton):
-    """Copy text, beside the split action.
-
-    Greyed with its reason wherever `platform.current.recognizes_text()` is
-    False, the same way `_WatermarkSlot` greys itself for a Settings with
-    nothing to stamp: `setEnabled(False)` would take the tooltip explaining
-    why along with the click, so the grey is a colour choice in `_colours`
-    and the click itself is refused by whoever handles it, not by Qt.
-    """
-
-    # Class default: `_IconButton.__init__` paints the button before this
-    # class's own `__init__` has had a chance to set it.
-    _reason = ""
-
-    def __init__(self, parent=None):
-        super().__init__("select", _COPY_TEXT_TOOLTIP, name="copy_text", parent=parent)
-
-    @property
-    def unavailable_reason(self) -> str:
-        """Why recognition cannot run here, or "" when it can."""
-        return self._reason
-
-    def set_unavailable_reason(self, reason: str) -> None:
-        self._reason = reason
-        self.setToolTip(reason or _COPY_TEXT_TOOLTIP)
-        self.setCursor(
-            Qt.CursorShape.ArrowCursor if reason else Qt.CursorShape.PointingHandCursor
-        )
-        self._refresh()
-
-    def _colours(self, hovered: bool) -> "tuple[QColor | None, QColor]":
-        if self._reason:
-            return None, design.bar_color("TOOL_DISABLED_FG")
-        return super()._colours(hovered)
-
-
 class FloatingBar(_Chrome):
     """The stills bar: one row under the selection, per
     docs/design/bars/README.md section 2 -- the destination at the left end,
     eight tool slots in a fixed order of consequence, the style dot and the
     watermark, then undo and clear.
-
-    Copy text sits beside the destination, past its own divider: it ends
-    the snip the way Copy does, but is not one of the destination caret's
-    three, since those persist a default (`AFTER_CAPTURE`) and reading text
-    out of a selection is a thing done to one snip, not a way every future
-    one should end (#82). Absent on the review window's bar, which has no
-    fresh selection left to read.
 
     Two of the slots hold families (`tokens.FAMILIES`): shapes and
     redaction. A family slot shows whichever sibling was used last, a notch
@@ -1256,7 +1204,6 @@ class FloatingBar(_Chrome):
     # above -- see `OverlayWindow._open_destination_menu`.
     pinRequested = pyqtSignal()
     destinationMenuRequested = pyqtSignal()
-    copyTextRequested = pyqtSignal()
     captureChipClicked = pyqtSignal()
     # Which tool the cursor is over, so a window can name it without relying
     # on Qt's tooltip timer -- see `ToolHintStrip`.
@@ -1358,7 +1305,6 @@ class FloatingBar(_Chrome):
         self._action: _SplitAction | None = None
         self._copy_button: _IconButton | None = None
         self._save_button: _PillButton | None = None
-        self._copy_text_button: _CopyTextButton | None = None
         if self._trailing == "done":
             self._copy_button = _IconButton(
                 "copy", "Copy", idle_color=design.color("ICON_NEUTRAL")
@@ -1375,15 +1321,6 @@ class FloatingBar(_Chrome):
             self._action.menuRequested.connect(self.destinationMenuRequested)
             layout.addWidget(self._action)
         self._add_divider(layout)
-
-        # Copy text (#82): its own control, not a fourth destination -- see
-        # the class docstring. Absent on the review window's bar, which has
-        # no fresh selection to read text out of.
-        if self._trailing != "done":
-            self._copy_text_button = _CopyTextButton(self)
-            self._copy_text_button.clicked.connect(self._on_copy_text_pressed)
-            layout.addWidget(self._copy_text_button)
-            self._add_divider(layout)
 
         # The chip is built but not placed on the overlay's bar: the
         # handoff's post-selection bar carries no mode control, and the way
@@ -1477,20 +1414,6 @@ class FloatingBar(_Chrome):
             "Open": self.openRequested,
             "Pin": self.pinRequested,
         }.get(destination, self.copyRequested).emit()
-
-    @property
-    def copy_text_available(self) -> bool:
-        return self._copy_text_button is not None and not self._copy_text_button.unavailable_reason
-
-    def set_copy_text_available(self, available: bool, reason: str = "") -> None:
-        """Say whether this machine can read text out of a capture -- a
-        no-op on the review window's bar, which has no Copy text control.
-        Greyed with a reason rather than hidden, the same rule Hide
-        sensitive follows.
-        """
-        if self._copy_text_button is None:
-            return
-        self._copy_text_button.set_unavailable_reason("" if available else reason)
 
     # -- construction helpers ------------------------------------------------
 
@@ -1690,14 +1613,6 @@ class FloatingBar(_Chrome):
     def _on_watermark_pressed(self) -> None:
         if not self._watermark.unavailable_reason:
             self.watermarkToggled.emit()
-
-    def _on_copy_text_pressed(self) -> None:
-        # A greyed button refuses its own click, the same way the
-        # watermark slot refuses one above -- see _CopyTextButton's own
-        # docstring on why that is a colour choice here rather than
-        # setEnabled(False).
-        if self._copy_text_button is not None and not self._copy_text_button.unavailable_reason:
-            self.copyTextRequested.emit()
 
     def _on_watermark_menu_pressed(self) -> None:
         if not self._watermark.unavailable_reason:
@@ -4750,7 +4665,6 @@ class OverlayWindow(QWidget):
         self._bar.openRequested.connect(self._on_bar_open)
         self._bar.pinRequested.connect(self._on_bar_pin)
         self._bar.destinationMenuRequested.connect(self._open_destination_menu)
-        self._bar.copyTextRequested.connect(self._on_bar_copy_text)
         self._bar.toolSelected.connect(self._on_tool_selected)
         # Bound, not a lambda: a lambda holding this window, kept by a bar
         # this window owns, is a cycle Python cannot see into, and the
@@ -4853,12 +4767,6 @@ class OverlayWindow(QWidget):
         )
         self._chooser.recordCursorChanged.connect(
             setup_desktop.save_recording_draw_cursor
-        )
-        # Copy text (#82): the same seam, greyed the same way, on the bar
-        # rather than the chooser -- see FloatingBar's own docstring.
-        self._bar.set_copy_text_available(
-            platform.current.recognizes_text(),
-            platform.current.text_recognition_unavailable_reason(),
         )
         # `kind` (the stills/record switch) is deliberately not remembered:
         # every snip opens on stills, and recording is chosen on purpose or
@@ -5711,8 +5619,8 @@ class OverlayWindow(QWidget):
     def _selection_crop(self) -> "tuple[QRectF, Frame] | None":
         """The current selection, in window coordinates, and its own pixels
         out of the frozen frame at capture resolution -- never the live
-        screen, per CLAUDE.md's one rule. What Hide sensitive and Copy text
-        both hand the OCR engine. None while there is no selection, or the
+        screen, per CLAUDE.md's one rule. What Hide sensitive hands
+        the OCR engine. None while there is no selection, or the
         crop comes back empty.
         """
         if self._selection is None:
@@ -7136,45 +7044,6 @@ class OverlayWindow(QWidget):
         self._show_toast("copy", "Copied to clipboard")
         self._report_capture(image, None)
 
-    def copy_text(self) -> None:
-        """Recognise the words in the current selection and put them on the
-        clipboard as plain text: one line per line, in reading order, no
-        trailing blank line. Toasts how many lines came back; finding none
-        says so and leaves the clipboard exactly as it was, rather than
-        failing silently.
-
-        Reads the same crop Hide sensitive does (`_selection_crop`), not
-        `rendered_image()`: the words underneath the selection's ink are
-        what get recognised, not the ink itself.
-
-        A small selection is read twice, at its own size and doubled --
-        `windows_ocr`'s own docstring says why -- and both reads' lines come
-        back one after another, so a line whose text exactly matches one
-        already kept is that same line seen again, not new text.
-        """
-        current = platform.current
-        crop = self._selection_crop()
-        lines = []
-        if crop is not None and current.recognizes_text():
-            _selection, cropped = crop
-            lines = current.recognize_text(cropped.image)
-
-        seen: set[str] = set()
-        kept: list[str] = []
-        for line in lines:
-            text = " ".join(word.text for word in line)
-            if text and text not in seen:
-                seen.add(text)
-                kept.append(text)
-
-        if kept:
-            output.copy_text_to_clipboard("\n".join(kept))
-            count = len(kept)
-            self._show_toast("text", f"Copied {count} line{'' if count == 1 else 's'}")
-        else:
-            self._show_toast("text", "No text found")
-        self._report_capture(self.rendered_image(), None)
-
     # Subdirectory of ~/Pictures saves land in -- per the spec's "Save
     # writes a timestamped PNG to ~/Pictures/snipux, creating the
     # directory." `app.save_image` defaults to a bare ~/Pictures for its
@@ -7255,11 +7124,6 @@ class OverlayWindow(QWidget):
     def _on_bar_copy(self) -> None:
         """The floating bar's Copy button: copy, then dismiss."""
         self.copy()
-        self.close()
-
-    def _on_bar_copy_text(self) -> None:
-        """The floating bar's Copy text button: recognise, then dismiss."""
-        self.copy_text()
         self.close()
 
     def _on_bar_save(self) -> None:
@@ -7864,21 +7728,38 @@ class OverlayWindow(QWidget):
                 self.close()
             return
 
-        if self._bar.handle_tool_key(key):
+        # Ctrl+C means copy everywhere else on the desktop, and Snipping Tool
+        # users press it by habit. Without this it fell through to C, the
+        # Callout letter: the snip armed a tool and the clipboard kept
+        # whatever it held before.
+        if key == Qt.Key.Key_C and modifiers == Qt.KeyboardModifier.ControlModifier:
+            if self._selection is not None and not self._armed_for_recording:
+                self.copy()
+                self.close()
             return
 
-        # Copy text (#82). Guarded the same way Escape's own back-a-stage
-        # branch is (`_handle_escape`): a selection that is not itself
-        # mid-recording-setup, which is when `self._bar` -- Copy text
-        # included -- is actually on screen. A greyed button refuses its
-        # own click, so the key refuses it too rather than doing it anyway.
-        if (
-            key == _COPY_TEXT_KEY_CODE
-            and self._selection is not None
-            and not self._armed_for_recording
-            and self._bar.copy_text_available
+        # The tool and style letters are bare keys. A chord that happens to
+        # end in one (Ctrl+X, Alt+R) is somebody else's shortcut, not a
+        # request to switch tools.
+        if modifiers & (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
         ):
-            self._on_bar_copy_text()
+            # Except AltGr, which Windows reports as Ctrl+Alt: on German and
+            # French layouts it is how [ and ] are typed at all.
+            alt_gr = (
+                modifiers & Qt.KeyboardModifier.ControlModifier
+                and modifiers & Qt.KeyboardModifier.AltModifier
+                and event.text().isprintable()
+                and event.text() != ""
+            )
+            if alt_gr and key in _STEP_KEY_CODES and self._style_popover.handle_key(key):
+                return
+            super().keyPressEvent(event)
+            return
+
+        if self._bar.handle_tool_key(key):
             return
 
         # 1-7, [ ] and D style the active tool, whether the popover is open

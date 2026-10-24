@@ -100,8 +100,8 @@ new process becomes the server.
 Optional things are found, not required:
 
 - `ffmpeg` on `PATH` gives H.264 export; without it, export drops one codec.
-- PowerShell + an OCR language gives Copy text; without it, the button is
-  greyed with the reason.
+- PowerShell + an OCR language gives Hide sensitive; without it, the
+  switch is greyed with the reason.
 - `grim`, `scrot`, `import`, `xprop`, `wl-copy` are each one backend or
   helper among several.
 

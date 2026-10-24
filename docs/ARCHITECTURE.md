@@ -138,7 +138,7 @@ packaging/          the one-line installers, the Linux .deb and AppImage, the
   `snipux --update`, which runs `pip`. Nothing is installed without a
   click.
 - Pixels leave memory only when the user chooses Copy, Save, Pin or Record.
-- OCR (Copy text, Hide sensitive) runs on the device. On Windows the image
+- OCR (Hide sensitive, text snapping) runs on the device. On Windows the image
   goes to a temp file that PowerShell reads through `Windows.Media.Ocr`, and
   is deleted afterwards.
 - Screenshots and recordings are user content: never log them, never put them

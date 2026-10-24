@@ -11,7 +11,7 @@ and only for something the user just asked for.
 
 | Facility | Used for | Notes |
 | --- | --- | --- |
-| Clipboard (`QClipboard`) | Copy, Copy text, player copy | Written only when the user clicks Copy. Never read in the background; no clipboard history. |
+| Clipboard (`QClipboard`) | Copy, player copy | Written only when the user clicks Copy. Never read in the background; no clipboard history. |
 | Local socket (`QLocalServer`/`QLocalSocket`) | a second `snipux --snip` hands its request to the running one | Local only, fixed server name. Carries a command, never pixels. |
 | Files | saving captures, `config.json` and friends | Only the save/recording folders, the config folder, and a file the user opened. |
 | `pip` (subprocess) | `snipux --update` | Only when the user runs it. Refused in the standalone exe. |
@@ -42,8 +42,7 @@ global hotkey registers one chord; snipux does not see other keystrokes.
 | `.desktop` files, autostart, hicolor icons | app launcher and start at login | Written by `--setup`; undone by `--remove`. |
 
 Pin is greyed on Wayland: a client cannot place its own window or keep it on
-top there. Copy text is greyed on Linux until a system OCR route exists
-(issue #92).
+top there.
 
 ## Windows
 
@@ -56,7 +55,7 @@ top there. Copy text is greyed on Linux until a system OCR route exists
 | `user32.SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` | keeping snipux's own bars out of a recording | Nothing. Windows 10 2004+. |
 | `kernel32.AttachConsole` | printing `--help`/`--update` output from the windowless launcher | Nothing. |
 | COM `IShellLinkW` / `IPersistFile` (raw `ctypes`) | Start Menu and Startup shortcuts | Written by `--setup` / first run of the exe; undone by `--remove`. |
-| `Windows.Media.Ocr` via `powershell.exe` | Copy text, Hide sensitive | On-device. The image goes to a temp `.bmp`, which is deleted after the call. Needs an OCR language installed; greyed with the reason if not. |
+| `Windows.Media.Ocr` via `powershell.exe` | Hide sensitive, text snapping | On-device. The image goes to a temp `.bmp`, which is deleted after the call. Needs an OCR language installed; greyed with the reason if not. |
 | Self-relocation to `%LOCALAPPDATA%\snipux` | the standalone exe survives a Downloads cleanup | First run only. |
 
 The exe is unsigned, so SmartScreen warns on first run (see

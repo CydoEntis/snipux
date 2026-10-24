@@ -7,9 +7,19 @@ use it; the commit history has the detail.
 
 ### Fixed
 
+- **Ctrl+C now copies the snip.** It used to pick the Callout tool and copy
+  nothing, so whatever was on the clipboard before stayed there. Ctrl, Alt
+  and Win chords no longer switch tools.
 - **"Checking for updates…" could be the last thing you saw.** A reply from
   GitHub cut off halfway stopped the check without a word. It now says it
   could not check.
+
+### Removed
+
+- **Copy text** (the button and the X key that put the words in a snip on
+  the clipboard). It was easy to set off by accident and leave text on the
+  clipboard where the picture should have been. Hide sensitive still reads
+  text the same way.
 
 ## 1.2.2 — 2026-10-23
 
