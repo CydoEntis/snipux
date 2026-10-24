@@ -1837,6 +1837,7 @@ class AppController:
 
         setup_desktop.save_setup_complete(True)
         setup_desktop.save_integration_target(self._integration_target())
+        setup_desktop.save_integration_revision(setup_desktop.INTEGRATION_REVISION)
         shortcut = setup_desktop.human_shortcut(setup_desktop.load_shortcut())
         self._report_shortcut(
             f"Snipux is set up: it starts at login, and {shortcut} starts a "
@@ -1858,15 +1859,23 @@ class AppController:
         return str(found) if found is not None else ""
 
     def _repoint_integration_if_stale(self) -> None:
-        """Rewrite the desktop entries when they name a different build.
+        """Rewrite the desktop entries when they name a different build, or
+        were written by a snipux that wrote fewer of them.
 
         Silent on the happy path, which is nearly every launch: the record
         matches and there is nothing to do. An empty record is the same
         answer -- it means the entries predate this record existing, and
         rewriting them to the build that is running is right either way.
+        An older `INTEGRATION_REVISION` is how an upgrade gets the editors'
+        launcher entries without the user running --setup again.
         """
         target = self._integration_target()
-        if not target or target == setup_desktop.load_integration_target():
+        if not target:
+            return
+        if (
+            target == setup_desktop.load_integration_target()
+            and setup_desktop.load_integration_revision() >= setup_desktop.INTEGRATION_REVISION
+        ):
             return
         try:
             platform.current.install_desktop_integration()
@@ -1874,6 +1883,7 @@ class AppController:
             # Nothing to re-point on a platform that never pointed anywhere.
             return
         setup_desktop.save_integration_target(target)
+        setup_desktop.save_integration_revision(setup_desktop.INTEGRATION_REVISION)
 
     def _quit(self) -> None:
         QApplication.instance().quit()

@@ -722,6 +722,25 @@ def save_integration_target(target: str, config_dir: Path | None = None) -> bool
     return _write_config("integration_target", target, config_dir)
 
 
+# Bumped whenever --setup starts writing something it did not before, so the
+# first launch after an upgrade writes it once, without anyone having to run
+# --setup by hand. 2: the editors' launcher entries and Open With.
+INTEGRATION_REVISION = 2
+
+
+def load_integration_revision(config_dir: Path | None = None) -> int:
+    """The `INTEGRATION_REVISION` the desktop entries were last written at
+    -- 1 for entries written before this record existed."""
+    stored = _read_config(config_dir).get("integration_revision")
+    if isinstance(stored, int) and not isinstance(stored, bool):
+        return stored
+    return 1
+
+
+def save_integration_revision(revision: int, config_dir: Path | None = None) -> bool:
+    return _write_config("integration_revision", revision, config_dir)
+
+
 def load_update_checked_on(config_dir: Path | None = None) -> str:
     """The date of the last update check, as `YYYY-MM-DD`, or empty.
 

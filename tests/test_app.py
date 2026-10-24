@@ -158,6 +158,11 @@ def _assume_integration_points_here(monkeypatch):
         "load_integration_target",
         lambda cd=None: app.AppController._integration_target(),
     )
+    monkeypatch.setattr(
+        app.setup_desktop,
+        "load_integration_revision",
+        lambda cd=None: app.setup_desktop.INTEGRATION_REVISION,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -6294,6 +6299,37 @@ class TestRunFirstLaunchSetup:
         controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
 
         controller.run_first_launch_setup()  # must not raise
+
+    def test_rewrites_entries_an_older_snipux_wrote_fewer_of(self, make_controller, monkeypatch):
+        # An upgrade from a snipux without the editors' launcher entries:
+        # same build path, older revision. Those entries arrive once, on
+        # the first launch, with nobody having to run --setup again.
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/here/snipux")
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/here/snipux"))
+        )
+        monkeypatch.setattr(app.setup_desktop, "load_integration_revision", lambda cd=None: 1)
+        install_calls = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: install_calls.append(kwargs) or 0,
+        )
+        revisions = []
+        monkeypatch.setattr(
+            app.setup_desktop,
+            "save_integration_revision",
+            lambda revision, cd=None: revisions.append(revision) or True,
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()
+
+        assert install_calls == [{}]
+        assert revisions == [app.setup_desktop.INTEGRATION_REVISION]
 
     def test_a_build_that_cannot_locate_itself_repoints_nothing(
         self, make_controller, monkeypatch

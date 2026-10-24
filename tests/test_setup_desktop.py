@@ -471,6 +471,22 @@ class TestRenderIco:
         assert setup_desktop.render_ico() is None
 
 
+class TestIntegrationRevision:
+    def test_entries_from_before_the_record_count_as_revision_one(self, tmp_path):
+        assert setup_desktop.load_integration_revision(tmp_path) == 1
+
+    def test_a_saved_revision_is_read_back(self, tmp_path):
+        assert setup_desktop.save_integration_revision(2, tmp_path)
+
+        assert setup_desktop.load_integration_revision(tmp_path) == 2
+
+    def test_a_corrupt_value_counts_as_revision_one(self, tmp_path):
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text('{"integration_revision": "two"}')
+
+        assert setup_desktop.load_integration_revision(tmp_path) == 1
+
+
 class TestEditorEntries:
     """The image and video editors each get a launcher entry of their own,
     offered under "Open With" for the files they open -- and never made
