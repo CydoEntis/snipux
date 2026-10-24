@@ -644,6 +644,11 @@ class ReviewWindow(WinWindow):
     or a dropped file gives it something to show.
     """
 
+    # A recording dropped on this window: the controller decides where it
+    # goes. Unconnected (a window built on its own), the drop is refused
+    # here as any other file this window cannot open.
+    otherEditorRequested = pyqtSignal(object)
+
     def __init__(
         self,
         image: QImage | None = None,
@@ -1137,7 +1142,14 @@ class ReviewWindow(WinWindow):
         event.acceptProposedAction()
         # The first, where several land at once: one window opens one image,
         # the same as `snipux PATH` only ever names one.
-        self.open_path(Path(urls[0].toLocalFile()))
+        path = Path(urls[0].toLocalFile())
+        if (
+            path.suffix.lower() in tokens.EDITOR_RECORDING_SUFFIXES
+            and self.receivers(self.otherEditorRequested) > 0
+        ):
+            self.otherEditorRequested.emit(path)
+            return
+        self.open_path(path)
 
     # -- actions ---------------------------------------------------------
 

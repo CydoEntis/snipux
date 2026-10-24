@@ -1727,6 +1727,10 @@ class PlayerWindow(WinWindow):
     """
 
     exported = pyqtSignal(str)
+    # Anything but a recording dropped on this window -- an image, most
+    # likely: the controller decides where it goes. Unconnected, the drop
+    # is refused here.
+    otherEditorRequested = pyqtSignal(object)
 
     def __init__(
         self,
@@ -2398,7 +2402,14 @@ class PlayerWindow(WinWindow):
         if not urls:
             return
         event.acceptProposedAction()
-        self.open_path(Path(urls[0].toLocalFile()))
+        path = Path(urls[0].toLocalFile())
+        if (
+            path.suffix.lower() not in tokens.EDITOR_RECORDING_SUFFIXES
+            and self.receivers(self.otherEditorRequested) > 0
+        ):
+            self.otherEditorRequested.emit(path)
+            return
+        self.open_path(path)
 
     def choose_file(self) -> None:
         """Open… and Ctrl+O: pick a recording and load it into this window."""

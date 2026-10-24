@@ -6927,6 +6927,20 @@ class TestOpenPathRoutesByType:
         assert "gone.mp4" in calls[0]
 
 
+class _FakeFileDrop:
+    """What an editor's `dropEvent` reads off a real drop of one file."""
+
+    def __init__(self, path: Path):
+        self._mime = QMimeData()
+        self._mime.setUrls([QUrl.fromLocalFile(str(path))])
+
+    def mimeData(self):
+        return self._mime
+
+    def acceptProposedAction(self) -> None:
+        pass
+
+
 class TestOpenEditor:
     """A forwarded `--image-editor`/`--video-editor` opens that editor
     empty in the resident."""
@@ -6993,6 +7007,48 @@ class TestOpenEditor:
             assert controller._reviews[0].is_empty
         finally:
             for window in list(controller._reviews):
+                window.close()
+
+    def test_a_recording_dropped_on_the_image_editor_goes_to_the_player(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        controller.open_editor("image")
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        target = tmp_path / "clip.mp4"
+        target.write_bytes(b"")
+
+        try:
+            controller._reviews[0].dropEvent(_FakeFileDrop(target))
+
+            assert opened == [target]
+            assert controller._reviews[0].is_empty
+        finally:
+            for window in list(controller._reviews):
+                window.close()
+
+    def test_an_image_dropped_on_the_video_editor_goes_to_the_image_editor(
+        self, make_controller, tmp_path
+    ):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        controller.open_editor("video")
+        target = tmp_path / "shot.png"
+        QImage(12, 8, QImage.Format.Format_RGB32).save(str(target), "PNG")
+
+        try:
+            controller._players[0].dropEvent(_FakeFileDrop(target))
+
+            assert [review.title_label.text() for review in controller._reviews] == ["shot.png"]
+            assert controller._players[0].is_empty
+        finally:
+            for window in list(controller._reviews) + list(controller._players):
                 window.close()
 
     def test_closing_it_lets_it_go(self, make_controller):

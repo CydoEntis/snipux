@@ -2183,7 +2183,8 @@ class AppController:
 
         Held in a list, not one slot: a parentless widget is fair game for
         the GC while it is on screen, and several snips or recordings in a
-        row should leave several windows open.
+        row should leave several windows open. A file dropped on the wrong
+        one comes back through `open_path`, which knows where it belongs.
         """
         if isinstance(window, PlayerWindow):
             self._players.append(window)
@@ -2191,6 +2192,7 @@ class AppController:
         else:
             self._reviews.append(window)
             window.closed.connect(lambda w=window: self._forget_review(w))
+        window.otherEditorRequested.connect(self.open_path)
         _present(window)
 
     def _warn(self, message: str) -> None:

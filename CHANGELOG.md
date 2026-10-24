@@ -36,6 +36,9 @@ window of its own beside the old Snipux.
   on the window. If the current recording has a trim you haven't exported,
   Snipux asks before discarding it. A file it can't play now says so
   instead of showing a black frame.
+- **Drop a file on the wrong editor and it opens in the right one** -- a
+  recording dropped on the image editor goes to the video editor, and a
+  picture dropped on the video editor goes to the image editor.
 
 ## 1.2.3 — 2026-10-24
 
