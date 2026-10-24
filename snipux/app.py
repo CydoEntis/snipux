@@ -1728,16 +1728,9 @@ class AppController:
         window still on screen. Non-modal, so a snip can still be taken
         while it is open.
         """
-        if self._settings is not None and self._settings.isVisible():
-            self._settings.raise_()
-            self._settings.activateWindow()
-            platform.current.take_keyboard_focus(self._settings)
-            return
-        self._settings = SettingsDialog(on_saved=self._on_settings_saved)
-        self._settings.show()
-        self._settings.raise_()
-        self._settings.activateWindow()
-        platform.current.take_keyboard_focus(self._settings)
+        if self._settings is None or not self._settings.isVisible():
+            self._settings = SettingsDialog(on_saved=self._on_settings_saved)
+        _present(self._settings)
 
     def _on_settings_saved(self) -> None:
         """Apply what Settings just wrote.
@@ -2149,17 +2142,7 @@ class AppController:
         # A copy of the image, not the overlay's own: the overlay is about
         # to close, and `rendered_image()` hands back a QImage backed by
         # buffers it owns.
-        review = ReviewWindow(image.copy(), saved_path=path)
-        # Held for the same reason `_overlay` and `_settings` are -- a
-        # parentless widget is fair game for the GC while it is on screen.
-        # A list, not one slot: taking several snips in a row should leave
-        # several windows open, which is most of the point of having one.
-        self._reviews.append(review)
-        review.closed.connect(lambda w=review: self._forget_review(w))
-        review.show()
-        review.raise_()
-        review.activateWindow()
-        platform.current.take_keyboard_focus(review)
+        self._show_editor(ReviewWindow(image.copy(), saved_path=path))
 
     def open_path(self, path: Path) -> None:
         """`snipux PATH`, here or forwarded over the socket: a recording
@@ -2182,8 +2165,7 @@ class AppController:
         )
         if empty is not None:
             empty.open_path(path)
-            empty.raise_()
-            empty.activateWindow()
+            _present(empty)
         elif video:
             self._open_player(path)
         else:
@@ -2194,18 +2176,22 @@ class AppController:
         `--video-editor`, run from an app launcher. Its own empty state
         offers Open… and a drop target.
         """
-        if editor == "video":
-            window = PlayerWindow()
+        self._show_editor(PlayerWindow() if editor == "video" else ReviewWindow())
+
+    def _show_editor(self, window: "ReviewWindow | PlayerWindow") -> None:
+        """Hold, wire up and raise a review or player window.
+
+        Held in a list, not one slot: a parentless widget is fair game for
+        the GC while it is on screen, and several snips or recordings in a
+        row should leave several windows open.
+        """
+        if isinstance(window, PlayerWindow):
             self._players.append(window)
             window.closed.connect(lambda w=window: self._forget_player(w))
         else:
-            window = ReviewWindow()
             self._reviews.append(window)
             window.closed.connect(lambda w=window: self._forget_review(w))
-        window.show()
-        window.raise_()
-        window.activateWindow()
-        platform.current.take_keyboard_focus(window)
+        _present(window)
 
     def _warn(self, message: str) -> None:
         if self._tray_available:
@@ -2234,13 +2220,7 @@ class AppController:
         if image.isNull():
             self._warn(f"Could not open {path.name}: {reader.errorString()}")
             return
-        review = ReviewWindow(image, saved_path=path)
-        self._reviews.append(review)
-        review.closed.connect(lambda w=review: self._forget_review(w))
-        review.show()
-        review.raise_()
-        review.activateWindow()
-        platform.current.take_keyboard_focus(review)
+        self._show_editor(ReviewWindow(image, saved_path=path))
 
     def _on_pin_requested(self, image: QImage, rect: QRect) -> None:
         """SNX-83: build and show the pin `OverlayWindow._on_bar_pin` asked
@@ -2435,19 +2415,8 @@ class AppController:
         self._quit()
 
     def _open_player(self, path: Path) -> None:
-        """Open a landed recording in the trim editor.
-
-        Held in a list for the same reason review windows are: a parentless
-        widget is fair game for the GC while it is on screen, and taking
-        several recordings in a row should leave several windows open.
-        """
-        player = PlayerWindow(path)
-        self._players.append(player)
-        player.closed.connect(lambda w=player: self._forget_player(w))
-        player.show()
-        player.raise_()
-        player.activateWindow()
-        platform.current.take_keyboard_focus(player)
+        """Open a landed recording in the trim editor."""
+        self._show_editor(PlayerWindow(path))
 
     def _forget_player(self, window) -> None:
         if window in self._players:
@@ -4278,6 +4247,14 @@ def _become_resident(
     return app.exec()
 
 
+def _present(window: QWidget) -> None:
+    """Show `window` in front, with the keyboard."""
+    window.show()
+    window.raise_()
+    window.activateWindow()
+    platform.current.take_keyboard_focus(window)
+
+
 def _open_editor_here(*, editor: str | None = None, path: Path | None = None) -> int:
     """Open an editor in this process, because the resident did not
     acknowledge the request: it is a Snipux from before the editors, left
@@ -4300,9 +4277,7 @@ def _open_editor_here(*, editor: str | None = None, path: Path | None = None) ->
     window = PlayerWindow() if editor == "video" else ReviewWindow()
     if path is not None:
         window.open_path(path)
-    window.show()
-    window.raise_()
-    window.activateWindow()
+    _present(window)
     app = QApplication.instance()
     app.setQuitOnLastWindowClosed(True)
     return app.exec()
