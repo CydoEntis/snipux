@@ -2380,6 +2380,24 @@ class TestWindowsEditorIntegration:
         assert created["Snipux Video Editor.lnk"]["arguments"] == "--video-editor"
         assert created["snipux.lnk"]["arguments"] == ""
 
+    def test_each_editor_shortcut_has_its_own_app_id(self, monkeypatch, tmp_path):
+        # The Start Menu shows one entry per AppUserModelID: shortcuts that
+        # share Snipux's are folded into it and can't be found in search.
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        created = {}
+        monkeypatch.setattr(
+            windows,
+            "_create_shortcut",
+            lambda lnk, target, **kw: created.update({lnk.name: kw}) or True,
+        )
+
+        windows.WindowsPlatform().install_desktop_integration()
+
+        ids = {name: kw.get("app_id", windows.APP_USER_MODEL_ID) for name, kw in created.items()}
+        assert ids["snipux.lnk"] == windows.APP_USER_MODEL_ID
+        assert ids["Snipux Image Editor.lnk"] == "CydoEntis.Snipux.ImageEditor"
+        assert ids["Snipux Video Editor.lnk"] == "CydoEntis.Snipux.VideoEditor"
+
     @pytest.mark.parametrize(
         "suffix,progid,flag",
         [

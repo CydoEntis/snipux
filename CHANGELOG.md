@@ -5,6 +5,13 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **On Windows, "Snipux Image Editor" and "Snipux Video Editor" now show up
+  in the Start menu and its search.** Windows was folding them into the
+  Snipux entry, so they were installed but impossible to find. The first
+  launch after updating puts them back.
+
 ## 1.2.4 — 2026-10-24
 
 **After updating, quit Snipux from the tray and start it again.** The

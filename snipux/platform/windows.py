@@ -381,6 +381,7 @@ def _create_shortcut(
     icon_path: Path | None = None,
     description: str = "",
     arguments: str = "",
+    app_id: str = APP_USER_MODEL_ID,
 ) -> bool:
     """Write a Windows `.lnk` shortcut at `lnk_path` that launches `target`
     with `arguments` (none, for Snipux itself; an editor flag for the two
@@ -433,7 +434,7 @@ def _create_shortcut(
                 )
                 set_icon(shell_link, str(icon_path), 0)
 
-            _set_shortcut_app_id(shell_link, APP_USER_MODEL_ID)
+            _set_shortcut_app_id(shell_link, app_id)
 
             query_interface = _com_call(
                 shell_link,
@@ -667,6 +668,7 @@ def _write_shortcut(
     *,
     arguments: str = "",
     description: str = "Snipux",
+    app_id: str = APP_USER_MODEL_ID,
 ) -> bool:
     """Write a `label` shortcut at `lnk_path` launching `target`, reporting
     either way -- the Windows analogue of `setup_desktop._write_entry()`.
@@ -686,7 +688,7 @@ def _write_shortcut(
         print(f"Note: could not create {lnk_path.parent} for the {label} entry: {exc}")
         return False
     if not _create_shortcut(
-        lnk_path, target, icon_path=icon_path, description=description, arguments=arguments
+        lnk_path, target, icon_path=icon_path, description=description, arguments=arguments, app_id=app_id
     ):
         print(f"Note: could not write the {label} entry at {lnk_path}.")
         return False
@@ -869,8 +871,15 @@ def _launcher_for_integration() -> Path | None:
     return stable_copy if stable_copy is not None else exec_path
 
 
+def _editor_app_id(progid: str) -> str:
+    """An editor shortcut's own AppUserModelID. The Start Menu lists one
+    entry per ID, so editor shortcuts carrying Snipux's own ID were folded
+    into the Snipux entry and never appeared in search."""
+    return f"{APP_USER_MODEL_ID}.{progid.split('.', 1)[1]}"
+
+
 def _write_editor_integration(exec_path: Path, icon_path: Path | None) -> None:
-    for name, flag, _progid, _suffixes in _EDITORS:
+    for name, flag, progid, _suffixes in _EDITORS:
         _write_shortcut(
             _start_menu_dir() / f"{name}.lnk",
             exec_path,
@@ -878,6 +887,7 @@ def _write_editor_integration(exec_path: Path, icon_path: Path | None) -> None:
             f"{name} Start Menu",
             arguments=flag,
             description=name,
+            app_id=_editor_app_id(progid),
         )
     _register_open_with(exec_path, icon_path)
 

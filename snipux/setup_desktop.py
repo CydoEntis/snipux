@@ -727,7 +727,9 @@ def save_integration_target(target: str, config_dir: Path | None = None) -> bool
 # Bumped whenever --setup starts writing something it did not before, so the
 # first launch after an upgrade writes it once, without anyone having to run
 # --setup by hand. 2: the editors' launcher entries and Open With.
-INTEGRATION_REVISION = 2
+# 3: the Windows editor shortcuts get their own AppUserModelID, without
+# which the Start Menu hid them behind the Snipux entry.
+INTEGRATION_REVISION = 3
 
 
 def load_integration_revision(config_dir: Path | None = None) -> int:
