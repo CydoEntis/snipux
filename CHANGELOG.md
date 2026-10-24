@@ -11,6 +11,10 @@ use it; the commit history has the detail.
   `snipux --image-editor` and `snipux --video-editor` open one with nothing
   in it, ready to open or drop a file into, without taking a snip or a
   recording first.
+- **On Linux, "Snipux Image Editor" and "Snipux Video Editor" are in the
+  app list** and under "Open With" for pictures (PNG, JPEG, WebP, BMP, GIF)
+  and recordings (MP4, WebM, MKV, MOV). Snipux does not make itself the
+  default app for any of them.
 - **`snipux clip.mp4` opens the recording in the video editor.** Handing
   Snipux a file now opens it in the right editor: a recording (.mp4, .webm,
   .mkv, .mov) in the trim editor, anything else in the image editor. A file

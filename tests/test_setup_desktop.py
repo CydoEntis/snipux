@@ -257,7 +257,11 @@ class TestRunSetup:
             hicolor_dir=tmp_path / "icons",
         )
 
-        assert list(applications_dir.iterdir()) == [applications_dir / "snipux.desktop"]
+        assert sorted(applications_dir.iterdir()) == [
+            applications_dir / "snipux-image-editor.desktop",
+            applications_dir / "snipux-video-editor.desktop",
+            applications_dir / "snipux.desktop",
+        ]
         assert list(autostart_dir.iterdir()) == [autostart_dir / "snipux.desktop"]
 
     def test_returns_1_and_reports_when_the_console_script_cannot_be_found(
@@ -465,6 +469,86 @@ class TestRenderIco:
         monkeypatch.setattr(setup_desktop, "_LOGO_DIR", tmp_path / "no-such-logo-dir")
 
         assert setup_desktop.render_ico() is None
+
+
+class TestEditorEntries:
+    """The image and video editors each get a launcher entry of their own,
+    offered under "Open With" for the files they open -- and never made
+    the default for them.
+    """
+
+    @staticmethod
+    def _setup(tmp_path):
+        applications_dir = tmp_path / "applications"
+        setup_desktop.run_setup(
+            exec_path=Path("/opt/snipux/bin/snipux"),
+            applications_dir=applications_dir,
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+        )
+        return applications_dir
+
+    @staticmethod
+    def _fields(path: Path) -> dict[str, str]:
+        return dict(
+            line.split("=", 1) for line in path.read_text().splitlines() if "=" in line
+        )
+
+    @pytest.mark.parametrize(
+        "filename,name,flag,mimes",
+        [
+            (
+                "snipux-image-editor.desktop",
+                "Snipux Image Editor",
+                "--image-editor",
+                {"image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif"},
+            ),
+            (
+                "snipux-video-editor.desktop",
+                "Snipux Video Editor",
+                "--video-editor",
+                {"video/mp4", "video/webm", "video/x-matroska", "video/quicktime"},
+            ),
+        ],
+    )
+    def test_each_editor_is_offered_for_its_files(self, tmp_path, filename, name, flag, mimes):
+        fields = self._fields(self._setup(tmp_path) / filename)
+
+        assert fields["Name"] == name
+        # %f: a file chosen under "Open With" is passed straight through.
+        assert fields["Exec"] == f"{Path('/opt/snipux/bin/snipux')} {flag} %f"
+        assert fields["Icon"] == "snipux"
+        assert set(filter(None, fields["MimeType"].split(";"))) == mimes
+
+    def test_one_mime_type_per_suffix_the_editors_open(self):
+        image = self._fields(setup_desktop.PACKAGE_DIR / "snipux-image-editor.desktop")
+        video = self._fields(setup_desktop.PACKAGE_DIR / "snipux-video-editor.desktop")
+
+        # .jpg and .jpeg share image/jpeg.
+        assert len(set(filter(None, image["MimeType"].split(";")))) == len(
+            tokens.EDITOR_IMAGE_SUFFIXES
+        ) - 1
+        assert len(set(filter(None, video["MimeType"].split(";")))) == len(
+            tokens.EDITOR_RECORDING_SUFFIXES
+        )
+
+    def test_nothing_is_made_the_default_handler(self, tmp_path):
+        self._setup(tmp_path)
+
+        written = {path.name for path in tmp_path.rglob("*") if path.is_file()}
+        assert "mimeapps.list" not in written
+
+    def test_remove_deletes_both(self, tmp_path):
+        applications_dir = self._setup(tmp_path)
+
+        setup_desktop.run_remove(
+            applications_dir=applications_dir,
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+            config_dir=tmp_path / "config",
+        )
+
+        assert list(applications_dir.iterdir()) == []
 
 
 class TestRunRemove:

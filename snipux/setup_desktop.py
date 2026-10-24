@@ -48,6 +48,16 @@ from .design import PACKAGE_DIR, tokens
 _TEMPLATE_PATH = PACKAGE_DIR / "snipux.desktop"
 _LAUNCHER_PLACEHOLDER = "__SNIPUX_LAUNCHER__"
 
+# The two editors' own launcher entries, by filename -- which is also their
+# desktop ID, so the .deb's system-wide copies of them are overridden by
+# these per-user ones rather than listed twice. Their `MimeType=` lines put
+# Snipux under "Open With" for images and recordings; nothing here writes
+# mimeapps.list, so Snipux is never made the default for anything.
+EDITOR_ENTRIES = {
+    "snipux-image-editor.desktop": "image editor",
+    "snipux-video-editor.desktop": "video editor",
+}
+
 _MEDIA_KEYS_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
 _SLOT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/"
 _SLOT_SCHEMA = f"{_MEDIA_KEYS_SCHEMA}.custom-keybinding:{_SLOT_PATH}"
@@ -154,7 +164,7 @@ def find_console_script(name: str = "snipux") -> Path | None:
     return None
 
 
-def render_desktop_entry(exec_path: Path) -> str:
+def render_desktop_entry(exec_path: Path, template: Path = _TEMPLATE_PATH) -> str:
     """Fill in the bundled `.desktop` template's `Exec=` line with
     `exec_path`'s real, absolute path.
 
@@ -164,8 +174,8 @@ def render_desktop_entry(exec_path: Path) -> str:
     placeholder instead and this is the one place that gets replaced with
     the console script's actual location.
     """
-    template = _TEMPLATE_PATH.read_text(encoding="utf-8")
-    return template.replace(_LAUNCHER_PLACEHOLDER, str(exec_path)).rstrip() + "\n"
+    text = template.read_text(encoding="utf-8")
+    return text.replace(_LAUNCHER_PLACEHOLDER, str(exec_path)).rstrip() + "\n"
 
 
 def render_autostart_entry(exec_path: Path) -> str:
@@ -190,9 +200,15 @@ def render_autostart_entry(exec_path: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _write_entry(directory: Path, contents: str, exec_path: Path, label: str) -> bool:
-    """Write `contents` as `directory/snipux.desktop`, overwriting whatever
-    was there.
+def _write_entry(
+    directory: Path,
+    contents: str,
+    exec_path: Path,
+    label: str,
+    filename: str = "snipux.desktop",
+) -> bool:
+    """Write `contents` as `directory/filename`, overwriting whatever was
+    there.
 
     The filename never changes between runs, so a second `--setup` replaces
     the first entry rather than adding a duplicate -- no extra bookkeeping
@@ -202,7 +218,7 @@ def _write_entry(directory: Path, contents: str, exec_path: Path, label: str) ->
     """
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / "snipux.desktop"
+        path = directory / filename
         path.write_text(contents, encoding="utf-8")
     except OSError as exc:
         print(f"Note: could not write the {label} entry into {directory}: {exc}")
@@ -211,8 +227,8 @@ def _write_entry(directory: Path, contents: str, exec_path: Path, label: str) ->
     return True
 
 
-def _remove_entry(directory: Path, label: str) -> bool:
-    """Delete `directory/snipux.desktop`, the counterpart to `_write_entry()`.
+def _remove_entry(directory: Path, label: str, filename: str = "snipux.desktop") -> bool:
+    """Delete `directory/filename`, the counterpart to `_write_entry()`.
 
     Reports plainly, rather than failing, when there is nothing to remove --
     a second `--remove`, or a first one run on a machine `--setup` never ran
@@ -221,7 +237,7 @@ def _remove_entry(directory: Path, label: str) -> bool:
     and reported here rather than raised, so it doesn't take down the steps
     after it, mirroring `_write_entry()`.
     """
-    path = directory / "snipux.desktop"
+    path = directory / filename
     if not path.exists():
         print(f"{label.capitalize()} entry not found at {path} -- nothing to remove")
         return True
@@ -2003,8 +2019,8 @@ def run_setup(
     hypr_config_dir: Path | None = None,
     shortcut: str | None = None,
 ) -> int:
-    """The body of `snipux --setup`: desktop entry, autostart entry, desktop
-    shortcut -- everything `packaging/install.sh` used to do by hand after
+    """The body of `snipux --setup`: desktop entry, the two editors' entries,
+    autostart entry, desktop shortcut -- everything `packaging/install.sh` used to do by hand after
     building its venv, now runnable straight from an installed copy of
     snipux with no repository checkout present.
 
@@ -2064,6 +2080,14 @@ def run_setup(
     _write_entry(
         applications_dir, render_desktop_entry(exec_path), exec_path, "desktop"
     )
+    for filename, label in EDITOR_ENTRIES.items():
+        _write_entry(
+            applications_dir,
+            render_desktop_entry(exec_path, PACKAGE_DIR / filename),
+            exec_path,
+            label,
+            filename,
+        )
     _write_entry(
         autostart_dir, render_autostart_entry(exec_path), exec_path, "autostart"
     )
@@ -2088,8 +2112,8 @@ def run_remove(
     hypr_config_dir: Path | None = None,
 ) -> int:
     """The body of `snipux --remove`: the exact counterpart to
-    `run_setup()` -- deletes the desktop entry, the autostart entry, the
-    installed icons, and the GNOME or Hyprland shortcut, so
+    `run_setup()` -- deletes the desktop entry, the editors' entries, the
+    autostart entry, the installed icons, and the GNOME or Hyprland shortcut, so
     `pipx uninstall snipux` afterwards leaves nothing behind (SNX-83).
 
     `applications_dir`/`autostart_dir`/`hicolor_dir` default to the same
@@ -2123,6 +2147,8 @@ def run_remove(
         )
 
     _remove_entry(applications_dir, "desktop")
+    for filename, label in EDITOR_ENTRIES.items():
+        _remove_entry(applications_dir, label, filename)
     _remove_entry(autostart_dir, "autostart")
     remove_icons(hicolor_dir)
     print(unbind_linux_shortcut(hypr_config_dir=hypr_config_dir))
