@@ -257,7 +257,11 @@ class TestRunSetup:
             hicolor_dir=tmp_path / "icons",
         )
 
-        assert list(applications_dir.iterdir()) == [applications_dir / "snipux.desktop"]
+        assert sorted(applications_dir.iterdir()) == [
+            applications_dir / "snipux-image-editor.desktop",
+            applications_dir / "snipux-video-editor.desktop",
+            applications_dir / "snipux.desktop",
+        ]
         assert list(autostart_dir.iterdir()) == [autostart_dir / "snipux.desktop"]
 
     def test_returns_1_and_reports_when_the_console_script_cannot_be_found(
@@ -465,6 +469,120 @@ class TestRenderIco:
         monkeypatch.setattr(setup_desktop, "_LOGO_DIR", tmp_path / "no-such-logo-dir")
 
         assert setup_desktop.render_ico() is None
+
+
+class TestIntegrationRevision:
+    def test_entries_from_before_the_record_count_as_revision_one(self, tmp_path):
+        assert setup_desktop.load_integration_revision(tmp_path) == 1
+
+    def test_a_saved_revision_is_read_back(self, tmp_path):
+        assert setup_desktop.save_integration_revision(2, tmp_path)
+
+        assert setup_desktop.load_integration_revision(tmp_path) == 2
+
+    def test_a_corrupt_value_counts_as_revision_one(self, tmp_path):
+        setup_desktop.config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        setup_desktop.config_path(tmp_path).write_text('{"integration_revision": "two"}')
+
+        assert setup_desktop.load_integration_revision(tmp_path) == 1
+
+
+class TestEditorEntries:
+    """The image and video editors each get a launcher entry of their own,
+    offered under "Open With" for the files they open -- without setting
+    themselves as the default for them.
+    """
+
+    @staticmethod
+    def _setup(tmp_path):
+        applications_dir = tmp_path / "applications"
+        setup_desktop.run_setup(
+            exec_path=Path("/opt/snipux/bin/snipux"),
+            applications_dir=applications_dir,
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+        )
+        return applications_dir
+
+    @staticmethod
+    def _fields(path: Path) -> dict[str, str]:
+        return dict(
+            line.split("=", 1) for line in path.read_text().splitlines() if "=" in line
+        )
+
+    @pytest.mark.parametrize(
+        "filename,name,flag,mimes",
+        [
+            (
+                "snipux-image-editor.desktop",
+                "Snipux Image Editor",
+                "--image-editor",
+                {"image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif"},
+            ),
+            (
+                "snipux-video-editor.desktop",
+                "Snipux Video Editor",
+                "--video-editor",
+                {"video/mp4", "video/webm", "video/x-matroska", "video/quicktime"},
+            ),
+        ],
+    )
+    def test_each_editor_is_offered_for_its_files(self, tmp_path, filename, name, flag, mimes):
+        fields = self._fields(self._setup(tmp_path) / filename)
+
+        assert fields["Name"] == name
+        # %f: a file chosen under "Open With" is passed straight through.
+        assert fields["Exec"] == f"{Path('/opt/snipux/bin/snipux')} {flag} %f"
+        assert fields["Icon"] == "snipux"
+        assert set(filter(None, fields["MimeType"].split(";"))) == mimes
+
+    def test_one_mime_type_per_suffix_the_editors_open(self):
+        image = self._fields(setup_desktop.PACKAGE_DIR / "snipux-image-editor.desktop")
+        video = self._fields(setup_desktop.PACKAGE_DIR / "snipux-video-editor.desktop")
+
+        # .jpg and .jpeg share image/jpeg.
+        assert len(set(filter(None, image["MimeType"].split(";")))) == len(
+            tokens.EDITOR_IMAGE_SUFFIXES
+        ) - 1
+        assert len(set(filter(None, video["MimeType"].split(";")))) == len(
+            tokens.EDITOR_RECORDING_SUFFIXES
+        )
+
+    def test_nothing_is_made_the_default_handler(self, tmp_path):
+        self._setup(tmp_path)
+
+        written = {path.name for path in tmp_path.rglob("*") if path.is_file()}
+        assert "mimeapps.list" not in written
+
+    def test_editor_entries_alone_leave_the_shortcut_and_autostart(self, tmp_path, monkeypatch):
+        def must_not_bind(*args, **kwargs):
+            raise AssertionError("the shortcut is the user's, not the upgrade's")
+
+        monkeypatch.setattr(setup_desktop, "bind_linux_shortcut", must_not_bind)
+        applications_dir = tmp_path / "applications"
+
+        exit_code = setup_desktop.install_editor_entries(
+            exec_path=Path("/opt/snipux/bin/snipux"), applications_dir=applications_dir
+        )
+
+        assert exit_code == 0
+        assert sorted(path.name for path in applications_dir.iterdir()) == [
+            "snipux-image-editor.desktop",
+            "snipux-video-editor.desktop",
+        ]
+        assert not (tmp_path / "autostart").exists()
+
+    def test_remove_deletes_both(self, tmp_path):
+        applications_dir = self._setup(tmp_path)
+
+        setup_desktop.run_remove(
+            applications_dir=applications_dir,
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+            config_dir=tmp_path / "config",
+        )
+
+        assert list(applications_dir.iterdir()) == []
 
 
 class TestRunRemove:

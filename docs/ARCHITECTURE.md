@@ -90,7 +90,7 @@ frozen frame has picked up a platform assumption.
 snipux/
   app.py            controller, tray, CLI, socket
   output.py         clipboard and save helpers shared by app, overlay and pin
-  handoff.py        forwards --snip/--settings to a running snipux without Qt
+  handoff.py        forwards --snip/--settings/an editor/a file to a running snipux without Qt
   capture.py        Frame, capture backends and their registry
   recording.py      recording backends and their registry
   overlay.py        the frozen-frame overlay: selection and in-place annotation

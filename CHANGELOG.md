@@ -5,6 +5,41 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+**After updating, quit Snipux from the tray and start it again.** The
+Snipux that was running before the update does not know about the new
+editors. Until it is restarted, opening an editor still works, but in a
+window of its own beside the old Snipux.
+
+### Added
+
+- **The image editor and the video editor work as apps of their own.**
+  `snipux --image-editor` and `snipux --video-editor` open one with nothing
+  in it, ready to open or drop a file into, without taking a snip or a
+  recording first.
+- **On Linux, "Snipux Image Editor" and "Snipux Video Editor" are in the
+  app list** and under "Open With" for pictures (PNG, JPEG, WebP, BMP, GIF)
+  and recordings (MP4, WebM, MKV, MOV). Snipux does not set itself as the
+  default app for any of them.
+- **On Windows, both editors are in the Start menu** and under "Open with"
+  for the same pictures and recordings. Snipux does not set itself as the
+  default app.
+  Uninstalling, or `snipux --remove`, takes them out again.
+- **`snipux clip.mp4` opens the recording in the video editor.** Handing
+  Snipux a file now opens it in the right editor: a recording (.mp4, .webm,
+  .mkv, .mov) in the trim editor, anything else in the image editor. A file
+  that is missing, or isn't an image or recording, gets a plain error
+  instead of an empty window.
+- **Open… in the image editor.** A button in the footer, or Ctrl+O, loads
+  another image into the same window. Opened on its own, the image editor
+  now shows what it is for, an Open… button and a place to drop a file.
+- **Open… in the video editor too**, with Ctrl+O or by dropping a recording
+  on the window. If the current recording has a trim you haven't exported,
+  Snipux asks before discarding it. A file it can't play now says so
+  instead of showing a black frame.
+- **Drop a file on the wrong editor and it opens in the right one** -- a
+  recording dropped on the image editor goes to the video editor, and a
+  picture dropped on the video editor goes to the image editor.
+
 ## 1.2.3 — 2026-10-24
 
 ### Fixed

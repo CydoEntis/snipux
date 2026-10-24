@@ -34,11 +34,12 @@ def bundle_datas(repo_root: Path) -> list[tuple[str, str]]:
         # design/__init__.py's icon() and the tray/window logo app.py loads.
         (str(snipux_dir / "design" / "icons"), "snipux/design/icons"),
         (str(snipux_dir / "design" / "logo"), "snipux/design/logo"),
-        # setup_desktop.py's .desktop template (SNX-73). Bundled on every
-        # platform even though only Linux renders it: teaching this list
-        # which OS it is building for costs more than the handful of bytes.
-        (str(snipux_dir / "snipux.desktop"), "snipux"),
     ]
+    # setup_desktop.py's .desktop templates (SNX-73), the app's and each
+    # editor's. Bundled on every platform even though only Linux renders
+    # them: teaching this list which OS it is building for costs more than
+    # the handful of bytes.
+    datas += [(str(entry), "snipux") for entry in sorted(snipux_dir.glob("*.desktop"))]
 
     # design/fonts/ is empty in this handoff (see design/__init__.py's own
     # docstring). Bundling an empty directory is a no-op PyInstaller does not

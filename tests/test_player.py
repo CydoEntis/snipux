@@ -18,14 +18,16 @@ import math
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QPoint, QPointF, QSize, Qt
+from PyQt6.QtCore import QMimeData, QPoint, QPointF, QSize, Qt, QUrl
 from PyQt6.QtGui import QColor, QImage
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from snipux import player as _player_module
 from snipux.design import tokens
 from snipux.player import (
     EXPORT_UNAVAILABLE,
+    PlayerWindow,
     TimelineRail,
     TransportBar,
     TrimState,
@@ -640,3 +642,202 @@ class TestCopyFileGoesThroughOutput:
         Stub().copy_file()
 
         assert copied == [recording]
+
+
+class _FakeDrop:
+    """What `dragEnterEvent`/`dropEvent` read off a real drop event."""
+
+    def __init__(self, path: Path):
+        self._mime = QMimeData()
+        self._mime.setUrls([QUrl.fromLocalFile(str(path))])
+        self.accepted = False
+
+    def mimeData(self) -> QMimeData:
+        return self._mime
+
+    def acceptProposedAction(self) -> None:
+        self.accepted = True
+
+
+def _recording(folder: Path, name: str = "clip.webm") -> Path:
+    # Never played: these tests are about which file the window holds,
+    # and a real decode would make them depend on this machine's codecs.
+    path = folder / name
+    path.write_bytes(b"")
+    return path
+
+
+@pytest.fixture
+def windows():
+    opened = []
+
+    def make(*args, **kwargs):
+        window = PlayerWindow(*args, **kwargs)
+        opened.append(window)
+        return window
+
+    yield make
+    for window in opened:
+        window.close()
+
+
+def _accent_pixels(pixmap) -> int:
+    image = pixmap.toImage()
+    accent = QColor(tokens.Color.ACCENT)
+    return sum(
+        1
+        for y in range(0, image.height(), 2)
+        for x in range(0, image.width(), 2)
+        if QColor(image.pixel(x, y)) == accent
+    )
+
+
+class TestTheVideoEditorOnItsOwn:
+    """`PlayerWindow()` with no file: `snipux --video-editor`."""
+
+    def test_it_opens_on_an_empty_state_with_nothing_to_export(self, windows):
+        window = windows()
+
+        assert window.title_label.text() == "Video Editor"
+        assert window._pages.currentWidget() is window._empty
+        assert window.open_button.isEnabled()
+        for control in (window.copy_button, window.folder_button, window.export_button):
+            assert not control.isEnabled()
+
+    def test_the_empty_state_paints_its_open_button(self, windows):
+        window = windows()
+        window.resize(*tokens.PlayerMetric.WINDOW_MIN)
+
+        assert _accent_pixels(window._empty.grab()) > 100
+
+    def test_a_dropped_recording_fills_it(self, windows, tmp_path):
+        window = windows()
+        target = _recording(tmp_path)
+
+        window.dropEvent(_FakeDrop(target))
+
+        assert window.path == target
+        assert window.title_label.text() == "clip.webm"
+        assert window._pages.currentWidget() is window._editor
+        assert window.export_button.isEnabled()
+
+    def test_a_hovering_file_lights_the_drop_zone(self, windows, tmp_path):
+        window = windows()
+
+        window.dragEnterEvent(_FakeDrop(tmp_path / "clip.webm"))
+        assert window._empty.drag_active
+
+        window.dragLeaveEvent(None)
+        assert not window._empty.drag_active
+
+    def test_its_keys_do_nothing_with_nothing_open(self, windows):
+        window = windows()
+
+        QTest.keyClick(window, Qt.Key.Key_I)
+
+        assert window._saved
+
+
+class TestOpenAnotherRecording:
+    """Open…, Ctrl+O and a drop load another recording into the window."""
+
+    def test_ctrl_o_replaces_the_recording(self, windows, tmp_path, monkeypatch):
+        window = windows(_recording(tmp_path, "first.webm"))
+        second = _recording(tmp_path, "second.mp4")
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileName", lambda *a, **k: (str(second), "")
+        )
+
+        QTest.keyClick(window, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier)
+
+        assert window.path == second
+        assert window.title_label.text() == "second.mp4"
+
+    def test_the_footer_open_button_picks_a_file(self, windows, tmp_path, monkeypatch):
+        window = windows(_recording(tmp_path, "first.webm"))
+        second = _recording(tmp_path, "second.mkv")
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileName", lambda *a, **k: (str(second), "")
+        )
+
+        window.open_button.click()
+
+        assert window.path == second
+
+    def test_the_new_file_starts_untrimmed_with_its_sound_on(self, windows, tmp_path):
+        window = windows(_recording(tmp_path, "first.webm"))
+        window.state.duration, window.state.start, window.state.end = 20.0, 2.0, 15.0
+        window._muted = True
+        window._saved = True
+
+        window.open_path(_recording(tmp_path, "second.webm"))
+
+        assert (window.state.start, window.state.end, window.state.duration) == (0, 0, 0)
+        assert window._muted is False
+        assert window._saved is True
+
+    def test_an_unsaved_trim_asks_before_it_is_discarded(self, windows, tmp_path, monkeypatch):
+        first = _recording(tmp_path, "first.webm")
+        window = windows(first)
+        window._mark_dirty()
+        asked = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **k: asked.append(True) or QMessageBox.StandardButton.Cancel,
+        )
+
+        window.open_path(_recording(tmp_path, "second.webm"))
+
+        assert asked == [True]
+        assert window.path == first
+        assert window._saved is False
+
+    def test_confirming_discards_the_trim_and_opens_the_file(self, windows, tmp_path, monkeypatch):
+        window = windows(_recording(tmp_path, "first.webm"))
+        window._mark_dirty()
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Discard
+        )
+        second = _recording(tmp_path, "second.webm")
+
+        window.open_path(second)
+
+        assert window.path == second
+        assert window._saved is True
+
+    def test_nothing_to_lose_means_no_question(self, windows, tmp_path, monkeypatch):
+        window = windows(_recording(tmp_path, "first.webm"))
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: pytest.fail("nothing to discard")
+        )
+        second = _recording(tmp_path, "second.webm")
+
+        window.open_path(second)
+
+        assert window.path == second
+
+    def test_a_file_that_is_not_a_recording_is_refused(self, windows, tmp_path, monkeypatch):
+        first = _recording(tmp_path, "first.webm")
+        window = windows(first)
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox, "warning", lambda parent, title, text: warnings.append(text)
+        )
+        picture = tmp_path / "shot.png"
+        picture.write_bytes(b"")
+
+        window.open_path(picture)
+
+        assert window.path == first
+        assert len(warnings) == 1 and "shot.png" in warnings[0]
+
+    def test_not_while_an_export_is_writing(self, windows, tmp_path):
+        first = _recording(tmp_path, "first.webm")
+        window = windows(first)
+        window._export_busy = True
+
+        window.open_path(_recording(tmp_path, "second.webm"))
+
+        assert window.path == first
+        assert "export" in window.status_label.text().lower()

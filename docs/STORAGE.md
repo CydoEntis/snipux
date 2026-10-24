@@ -17,8 +17,9 @@ issue that shows a problem the current approach cannot handle.
 | Unexpected errors      | `crash.log`, beside `config.json`                        |
 | Snips                  | `save_folder` setting, default `~/Pictures/snipux`       |
 | Recordings             | `recording_folder` setting, default `~/Videos/snipux`    |
-| Linux desktop entries  | `$XDG_DATA_HOME/applications`, `$XDG_CONFIG_HOME/autostart`, `$XDG_DATA_HOME/icons/hicolor` |
-| Windows shortcuts      | `%APPDATA%\Microsoft\Windows\Start Menu\Programs` (+ Startup) |
+| Linux desktop entries  | `$XDG_DATA_HOME/applications` (`snipux.desktop` and the two editors' `snipux-image-editor.desktop`, `snipux-video-editor.desktop`), `$XDG_CONFIG_HOME/autostart`, `$XDG_DATA_HOME/icons/hicolor` |
+| Windows shortcuts      | `%APPDATA%\Microsoft\Windows\Start Menu\Programs` (`snipux.lnk`, `Snipux Image Editor.lnk`, `Snipux Video Editor.lnk`, + Startup) |
+| Windows Open with      | `HKCU\Software\Classes`: `Snipux.ImageEditor`, `Snipux.VideoEditor`, `Applications\<launcher>.exe`, and one value under each suffix's `OpenWithProgids` |
 | Windows exe + icon     | `%LOCALAPPDATA%\snipux`                                  |
 
 The settings folder is `$XDG_CONFIG_HOME/snipux`, falling back to
@@ -44,9 +45,9 @@ filename_pattern            recording_draw_cursor       tray_toggles
 hide_sensitive              recording_filename_pattern  update_checked_on
 hints_enabled               recording_folder            watermark_backing
 instant_saves               recording_frame_rate        watermark_color
-integration_target          remember_tool               watermark_font
-last_region                 reuse_last_region           watermark_image
-                                                        watermark_kind
+integration_revision        remember_tool               watermark_font
+integration_target          reuse_last_region           watermark_image
+last_region                                             watermark_kind
                                                         watermark_text
 ```
 

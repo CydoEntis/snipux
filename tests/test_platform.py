@@ -122,6 +122,16 @@ class TestLinuxPlatform:
 
         assert linux.LinuxPlatform().install_desktop_integration() == 1
 
+    def test_install_editor_integration_writes_only_the_editors_entries(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "run_setup", lambda **kwargs: pytest.fail("not all of it"))
+        calls = []
+        monkeypatch.setattr(
+            setup_desktop, "install_editor_entries", lambda: calls.append("called") or 0
+        )
+
+        assert linux.LinuxPlatform().install_editor_integration() == 0
+        assert calls == ["called"]
+
     def test_remove_desktop_integration_delegates_to_run_remove(self, monkeypatch):
         calls = []
         monkeypatch.setattr(setup_desktop, "run_remove", lambda: calls.append("called") or 0)
@@ -1097,6 +1107,7 @@ class TestStubPlatforms:
 
     DARWIN_OPERATIONS = (
         "install_desktop_integration",
+        "install_editor_integration",
         "remove_desktop_integration",
         "bind_shortcut",
         "unbind_shortcut",
@@ -1612,6 +1623,7 @@ class _FakeShellLinkCom:
         self.path = None
         self.description = None
         self.icon_location = None
+        self.arguments = None
         self.saved_to = None
         self.released = []
         self._fail_save = fail_save
@@ -1669,6 +1681,10 @@ class _FakeShellLinkCom:
             self.path = path
             return 0
 
+        def set_arguments(_this, text):
+            self.arguments = text
+            return 0
+
         return self._vtable(
             21,
             {
@@ -1682,6 +1698,9 @@ class _FakeShellLinkCom:
                 17: ctypes.CFUNCTYPE(
                     self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int
                 )(set_icon_location),
+                11: ctypes.CFUNCTYPE(self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p)(
+                    set_arguments
+                ),
                 20: ctypes.CFUNCTYPE(self._HRESULT, ctypes.c_void_p, ctypes.c_wchar_p)(set_path),
             },
         )
@@ -1846,7 +1865,18 @@ class TestCreateShortcut:
 
         assert fake.description is None
         assert fake.icon_location is None
+        assert fake.arguments is None
         assert fake.saved_to == str(lnk_path)
+
+    def test_arguments_are_written_into_the_shortcut(self, monkeypatch):
+        fake = _FakeShellLinkCom()
+        _patch_windows_com(monkeypatch, fake)
+
+        windows._create_shortcut(
+            Path("C:/x/Snipux Image Editor.lnk"), Path("C:/x/snipuxw.exe"), arguments="--image-editor"
+        )
+
+        assert fake.arguments == "--image-editor"
 
     def test_a_cocreateinstance_failure_is_reported_as_false_not_raised(self, monkeypatch):
         _patch_windows_com(monkeypatch, cocreate_hresult=1)  # a failing HRESULT
@@ -2115,10 +2145,13 @@ class TestWindowsDesktopIntegration:
 
         assert exit_code == 0
         start_menu = tmp_path / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs"
-        [(lnk1, target1), (lnk2, target2)] = created
-        assert lnk1 == start_menu / "snipux.lnk"
-        assert lnk2 == start_menu / "Startup" / "snipux.lnk"
-        assert target1 == target2 == Path("C:/snipux/snipuxw.exe")
+        assert [lnk for lnk, _target in created] == [
+            start_menu / "snipux.lnk",
+            start_menu / "Startup" / "snipux.lnk",
+            start_menu / "Snipux Image Editor.lnk",
+            start_menu / "Snipux Video Editor.lnk",
+        ]
+        assert {target for _lnk, target in created} == {Path("C:/snipux/snipuxw.exe")}
 
     def test_both_shortcuts_launch_snipuxw_and_never_the_console_script(
         self, monkeypatch, tmp_path
@@ -2140,7 +2173,7 @@ class TestWindowsDesktopIntegration:
 
         windows.WindowsPlatform().install_desktop_integration()
 
-        assert targets == [launcher, launcher]
+        assert targets == [launcher] * 4
         assert asked_for == []
 
     def test_falls_back_to_looking_up_snipuxw_by_name(self, monkeypatch, tmp_path):
@@ -2195,7 +2228,7 @@ class TestWindowsDesktopIntegration:
 
         expected_icon = tmp_path / "Local" / "snipux" / "snipux.ico"
         assert expected_icon.read_bytes() == b"icon-bytes"
-        assert icon_paths == [expected_icon, expected_icon]
+        assert icon_paths == [expected_icon] * 4
 
     def test_missing_launcher_is_fatal(self, monkeypatch, tmp_path):
         self._use_tmp_dirs(monkeypatch, tmp_path)
@@ -2219,7 +2252,7 @@ class TestWindowsDesktopIntegration:
         exit_code = windows.WindowsPlatform().install_desktop_integration()
 
         assert exit_code == 0
-        assert len(calls) == 2  # both attempted despite the first failing
+        assert len(calls) == 4  # all attempted despite one failing
 
     def test_an_invalid_shortcut_is_rejected_before_writing_anything(self, monkeypatch, tmp_path):
         self._use_tmp_dirs(monkeypatch, tmp_path)
@@ -2274,8 +2307,7 @@ class TestWindowsDesktopIntegration:
 
         assert exit_code == 0
         stable_copy = tmp_path / "Local" / "snipux" / "snipux.exe"
-        [(_, target1), (_, target2)] = created
-        assert target1 == target2 == stable_copy
+        assert {target for _lnk, target in created} == {stable_copy}
         assert stable_copy.read_bytes() == b"portable-build-bytes"
 
     def test_remove_deletes_both_shortcuts_and_the_icon(self, monkeypatch, tmp_path):
@@ -2322,6 +2354,158 @@ class TestWindowsDesktopIntegration:
 
         assert first == 0
         assert second == 0
+
+
+class TestWindowsEditorIntegration:
+    """The two editors on Windows: a Start Menu shortcut each, and per-user
+    "Open with" entries for the files they open -- written by `--setup`,
+    gone after `--remove`, and never set as the default handler. The registry is
+    conftest's `FakeRegistry`, never this machine's.
+    """
+
+    _use_tmp_dirs = TestWindowsDesktopIntegration._use_tmp_dirs
+
+    def test_each_editor_gets_a_start_menu_shortcut_passing_its_flag(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        created = {}
+        monkeypatch.setattr(
+            windows,
+            "_create_shortcut",
+            lambda lnk, target, **kw: created.update({lnk.name: kw}) or True,
+        )
+
+        windows.WindowsPlatform().install_desktop_integration()
+
+        assert created["Snipux Image Editor.lnk"]["arguments"] == "--image-editor"
+        assert created["Snipux Video Editor.lnk"]["arguments"] == "--video-editor"
+        assert created["snipux.lnk"]["arguments"] == ""
+
+    @pytest.mark.parametrize(
+        "suffix,progid,flag",
+        [
+            (".png", "Snipux.ImageEditor", "--image-editor"),
+            (".jpeg", "Snipux.ImageEditor", "--image-editor"),
+            (".mp4", "Snipux.VideoEditor", "--video-editor"),
+            (".mkv", "Snipux.VideoEditor", "--video-editor"),
+        ],
+    )
+    def test_setup_offers_snipux_under_open_with(
+        self, monkeypatch, tmp_path, fake_registry, suffix, progid, flag
+    ):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+
+        windows.WindowsPlatform().install_desktop_integration()
+
+        classes = r"Software\Classes"
+        assert fake_registry.value(rf"{classes}\{suffix}\OpenWithProgids", progid) == ""
+        command = fake_registry.value(rf"{classes}\{progid}\shell\open\command", "")
+        assert command == f'"{Path("C:/snipux/snipuxw.exe")}" {flag} "%1"'
+        assert fake_registry.value(
+            rf"{classes}\Applications\snipuxw.exe\SupportedTypes", suffix
+        ) == ""
+        assert fake_registry.value(
+            rf"{classes}\Applications\snipuxw.exe", "FriendlyAppName"
+        ) == "Snipux"
+
+    def test_setup_never_touches_the_default_handler(self, monkeypatch, tmp_path, fake_registry):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+
+        windows.WindowsPlatform().install_desktop_integration()
+
+        for key, values in fake_registry.keys.items():
+            # A suffix's own default value is its default ProgID, and
+            # UserChoice is the user's pick: neither is Snipux's to set.
+            if key.startswith(r"software\classes\.") and key.count("\\") == 2:
+                assert "" not in values, key
+            assert "userchoice" not in key
+
+    def test_remove_clears_every_registration_but_the_shared_suffix_keys(
+        self, monkeypatch, tmp_path, fake_registry
+    ):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+        other_app = r"Software\Classes\.png\OpenWithProgids"
+        with fake_registry.CreateKeyEx(fake_registry.HKEY_CURRENT_USER, other_app) as handle:
+            fake_registry.SetValueEx(handle, "Paint.Picture", 0, fake_registry.REG_SZ, "")
+        windows.WindowsPlatform().install_desktop_integration()
+
+        windows.WindowsPlatform().remove_desktop_integration()
+
+        leftover = {
+            key: values
+            for key, values in fake_registry.keys.items()
+            if "snipux" in key or any("snipux" in name.lower() for name in values)
+        }
+        assert leftover == {}
+        # Another app's Open with entry on the same suffix is untouched.
+        assert fake_registry.value(other_app, "Paint.Picture") == ""
+
+    def test_remove_tidies_away_suffix_keys_left_empty(self, monkeypatch, tmp_path, fake_registry):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+        kept = r"Software\Classes\.mp4"
+        with fake_registry.CreateKeyEx(fake_registry.HKEY_CURRENT_USER, kept) as handle:
+            fake_registry.SetValueEx(handle, "", 0, fake_registry.REG_SZ, "VLC.mp4")
+        windows.WindowsPlatform().install_desktop_integration()
+
+        windows.WindowsPlatform().remove_desktop_integration()
+
+        assert r"software\classes\.png" not in fake_registry.keys
+        assert r"software\classes\.png\openwithprogids" not in fake_registry.keys
+        # Another app's default stays, and so does the key holding it.
+        assert fake_registry.value(kept, "") == "VLC.mp4"
+        assert r"software\classes\.mp4\openwithprogids" not in fake_registry.keys
+
+    def test_remove_deletes_the_editors_shortcuts(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        start_menu = tmp_path / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+        monkeypatch.setattr(
+            windows,
+            "_create_shortcut",
+            lambda lnk, target, **kw: lnk.write_bytes(b"lnk") or True,
+        )
+        windows.WindowsPlatform().install_desktop_integration()
+        assert (start_menu / "Snipux Video Editor.lnk").exists()
+
+        windows.WindowsPlatform().remove_desktop_integration()
+
+        assert not (start_menu / "Snipux Image Editor.lnk").exists()
+        assert not (start_menu / "Snipux Video Editor.lnk").exists()
+
+    def test_editor_integration_alone_leaves_startup_and_the_app_entry(
+        self, monkeypatch, tmp_path, fake_registry
+    ):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        created = []
+        monkeypatch.setattr(
+            windows, "_create_shortcut", lambda lnk, target, **kw: created.append(lnk.name) or True
+        )
+
+        assert windows.WindowsPlatform().install_editor_integration() == 0
+
+        assert created == ["Snipux Image Editor.lnk", "Snipux Video Editor.lnk"]
+        assert fake_registry.value(
+            r"Software\Classes\.png\OpenWithProgids", "Snipux.ImageEditor"
+        ) == ""
+
+    def test_remove_with_nothing_registered_is_harmless(self, monkeypatch, tmp_path):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+
+        assert windows.WindowsPlatform().remove_desktop_integration() == 0
+
+    def test_a_registry_failure_does_not_stop_setup(self, monkeypatch, tmp_path, fake_registry, capsys):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        monkeypatch.setattr(windows, "_create_shortcut", lambda *a, **kw: True)
+
+        def refuse(*args, **kwargs):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(fake_registry, "CreateKeyEx", refuse)
+
+        assert windows.WindowsPlatform().install_desktop_integration() == 0
+        assert "could not add Snipux to Open with" in capsys.readouterr().out
 
 
 class TestAcceleratorToWin32:

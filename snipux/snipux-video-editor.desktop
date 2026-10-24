@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Snipux Video Editor
+GenericName=Video Trimmer
+Comment=Trim any screen recording and export it
+Exec=__SNIPUX_LAUNCHER__ --video-editor %f
+Icon=snipux
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=video/mp4;video/webm;video/x-matroska;video/quicktime;
+Terminal=false

@@ -159,6 +159,93 @@ def _isolated_config(tmp_path):
         setup_desktop.config_path = real_config_path
 
 
+class FakeRegistry:
+    """An in-memory stand-in for the slice of `winreg` that
+    `platform/windows.py` uses, so no test can write this machine's real
+    registry and the same tests run on Linux, which has no `winreg` at all.
+
+    `keys` maps a lower-cased key path to its values, as the registry
+    treats key names case-insensitively. `DeleteKey` refuses a key with
+    subkeys, as the real one does.
+    """
+
+    HKEY_CURRENT_USER = "HKCU"
+    KEY_WRITE = 0x20006
+    KEY_SET_VALUE = 0x0002
+    REG_SZ = 1
+
+    def __init__(self):
+        self.keys: dict[str, dict[str, object]] = {}
+
+    class _Handle:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def CreateKeyEx(self, root, path, reserved=0, access=0):
+        parts = path.lower().split("\\")
+        for depth in range(1, len(parts) + 1):
+            self.keys.setdefault("\\".join(parts[:depth]), {})
+        return self._Handle(path.lower())
+
+    def OpenKey(self, root, path, reserved=0, access=0):
+        if path.lower() not in self.keys:
+            raise FileNotFoundError(path)
+        return self._Handle(path.lower())
+
+    def QueryInfoKey(self, handle):
+        depth = handle.path.count("\\") + 1
+        subkeys = sum(
+            1
+            for key in self.keys
+            if key.startswith(handle.path + "\\") and key.count("\\") == depth
+        )
+        return subkeys, len(self.keys[handle.path]), 0
+
+    def SetValueEx(self, handle, name, reserved, kind, data):
+        self.keys[handle.path][name] = data
+
+    def DeleteValue(self, handle, name):
+        if name not in self.keys[handle.path]:
+            raise FileNotFoundError(name)
+        del self.keys[handle.path][name]
+
+    def DeleteKey(self, root, path):
+        path = path.lower()
+        if path not in self.keys:
+            raise FileNotFoundError(path)
+        if any(key.startswith(path + "\\") for key in self.keys):
+            raise PermissionError(f"{path} has subkeys")
+        del self.keys[path]
+
+    def value(self, path, name):
+        return self.keys.get(path.lower(), {}).get(name)
+
+
+@pytest.fixture(autouse=True)
+def fake_registry():
+    """Every test gets `FakeRegistry` in place of `winreg`, and Explorer is
+    never told about an association change. Restored by hand for the same
+    reason `_isolated_config` is."""
+    from snipux.platform import windows
+
+    registry = FakeRegistry()
+    real_winreg = windows.winreg
+    real_announce = windows._announce_association_change
+    windows.winreg = registry
+    windows._announce_association_change = lambda: None
+    try:
+        yield registry
+    finally:
+        windows.winreg = real_winreg
+        windows._announce_association_change = real_announce
+
+
 @pytest.fixture(autouse=True)
 def _restore_excepthook():
     """Put `sys.excepthook` back after any test that replaced it.
