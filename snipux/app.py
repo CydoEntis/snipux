@@ -1932,7 +1932,9 @@ class AppController:
                 # Only what is new. Rerunning all of it would put back a
                 # shortcut rebound in GNOME's own settings, or an autostart
                 # entry the user deleted.
-                platform.current.install_editor_integration()
+                if platform.current.install_editor_integration() != 0:
+                    # Not recorded, so the next launch tries again.
+                    return
         except platform.UnimplementedPlatformError:
             # Nothing to re-point on a platform that never pointed anywhere.
             return

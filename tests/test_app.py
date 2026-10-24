@@ -6547,6 +6547,25 @@ class TestRunFirstLaunchSetup:
         assert editor_calls == [True]
         assert revisions == [app.setup_desktop.INTEGRATION_REVISION]
 
+    def test_a_failed_editor_setup_is_tried_again_next_launch(self, make_controller, monkeypatch):
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/here/snipux")
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/here/snipux"))
+        )
+        monkeypatch.setattr(app.setup_desktop, "load_integration_revision", lambda cd=None: 1)
+        monkeypatch.setattr(app.platform.current, "install_editor_integration", lambda: 1)
+
+        def must_not_record(revision, cd=None):
+            raise AssertionError("a failed setup must not be recorded as done")
+
+        monkeypatch.setattr(app.setup_desktop, "save_integration_revision", must_not_record)
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()  # must not raise
+
     def test_a_build_that_cannot_locate_itself_repoints_nothing(
         self, make_controller, monkeypatch
     ):
