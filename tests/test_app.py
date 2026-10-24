@@ -6844,6 +6844,46 @@ class TestOpenEditor:
             for window in list(windows):
                 window.close()
 
+    def test_a_file_opened_next_fills_the_empty_editor(self, make_controller, tmp_path):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        controller.open_editor("image")
+        target = tmp_path / "shot.png"
+        QImage(16, 9, QImage.Format.Format_RGB32).save(str(target), "PNG")
+
+        controller.open_path(target)
+
+        try:
+            assert len(controller._reviews) == 1
+            assert controller._reviews[0].title_label.text() == "shot.png"
+        finally:
+            for window in list(controller._reviews):
+                window.close()
+
+    def test_a_recording_does_not_land_in_an_empty_image_editor(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        controller.open_editor("image")
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        target = tmp_path / "clip.mp4"
+        target.write_bytes(b"")
+
+        controller.open_path(target)
+
+        try:
+            assert opened == [target]
+            assert controller._reviews[0].is_empty
+        finally:
+            for window in list(controller._reviews):
+                window.close()
+
     def test_closing_it_lets_it_go(self, make_controller):
         controller = make_controller(
             BackendRegistry([FakeCaptureBackend(make_capture_frame())]),

@@ -1969,6 +1969,11 @@ class PlayerWindow(WinWindow):
         self._waveform = None
         self._probes_started = False
 
+    @property
+    def is_empty(self) -> bool:
+        """Opened on its own, with no recording loaded into it yet."""
+        return self.path is None
+
     def _show_video_page(self, has_video: bool) -> None:
         self._pages.setCurrentWidget(self._editor if has_video else self._empty)
         for control in (self.copy_button, self.folder_button, self.export_button):

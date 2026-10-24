@@ -994,6 +994,11 @@ class ReviewWindow(WinWindow):
         self._toast.show_message(icon_name, text, area)
         self._toast.raise_()
 
+    @property
+    def is_empty(self) -> bool:
+        """Opened on its own, with no image loaded into it yet."""
+        return not self._has_image
+
     def _show_image_page(self, has_image: bool) -> None:
         """The canvas and everything that acts on it, or the empty state
         with all of that greyed out -- there is nothing to copy or save

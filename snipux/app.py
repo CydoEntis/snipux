@@ -2141,11 +2141,24 @@ class AppController:
 
         Routed in the resident rather than only in the launching process,
         because a forwarded request carries nothing but the path.
+
+        An editor of the right kind standing empty -- opened from the app
+        menu a moment ago -- takes the file, rather than a second window
+        opening beside it.
         """
         if not path.is_file():
             self._warn(f"Could not open {path.name}: there is no file there.")
             return
-        if editor_for(path) == "video":
+        video = editor_for(path) == "video"
+        empty = next(
+            (window for window in (self._players if video else self._reviews) if window.is_empty),
+            None,
+        )
+        if empty is not None:
+            empty.open_path(path)
+            empty.raise_()
+            empty.activateWindow()
+        elif video:
             self._open_player(path)
         else:
             self.open_image_path(path)
