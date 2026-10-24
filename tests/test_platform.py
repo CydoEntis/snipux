@@ -799,10 +799,11 @@ class TestSkipMapAnimation:
 
         return QWidget()
 
-    def test_no_other_platform_claims_it(self):
+    def test_macos_does_not_claim_it(self):
+        # Windows claims it through DWM -- see
+        # TestWindowsSkipsTheOverlaysOpeningAnimation.
         widget = self._widget()
 
-        assert windows.WindowsPlatform().skip_map_animation(widget) is False
         assert darwin.DarwinPlatform().skip_map_animation(widget) is False
         assert not widget.testAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash)
 
