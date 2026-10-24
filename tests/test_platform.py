@@ -1951,6 +1951,22 @@ class TestPortableSelfInstall:
         assert result == target
         assert target.read_bytes() == b"v1-bytes"
 
+    def test_a_folder_build_never_copies_its_exe_over_the_install(self, monkeypatch, tmp_path):
+        # The installer's build keeps its libraries in `_internal` beside the
+        # exe; the exe copied on its own over a working install could not
+        # start.
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        exe = tmp_path / "dist" / "snipux" / "snipux.exe"
+        self._make_frozen(monkeypatch, exe)
+        exe.write_bytes(b"bootloader")
+        monkeypatch.setattr(windows.sys, "_MEIPASS", str(exe.parent / "_internal"), raising=False)
+        target = tmp_path / "Local" / "snipux" / "snipux.exe"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"the-installed-one")
+
+        assert windows._ensure_stable_copy() is None
+        assert target.read_bytes() == b"the-installed-one"
+
     def test_running_the_installed_copy_does_not_copy_itself_again(self, monkeypatch, tmp_path):
         self._use_tmp_local_app_data(monkeypatch, tmp_path)
         target = tmp_path / "Local" / "snipux" / "snipux.exe"

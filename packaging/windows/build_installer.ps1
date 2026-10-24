@@ -2,10 +2,11 @@
 #
 #   powershell -File packaging\windows\build_installer.ps1
 #
-# Runs build.ps1 first (so the exe inside the installer is always the one
-# this checkout produces, never a stale dist\snipux.exe), then compiles
-# packaging\windows\snipux.iss with Inno Setup. Pass -SkipExe to reuse an
-# exe you have just built by hand.
+# Runs build.ps1 first (so what the installer carries is always what this
+# checkout produces, never a stale build), then compiles
+# packaging\windows\snipux.iss with Inno Setup. The installer carries the
+# onedir build, dist\snipux\ -- not dist\snipux.exe, the portable one. Pass
+# -SkipExe to reuse a build you have just made by hand.
 #
 # **The installer does not replace the portable exe.** Both ship, for the
 # reason snipux.iss's own header sets out: Smart App Control blocks an
@@ -48,7 +49,7 @@ Install it and run this again:
 
     winget install --id JRSoftware.InnoSetup
 
-Building dist\snipux.exe on its own needs none of this -- see build.ps1.
+Building the exes on their own needs none of this -- see build.ps1.
 "@
 }
 
@@ -60,9 +61,9 @@ try {
         }
     }
 
-    $Exe = Join-Path $RepoRoot "dist\snipux.exe"
+    $Exe = Join-Path $RepoRoot "dist\snipux\snipux.exe"
     if (-not (Test-Path $Exe)) {
-        throw "dist\snipux.exe is missing -- run without -SkipExe, or build it first."
+        throw "dist\snipux\snipux.exe is missing -- run without -SkipExe, or build it first."
     }
 
     # The same version the app reports, read from __init__.py rather than

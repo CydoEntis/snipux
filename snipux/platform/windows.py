@@ -558,6 +558,14 @@ def _ensure_stable_copy() -> Path | None:
     except OSError:
         pass
 
+    # A folder build (what the installer ships) keeps its libraries in
+    # `_internal` beside the exe. Copied alone, the exe could not start, and
+    # it would be written over a working install -- so only the
+    # self-contained single-file build relocates itself.
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle is not None and Path(bundle).resolve() == current.parent / "_internal":
+        return None
+
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(current, target)

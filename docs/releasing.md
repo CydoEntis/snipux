@@ -181,8 +181,26 @@ installer" below). This needs a Windows machine (or a VM) with Python
 powershell -File packaging\windows\build.ps1
 ```
 
-This builds `dist\snipux.exe` with PyInstaller
-(`packaging\windows\snipux.spec`) and nothing else — there is no
+This builds two things with PyInstaller (`packaging\windows\snipux.spec`):
+`dist\snipux.exe`, the portable onefile download, and `dist\snipux\` — the
+same app as onedir, `snipux.exe` with its libraries in `_internal\` beside
+it, which is what the installer ships. Onefile unpacks the whole bundle into
+`%TEMP%\_MEI*` on every launch and Defender scans each DLL as it lands: on
+the build machine `--list-backends` took about 1.1 s that way against about
+0.15 s from the onedir tree (about 2.2 s for an installed onefile 1.2.2).
+The portable exe still pays that, since being a single file is its point.
+Both builds also leave out what PyQt6's hooks collect but snipux never
+loads — software OpenGL, the PDF image plugin and Qt6Pdf, Qt's TLS
+backends and their OpenSSL, Qt's translations; the list and the reason for
+each entry are in the spec. Python's own OpenSSL, which the update check's
+HTTPS uses, stays.
+
+Only the onefile build relocates itself to
+`%LOCALAPPDATA%\snipux\snipux.exe` (below). The onedir build is safe to
+run from `dist\snipux\`: its exe cannot start without the `_internal\`
+beside it, so it never copies itself over an install.
+
+That is all the build does — there is no
 Add/Remove Programs entry to stamp a version into the way the installer
 used to, so the build itself carries no version. The version bump belongs to
 [Cutting a release](#cutting-a-release) above, which is also what produces the
@@ -201,8 +219,12 @@ for a pip/pipx install. `snipux --remove` undoes all of it.
 powershell -File packaging\windows\build_installer.ps1
 ```
 
-Produces `dist\snipux-setup-<version>.exe`, unsigned. It builds the exe
-first; pass `-SkipExe` to reuse one you have just built. Inno Setup is the
+Produces `dist\snipux-setup-<version>.exe`, unsigned, from the onedir
+build in `dist\snipux\`. It runs `build.ps1` first; pass `-SkipExe` to reuse
+a build you have just made. Installing deletes the previous version's
+`_internal\` first, so files a newer build no longer ships don't linger,
+and an older onefile install is upgraded in place: its single `snipux.exe`
+is replaced at the same path. Inno Setup is the
 only extra tool (`winget install --id JRSoftware.InnoSetup`), and the
 script names that command if it is missing.
 

@@ -32,6 +32,12 @@ use it; the commit history has the detail.
 - **Snips open faster on Windows** — about a quarter of a second sooner on
   every snip, and the first snip after starting Snipux is no slower than
   the rest.
+- **Snipux starts much faster on Windows when installed with the
+  installer.** It used to unpack about 120 MB into a temporary folder every
+  time it started, which took one to two seconds. The installer now puts
+  those files in place once, so starting takes a fraction of a second. The
+  portable `snipux.exe` still unpacks on every start, but it is about 15 MB
+  smaller and starts a little faster too.
 
 ### Removed
 
