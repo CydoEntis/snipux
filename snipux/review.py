@@ -682,7 +682,7 @@ class ReviewWindow(WinWindow):
         self._empty = EmptyState(
             "image",
             "Open an image to edit",
-            "Mark up, blur or crop any screenshot, then copy it or save it.",
+            "Mark up, blur or pixelate any screenshot, then copy it or save it.",
         )
         self._empty.openRequested.connect(self.choose_file)
         self._pages.addWidget(self._empty)

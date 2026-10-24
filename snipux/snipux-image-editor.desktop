@@ -2,7 +2,7 @@
 Type=Application
 Name=Snipux Image Editor
 GenericName=Image Editor
-Comment=Mark up, blur or crop any screenshot
+Comment=Mark up, blur or pixelate any screenshot
 Exec=__SNIPUX_LAUNCHER__ --image-editor %f
 Icon=snipux
 Categories=Graphics;2DGraphics;RasterGraphics;
