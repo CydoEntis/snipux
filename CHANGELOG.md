@@ -15,6 +15,9 @@ use it; the commit history has the detail.
   app list** and under "Open With" for pictures (PNG, JPEG, WebP, BMP, GIF)
   and recordings (MP4, WebM, MKV, MOV). Snipux does not make itself the
   default app for any of them.
+- **On Windows, both editors are in the Start menu** and under "Open with"
+  for the same pictures and recordings, without becoming the default app.
+  Uninstalling, or `snipux --remove`, takes them out again.
 - **`snipux clip.mp4` opens the recording in the video editor.** Handing
   Snipux a file now opens it in the right editor: a recording (.mp4, .webm,
   .mkv, .mov) in the trim editor, anything else in the image editor. A file
