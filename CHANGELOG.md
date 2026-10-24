@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.5 — 2026-10-24
+
 ### Fixed
 
 - **On Windows, "Snipux Image Editor" and "Snipux Video Editor" now show up
