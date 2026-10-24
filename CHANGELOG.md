@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.3 — 2026-10-24
+
 ### Fixed
 
 - **On Windows, snips were wrong when monitors use different scaling** (say
