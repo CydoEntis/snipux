@@ -657,7 +657,15 @@ def version_line() -> str:
     Snipux's own version alone. It used to carry the Qt version and the
     session type after it, which read as noise to the person looking at it
     and made the one number that matters harder to find.
+
+    `SNIPUX_DEMO=1` leaves the number out, so marketing screenshots do not
+    date themselves. An environment variable rather than a flag the shot
+    script sets, because the same switch then also covers a shot taken by
+    hand of a real running snipux. Everything else a shot could date (paths,
+    times) the script passes in itself, so this is the only check there is.
     """
+    if os.environ.get("SNIPUX_DEMO") == "1":
+        return "Snipux"
     from importlib.metadata import PackageNotFoundError, version as _version
 
     try:
