@@ -39,6 +39,15 @@ SNIP_REQUEST = b"S"
 SETTINGS_REQUEST = b"T"
 OPEN_REQUEST_PREFIX = b"O"
 EDITOR_REQUESTS = {"image": b"I", "video": b"V"}
+# A path to open in the editor its type calls for. Not `O`: a resident from
+# before the editors opens every `O` path as an image, so a recording sent
+# that way would fail there with a confusing message instead of not at all.
+ROUTED_OPEN_PREFIX = b"P"
+# What a resident sends back for the requests above that the editors added.
+# One from before them ignores those without a word, and an upgrade leaves
+# exactly that resident running -- the ack is how a launcher can tell.
+ACK = b"K"
+ACKED_REQUESTS = (*EDITOR_REQUESTS.values(), ROUTED_OPEN_PREFIX)
 
 _EDITOR_FLAGS = {"--image-editor": "image", "--video-editor": "video"}
 _REQUESTS = {
@@ -49,6 +58,9 @@ _REQUESTS = {
 
 # A resident that is up accepts at once; this only bounds a wedged one.
 _CONNECT_TIMEOUT_S = 0.5
+# The ack comes from the resident's event loop, which a snip in progress
+# can hold for a moment.
+ACK_TIMEOUT_S = 1.0
 
 
 def socket_path(server_name: str = SERVER_NAME) -> str:
@@ -96,10 +108,15 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
     `--video-editor`, or the path of an existing file an editor opens
     (alone, or after one of the editor flags) is a request; anything else
     belongs to the full CLI. False whenever the
-    resident cannot be reached this way, which is never an error -- it is
-    the caller's cue to take the full path.
+    resident cannot be reached this way, or does not acknowledge a request
+    that expects it, which is never an error -- it is the caller's cue to
+    take the full path.
     """
-    if len(arguments) == 2 and arguments[0] in _EDITOR_FLAGS:
+    if (
+        len(arguments) == 2
+        and arguments[0] in _EDITOR_FLAGS
+        and not arguments[1].startswith("-")
+    ):
         # `--image-editor %f` from a desktop entry, given a file: the file
         # opens in whichever editor its type calls for, as a bare path does.
         arguments = arguments[1:]
@@ -111,7 +128,7 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
     elif _is_quick_to_open(argument):
         # Made absolute here, before it travels anywhere -- the resident's
         # working directory is not this process's.
-        payload = OPEN_REQUEST_PREFIX + os.fsencode(os.path.abspath(argument))
+        payload = ROUTED_OPEN_PREFIX + os.fsencode(os.path.abspath(argument))
     else:
         return False
     if not hasattr(socket, "AF_UNIX"):
@@ -121,9 +138,14 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
             connection.settimeout(_CONNECT_TIMEOUT_S)
             connection.connect(socket_path(server_name))
             connection.sendall(payload)
+            if payload[:1] not in ACKED_REQUESTS:
+                return True
+            # No ack is an older resident, and the full CLI knows what to
+            # do about one; this module cannot without loading Qt.
+            connection.settimeout(ACK_TIMEOUT_S)
+            return connection.recv(len(ACK)) == ACK
     except OSError:
         return False
-    return True
 
 
 def cli() -> int:

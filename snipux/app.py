@@ -893,7 +893,8 @@ def main(
             if registry is None:
                 registry = build_default_registry()
             return _become_resident(registry, transport, open_editor_immediately=editor)
-        transport.send_editor_request(editor)
+        if not transport.send_editor_request(editor):
+            return _open_editor_here(editor=editor)
         return 0
 
     if args.path is not None:
@@ -918,7 +919,8 @@ def main(
             if registry is None:
                 registry = build_default_registry()
             return _become_resident(registry, transport, open_path_immediately=target)
-        transport.send_open_request(target)
+        if not transport.send_open_request(target):
+            return _open_editor_here(path=target)
         return 0
 
     if registry is None:
@@ -982,17 +984,19 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def send_open_request(self, path: Path) -> None:
-        """Ask the primary instance to open `path` in a fresh review
-        window. Same shape as `send_snip_request`/`send_settings_request`,
-        for the same reason: `path` is opened by whichever instance is
-        actually resident, not by this short-lived one.
+    def send_open_request(self, path: Path) -> bool:
+        """Ask the primary instance to open `path` in its editor. Same
+        shape as `send_snip_request`/`send_settings_request`, for the same
+        reason: `path` is opened by whichever instance is actually resident,
+        not by this short-lived one. False when the resident did not
+        acknowledge it -- one from before the editors.
         """
 
     @abstractmethod
-    def send_editor_request(self, editor: str) -> None:
+    def send_editor_request(self, editor: str) -> bool:
         """Ask the primary instance to open an empty editor, "image" or
         "video" -- `snipux --image-editor`/`--video-editor` with no file.
+        False when the resident did not acknowledge it.
         """
 
     @abstractmethod
@@ -1113,11 +1117,25 @@ class QLocalSocketTransport(Transport):
     def send_settings_request(self) -> None:
         self._send(self._SETTINGS_REQUEST_BYTE)
 
-    def send_open_request(self, path: Path) -> None:
-        self._send(self._OPEN_REQUEST_PREFIX + os.fsencode(str(path)))
+    def send_open_request(self, path: Path) -> bool:
+        return self._send_expecting_ack(handoff.ROUTED_OPEN_PREFIX + os.fsencode(str(path)))
 
-    def send_editor_request(self, editor: str) -> None:
-        self._send(handoff.EDITOR_REQUESTS[editor])
+    def send_editor_request(self, editor: str) -> bool:
+        return self._send_expecting_ack(handoff.EDITOR_REQUESTS[editor])
+
+    def _send_expecting_ack(self, payload: bytes) -> bool:
+        socket = QLocalSocket()
+        socket.connectToServer(self._server_name)
+        if not socket.waitForConnected(self._CONNECT_TIMEOUT_MS):
+            return False
+        socket.write(payload)
+        socket.waitForBytesWritten(self._CONNECT_TIMEOUT_MS)
+        acknowledged = (
+            socket.waitForReadyRead(int(handoff.ACK_TIMEOUT_S * 1000))
+            and bytes(socket.read(len(handoff.ACK))) == handoff.ACK
+        )
+        socket.disconnectFromServer()
+        return acknowledged
 
     def _send(self, payload: bytes) -> None:
         socket = QLocalSocket()
@@ -1152,15 +1170,17 @@ class QLocalSocketTransport(Transport):
                 if connection.waitForReadyRead(self._READ_TIMEOUT_MS)
                 else b""
             )
+            if received[:1] in handoff.ACKED_REQUESTS:
+                connection.write(handoff.ACK)
+                connection.waitForBytesWritten(self._READ_TIMEOUT_MS)
             connection.disconnectFromServer()
             if received.startswith(self._REQUEST_BYTE):
                 on_snip_request()
             elif received.startswith(self._SETTINGS_REQUEST_BYTE):
                 on_settings_request()
-            elif received.startswith(self._OPEN_REQUEST_PREFIX):
-                on_open_request(
-                    Path(os.fsdecode(received[len(self._OPEN_REQUEST_PREFIX):]))
-                )
+            elif received[:1] in (self._OPEN_REQUEST_PREFIX, handoff.ROUTED_OPEN_PREFIX):
+                # `O` is what a launcher from before the editors sends.
+                on_open_request(Path(os.fsdecode(received[1:])))
             else:
                 for editor, request in handoff.EDITOR_REQUESTS.items():
                     if received == request:
@@ -4249,6 +4269,36 @@ def _become_resident(
         controller.open_path(open_path_immediately)
     if open_editor_immediately is not None:
         controller.open_editor(open_editor_immediately)
+    return app.exec()
+
+
+def _open_editor_here(*, editor: str | None = None, path: Path | None = None) -> int:
+    """Open an editor in this process, because the resident did not
+    acknowledge the request: it is a Snipux from before the editors, left
+    running by an upgrade, and it dropped the request without a word.
+
+    Here rather than only telling the user to restart, because a launcher
+    that opens its window is better than one that explains why it did not
+    -- and an editor needs nothing the resident owns. The window is
+    standalone: when it closes this process ends, and the old resident
+    keeps the tray and the shortcut until it is restarted.
+    """
+    print(
+        "snipux: the Snipux that is already running is an older version, so "
+        "this editor opened on its own. Quit Snipux from the tray and start "
+        "it again to finish updating.",
+        file=sys.stderr,
+    )
+    if path is not None:
+        editor = editor_for(path)
+    window = PlayerWindow() if editor == "video" else ReviewWindow()
+    if path is not None:
+        window.open_path(path)
+    window.show()
+    window.raise_()
+    window.activateWindow()
+    app = QApplication.instance()
+    app.setQuitOnLastWindowClosed(True)
     return app.exec()
 
 

@@ -5,6 +5,11 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+**After updating, quit Snipux from the tray and start it again.** The
+Snipux that was running before the update does not know about the new
+editors. Until it is restarted, opening an editor still works, but in a
+window of its own beside the old Snipux.
+
 ### Added
 
 - **The image editor and the video editor work as apps of their own.**

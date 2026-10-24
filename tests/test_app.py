@@ -845,17 +845,19 @@ class FakeTransport(Transport):
         if primary_on_settings_request is not None:
             primary_on_settings_request()
 
-    def send_open_request(self, path: Path) -> None:
+    def send_open_request(self, path: Path) -> bool:
         self._state["forwarded_open_paths"].append(path)
         primary_on_open_request = self._state["primary_on_open_request"]
         if primary_on_open_request is not None:
             primary_on_open_request(path)
+        return self._state["acknowledges"]
 
-    def send_editor_request(self, editor: str) -> None:
+    def send_editor_request(self, editor: str) -> bool:
         self._state["forwarded_editor_requests"].append(editor)
         primary_on_editor_request = self._state["primary_on_editor_request"]
         if primary_on_editor_request is not None:
             primary_on_editor_request(editor)
+        return self._state["acknowledges"]
 
     def listen(self, on_request, on_settings_request, on_open_request, on_editor_request) -> None:
         self._state["primary_on_request"] = on_request
@@ -871,6 +873,8 @@ def make_transport_state() -> dict:
         "forwarded_settings_requests": 0,
         "forwarded_open_paths": [],
         "forwarded_editor_requests": [],
+        # False models a resident from before the editors.
+        "acknowledges": True,
         "primary_on_request": None,
         "primary_on_settings_request": None,
         "primary_on_open_request": None,
@@ -1233,6 +1237,56 @@ class TestEditorFlags:
             main(["--video-editor", "--snip"])
 
         assert excinfo.value.code != 0
+
+
+class TestAResidentFromBeforeTheEditors:
+    """An upgrade can leave the old resident running, and it ignores the
+    editors' requests. Without an ack, the editor opens in this process
+    instead, and the user is told to restart Snipux."""
+
+    @pytest.fixture
+    def opened_here(self, monkeypatch):
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        monkeypatch.setattr(QApplication, "setQuitOnLastWindowClosed", lambda self, on: None)
+        shown = []
+        monkeypatch.setattr(app.ReviewWindow, "show", lambda self: shown.append(self))
+        monkeypatch.setattr(app.PlayerWindow, "show", lambda self: shown.append(self))
+        yield shown
+        for window in shown:
+            window.close()
+
+    @pytest.mark.parametrize(
+        "flag,window_type", [("--image-editor", ReviewWindow), ("--video-editor", PlayerWindow)]
+    )
+    def test_an_unacknowledged_editor_opens_here(self, opened_here, capsys, flag, window_type):
+        state = make_transport_state()
+        state["claimed"] = True
+        state["acknowledges"] = False
+
+        assert main([flag], transport=FakeTransport(state)) == 0
+        assert [type(window) for window in opened_here] == [window_type]
+        assert "Quit Snipux from the tray and start it again" in capsys.readouterr().err
+
+    def test_an_unacknowledged_recording_opens_here_in_the_player(
+        self, opened_here, tmp_path
+    ):
+        state = make_transport_state()
+        state["claimed"] = True
+        state["acknowledges"] = False
+        target = tmp_path / "clip.webm"
+        target.write_bytes(b"")
+
+        assert main([str(target)], transport=FakeTransport(state)) == 0
+        [window] = opened_here
+        assert isinstance(window, PlayerWindow)
+        assert window.path == target
+
+    def test_an_acknowledged_request_opens_nothing_here(self, opened_here):
+        state = make_transport_state()
+        state["claimed"] = True
+
+        assert main(["--image-editor"], transport=FakeTransport(state)) == 0
+        assert opened_here == []
 
 
 class TestOpenPathArgument:
@@ -1762,8 +1816,6 @@ class TestHandoff:
         [
             ("--snip", "snip"),
             ("--settings", "settings"),
-            ("--image-editor", ("editor", "image")),
-            ("--video-editor", ("editor", "video")),
         ],
     )
     def test_a_request_reaches_a_running_resident(self, tmp_path, argument, expected):
@@ -1780,20 +1832,15 @@ class TestHandoff:
         target = tmp_path / "shot.png"
         target.write_bytes(b"")
 
-        assert handoff.forward([str(target)], server_name=name) is True
-        self._settle()
-
+        assert self._forward_from_another_process(name, [str(target)]) == "True"
         assert heard == [("open", target)]
 
     @skip_on_windows(_NO_SOCKET_FILE)
     def test_a_relative_path_arrives_absolute(self, tmp_path, monkeypatch):
         name, heard = self._resident(tmp_path)
-        monkeypatch.chdir(tmp_path)
         (tmp_path / "shot.png").write_bytes(b"")
 
-        assert handoff.forward(["shot.png"], server_name=name) is True
-        self._settle()
-
+        assert self._forward_from_another_process(name, ["shot.png"], cwd=tmp_path) == "True"
         assert heard == [("open", tmp_path / "shot.png")]
 
     @skip_on_windows(
@@ -1842,6 +1889,33 @@ class TestHandoff:
         assert result.stdout.strip() == "True []", result.stderr
         assert heard == ["snip"]
 
+    def _forward_from_another_process(self, name, arguments, cwd=None) -> str:
+        """`handoff.forward` from a second process, with this one's event
+        loop running meanwhile: a request that waits for the resident's ack
+        cannot get it from a resident blocked in the same thread."""
+        root = Path(__file__).resolve().parent.parent
+        code = (
+            f"import sys; sys.path.insert(0, {str(root)!r}); from snipux import handoff; "
+            f"print(handoff.forward({arguments!r}, server_name={name!r}))"
+        )
+        client = subprocess.Popen(
+            [sys.executable, "-c", code], cwd=cwd or root, stdout=subprocess.PIPE, text=True
+        )
+        deadline = time.monotonic() + 20
+        while client.poll() is None and time.monotonic() < deadline:
+            QApplication.processEvents()
+            QTest.qWait(10)
+        self._settle()
+        return client.stdout.read().strip()
+
+    @skip_on_windows(_NO_SOCKET_FILE)
+    @pytest.mark.parametrize("flag,editor", [("--image-editor", "image"), ("--video-editor", "video")])
+    def test_a_resident_acknowledges_an_editor_request(self, tmp_path, flag, editor):
+        name, heard = self._resident(tmp_path)
+
+        assert self._forward_from_another_process(name, [flag]) == "True"
+        assert heard == [("editor", editor)]
+
     def test_nothing_listening_is_not_delivered(self, tmp_path):
         assert handoff.forward(["--snip"], server_name=f"snipux-nobody-{tmp_path.name}") is False
 
@@ -1885,7 +1959,7 @@ class TestHandoff:
         assert handoff.forward([str(tmp_path / name)]) is False
 
     @staticmethod
-    def _capture_payloads(monkeypatch) -> list:
+    def _capture_payloads(monkeypatch, reply: bytes = handoff.ACK) -> list:
         sent = []
 
         class Connection:
@@ -1907,6 +1981,11 @@ class TestHandoff:
             def sendall(self, payload):
                 sent.append(payload)
 
+            def recv(self, size):
+                if not reply:
+                    raise socket.timeout("no ack")
+                return reply[:size]
+
         monkeypatch.setattr(
             handoff, "socket", SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=Connection)
         )
@@ -1927,7 +2006,31 @@ class TestHandoff:
         target.write_bytes(b"")
 
         assert handoff.forward(["--image-editor", str(target)]) is True
-        assert sent == [handoff.OPEN_REQUEST_PREFIX + os.fsencode(str(target))]
+        assert sent == [handoff.ROUTED_OPEN_PREFIX + os.fsencode(str(target))]
+
+    @pytest.mark.parametrize("arguments", [["--image-editor"], ["shot.png"]])
+    def test_a_resident_that_does_not_acknowledge_takes_the_full_path(
+        self, monkeypatch, tmp_path, arguments
+    ):
+        # A resident from before the editors drops these without a word.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "shot.png").write_bytes(b"")
+        self._capture_payloads(monkeypatch, reply=b"")
+
+        assert handoff.forward(arguments) is False
+
+    def test_a_snip_still_needs_no_ack(self, monkeypatch):
+        sent = self._capture_payloads(monkeypatch, reply=b"")
+
+        assert handoff.forward(["--snip"]) is True
+        assert sent == [handoff.SNIP_REQUEST]
+
+    def test_a_flag_after_an_editor_flag_is_not_a_file(self, monkeypatch):
+        # `--image-editor --snip` is an argparse error, not a snip.
+        sent = self._capture_payloads(monkeypatch)
+
+        assert handoff.forward(["--image-editor", "--snip"]) is False
+        assert sent == []
 
     def test_its_suffix_copy_matches_the_editors(self):
         assert set(handoff._OPENABLE_SUFFIXES) == set(
@@ -7086,6 +7189,33 @@ class TestSnipRequestProtocol:
         assert snip_fired == []
         assert settings_fired == []
 
+    @pytest.mark.parametrize("editor", ["image", "video"])
+    def test_another_process_gets_an_ack_for_an_editor_request(self, tmp_path, editor):
+        # From a second process, so this one's event loop can run the
+        # resident's side while the client waits for the ack.
+        name = f"snipux-test-ack-{editor}-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        heard = []
+        server.listen(lambda: None, lambda: None, lambda path: None, heard.append)
+        root = Path(__file__).resolve().parent.parent
+        code = (
+            f"import sys; sys.path.insert(0, {str(root)!r}); "
+            "from PyQt6.QtCore import QCoreApplication; qt = QCoreApplication([]); "
+            "from snipux import app; "
+            f"print(app.QLocalSocketTransport({name!r}).send_editor_request({editor!r}))"
+        )
+        client = subprocess.Popen(
+            [sys.executable, "-c", code], cwd=root, stdout=subprocess.PIPE, text=True
+        )
+        deadline = time.monotonic() + 30
+        while client.poll() is None and time.monotonic() < deadline:
+            QApplication.processEvents()
+            QTest.qWait(10)
+
+        assert client.stdout.read().strip() == "True"
+        assert heard == [editor]
+
     @skip_on_windows(
         "Same nested-wait timing gap test_a_real_request_is_delivered "
         "documents for the snip byte -- an editor request goes through the "
@@ -7105,6 +7235,9 @@ class TestSnipRequestProtocol:
             heard.append,
         )
 
+        # Its ack cannot arrive while this one thread is blocked waiting
+        # for it -- `test_a_resident_acknowledges_an_editor_request` waits
+        # from a second process instead.
         app.QLocalSocketTransport(name).send_editor_request(editor)
         for _ in range(20):
             QApplication.processEvents()
