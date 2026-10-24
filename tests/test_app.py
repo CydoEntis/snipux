@@ -845,14 +845,14 @@ class FakeTransport(Transport):
         if primary_on_settings_request is not None:
             primary_on_settings_request()
 
-    def send_open_request(self, path: Path) -> bool:
+    def send_open_request(self, path: Path) -> "app.Delivery":
         self._state["forwarded_open_paths"].append(path)
         primary_on_open_request = self._state["primary_on_open_request"]
         if primary_on_open_request is not None:
             primary_on_open_request(path)
         return self._state["acknowledges"]
 
-    def send_editor_request(self, editor: str) -> bool:
+    def send_editor_request(self, editor: str) -> "app.Delivery":
         self._state["forwarded_editor_requests"].append(editor)
         primary_on_editor_request = self._state["primary_on_editor_request"]
         if primary_on_editor_request is not None:
@@ -873,8 +873,8 @@ def make_transport_state() -> dict:
         "forwarded_settings_requests": 0,
         "forwarded_open_paths": [],
         "forwarded_editor_requests": [],
-        # False models a resident from before the editors.
-        "acknowledges": True,
+        # Delivery.IGNORED models a resident from before the editors.
+        "acknowledges": app.Delivery.ACKNOWLEDGED,
         "primary_on_request": None,
         "primary_on_settings_request": None,
         "primary_on_open_request": None,
@@ -1261,7 +1261,7 @@ class TestAResidentFromBeforeTheEditors:
     def test_an_unacknowledged_editor_opens_here(self, opened_here, capsys, flag, window_type):
         state = make_transport_state()
         state["claimed"] = True
-        state["acknowledges"] = False
+        state["acknowledges"] = app.Delivery.IGNORED
 
         assert main([flag], transport=FakeTransport(state)) == 0
         assert [type(window) for window in opened_here] == [window_type]
@@ -1272,7 +1272,7 @@ class TestAResidentFromBeforeTheEditors:
     ):
         state = make_transport_state()
         state["claimed"] = True
-        state["acknowledges"] = False
+        state["acknowledges"] = app.Delivery.IGNORED
         target = tmp_path / "clip.webm"
         target.write_bytes(b"")
 
@@ -1281,12 +1281,107 @@ class TestAResidentFromBeforeTheEditors:
         assert isinstance(window, PlayerWindow)
         assert window.path == target
 
+    def test_a_busy_resident_gets_no_second_editor(self, opened_here, capsys):
+        # It has the request, and acts on it once its event loop is free.
+        state = make_transport_state()
+        state["claimed"] = True
+        state["acknowledges"] = app.Delivery.NO_ANSWER
+
+        assert main(["--image-editor"], transport=FakeTransport(state)) == 0
+        assert opened_here == []
+        assert state["forwarded_editor_requests"] == ["image"]
+        assert "busy" in capsys.readouterr().err
+
+    def test_an_unreachable_resident_opens_here_without_blaming_its_version(
+        self, opened_here, capsys
+    ):
+        state = make_transport_state()
+        state["claimed"] = True
+        state["acknowledges"] = app.Delivery.UNREACHABLE
+
+        assert main(["--video-editor"], transport=FakeTransport(state)) == 0
+        assert len(opened_here) == 1
+        err = capsys.readouterr().err
+        assert "could not reach" in err
+        assert "older version" not in err
+
     def test_an_acknowledged_request_opens_nothing_here(self, opened_here):
         state = make_transport_state()
         state["claimed"] = True
 
         assert main(["--image-editor"], transport=FakeTransport(state)) == 0
         assert opened_here == []
+
+
+class TestWhatTheResidentAcks:
+    """Only a request the resident recognised is acked -- a malformed one
+    gets the hang-up an older resident would give."""
+
+    @pytest.mark.parametrize(
+        "received,acted",
+        [(b"I", True), (b"V", True), (b"P/x/shot.png", True), (b"P", False), (b"Ix", False), (b"", False)],
+    )
+    def test_only_a_recognised_request_is_handled(self, received, acted):
+        transport = app.QLocalSocketTransport("snipux-unused")
+
+        handle = transport._recognise(
+            received, lambda: None, lambda: None, lambda path: None, lambda editor: None
+        )
+
+        assert (handle is not None) is acted
+
+
+class TestTheAckAgainstARealResident:
+    """The real transport against a stand-in resident in its own process,
+    so the wait for the ack is real: a resident that hangs up is one from
+    before the editors, and one that is merely slow must get exactly one
+    request and no editor opened beside it."""
+
+    @staticmethod
+    def _standin(tmp_path, mode):
+        name = f"snipux-standin-{mode}-{tmp_path.name}"
+        script = Path(__file__).resolve().parent / "standin_resident.py"
+        process = subprocess.Popen(
+            [sys.executable, str(script), name, mode], stdout=subprocess.PIPE, text=True
+        )
+        assert process.stdout.readline().strip() == "ready"
+        return name, process
+
+    @staticmethod
+    def _payloads(process) -> list[str]:
+        process.terminate()
+        output, _ = process.communicate(timeout=10)
+        return [line for line in output.splitlines() if line.startswith("payload")]
+
+    def test_a_slow_ack_opens_nothing_here_and_sends_once(self, tmp_path, monkeypatch):
+        name, process = self._standin(tmp_path, "slow")
+        opened = []
+        monkeypatch.setattr(app, "_open_editor_here", lambda **kwargs: opened.append(kwargs) or 0)
+        try:
+            exit_code = main(["--image-editor"], transport=app.QLocalSocketTransport(name))
+        finally:
+            payloads = self._payloads(process)
+
+        assert exit_code == 0
+        assert opened == []
+        assert payloads == ["payload b'I'"]
+
+    def test_a_hang_up_opens_the_editor_here(self, tmp_path, monkeypatch):
+        name, process = self._standin(tmp_path, "old")
+        opened = []
+        monkeypatch.setattr(app, "_open_editor_here", lambda **kwargs: opened.append(kwargs) or 0)
+        try:
+            started = time.monotonic()
+            exit_code = main(["--video-editor"], transport=app.QLocalSocketTransport(name))
+            waited = time.monotonic() - started
+        finally:
+            payloads = self._payloads(process)
+
+        assert exit_code == 0
+        assert opened == [{"editor": "video", "path": None, "older": True}]
+        assert payloads == ["payload b'V'"]
+        # A hang-up is not a timeout: nobody waits out ACK_TIMEOUT_S for it.
+        assert waited < handoff.ACK_TIMEOUT_S / 2
 
 
 class TestOpenPathArgument:
@@ -1959,7 +2054,9 @@ class TestHandoff:
         assert handoff.forward([str(tmp_path / name)]) is False
 
     @staticmethod
-    def _capture_payloads(monkeypatch, reply: bytes = handoff.ACK) -> list:
+    def _capture_payloads(monkeypatch, reply: bytes | None = handoff.ACK) -> list:
+        """`reply` is what the resident sends back: the ack, b"" for a
+        hang-up, or None for silence until the timeout."""
         sent = []
 
         class Connection:
@@ -1982,8 +2079,8 @@ class TestHandoff:
                 sent.append(payload)
 
             def recv(self, size):
-                if not reply:
-                    raise socket.timeout("no ack")
+                if reply is None:
+                    raise TimeoutError("no ack")
                 return reply[:size]
 
         monkeypatch.setattr(
@@ -2018,6 +2115,14 @@ class TestHandoff:
         self._capture_payloads(monkeypatch, reply=b"")
 
         assert handoff.forward(arguments) is False
+
+    def test_a_busy_resident_is_not_sent_the_request_twice(self, monkeypatch, capsys):
+        # True, so the full CLI does not resend it: the resident has it.
+        sent = self._capture_payloads(monkeypatch, reply=None)
+
+        assert handoff.forward(["--image-editor"]) is True
+        assert sent == [b"I"]
+        assert "busy" in capsys.readouterr().err
 
     def test_a_snip_still_needs_no_ack(self, monkeypatch):
         sent = self._capture_payloads(monkeypatch, reply=b"")
@@ -7277,7 +7382,7 @@ class TestSnipRequestProtocol:
             QApplication.processEvents()
             QTest.qWait(10)
 
-        assert client.stdout.read().strip() == "True"
+        assert client.stdout.read().strip() == "Delivery.ACKNOWLEDGED"
         assert heard == [editor]
 
     @skip_on_windows(

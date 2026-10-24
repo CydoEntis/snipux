@@ -58,9 +58,16 @@ _REQUESTS = {
 
 # A resident that is up accepts at once; this only bounds a wedged one.
 _CONNECT_TIMEOUT_S = 0.5
-# The ack comes from the resident's event loop, which a snip in progress
-# can hold for a moment.
-ACK_TIMEOUT_S = 1.0
+# How long to wait for the ack. A resident from before the editors hangs up
+# straight after reading, so that case is over in milliseconds whatever
+# this says; only a busy resident -- one still starting up, or held by a
+# capture subprocess -- ever runs this down, and it answers once its event
+# loop is free.
+ACK_TIMEOUT_S = 10.0
+BUSY_MESSAGE = (
+    "snipux: Snipux is busy and did not answer in time. If nothing opens in "
+    "a moment, try again."
+)
 
 
 def socket_path(server_name: str = SERVER_NAME) -> str:
@@ -108,9 +115,10 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
     `--video-editor`, or the path of an existing file an editor opens
     (alone, or after one of the editor flags) is a request; anything else
     belongs to the full CLI. False whenever the
-    resident cannot be reached this way, or does not acknowledge a request
-    that expects it, which is never an error -- it is the caller's cue to
-    take the full path.
+    resident cannot be reached this way, or hangs up on a request that
+    expects an ack, which is never an error -- it is the caller's cue to
+    take the full path. A resident that is reached but too busy to answer
+    counts as delivered: it has the request.
     """
     if (
         len(arguments) == 2
@@ -140,10 +148,18 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
             connection.sendall(payload)
             if payload[:1] not in ACKED_REQUESTS:
                 return True
-            # No ack is an older resident, and the full CLI knows what to
-            # do about one; this module cannot without loading Qt.
             connection.settimeout(ACK_TIMEOUT_S)
-            return connection.recv(len(ACK)) == ACK
+            try:
+                reply = connection.recv(len(ACK))
+            except TimeoutError:
+                # Busy, not old: the request is in its queue. Handing this
+                # to the full CLI would send it a second time.
+                print(BUSY_MESSAGE, file=sys.stderr)
+                return True
+            # A hang-up without the ack is a resident from before the
+            # editors, and the full CLI knows what to do about one; this
+            # module cannot without loading Qt.
+            return reply == ACK
     except OSError:
         return False
 

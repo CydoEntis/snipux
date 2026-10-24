@@ -36,6 +36,7 @@ import threading
 import time
 import traceback
 from abc import ABC, abstractmethod
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -893,9 +894,7 @@ def main(
             if registry is None:
                 registry = build_default_registry()
             return _become_resident(registry, transport, open_editor_immediately=editor)
-        if not transport.send_editor_request(editor):
-            return _open_editor_here(editor=editor)
-        return 0
+        return _after_delivery(transport.send_editor_request(editor), editor=editor)
 
     if args.path is not None:
         # Same forward-or-become-resident shape as --snip/--settings above,
@@ -919,9 +918,7 @@ def main(
             if registry is None:
                 registry = build_default_registry()
             return _become_resident(registry, transport, open_path_immediately=target)
-        if not transport.send_open_request(target):
-            return _open_editor_here(path=target)
-        return 0
+        return _after_delivery(transport.send_open_request(target), path=target)
 
     if registry is None:
         registry = build_default_registry()
@@ -947,6 +944,19 @@ def main(
 # below), and repurposing all of main() for it would break the other,
 # still-immediate paths' tests. `__main__.py` dispatches to
 # `run_resident_app()` only when invoked with no arguments.
+
+
+class Delivery(Enum):
+    """What became of a request that expects the resident's ack."""
+
+    ACKNOWLEDGED = "acknowledged"
+    # Read and hung up on, with no ack: a resident from before the editors.
+    IGNORED = "ignored"
+    # Connected, never answered: a resident whose event loop is busy. It has
+    # the request, and will act on it.
+    NO_ANSWER = "no answer"
+    # Not even connected: the resident went away after try_claim() saw it.
+    UNREACHABLE = "unreachable"
 
 
 class Transport(ABC):
@@ -984,19 +994,17 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def send_open_request(self, path: Path) -> bool:
+    def send_open_request(self, path: Path) -> Delivery:
         """Ask the primary instance to open `path` in its editor. Same
         shape as `send_snip_request`/`send_settings_request`, for the same
         reason: `path` is opened by whichever instance is actually resident,
-        not by this short-lived one. False when the resident did not
-        acknowledge it -- one from before the editors.
+        not by this short-lived one.
         """
 
     @abstractmethod
-    def send_editor_request(self, editor: str) -> bool:
+    def send_editor_request(self, editor: str) -> Delivery:
         """Ask the primary instance to open an empty editor, "image" or
         "video" -- `snipux --image-editor`/`--video-editor` with no file.
-        False when the resident did not acknowledge it.
         """
 
     @abstractmethod
@@ -1117,25 +1125,33 @@ class QLocalSocketTransport(Transport):
     def send_settings_request(self) -> None:
         self._send(self._SETTINGS_REQUEST_BYTE)
 
-    def send_open_request(self, path: Path) -> bool:
+    def send_open_request(self, path: Path) -> Delivery:
         return self._send_expecting_ack(handoff.ROUTED_OPEN_PREFIX + os.fsencode(str(path)))
 
-    def send_editor_request(self, editor: str) -> bool:
+    def send_editor_request(self, editor: str) -> Delivery:
         return self._send_expecting_ack(handoff.EDITOR_REQUESTS[editor])
 
-    def _send_expecting_ack(self, payload: bytes) -> bool:
+    def _send_expecting_ack(self, payload: bytes) -> Delivery:
+        """Send `payload` and tell a hang-up from silence. A resident from
+        before the editors disconnects as soon as it has read, which ends
+        the wait at once; one that is merely busy keeps the connection open
+        and answers when its event loop comes back.
+        """
         socket = QLocalSocket()
         socket.connectToServer(self._server_name)
         if not socket.waitForConnected(self._CONNECT_TIMEOUT_MS):
-            return False
+            return Delivery.UNREACHABLE
         socket.write(payload)
         socket.waitForBytesWritten(self._CONNECT_TIMEOUT_MS)
-        acknowledged = (
-            socket.waitForReadyRead(int(handoff.ACK_TIMEOUT_S * 1000))
-            and bytes(socket.read(len(handoff.ACK))) == handoff.ACK
-        )
+        if socket.waitForReadyRead(int(handoff.ACK_TIMEOUT_S * 1000)):
+            replied = bytes(socket.read(len(handoff.ACK)))
+            delivery = Delivery.ACKNOWLEDGED if replied == handoff.ACK else Delivery.IGNORED
+        elif socket.state() == QLocalSocket.LocalSocketState.ConnectedState:
+            delivery = Delivery.NO_ANSWER
+        else:
+            delivery = Delivery.IGNORED
         socket.disconnectFromServer()
-        return acknowledged
+        return delivery
 
     def _send(self, payload: bytes) -> None:
         socket = QLocalSocket()
@@ -1170,23 +1186,42 @@ class QLocalSocketTransport(Transport):
                 if connection.waitForReadyRead(self._READ_TIMEOUT_MS)
                 else b""
             )
-            if received[:1] in handoff.ACKED_REQUESTS:
+            handle = self._recognise(
+                received, on_snip_request, on_settings_request, on_open_request, on_editor_request
+            )
+            # Acked once recognised and before it is acted on: the
+            # launcher is waiting, and opening a window takes a moment.
+            if handle is not None and received[:1] in handoff.ACKED_REQUESTS:
                 connection.write(handoff.ACK)
                 connection.waitForBytesWritten(self._READ_TIMEOUT_MS)
             connection.disconnectFromServer()
-            if received.startswith(self._REQUEST_BYTE):
-                on_snip_request()
-            elif received.startswith(self._SETTINGS_REQUEST_BYTE):
-                on_settings_request()
-            elif received[:1] in (self._OPEN_REQUEST_PREFIX, handoff.ROUTED_OPEN_PREFIX):
-                # `O` is what a launcher from before the editors sends.
-                on_open_request(Path(os.fsdecode(received[1:])))
-            else:
-                for editor, request in handoff.EDITOR_REQUESTS.items():
-                    if received == request:
-                        on_editor_request(editor)
+            if handle is not None:
+                handle()
 
         self._server.newConnection.connect(_accept)
+
+    def _recognise(
+        self,
+        received: bytes,
+        on_snip_request: Callable[[], None],
+        on_settings_request: Callable[[], None],
+        on_open_request: Callable[[Path], None],
+        on_editor_request: Callable[[str], None],
+    ) -> Callable[[], None] | None:
+        """What `received` asks for, ready to run, or None for a probe or
+        anything malformed -- which is then neither acted on nor acked."""
+        if received.startswith(self._REQUEST_BYTE):
+            return on_snip_request
+        if received.startswith(self._SETTINGS_REQUEST_BYTE):
+            return on_settings_request
+        # `O` is what a launcher from before the editors sends.
+        if received[:1] in (self._OPEN_REQUEST_PREFIX, handoff.ROUTED_OPEN_PREFIX) and received[1:]:
+            path = Path(os.fsdecode(received[1:]))
+            return lambda: on_open_request(path)
+        for editor, request in handoff.EDITOR_REQUESTS.items():
+            if received == request:
+                return lambda: on_editor_request(editor)
+        return None
 
 
 class AppController:
@@ -4257,10 +4292,26 @@ def _present(window: QWidget) -> None:
     platform.current.take_keyboard_focus(window)
 
 
-def _open_editor_here(*, editor: str | None = None, path: Path | None = None) -> int:
-    """Open an editor in this process, because the resident did not
-    acknowledge the request: it is a Snipux from before the editors, left
-    running by an upgrade, and it dropped the request without a word.
+def _after_delivery(delivery: Delivery, *, editor: str | None = None, path: Path | None = None) -> int:
+    """Finish an editor request a resident was sent. Only a resident that
+    hung up, or could not be reached, means opening the editor here: one
+    that is busy has the request, and a second editor would be a duplicate.
+    """
+    if delivery is Delivery.ACKNOWLEDGED:
+        return 0
+    if delivery is Delivery.NO_ANSWER:
+        print(handoff.BUSY_MESSAGE, file=sys.stderr)
+        return 0
+    return _open_editor_here(editor=editor, path=path, older=delivery is Delivery.IGNORED)
+
+
+def _open_editor_here(
+    *, editor: str | None = None, path: Path | None = None, older: bool
+) -> int:
+    """Open an editor in this process, because the resident will not: it
+    is a Snipux from before the editors (`older`), left running by an
+    upgrade, which dropped the request without a word -- or it went away
+    between this launch finding it and asking it.
 
     Here rather than only telling the user to restart, because a launcher
     that opens its window is better than one that explains why it did not
@@ -4268,12 +4319,15 @@ def _open_editor_here(*, editor: str | None = None, path: Path | None = None) ->
     standalone: when it closes this process ends, and the old resident
     keeps the tray and the shortcut until it is restarted.
     """
-    print(
-        "snipux: the Snipux that is already running is an older version, so "
-        "this editor opened on its own. Quit Snipux from the tray and start "
-        "it again to finish updating.",
-        file=sys.stderr,
-    )
+    if older:
+        message = (
+            "snipux: the Snipux that is already running is an older version, so "
+            "this editor opened on its own. Quit Snipux from the tray and start "
+            "it again to finish updating."
+        )
+    else:
+        message = "snipux: could not reach the running Snipux, so this editor opened on its own."
+    print(message, file=sys.stderr)
     if path is not None:
         editor = editor_for(path)
     window = PlayerWindow() if editor == "video" else ReviewWindow()
