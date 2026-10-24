@@ -727,7 +727,10 @@ def save_integration_target(target: str, config_dir: Path | None = None) -> bool
 # Bumped whenever --setup starts writing something it did not before, so the
 # first launch after an upgrade writes it once, without anyone having to run
 # --setup by hand. 2: the editors' launcher entries and Open With.
-INTEGRATION_REVISION = 2
+# 3: the Windows editor shortcuts get their own AppUserModelID, without
+# which the Start Menu hid them behind the Snipux entry; and the app icon
+# at every size is the bracket mark, so the installed icon is rewritten.
+INTEGRATION_REVISION = 3
 
 
 def load_integration_revision(config_dir: Path | None = None) -> int:
@@ -2118,11 +2121,15 @@ def run_setup(
 
 
 def install_editor_entries(
-    *, exec_path: Path | None = None, applications_dir: Path | None = None
+    *,
+    exec_path: Path | None = None,
+    applications_dir: Path | None = None,
+    hicolor_dir: Path | None = None,
 ) -> int:
-    """Write only the editors' launcher entries -- what an upgrade from a
-    snipux without them is missing -- leaving the app's own entry, the
-    autostart entry and the shortcut exactly as the user has them.
+    """Write only the editors' launcher entries and refresh the app icon --
+    what an upgrade from an older snipux is missing -- leaving the app's
+    own entry, the autostart entry and the shortcut exactly as the user
+    has them.
 
     The same defaults and the same exit-code rule as `run_setup()`.
     """
@@ -2137,6 +2144,8 @@ def install_editor_entries(
             / "applications"
         )
     _write_editor_entries(applications_dir, exec_path)
+    # The theme sits beside applications/ under the same XDG data dir.
+    install_icons(hicolor_dir if hicolor_dir is not None else applications_dir.parent / "icons" / "hicolor")
     return 0
 
 
