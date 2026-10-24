@@ -1876,10 +1876,17 @@ class AppController:
             # closes it. `_reveal` covers the case where the request landed
             # inside the window's own opacity-0 reveal delay, which would
             # otherwise raise something still invisible.
-            self._overlay._reveal()
-            self._overlay.raise_()
-            self._overlay.activateWindow()
-            return
+            if self._overlay.isVisible() or self._overlay.counting_down:
+                self._overlay._reveal()
+                self._overlay.raise_()
+                self._overlay.activateWindow()
+                return
+            # Hidden and not waiting out a delay: whatever was meant to show
+            # it again failed. There is nothing to bring back, and returning
+            # here turned every later press into nothing at all, so it is
+            # dropped and this press snips afresh.
+            stale, self._overlay = self._overlay, None
+            stale.close()
 
         # While the screenshot is being taken, ask the desktop the things the
         # overlay will want to know the moment it has the picture.
@@ -2014,11 +2021,15 @@ class AppController:
             opening_review = self._overlay.outcome == "review"
         else:
             opening_review = setup_desktop.load_review_window()
+        save_error = self._overlay.save_error if self._overlay is not None else None
+        if opening_review and save_error is not None:
+            # The review window shows the snip but not that its save failed.
+            self._notify_capture(None, save_error=save_error)
 
         if not opening_review:
             # Nothing else is about to appear, so this is the only
             # confirmation there will be -- see `_notify_capture`.
-            self._notify_capture(path)
+            self._notify_capture(path, save_error=save_error)
             return
         # A copy of the image, not the overlay's own: the overlay is about
         # to close, and `rendered_image()` hands back a QImage backed by
@@ -2089,7 +2100,7 @@ class AppController:
         if window in self._pins:
             self._pins.remove(window)
 
-    def _notify_capture(self, path: "Path | None") -> None:
+    def _notify_capture(self, path: "Path | None", *, save_error: str | None = None) -> None:
         """Confirm, through the tray, that a snip actually happened.
 
         The overlay has a toast of its own and the user never sees it.
@@ -2114,7 +2125,9 @@ class AppController:
         rather than the full path: it is the part that answers "where did
         that go", and a full path elides to uselessness in a balloon.
         """
-        if path is None:
+        if save_error is not None:
+            message = f"Could not save: {save_error}. Copied to clipboard instead."
+        elif path is None:
             message = "Copied to clipboard"
         else:
             message = f"Saved to {path.parent.name}/{path.name}"
@@ -3540,34 +3553,39 @@ class AppController:
         if self._stopping_recording or self._active_recording is None:
             return
         self._stopping_recording = True
-        # Read before the teardown clears it -- the summary needs to say how
-        # long the recording ran, and by the time the file has landed there
-        # is nothing left that knows.
-        elapsed = self._elapsed_text()
-        self._teardown_recording_ui(keep_bar=True)
         backend, path, after = self._active_recording
         landed = None
         stopped = True
+        # Both flags are reset in `finally`. Left set by an exception, they
+        # made every later hotkey press reach the early return above and do
+        # nothing until snipux was restarted.
         try:
-            backend.stop()
-        except RecordingPartsError as exc:
-            stopped = False
-            self._keep_recording_parts(exc.parts)
-        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            self._report_shortcut(f"Stopping the recording failed: {exc}")
-            stopped = False
-        else:
-            # "gif" lands asynchronously (`_land_recording_as_gif` runs
-            # ffmpeg as a `QProcess`), so it cannot hand back a path here
-            # the way every other destination does -- it reports its own
-            # toast and finished bar once the convert actually finishes.
-            if after != "gif":
-                try:
-                    landed = self._land_recording(path, after, reason=reason)
-                except OSError as exc:
-                    self._report_shortcut(f"Saving the recording failed: {exc}")
-        self._active_recording = None
-        self._stopping_recording = False
+            # Read before the teardown clears it -- the summary needs to say
+            # how long the recording ran, and by the time the file has
+            # landed there is nothing left that knows.
+            elapsed = self._elapsed_text()
+            self._teardown_recording_ui(keep_bar=True)
+            try:
+                backend.stop()
+            except RecordingPartsError as exc:
+                stopped = False
+                self._keep_recording_parts(exc.parts)
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                self._report_shortcut(f"Stopping the recording failed: {exc}")
+                stopped = False
+            else:
+                # "gif" lands asynchronously (`_land_recording_as_gif` runs
+                # ffmpeg as a `QProcess`), so it cannot hand back a path
+                # here the way every other destination does -- it reports
+                # its own toast and finished bar once the convert finishes.
+                if after != "gif":
+                    try:
+                        landed = self._land_recording(path, after, reason=reason)
+                    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                        self._report_shortcut(f"Saving the recording failed: {exc}")
+        finally:
+            self._active_recording = None
+            self._stopping_recording = False
 
         if stopped and after == "gif":
             self._land_recording_as_gif(Path(path), elapsed, reason=reason)
@@ -3917,7 +3935,10 @@ def crash_log_path() -> Path:
     return setup_desktop.config_path().parent / "crash.log"
 
 
-def install_crash_log(log_path: Callable[[], Path] = crash_log_path) -> None:
+def install_crash_log(
+    log_path: Callable[[], Path] = crash_log_path,
+    notify: Callable[[str], None] | None = None,
+) -> None:
     """Make an unhandled exception a logged event, not the end of the process.
 
     PyQt6 answers an exception escaping a Python override of a Qt virtual --
@@ -3935,8 +3956,14 @@ def install_crash_log(log_path: Callable[[], Path] = crash_log_path) -> None:
 
     `log_path` is a callable rather than a path so the location is resolved
     when an exception happens, not when the hook is installed.
+
+    `notify`, when given, also tells the user, once per distinct error. A
+    log alone was not enough: a snip that failed to open looked exactly like
+    a hotkey that had stopped working, with nothing on screen to say
+    otherwise.
     """
     already_logged: set[str] = set()
+    notified: set[type] = set()
 
     def log_unhandled(exc_type, exc, tb) -> None:
         text = "".join(traceback.format_exception(exc_type, exc, tb))
@@ -3961,6 +3988,16 @@ def install_crash_log(log_path: Callable[[], Path] = crash_log_path) -> None:
             # A log that cannot be written must not raise from the hook:
             # that would put the error back in Qt's hands.
             pass
+        # One notice per kind of error: a message that changes each time (a
+        # position in a paint error) would otherwise be a balloon per frame.
+        if notify is not None and exc_type not in notified:
+            notified.add(exc_type)
+            try:
+                notify(f"Something went wrong: {exc}. Details are in {log_path()}.")
+            except Exception as notify_error:  # noqa: BLE001 - must not leave the hook
+                # Raising here would put the error back in Qt's hands; the
+                # log already has the original.
+                print(f"Note: could not show the error notice: {notify_error}")
 
     sys.excepthook = log_unhandled
 
@@ -4044,12 +4081,16 @@ def _become_resident(
     # `_ensure_qapplication`, which must run before the claim, not after.
     app = _ensure_qapplication()
     # First, so nothing below -- and nothing in the event loop after it --
-    # can take the process down through an exception in a Qt handler.
-    install_crash_log()
+    # can take the process down through an exception in a Qt handler. The
+    # tray that tells the user does not exist yet, so it is attached below;
+    # anything that fails before then is logged only.
+    report: list[Callable[[str], None]] = []
+    install_crash_log(notify=lambda message: report and report[0](message))
 
     platform.current.ensure_stable_install()
 
     controller = AppController(registry, transport)
+    report.append(controller._report_shortcut)
     controller.install_hotkey_listener()
     controller.run_first_launch_setup()
     # Once a day, on the launch that becomes resident -- so at most one

@@ -13,6 +13,14 @@ use it; the commit history has the detail.
 - **"Checking for updates…" could be the last thing you saw.** A reply from
   GitHub cut off halfway stopped the check without a word. It now says it
   could not check.
+- **The snip hotkey could stop working until Snipux was restarted** after a
+  recording failed to stop cleanly, or a delayed snip failed to come back.
+  The next press now works.
+- **Errors no longer happen silently.** When something goes wrong, Snipux
+  now says so in a notification and points to the crash log, instead of
+  appearing to ignore the hotkey.
+- **A save that fails no longer says "Copied to clipboard".** It says the
+  save failed and why, and puts the snip on the clipboard so it isn't lost.
 
 ### Changed
 

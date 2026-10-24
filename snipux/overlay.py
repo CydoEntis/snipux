@@ -5435,6 +5435,21 @@ class OverlayWindow(QWidget):
         it described a rectangle of the *old* content -- and the picked
         mode is re-dispatched against the new one.
         """
+        try:
+            self._reopen_after_delay()
+        except Exception:
+            # Hidden, and still the app's open snip, this window turned
+            # every later hotkey press into revealing nothing. Ending it
+            # frees the next snip; the error goes on to the crash log.
+            self.close()
+            raise
+
+    @property
+    def counting_down(self) -> bool:
+        """Hidden on purpose, waiting out the capture delay."""
+        return self._delay_timer is not None and self._delay_timer.isActive()
+
+    def _reopen_after_delay(self) -> None:
         mode = self._pending_capture_mode
         try:
             frame = self._registry.capture()
@@ -6255,6 +6270,9 @@ class OverlayWindow(QWidget):
         self._chooser.set_delay(delay)
         self._popover.set_delay(delay)
 
+    # Why the last save failed, or None. Read by app.py's notice.
+    save_error: str | None = None
+
     @property
     def outcome(self) -> str:
         """What should happen to this snip once it is taken.
@@ -7068,10 +7086,15 @@ class OverlayWindow(QWidget):
         try:
             path = output.save_image(image, directory)
         except OSError as exc:
-            # A full disk or a read-only folder. The snip itself is still
-            # good, so it is reported as a capture with no path -- that
-            # keeps Open/Review working on an image that could not be
+            # A full disk, a read-only folder, or Windows' Controlled Folder
+            # Access. The snip itself is still good, so it goes to the
+            # clipboard instead and is reported as a capture with no path --
+            # that keeps Open/Review working on an image that could not be
             # written, rather than losing it along with the file.
+            # `save_error` is how the app's notice tells this apart from an
+            # ordinary copy: the toast below dies with the window.
+            output.copy_image_to_clipboard(image)
+            self.save_error = str(exc)
             self._show_toast("save", f"Could not save: {exc}")
             self._report_capture(image, None)
             return None
@@ -9456,9 +9479,10 @@ def open_overlay(
         if closing:
             return
         closing = True
+        # Hidden members too: a delayed snip hides the others, and one that
+        # fails to come back must not leave them holding their frames.
         for member in overlays:
-            if member.isVisible():
-                member.close()
+            member.close()
         if on_dismissed is not None:
             on_dismissed()
 
