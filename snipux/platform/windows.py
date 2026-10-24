@@ -110,8 +110,16 @@ from PyQt6.QtCore import QAbstractNativeEventFilter
 from PyQt6.QtMultimedia import QMediaDevices
 
 from snipux import capture, recording, setup_desktop
+from snipux.design import tokens
 
 from . import Platform, UnimplementedPlatformError, windows_ocr
+
+try:
+    import winreg
+except ImportError:
+    # Not Windows. Nothing reaches the registry there, and the tests put a
+    # fake in its place on every OS.
+    winreg = None
 
 # Type-only: `capture.py`/`recording.py` import this package at their top, so
 # a name imported out of either here could still be undefined when
@@ -290,6 +298,7 @@ _VT_LPWSTR = 31
 _QUERY_INTERFACE = 0
 _RELEASE = 2
 _ISHELLLINKW_SET_DESCRIPTION = 7
+_ISHELLLINKW_SET_ARGUMENTS = 11
 _ISHELLLINKW_SET_ICON_LOCATION = 17
 _ISHELLLINKW_SET_PATH = 20
 _IPERSISTFILE_SAVE = 6
@@ -366,11 +375,16 @@ def _com_call(interface: ctypes.c_void_p, index: int, restype, *argtypes):
 
 
 def _create_shortcut(
-    lnk_path: Path, target: Path, *, icon_path: Path | None = None, description: str = ""
+    lnk_path: Path,
+    target: Path,
+    *,
+    icon_path: Path | None = None,
+    description: str = "",
+    arguments: str = "",
 ) -> bool:
     """Write a Windows `.lnk` shortcut at `lnk_path` that launches `target`
-    with no arguments -- the same bare, argument-less launch Linux's own
-    `Exec=` line does (`setup_desktop.render_desktop_entry`) -- via COM's
+    with `arguments` (none, for Snipux itself; an editor flag for the two
+    editors' shortcuts) -- via COM's
     `IShellLinkW`/`IPersistFile`, the actual mechanism behind every Windows
     shortcut: a `.lnk` is a serialised COM object, not a text file the way
     Linux's `.desktop` is. Reached through bare `ctypes` rather than
@@ -407,6 +421,12 @@ def _create_shortcut(
                     shell_link, _ISHELLLINKW_SET_DESCRIPTION, ctypes.c_long, ctypes.c_wchar_p
                 )
                 set_description(shell_link, description)
+            if arguments:
+                set_arguments = _com_call(
+                    shell_link, _ISHELLLINKW_SET_ARGUMENTS, ctypes.c_long, ctypes.c_wchar_p
+                )
+                if set_arguments(shell_link, arguments) != 0:
+                    return False
             if icon_path is not None:
                 set_icon = _com_call(
                     shell_link, _ISHELLLINKW_SET_ICON_LOCATION, ctypes.c_long, ctypes.c_wchar_p, ctypes.c_int
@@ -639,7 +659,15 @@ def _remove_icon(icon_path: Path) -> bool:
     return True
 
 
-def _write_shortcut(lnk_path: Path, target: Path, icon_path: Path | None, label: str) -> bool:
+def _write_shortcut(
+    lnk_path: Path,
+    target: Path,
+    icon_path: Path | None,
+    label: str,
+    *,
+    arguments: str = "",
+    description: str = "Snipux",
+) -> bool:
     """Write a `label` shortcut at `lnk_path` launching `target`, reporting
     either way -- the Windows analogue of `setup_desktop._write_entry()`.
     The filename never changes between runs, so a second `--setup`
@@ -657,7 +685,9 @@ def _write_shortcut(lnk_path: Path, target: Path, icon_path: Path | None, label:
     except OSError as exc:
         print(f"Note: could not create {lnk_path.parent} for the {label} entry: {exc}")
         return False
-    if not _create_shortcut(lnk_path, target, icon_path=icon_path, description="Snipux"):
+    if not _create_shortcut(
+        lnk_path, target, icon_path=icon_path, description=description, arguments=arguments
+    ):
         print(f"Note: could not write the {label} entry at {lnk_path}.")
         return False
     print(f"{label} entry written to {lnk_path} (target={target})")
@@ -679,6 +709,177 @@ def _remove_shortcut(lnk_path: Path, label: str) -> bool:
         return False
     print(f"{label} entry removed from {lnk_path}")
     return True
+
+
+# The two editors, as Windows is told about them: the Start Menu shortcut's
+# name (which is what the Start Menu lists), the flag it passes, and the
+# ProgID that puts it under "Open with" for the suffixes it opens.
+_EDITORS = (
+    ("Snipux Image Editor", "--image-editor", "Snipux.ImageEditor", tokens.EDITOR_IMAGE_SUFFIXES),
+    ("Snipux Video Editor", "--video-editor", "Snipux.VideoEditor", tokens.EDITOR_RECORDING_SUFFIXES),
+)
+
+_CLASSES_KEY = r"Software\Classes"
+# Both names a launcher can have: pip's GUI stub, and the frozen build.
+# `--remove` clears both, since it cannot know which one --setup saw.
+_LAUNCHER_NAMES = ("snipuxw.exe", "snipux.exe")
+
+
+def open_with_values(exec_path: Path, icon_path: Path | None) -> list[tuple[str, str, str]]:
+    r"""Every `(key, value name, data)` `--setup` writes under HKCU so
+    Explorer offers Snipux in "Open with" for images and recordings.
+
+    Per user, under `HKCU\Software\Classes`, so no elevation is needed.
+    A ProgID per editor, named in each suffix's `OpenWithProgids`, is how an
+    app joins the list without becoming the default: since Windows 8 the
+    default is the user's own `UserChoice`, which nothing may write.
+    `Applications\<launcher>` gives the entry its name -- pip's stub would
+    otherwise read as "snipuxw".
+    """
+    app_key = rf"{_CLASSES_KEY}\Applications\{exec_path.name}"
+    values = [
+        (app_key, "FriendlyAppName", "Snipux"),
+        (rf"{app_key}\shell\open\command", "", f'"{exec_path}" "%1"'),
+    ]
+    for name, flag, progid, suffixes in _EDITORS:
+        progid_key = rf"{_CLASSES_KEY}\{progid}"
+        values.append((progid_key, "", name))
+        if icon_path is not None:
+            values.append((rf"{progid_key}\DefaultIcon", "", str(icon_path)))
+        values.append((rf"{progid_key}\shell\open\command", "", f'"{exec_path}" {flag} "%1"'))
+        for suffix in suffixes:
+            values.append((rf"{app_key}\SupportedTypes", suffix, ""))
+            values.append((rf"{_CLASSES_KEY}\{suffix}\OpenWithProgids", progid, ""))
+    return values
+
+
+def _owned_keys(exec_name: str) -> list[str]:
+    """The keys `open_with_values` creates that are Snipux's alone, deepest
+    first, the order `DeleteKey` -- which refuses a key with subkeys --
+    needs them in. The suffix keys are shared with every other app and are
+    never deleted; only Snipux's value under each one is.
+    """
+    app_key = rf"{_CLASSES_KEY}\Applications\{exec_name}"
+    keys = [
+        rf"{app_key}\shell\open\command",
+        rf"{app_key}\shell\open",
+        rf"{app_key}\shell",
+        rf"{app_key}\SupportedTypes",
+        app_key,
+    ]
+    for _name, _flag, progid, _suffixes in _EDITORS:
+        progid_key = rf"{_CLASSES_KEY}\{progid}"
+        keys += [
+            rf"{progid_key}\shell\open\command",
+            rf"{progid_key}\shell\open",
+            rf"{progid_key}\shell",
+            rf"{progid_key}\DefaultIcon",
+            progid_key,
+        ]
+    return keys
+
+
+def _announce_association_change() -> None:
+    """Tell Explorer the associations changed, so "Open with" shows the
+    change now rather than after the next sign-in."""
+    _SHCNE_ASSOCCHANGED = 0x08000000
+    ctypes.windll.shell32.SHChangeNotify(_SHCNE_ASSOCCHANGED, 0, None, None)
+
+
+def _register_open_with(exec_path: Path, icon_path: Path | None) -> bool:
+    try:
+        for key, name, data in open_with_values(exec_path, icon_path):
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_WRITE) as handle:
+                winreg.SetValueEx(handle, name, 0, winreg.REG_SZ, data)
+    except OSError as exc:
+        print(f"Note: could not add Snipux to Open with: {exc}")
+        return False
+    _announce_association_change()
+    print("Added Snipux to Open with for images and recordings")
+    return True
+
+
+def _delete_if_empty(key: str) -> bool:
+    """Delete `key` when it holds no values and no subkeys -- left behind
+    once Snipux's value is gone. An empty key is no app's data, whoever
+    created it, so this can never take another app's association with it.
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
+            subkeys, values, _modified = winreg.QueryInfoKey(handle)
+        if subkeys == 0 and values == 0:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        print(f"Note: could not tidy up HKCU\\{key}: {exc}")
+        return False
+    return True
+
+
+def _unregister_open_with() -> bool:
+    """The counterpart to `_register_open_with()`. Whatever is already gone
+    is skipped; any other failure is a note, and the rest still runs."""
+    ok = True
+    for _name, _flag, progid, suffixes in _EDITORS:
+        for suffix in suffixes:
+            key = rf"{_CLASSES_KEY}\{suffix}\OpenWithProgids"
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as handle:
+                    winreg.DeleteValue(handle, progid)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(f"Note: could not remove Snipux from Open with for {suffix}: {exc}")
+                ok = False
+            ok = _delete_if_empty(key) and ok
+            ok = _delete_if_empty(rf"{_CLASSES_KEY}\{suffix}") and ok
+    for exec_name in _LAUNCHER_NAMES:
+        for key in _owned_keys(exec_name):
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(f"Note: could not remove HKCU\\{key}: {exc}")
+                ok = False
+    _announce_association_change()
+    print("Removed Snipux from Open with")
+    return ok
+
+
+def _launcher_for_integration() -> Path | None:
+    """What every shortcut and registration should launch: pip's
+    windowless stub, or the frozen build -- relocated first if it is a
+    portable one (`_ensure_stable_copy`). None, said on stderr, when there
+    is no installed launcher at all.
+    """
+    exec_path = windowless_launcher() or setup_desktop.find_console_script(
+        _WINDOWLESS_LAUNCHER
+    )
+    if exec_path is None:
+        print(
+            f"error: could not locate the installed {_WINDOWLESS_LAUNCHER} launcher -- "
+            "is snipux actually installed (pip install), rather than just "
+            "being run from a checkout?",
+            file=sys.stderr,
+        )
+        return None
+    stable_copy = _ensure_stable_copy()
+    return stable_copy if stable_copy is not None else exec_path
+
+
+def _write_editor_integration(exec_path: Path, icon_path: Path | None) -> None:
+    for name, flag, _progid, _suffixes in _EDITORS:
+        _write_shortcut(
+            _start_menu_dir() / f"{name}.lnk",
+            exec_path,
+            icon_path,
+            f"{name} Start Menu",
+            arguments=flag,
+            description=name,
+        )
+    _register_open_with(exec_path, icon_path)
 
 
 # AttachConsole's own pseudo-process-id (winbase.h: `((DWORD)-1)`) meaning
@@ -942,6 +1143,9 @@ class WindowsPlatform(Platform):
         second copy of it in the per-user Startup folder, and a `.ico`
         built from the vendored PNGs for both to point at -- the Windows
         analogue of `LinuxPlatform`'s `.desktop`/autostart/hicolor trio.
+        Then a Start Menu shortcut for each editor, and the per-user
+        "Open with" registrations (`open_with_values`) for the files they
+        open -- the analogue of the editors' `.desktop` entries.
 
         Startup-folder shortcut, not the Run registry key, for autostart:
         it is a plain file, inspectable in Explorer and removable by
@@ -1014,21 +1218,9 @@ class WindowsPlatform(Platform):
                     file=sys.stderr,
                 )
 
-        exec_path = windowless_launcher() or setup_desktop.find_console_script(
-            _WINDOWLESS_LAUNCHER
-        )
+        exec_path = _launcher_for_integration()
         if exec_path is None:
-            print(
-                f"error: could not locate the installed {_WINDOWLESS_LAUNCHER} launcher -- "
-                "is snipux actually installed (pip install), rather than just "
-                "being run from a checkout?",
-                file=sys.stderr,
-            )
             return 1
-
-        stable_copy = _ensure_stable_copy()
-        if stable_copy is not None:
-            exec_path = stable_copy
 
         icon_path = _icon_path()
         has_icon = _write_icon(icon_path)
@@ -1039,13 +1231,28 @@ class WindowsPlatform(Platform):
         _write_shortcut(
             _startup_dir() / "snipux.lnk", exec_path, icon_path if has_icon else None, "Startup"
         )
+        _write_editor_integration(exec_path, icon_path if has_icon else None)
 
+        return 0
+
+    def install_editor_integration(self) -> int:
+        """The editors' Start Menu shortcuts and "Open with", alone -- see
+        `Platform.install_editor_integration`. Points at the same launcher
+        and icon `install_desktop_integration()` would, without rewriting
+        either, or the Startup shortcut.
+        """
+        exec_path = _launcher_for_integration()
+        if exec_path is None:
+            return 1
+        icon_path = _icon_path()
+        _write_editor_integration(exec_path, icon_path if icon_path.is_file() else None)
         return 0
 
     def remove_desktop_integration(self) -> int:
         """The exact counterpart to `install_desktop_integration()`:
-        deletes the Start Menu shortcut, the Startup shortcut, the
-        generated `.ico`, the relocated portable-build copy (SNX-103), and
+        deletes the Start Menu shortcut, the Startup shortcut, the editors'
+        Start Menu shortcuts and "Open with" registrations, the generated
+        `.ico`, the relocated portable-build copy (SNX-103), and
         the remembered shortcut choice -- mirroring `setup_desktop.
         run_remove()` step for step. Always returns 0, the same reasoning
         `run_remove()` states for its own return: every step already
@@ -1059,6 +1266,9 @@ class WindowsPlatform(Platform):
         """
         _remove_shortcut(_start_menu_dir() / "snipux.lnk", "Start Menu")
         _remove_shortcut(_startup_dir() / "snipux.lnk", "Startup")
+        for name, _flag, _progid, _suffixes in _EDITORS:
+            _remove_shortcut(_start_menu_dir() / f"{name}.lnk", f"{name} Start Menu")
+        _unregister_open_with()
         _remove_icon(_icon_path())
         _remove_stable_copy(_portable_exe_path())
         if setup_desktop.forget_shortcut():

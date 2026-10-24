@@ -53,6 +53,9 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Recent copies in the tray: the last 10 copies, in memory only
 - [x] `done` History panel: copies and saves with big previews (click the tray icon)
 - [x] `done` Edit an image or a recording from the tray
+- [x] `done` The image and video editors as apps of their own: `snipux FILE`
+      by type, `--image-editor`/`--video-editor`, an empty state, Open… and
+      drag-and-drop, launcher entries and "Open with" on Linux and Windows
 - [ ] `now` Read text on Linux with a system tesseract (#92)
 - [ ] `now` Recent captures as thumbnails in a window (#107)
 - [ ] `idea` The stills destination model -- open product question, see TODO.md

@@ -50,6 +50,9 @@ class DarwinPlatform(Platform):
     def install_desktop_integration(self, *, shortcut: str | None = None) -> int:
         raise UnimplementedPlatformError(_PLATFORM_NAME, "install_desktop_integration")
 
+    def install_editor_integration(self) -> int:
+        raise UnimplementedPlatformError(_PLATFORM_NAME, "install_editor_integration")
+
     def remove_desktop_integration(self) -> int:
         raise UnimplementedPlatformError(_PLATFORM_NAME, "remove_desktop_integration")
 

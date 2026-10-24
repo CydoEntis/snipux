@@ -33,11 +33,12 @@
 ;    screen-capture tool that demands elevation to install is asking for
 ;    more trust than it needs.
 ;
-; 3. It creates no shortcuts of its own. snipux writes its own Start Menu
-;    entry, Startup entry, icon and Ctrl+Alt+S binding on first launch
-;    (`run_first_launch_setup`), and a second set written here would be a
-;    second thing to keep in step with it. The installer launches snipux
-;    instead, which does all four.
+; 3. It creates no shortcuts or registry entries of its own. snipux writes
+;    its own Start Menu entry, Startup entry, the two editors' Start Menu
+;    entries, their per-user "Open with" registrations, the icon and the
+;    Ctrl+Alt+S binding on first launch (`run_first_launch_setup`), and a
+;    second set written here would be a second thing to keep in step with
+;    it. The installer launches snipux instead, which does all of it.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -91,9 +92,10 @@ Type: filesandordirs; Name: "{app}\_internal"
 Source: "..\..\dist\snipux\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Run]
-; Launching is what performs setup: the Start Menu entry, the Startup entry,
-; the icon and the hotkey are all written by snipux itself on first launch,
-; so there is nothing for [Icons] to duplicate here.
+; Launching is what performs setup: the Start Menu entries, the Startup
+; entry, "Open with", the icon and the hotkey are all written by snipux
+; itself on first launch, so there is nothing for [Icons] or [Registry] to
+; duplicate here.
 Filename: "{app}\snipux.exe"; Description: "Start Snipux"; Flags: nowait postinstall skipifsilent
 ; And the same launch for a silent install started *by snipux updating
 ; itself*: the line above is skipped in silent mode, which is right for
@@ -105,8 +107,9 @@ Filename: "{app}\snipux.exe"; Flags: nowait; Check: LaunchAfterSilentInstall
 
 [UninstallRun]
 ; `--remove` undoes exactly what that first launch wrote -- the shortcuts,
-; the icon and the Ctrl+Alt+S binding -- none of which the installer put
-; there, so none of which Inno knows to remove. RunOnceId keeps it to one
+; the "Open with" registrations, the icon and the Ctrl+Alt+S binding --
+; none of which the installer put there, so none of which Inno knows to
+; remove. RunOnceId keeps it to one
 ; call across a repeated uninstall.
 Filename: "{app}\snipux.exe"; Parameters: "--remove"; RunOnceId: "RemoveIntegration"; Flags: runhidden
 

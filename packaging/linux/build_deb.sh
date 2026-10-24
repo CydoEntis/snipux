@@ -69,6 +69,18 @@ if grep -q '__SNIPUX_LAUNCHER__' "$STAGE/usr/share/applications/snipux.desktop" 
     exit 1
 fi
 
+# The two editors' entries, for "Open With" on images and recordings. Same
+# filenames as the per-user copies --setup writes, for the same reason.
+for editor in image video; do
+    entry="snipux-$editor-editor.desktop"
+    sed 's|__SNIPUX_LAUNCHER__|/usr/bin/snipux|g' \
+        "$REPO_ROOT/snipux/$entry" > "$STAGE/usr/share/applications/$entry"
+    if ! grep -q "^Exec=/usr/bin/snipux --$editor-editor %f$" "$STAGE/usr/share/applications/$entry"; then
+        echo "error: the Exec placeholder in snipux/$entry was not substituted." >&2
+        exit 1
+    fi
+done
+
 # Icon=snipux is a theme name, so every vendored size goes into the system
 # hicolor tree -- the same sizes and the same destination shape that
 # setup_desktop.install_icons() writes per-user.

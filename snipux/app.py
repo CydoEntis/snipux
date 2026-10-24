@@ -36,6 +36,7 @@ import threading
 import time
 import traceback
 from abc import ABC, abstractmethod
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -126,11 +127,12 @@ from snipux.pin import PinWindow
 from snipux.player import (
     EXPORT_UNAVAILABLE,
     FfmpegExporter,
+    RECORDING_FILTER,
     PlayerWindow,
     TrimState,
     system_ffmpeg,
 )
-from snipux.review import ReviewWindow
+from snipux.review import IMAGE_FILTER, ReviewWindow
 from snipux.settings import SettingsDialog
 
 
@@ -518,7 +520,9 @@ def build_default_geometry_provider() -> GeometryProvider:
 # `PATH` sits outside `_build_parser()`'s mutually exclusive group --
 # argparse has no way to add a positional to one -- so `main()` checks it
 # against every one of the group's own flags by hand. One place, so a flag
-# added to the group later can't be forgotten here.
+# added to the group later can't be forgotten here. The two editor flags
+# are the exception, and are not listed: a desktop entry's `Exec` passes
+# the file it was opened with after them.
 _ACTION_FLAGS = (
     ("list_backends", "--list-backends"),
     ("snip", "--snip"),
@@ -527,6 +531,30 @@ _ACTION_FLAGS = (
     ("remove", "--remove"),
     ("update", "--update"),
 )
+
+
+def editor_for(path: Path) -> str:
+    """Which editor opens `path`: "video" for a recording, "image" for
+    anything else -- `QImageReader` is what then decides whether it really
+    is one.
+    """
+    if path.suffix.lower() in design.tokens.EDITOR_RECORDING_SUFFIXES:
+        return "video"
+    return "image"
+
+
+def unopenable_reason(path: Path) -> str | None:
+    """Why `snipux PATH` cannot open `path`, or None when it can.
+
+    Asked in the launching process, before anything is forwarded, so a
+    typo in a terminal is answered in that terminal rather than as a
+    balloon from a resident the user may not know is running.
+    """
+    if not path.is_file():
+        return f"{path} does not exist."
+    if editor_for(path) == "video" or QImageReader(str(path)).canRead():
+        return None
+    return f"{path.name} is not an image or a recording Snipux can open."
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -558,6 +586,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "instance to raise its own if there is one, starting one first if "
         "not (same rule --snip follows). The way in on a machine with no "
         "tray icon, e.g. stock GNOME without the AppIndicator extension",
+    )
+    group.add_argument(
+        "--image-editor",
+        action="store_true",
+        help="open the image editor on its own, to open or drop an image "
+        "into -- or, with PATH, open PATH -- asking an already-running "
+        "Snipux instance to do it if there is one (same rule --snip "
+        "follows)",
+    )
+    group.add_argument(
+        "--video-editor",
+        action="store_true",
+        help="open the video editor on its own, to open or drop a "
+        "recording into -- or, with PATH, open PATH -- the same way "
+        "--image-editor does",
     )
     group.add_argument(
         "--setup",
@@ -592,9 +635,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "path",
         nargs="?",
         metavar="PATH",
-        help="open this image in the review window, with the full "
-        "toolbar, instead of re-snipping it off your own screen -- "
-        "forwarded to an already-running Snipux instance the way --snip "
+        help="open this file in its editor -- a recording (.mp4, .webm, "
+        ".mkv, .mov) in the player, an image in the review window with the "
+        "full toolbar -- forwarded to an already-running Snipux instance the way --snip "
         "already is, starting one first if none is running yet",
     )
     # Outside the mutually exclusive group above: this modifies --setup
@@ -839,6 +882,20 @@ def main(
         transport.send_settings_request()
         return 0
 
+    editor = "image" if args.image_editor else "video" if args.video_editor else None
+    if editor is not None and args.path is None:
+        # Same forward-or-become-resident shape as --settings above: the
+        # editor opens in the one process that owns the tray, next to every
+        # other window it has open.
+        if transport is None:
+            transport = QLocalSocketTransport()
+        _ensure_qapplication()
+        if transport.try_claim():
+            if registry is None:
+                registry = build_default_registry()
+            return _become_resident(registry, transport, open_editor_immediately=editor)
+        return _after_delivery(transport.send_editor_request(editor), editor=editor)
+
     if args.path is not None:
         # Same forward-or-become-resident shape as --snip/--settings above,
         # for the same reason: an image opened in its own short-lived
@@ -853,12 +910,15 @@ def main(
         if transport is None:
             transport = QLocalSocketTransport()
         _ensure_qapplication()
+        reason = unopenable_reason(target)
+        if reason is not None:
+            print(f"snipux: {reason}", file=sys.stderr)
+            return 1
         if transport.try_claim():
             if registry is None:
                 registry = build_default_registry()
             return _become_resident(registry, transport, open_path_immediately=target)
-        transport.send_open_request(target)
-        return 0
+        return _after_delivery(transport.send_open_request(target), path=target)
 
     if registry is None:
         registry = build_default_registry()
@@ -884,6 +944,19 @@ def main(
 # below), and repurposing all of main() for it would break the other,
 # still-immediate paths' tests. `__main__.py` dispatches to
 # `run_resident_app()` only when invoked with no arguments.
+
+
+class Delivery(Enum):
+    """What became of a request that expects the resident's ack."""
+
+    ACKNOWLEDGED = "acknowledged"
+    # Read and hung up on, with no ack: a resident from before the editors.
+    IGNORED = "ignored"
+    # Connected, never answered: a resident whose event loop is busy. It has
+    # the request, and will act on it.
+    NO_ANSWER = "no answer"
+    # Not even connected: the resident went away after try_claim() saw it.
+    UNREACHABLE = "unreachable"
 
 
 class Transport(ABC):
@@ -921,11 +994,17 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def send_open_request(self, path: Path) -> None:
-        """Ask the primary instance to open `path` in a fresh review
-        window. Same shape as `send_snip_request`/`send_settings_request`,
-        for the same reason: `path` is opened by whichever instance is
-        actually resident, not by this short-lived one.
+    def send_open_request(self, path: Path) -> Delivery:
+        """Ask the primary instance to open `path` in its editor. Same
+        shape as `send_snip_request`/`send_settings_request`, for the same
+        reason: `path` is opened by whichever instance is actually resident,
+        not by this short-lived one.
+        """
+
+    @abstractmethod
+    def send_editor_request(self, editor: str) -> Delivery:
+        """Ask the primary instance to open an empty editor, "image" or
+        "video" -- `snipux --image-editor`/`--video-editor` with no file.
         """
 
     @abstractmethod
@@ -934,10 +1013,12 @@ class Transport(ABC):
         on_snip_request: Callable[[], None],
         on_settings_request: Callable[[], None],
         on_open_request: Callable[[Path], None],
+        on_editor_request: Callable[[str], None],
     ) -> None:
         """Primary-instance only: call `on_snip_request` for every snip
-        request, `on_settings_request` for every Settings request, and
-        `on_open_request` for every path, that a later, non-primary launch
+        request, `on_settings_request` for every Settings request,
+        `on_open_request` for every path, and `on_editor_request` for every
+        editor ("image" or "video"), that a later, non-primary launch
         forwards.
         """
 
@@ -1044,8 +1125,33 @@ class QLocalSocketTransport(Transport):
     def send_settings_request(self) -> None:
         self._send(self._SETTINGS_REQUEST_BYTE)
 
-    def send_open_request(self, path: Path) -> None:
-        self._send(self._OPEN_REQUEST_PREFIX + os.fsencode(str(path)))
+    def send_open_request(self, path: Path) -> Delivery:
+        return self._send_expecting_ack(handoff.ROUTED_OPEN_PREFIX + os.fsencode(str(path)))
+
+    def send_editor_request(self, editor: str) -> Delivery:
+        return self._send_expecting_ack(handoff.EDITOR_REQUESTS[editor])
+
+    def _send_expecting_ack(self, payload: bytes) -> Delivery:
+        """Send `payload` and tell a hang-up from silence. A resident from
+        before the editors disconnects as soon as it has read, which ends
+        the wait at once; one that is merely busy keeps the connection open
+        and answers when its event loop comes back.
+        """
+        socket = QLocalSocket()
+        socket.connectToServer(self._server_name)
+        if not socket.waitForConnected(self._CONNECT_TIMEOUT_MS):
+            return Delivery.UNREACHABLE
+        socket.write(payload)
+        socket.waitForBytesWritten(self._CONNECT_TIMEOUT_MS)
+        if socket.waitForReadyRead(int(handoff.ACK_TIMEOUT_S * 1000)):
+            replied = bytes(socket.read(len(handoff.ACK)))
+            delivery = Delivery.ACKNOWLEDGED if replied == handoff.ACK else Delivery.IGNORED
+        elif socket.state() == QLocalSocket.LocalSocketState.ConnectedState:
+            delivery = Delivery.NO_ANSWER
+        else:
+            delivery = Delivery.IGNORED
+        socket.disconnectFromServer()
+        return delivery
 
     def _send(self, payload: bytes) -> None:
         socket = QLocalSocket()
@@ -1064,6 +1170,7 @@ class QLocalSocketTransport(Transport):
         on_snip_request: Callable[[], None],
         on_settings_request: Callable[[], None],
         on_open_request: Callable[[Path], None],
+        on_editor_request: Callable[[str], None],
     ) -> None:
         if self._server is None:
             raise RuntimeError("listen() called before a successful try_claim()")
@@ -1079,17 +1186,42 @@ class QLocalSocketTransport(Transport):
                 if connection.waitForReadyRead(self._READ_TIMEOUT_MS)
                 else b""
             )
+            handle = self._recognise(
+                received, on_snip_request, on_settings_request, on_open_request, on_editor_request
+            )
+            # Acked once recognised and before it is acted on: the
+            # launcher is waiting, and opening a window takes a moment.
+            if handle is not None and received[:1] in handoff.ACKED_REQUESTS:
+                connection.write(handoff.ACK)
+                connection.waitForBytesWritten(self._READ_TIMEOUT_MS)
             connection.disconnectFromServer()
-            if received.startswith(self._REQUEST_BYTE):
-                on_snip_request()
-            elif received.startswith(self._SETTINGS_REQUEST_BYTE):
-                on_settings_request()
-            elif received.startswith(self._OPEN_REQUEST_PREFIX):
-                on_open_request(
-                    Path(os.fsdecode(received[len(self._OPEN_REQUEST_PREFIX):]))
-                )
+            if handle is not None:
+                handle()
 
         self._server.newConnection.connect(_accept)
+
+    def _recognise(
+        self,
+        received: bytes,
+        on_snip_request: Callable[[], None],
+        on_settings_request: Callable[[], None],
+        on_open_request: Callable[[Path], None],
+        on_editor_request: Callable[[str], None],
+    ) -> Callable[[], None] | None:
+        """What `received` asks for, ready to run, or None for a probe or
+        anything malformed -- which is then neither acted on nor acked."""
+        if received.startswith(self._REQUEST_BYTE):
+            return on_snip_request
+        if received.startswith(self._SETTINGS_REQUEST_BYTE):
+            return on_settings_request
+        # `O` is what a launcher from before the editors sends.
+        if received[:1] in (self._OPEN_REQUEST_PREFIX, handoff.ROUTED_OPEN_PREFIX) and received[1:]:
+            path = Path(os.fsdecode(received[1:]))
+            return lambda: on_open_request(path)
+        for editor, request in handoff.EDITOR_REQUESTS.items():
+            if received == request:
+                return lambda: on_editor_request(editor)
+        return None
 
 
 class AppController:
@@ -1395,7 +1527,9 @@ class AppController:
                 "quit it, kill this process."
             )
 
-        self._transport.listen(self.start_capture, self.open_settings, self.open_image_path)
+        self._transport.listen(
+            self.start_capture, self.open_settings, self.open_path, self.open_editor
+        )
 
     def _rebuild_recent_menu(self) -> None:
         """Refresh the tray's Recent section from what is actually still on
@@ -1558,7 +1692,7 @@ class AppController:
             None,
             "Edit an image",
             str(setup_desktop.load_save_folder()),
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)",
+            IMAGE_FILTER,
         )
         if path:
             self.open_image_path(Path(path))
@@ -1569,7 +1703,7 @@ class AppController:
             None,
             "Edit a recording",
             str(setup_desktop.load_recording_folder()),
-            "Recordings (*.mp4 *.webm *.mkv *.mov)",
+            RECORDING_FILTER,
         )
         if path:
             self._open_player(Path(path))
@@ -1629,16 +1763,9 @@ class AppController:
         window still on screen. Non-modal, so a snip can still be taken
         while it is open.
         """
-        if self._settings is not None and self._settings.isVisible():
-            self._settings.raise_()
-            self._settings.activateWindow()
-            platform.current.take_keyboard_focus(self._settings)
-            return
-        self._settings = SettingsDialog(on_saved=self._on_settings_saved)
-        self._settings.show()
-        self._settings.raise_()
-        self._settings.activateWindow()
-        platform.current.take_keyboard_focus(self._settings)
+        if self._settings is None or not self._settings.isVisible():
+            self._settings = SettingsDialog(on_saved=self._on_settings_saved)
+        _present(self._settings)
 
     def _on_settings_saved(self) -> None:
         """Apply what Settings just wrote.
@@ -1758,6 +1885,7 @@ class AppController:
 
         setup_desktop.save_setup_complete(True)
         setup_desktop.save_integration_target(self._integration_target())
+        setup_desktop.save_integration_revision(setup_desktop.INTEGRATION_REVISION)
         shortcut = setup_desktop.human_shortcut(setup_desktop.load_shortcut())
         self._report_shortcut(
             f"Snipux is set up: it starts at login, and {shortcut} starts a "
@@ -1779,22 +1907,39 @@ class AppController:
         return str(found) if found is not None else ""
 
     def _repoint_integration_if_stale(self) -> None:
-        """Rewrite the desktop entries when they name a different build.
+        """Rewrite the desktop entries when they name a different build, or
+        were written by a snipux that wrote fewer of them.
 
         Silent on the happy path, which is nearly every launch: the record
         matches and there is nothing to do. An empty record is the same
         answer -- it means the entries predate this record existing, and
         rewriting them to the build that is running is right either way.
+        An older `INTEGRATION_REVISION` with the same build is an upgrade
+        from a snipux without the editors: it gets just their entries,
+        without the user running --setup again.
         """
         target = self._integration_target()
-        if not target or target == setup_desktop.load_integration_target():
+        if not target:
+            return
+        moved = target != setup_desktop.load_integration_target()
+        behind = setup_desktop.load_integration_revision() < setup_desktop.INTEGRATION_REVISION
+        if not moved and not behind:
             return
         try:
-            platform.current.install_desktop_integration()
+            if moved:
+                platform.current.install_desktop_integration()
+            else:
+                # Only what is new. Rerunning all of it would put back a
+                # shortcut rebound in GNOME's own settings, or an autostart
+                # entry the user deleted.
+                if platform.current.install_editor_integration() != 0:
+                    # Not recorded, so the next launch tries again.
+                    return
         except platform.UnimplementedPlatformError:
             # Nothing to re-point on a platform that never pointed anywhere.
             return
         setup_desktop.save_integration_target(target)
+        setup_desktop.save_integration_revision(setup_desktop.INTEGRATION_REVISION)
 
     def _quit(self) -> None:
         QApplication.instance().quit()
@@ -2034,17 +2179,66 @@ class AppController:
         # A copy of the image, not the overlay's own: the overlay is about
         # to close, and `rendered_image()` hands back a QImage backed by
         # buffers it owns.
-        review = ReviewWindow(image.copy(), saved_path=path)
-        # Held for the same reason `_overlay` and `_settings` are -- a
-        # parentless widget is fair game for the GC while it is on screen.
-        # A list, not one slot: taking several snips in a row should leave
-        # several windows open, which is most of the point of having one.
-        self._reviews.append(review)
-        review.closed.connect(lambda w=review: self._forget_review(w))
-        review.show()
-        review.raise_()
-        review.activateWindow()
-        platform.current.take_keyboard_focus(review)
+        self._show_editor(ReviewWindow(image.copy(), saved_path=path))
+
+    def open_path(self, path: Path) -> None:
+        """`snipux PATH`, here or forwarded over the socket: a recording
+        opens in the player, anything else in the review window.
+
+        Routed in the resident rather than only in the launching process,
+        because a forwarded request carries nothing but the path.
+
+        An editor of the right kind standing empty -- opened from the app
+        menu a moment ago -- takes the file, rather than a second window
+        opening beside it.
+        """
+        if not path.is_file():
+            self._warn(f"Could not open {path.name}: there is no file there.")
+            return
+        video = editor_for(path) == "video"
+        empty = next(
+            (window for window in (self._players if video else self._reviews) if window.is_empty),
+            None,
+        )
+        if empty is not None:
+            empty.open_path(path)
+            _present(empty)
+        elif video:
+            self._open_player(path)
+        else:
+            self.open_image_path(path)
+
+    def open_editor(self, editor: str) -> None:
+        """An editor with nothing in it yet -- `snipux --image-editor` or
+        `--video-editor`, run from an app launcher. Its own empty state
+        offers Open… and a drop target.
+        """
+        self._show_editor(PlayerWindow() if editor == "video" else ReviewWindow())
+
+    def _show_editor(self, window: "ReviewWindow | PlayerWindow") -> None:
+        """Hold, wire up and raise a review or player window.
+
+        Held in a list, not one slot: a parentless widget is fair game for
+        the GC while it is on screen, and several snips or recordings in a
+        row should leave several windows open. A file dropped on the wrong
+        one comes back through `open_path`, which knows where it belongs.
+        """
+        if isinstance(window, PlayerWindow):
+            self._players.append(window)
+            window.closed.connect(lambda w=window: self._forget_player(w))
+        else:
+            self._reviews.append(window)
+            window.closed.connect(lambda w=window: self._forget_review(w))
+        window.otherEditorRequested.connect(self.open_path)
+        _present(window)
+
+    def _warn(self, message: str) -> None:
+        if self._tray_available:
+            self._tray_icon.showMessage(
+                "Snipux", message, QSystemTrayIcon.MessageIcon.Warning
+            )
+        else:
+            print(message)
 
     def open_image_path(self, path: Path) -> None:
         """Open an image you already have in a fresh review window, with
@@ -2063,21 +2257,9 @@ class AppController:
         reader = QImageReader(str(path))
         image = reader.read()
         if image.isNull():
-            message = f"Could not open {path.name}: {reader.errorString()}"
-            if self._tray_available:
-                self._tray_icon.showMessage(
-                    "Snipux", message, QSystemTrayIcon.MessageIcon.Warning
-                )
-            else:
-                print(message)
+            self._warn(f"Could not open {path.name}: {reader.errorString()}")
             return
-        review = ReviewWindow(image, saved_path=path)
-        self._reviews.append(review)
-        review.closed.connect(lambda w=review: self._forget_review(w))
-        review.show()
-        review.raise_()
-        review.activateWindow()
-        platform.current.take_keyboard_focus(review)
+        self._show_editor(ReviewWindow(image, saved_path=path))
 
     def _on_pin_requested(self, image: QImage, rect: QRect) -> None:
         """SNX-83: build and show the pin `OverlayWindow._on_bar_pin` asked
@@ -2272,19 +2454,8 @@ class AppController:
         self._quit()
 
     def _open_player(self, path: Path) -> None:
-        """Open a landed recording in the trim editor.
-
-        Held in a list for the same reason review windows are: a parentless
-        widget is fair game for the GC while it is on screen, and taking
-        several recordings in a row should leave several windows open.
-        """
-        player = PlayerWindow(path)
-        self._players.append(player)
-        player.closed.connect(lambda w=player: self._forget_player(w))
-        player.show()
-        player.raise_()
-        player.activateWindow()
-        platform.current.take_keyboard_focus(player)
+        """Open a landed recording in the trim editor."""
+        self._show_editor(PlayerWindow(path))
 
     def _forget_player(self, window) -> None:
         if window in self._players:
@@ -4022,6 +4193,7 @@ def _become_resident(
     start_capture_immediately: bool = False,
     open_settings_immediately: bool = False,
     open_path_immediately: Path | None = None,
+    open_editor_immediately: str | None = None,
 ) -> int:
     """Build the `QApplication`/`AppController` and run the event loop.
 
@@ -4041,9 +4213,10 @@ def _become_resident(
     `start_capture_immediately`/`open_settings_immediately`/
     `open_path_immediately` are what tell the four callers apart -- a bare
     launch opens idle to the tray, `--snip` opens the overlay right away,
-    `--settings` opens Settings right away, and `PATH` opens it in a review
-    window right away, each the same as if it had forwarded its request to
-    an instance that was already up.
+    `--settings` opens Settings right away, `PATH` opens it in its editor
+    right away, and `--image-editor`/`--video-editor`
+    (`open_editor_immediately`) open that editor empty, each the same as if
+    it had forwarded its request to an instance that was already up.
 
     `install_hotkey_listener()` runs here, once, for the same reason: this
     is the process that is actually resident, so it is the one that should
@@ -4107,7 +4280,64 @@ def _become_resident(
     if open_settings_immediately:
         controller.open_settings()
     if open_path_immediately is not None:
-        controller.open_image_path(open_path_immediately)
+        controller.open_path(open_path_immediately)
+    if open_editor_immediately is not None:
+        controller.open_editor(open_editor_immediately)
+    return app.exec()
+
+
+def _present(window: QWidget) -> None:
+    """Show `window` in front, with the keyboard."""
+    window.show()
+    window.raise_()
+    window.activateWindow()
+    platform.current.take_keyboard_focus(window)
+
+
+def _after_delivery(delivery: Delivery, *, editor: str | None = None, path: Path | None = None) -> int:
+    """Finish an editor request a resident was sent. Only a resident that
+    hung up, or could not be reached, means opening the editor here: one
+    that is busy has the request, and a second editor would be a duplicate.
+    """
+    if delivery is Delivery.ACKNOWLEDGED:
+        return 0
+    if delivery is Delivery.NO_ANSWER:
+        print(handoff.BUSY_MESSAGE, file=sys.stderr)
+        return 0
+    return _open_editor_here(editor=editor, path=path, older=delivery is Delivery.IGNORED)
+
+
+def _open_editor_here(
+    *, editor: str | None = None, path: Path | None = None, older: bool
+) -> int:
+    """Open an editor in this process, because the resident will not: it
+    is a Snipux from before the editors (`older`), left running by an
+    upgrade, which dropped the request without a word -- or it went away
+    between this launch finding it and asking it.
+
+    Here rather than only telling the user to restart, because a launcher
+    that opens its window is better than one that explains why it did not
+    -- and an editor needs nothing the resident owns. The window is
+    standalone: when it closes this process ends, and the old resident
+    keeps the tray and the shortcut until it is restarted.
+    """
+    if older:
+        message = (
+            "snipux: the Snipux that is already running is an older version, so "
+            "this editor opened on its own. Quit Snipux from the tray and start "
+            "it again to finish updating."
+        )
+    else:
+        message = "snipux: could not reach the running Snipux, so this editor opened on its own."
+    print(message, file=sys.stderr)
+    if path is not None:
+        editor = editor_for(path)
+    window = PlayerWindow() if editor == "video" else ReviewWindow()
+    if path is not None:
+        window.open_path(path)
+    _present(window)
+    app = QApplication.instance()
+    app.setQuitOnLastWindowClosed(True)
     return app.exec()
 
 

@@ -78,6 +78,8 @@ from snipux.recording import (
     RecordingError,
     RecordingPartsError,
 )
+from snipux.player import PlayerWindow
+from snipux.review import ReviewWindow
 from snipux.settings import SettingsDialog
 
 FILL_COLOR = qRgb(10, 20, 30)
@@ -155,6 +157,11 @@ def _assume_integration_points_here(monkeypatch):
         app.setup_desktop,
         "load_integration_target",
         lambda cd=None: app.AppController._integration_target(),
+    )
+    monkeypatch.setattr(
+        app.setup_desktop,
+        "load_integration_revision",
+        lambda cd=None: app.setup_desktop.INTEGRATION_REVISION,
     )
 
 
@@ -838,16 +845,25 @@ class FakeTransport(Transport):
         if primary_on_settings_request is not None:
             primary_on_settings_request()
 
-    def send_open_request(self, path: Path) -> None:
+    def send_open_request(self, path: Path) -> "app.Delivery":
         self._state["forwarded_open_paths"].append(path)
         primary_on_open_request = self._state["primary_on_open_request"]
         if primary_on_open_request is not None:
             primary_on_open_request(path)
+        return self._state["acknowledges"]
 
-    def listen(self, on_request, on_settings_request, on_open_request) -> None:
+    def send_editor_request(self, editor: str) -> "app.Delivery":
+        self._state["forwarded_editor_requests"].append(editor)
+        primary_on_editor_request = self._state["primary_on_editor_request"]
+        if primary_on_editor_request is not None:
+            primary_on_editor_request(editor)
+        return self._state["acknowledges"]
+
+    def listen(self, on_request, on_settings_request, on_open_request, on_editor_request) -> None:
         self._state["primary_on_request"] = on_request
         self._state["primary_on_settings_request"] = on_settings_request
         self._state["primary_on_open_request"] = on_open_request
+        self._state["primary_on_editor_request"] = on_editor_request
 
 
 def make_transport_state() -> dict:
@@ -856,9 +872,13 @@ def make_transport_state() -> dict:
         "forwarded_requests": 0,
         "forwarded_settings_requests": 0,
         "forwarded_open_paths": [],
+        "forwarded_editor_requests": [],
+        # Delivery.IGNORED models a resident from before the editors.
+        "acknowledges": app.Delivery.ACKNOWLEDGED,
         "primary_on_request": None,
         "primary_on_settings_request": None,
         "primary_on_open_request": None,
+        "primary_on_editor_request": None,
     }
 
 
@@ -1140,6 +1160,230 @@ class TestSettingsFlag:
         assert excinfo.value.code != 0
 
 
+class TestEditorFlags:
+    """`--image-editor`/`--video-editor`: an editor opened on its own, from
+    an app launcher, following the forward-or-become-resident shape
+    `--settings` does.
+    """
+
+    @pytest.mark.parametrize("flag,editor", [("--image-editor", "image"), ("--video-editor", "video")])
+    def test_forwards_to_an_already_running_instance(self, flag, editor):
+        state = make_transport_state()
+        state["claimed"] = True
+
+        assert main([flag], transport=FakeTransport(state)) == 0
+        assert state["forwarded_editor_requests"] == [editor]
+        assert state["forwarded_open_paths"] == []
+
+    def test_with_a_file_it_opens_the_file_by_its_type(self, tmp_path):
+        state = make_transport_state()
+        state["claimed"] = True
+        target = tmp_path / "clip.mp4"
+        target.write_bytes(b"")
+
+        assert main(["--image-editor", str(target)], transport=FakeTransport(state)) == 0
+        assert state["forwarded_open_paths"] == [target]
+        assert state["forwarded_editor_requests"] == []
+
+    def test_with_a_missing_file_it_says_so(self, tmp_path, capsys):
+        state = make_transport_state()
+        state["claimed"] = True
+
+        assert main(["--video-editor", str(tmp_path / "gone.mp4")], transport=FakeTransport(state)) == 1
+        assert state["forwarded_open_paths"] == []
+        assert "gone.mp4 does not exist" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "flag,held,window_type",
+        [("--image-editor", "_reviews", ReviewWindow), ("--video-editor", "_players", PlayerWindow)],
+    )
+    def test_starts_a_resident_instance_showing_the_empty_editor(
+        self, monkeypatch, flag, held, window_type
+    ):
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        state = make_transport_state()
+
+        try:
+            assert main([flag], registry=registry, transport=FakeTransport(state)) == 0
+            windows = getattr(created[0], held)
+            assert len(windows) == 1
+            assert isinstance(windows[0], window_type)
+            assert windows[0]._pages.currentWidget() is windows[0]._empty
+            assert state["primary_on_editor_request"] is not None
+            assert created[0]._overlay is None
+        finally:
+            if created:
+                for window in list(created[0]._reviews) + list(created[0]._players):
+                    window.close()
+                created[0]._tray_icon.hide()
+
+    def test_the_two_editors_are_mutually_exclusive(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--image-editor", "--video-editor"])
+
+        assert excinfo.value.code != 0
+
+    def test_mutually_exclusive_with_snip(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--video-editor", "--snip"])
+
+        assert excinfo.value.code != 0
+
+
+class TestAResidentFromBeforeTheEditors:
+    """An upgrade can leave the old resident running, and it ignores the
+    editors' requests. Without an ack, the editor opens in this process
+    instead, and the user is told to restart Snipux."""
+
+    @pytest.fixture
+    def opened_here(self, monkeypatch):
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        monkeypatch.setattr(QApplication, "setQuitOnLastWindowClosed", lambda self, on: None)
+        shown = []
+        monkeypatch.setattr(app.ReviewWindow, "show", lambda self: shown.append(self))
+        monkeypatch.setattr(app.PlayerWindow, "show", lambda self: shown.append(self))
+        yield shown
+        for window in shown:
+            window.close()
+
+    @pytest.mark.parametrize(
+        "flag,window_type", [("--image-editor", ReviewWindow), ("--video-editor", PlayerWindow)]
+    )
+    def test_an_unacknowledged_editor_opens_here(self, opened_here, capsys, flag, window_type):
+        state = make_transport_state()
+        state["claimed"] = True
+        state["acknowledges"] = app.Delivery.IGNORED
+
+        assert main([flag], transport=FakeTransport(state)) == 0
+        assert [type(window) for window in opened_here] == [window_type]
+        assert "Quit Snipux from the tray and start it again" in capsys.readouterr().err
+
+    def test_an_unacknowledged_recording_opens_here_in_the_player(
+        self, opened_here, tmp_path
+    ):
+        state = make_transport_state()
+        state["claimed"] = True
+        state["acknowledges"] = app.Delivery.IGNORED
+        target = tmp_path / "clip.webm"
+        target.write_bytes(b"")
+
+        assert main([str(target)], transport=FakeTransport(state)) == 0
+        [window] = opened_here
+        assert isinstance(window, PlayerWindow)
+        assert window.path == target
+
+    def test_a_busy_resident_gets_no_second_editor(self, opened_here, capsys):
+        # It has the request, and acts on it once its event loop is free.
+        state = make_transport_state()
+        state["claimed"] = True
+        state["acknowledges"] = app.Delivery.NO_ANSWER
+
+        assert main(["--image-editor"], transport=FakeTransport(state)) == 0
+        assert opened_here == []
+        assert state["forwarded_editor_requests"] == ["image"]
+        assert "busy" in capsys.readouterr().err
+
+    def test_an_unreachable_resident_opens_here_without_blaming_its_version(
+        self, opened_here, capsys
+    ):
+        state = make_transport_state()
+        state["claimed"] = True
+        state["acknowledges"] = app.Delivery.UNREACHABLE
+
+        assert main(["--video-editor"], transport=FakeTransport(state)) == 0
+        assert len(opened_here) == 1
+        err = capsys.readouterr().err
+        assert "could not reach" in err
+        assert "older version" not in err
+
+    def test_an_acknowledged_request_opens_nothing_here(self, opened_here):
+        state = make_transport_state()
+        state["claimed"] = True
+
+        assert main(["--image-editor"], transport=FakeTransport(state)) == 0
+        assert opened_here == []
+
+
+class TestWhatTheResidentAcks:
+    """Only a request the resident recognised is acked -- a malformed one
+    gets the hang-up an older resident would give."""
+
+    @pytest.mark.parametrize(
+        "received,acted",
+        [(b"I", True), (b"V", True), (b"P/x/shot.png", True), (b"P", False), (b"Ix", False), (b"", False)],
+    )
+    def test_only_a_recognised_request_is_handled(self, received, acted):
+        transport = app.QLocalSocketTransport("snipux-unused")
+
+        handle = transport._recognise(
+            received, lambda: None, lambda: None, lambda path: None, lambda editor: None
+        )
+
+        assert (handle is not None) is acted
+
+
+class TestTheAckAgainstARealResident:
+    """The real transport against a stand-in resident in its own process,
+    so the wait for the ack is real: a resident that hangs up is one from
+    before the editors, and one that is merely slow must get exactly one
+    request and no editor opened beside it."""
+
+    @staticmethod
+    def _standin(tmp_path, mode):
+        name = f"snipux-standin-{mode}-{tmp_path.name}"
+        script = Path(__file__).resolve().parent / "standin_resident.py"
+        process = subprocess.Popen(
+            [sys.executable, str(script), name, mode], stdout=subprocess.PIPE, text=True
+        )
+        assert process.stdout.readline().strip() == "ready"
+        return name, process
+
+    @staticmethod
+    def _payloads(process) -> list[str]:
+        process.terminate()
+        output, _ = process.communicate(timeout=10)
+        return [line for line in output.splitlines() if line.startswith("payload")]
+
+    def test_a_slow_ack_opens_nothing_here_and_sends_once(self, tmp_path, monkeypatch):
+        name, process = self._standin(tmp_path, "slow")
+        opened = []
+        monkeypatch.setattr(app, "_open_editor_here", lambda **kwargs: opened.append(kwargs) or 0)
+        try:
+            exit_code = main(["--image-editor"], transport=app.QLocalSocketTransport(name))
+        finally:
+            payloads = self._payloads(process)
+
+        assert exit_code == 0
+        assert opened == []
+        assert payloads == ["payload b'I'"]
+
+    def test_a_hang_up_opens_the_editor_here(self, tmp_path, monkeypatch):
+        name, process = self._standin(tmp_path, "old")
+        opened = []
+        monkeypatch.setattr(app, "_open_editor_here", lambda **kwargs: opened.append(kwargs) or 0)
+        try:
+            started = time.monotonic()
+            exit_code = main(["--video-editor"], transport=app.QLocalSocketTransport(name))
+            waited = time.monotonic() - started
+        finally:
+            payloads = self._payloads(process)
+
+        assert exit_code == 0
+        assert opened == [{"editor": "video", "path": None, "older": True}]
+        assert payloads == ["payload b'V'"]
+        # A hang-up is not a timeout: nobody waits out ACK_TIMEOUT_S for it.
+        assert waited < handoff.ACK_TIMEOUT_S / 2
+
+
 class TestOpenPathArgument:
     """`snipux PATH` follows the same forward-or-become-resident shape
     `TestSnipFlag`/`TestSettingsFlag` above already cover -- opening an
@@ -1151,6 +1395,7 @@ class TestOpenPathArgument:
         state = make_transport_state()
         state["claimed"] = True  # simulates a resident instance already running
         target = tmp_path / "shot.png"
+        QImage(8, 8, QImage.Format.Format_RGB32).save(str(target), "PNG")
 
         exit_code = main([str(target)], transport=FakeTransport(state))
 
@@ -1165,6 +1410,7 @@ class TestOpenPathArgument:
         # one's working directory, so a relative PATH means nothing to it
         # unless it is made absolute here, before it travels.
         monkeypatch.chdir(tmp_path)
+        QImage(8, 8, QImage.Format.Format_RGB32).save("shot.png", "PNG")
         state = make_transport_state()
         state["claimed"] = True
 
@@ -1212,6 +1458,37 @@ class TestOpenPathArgument:
                 for review in list(created[0]._reviews):
                     review.close()
                 created[0]._tray_icon.hide()
+
+    def test_a_recording_is_forwarded_too(self, tmp_path):
+        state = make_transport_state()
+        state["claimed"] = True
+        target = tmp_path / "clip.mp4"
+        target.write_bytes(b"")
+
+        assert main([str(target)], transport=FakeTransport(state)) == 0
+        assert state["forwarded_open_paths"] == [target]
+
+    def test_a_missing_file_is_an_error_here_not_a_forward(self, tmp_path, capsys):
+        state = make_transport_state()
+        state["claimed"] = True
+
+        exit_code = main([str(tmp_path / "typo.png")], transport=FakeTransport(state))
+
+        assert exit_code == 1
+        assert state["forwarded_open_paths"] == []
+        assert "typo.png does not exist" in capsys.readouterr().err
+
+    def test_a_file_no_editor_opens_is_an_error_here(self, tmp_path, capsys):
+        state = make_transport_state()
+        state["claimed"] = True
+        target = tmp_path / "notes.txt"
+        target.write_text("not a picture")
+
+        exit_code = main([str(target)], transport=FakeTransport(state))
+
+        assert exit_code == 1
+        assert state["forwarded_open_paths"] == []
+        assert "notes.txt is not an image or a recording" in capsys.readouterr().err
 
     def test_mutually_exclusive_with_snip(self, tmp_path):
         with pytest.raises(SystemExit) as excinfo:
@@ -1618,6 +1895,7 @@ class TestHandoff:
             lambda: heard.append("snip"),
             lambda: heard.append("settings"),
             lambda path: heard.append(("open", path)),
+            lambda editor: heard.append(("editor", editor)),
         )
         return name, heard
 
@@ -1628,7 +1906,13 @@ class TestHandoff:
         QApplication.processEvents()
 
     @skip_on_windows(_NO_SOCKET_FILE)
-    @pytest.mark.parametrize("argument,expected", [("--snip", "snip"), ("--settings", "settings")])
+    @pytest.mark.parametrize(
+        "argument,expected",
+        [
+            ("--snip", "snip"),
+            ("--settings", "settings"),
+        ],
+    )
     def test_a_request_reaches_a_running_resident(self, tmp_path, argument, expected):
         name, heard = self._resident(tmp_path)
 
@@ -1641,20 +1925,17 @@ class TestHandoff:
     def test_a_path_reaches_a_running_resident(self, tmp_path):
         name, heard = self._resident(tmp_path)
         target = tmp_path / "shot.png"
+        target.write_bytes(b"")
 
-        assert handoff.forward([str(target)], server_name=name) is True
-        self._settle()
-
+        assert self._forward_from_another_process(name, [str(target)]) == "True"
         assert heard == [("open", target)]
 
     @skip_on_windows(_NO_SOCKET_FILE)
     def test_a_relative_path_arrives_absolute(self, tmp_path, monkeypatch):
         name, heard = self._resident(tmp_path)
-        monkeypatch.chdir(tmp_path)
+        (tmp_path / "shot.png").write_bytes(b"")
 
-        assert handoff.forward(["shot.png"], server_name=name) is True
-        self._settle()
-
+        assert self._forward_from_another_process(name, ["shot.png"], cwd=tmp_path) == "True"
         assert heard == [("open", tmp_path / "shot.png")]
 
     @skip_on_windows(
@@ -1674,7 +1955,7 @@ class TestHandoff:
         server = app.QLocalSocketTransport(name)
         assert server.try_claim()
         heard = []
-        server.listen(lambda: None, lambda: None, lambda path: heard.append(path))
+        server.listen(lambda: None, lambda: None, lambda path: heard.append(path), lambda editor: None)
         client = app.QLocalSocketTransport(name)
         windows_path = Path(r"C:\Users\Cody\My Pictures\shot from a friend.png")
 
@@ -1703,6 +1984,33 @@ class TestHandoff:
         assert result.stdout.strip() == "True []", result.stderr
         assert heard == ["snip"]
 
+    def _forward_from_another_process(self, name, arguments, cwd=None) -> str:
+        """`handoff.forward` from a second process, with this one's event
+        loop running meanwhile: a request that waits for the resident's ack
+        cannot get it from a resident blocked in the same thread."""
+        root = Path(__file__).resolve().parent.parent
+        code = (
+            f"import sys; sys.path.insert(0, {str(root)!r}); from snipux import handoff; "
+            f"print(handoff.forward({arguments!r}, server_name={name!r}))"
+        )
+        client = subprocess.Popen(
+            [sys.executable, "-c", code], cwd=cwd or root, stdout=subprocess.PIPE, text=True
+        )
+        deadline = time.monotonic() + 20
+        while client.poll() is None and time.monotonic() < deadline:
+            QApplication.processEvents()
+            QTest.qWait(10)
+        self._settle()
+        return client.stdout.read().strip()
+
+    @skip_on_windows(_NO_SOCKET_FILE)
+    @pytest.mark.parametrize("flag,editor", [("--image-editor", "image"), ("--video-editor", "video")])
+    def test_a_resident_acknowledges_an_editor_request(self, tmp_path, flag, editor):
+        name, heard = self._resident(tmp_path)
+
+        assert self._forward_from_another_process(name, [flag]) == "True"
+        assert heard == [("editor", editor)]
+
     def test_nothing_listening_is_not_delivered(self, tmp_path):
         assert handoff.forward(["--snip"], server_name=f"snipux-nobody-{tmp_path.name}") is False
 
@@ -1730,6 +2038,109 @@ class TestHandoff:
         )
 
         assert handoff.forward(arguments) is False
+
+    @pytest.mark.parametrize("name", ["typo.png", "notes.txt"])
+    def test_a_path_the_cli_must_explain_is_not_forwarded(self, monkeypatch, tmp_path, name):
+        # A missing file, or one no editor opens, goes to the full CLI so
+        # the error lands in the terminal it was typed into.
+        def refuse(*args, **kwargs):
+            raise AssertionError("this path belongs to the full CLI")
+
+        monkeypatch.setattr(
+            handoff, "socket", SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=refuse)
+        )
+        (tmp_path / "notes.txt").write_text("not a picture")
+
+        assert handoff.forward([str(tmp_path / name)]) is False
+
+    @staticmethod
+    def _capture_payloads(monkeypatch, reply: bytes | None = handoff.ACK) -> list:
+        """`reply` is what the resident sends back: the ack, b"" for a
+        hang-up, or None for silence until the timeout."""
+        sent = []
+
+        class Connection:
+            def __init__(self, *args):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def settimeout(self, seconds):
+                pass
+
+            def connect(self, path):
+                pass
+
+            def sendall(self, payload):
+                sent.append(payload)
+
+            def recv(self, size):
+                if reply is None:
+                    raise TimeoutError("no ack")
+                return reply[:size]
+
+        monkeypatch.setattr(
+            handoff, "socket", SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=Connection)
+        )
+        return sent
+
+    @pytest.mark.parametrize("flag,byte", [("--image-editor", b"I"), ("--video-editor", b"V")])
+    def test_an_editor_flag_alone_asks_for_that_editor(self, monkeypatch, flag, byte):
+        sent = self._capture_payloads(monkeypatch)
+
+        assert handoff.forward([flag]) is True
+        assert sent == [byte]
+
+    def test_an_editor_flag_with_a_file_opens_the_file(self, monkeypatch, tmp_path):
+        # What a desktop entry's `Exec=snipux --image-editor %f` runs when
+        # it is handed a file.
+        sent = self._capture_payloads(monkeypatch)
+        target = tmp_path / "clip.mp4"
+        target.write_bytes(b"")
+
+        assert handoff.forward(["--image-editor", str(target)]) is True
+        assert sent == [handoff.ROUTED_OPEN_PREFIX + os.fsencode(str(target))]
+
+    @pytest.mark.parametrize("arguments", [["--image-editor"], ["shot.png"]])
+    def test_a_resident_that_does_not_acknowledge_takes_the_full_path(
+        self, monkeypatch, tmp_path, arguments
+    ):
+        # A resident from before the editors drops these without a word.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "shot.png").write_bytes(b"")
+        self._capture_payloads(monkeypatch, reply=b"")
+
+        assert handoff.forward(arguments) is False
+
+    def test_a_busy_resident_is_not_sent_the_request_twice(self, monkeypatch, capsys):
+        # True, so the full CLI does not resend it: the resident has it.
+        sent = self._capture_payloads(monkeypatch, reply=None)
+
+        assert handoff.forward(["--image-editor"]) is True
+        assert sent == [b"I"]
+        assert "busy" in capsys.readouterr().err
+
+    def test_a_snip_still_needs_no_ack(self, monkeypatch):
+        sent = self._capture_payloads(monkeypatch, reply=b"")
+
+        assert handoff.forward(["--snip"]) is True
+        assert sent == [handoff.SNIP_REQUEST]
+
+    def test_a_flag_after_an_editor_flag_is_not_a_file(self, monkeypatch):
+        # `--image-editor --snip` is an argparse error, not a snip.
+        sent = self._capture_payloads(monkeypatch)
+
+        assert handoff.forward(["--image-editor", "--snip"]) is False
+        assert sent == []
+
+    def test_its_suffix_copy_matches_the_editors(self):
+        assert set(handoff._OPENABLE_SUFFIXES) == set(
+            tokens.EDITOR_IMAGE_SUFFIXES + tokens.EDITOR_RECORDING_SUFFIXES
+        )
 
     @pytest.mark.parametrize("entry", ["cli", "gui"])
     def test_an_undelivered_request_takes_the_full_path(self, monkeypatch, entry):
@@ -1951,7 +2362,7 @@ class TestTransportSingleInstance:
         second = FakeTransport(state)
         first.try_claim()
         received = []
-        first.listen(lambda: received.append(True), lambda: None, lambda path: None)
+        first.listen(lambda: received.append(True), lambda: None, lambda path: None, lambda editor: None)
 
         second.try_claim()
         second.send_snip_request()
@@ -1964,7 +2375,7 @@ class TestTransportSingleInstance:
         second = FakeTransport(state)
         first.try_claim()
         received = []
-        first.listen(lambda: None, lambda: received.append(True), lambda path: None)
+        first.listen(lambda: None, lambda: received.append(True), lambda path: None, lambda editor: None)
 
         second.try_claim()
         second.send_settings_request()
@@ -1977,7 +2388,7 @@ class TestTransportSingleInstance:
         second = FakeTransport(state)
         first.try_claim()
         received = []
-        first.listen(lambda: None, lambda: None, lambda path: received.append(path))
+        first.listen(lambda: None, lambda: None, lambda path: received.append(path), lambda editor: None)
 
         second.try_claim()
         second.send_open_request(Path("/tmp/shot.png"))
@@ -4082,7 +4493,7 @@ class TestAppControllerLandingRecording:
         controller, backend = self._start_a_recording(
             make_controller, monkeypatch, after="instant"
         )
-        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None)
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None, lambda editor: None)
         calls = []
         monkeypatch.setattr(
             controller._tray_icon, "showMessage", lambda *a, **k: calls.append(a)
@@ -4108,7 +4519,7 @@ class TestAppControllerLandingRecording:
             make_controller, monkeypatch, after="instant"
         )
         _rect, temp_path = backend.start_calls[0]
-        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None)
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None, lambda editor: None)
 
         controller._stop_recording()
 
@@ -4334,7 +4745,7 @@ class TestTheBarStaysUpAfterARecordingLands:
         monkeypatch.setattr(
             QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
         )
-        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None)
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None, lambda editor: None)
         backend = FakeRecordingBackend()
         controller = make_controller(
             BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
@@ -5339,7 +5750,7 @@ class TestAppControllerRecentCaptures:
         controller, _backend = self._start_a_recording(
             make_controller, monkeypatch, after="instant"
         )
-        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None)
+        monkeypatch.setattr(app, "copy_file_to_clipboard", lambda path: None, lambda editor: None)
 
         controller._stop_recording()
 
@@ -6097,6 +6508,64 @@ class TestRunFirstLaunchSetup:
 
         controller.run_first_launch_setup()  # must not raise
 
+    def test_adds_only_the_editors_entries_after_an_upgrade(self, make_controller, monkeypatch):
+        # An upgrade from a snipux without the editors' launcher entries:
+        # same build path, older revision. Those entries arrive once, on
+        # the first launch, with nobody having to run --setup again -- and
+        # nothing else is rewritten, so a shortcut rebound in GNOME or an
+        # autostart entry the user deleted stays the way they left it.
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/here/snipux")
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/here/snipux"))
+        )
+        monkeypatch.setattr(app.setup_desktop, "load_integration_revision", lambda cd=None: 1)
+        def full_setup_must_not_run(**kwargs):
+            raise AssertionError("a revision-only upgrade must not redo the shortcut or autostart")
+
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", full_setup_must_not_run
+        )
+        editor_calls = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "install_editor_integration",
+            lambda: editor_calls.append(True) or 0,
+        )
+        revisions = []
+        monkeypatch.setattr(
+            app.setup_desktop,
+            "save_integration_revision",
+            lambda revision, cd=None: revisions.append(revision) or True,
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()
+
+        assert editor_calls == [True]
+        assert revisions == [app.setup_desktop.INTEGRATION_REVISION]
+
+    def test_a_failed_editor_setup_is_tried_again_next_launch(self, make_controller, monkeypatch):
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/here/snipux")
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/here/snipux"))
+        )
+        monkeypatch.setattr(app.setup_desktop, "load_integration_revision", lambda cd=None: 1)
+        monkeypatch.setattr(app.platform.current, "install_editor_integration", lambda: 1)
+
+        def must_not_record(revision, cd=None):
+            raise AssertionError("a failed setup must not be recorded as done")
+
+        monkeypatch.setattr(app.setup_desktop, "save_integration_revision", must_not_record)
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()  # must not raise
+
     def test_a_build_that_cannot_locate_itself_repoints_nothing(
         self, make_controller, monkeypatch
     ):
@@ -6505,6 +6974,219 @@ class TestOpenImagePath:
         assert "does-not-exist.png" in capsys.readouterr().out
 
 
+class TestOpenPathRoutesByType:
+    """`AppController.open_path` -- what `snipux PATH` reaches in the
+    resident, whether this process became it or the path was forwarded.
+    A recording goes to the player and anything else to the review window.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+
+    @pytest.mark.parametrize("name", ["clip.mp4", "clip.webm", "clip.MKV", "clip.mov"])
+    def test_a_recording_opens_in_the_player(self, make_controller, monkeypatch, tmp_path, name):
+        controller = self._controller(make_controller)
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        target = tmp_path / name
+        target.write_bytes(b"")
+
+        controller.open_path(target)
+
+        assert opened == [target]
+        assert controller._reviews == []
+
+    def test_an_image_opens_in_the_review_window(self, make_controller, monkeypatch, tmp_path):
+        controller = self._controller(make_controller)
+        monkeypatch.setattr(
+            controller, "_open_player", lambda path: pytest.fail("not a recording")
+        )
+        target = tmp_path / "shot.png"
+        QImage(12, 10, QImage.Format.Format_RGB32).save(str(target), "PNG")
+
+        controller.open_path(target)
+
+        assert [review.title_label.text() for review in controller._reviews] == ["shot.png"]
+
+    def test_a_forwarded_recording_opens_in_the_player(self, make_controller, monkeypatch, tmp_path):
+        state = make_transport_state()
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(state),
+        )
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        target = tmp_path / "clip.webm"
+        target.write_bytes(b"")
+        state["claimed"] = True
+
+        FakeTransport(state).send_open_request(target)
+
+        assert opened == [target]
+
+    def test_a_missing_file_is_reported_and_opens_nothing(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        calls = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: calls.append(message),
+        )
+        controller = self._controller(make_controller)
+        monkeypatch.setattr(
+            controller, "_open_player", lambda path: pytest.fail("nothing to play")
+        )
+
+        controller.open_path(tmp_path / "gone.mp4")
+
+        assert controller._reviews == []
+        assert len(calls) == 1
+        assert "gone.mp4" in calls[0]
+
+
+class _FakeFileDrop:
+    """What an editor's `dropEvent` reads off a real drop of one file."""
+
+    def __init__(self, path: Path):
+        self._mime = QMimeData()
+        self._mime.setUrls([QUrl.fromLocalFile(str(path))])
+
+    def mimeData(self):
+        return self._mime
+
+    def acceptProposedAction(self) -> None:
+        pass
+
+
+class TestOpenEditor:
+    """A forwarded `--image-editor`/`--video-editor` opens that editor
+    empty in the resident."""
+
+    @pytest.mark.parametrize(
+        "editor,held,window_type",
+        [("image", "_reviews", ReviewWindow), ("video", "_players", PlayerWindow)],
+    )
+    def test_a_forwarded_request_opens_the_empty_editor(
+        self, make_controller, editor, held, window_type
+    ):
+        state = make_transport_state()
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(state),
+        )
+        state["claimed"] = True
+
+        FakeTransport(state).send_editor_request(editor)
+
+        windows = getattr(controller, held)
+        try:
+            assert len(windows) == 1
+            assert isinstance(windows[0], window_type)
+        finally:
+            for window in list(windows):
+                window.close()
+
+    def test_a_file_opened_next_fills_the_empty_editor(self, make_controller, tmp_path):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        controller.open_editor("image")
+        target = tmp_path / "shot.png"
+        QImage(16, 9, QImage.Format.Format_RGB32).save(str(target), "PNG")
+
+        controller.open_path(target)
+
+        try:
+            assert len(controller._reviews) == 1
+            assert controller._reviews[0].title_label.text() == "shot.png"
+        finally:
+            for window in list(controller._reviews):
+                window.close()
+
+    def test_a_recording_does_not_land_in_an_empty_image_editor(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        controller.open_editor("image")
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        target = tmp_path / "clip.mp4"
+        target.write_bytes(b"")
+
+        controller.open_path(target)
+
+        try:
+            assert opened == [target]
+            assert controller._reviews[0].is_empty
+        finally:
+            for window in list(controller._reviews):
+                window.close()
+
+    def test_a_recording_dropped_on_the_image_editor_goes_to_the_player(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        controller.open_editor("image")
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        target = tmp_path / "clip.mp4"
+        target.write_bytes(b"")
+
+        try:
+            controller._reviews[0].dropEvent(_FakeFileDrop(target))
+
+            assert opened == [target]
+            assert controller._reviews[0].is_empty
+        finally:
+            for window in list(controller._reviews):
+                window.close()
+
+    def test_an_image_dropped_on_the_video_editor_goes_to_the_image_editor(
+        self, make_controller, tmp_path
+    ):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        controller.open_editor("video")
+        target = tmp_path / "shot.png"
+        QImage(12, 8, QImage.Format.Format_RGB32).save(str(target), "PNG")
+
+        try:
+            controller._players[0].dropEvent(_FakeFileDrop(target))
+
+            assert [review.title_label.text() for review in controller._reviews] == ["shot.png"]
+            assert controller._players[0].is_empty
+        finally:
+            for window in list(controller._reviews) + list(controller._players):
+                window.close()
+
+    def test_closing_it_lets_it_go(self, make_controller):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        controller.open_editor("video")
+
+        controller._players[0].close()
+
+        assert controller._players == []
+
+
 class TestChooserKindIntegration:
     """SNX-120: the stills/record switch has to remember which side was
     last used *across snips*, not just across a `reopen()` on one live
@@ -6592,7 +7274,7 @@ class TestSnipRequestProtocol:
         server = app.QLocalSocketTransport(name)
         assert server.try_claim()
         fired = []
-        server.listen(lambda: fired.append(True), lambda: None, lambda path: None)
+        server.listen(lambda: fired.append(True), lambda: None, lambda path: None, lambda editor: None)
 
         probe = app.QLocalSocketTransport(name)
         assert probe.try_claim() is False  # the probe connects, then gives up
@@ -6618,7 +7300,7 @@ class TestSnipRequestProtocol:
         server = app.QLocalSocketTransport(name)
         assert server.try_claim()
         fired = []
-        server.listen(lambda: fired.append(True), lambda: None, lambda path: None)
+        server.listen(lambda: fired.append(True), lambda: None, lambda path: None, lambda editor: None)
 
         client = app.QLocalSocketTransport(name)
         client.send_snip_request()
@@ -6650,6 +7332,7 @@ class TestSnipRequestProtocol:
             lambda: snip_fired.append(True),
             lambda: settings_fired.append(True),
             lambda path: None,
+            lambda editor: None,
         )
 
         client = app.QLocalSocketTransport(name)
@@ -6678,6 +7361,7 @@ class TestSnipRequestProtocol:
             lambda: snip_fired.append(True),
             lambda: settings_fired.append(True),
             lambda path: opened.append(path),
+            lambda editor: None,
         )
 
         client = app.QLocalSocketTransport(name)
@@ -6692,6 +7376,64 @@ class TestSnipRequestProtocol:
         assert opened == [target]
         assert snip_fired == []
         assert settings_fired == []
+
+    @pytest.mark.parametrize("editor", ["image", "video"])
+    def test_another_process_gets_an_ack_for_an_editor_request(self, tmp_path, editor):
+        # From a second process, so this one's event loop can run the
+        # resident's side while the client waits for the ack.
+        name = f"snipux-test-ack-{editor}-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        heard = []
+        server.listen(lambda: None, lambda: None, lambda path: None, heard.append)
+        root = Path(__file__).resolve().parent.parent
+        code = (
+            f"import sys; sys.path.insert(0, {str(root)!r}); "
+            "from PyQt6.QtCore import QCoreApplication; qt = QCoreApplication([]); "
+            "from snipux import app; "
+            f"print(app.QLocalSocketTransport({name!r}).send_editor_request({editor!r}))"
+        )
+        client = subprocess.Popen(
+            [sys.executable, "-c", code], cwd=root, stdout=subprocess.PIPE, text=True
+        )
+        deadline = time.monotonic() + 30
+        while client.poll() is None and time.monotonic() < deadline:
+            QApplication.processEvents()
+            QTest.qWait(10)
+
+        assert client.stdout.read().strip() == "Delivery.ACKNOWLEDGED"
+        assert heard == [editor]
+
+    @skip_on_windows(
+        "Same nested-wait timing gap test_a_real_request_is_delivered "
+        "documents for the snip byte -- an editor request goes through the "
+        "identical _accept() path, on the identical Windows named-pipe "
+        "backend."
+    )
+    @pytest.mark.parametrize("editor", ["image", "video"])
+    def test_an_editor_request_is_delivered_and_nothing_else(self, tmp_path, editor):
+        name = f"snipux-test-editor-{editor}-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        heard = []
+        server.listen(
+            lambda: heard.append("snip"),
+            lambda: heard.append("settings"),
+            lambda path: heard.append(path),
+            heard.append,
+        )
+
+        # Its ack cannot arrive while this one thread is blocked waiting
+        # for it -- `test_a_resident_acknowledges_an_editor_request` waits
+        # from a second process instead.
+        app.QLocalSocketTransport(name).send_editor_request(editor)
+        for _ in range(20):
+            QApplication.processEvents()
+            QTest.qWait(20)
+            if heard:
+                break
+
+        assert heard == [editor]
 
 
 class TestASecondRequestSurfacesTheOverlay:

@@ -130,5 +130,5 @@ include = ["snipux", "snipux.*"]
 # snipux.desktop is read at runtime by setup_desktop.py via Path(__file__),
 # the same pattern as design/icons above -- SNX-73: this is what lets
 # `snipux --setup` write a real .desktop entry from an installed wheel with
-# no repository checkout present.
-"snipux" = ["snipux.desktop"]
+# no repository checkout present. The editors' entries are the same.
+"snipux" = ["*.desktop"]

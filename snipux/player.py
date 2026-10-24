@@ -54,6 +54,7 @@ from PyQt6.QtGui import (
     QFontMetrics,
     QGuiApplication,
     QImage,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -66,12 +67,22 @@ from PyQt6.QtMultimedia import (
     QMediaPlayer,
     QVideoSink,
 )
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-from . import design, hostenv, output
+from . import design, hostenv, output, setup_desktop
 from .design import tokens
 from .flowbars import FlowMenu, MenuReopenGuard
-from .winchrome import WinWindow, _mono_font, _ui_font
+from .winchrome import EmptyState, WinWindow, _mono_font, _ui_font, open_filter
+
+RECORDING_FILTER = open_filter("Recordings", tokens.EDITOR_RECORDING_SUFFIXES)
 
 _M = tokens.PlayerMetric
 _C = tokens.PlayerColor
@@ -435,6 +446,13 @@ class TimelineRail(QWidget):
 
     def set_peaks(self, peaks: list[float]) -> None:
         self._peaks = peaks
+        self.update()
+
+    def clear(self) -> None:
+        """Forget the last file's thumbnails and waveform."""
+        self._thumbs = {}
+        self._peaks = []
+        self._muted = False
         self.update()
 
     def set_muted(self, muted: bool) -> None:
@@ -954,6 +972,13 @@ class VideoCanvas(QWidget):
 
     def set_source_size(self, size: QSize) -> None:
         self._source_size = size
+        self.update()
+
+    def clear(self) -> None:
+        """Back to no picture, ready for another file."""
+        self._frame = None
+        self._source_size = QSize(0, 0)
+        self._zoom = 100
         self.update()
 
     @property
@@ -1661,17 +1686,18 @@ class _SplitExportButton(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         radius = _M.ACTION_RADIUS
-        accent = QColor(tokens.Color.ACCENT)
+        enabled = self.isEnabled()
+        accent = QColor(tokens.Color.ACCENT if enabled else tokens.Win.CONTROL_BG)
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), radius, radius)
-        painter.fillPath(path, accent.lighter(106) if self._hover else accent)
+        painter.fillPath(path, accent.lighter(106) if self._hover and enabled else accent)
 
         # The seam: the two halves are one colour, so without it the caret
         # is not visibly a separate target.
         seam = self.width() - _M.SPLIT_CARET_W
         painter.fillRect(QRectF(seam, 4, 1, self.height() - 8), _rgba("#15170e", 0.22))
 
-        ink = QColor(tokens.Color.ACCENT_FG)
+        ink = QColor(tokens.Color.ACCENT_FG if enabled else tokens.Win.TEXT_DISABLED)
         glyph = design.icon("save", ink).pixmap(QSize(15, 15))
         painter.drawPixmap(QPointF(15, (self.height() - 15) / 2), glyph)
         painter.setFont(_ui_font(12.5, 600))
@@ -1694,19 +1720,31 @@ class PlayerWindow(WinWindow):
     the exporter each have their own, deliberately -- sharing one would
     make a filmstrip decode fight a playback), and holds `TrimState`, which
     every readout in the window is a different phrasing of.
+
+    With no `path` it is the video editor opened on its own (`snipux
+    --video-editor`): an empty state where the picture and timeline go,
+    until Open… or a dropped file gives it a recording.
     """
 
     exported = pyqtSignal(str)
+    # Anything but a recording dropped on this window -- an image, most
+    # likely: the controller decides where it goes. Unconnected, the drop
+    # is refused here.
+    otherEditorRequested = pyqtSignal(object)
 
     def __init__(
         self,
-        path: str | Path,
+        path: str | Path | None = None,
         parent: QWidget | None = None,
         *,
         autoplay: bool = False,
     ):
-        self.path = Path(path)
-        super().__init__(self.path.name, size=_M.WINDOW_MIN, parent=parent)
+        self.path = Path(path) if path is not None else None
+        super().__init__(
+            self.path.name if self.path is not None else "Video Editor",
+            size=_M.WINDOW_MIN,
+            parent=parent,
+        )
         self.setMinimumSize(*_M.WINDOW_MIN)
 
         self.state = TrimState()
@@ -1721,13 +1759,22 @@ class PlayerWindow(WinWindow):
         # open still swaps them in a single press. See MenuReopenGuard.
         self._menu_guard = MenuReopenGuard()
         self._exporter = None
+        self._export_busy = False
         self._source_fps: float = float(tokens.PLAYER_FPS)
+        self._filmstrip: FilmstripProbe | None = None
+        self._waveform: WaveformProbe | None = None
 
         self._build_title_extras()
         self._build_body()
         self._build_footer_row()
-        self._build_media(autoplay)
-        self._sync_all()
+        self._build_media()
+        # A recording dropped anywhere on the window opens in it.
+        self.setAcceptDrops(True)
+        if self.path is not None:
+            self._load(self.path, autoplay=autoplay)
+        else:
+            self._show_video_page(False)
+            self._sync_all()
 
     # -- construction ---------------------------------------------------
 
@@ -1744,7 +1791,21 @@ class PlayerWindow(WinWindow):
         row.insertWidget(row.count() - 4, self.pending_label)
 
     def _build_body(self) -> None:
-        column = QVBoxLayout(self.body)
+        outer = QVBoxLayout(self.body)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._pages = QStackedWidget()
+        outer.addWidget(self._pages)
+        self._empty = EmptyState(
+            "camcorder",
+            "Open a recording to trim",
+            "Play it back, cut the start and the end, drop the sound, and export it.",
+        )
+        self._empty.openRequested.connect(self.choose_file)
+        self._pages.addWidget(self._empty)
+
+        self._editor = QWidget()
+        self._pages.addWidget(self._editor)
+        column = QVBoxLayout(self._editor)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
 
@@ -1834,11 +1895,16 @@ class PlayerWindow(WinWindow):
         state_row.addStretch()
         stack.addLayout(state_row)
 
-        self.path_label = QLabel(self._display_path())
+        self.path_label = QLabel()
         self.path_label.setFont(_mono_font(11.5))
         self.path_label.setStyleSheet(f"color: {tokens.Win.TEXT_MUTED};")
         stack.addWidget(self.path_label)
         self.footer_left.addWidget(status)
+
+        self.open_button = SecondaryButton("Open…")
+        self.open_button.setToolTip("Open another recording in this window (Ctrl+O)")
+        self.open_button.clicked.connect(self.choose_file)
+        self.footer_right.addWidget(self.open_button)
 
         self.copy_button = SecondaryButton("Copy file")
         self.copy_button.setToolTip(
@@ -1857,7 +1923,7 @@ class PlayerWindow(WinWindow):
         self.export_button.menu_requested.connect(self._open_export_menu)
         self.footer_right.addWidget(self.export_button)
 
-    def _build_media(self, autoplay: bool) -> None:
+    def _build_media(self) -> None:
         self._sink = QVideoSink(self)
         self._audio_out = QAudioOutput(self)
         self.player = QMediaPlayer(self)
@@ -1868,9 +1934,60 @@ class PlayerWindow(WinWindow):
         self.player.positionChanged.connect(self._on_position)
         self.player.playbackStateChanged.connect(lambda *_: self._sync_transport())
         self.player.metaDataChanged.connect(self._on_metadata)
-        self.player.setSource(QUrl.fromLocalFile(str(self.path)))
-        self._autoplay = autoplay
+        self.player.errorOccurred.connect(self._on_media_error)
+        self._autoplay = False
         self._probes_started = False
+
+    def _load(self, path: Path, *, autoplay: bool = False) -> None:
+        """Point the whole window at `path`, from a clean slate: no trim,
+        sound on, no thumbnails or waveform left from the last file. Loop
+        and speed are how the user likes to watch, so they stay.
+        """
+        self.player.stop()
+        self._drop_probes()
+        self.path = path
+        self.state.duration = self.state.start = self.state.end = 0.0
+        self.state.position = 0.0
+        self._muted = False
+        self._audio_out.setMuted(False)
+        self.rail.clear()
+        self.canvas.clear()
+        self.zoom_badge.set_zoom(100)
+        self._source_fps = float(tokens.PLAYER_FPS)
+        self._saved = True
+        self._autoplay = autoplay
+        self.title_label.setText(path.name)
+        self._show_video_page(True)
+        self.player.setSource(QUrl.fromLocalFile(str(path)))
+        self._elide_path()
+        self._sync_all()
+
+    def _drop_probes(self) -> None:
+        """Stop the last file's filmstrip and waveform decodes, so nothing
+        they deliver late lands on the next file's rail."""
+        for probe in (self._filmstrip, self._waveform):
+            if probe is not None:
+                probe.blockSignals(True)
+                probe.deleteLater()
+        self._filmstrip = None
+        self._waveform = None
+        self._probes_started = False
+
+    @property
+    def is_empty(self) -> bool:
+        """Opened on its own, with no recording loaded into it yet."""
+        return self.path is None
+
+    def _show_video_page(self, has_video: bool) -> None:
+        self._pages.setCurrentWidget(self._editor if has_video else self._empty)
+        for control in (self.copy_button, self.folder_button, self.export_button):
+            control.setEnabled(has_video)
+        self.pending_label.setVisible(has_video)
+
+    def _on_media_error(self, _error, message: str) -> None:
+        # Without this a file Qt cannot play is a black frame and silence,
+        # which reads as a broken window rather than a broken file.
+        self._set_status(f"Could not play this file: {message}", ok=False)
 
     def _on_metadata(self) -> None:
         """Adopt the resolution as soon as the container reports it.
@@ -2057,6 +2174,12 @@ class PlayerWindow(WinWindow):
         self._place_floating()
 
     def _sync_chrome(self) -> None:
+        if self.path is None:
+            self.title_detail.setText("")
+            self.status_icon.clear()
+            self.status_label.setText("No recording open")
+            self.status_label.setStyleSheet(f"color: {tokens.Win.TEXT_MUTED};")
+            return
         size = self.canvas.source_size
         detail = []
         if not size.isEmpty():
@@ -2161,7 +2284,7 @@ class PlayerWindow(WinWindow):
         what identifies the recording, and a middle elision would cut the
         one part worth reading.
         """
-        full = self._display_path()
+        full = self._display_path() if self.path is not None else ""
         metrics = QFontMetrics(self.path_label.font())
         available = max(80, self.path_label.width())
         self.path_label.setText(
@@ -2230,9 +2353,15 @@ class PlayerWindow(WinWindow):
     # -- keyboard ----------------------------------------------------------
 
     def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.StandardKey.Open):
+            self.choose_file()
+            return
         key = event.key()
         if key == Qt.Key.Key_Escape and self._menu is not None:
             self._close_menu()
+            return
+        if self.path is None:
+            super().keyPressEvent(event)
             return
         actions = {
             Qt.Key.Key_Space: self.toggle_play,
@@ -2256,6 +2385,77 @@ class PlayerWindow(WinWindow):
         self.player.stop()
         self._close_menu()
         super().closeEvent(event)
+
+    # -- opening another file ---------------------------------------------
+
+    def dragEnterEvent(self, event) -> None:
+        if any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+            self._empty.set_drag_active(True)
+
+    def dragLeaveEvent(self, event) -> None:
+        self._empty.set_drag_active(False)
+
+    def dropEvent(self, event) -> None:
+        self._empty.set_drag_active(False)
+        urls = [url for url in event.mimeData().urls() if url.isLocalFile()]
+        if not urls:
+            return
+        event.acceptProposedAction()
+        path = Path(urls[0].toLocalFile())
+        if (
+            path.suffix.lower() not in tokens.EDITOR_RECORDING_SUFFIXES
+            and self.receivers(self.otherEditorRequested) > 0
+        ):
+            self.otherEditorRequested.emit(path)
+            return
+        self.open_path(path)
+
+    def choose_file(self) -> None:
+        """Open… and Ctrl+O: pick a recording and load it into this window."""
+        folder = (
+            self.path.parent if self.path is not None else setup_desktop.load_recording_folder()
+        )
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Open a recording", str(folder), RECORDING_FILTER
+        )
+        if chosen:
+            self.open_path(Path(chosen))
+
+    def open_path(self, path: Path) -> None:
+        """Load `path` in place of the recording this window shows.
+
+        Not while an export is running: it is writing the current file's
+        clip, and its finish would mark the wrong recording saved. And not
+        over an unsaved trim without asking -- the trim lives nowhere but
+        this window.
+        """
+        if self._export_busy:
+            self._set_status("Wait for the export to finish first", ok=False)
+            return
+        if not path.is_file() or path.suffix.lower() not in tokens.EDITOR_RECORDING_SUFFIXES:
+            QMessageBox.warning(
+                self,
+                "Could not open recording",
+                f"{path.name}: Snipux opens .mp4, .webm, .mkv and .mov recordings.",
+            )
+            return
+        if not self._saved and not self._confirm_discard():
+            return
+        self._close_menu()
+        self._load(path)
+
+    def _confirm_discard(self) -> bool:
+        """The "Discard changes?" prompt Settings and the image editor show
+        before throwing away unsaved work, here for an unexported trim.
+        """
+        answer = QMessageBox.question(
+            self,
+            "Discard changes?",
+            "This recording has a trim that has not been exported. Discard it?",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Discard
 
     # -- the footer's three actions ---------------------------------------
 
@@ -2327,13 +2527,19 @@ class PlayerWindow(WinWindow):
             )
         )
         self._exporter.finished.connect(self._finish_export)
-        self._exporter.failed.connect(lambda why: self._report(why, ok=False))
+        self._exporter.failed.connect(self._fail_export)
+        self._export_busy = True
         self._exporter.start()
+
+    def _fail_export(self, why: str) -> None:
+        self._export_busy = False
+        self._report(why, ok=False)
 
     def _finish_export(self, written: str, mark_saved: bool = True) -> None:
         # A still is not the clip: exporting one frame does not mean the
         # trim has been written anywhere, so it must not clear the dirty
         # mark.
+        self._export_busy = False
         if mark_saved:
             self._saved = True
         self._sync_chrome()
