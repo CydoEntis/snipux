@@ -519,7 +519,9 @@ def build_default_geometry_provider() -> GeometryProvider:
 # `PATH` sits outside `_build_parser()`'s mutually exclusive group --
 # argparse has no way to add a positional to one -- so `main()` checks it
 # against every one of the group's own flags by hand. One place, so a flag
-# added to the group later can't be forgotten here.
+# added to the group later can't be forgotten here. The two editor flags
+# are the exception, and are not listed: a desktop entry's `Exec` passes
+# the file it was opened with after them.
 _ACTION_FLAGS = (
     ("list_backends", "--list-backends"),
     ("snip", "--snip"),
@@ -583,6 +585,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "instance to raise its own if there is one, starting one first if "
         "not (same rule --snip follows). The way in on a machine with no "
         "tray icon, e.g. stock GNOME without the AppIndicator extension",
+    )
+    group.add_argument(
+        "--image-editor",
+        action="store_true",
+        help="open the image editor on its own, to open or drop an image "
+        "into -- or, with PATH, open PATH -- asking an already-running "
+        "Snipux instance to do it if there is one (same rule --snip "
+        "follows)",
+    )
+    group.add_argument(
+        "--video-editor",
+        action="store_true",
+        help="open the video editor on its own, to open or drop a "
+        "recording into -- or, with PATH, open PATH -- the same way "
+        "--image-editor does",
     )
     group.add_argument(
         "--setup",
@@ -864,6 +881,21 @@ def main(
         transport.send_settings_request()
         return 0
 
+    editor = "image" if args.image_editor else "video" if args.video_editor else None
+    if editor is not None and args.path is None:
+        # Same forward-or-become-resident shape as --settings above: the
+        # editor opens in the one process that owns the tray, next to every
+        # other window it has open.
+        if transport is None:
+            transport = QLocalSocketTransport()
+        _ensure_qapplication()
+        if transport.try_claim():
+            if registry is None:
+                registry = build_default_registry()
+            return _become_resident(registry, transport, open_editor_immediately=editor)
+        transport.send_editor_request(editor)
+        return 0
+
     if args.path is not None:
         # Same forward-or-become-resident shape as --snip/--settings above,
         # for the same reason: an image opened in its own short-lived
@@ -958,15 +990,23 @@ class Transport(ABC):
         """
 
     @abstractmethod
+    def send_editor_request(self, editor: str) -> None:
+        """Ask the primary instance to open an empty editor, "image" or
+        "video" -- `snipux --image-editor`/`--video-editor` with no file.
+        """
+
+    @abstractmethod
     def listen(
         self,
         on_snip_request: Callable[[], None],
         on_settings_request: Callable[[], None],
         on_open_request: Callable[[Path], None],
+        on_editor_request: Callable[[str], None],
     ) -> None:
         """Primary-instance only: call `on_snip_request` for every snip
-        request, `on_settings_request` for every Settings request, and
-        `on_open_request` for every path, that a later, non-primary launch
+        request, `on_settings_request` for every Settings request,
+        `on_open_request` for every path, and `on_editor_request` for every
+        editor ("image" or "video"), that a later, non-primary launch
         forwards.
         """
 
@@ -1076,6 +1116,9 @@ class QLocalSocketTransport(Transport):
     def send_open_request(self, path: Path) -> None:
         self._send(self._OPEN_REQUEST_PREFIX + os.fsencode(str(path)))
 
+    def send_editor_request(self, editor: str) -> None:
+        self._send(handoff.EDITOR_REQUESTS[editor])
+
     def _send(self, payload: bytes) -> None:
         socket = QLocalSocket()
         socket.connectToServer(self._server_name)
@@ -1093,6 +1136,7 @@ class QLocalSocketTransport(Transport):
         on_snip_request: Callable[[], None],
         on_settings_request: Callable[[], None],
         on_open_request: Callable[[Path], None],
+        on_editor_request: Callable[[str], None],
     ) -> None:
         if self._server is None:
             raise RuntimeError("listen() called before a successful try_claim()")
@@ -1117,6 +1161,10 @@ class QLocalSocketTransport(Transport):
                 on_open_request(
                     Path(os.fsdecode(received[len(self._OPEN_REQUEST_PREFIX):]))
                 )
+            else:
+                for editor, request in handoff.EDITOR_REQUESTS.items():
+                    if received == request:
+                        on_editor_request(editor)
 
         self._server.newConnection.connect(_accept)
 
@@ -1424,7 +1472,9 @@ class AppController:
                 "quit it, kill this process."
             )
 
-        self._transport.listen(self.start_capture, self.open_settings, self.open_path)
+        self._transport.listen(
+            self.start_capture, self.open_settings, self.open_path, self.open_editor
+        )
 
     def _rebuild_recent_menu(self) -> None:
         """Refresh the tray's Recent section from what is actually still on
@@ -2089,6 +2139,24 @@ class AppController:
             self._open_player(path)
         else:
             self.open_image_path(path)
+
+    def open_editor(self, editor: str) -> None:
+        """An editor with nothing in it yet -- `snipux --image-editor` or
+        `--video-editor`, run from an app launcher. Its own empty state
+        offers Open… and a drop target.
+        """
+        if editor == "video":
+            window = PlayerWindow()
+            self._players.append(window)
+            window.closed.connect(lambda w=window: self._forget_player(w))
+        else:
+            window = ReviewWindow()
+            self._reviews.append(window)
+            window.closed.connect(lambda w=window: self._forget_review(w))
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        platform.current.take_keyboard_focus(window)
 
     def _warn(self, message: str) -> None:
         if self._tray_available:
@@ -4068,6 +4136,7 @@ def _become_resident(
     start_capture_immediately: bool = False,
     open_settings_immediately: bool = False,
     open_path_immediately: Path | None = None,
+    open_editor_immediately: str | None = None,
 ) -> int:
     """Build the `QApplication`/`AppController` and run the event loop.
 
@@ -4087,9 +4156,10 @@ def _become_resident(
     `start_capture_immediately`/`open_settings_immediately`/
     `open_path_immediately` are what tell the four callers apart -- a bare
     launch opens idle to the tray, `--snip` opens the overlay right away,
-    `--settings` opens Settings right away, and `PATH` opens it in a review
-    window right away, each the same as if it had forwarded its request to
-    an instance that was already up.
+    `--settings` opens Settings right away, `PATH` opens it in its editor
+    right away, and `--image-editor`/`--video-editor`
+    (`open_editor_immediately`) open that editor empty, each the same as if
+    it had forwarded its request to an instance that was already up.
 
     `install_hotkey_listener()` runs here, once, for the same reason: this
     is the process that is actually resident, so it is the one that should
@@ -4154,6 +4224,8 @@ def _become_resident(
         controller.open_settings()
     if open_path_immediately is not None:
         controller.open_path(open_path_immediately)
+    if open_editor_immediately is not None:
+        controller.open_editor(open_editor_immediately)
     return app.exec()
 
 

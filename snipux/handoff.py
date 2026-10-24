@@ -17,7 +17,8 @@ that byte followed by a path to open. Where there is no such socket to reach
 named pipes -- `forward` says so, and the caller takes the full path, which
 finds or becomes the resident exactly as it always has.
 
-A lone argument naming an existing image or recording is a path to open
+`--image-editor`/`--video-editor` open that editor empty, behind a byte
+each. A lone argument naming an existing image or recording is a path to open
 (`snipux shot.png`), forwarded the same way behind the `OPEN_REQUEST_PREFIX`
 byte; the resident decides which editor it goes to. It travels as the bytes `os.fsencode` gives it,
 made absolute first -- the resident's working directory is not this
@@ -37,8 +38,14 @@ SERVER_NAME = "snipux-resident"
 SNIP_REQUEST = b"S"
 SETTINGS_REQUEST = b"T"
 OPEN_REQUEST_PREFIX = b"O"
+EDITOR_REQUESTS = {"image": b"I", "video": b"V"}
 
-_REQUESTS = {"--snip": SNIP_REQUEST, "--settings": SETTINGS_REQUEST}
+_EDITOR_FLAGS = {"--image-editor": "image", "--video-editor": "video"}
+_REQUESTS = {
+    "--snip": SNIP_REQUEST,
+    "--settings": SETTINGS_REQUEST,
+    **{flag: EDITOR_REQUESTS[editor] for flag, editor in _EDITOR_FLAGS.items()},
+}
 
 # A resident that is up accepts at once; this only bounds a wedged one.
 _CONNECT_TIMEOUT_S = 0.5
@@ -85,11 +92,17 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
     """Send the request `arguments` names to a running resident, and say
     whether it was delivered.
 
-    Only a lone `--snip`, `--settings`, or the path of an existing file
-    an editor opens is a request; anything else belongs to the full CLI. False whenever the
+    Only a lone `--snip`, `--settings`, `--image-editor`,
+    `--video-editor`, or the path of an existing file an editor opens
+    (alone, or after one of the editor flags) is a request; anything else
+    belongs to the full CLI. False whenever the
     resident cannot be reached this way, which is never an error -- it is
     the caller's cue to take the full path.
     """
+    if len(arguments) == 2 and arguments[0] in _EDITOR_FLAGS:
+        # `--image-editor %f` from a desktop entry, given a file: the file
+        # opens in whichever editor its type calls for, as a bare path does.
+        arguments = arguments[1:]
     if len(arguments) != 1:
         return False
     argument = arguments[0]

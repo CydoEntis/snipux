@@ -7,6 +7,10 @@ use it; the commit history has the detail.
 
 ### Added
 
+- **The image editor and the video editor work as apps of their own.**
+  `snipux --image-editor` and `snipux --video-editor` open one with nothing
+  in it, ready to open or drop a file into, without taking a snip or a
+  recording first.
 - **`snipux clip.mp4` opens the recording in the video editor.** Handing
   Snipux a file now opens it in the right editor: a recording (.mp4, .webm,
   .mkv, .mov) in the trim editor, anything else in the image editor. A file
