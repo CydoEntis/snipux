@@ -1886,19 +1886,25 @@ class AppController:
         matches and there is nothing to do. An empty record is the same
         answer -- it means the entries predate this record existing, and
         rewriting them to the build that is running is right either way.
-        An older `INTEGRATION_REVISION` is how an upgrade gets the editors'
-        launcher entries without the user running --setup again.
+        An older `INTEGRATION_REVISION` with the same build is an upgrade
+        from a snipux without the editors: it gets just their entries,
+        without the user running --setup again.
         """
         target = self._integration_target()
         if not target:
             return
-        if (
-            target == setup_desktop.load_integration_target()
-            and setup_desktop.load_integration_revision() >= setup_desktop.INTEGRATION_REVISION
-        ):
+        moved = target != setup_desktop.load_integration_target()
+        behind = setup_desktop.load_integration_revision() < setup_desktop.INTEGRATION_REVISION
+        if not moved and not behind:
             return
         try:
-            platform.current.install_desktop_integration()
+            if moved:
+                platform.current.install_desktop_integration()
+            else:
+                # Only what is new. Rerunning all of it would put back a
+                # shortcut rebound in GNOME's own settings, or an autostart
+                # entry the user deleted.
+                platform.current.install_editor_integration()
         except platform.UnimplementedPlatformError:
             # Nothing to re-point on a platform that never pointed anywhere.
             return

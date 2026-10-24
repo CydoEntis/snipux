@@ -55,6 +55,9 @@ class LinuxPlatform(Platform):
     def install_desktop_integration(self, *, shortcut: str | None = None) -> int:
         return setup_desktop.run_setup(shortcut=shortcut)
 
+    def install_editor_integration(self) -> int:
+        return setup_desktop.install_editor_entries()
+
     def remove_desktop_integration(self) -> int:
         return setup_desktop.run_remove()
 

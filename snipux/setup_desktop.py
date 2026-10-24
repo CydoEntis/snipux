@@ -2099,14 +2099,7 @@ def run_setup(
     _write_entry(
         applications_dir, render_desktop_entry(exec_path), exec_path, "desktop"
     )
-    for filename, label in EDITOR_ENTRIES.items():
-        _write_entry(
-            applications_dir,
-            render_desktop_entry(exec_path, PACKAGE_DIR / filename),
-            exec_path,
-            label,
-            filename,
-        )
+    _write_editor_entries(applications_dir, exec_path)
     _write_entry(
         autostart_dir, render_autostart_entry(exec_path), exec_path, "autostart"
     )
@@ -2120,6 +2113,40 @@ def run_setup(
     )
 
     return 0
+
+
+def install_editor_entries(
+    *, exec_path: Path | None = None, applications_dir: Path | None = None
+) -> int:
+    """Write only the editors' launcher entries -- what an upgrade from a
+    snipux without them is missing -- leaving the app's own entry, the
+    autostart entry and the shortcut exactly as the user has them.
+
+    The same defaults and the same exit-code rule as `run_setup()`.
+    """
+    if exec_path is None:
+        exec_path = find_console_script()
+    if exec_path is None:
+        print("error: could not locate the installed snipux console script", file=sys.stderr)
+        return 1
+    if applications_dir is None:
+        applications_dir = (
+            Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+            / "applications"
+        )
+    _write_editor_entries(applications_dir, exec_path)
+    return 0
+
+
+def _write_editor_entries(applications_dir: Path, exec_path: Path) -> None:
+    for filename, label in EDITOR_ENTRIES.items():
+        _write_entry(
+            applications_dir,
+            render_desktop_entry(exec_path, PACKAGE_DIR / filename),
+            exec_path,
+            label,
+            filename,
+        )
 
 
 def run_remove(

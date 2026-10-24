@@ -6403,10 +6403,12 @@ class TestRunFirstLaunchSetup:
 
         controller.run_first_launch_setup()  # must not raise
 
-    def test_rewrites_entries_an_older_snipux_wrote_fewer_of(self, make_controller, monkeypatch):
+    def test_adds_only_the_editors_entries_after_an_upgrade(self, make_controller, monkeypatch):
         # An upgrade from a snipux without the editors' launcher entries:
         # same build path, older revision. Those entries arrive once, on
-        # the first launch, with nobody having to run --setup again.
+        # the first launch, with nobody having to run --setup again -- and
+        # nothing else is rewritten, so a shortcut rebound in GNOME or an
+        # autostart entry the user deleted stays the way they left it.
         monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
         monkeypatch.setattr(
             app.setup_desktop, "find_console_script", lambda name="snipux": Path("/here/snipux")
@@ -6415,11 +6417,17 @@ class TestRunFirstLaunchSetup:
             app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/here/snipux"))
         )
         monkeypatch.setattr(app.setup_desktop, "load_integration_revision", lambda cd=None: 1)
-        install_calls = []
+        def full_setup_must_not_run(**kwargs):
+            raise AssertionError("a revision-only upgrade must not redo the shortcut or autostart")
+
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", full_setup_must_not_run
+        )
+        editor_calls = []
         monkeypatch.setattr(
             app.platform.current,
-            "install_desktop_integration",
-            lambda **kwargs: install_calls.append(kwargs) or 0,
+            "install_editor_integration",
+            lambda: editor_calls.append(True) or 0,
         )
         revisions = []
         monkeypatch.setattr(
@@ -6431,7 +6439,7 @@ class TestRunFirstLaunchSetup:
 
         controller.run_first_launch_setup()
 
-        assert install_calls == [{}]
+        assert editor_calls == [True]
         assert revisions == [app.setup_desktop.INTEGRATION_REVISION]
 
     def test_a_build_that_cannot_locate_itself_repoints_nothing(

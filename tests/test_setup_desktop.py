@@ -554,6 +554,24 @@ class TestEditorEntries:
         written = {path.name for path in tmp_path.rglob("*") if path.is_file()}
         assert "mimeapps.list" not in written
 
+    def test_editor_entries_alone_leave_the_shortcut_and_autostart(self, tmp_path, monkeypatch):
+        def must_not_bind(*args, **kwargs):
+            raise AssertionError("the shortcut is the user's, not the upgrade's")
+
+        monkeypatch.setattr(setup_desktop, "bind_linux_shortcut", must_not_bind)
+        applications_dir = tmp_path / "applications"
+
+        exit_code = setup_desktop.install_editor_entries(
+            exec_path=Path("/opt/snipux/bin/snipux"), applications_dir=applications_dir
+        )
+
+        assert exit_code == 0
+        assert sorted(path.name for path in applications_dir.iterdir()) == [
+            "snipux-image-editor.desktop",
+            "snipux-video-editor.desktop",
+        ]
+        assert not (tmp_path / "autostart").exists()
+
     def test_remove_deletes_both(self, tmp_path):
         applications_dir = self._setup(tmp_path)
 

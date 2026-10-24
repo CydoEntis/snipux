@@ -122,6 +122,16 @@ class TestLinuxPlatform:
 
         assert linux.LinuxPlatform().install_desktop_integration() == 1
 
+    def test_install_editor_integration_writes_only_the_editors_entries(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "run_setup", lambda **kwargs: pytest.fail("not all of it"))
+        calls = []
+        monkeypatch.setattr(
+            setup_desktop, "install_editor_entries", lambda: calls.append("called") or 0
+        )
+
+        assert linux.LinuxPlatform().install_editor_integration() == 0
+        assert calls == ["called"]
+
     def test_remove_desktop_integration_delegates_to_run_remove(self, monkeypatch):
         calls = []
         monkeypatch.setattr(setup_desktop, "run_remove", lambda: calls.append("called") or 0)
@@ -1097,6 +1107,7 @@ class TestStubPlatforms:
 
     DARWIN_OPERATIONS = (
         "install_desktop_integration",
+        "install_editor_integration",
         "remove_desktop_integration",
         "bind_shortcut",
         "unbind_shortcut",
@@ -2446,6 +2457,22 @@ class TestWindowsEditorIntegration:
 
         assert not (start_menu / "Snipux Image Editor.lnk").exists()
         assert not (start_menu / "Snipux Video Editor.lnk").exists()
+
+    def test_editor_integration_alone_leaves_startup_and_the_app_entry(
+        self, monkeypatch, tmp_path, fake_registry
+    ):
+        self._use_tmp_dirs(monkeypatch, tmp_path)
+        created = []
+        monkeypatch.setattr(
+            windows, "_create_shortcut", lambda lnk, target, **kw: created.append(lnk.name) or True
+        )
+
+        assert windows.WindowsPlatform().install_editor_integration() == 0
+
+        assert created == ["Snipux Image Editor.lnk", "Snipux Video Editor.lnk"]
+        assert fake_registry.value(
+            r"Software\Classes\.png\OpenWithProgids", "Snipux.ImageEditor"
+        ) == ""
 
     def test_remove_with_nothing_registered_is_harmless(self, monkeypatch, tmp_path):
         self._use_tmp_dirs(monkeypatch, tmp_path)

@@ -828,6 +828,40 @@ def _unregister_open_with() -> bool:
     return ok
 
 
+def _launcher_for_integration() -> Path | None:
+    """What every shortcut and registration should launch: pip's
+    windowless stub, or the frozen build -- relocated first if it is a
+    portable one (`_ensure_stable_copy`). None, said on stderr, when there
+    is no installed launcher at all.
+    """
+    exec_path = windowless_launcher() or setup_desktop.find_console_script(
+        _WINDOWLESS_LAUNCHER
+    )
+    if exec_path is None:
+        print(
+            f"error: could not locate the installed {_WINDOWLESS_LAUNCHER} launcher -- "
+            "is snipux actually installed (pip install), rather than just "
+            "being run from a checkout?",
+            file=sys.stderr,
+        )
+        return None
+    stable_copy = _ensure_stable_copy()
+    return stable_copy if stable_copy is not None else exec_path
+
+
+def _write_editor_integration(exec_path: Path, icon_path: Path | None) -> None:
+    for name, flag, _progid, _suffixes in _EDITORS:
+        _write_shortcut(
+            _start_menu_dir() / f"{name}.lnk",
+            exec_path,
+            icon_path,
+            f"{name} Start Menu",
+            arguments=flag,
+            description=name,
+        )
+    _register_open_with(exec_path, icon_path)
+
+
 # AttachConsole's own pseudo-process-id (winbase.h: `((DWORD)-1)`) meaning
 # "the console of whatever process started this one", not a real pid to
 # look up.
@@ -1164,21 +1198,9 @@ class WindowsPlatform(Platform):
                     file=sys.stderr,
                 )
 
-        exec_path = windowless_launcher() or setup_desktop.find_console_script(
-            _WINDOWLESS_LAUNCHER
-        )
+        exec_path = _launcher_for_integration()
         if exec_path is None:
-            print(
-                f"error: could not locate the installed {_WINDOWLESS_LAUNCHER} launcher -- "
-                "is snipux actually installed (pip install), rather than just "
-                "being run from a checkout?",
-                file=sys.stderr,
-            )
             return 1
-
-        stable_copy = _ensure_stable_copy()
-        if stable_copy is not None:
-            exec_path = stable_copy
 
         icon_path = _icon_path()
         has_icon = _write_icon(icon_path)
@@ -1189,17 +1211,21 @@ class WindowsPlatform(Platform):
         _write_shortcut(
             _startup_dir() / "snipux.lnk", exec_path, icon_path if has_icon else None, "Startup"
         )
-        for name, flag, _progid, _suffixes in _EDITORS:
-            _write_shortcut(
-                _start_menu_dir() / f"{name}.lnk",
-                exec_path,
-                icon_path if has_icon else None,
-                f"{name} Start Menu",
-                arguments=flag,
-                description=name,
-            )
-        _register_open_with(exec_path, icon_path if has_icon else None)
+        _write_editor_integration(exec_path, icon_path if has_icon else None)
 
+        return 0
+
+    def install_editor_integration(self) -> int:
+        """The editors' Start Menu shortcuts and "Open with", alone -- see
+        `Platform.install_editor_integration`. Points at the same launcher
+        and icon `install_desktop_integration()` would, without rewriting
+        either, or the Startup shortcut.
+        """
+        exec_path = _launcher_for_integration()
+        if exec_path is None:
+            return 1
+        icon_path = _icon_path()
+        _write_editor_integration(exec_path, icon_path if icon_path.is_file() else None)
         return 0
 
     def remove_desktop_integration(self) -> int:
