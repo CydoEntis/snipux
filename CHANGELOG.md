@@ -15,6 +15,10 @@ use it; the commit history has the detail.
 - **Open… in the image editor.** A button in the footer, or Ctrl+O, loads
   another image into the same window. Opened on its own, the image editor
   now shows what it is for, an Open… button and a place to drop a file.
+- **Open… in the video editor too**, with Ctrl+O or by dropping a recording
+  on the window. If the current recording has a trim you haven't exported,
+  Snipux asks before discarding it. A file it can't play now says so
+  instead of showing a black frame.
 
 ## 1.2.3 — 2026-10-24
 

@@ -126,6 +126,7 @@ from snipux.pin import PinWindow
 from snipux.player import (
     EXPORT_UNAVAILABLE,
     FfmpegExporter,
+    RECORDING_FILTER,
     PlayerWindow,
     TrimState,
     system_ffmpeg,
@@ -1597,7 +1598,7 @@ class AppController:
             None,
             "Edit a recording",
             str(setup_desktop.load_recording_folder()),
-            "Recordings (*.mp4 *.webm *.mkv *.mov)",
+            RECORDING_FILTER,
         )
         if path:
             self._open_player(Path(path))
