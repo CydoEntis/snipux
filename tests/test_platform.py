@@ -799,10 +799,11 @@ class TestSkipMapAnimation:
 
         return QWidget()
 
-    def test_no_other_platform_claims_it(self):
+    def test_macos_does_not_claim_it(self):
+        # Windows claims it through DWM -- see
+        # TestWindowsSkipsTheOverlaysOpeningAnimation.
         widget = self._widget()
 
-        assert windows.WindowsPlatform().skip_map_animation(widget) is False
         assert darwin.DarwinPlatform().skip_map_animation(widget) is False
         assert not widget.testAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash)
 
@@ -1951,6 +1952,22 @@ class TestPortableSelfInstall:
         assert result == target
         assert target.read_bytes() == b"v1-bytes"
 
+    def test_a_folder_build_never_copies_its_exe_over_the_install(self, monkeypatch, tmp_path):
+        # The installer's build keeps its libraries in `_internal` beside the
+        # exe; the exe copied on its own over a working install could not
+        # start.
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        exe = tmp_path / "dist" / "snipux" / "snipux.exe"
+        self._make_frozen(monkeypatch, exe)
+        exe.write_bytes(b"bootloader")
+        monkeypatch.setattr(windows.sys, "_MEIPASS", str(exe.parent / "_internal"), raising=False)
+        target = tmp_path / "Local" / "snipux" / "snipux.exe"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"the-installed-one")
+
+        assert windows._ensure_stable_copy() is None
+        assert target.read_bytes() == b"the-installed-one"
+
     def test_running_the_installed_copy_does_not_copy_itself_again(self, monkeypatch, tmp_path):
         self._use_tmp_local_app_data(monkeypatch, tmp_path)
         target = tmp_path / "Local" / "snipux" / "snipux.exe"
@@ -3038,3 +3055,38 @@ class TestUpdatingItself:
 
         assert windows.WindowsPlatform().install_update(tmp_path / "setup.exe") is False
         assert "could not start the update installer" in capsys.readouterr().out
+
+
+class TestWindowsSkipsTheOverlaysOpeningAnimation:
+    """Windows has no GNOME zoom-in to hide, so the overlay should show at
+    once instead of waiting out the reveal delay -- but only when DWM
+    actually agreed to skip its own transition."""
+
+    class _Dwm:
+        def __init__(self, result):
+            self.result = result
+            self.calls = []
+
+        def DwmSetWindowAttribute(self, hwnd, attribute, value, size):
+            self.calls.append((hwnd.value, attribute))
+            return self.result
+
+    class _Widget:
+        def winId(self):
+            return 4242
+
+    def _patch(self, monkeypatch, result):
+        dwm = self._Dwm(result)
+        monkeypatch.setattr(windows.ctypes, "windll", SimpleNamespace(dwmapi=dwm), raising=False)
+        return dwm
+
+    def test_it_turns_transitions_off_on_the_overlays_own_window(self, monkeypatch):
+        dwm = self._patch(monkeypatch, 0)
+
+        assert windows.WindowsPlatform().skip_map_animation(self._Widget()) is True
+        assert dwm.calls == [(4242, windows._DWMWA_TRANSITIONS_FORCEDISABLED)]
+
+    def test_a_refusal_keeps_the_reveal_delay(self, monkeypatch):
+        self._patch(monkeypatch, -2147024809)  # E_INVALIDARG
+
+        assert windows.WindowsPlatform().skip_map_animation(self._Widget()) is False

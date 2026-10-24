@@ -1,4 +1,5 @@
 import ctypes
+import json
 import os
 import re
 import shutil
@@ -1818,10 +1819,44 @@ class TestCrashLog:
 
         self._raise_and_report("nowhere to write this")
 
+    def test_the_user_is_told_once_per_distinct_failure(self, tmp_path):
+        # Logged and nothing else, a snip that failed to open looked like a
+        # hotkey that had stopped working.
+        told = []
+        install_crash_log(lambda: tmp_path / "crash.log", notify=told.append)
+
+        for _ in range(3):
+            self._raise_and_report("the overlay would not open")
+
+        assert len(told) == 1
+        assert "the overlay would not open" in told[0]
+        assert "crash.log" in told[0]
+
+    def test_an_error_whose_message_changes_is_announced_once(self, tmp_path):
+        # A paint error carrying a position would otherwise be a balloon on
+        # every frame.
+        told = []
+        install_crash_log(lambda: tmp_path / "crash.log", notify=told.append)
+
+        for n in range(5):
+            self._raise_and_report(f"bad point ({n}, {n})")
+
+        assert len(told) == 1
+
+    def test_a_tray_already_gone_does_not_raise_from_the_hook(self, tmp_path):
+        def gone(_message):
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        install_crash_log(lambda: tmp_path / "crash.log", notify=gone)
+
+        self._raise_and_report("while quitting")
+
     def test_becoming_resident_installs_it(self, monkeypatch):
         monkeypatch.setattr(QApplication, "exec", lambda self: 0)
         installed = []
-        monkeypatch.setattr(app, "install_crash_log", lambda: installed.append(True))
+        monkeypatch.setattr(
+            app, "install_crash_log", lambda **_kwargs: installed.append(True)
+        )
         created = []
 
         class TrackingAppController(AppController):
@@ -6151,6 +6186,54 @@ class TestACaptureIsConfirmed:
 
         assert said == ["Copied to clipboard"]
 
+    def test_a_failed_save_says_so_and_keeps_the_snip(self, make_controller, monkeypatch):
+        # It used to say "Copied to clipboard" while nothing had been
+        # copied or saved -- the overlay's own "Could not save" toast died
+        # with the window.
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "edit"
+        )
+
+        def refuse(image, directory):
+            raise PermissionError("access denied")
+
+        monkeypatch.setattr(overlay_module.output, "save_image", refuse)
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        said = self._reported(controller, monkeypatch)
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+        QGuiApplication.clipboard().clear()
+
+        controller._overlay.save()
+
+        assert len(said) == 1
+        assert "Could not save" in said[0] and "access denied" in said[0]
+        assert QGuiApplication.clipboard().image().size() == QSize(100, 80)
+
+    def test_a_failed_save_is_reported_even_when_review_opens(
+        self, make_controller, monkeypatch
+    ):
+        # The review window shows the snip, not that its file never landed.
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_after_capture", lambda cd=None: "review"
+        )
+
+        def refuse(image, directory):
+            raise PermissionError("access denied")
+
+        monkeypatch.setattr(overlay_module.output, "save_image", refuse)
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        said = self._reported(controller, monkeypatch)
+        controller._overlay.set_selection(QRect(10, 10, 100, 80))
+
+        controller._overlay.save()
+
+        assert any("Could not save" in line for line in said)
+        assert len(controller._reviews) == 1
+        for review in controller._reviews:
+            review.close()
+
     def test_an_instant_capture_says_so_too(self, make_controller, monkeypatch):
         # The case that prompted this: the destination that shows no bar
         # and no overlay, so the screen simply flickers.
@@ -6657,6 +6740,83 @@ class TestASecondRequestSurfacesTheOverlay:
 
         assert controller._overlay is not None
         assert controller._overlay is not first
+
+
+class TestTheHotkeyCannotBeLeftDead:
+    """Ways the capture hotkey used to stop doing anything until snipux was
+    restarted: something failed and left state saying a snip or a stop was
+    still under way."""
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    def test_a_snip_left_hidden_is_replaced_by_the_next_press(self, make_controller):
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        stuck = controller._overlay
+        stuck.hide()
+
+        controller.start_capture()
+
+        assert controller._overlay is not None
+        assert controller._overlay is not stuck
+        assert controller._overlay.isVisible()
+
+    def test_a_snip_hidden_for_its_delay_is_left_counting(self, make_controller, monkeypatch):
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        waiting = controller._overlay
+        waiting.hide()
+        monkeypatch.setattr(type(waiting), "counting_down", property(lambda self: True))
+
+        controller.start_capture()
+
+        assert controller._overlay is waiting
+
+    def test_a_delayed_snip_that_fails_to_reopen_ends_the_session(
+        self, make_controller, monkeypatch
+    ):
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        overlay = controller._overlay
+        overlay.hide()
+
+        def broken(*_args, **_kwargs):
+            raise ValueError("replace_frame broke")
+
+        monkeypatch.setattr(overlay, "replace_frame", broken)
+
+        with pytest.raises(ValueError):
+            overlay._finish_delayed_capture()
+
+        assert controller._overlay is None
+
+    def test_a_stop_that_fails_unexpectedly_still_frees_the_hotkey(
+        self, make_controller, monkeypatch
+    ):
+        controller = self._controller(make_controller)
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+
+        class Backend:
+            def stop(self):
+                pass
+
+        def broken_landing(*_args, **_kwargs):
+            raise ValueError("the player would not open")
+
+        monkeypatch.setattr(controller, "_land_recording", broken_landing)
+        controller._active_recording = (Backend(), "/tmp/rec.mp4", "open")
+
+        controller._stop_recording()
+
+        assert controller._active_recording is None
+        assert controller._stopping_recording is False
+        assert any("the player would not open" in line for line in said)
 
 
 class TestTheChoosersOutcomeWins:
@@ -7518,6 +7678,25 @@ class TestCheckingForUpdates:
         message = self._answer(controller, said, None)
 
         assert "Could not check" in message
+
+    def test_a_real_check_reaches_the_tray(self, make_controller, monkeypatch):
+        """The real worker, not a fake one: up to 1.2.1 the worker sent a
+        version string while the handler read `.version` off it, so every
+        check that reached GitHub died silently after "Checking for
+        updates...". Each half passed its own tests."""
+        from PyQt6.QtCore import QCoreApplication, QEventLoop
+
+        controller, said = self._controller(make_controller, monkeypatch)
+        payload = json.dumps({"tag_name": f"v{app.__version__}", "assets": []}).encode()
+
+        controller.check_for_updates(opener=lambda _url: payload)
+        loop_guard = 0
+        while len(said) < 2 and loop_guard < 200:
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 10)
+            loop_guard += 1
+
+        assert said[0].startswith("Checking")
+        assert len(said) == 2 and "newest" in said[1]
 
     def test_the_tray_item_is_wired_to_it(self, make_controller, monkeypatch):
         controller, _said = self._controller(make_controller, monkeypatch)

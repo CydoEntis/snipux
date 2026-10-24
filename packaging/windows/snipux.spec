@@ -18,8 +18,25 @@
 # annotation or the platform seam needs anything spec- or
 # PyInstaller-specific at all.
 
+import argparse
 import sys
 from pathlib import Path
+
+# Two builds come out of this one spec, chosen by build.ps1:
+#
+#   python -m PyInstaller snipux.spec               -> dist\snipux.exe
+#   python -m PyInstaller snipux.spec -- --onedir   -> dist\snipux\snipux.exe
+#                                                      + dist\snipux\_internal\
+#
+# The onefile exe is the portable download. The onedir tree is what the
+# installer ships, because a onefile exe unpacks the whole bundle -- ~300
+# files, Qt included -- into %TEMP%\_MEI* on *every* launch, and Defender
+# scans each DLL as it lands: about 2.2 s before main() on a real install,
+# against ~0.25 s from source. An installed copy has no reason to pay that;
+# the portable one keeps paying it because being one file is its point.
+_parser = argparse.ArgumentParser()
+_parser.add_argument("--onedir", action="store_true")
+_ONEDIR = _parser.parse_args().onedir
 
 # SPECPATH is PyInstaller's own name for this file's directory, always
 # defined in the namespace a .spec is exec'd in -- used instead of
@@ -61,15 +78,56 @@ a = Analysis(
     noarchive=False,
     cipher=block_cipher,
 )
+
+# What PyQt6's hooks collect but snipux never loads. Every entry is bytes
+# both builds carry and, in the onefile one, a file unpacked and scanned on
+# every launch. Paths are bundle-relative, `/`-separated; a trailing `/`
+# drops the whole directory.
+_UNNEEDED = (
+    # Qt's software OpenGL fallback (~20 MB). Nothing here renders through
+    # OpenGL -- the overlay, player and bars are QPainter on QWidget.
+    "PyQt6/Qt6/bin/opengl32sw.dll",
+    # The PDF image-format plugin, and the 4.6 MB Qt6Pdf it alone pulls in.
+    "PyQt6/Qt6/plugins/imageformats/qpdf.dll",
+    "PyQt6/Qt6/bin/Qt6Pdf.dll",
+    # Qt's TLS backends and the OpenSSL copy (libssl/libcrypto-3-x64) that
+    # only qopensslbackend loads. QtNetwork is here for QLocalServer, the
+    # single-instance socket, which never touches TLS. The update check is
+    # Python's urllib, whose _ssl/_hashlib link Python's own libssl-3.dll /
+    # libcrypto-3.dll -- different files, and those stay.
+    "PyQt6/Qt6/plugins/tls/",
+    "libssl-3-x64.dll",
+    "libcrypto-3-x64.dll",
+    # Qt's own UI translations (124 files). snipux installs no QTranslator,
+    # so Qt never reads them.
+    "PyQt6/Qt6/translations/",
+)
+
+
+def _needed(entry) -> bool:
+    dest = entry[0].replace("\\", "/")
+    return not any(
+        dest.startswith(item) if item.endswith("/") else dest == item
+        for item in _UNNEEDED
+    )
+
+
+a.binaries = [entry for entry in a.binaries if _needed(entry)]
+a.datas = [entry for entry in a.datas if _needed(entry)]
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+# The onefile exe carries everything inside itself; the onedir one carries
+# only the scripts, with the binaries and data beside it in _internal\
+# (COLLECT, at the bottom).
+_bundled = [] if _ONEDIR else [a.binaries, a.zipfiles, a.datas]
 
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
+    *_bundled,
     [],
+    exclude_binaries=_ONEDIR,
     name="snipux",
     debug=False,
     bootloader_ignore_signals=False,
@@ -101,3 +159,15 @@ exe = EXE(
     entitlements_file=None,
     icon=str(_icon_path) if _icon_path.is_file() else None,
 )
+
+if _ONEDIR:
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="snipux",
+    )

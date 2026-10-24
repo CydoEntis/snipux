@@ -5,6 +5,47 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **On Windows, snips were wrong when monitors use different scaling** (say
+  a laptop at 150% beside a monitor at 100%). The frozen screen could show a
+  black strip and sit out of line with the real monitors, and a snip could
+  come out blurred. Each monitor now gets its own frozen image at its own
+  sharpness, and a snip has that monitor's real pixels.
+- **Ctrl+C now copies the snip.** It used to pick the Callout tool and copy
+  nothing, so whatever was on the clipboard before stayed there. Ctrl, Alt
+  and Win chords no longer switch tools.
+- **"Checking for updates…" could be the last thing you saw.** A reply from
+  GitHub cut off halfway stopped the check without a word. It now says it
+  could not check.
+- **The snip hotkey could stop working until Snipux was restarted** after a
+  recording failed to stop cleanly, or a delayed snip failed to come back.
+  The next press now works.
+- **Errors no longer happen silently.** When something goes wrong, Snipux
+  now says so in a notification and points to the crash log, instead of
+  appearing to ignore the hotkey.
+- **A save that fails no longer says "Copied to clipboard".** It says the
+  save failed and why, and puts the snip on the clipboard so it isn't lost.
+
+### Changed
+
+- **Snips open faster on Windows** — about a quarter of a second sooner on
+  every snip, and the first snip after starting Snipux is no slower than
+  the rest.
+- **Snipux starts much faster on Windows when installed with the
+  installer.** It used to unpack about 120 MB into a temporary folder every
+  time it started, which took one to two seconds. The installer now puts
+  those files in place once, so starting takes a fraction of a second. The
+  portable `snipux.exe` still unpacks on every start, but it is about 15 MB
+  smaller and starts a little faster too.
+
+### Removed
+
+- **Copy text** (the button and the X key that put the words in a snip on
+  the clipboard). It was easy to set off by accident and leave text on the
+  clipboard where the picture should have been. Hide sensitive still reads
+  text the same way.
+
 ## 1.2.2 — 2026-10-23
 
 ### Fixed

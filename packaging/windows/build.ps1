@@ -3,9 +3,15 @@
 #
 #   powershell -File packaging\windows\build.ps1
 #
-# Produces dist\snipux.exe, one of the two Windows release artifacts --
-# build_installer.ps1 beside this wraps it in snipux-setup-<version>.exe and
-# ships both, because Smart App Control blocks an unsigned installer
+# Produces two builds of the same app from snipux.spec:
+#
+#   dist\snipux.exe           the portable download, one self-unpacking file
+#   dist\snipux\snipux.exe    onedir, its libraries in dist\snipux\_internal\
+#
+# build_installer.ps1 beside this wraps the onedir tree in
+# snipux-setup-<version>.exe -- installed, nothing has to be unpacked into
+# %TEMP% before every launch (snipux.spec says what that costs) -- and the
+# release ships the portable exe beside it, because Smart App Control blocks an unsigned installer
 # outright on a meaningful share of clean Windows 11 installs and the
 # portable exe is what those machines can still run (docs/releasing.md).
 # The exe installs itself --
@@ -63,10 +69,11 @@ try {
     # is the single most likely way this step fails, so say so rather than
     # leaving the caller with a raw PermissionError.
     $ExePath = Join-Path $RepoRoot 'dist\snipux.exe'
+    $OnedirExePath = Join-Path $RepoRoot 'dist\snipux\snipux.exe'
     $Running = Get-Process -Name snipux -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -eq $ExePath }
+        Where-Object { $_.Path -eq $ExePath -or $_.Path -eq $OnedirExePath }
     if ($Running) {
-        throw ("$ExePath is running (pid $($Running.Id -join ', ')) and cannot " +
+        throw ("$($Running[0].Path) is running (pid $($Running.Id -join ', ')) and cannot " +
                "be overwritten. Close Snipux from its tray icon, or stop it " +
                "with: Stop-Process -Name snipux")
     }
@@ -80,11 +87,19 @@ try {
     # sidesteps the block entirely: the identical reasoning the README
     # gives for preferring pipx over the standalone exe on a Smart App
     # Control machine, applied to the build step itself.
-    Invoke-Checked "pyinstaller" {
-        python -m PyInstaller packaging/windows/snipux.spec --noconfirm
+    # Separate work directories, so neither build reuses or clobbers the
+    # other's cached intermediate files -- both name their exe snipux.exe.
+    Invoke-Checked "pyinstaller (onefile)" {
+        python -m PyInstaller packaging/windows/snipux.spec --noconfirm `
+            --workpath build/pyinstaller-onefile
+    }
+    Invoke-Checked "pyinstaller (onedir)" {
+        python -m PyInstaller packaging/windows/snipux.spec --noconfirm `
+            --workpath build/pyinstaller-onedir -- --onedir
     }
 
     Write-Host "Built $ExePath"
+    Write-Host "Built $OnedirExePath"
 }
 finally {
     Pop-Location

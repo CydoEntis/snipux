@@ -20,7 +20,7 @@ import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from jeepney import DBusAddress, MatchRule, MessageType, new_method_call
 from jeepney.io.blocking import open_dbus_connection
@@ -41,11 +41,23 @@ class Frame:
     `logical_size` under display scaling. The ratio between them is derived
     per-axis in `crop()` rather than trusted from a reported DPI value,
     because fractional scaling setups misreport it (see CLAUDE.md).
+
+    `screen_frames` is empty unless the screens differ in scale. One image
+    holds one pixel density, so a desktop with a 150% laptop beside a 100%
+    monitor cannot keep both at their own resolution in `image`: that is
+    composited at the densest screen's scale (so nothing loses detail) and
+    every screen's own grab, at its native resolution, is kept here as a
+    `Frame` of its own logical rect. `crop()` takes from whichever one holds
+    the whole rect, so a snip inside one monitor comes back as that
+    monitor's real pixels rather than a resample of them, and a non-empty
+    tuple is also how `overlay.open_overlay` knows no single window can
+    show this frame correctly.
     """
 
     image: QImage
     logical_origin: QPointF
     logical_size: QSizeF
+    screen_frames: "tuple[Frame, ...]" = field(default_factory=tuple)
 
     def crop(self, logical_rect: QRectF) -> "Frame":
         """Return a new `Frame` covering `logical_rect` of this frame.
@@ -60,7 +72,17 @@ class Frame:
         on each axis) rather than one scalar, since nothing guarantees the
         two axes scale identically — a single shared ratio would silently
         produce wrong crops on a mixed-DPI multi-monitor setup.
+
+        A rect that lies wholly on one of `screen_frames` is cut from that
+        screen's own native image instead (see the class docstring); only a
+        rect straddling screens of different scale falls back to the
+        composite.
         """
+        for screen_frame in self.screen_frames:
+            screen_rect = QRectF(screen_frame.logical_origin, screen_frame.logical_size)
+            if screen_rect.contains(logical_rect):
+                return screen_frame.crop(logical_rect)
+
         scale_x = self.image.width() / self.logical_size.width()
         scale_y = self.image.height() / self.logical_size.height()
 
@@ -303,6 +325,80 @@ def _grab_all_screens_composited(ratio: float) -> Frame:
     painter.end()
 
     return Frame(image=image, logical_origin=origin, logical_size=virtual_rect.size())
+
+
+def _screens_differ_in_scale() -> bool:
+    """Whether the screens Qt reports do not all share one devicePixelRatio
+    -- the case a single composited image at one ratio cannot represent."""
+    return len({screen.devicePixelRatio() for screen in QGuiApplication.screens()}) > 1
+
+
+def _frame_from_screen_images(shots: "list[tuple[QRectF, QImage]]") -> Frame:
+    """A `Frame` from each screen's own native-resolution image, keyed by
+    that screen's absolute logical rect -- for a desktop whose screens
+    differ in scale (see `Frame`'s docstring).
+
+    The composite is drawn at the highest pixel density any screen actually
+    delivered (image pixels per logical unit, measured from the images
+    rather than trusted from a reported DPI), so the densest screen is
+    copied 1:1 and the others are upscaled rather than any one being shrunk.
+    Logical rects need not tile: Qt6 on Windows keeps each screen's native
+    top-left as its logical position and only divides the size, so a 150%
+    screen left of a 100% one leaves a strip of the union belonging to no
+    screen. That strip stays black in the composite, and nothing shows it:
+    `screen_frames` is what each monitor's overlay is cut from.
+    """
+    union = QRectF()
+    ratio = 1.0
+    for logical_rect, image in shots:
+        union = logical_rect if union.isEmpty() else union.united(logical_rect)
+        ratio = max(
+            ratio,
+            image.width() / logical_rect.width(),
+            image.height() / logical_rect.height(),
+        )
+    origin = union.topLeft()
+
+    composite = QImage(
+        round(union.width() * ratio),
+        round(union.height() * ratio),
+        QImage.Format.Format_RGB32,
+    )
+    composite.fill(0)
+    screen_frames = []
+    painter = QPainter(composite)
+    # Smooth: the lower-density screens are upscaled into this image, and a
+    # nearest-neighbour 1.5x leaves every other row and column doubled.
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    for logical_rect, image in shots:
+        target = QRectF(
+            (logical_rect.x() - origin.x()) * ratio,
+            (logical_rect.y() - origin.y()) * ratio,
+            logical_rect.width() * ratio,
+            logical_rect.height() * ratio,
+        )
+        painter.drawImage(target, image, QRectF(image.rect()))
+        native = image.convertToFormat(QImage.Format.Format_RGB32)
+        # 1.0 like every other Frame image: the scale lives in the ratio of
+        # pixels to `logical_size`, never in a QImage's own devicePixelRatio,
+        # which `grabWindow` sets to the screen's.
+        native.setDevicePixelRatio(1.0)
+        screen_frames.append(
+            Frame(
+                image=native,
+                logical_origin=logical_rect.topLeft(),
+                logical_size=logical_rect.size(),
+            )
+        )
+    # Closed before the Frame is built, per CLAUDE.md.
+    painter.end()
+
+    return Frame(
+        image=composite,
+        logical_origin=origin,
+        logical_size=union.size(),
+        screen_frames=tuple(screen_frames),
+    )
 
 
 class QtNativeX11Backend(CaptureBackend):
@@ -1390,8 +1486,23 @@ class QtNativeWindowsBackend(CaptureBackend):
         return None if self.is_available() else "not running on Windows"
 
     def capture(self) -> Frame:
+        if _screens_differ_in_scale():
+            return self._capture_mixed_scale()
         ratio = QGuiApplication.primaryScreen().devicePixelRatio()
         return _grab_all_screens_composited(ratio)
+
+    def _capture_mixed_scale(self) -> Frame:
+        """Each screen's `grabWindow(0)` kept at its own native size, for
+        `_frame_from_screen_images` -- compositing them at the primary's one
+        ratio, as the uniform path does, resampled every other screen and
+        put it at the wrong place in the image."""
+        shots = []
+        for screen in QGuiApplication.screens():
+            pixmap = screen.grabWindow(0)
+            if pixmap.isNull():
+                raise RuntimeError("qt-native: grabWindow returned an empty image for a screen")
+            shots.append((QRectF(screen.geometry()), pixmap.toImage()))
+        return _frame_from_screen_images(shots)
 
 
 class _BitmapInfoHeader(ctypes.Structure):
@@ -1473,12 +1584,41 @@ class Win32GdiBackend(CaptureBackend):
         if image.isNull():
             raise RuntimeError("win32-gdi: produced an unreadable image")
 
+        if _screens_differ_in_scale():
+            return self._split_by_monitor(image, QPointF(phys_x, phys_y))
+
         virtual_rect = _virtual_desktop_geometry()
         return Frame(
             image=image,
             logical_origin=virtual_rect.topLeft(),
             logical_size=virtual_rect.size(),
         )
+
+    def _split_by_monitor(self, image: QImage, image_origin_physical: QPointF) -> Frame:
+        """Cut the one physical-pixel blit into each monitor's native image
+        and pair it with that screen's logical rect.
+
+        Needed only when screens differ in scale: the blit is physical
+        pixels throughout, and Qt's logical union is no uniform division of
+        it then (screens keep their native top-left, sizes shrink by each
+        one's own scale), so pairing the whole blit with that union -- as
+        the uniform case does -- would put every crop in the wrong place.
+        Raises when the monitors cannot be matched to Qt's screens with
+        confidence, so the registry reports this backend as failed rather
+        than handing back a frame that looks right and crops wrong.
+        """
+        mapping = WindowsWindowGeometryProvider().monitor_map()
+        if not mapping:
+            raise RuntimeError(
+                "win32-gdi: screens differ in scale and the monitors could not be "
+                "matched to Qt's screens"
+            )
+        shots = []
+        for physical, logical, _scale in mapping:
+            # Physical virtual-screen coords -> pixels of this blit.
+            in_image = physical.translated(-image_origin_physical).toRect()
+            shots.append((logical, image.copy(in_image)))
+        return _frame_from_screen_images(shots)
 
     def _blit_to_image(self, gdi32, screen_dc, x, y, width, height) -> QImage:
         mem_dc = gdi32.CreateCompatibleDC(screen_dc)

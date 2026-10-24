@@ -16,6 +16,7 @@ from PyQt6.QtGui import (
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QPixmap,
     QRegion,
     qRgb,
 )
@@ -251,6 +252,10 @@ class _FakeWindowsDwmapi:
             return 0
         target = ctypes.cast(out_ref, ctypes.POINTER(capture_module._RECT)).contents
         target.left, target.top, target.right, target.bottom = self._bounds
+        return 0
+
+    def DwmSetWindowAttribute(self, hwnd, attribute, value_ref, _size):
+        # The overlay turns its own open animation off as it is built.
         return 0
 
 
@@ -2606,10 +2611,9 @@ class TestToast:
 
 
 class TestFloatingBarComposition:
-    """The stills bar is one row: the split action, a divider, Copy text, a
-    divider, eight tool slots, a divider, the style dot, a divider, then
-    undo and clear -- docs/design/bars/README.md section 2, with Copy text
-    added past it (#82; see FloatingBar's own docstring). Built from real
+    """The stills bar is one row: the split action, a divider, eight tool
+    slots, a divider, the style dot, a divider, then undo and clear --
+    docs/design/bars/README.md section 2. Built from real
     widgets rather than painted, so tooltips and hover come for free
     (TestFloatingBarTooltips below covers the tooltip half).
     """
@@ -2625,13 +2629,13 @@ class TestFloatingBarComposition:
 
         buttons = bar.findChildren(QPushButton)
 
-        # 8 slots + Copy text + the watermark + undo + clear == 12 on the
+        # 8 slots + the watermark + undo + clear == 11 on the
         # overlay's bar. The destinations are one split action and the
         # style dot is a widget of its own, neither a QPushButton; the mode
         # chip and redo are built but not placed, since the handoff's
         # post-selection bar carries neither.
         visible = [button for button in buttons if not button.isHidden()]
-        assert len(visible) == 12
+        assert len(visible) == 11
         assert bar._action is not None
         assert bar._chip.isHidden()
         assert bar._redo_button.isHidden()
@@ -2644,9 +2648,6 @@ class TestFloatingBarComposition:
         assert bar._action is None
         assert bar._copy_button is not None
         assert bar._save_button is not None
-        # No fresh selection to read text out of -- see FloatingBar's own
-        # docstring on why Copy text is absent here.
-        assert bar._copy_text_button is None
 
     def test_slots_run_in_the_handoffs_order(self):
         # A gradient of consequence, never reordered: muscle memory is the
@@ -2663,20 +2664,18 @@ class TestFloatingBarComposition:
         row = [
             bar._action,
             dividers[0],
-            bar._copy_text_button,
-            dividers[1],
             *bar._tool_buttons.values(),
-            dividers[2],
+            dividers[1],
             bar._style_dot,
             bar._watermark,
-            dividers[3],
+            dividers[2],
             bar._undo_button,
             bar._clear_button,
         ]
 
         lefts = [widget.geometry().x() for widget in row]
 
-        assert len(dividers) == 4
+        assert len(dividers) == 3
         assert lefts == sorted(set(lefts))
 
     def test_the_review_windows_bar_adds_only_its_chip_and_redo(self):
@@ -9070,6 +9069,129 @@ class TestOpenOverlay:
         assert sorted(member._frame.image.width() for member in members) == [200, 200]
 
 
+def _tagged_image(width: int, height: int, blue: int) -> QImage:
+    """Distinct pixels, tagged per screen in blue -- a black gap reads as
+    blue 0, a resample as a pixel that no longer matches its source."""
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    for x in range(width):
+        for y in range(height):
+            image.setPixel(x, y, qRgb(x % 256, y % 256, blue))
+    return image
+
+
+class _MixedScaleScreen:
+    """Just what `capture.QtNativeWindowsBackend` asks of a QScreen."""
+
+    def __init__(self, geometry: QRect, ratio: float, native: QImage):
+        self._geometry = geometry
+        self._ratio = ratio
+        self.native = native
+
+    def geometry(self) -> QRect:
+        return self._geometry
+
+    def devicePixelRatio(self) -> float:
+        return self._ratio
+
+    def grabWindow(self, window_id):
+        pixmap = QPixmap.fromImage(self.native)
+        pixmap.setDevicePixelRatio(self._ratio)
+        return pixmap
+
+
+def _capture_on(monkeypatch, screens: list[_MixedScaleScreen]) -> Frame:
+    """A frame from the real Windows Qt backend, grabbing `screens`."""
+    monkeypatch.setattr(
+        capture_module,
+        "QGuiApplication",
+        SimpleNamespace(screens=lambda: screens, primaryScreen=lambda: screens[0]),
+    )
+    return capture_module.QtNativeWindowsBackend().capture()
+
+
+class TestOpenOverlayMixedScale:
+    """Windows with a 150% laptop as primary and a 100% monitor to its
+    right. Qt6 keeps each screen's native top-left as its logical position,
+    so the laptop is logical 200x100 at 0 and the monitor starts at native
+    x 300: logical x 200..300 is no screen's. One window over that union
+    showed a black strip and could not sit on both monitors' pixels.
+
+    The frame comes from the real capture backend over faked screens, so
+    this is the path a snip takes, not a hand-built Frame.
+    """
+
+    LAPTOP = QRectF(0, 0, 200, 100)
+    MONITOR = QRectF(300, 0, 200, 100)
+
+    def _open(self, monkeypatch, **kwargs):
+        screens = [
+            _MixedScaleScreen(self.LAPTOP.toRect(), 1.5, _tagged_image(300, 150, blue=120)),
+            _MixedScaleScreen(self.MONITOR.toRect(), 1.0, _tagged_image(200, 100, blue=240)),
+        ]
+        frame = _capture_on(monkeypatch, screens)
+        result = open_overlay(frame, [self.LAPTOP, self.MONITOR], wayland=False, **kwargs)
+        members = {
+            (widget._frame.logical_origin.x(), widget._frame.logical_origin.y()): widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow)
+            and widget.isVisible()
+            and widget._on_dismissed is result._on_dismissed
+        }
+        return screens, result, members
+
+    def test_each_monitor_gets_its_own_window_over_its_own_rect(self, monkeypatch):
+        _screens, _result, members = self._open(monkeypatch)
+
+        assert sorted(members) == [(0, 0), (300, 0)]
+        assert QRectF(members[(0, 0)].geometry()) == self.LAPTOP
+        assert QRectF(members[(300, 0)].geometry()) == self.MONITOR
+
+    def test_each_window_shows_its_own_screens_native_pixels(self, monkeypatch):
+        screens, _result, members = self._open(monkeypatch)
+
+        for screen, origin in zip(screens, [(0, 0), (300, 0)]):
+            shown = members[origin]._frame.image.convertToFormat(QImage.Format.Format_RGB32)
+            assert shown == screen.native.convertToFormat(QImage.Format.Format_RGB32)
+
+    def test_no_window_paints_a_black_gap(self, monkeypatch):
+        _screens, _result, members = self._open(monkeypatch)
+
+        for origin, blue in [((0, 0), 120), ((300, 0), 240)]:
+            painted = members[origin].grab().toImage()
+            # The bottom row, clear of the chooser and the close button.
+            row = painted.height() - 2
+            blues = {QColor(painted.pixel(x, row)).blue() for x in range(painted.width())}
+            assert 0 not in blues
+            # Dimmed or not, every pixel is this screen's, not the other's.
+            assert max(blues) <= blue
+
+    def test_a_snip_on_the_150_percent_screen_has_its_native_pixels(self, monkeypatch):
+        screens, _result, members = self._open(monkeypatch)
+        laptop = members[(0, 0)]
+
+        laptop.set_selection(QRect(20, 10, 100, 60))
+        image = laptop.rendered_image().convertToFormat(QImage.Format.Format_RGB32)
+
+        assert (image.width(), image.height()) == (150, 90)
+        assert image == screens[0].native.copy(QRect(30, 15, 150, 90)).convertToFormat(
+            QImage.Format.Format_RGB32
+        )
+
+    def test_a_uniform_scale_desktop_keeps_the_single_window(self, monkeypatch):
+        screens = [
+            _MixedScaleScreen(QRect(0, 0, 200, 100), 1.0, _tagged_image(200, 100, blue=120)),
+            _MixedScaleScreen(QRect(200, 0, 200, 100), 1.0, _tagged_image(200, 100, blue=240)),
+        ]
+        frame = _capture_on(monkeypatch, screens)
+
+        result = open_overlay(
+            frame, [QRectF(0, 0, 200, 100), QRectF(200, 0, 200, 100)], wayland=False
+        )
+
+        assert result._frame is frame
+        assert QRectF(result.geometry()) == QRectF(0, 0, 400, 100)
+
+
 # ---------------------------------------------------------------------------
 # Chrome on a staggered multi-monitor desktop
 # ---------------------------------------------------------------------------
@@ -9374,194 +9496,6 @@ class TestHideSensitiveText:
         assert overlay._chooser.hide_sensitive_available is False
         overlay._chooser._on_control_hovered(overlay._chooser.row.hide_flag, True)
         assert overlay._chooser.hint.text == "Windows only for now"
-
-
-class TestCopyText:
-    """Copy text (#82): its own action on the floating bar, not a fourth
-    destination -- see FloatingBar's own docstring and OverlayWindow.
-    copy_text. Driven through a faked recognizer, the same way
-    TestHideSensitiveText above is, so nothing here depends on the machine
-    actually having OCR.
-    """
-
-    SELECTION = QRect(100, 50, 400, 300)
-
-    @pytest.fixture(autouse=True)
-    def _clean_slate(self):
-        _close_stray_toplevel_windows()
-
-    @pytest.fixture
-    def recognizer(self, monkeypatch):
-        """Replaces the platform's text recognition. `lines` is what it
-        returns, each a list of (text, x, y, w, h) words already in
-        reading order, the way OCR hands words back within one line."""
-        state = SimpleNamespace(
-            available=True,
-            reason="",
-            lines=[
-                [("Hello,", 0, 0, 60, 20), ("world.", 70, 0, 60, 20)],
-                [("Second", 0, 30, 70, 20), ("line.", 80, 30, 50, 20)],
-            ],
-        )
-        current = overlay_module.platform.current
-
-        def recognize_text(image):
-            return [
-                [RecognizedWord(text, QRectF(x, y, w, h)) for text, x, y, w, h in line]
-                for line in state.lines
-            ]
-
-        monkeypatch.setattr(current, "recognizes_text", lambda: state.available)
-        monkeypatch.setattr(current, "text_recognition_unavailable_reason", lambda: state.reason)
-        monkeypatch.setattr(current, "recognize_text", recognize_text)
-        return state
-
-    def _overlay(self):
-        frame = make_frame(image_size=(1600, 1000), logical_size=(1600, 1000))
-        overlay = OverlayWindow(frame)
-        overlay.set_selection(self.SELECTION)
-        return overlay
-
-    def test_lines_come_back_in_reading_order_one_per_line(self, recognizer, monkeypatch):
-        copied = []
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", copied.append)
-        overlay = self._overlay()
-
-        overlay.copy_text()
-
-        assert copied == ["Hello, world.\nSecond line."]
-
-    def test_the_toast_says_how_many_lines_came_back(self, recognizer, monkeypatch):
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", lambda text: None)
-        overlay = self._overlay()
-        said = []
-        overlay._show_toast = lambda icon, text: said.append(text)
-
-        overlay.copy_text()
-
-        assert said == ["Copied 2 lines"]
-
-    def test_a_single_line_is_not_pluralised(self, recognizer, monkeypatch):
-        recognizer.lines = [[("Solo", 0, 0, 40, 20)]]
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", lambda text: None)
-        overlay = self._overlay()
-        said = []
-        overlay._show_toast = lambda icon, text: said.append(text)
-
-        overlay.copy_text()
-
-        assert said == ["Copied 1 line"]
-
-    def test_finding_nothing_says_so_and_leaves_the_clipboard_alone(self, recognizer, monkeypatch):
-        recognizer.lines = []
-        copied = []
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", copied.append)
-        overlay = self._overlay()
-        said = []
-        overlay._show_toast = lambda icon, text: said.append(text)
-
-        overlay.copy_text()
-
-        assert copied == []
-        assert said == ["No text found"]
-
-    def test_a_line_seen_in_both_reads_is_kept_once(self, recognizer, monkeypatch):
-        # windows_ocr reads a small selection twice, at its own size and
-        # doubled, and hands both reads' lines back one after another --
-        # the same duplication TestHideSensitiveText's own
-        # test_the_same_value_found_by_both_reads_is_one_box_covering_both
-        # covers for the redaction-box side of this.
-        recognizer.lines = [
-            [("Hello,", 0, 0, 60, 20), ("world.", 70, 0, 60, 20)],
-            [("Hello,", 0, 0, 60, 20), ("world.", 70, 0, 60, 20)],
-        ]
-        copied = []
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", copied.append)
-        overlay = self._overlay()
-
-        overlay.copy_text()
-
-        assert copied == ["Hello, world."]
-
-    def test_the_recognizer_reads_the_selection_at_full_resolution(self, recognizer, monkeypatch):
-        # The same crop Hide sensitive hands the engine -- not
-        # rendered_image(), which flattens ink onto it (see copy_text's
-        # own docstring).
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", lambda text: None)
-        overlay = self._overlay()
-        seen = []
-        monkeypatch.setattr(
-            overlay_module.platform.current,
-            "recognize_text",
-            lambda image: seen.append(QImage(image)) or [],
-        )
-
-        overlay.copy_text()
-
-        [image] = seen
-        assert (image.width(), image.height()) == (400, 300)
-
-    def test_the_bar_greys_copy_text_with_the_platforms_reason(self, recognizer):
-        recognizer.available = False
-        recognizer.reason = "Windows only for now"
-
-        overlay = self._overlay()
-
-        assert overlay._bar.copy_text_available is False
-        assert overlay._bar._copy_text_button.unavailable_reason == "Windows only for now"
-
-    def test_the_button_click_is_refused_while_the_platform_cannot(self, recognizer, monkeypatch):
-        recognizer.available = False
-        recognizer.reason = "Windows only for now"
-        copied = []
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", copied.append)
-        overlay = self._overlay()
-        said = []
-        overlay._show_toast = lambda icon, text: said.append(text)
-
-        # Not setEnabled(False) -- the tooltip explaining why must survive
-        # (_CopyTextButton's own docstring) -- so the click still reaches
-        # Qt; it is FloatingBar._on_copy_text_pressed that refuses it.
-        overlay._bar._copy_text_button.click()
-
-        assert copied == []
-        assert said == []
-
-    def test_the_key_is_refused_while_the_platform_cannot(self, recognizer, monkeypatch):
-        recognizer.available = False
-        recognizer.reason = "Windows only for now"
-        copied = []
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", copied.append)
-        overlay = self._overlay()
-        said = []
-        overlay._show_toast = lambda icon, text: said.append(text)
-
-        QTest.keyClick(overlay, Qt.Key.Key_X)
-
-        # A greyed button refuses its own click, and the key refuses it the
-        # same way -- neither the clipboard nor the toast moves at all.
-        assert copied == []
-        assert said == []
-
-    def test_the_key_copies_text_and_ends_the_snip(self, recognizer, monkeypatch):
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", lambda text: None)
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-
-        QTest.keyClick(overlay, Qt.Key.Key_X)
-
-        assert not overlay.isVisible()
-
-    def test_the_button_click_copies_text_and_ends_the_snip(self, recognizer, monkeypatch):
-        monkeypatch.setattr(output_module, "copy_text_to_clipboard", lambda text: None)
-        overlay = self._overlay()
-        overlay.show()
-        QTest.qWaitForWindowExposed(overlay)
-
-        overlay._bar.copyTextRequested.emit()
-
-        assert not overlay.isVisible()
 
 
 class _FakeBrowserProvider(UnsupportedGeometryProvider):
@@ -14037,6 +13971,40 @@ class TestKeysReachTheOverlayNotItsButtons:
         QTest.keyClick(QApplication.focusWidget() or overlay, Qt.Key.Key_Return)
 
         assert QGuiApplication.clipboard().image().size() == QSize(300, 200)
+
+    def test_ctrl_c_copies_the_snip_and_ends_it(self):
+        overlay = _styled_overlay(selection=QRect(400, 200, 300, 200))
+        overlay.show()
+        QGuiApplication.clipboard().clear()
+
+        QTest.keyClick(overlay, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+
+        assert QGuiApplication.clipboard().image().size() == QSize(300, 200)
+        assert not overlay.isVisible()
+
+    @pytest.mark.parametrize("letter", [Qt.Key.Key_S, Qt.Key.Key_T, Qt.Key.Key_R])
+    def test_a_ctrl_chord_does_not_switch_tools(self, letter):
+        overlay = _styled_overlay(selection=QRect(400, 200, 300, 200))
+        before = overlay._bar.active_tool
+
+        QTest.keyClick(overlay, letter, Qt.KeyboardModifier.ControlModifier)
+
+        assert overlay._bar.active_tool == before
+
+    def test_altgr_brackets_still_step_the_stroke(self):
+        # Windows reports AltGr as Ctrl+Alt, and on German and French
+        # layouts that is the only way to type [ and ].
+        overlay = _styled_overlay(selection=QRect(400, 200, 300, 200))
+        overlay._bar.select_tool("pen")
+        before = overlay._style_popover._styles.of("pen").size
+
+        QTest.keyClick(
+            overlay,
+            Qt.Key.Key_BracketRight,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier,
+        )
+
+        assert overlay._style_popover._styles.of("pen").size == before + 1
 
     def test_a_hidden_label_hands_focus_back_to_the_overlay(self):
         # Hiding a focused field is what commits it; with no button to take

@@ -8,7 +8,7 @@ from unittest.mock import Mock
 from jeepney import HeaderFields
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF
-from PyQt6.QtGui import QColor, QImage, QPixmap, qRgb
+from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap, qRgb
 from PyQt6.QtWidgets import QApplication
 
 import pytest
@@ -1829,6 +1829,149 @@ class TestWin32GdiBackend:
         _patch_win32_dll(monkeypatch, user32, gdi32)
 
         with pytest.raises(RuntimeError, match="GetSystemMetrics"):
+            capture.Win32GdiBackend().capture()
+
+
+def _patterned_image(width: int, height: int, blue: int) -> QImage:
+    """Every pixel distinct within a 256 block, plus a per-screen `blue`
+    tag: any resample or misplacement shows up as a pixel that differs."""
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    for x in range(width):
+        for y in range(height):
+            image.setPixel(x, y, qRgb(x % 256, y % 256, blue))
+    return image
+
+
+def _same_pixels(a: QImage, b: QImage) -> bool:
+    return a.convertToFormat(QImage.Format.Format_RGB32) == b.convertToFormat(
+        QImage.Format.Format_RGB32
+    )
+
+
+class _GrabbingScreen(_FakeScreen):
+    """A screen whose grab is a given native-resolution image, the way
+    Qt6's `grabWindow(0)` returns physical pixels tagged with the
+    screen's devicePixelRatio."""
+
+    def __init__(self, geometry: QRect, ratio: float, native: QImage):
+        super().__init__(geometry, ratio)
+        self.native = native
+
+    def grabWindow(self, window_id):
+        pixmap = QPixmap.fromImage(self.native)
+        pixmap.setDevicePixelRatio(self._ratio)
+        return pixmap
+
+
+def _mixed_scale_screens() -> list[_GrabbingScreen]:
+    """A 150% laptop as primary with a 100% monitor to its right, laid out
+    the way Qt6 on Windows reports it: the laptop's 300x150 physical pixels
+    become a 200x100 logical rect at its native top-left, and the monitor
+    keeps its native x of 300 -- leaving logical x 200..300 owned by no
+    screen at all."""
+    return [
+        _GrabbingScreen(QRect(0, 0, 200, 100), 1.5, _patterned_image(300, 150, blue=10)),
+        _GrabbingScreen(QRect(300, 0, 200, 100), 1.0, _patterned_image(200, 100, blue=200)),
+    ]
+
+
+class TestMixedScaleWindowsCapture:
+    """Monitors at different scale factors on Windows: one image at one
+    ratio cannot hold both at their own resolution, so each screen's own
+    grab must survive into the Frame, and a crop on one screen must come
+    back as that screen's real pixels."""
+
+    def _capture(self, monkeypatch, screens):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        return capture.QtNativeWindowsBackend().capture()
+
+    def test_a_crop_on_the_150_percent_screen_is_its_native_pixels(self, monkeypatch):
+        screens = _mixed_scale_screens()
+        frame = self._capture(monkeypatch, screens)
+
+        cropped = frame.crop(QRectF(20, 10, 100, 60))
+
+        assert cropped.image.size().width() == 150
+        assert cropped.image.size().height() == 90
+        assert _same_pixels(cropped.image, screens[0].native.copy(QRect(30, 15, 150, 90)))
+
+    def test_each_whole_screen_crops_to_its_own_grab_unresampled(self, monkeypatch):
+        screens = _mixed_scale_screens()
+        frame = self._capture(monkeypatch, screens)
+
+        laptop = frame.crop(QRectF(0, 0, 200, 100))
+        monitor = frame.crop(QRectF(300, 0, 200, 100))
+
+        assert _same_pixels(laptop.image, screens[0].native)
+        assert _same_pixels(monitor.image, screens[1].native)
+        assert monitor.logical_origin == QPointF(300, 0)
+
+    def test_the_composite_keeps_the_densest_screens_detail(self, monkeypatch):
+        # The 100% monitor as primary: its ratio alone would shrink the
+        # laptop's 300x150 pixels into 200x100 and lose a third of them.
+        laptop, monitor = _mixed_scale_screens()
+        frame = self._capture(monkeypatch, [monitor, laptop])
+
+        # Union 500x100 logical at the laptop's 1.5.
+        assert frame.logical_size == QSizeF(500, 100)
+        assert (frame.image.width(), frame.image.height()) == (750, 150)
+        # The 100% monitor lands at its own logical x (300 -> 450 pixels).
+        assert QColor(frame.image.pixel(460, 75)).blue() == 200
+        assert QColor(frame.image.pixel(10, 75)).blue() == 10
+
+    def test_a_uniform_scale_desktop_carries_no_per_screen_images(self, monkeypatch):
+        screens = [
+            _FakeScreen(QRect(-2560, -1440, 2560, 1440)),
+            _FakeScreen(QRect(0, 0, 2560, 1440)),
+        ]
+        frame = self._capture(monkeypatch, screens)
+
+        assert frame.screen_frames == ()
+
+    def test_gdi_splits_its_physical_blit_into_each_monitor(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        screens = _mixed_scale_screens()
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        # One physical virtual screen: laptop 300x150 at 0, monitor 200x100
+        # at native x 300.
+        blit = QImage(500, 150, QImage.Format.Format_RGB32)
+        blit.fill(0)
+        painter = QPainter(blit)
+        painter.drawImage(0, 0, screens[0].native)
+        painter.drawImage(300, 0, screens[1].native)
+        painter.end()
+        monkeypatch.setattr(
+            capture.Win32GdiBackend, "_blit_to_image", lambda self, *args: blit
+        )
+        monkeypatch.setattr(
+            WindowsWindowGeometryProvider,
+            "monitor_map",
+            lambda self: [
+                (QRectF(0, 0, 300, 150), QRectF(0, 0, 200, 100), 1.5),
+                (QRectF(300, 0, 200, 100), QRectF(300, 0, 200, 100), 1.0),
+            ],
+        )
+        _patch_win32_dll(
+            monkeypatch, _FakeUser32({76: 0, 77: 0, 78: 500, 79: 150}), _FakeGdi32()
+        )
+
+        frame = capture.Win32GdiBackend().capture()
+
+        assert _same_pixels(frame.crop(QRectF(0, 0, 200, 100)).image, screens[0].native)
+        assert _same_pixels(frame.crop(QRectF(300, 0, 200, 100)).image, screens[1].native)
+
+    def test_gdi_refuses_mixed_scale_it_cannot_map(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            capture, "QGuiApplication", _FakeQGuiApplication(_mixed_scale_screens())
+        )
+        monkeypatch.setattr(WindowsWindowGeometryProvider, "monitor_map", lambda self: [])
+        _patch_win32_dll(
+            monkeypatch, _FakeUser32({76: 0, 77: 0, 78: 500, 79: 150}), _FakeGdi32()
+        )
+
+        with pytest.raises(RuntimeError, match="differ in scale"):
             capture.Win32GdiBackend().capture()
 
 

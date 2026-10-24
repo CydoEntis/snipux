@@ -2,7 +2,8 @@
 ;
 ; Built by packaging/windows/build_installer.ps1, which builds snipux.exe
 ; first and passes the version in as /DAppVersion. Running ISCC on this file
-; by hand works too, provided dist\snipux.exe already exists.
+; by hand works too, provided the onedir build (dist\snipux\snipux.exe and
+; dist\snipux\_internal\) already exists.
 ;
 ; SNX-97 built an installer, SNX-104 deleted it, and this brings one back
 ; deliberately. The reason it was deleted still stands and is worth stating
@@ -74,8 +75,20 @@ UninstallDisplayIcon={app}\snipux.exe
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[InstallDelete]
+; The previous version's libraries. Overwriting the tree in place would
+; leave behind every file this version no longer ships -- a Qt plugin
+; dropped from the build is still loaded if it is still in the folder.
+; Only _internal: the rest of {app} holds the uninstaller and what snipux
+; writes there itself. An older onefile install has no _internal, so this
+; is a no-op for it, and its snipux.exe is simply replaced below.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
-Source: "..\..\dist\snipux.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The onedir build (snipux.spec, `-- --onedir`): snipux.exe with its
+; libraries already unpacked in _internal\ beside it, rather than the
+; portable exe, which unpacks all of them into %TEMP% on every launch.
+Source: "..\..\dist\snipux\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Run]
 ; Launching is what performs setup: the Start Menu entry, the Startup entry,

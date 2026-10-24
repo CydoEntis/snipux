@@ -48,7 +48,6 @@ only once its scope, acceptance criteria and how to verify it are clear.
 
 - [x] `done` Copy, Save, Open (review window), with the choice remembered
 - [x] `done` Instant saves, filename patterns, save folder
-- [x] `done` Copy text: OCR the selection to the clipboard (Windows)
 - [x] `done` Pin a snip on top of the screen (not on Wayland)
 - [x] `done` Recent captures in the tray menu
 - [x] `done` Recent copies in the tray: the last 10 copies, in memory only

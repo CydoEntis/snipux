@@ -154,6 +154,9 @@ _HOTKEY_ID = 1
 # registration bind_shortcut() already owns under _HOTKEY_ID while doing so.
 _CONFLICT_PROBE_ID = 2
 
+# dwmapi.h's DWMWINDOWATTRIBUTE value for "never animate this window".
+_DWMWA_TRANSITIONS_FORCEDISABLED = 3
+
 # The Windows Snipping Tool's own global shortcut (Windows 10 1809+) --
 # already spoken for on every fresh install, whether or not anything else
 # has claimed a hotkey yet, and invisible to a RegisterHotKey probe since it
@@ -554,6 +557,14 @@ def _ensure_stable_copy() -> Path | None:
             return target
     except OSError:
         pass
+
+    # A folder build (what the installer ships) keeps its libraries in
+    # `_internal` beside the exe. Copied alone, the exe could not start, and
+    # it would be written over a working install -- so only the
+    # self-contained single-file build relocates itself.
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle is not None and Path(bundle).resolve() == current.parent / "_internal":
+        return None
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1301,6 +1312,31 @@ class WindowsPlatform(Platform):
             print(f"Note: could not start the update installer: {exc}")
             return False
         return True
+
+    def skip_map_animation(self, widget) -> bool:
+        """Turn off DWM's open/close transition for the overlay, so it can
+        show at once instead of mapping transparent and waiting out
+        `OverlayWindow._REVEAL_DELAY_MS` -- a wait that existed for GNOME's
+        zoom-in and cost every Windows snip 220ms for nothing.
+
+        `winId()` creates the native window here, which is safe: the
+        overlay sets its window flags just before asking, and nothing after
+        that re-creates it. False -- and the old reveal delay -- if DWM
+        refuses, rather than claiming a skip that did not happen.
+        """
+        try:
+            hwnd = int(widget.winId())
+        except (RuntimeError, TypeError, ValueError) as exc:
+            print(f"Note: could not read the window handle to skip its animation: {exc}")
+            return False
+        disabled = ctypes.c_int(1)
+        result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(hwnd),
+            _DWMWA_TRANSITIONS_FORCEDISABLED,
+            ctypes.byref(disabled),
+            ctypes.sizeof(disabled),
+        )
+        return result == 0
 
     def take_keyboard_focus(self, widget) -> bool:
         """Windows refuses `activateWindow()` from a process that is not

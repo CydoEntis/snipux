@@ -121,17 +121,26 @@ jobs:
           python-version: "3.12"
 
       # Both artifacts in one go: build_installer.ps1 runs build.ps1 first,
-      # so the exe inside the installer is always the one this tag produces.
-      # Inno Setup is already on the GitHub Windows image.
+      # so what the installer carries is always what this tag produces --
+      # the onedir build in dist/snipux/, while dist/snipux.exe is the
+      # portable onefile one. Inno Setup is already on the GitHub Windows
+      # image.
       - name: Build the exe and the installer
         run: powershell -ExecutionPolicy Bypass -File packaging/windows/build_installer.ps1
 
       # The same smoke test the Linux bundle gets: a build that cannot start
       # should fail here rather than on the first person to download it.
-      - name: Check the exe runs
+      # Both builds, since they are packed differently and either can break
+      # alone. Start-Process -Wait, because PowerShell does not wait for a
+      # windowed exe started bare, and so would never see it fail.
+      - name: Check the exes run
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ./dist/snipux.exe --list-backends
+        run: |
+          foreach ($exe in "dist/snipux.exe", "dist/snipux/snipux.exe") {
+            $p = Start-Process $exe -ArgumentList "--list-backends" -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -ne 0) { throw "$exe --list-backends exited $($p.ExitCode)" }
+          }
 
       - name: Attach them to the release
         env:
