@@ -27,6 +27,7 @@ user did anything to cause.
 from __future__ import annotations
 
 import dataclasses
+import http.client
 import json
 import pathlib
 import re
@@ -51,6 +52,12 @@ _TIMEOUT_SECONDS = 6.0
 _DOWNLOAD_TIMEOUT_SECONDS = 300.0
 
 _VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)")
+
+# What a request can fail with. `HTTPException` is not an `OSError`: a reply
+# cut off mid-body (`IncompleteRead`) or a garbled status line raises it, and
+# letting it out kills the worker thread before it reports -- the tray then
+# says "Checking for updates..." and nothing ever follows.
+_NETWORK_ERRORS = (OSError, urllib.error.URLError, http.client.HTTPException)
 
 
 def parse_version(text: str) -> tuple[int, ...] | None:
@@ -92,7 +99,7 @@ def fetch_latest_version(opener: Callable[[str], bytes] | None = None) -> str | 
     fetch = opener if opener is not None else _read_latest_release
     try:
         payload = fetch(LATEST_RELEASE_URL)
-    except (OSError, urllib.error.URLError):
+    except _NETWORK_ERRORS:
         return None
 
     try:
@@ -131,7 +138,7 @@ def fetch_latest_release(opener: Callable[[str], bytes] | None = None) -> Releas
     fetch = opener if opener is not None else _read_latest_release
     try:
         payload = fetch(LATEST_RELEASE_URL)
-    except (OSError, urllib.error.URLError):
+    except _NETWORK_ERRORS:
         return None
 
     try:
@@ -166,7 +173,7 @@ def download(url: str, destination: pathlib.Path,
         part.parent.mkdir(parents=True, exist_ok=True)
         part.write_bytes(body)
         part.replace(destination)
-    except (OSError, urllib.error.URLError) as exc:
+    except _NETWORK_ERRORS as exc:
         print(f"Note: could not download the update: {exc}")
         part.unlink(missing_ok=True)
         return False

@@ -149,6 +149,28 @@ class TestUpdateCheckRunsOffTheCallingThread:
         assert seen == [None]
 
 
+    def test_a_reply_cut_off_midway_still_reports(self):
+        # IncompleteRead is not an OSError. Escaping the worker, it would
+        # leave the tray on "Checking for updates..." with nothing after.
+        import http.client
+        from PyQt6.QtCore import QCoreApplication, QEventLoop
+
+        def cut_off(_url):
+            raise http.client.IncompleteRead(b"{\"tag_")
+
+        check = updates.UpdateCheck(cut_off)
+        seen = []
+        check.finished.connect(seen.append)
+
+        check.start()
+        loop_guard = 0
+        while not seen and loop_guard < 200:
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 10)
+            loop_guard += 1
+
+        assert seen == [None]
+
+
 class TestTheReleaseItself:
     def test_it_carries_every_asset_by_name(self):
         payload = json.dumps({
@@ -218,3 +240,14 @@ class TestDownloading:
         updates.download("https://example/x", tmp_path / "setup.exe", refuse)
 
         assert "could not download the update" in capsys.readouterr().out.lower()
+
+
+class TestDownloadingOverABrokenConnection:
+    def test_a_garbled_reply_fails_the_download_instead_of_raising(self, tmp_path):
+        import http.client
+
+        def garbled(_url):
+            raise http.client.BadStatusLine("HTTP/1.1 ???")
+
+        assert updates.download("https://example/x", tmp_path / "setup.exe", garbled) is False
+        assert list(tmp_path.iterdir()) == []

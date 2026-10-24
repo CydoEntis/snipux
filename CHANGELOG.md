@@ -5,6 +5,12 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **"Checking for updates…" could be the last thing you saw.** A reply from
+  GitHub cut off halfway stopped the check without a word. It now says it
+  could not check.
+
 ## 1.2.2 — 2026-10-23
 
 ### Fixed

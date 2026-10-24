@@ -1,4 +1,5 @@
 import ctypes
+import json
 import os
 import re
 import shutil
@@ -7518,6 +7519,25 @@ class TestCheckingForUpdates:
         message = self._answer(controller, said, None)
 
         assert "Could not check" in message
+
+    def test_a_real_check_reaches_the_tray(self, make_controller, monkeypatch):
+        """The real worker, not a fake one: up to 1.2.1 the worker sent a
+        version string while the handler read `.version` off it, so every
+        check that reached GitHub died silently after "Checking for
+        updates...". Each half passed its own tests."""
+        from PyQt6.QtCore import QCoreApplication, QEventLoop
+
+        controller, said = self._controller(make_controller, monkeypatch)
+        payload = json.dumps({"tag_name": f"v{app.__version__}", "assets": []}).encode()
+
+        controller.check_for_updates(opener=lambda _url: payload)
+        loop_guard = 0
+        while len(said) < 2 and loop_guard < 200:
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 10)
+            loop_guard += 1
+
+        assert said[0].startswith("Checking")
+        assert len(said) == 2 and "newest" in said[1]
 
     def test_the_tray_item_is_wired_to_it(self, make_controller, monkeypatch):
         controller, _said = self._controller(make_controller, monkeypatch)
