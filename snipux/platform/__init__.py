@@ -78,9 +78,9 @@ class Platform(ABC):
     @abstractmethod
     def install_editor_integration(self) -> int:
         """Write only the image and video editors' launcher entries and
-        "Open with" registrations -- the part of
-        `install_desktop_integration()` an upgrade from a snipux without
-        the editors is missing. Leaves the shortcut and autostart alone, so
+        "Open with" registrations, and refresh the app icon -- the part of
+        `install_desktop_integration()` an upgrade from an older snipux is
+        missing. Leaves the shortcut and autostart alone, so
         a user who changed either since is not overruled. Returns a process
         exit code: 0 on success.
         """

@@ -40,12 +40,9 @@ from PyQt6.QtWidgets import (
 from . import design
 from .design import tokens
 
-# SNX-102's small-size artwork, purpose-drawn to stay legible at 16/24/32px
-# rather than a downscale of the detailed master -- see
-# design/logo/generate_small_icons.py. The title bar mark below picks only
-# from these three; reaching for the 48px+ files (still a downscale of the
-# master) once the title bar wants more resolution would silently reintroduce
-# the blur this ticket exists to remove.
+# Every icon size is the same mark drawn at its own resolution -- see
+# design/logo/generate_icons.py. The title bar mark below picks from the
+# three small ones because that is the size it is shown at.
 # How far in from an edge still counts as grabbing that edge. Matched to
 # what a window manager gives its own borders -- much less and the window
 # is not resizable in practice, much more and clicks near the edge of the

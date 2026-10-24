@@ -5,6 +5,19 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.5 — 2026-10-24
+
+### Fixed
+
+- **On Windows, "Snipux Image Editor" and "Snipux Video Editor" now show up
+  in the Start menu and its search.** Windows was folding them into the
+  Snipux entry, so they were installed but impossible to find. The first
+  launch after updating puts them back.
+- **The current Snipux logo everywhere.** The Start menu tile, the Windows
+  taskbar and the Linux app grid still showed the old logo, a dark window
+  with a dashed box; they now show the lime bracket mark the rest of Snipux
+  uses. The first launch after updating swaps the icon.
+
 ## 1.2.4 — 2026-10-24
 
 **After updating, quit Snipux from the tray and start it again.** The
