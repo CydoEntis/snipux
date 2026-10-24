@@ -43,6 +43,9 @@ free, on Linux too — and a slightly better one back on Windows.
   optional countdown.
 - **Trim and export** — a player with a filmstrip and waveform, exporting MP4,
   WebM, GIF or a single frame.
+- **Edit any screenshot, trim any recording** — the image editor and the video
+  editor also work as apps of their own: open one from the app menu, or pick
+  Snipux under "Open with" for a picture or a recording.
 - **Watermark** — stamp text or an image in a corner of every capture.
 - **Keep the pointer out of a recording** — or in it, decided on the same row
   you pick the region on *(Linux; Windows' recorder has no cursor option)*.
@@ -509,6 +512,12 @@ Marks made here live in image coordinates rather than screen coordinates, so
 they survive zooming and export exactly where they looked. Several snips in a
 row leave several windows open.
 
+**Open…** in the footer (or Ctrl+O, or dropping a file on the window) loads
+another image into the same window, asking first if the current one has
+unsaved marks. Opened on its own — **Snipux Image Editor** in the app menu,
+`snipux --image-editor`, or tray → **Edit an image…** — the window starts
+empty, with an Open… button and a place to drop a file.
+
 ## Recording
 
 Switch the chooser row from snipping to recording and the same selection you'd
@@ -589,6 +598,11 @@ and a real waveform, in/out handles with a plain-language readout, and export.
 Trimming re-encodes; the untrimmed original stays at its own path until you
 overwrite it.
 
+**Open…** in the footer, Ctrl+O, or dropping a recording on the window loads
+another one; if the current recording has a trim you haven't exported, Snipux
+asks before throwing it away. **Snipux Video Editor** in the app menu, or
+`snipux --video-editor`, opens the player empty, ready for a file.
+
 ### About ffmpeg
 
 Snipux does not depend on `ffmpeg`, does not bundle it, and never installs it.
@@ -645,7 +659,10 @@ details to `~/.config/snipux/crash.log`, beside its settings.
 | `snipuxw` | The same, with no console window. On Windows this is what the Start Menu and Startup entries run, and what a bare `snipux` starts before giving the terminal back — so closing the terminal does not close Snipux |
 | `snipux --snip` | Ask the running instance to start a capture, starting one first if needed. This is what the shortcut runs |
 | `snipux --settings` | Open Settings — the way in on a machine with no tray icon |
-| `snipux --setup` | Install desktop integration. Safe to re-run |
+| `snipux FILE` | Open FILE in its editor: a recording (`.mp4`, `.webm`, `.mkv`, `.mov`) in the player, an image in the review window |
+| `snipux --image-editor` | Open the image editor empty, to open or drop an image into |
+| `snipux --video-editor` | Open the video editor (the player) empty, to open or drop a recording into |
+| `snipux --setup` | Install desktop integration — including the two editors' app-menu entries and "Open with" — without making Snipux the default app for anything. Safe to re-run |
 | `snipux --setup --shortcut '…'` | Same, binding a specific accelerator and remembering it |
 | `snipux --remove` | Undo everything `--setup` wrote |
 | `snipux --update` | Fetch and install the newest Snipux from PyPI, then say what to restart. `py -m snipux --update` is the same thing where `PATH` has no `snipux` on it |
