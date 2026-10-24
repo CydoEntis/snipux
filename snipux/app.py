@@ -130,7 +130,7 @@ from snipux.player import (
     TrimState,
     system_ffmpeg,
 )
-from snipux.review import ReviewWindow
+from snipux.review import IMAGE_FILTER, ReviewWindow
 from snipux.settings import SettingsDialog
 
 
@@ -1586,7 +1586,7 @@ class AppController:
             None,
             "Edit an image",
             str(setup_desktop.load_save_folder()),
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)",
+            IMAGE_FILTER,
         )
         if path:
             self.open_image_path(Path(path))

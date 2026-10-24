@@ -36,6 +36,7 @@ from PyQt6.QtGui import (
     QImage,
     QImageReader,
     QImageWriter,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -48,6 +49,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -70,7 +72,17 @@ from .overlay import (
     Toast,
     ToolHintStrip,
 )
-from .winchrome import AccentButton, SecondaryButton, WinWindow, _mono_font, _ui_font
+from .winchrome import (
+    AccentButton,
+    EmptyState,
+    SecondaryButton,
+    WinWindow,
+    _mono_font,
+    _ui_font,
+    open_filter,
+)
+
+IMAGE_FILTER = open_filter("Images", tokens.EDITOR_IMAGE_SUFFIXES)
 
 
 class ImageCanvas(QWidget):
@@ -626,11 +638,15 @@ class ReviewWindow(WinWindow):
     copied. Its absence is why `Show in Folder` starts disabled rather than
     hidden -- the window should not change shape depending on how the snip
     arrived.
+
+    With no `image` it is the image editor opened on its own (`snipux
+    --image-editor`): an empty state where the canvas goes, until Open…
+    or a dropped file gives it something to show.
     """
 
     def __init__(
         self,
-        image: QImage,
+        image: QImage | None = None,
         *,
         saved_path: Path | None = None,
         parent: QWidget | None = None,
@@ -640,18 +656,36 @@ class ReviewWindow(WinWindow):
             size=(tokens.WinMetric.REVIEW_W, tokens.WinMetric.REVIEW_H),
             parent=parent,
         )
+        self._has_image = image is not None
+        if image is None:
+            # The canvas needs something to hold until a file arrives; it is
+            # never on screen while this stands in.
+            image = QImage(1, 1, QImage.Format.Format_ARGB32)
+            image.fill(Qt.GlobalColor.transparent)
         self._image = image
         self._saved_path = saved_path
         self._dirty = False
         self._store = MarkStore(self)
 
-        self.title_label.setText(
-            saved_path.name if saved_path is not None else "Unsaved snip"
-        )
-        self.title_detail.setText(f"{image.width()} × {image.height()}")
+        if self._has_image:
+            self.title_label.setText(
+                saved_path.name if saved_path is not None else "Unsaved snip"
+            )
+            self.title_detail.setText(f"{image.width()} × {image.height()}")
+        else:
+            self.title_label.setText("Image Editor")
 
         body = QVBoxLayout(self.body)
         body.setContentsMargins(0, 0, 0, 0)
+        self._pages = QStackedWidget()
+        body.addWidget(self._pages)
+        self._empty = EmptyState(
+            "image",
+            "Open an image to edit",
+            "Mark up, blur or crop any screenshot, then copy it or save it.",
+        )
+        self._empty.openRequested.connect(self.choose_file)
+        self._pages.addWidget(self._empty)
 
         self._styles = session_styles
         # A review window can be the first thing a session opens (a file
@@ -659,7 +693,7 @@ class ReviewWindow(WinWindow):
         self._styles.configure(*setup_desktop.load_style_defaults())
         self._canvas = ImageCanvas(image, self._store, styles=self._styles)
         self._canvas.marksChanged.connect(self._on_edited)
-        body.addWidget(self._canvas)
+        self._pages.addWidget(self._canvas)
 
         self._dimension_badge = _Badge(self._canvas)
         self._zoom_badge = _ZoomBadge(self._canvas)
@@ -723,6 +757,7 @@ class ReviewWindow(WinWindow):
         self._store.changed.connect(self._on_edited)
 
         self._build_footer_contents()
+        self._show_image_page(self._has_image)
         self._refresh_status()
         # A colleague's screenshot dropped onto this window opens it here,
         # the same as `snipux PATH` does over the socket -- see `open_path`.
@@ -909,6 +944,11 @@ class ReviewWindow(WinWindow):
         stacked.addWidget(self._path_label)
         self.footer_left.addLayout(stacked)
 
+        self._open_button = SecondaryButton("Open…")
+        self._open_button.setToolTip("Open another image in this window (Ctrl+O)")
+        self._open_button.clicked.connect(self.choose_file)
+        self.footer_right.addWidget(self._open_button)
+
         self._annotate_button = SecondaryButton("Edit")
         self._annotate_button.clicked.connect(
             lambda: self._set_annotating(not self._canvas._annotating)
@@ -954,8 +994,29 @@ class ReviewWindow(WinWindow):
         self._toast.show_message(icon_name, text, area)
         self._toast.raise_()
 
+    def _show_image_page(self, has_image: bool) -> None:
+        """The canvas and everything that acts on it, or the empty state
+        with all of that greyed out -- there is nothing to copy or save
+        until an image is open.
+        """
+        self._has_image = has_image
+        self._pages.setCurrentWidget(self._canvas if has_image else self._empty)
+        for button in (
+            self._annotate_button,
+            self._save_button,
+            self._save_as_button,
+            self._copy_button,
+        ):
+            button.setEnabled(has_image)
+        self._folder_button.setEnabled(has_image and self._saved_path is not None)
+        self._dimension_badge.setVisible(has_image)
+        self._zoom_badge.setVisible(has_image)
+
     def _refresh_status(self) -> None:
-        if self._dirty:
+        if not self._has_image:
+            self._status.setText("No image open")
+            self._status.setStyleSheet(f"color: {tokens.Win.TEXT_MUTED};")
+        elif self._dirty:
             self._status.setText("✎  Edited — not saved")
             self._status.setStyleSheet(f"color: {tokens.Win.WARN_FG};")
         elif self._saved_path is not None:
@@ -964,7 +1025,9 @@ class ReviewWindow(WinWindow):
         else:
             self._status.setText("Copied to the clipboard — not saved to disk.")
             self._status.setStyleSheet(f"color: {tokens.Win.TEXT_MUTED};")
-        self._path_label.setText(self._display_path(self._saved_path))
+        self._path_label.setText(
+            self._display_path(self._saved_path) if self._has_image else ""
+        )
         self._path_label.setEnabled(self._saved_path is not None)
 
     def _on_edited(self) -> None:
@@ -1016,6 +1079,9 @@ class ReviewWindow(WinWindow):
         closes -- the same staged retreat the overlay offers, so a
         half-typed label never costs the window.
         """
+        if event.matches(QKeySequence.StandardKey.Open) and not self._canvas.has_active_label():
+            self.choose_file()
+            return
         if event.key() == Qt.Key.Key_Escape:
             if self._canvas.has_active_label():
                 self._canvas.abandon_text()
@@ -1053,8 +1119,13 @@ class ReviewWindow(WinWindow):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if any(url.isLocalFile() for url in event.mimeData().urls()):
             event.acceptProposedAction()
+            self._empty.set_drag_active(True)
+
+    def dragLeaveEvent(self, event) -> None:
+        self._empty.set_drag_active(False)
 
     def dropEvent(self, event: QDropEvent) -> None:
+        self._empty.set_drag_active(False)
         urls = [url for url in event.mimeData().urls() if url.isLocalFile()]
         if not urls:
             return
@@ -1218,9 +1289,22 @@ class ReviewWindow(WinWindow):
         self._canvas.set_image(image, self._store)
         self.title_label.setText(path.name)
         self.title_detail.setText(f"{image.width()} × {image.height()}")
-        self._folder_button.setEnabled(True)
+        self._show_image_page(True)
         self._refresh_badges()
         self._refresh_status()
+
+    def choose_file(self) -> None:
+        """Open… and Ctrl+O: pick an image and load it into this window."""
+        folder = (
+            self._saved_path.parent
+            if self._saved_path is not None
+            else setup_desktop.load_save_folder()
+        )
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Open an image", str(folder), IMAGE_FILTER
+        )
+        if chosen:
+            self.open_path(Path(chosen))
 
     def _confirm_discard(self) -> bool:
         """The same "Discard changes?" prompt Settings' own Cancel shows

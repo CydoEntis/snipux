@@ -20,10 +20,13 @@ from PyQt6.QtGui import (
     QColor,
     QFont,
     QGuiApplication,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QPen,
     QPixmap,
+    QRadialGradient,
 )
 from PyQt6.QtWidgets import (
     QAbstractButton,
@@ -192,6 +195,134 @@ class SectionHeading(QLabel):
         font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 110)
         self.setFont(font)
         self.setStyleSheet(f"color: {tokens.Win.TEXT_SECTION};")
+
+
+def open_filter(label: str, suffixes: tuple[str, ...]) -> str:
+    """A file dialog filter such as `Images (*.png *.jpg)`."""
+    return f"{label} ({' '.join('*' + suffix for suffix in suffixes)})"
+
+
+class _DropZone(QWidget):
+    """The card in an empty editor: a dashed outline that turns accent, over
+    a faint accent wash, while a file hovers over the window.
+    """
+
+    RADIUS = 14
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.active = False
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if self.active:
+            wash = QColor(tokens.Color.ACCENT)
+            wash.setAlphaF(0.06)
+            edge = QColor(tokens.Color.ACCENT)
+        else:
+            wash = QColor(tokens.Win.CHROME_BG)
+            wash.setAlphaF(0.55)
+            edge = QColor(tokens.Win.CONTROL_BORDER_HOVER)
+        painter.setBrush(wash)
+        pen = QPen(edge, 1.5)
+        pen.setDashPattern([5, 4])
+        painter.setPen(pen)
+        painter.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
+        painter.end()
+
+
+class EmptyState(QWidget):
+    """What an editor shows with no file open: what it is for, Open…, and
+    a place to drop a file.
+
+    It stands where the canvas would, on the same workspace gradient, so
+    opening a file swaps one for the other rather than changing the
+    window's shape. The window, not this widget, accepts the drop -- a
+    file let go anywhere over it should open -- and tells this widget
+    while one is hovering, so the drop zone can light up.
+    """
+
+    openRequested = pyqtSignal()
+
+    _CARD_W = 400
+    _ICON = 30
+    _ICON_WELL = 60
+
+    def __init__(self, icon_name: str, heading: str, line: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        win = tokens.Win
+
+        outer = QVBoxLayout(self)
+        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.card = _DropZone()
+        self.card.setFixedWidth(self._CARD_W)
+        outer.addWidget(self.card, 0, Qt.AlignmentFlag.AlignCenter)
+
+        column = QVBoxLayout(self.card)
+        column.setContentsMargins(32, 34, 32, 30)
+        column.setSpacing(0)
+        column.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        well = QLabel()
+        well.setFixedSize(self._ICON_WELL, self._ICON_WELL)
+        well.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        well.setPixmap(
+            design.icon(icon_name, win.ICON_IDLE).pixmap(QSize(self._ICON, self._ICON))
+        )
+        well.setStyleSheet(
+            f"background: {win.CONTROL_BG}; border: 1px solid {win.CONTROL_BORDER};"
+            f" border-radius: {self._ICON_WELL // 2}px;"
+        )
+        column.addWidget(well, 0, Qt.AlignmentFlag.AlignHCenter)
+        column.addSpacing(18)
+
+        self.heading = self._label(heading, _ui_font(15, 600), win.TEXT_PRIMARY)
+        column.addWidget(self.heading)
+        column.addSpacing(6)
+        self.line = self._label(line, _ui_font(12.5, 400), win.TEXT_MUTED)
+        column.addWidget(self.line)
+        column.addSpacing(22)
+
+        self.open_button = AccentButton("Open…")
+        self.open_button.clicked.connect(self.openRequested)
+        column.addWidget(self.open_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        column.addSpacing(12)
+
+        shortcut = QKeySequence(QKeySequence.StandardKey.Open).toString(
+            QKeySequence.SequenceFormat.NativeText
+        )
+        self.hint = self._label(
+            f"or drop a file here  ·  {shortcut}", _ui_font(11.5, 400), win.TEXT_FAINT
+        )
+        column.addWidget(self.hint)
+
+    @staticmethod
+    def _label(text: str, font: QFont, colour: str) -> QLabel:
+        label = QLabel(text)
+        label.setFont(font)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        label.setStyleSheet(f"color: {colour}; background: transparent;")
+        return label
+
+    @property
+    def drag_active(self) -> bool:
+        return self.card.active
+
+    def set_drag_active(self, active: bool) -> None:
+        self.card.active = active
+        self.card.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        _kind, (cx, cy), radius, stops = tokens.Gradient.WORKSPACE
+        gradient = QRadialGradient(self.width() * cx, self.height() * cy, self.width() * radius)
+        for position, colour in stops:
+            gradient.setColorAt(position, QColor(colour))
+        painter.fillRect(self.rect(), gradient)
+        painter.end()
 
 
 class _TitleBarButton(QPushButton):

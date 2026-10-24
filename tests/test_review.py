@@ -16,7 +16,7 @@ import pytest
 from PyQt6.QtCore import QEvent, QMimeData, QPointF, Qt, QUrl
 from PyQt6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from snipux import output as output_module
 from snipux import review as review_module
@@ -642,6 +642,123 @@ class TestOpenPath:
         window._bar.undoRequested.emit()
 
         assert len(window._store) == 0
+
+
+def _accent_pixels(pixmap) -> int:
+    """How much of a grab is the accent -- the Open… button's fill."""
+    image = pixmap.toImage()
+    accent = QColor(tokens.Color.ACCENT)
+    return sum(
+        1
+        for y in range(0, image.height(), 2)
+        for x in range(0, image.width(), 2)
+        if QColor(image.pixel(x, y)) == accent
+    )
+
+
+class TestTheImageEditorOnItsOwn:
+    """`ReviewWindow()` with no image: `snipux --image-editor`. An empty
+    state stands where the canvas goes, and Open…, Ctrl+O or a dropped
+    file fills the window.
+    """
+
+    def test_it_opens_on_an_empty_state_with_nothing_to_copy_or_save(self):
+        window = ReviewWindow()
+
+        assert window.title_label.text() == "Image Editor"
+        assert window._pages.currentWidget() is window._empty
+        assert window._open_button.isEnabled()
+        for button in (
+            window._copy_button,
+            window._save_button,
+            window._save_as_button,
+            window._annotate_button,
+            window._folder_button,
+        ):
+            assert not button.isEnabled()
+
+    def test_the_empty_state_paints_its_open_button(self):
+        window = ReviewWindow()
+        window.resize(tokens.WinMetric.REVIEW_W, tokens.WinMetric.REVIEW_H)
+
+        assert _accent_pixels(window._empty.grab()) > 100
+
+    def test_a_snip_still_opens_straight_onto_its_canvas(self):
+        window = ReviewWindow(make_image(40, 30))
+
+        assert window._pages.currentWidget() is window._canvas
+        assert window._copy_button.isEnabled()
+
+    def test_a_dropped_file_fills_the_empty_editor(self, tmp_path):
+        window = ReviewWindow()
+        target = tmp_path / "shared.png"
+        make_image(60, 40).save(str(target), "PNG")
+
+        window.dropEvent(_file_drop(target))
+
+        assert window._pages.currentWidget() is window._canvas
+        assert window.title_label.text() == "shared.png"
+        assert window._copy_button.isEnabled()
+        assert window._folder_button.isEnabled()
+
+    def test_a_hovering_file_lights_the_drop_zone(self, tmp_path):
+        window = ReviewWindow()
+
+        window.dragEnterEvent(_file_drop(tmp_path / "shared.png"))
+        assert window._empty.drag_active
+
+        window.dragLeaveEvent(None)
+        assert not window._empty.drag_active
+
+    def test_the_empty_states_open_button_picks_a_file(self, tmp_path, monkeypatch):
+        window = ReviewWindow()
+        target = tmp_path / "picked.png"
+        make_image(20, 10).save(str(target), "PNG")
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileName", lambda *a, **k: (str(target), "")
+        )
+
+        window._empty.open_button.click()
+
+        assert window.title_label.text() == "picked.png"
+
+
+class TestOpenAnotherImage:
+    """Open… and Ctrl+O load another file into the same window."""
+
+    def test_ctrl_o_replaces_the_image(self, tmp_path, monkeypatch):
+        window = ReviewWindow(make_image(100, 100))
+        target = tmp_path / "next.png"
+        make_image(30, 20).save(str(target), "PNG")
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileName", lambda *a, **k: (str(target), "")
+        )
+
+        QTest.keyClick(window, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier)
+
+        assert window.title_label.text() == "next.png"
+        assert window.title_detail.text() == "30 × 20"
+
+    def test_the_footer_open_button_replaces_the_image(self, tmp_path, monkeypatch):
+        window = ReviewWindow(make_image(100, 100))
+        target = tmp_path / "next.png"
+        make_image(30, 20).save(str(target), "PNG")
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileName", lambda *a, **k: (str(target), "")
+        )
+
+        window._open_button.click()
+
+        assert window.title_label.text() == "next.png"
+
+    def test_cancelling_the_dialog_keeps_the_image(self, monkeypatch):
+        window = ReviewWindow(make_image(100, 100))
+        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: ("", ""))
+
+        window._open_button.click()
+
+        assert window.title_label.text() == "Unsaved snip"
+        assert window._canvas._image.width() == 100
 
 
 class TestEveryToolSurvivesAPaint:

@@ -12,6 +12,9 @@ use it; the commit history has the detail.
   .mkv, .mov) in the trim editor, anything else in the image editor. A file
   that is missing, or isn't an image or recording, gets a plain error
   instead of an empty window.
+- **Open… in the image editor.** A button in the footer, or Ctrl+O, loads
+  another image into the same window. Opened on its own, the image editor
+  now shows what it is for, an Open… button and a place to drop a file.
 
 ## 1.2.3 — 2026-10-24
 
