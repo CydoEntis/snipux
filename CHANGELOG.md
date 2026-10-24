@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.4 — 2026-10-24
+
 **After updating, quit Snipux from the tray and start it again.** The
 Snipux that was running before the update does not know about the new
 editors. Until it is restarted, opening an editor still works, but in a
