@@ -5972,8 +5972,9 @@ class OverlayWindow(QWidget):
         touches-a-real-monitor test above and is dropped, leaving an
         ordinary empty drag. That is the correct outcome rather than a gap
         to close -- the other monitor's pixels are not in this frame to
-        crop from. X11 and Windows both span the whole virtual desktop in
-        one window and have no such limit.
+        crop from. Windows does the same when its screens differ in scale
+        (see `Frame.screen_frames`). X11, and Windows with one scale, span
+        the whole virtual desktop in one window and have no such limit.
 
         Called only as the overlay opens. Choosing Last region during a snip
         is `_select_last_region`, which commits: that is the user choosing
@@ -9415,6 +9416,16 @@ def open_overlay(
     closes as one session. No surface is ever moved or remapped when the
     pointer crosses an output boundary; doing that can make Hyprland loop
     between fullscreen mappings and visibly black-flash an output.
+
+    Screens that differ in scale get the same per-screen group, on any
+    session type -- the frame says so by carrying `screen_frames` (see
+    `Frame`). One window has one devicePixelRatio, so a single window
+    spanning a 150% laptop and a 100% monitor draws at least one of them
+    resampled; and on Windows those screens' logical rects need not even
+    tile, so one window over their union cannot line up with the physical
+    monitors at all. One window per screen, each cut from that screen's own
+    native image, is crisp and in place on every monitor. Uniform-scale
+    desktops never carry `screen_frames` and keep the single window.
     """
     primary_geometry = (
         _interactive_geometry(monitor_geometries)
@@ -9422,8 +9433,10 @@ def open_overlay(
         else QRectF(frame.logical_origin, frame.logical_size)
     )
 
-    multi_monitor_wayland = wayland and len(monitor_geometries) > 1
-    if not multi_monitor_wayland:
+    one_window_per_screen = len(monitor_geometries) > 1 and (
+        wayland or bool(frame.screen_frames)
+    )
+    if not one_window_per_screen:
         overlay = OverlayWindow(
             frame,
             hints_enabled=hints_enabled,

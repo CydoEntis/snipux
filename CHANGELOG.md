@@ -7,6 +7,11 @@ use it; the commit history has the detail.
 
 ### Fixed
 
+- **On Windows, snips were wrong when monitors use different scaling** (say
+  a laptop at 150% beside a monitor at 100%). The frozen screen could show a
+  black strip and sit out of line with the real monitors, and a snip could
+  come out blurred. Each monitor now gets its own frozen image at its own
+  sharpness, and a snip has that monitor's real pixels.
 - **Ctrl+C now copies the snip.** It used to pick the Callout tool and copy
   nothing, so whatever was on the clipboard before stayed there. Ctrl, Alt
   and Win chords no longer switch tools.

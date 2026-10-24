@@ -16,6 +16,7 @@ from PyQt6.QtGui import (
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QPixmap,
     QRegion,
     qRgb,
 )
@@ -9066,6 +9067,129 @@ class TestOpenOverlay:
         result.show()
         assert all(member.isVisible() for member in members)
         assert sorted(member._frame.image.width() for member in members) == [200, 200]
+
+
+def _tagged_image(width: int, height: int, blue: int) -> QImage:
+    """Distinct pixels, tagged per screen in blue -- a black gap reads as
+    blue 0, a resample as a pixel that no longer matches its source."""
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    for x in range(width):
+        for y in range(height):
+            image.setPixel(x, y, qRgb(x % 256, y % 256, blue))
+    return image
+
+
+class _MixedScaleScreen:
+    """Just what `capture.QtNativeWindowsBackend` asks of a QScreen."""
+
+    def __init__(self, geometry: QRect, ratio: float, native: QImage):
+        self._geometry = geometry
+        self._ratio = ratio
+        self.native = native
+
+    def geometry(self) -> QRect:
+        return self._geometry
+
+    def devicePixelRatio(self) -> float:
+        return self._ratio
+
+    def grabWindow(self, window_id):
+        pixmap = QPixmap.fromImage(self.native)
+        pixmap.setDevicePixelRatio(self._ratio)
+        return pixmap
+
+
+def _capture_on(monkeypatch, screens: list[_MixedScaleScreen]) -> Frame:
+    """A frame from the real Windows Qt backend, grabbing `screens`."""
+    monkeypatch.setattr(
+        capture_module,
+        "QGuiApplication",
+        SimpleNamespace(screens=lambda: screens, primaryScreen=lambda: screens[0]),
+    )
+    return capture_module.QtNativeWindowsBackend().capture()
+
+
+class TestOpenOverlayMixedScale:
+    """Windows with a 150% laptop as primary and a 100% monitor to its
+    right. Qt6 keeps each screen's native top-left as its logical position,
+    so the laptop is logical 200x100 at 0 and the monitor starts at native
+    x 300: logical x 200..300 is no screen's. One window over that union
+    showed a black strip and could not sit on both monitors' pixels.
+
+    The frame comes from the real capture backend over faked screens, so
+    this is the path a snip takes, not a hand-built Frame.
+    """
+
+    LAPTOP = QRectF(0, 0, 200, 100)
+    MONITOR = QRectF(300, 0, 200, 100)
+
+    def _open(self, monkeypatch, **kwargs):
+        screens = [
+            _MixedScaleScreen(self.LAPTOP.toRect(), 1.5, _tagged_image(300, 150, blue=120)),
+            _MixedScaleScreen(self.MONITOR.toRect(), 1.0, _tagged_image(200, 100, blue=240)),
+        ]
+        frame = _capture_on(monkeypatch, screens)
+        result = open_overlay(frame, [self.LAPTOP, self.MONITOR], wayland=False, **kwargs)
+        members = {
+            (widget._frame.logical_origin.x(), widget._frame.logical_origin.y()): widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow)
+            and widget.isVisible()
+            and widget._on_dismissed is result._on_dismissed
+        }
+        return screens, result, members
+
+    def test_each_monitor_gets_its_own_window_over_its_own_rect(self, monkeypatch):
+        _screens, _result, members = self._open(monkeypatch)
+
+        assert sorted(members) == [(0, 0), (300, 0)]
+        assert QRectF(members[(0, 0)].geometry()) == self.LAPTOP
+        assert QRectF(members[(300, 0)].geometry()) == self.MONITOR
+
+    def test_each_window_shows_its_own_screens_native_pixels(self, monkeypatch):
+        screens, _result, members = self._open(monkeypatch)
+
+        for screen, origin in zip(screens, [(0, 0), (300, 0)]):
+            shown = members[origin]._frame.image.convertToFormat(QImage.Format.Format_RGB32)
+            assert shown == screen.native.convertToFormat(QImage.Format.Format_RGB32)
+
+    def test_no_window_paints_a_black_gap(self, monkeypatch):
+        _screens, _result, members = self._open(monkeypatch)
+
+        for origin, blue in [((0, 0), 120), ((300, 0), 240)]:
+            painted = members[origin].grab().toImage()
+            # The bottom row, clear of the chooser and the close button.
+            row = painted.height() - 2
+            blues = {QColor(painted.pixel(x, row)).blue() for x in range(painted.width())}
+            assert 0 not in blues
+            # Dimmed or not, every pixel is this screen's, not the other's.
+            assert max(blues) <= blue
+
+    def test_a_snip_on_the_150_percent_screen_has_its_native_pixels(self, monkeypatch):
+        screens, _result, members = self._open(monkeypatch)
+        laptop = members[(0, 0)]
+
+        laptop.set_selection(QRect(20, 10, 100, 60))
+        image = laptop.rendered_image().convertToFormat(QImage.Format.Format_RGB32)
+
+        assert (image.width(), image.height()) == (150, 90)
+        assert image == screens[0].native.copy(QRect(30, 15, 150, 90)).convertToFormat(
+            QImage.Format.Format_RGB32
+        )
+
+    def test_a_uniform_scale_desktop_keeps_the_single_window(self, monkeypatch):
+        screens = [
+            _MixedScaleScreen(QRect(0, 0, 200, 100), 1.0, _tagged_image(200, 100, blue=120)),
+            _MixedScaleScreen(QRect(200, 0, 200, 100), 1.0, _tagged_image(200, 100, blue=240)),
+        ]
+        frame = _capture_on(monkeypatch, screens)
+
+        result = open_overlay(
+            frame, [QRectF(0, 0, 200, 100), QRectF(200, 0, 200, 100)], wayland=False
+        )
+
+        assert result._frame is frame
+        assert QRectF(result.geometry()) == QRectF(0, 0, 400, 100)
 
 
 # ---------------------------------------------------------------------------
