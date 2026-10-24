@@ -253,6 +253,10 @@ class _FakeWindowsDwmapi:
         target.left, target.top, target.right, target.bottom = self._bounds
         return 0
 
+    def DwmSetWindowAttribute(self, hwnd, attribute, value_ref, _size):
+        # The overlay turns its own open animation off as it is built.
+        return 0
+
 
 class TestOverlayWindow:
     """The redesign's shell (SNX-31): a single window over the whole

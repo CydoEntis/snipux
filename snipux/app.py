@@ -4057,6 +4057,10 @@ def _become_resident(
     # day snipux is not opened. Says nothing unless there is something to
     # say (`check_for_updates_daily`).
     controller.check_for_updates_daily()
+    # Reading the system font list is ~120ms on Windows and the first
+    # overlay needs it. Once the loop is idle, so the first snip after
+    # launch is not the one that pays for it.
+    QTimer.singleShot(0, design.font_families)
     if start_capture_immediately:
         controller.start_capture()
     if open_settings_immediately:

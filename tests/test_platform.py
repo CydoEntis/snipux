@@ -3038,3 +3038,38 @@ class TestUpdatingItself:
 
         assert windows.WindowsPlatform().install_update(tmp_path / "setup.exe") is False
         assert "could not start the update installer" in capsys.readouterr().out
+
+
+class TestWindowsSkipsTheOverlaysOpeningAnimation:
+    """Windows has no GNOME zoom-in to hide, so the overlay should show at
+    once instead of waiting out the reveal delay -- but only when DWM
+    actually agreed to skip its own transition."""
+
+    class _Dwm:
+        def __init__(self, result):
+            self.result = result
+            self.calls = []
+
+        def DwmSetWindowAttribute(self, hwnd, attribute, value, size):
+            self.calls.append((hwnd.value, attribute))
+            return self.result
+
+    class _Widget:
+        def winId(self):
+            return 4242
+
+    def _patch(self, monkeypatch, result):
+        dwm = self._Dwm(result)
+        monkeypatch.setattr(windows.ctypes, "windll", SimpleNamespace(dwmapi=dwm), raising=False)
+        return dwm
+
+    def test_it_turns_transitions_off_on_the_overlays_own_window(self, monkeypatch):
+        dwm = self._patch(monkeypatch, 0)
+
+        assert windows.WindowsPlatform().skip_map_animation(self._Widget()) is True
+        assert dwm.calls == [(4242, windows._DWMWA_TRANSITIONS_FORCEDISABLED)]
+
+    def test_a_refusal_keeps_the_reveal_delay(self, monkeypatch):
+        self._patch(monkeypatch, -2147024809)  # E_INVALIDARG
+
+        assert windows.WindowsPlatform().skip_map_animation(self._Widget()) is False

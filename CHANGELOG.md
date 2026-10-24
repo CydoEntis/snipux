@@ -14,6 +14,12 @@ use it; the commit history has the detail.
   GitHub cut off halfway stopped the check without a word. It now says it
   could not check.
 
+### Changed
+
+- **Snips open faster on Windows** — about a quarter of a second sooner on
+  every snip, and the first snip after starting Snipux is no slower than
+  the rest.
+
 ### Removed
 
 - **Copy text** (the button and the X key that put the words in a snip on
