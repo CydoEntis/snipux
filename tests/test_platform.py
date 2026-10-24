@@ -2504,6 +2504,9 @@ class TestWindowsEditorIntegration:
         assert windows.WindowsPlatform().install_editor_integration() == 0
 
         assert created == ["Snipux Image Editor.lnk", "Snipux Video Editor.lnk"]
+        # The .ico is rebuilt from the bundled PNGs, so a redrawn icon reaches
+        # the Start menu on upgrade.
+        assert windows._icon_path().is_file()
         assert fake_registry.value(
             r"Software\Classes\.png\OpenWithProgids", "Snipux.ImageEditor"
         ) == ""

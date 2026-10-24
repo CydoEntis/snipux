@@ -572,6 +572,17 @@ class TestEditorEntries:
         ]
         assert not (tmp_path / "autostart").exists()
 
+    def test_editor_entries_also_refresh_the_app_icon(self, tmp_path):
+        # An upgrade that redrew the icon must reach the theme, or the app
+        # grid keeps the old one.
+        applications_dir = tmp_path / "share" / "applications"
+
+        setup_desktop.install_editor_entries(
+            exec_path=Path("/opt/snipux/bin/snipux"), applications_dir=applications_dir
+        )
+
+        assert (tmp_path / "share" / "icons" / "hicolor" / "256x256" / "apps" / "snipux.png").is_file()
+
     def test_remove_deletes_both(self, tmp_path):
         applications_dir = self._setup(tmp_path)
 

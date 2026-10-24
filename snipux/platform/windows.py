@@ -1246,16 +1246,19 @@ class WindowsPlatform(Platform):
         return 0
 
     def install_editor_integration(self) -> int:
-        """The editors' Start Menu shortcuts and "Open with", alone -- see
-        `Platform.install_editor_integration`. Points at the same launcher
-        and icon `install_desktop_integration()` would, without rewriting
-        either, or the Startup shortcut.
+        """The editors' Start Menu shortcuts, "Open with" and the app icon,
+        alone -- see `Platform.install_editor_integration`. Points at the
+        same launcher `install_desktop_integration()` would, without
+        rewriting the Startup shortcut.
         """
         exec_path = _launcher_for_integration()
         if exec_path is None:
             return 1
         icon_path = _icon_path()
-        _write_editor_integration(exec_path, icon_path if icon_path.is_file() else None)
+        # Rewritten too: the .ico is built from the bundled PNGs, so an
+        # upgrade that redrew the icon is not seen until it is.
+        has_icon = _write_icon(icon_path)
+        _write_editor_integration(exec_path, icon_path if has_icon else None)
         return 0
 
     def remove_desktop_integration(self) -> int:

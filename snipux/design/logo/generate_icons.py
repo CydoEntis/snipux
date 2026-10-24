@@ -1,31 +1,25 @@
-"""Generates the small app-icon sizes (16, 24 and 32px) from simplified,
-purpose-drawn artwork instead of downscaling the detailed 1284px master
-(`snipux.png`) -- SNX-102.
+"""Generates every app-icon size, and the large `snipux.png`, from the
+Snipux mark: four lime corner brackets and the select-tool cursor.
 
-At 16px the master's outer rounded container, its title-bar dots, the
-dashed selection marquee and the inner window each get about two pixels
-and average into an indistinct blur once anything smooths them down that
-far. Icon sets solve this by drawing *different* artwork per size: the
-large sizes (48px and up, still produced the old way -- a smooth downscale
-of `snipux.png`) keep the full scene, and the small ones here drop the
-outer container and the title-bar chrome entirely and enlarge the one
-element that actually identifies snipux: the green dashed selection
-marquee with its cursor.
+The large sizes used to be a downscale of an older, detailed master (a
+dark rounded window with title-bar dots, a dashed marquee and a cursor),
+and only 16/24/32px were drawn from this simplified mark -- SNX-102, because
+the detailed scene blurs into nothing below 48px. That left two different
+logos depending on size: the Start menu tile and the Linux app grid showed
+the old one, the title bar and the tray the new one. Now every size is this
+mark, drawn directly at its own resolution rather than scaled.
 
-Run this after changing the small-icon design (colours, proportions, the
-cursor shape) to regenerate `snipux-16.png`, `snipux-24.png` and
-`snipux-32.png` in this directory -- see docs/releasing.md for when that
-is and isn't needed. Nothing downstream has to know sizes are now drawn
-two different ways: `setup_desktop.install_icons()` (the Linux hicolor
-theme) and `setup_desktop.render_ico()` (the Windows .ico, via
-`packaging/windows/build_icon.py`) both just read whatever
-`snipux-<size>.png` files are sitting in this directory.
+Run this after changing the design (colours, proportions, the cursor
+shape) to regenerate `snipux-<size>.png` and `snipux.png` in this
+directory. Nothing downstream has to change: `setup_desktop.install_icons()`
+(the Linux hicolor theme) and `setup_desktop.render_ico()` (the Windows
+.ico, via `packaging/windows/build_icon.py`) both read whatever
+`snipux-<size>.png` files are here.
 
-    QT_QPA_PLATFORM=offscreen python snipux/design/logo/generate_small_icons.py
+    QT_QPA_PLATFORM=offscreen python snipux/design/logo/generate_icons.py
 
 PyQt6 only, no Pillow/numpy -- CLAUDE.md's "no imaging dependency" rule
-applies to build tooling too, and QPainter already does everything a
-two-element, two-colour mark needs.
+applies to build tooling too.
 """
 
 from __future__ import annotations
@@ -42,13 +36,10 @@ from snipux.design import tokens
 _HERE = Path(__file__).resolve().parent
 _CURSOR_SVG_PATH = _HERE.parent / "icons" / "select.svg"
 
-# The three sizes small enough that the master's detail collapses into
-# noise -- see the module docstring. 48px and up are untouched by this
-# script.
-SIZES = (16, 24, 32)
+SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+# The unsized master: what the website and anything wanting a big copy use.
+MASTER_SIZE = 1284
 
-# Sampled from snipux.png's own dashed marquee and cursor glow, so the
-# simplified mark reads as the same app rather than a re-invented palette.
 # The app's own accent, not a green of its own: the icon used to be
 # #60fa46, a fifth green in a palette that already had four within a few
 # percent of each other. An icon that does not match the application it
@@ -136,8 +127,8 @@ def _draw_cursor(painter: QPainter, size: int) -> None:
     _recoloured_cursor_svg(_CURSOR_FILL).render(painter, fill_rect)
 
 
-def render_small_icon(size: int) -> QImage:
-    """The simplified snipux mark, rendered directly at `size` -- not
+def render_icon(size: int) -> QImage:
+    """The snipux mark, rendered directly at `size` -- not
     scaled down from a larger render, so every edge is antialiased against
     the actual output resolution rather than being blurred a second time.
     """
@@ -160,10 +151,10 @@ def main() -> None:
     # fixture documents for `design.icon()`.
     app = QApplication.instance() or QApplication([])
 
-    for size in SIZES:
-        image = render_small_icon(size)
-        path = _HERE / f"snipux-{size}.png"
-        if not image.save(str(path), "PNG"):
+    targets = [(size, _HERE / f"snipux-{size}.png") for size in SIZES]
+    targets.append((MASTER_SIZE, _HERE / "snipux.png"))
+    for size, path in targets:
+        if not render_icon(size).save(str(path), "PNG"):
             raise SystemExit(f"failed to write {path}")
         print(f"wrote {path}")
 
