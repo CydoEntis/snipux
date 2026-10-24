@@ -51,8 +51,10 @@ _LAUNCHER_PLACEHOLDER = "__SNIPUX_LAUNCHER__"
 # The two editors' own launcher entries, by filename -- which is also their
 # desktop ID, so the .deb's system-wide copies of them are overridden by
 # these per-user ones rather than listed twice. Their `MimeType=` lines put
-# Snipux under "Open With" for images and recordings; nothing here writes
-# mimeapps.list, so Snipux is never made the default for anything.
+# Snipux under "Open With" for images and recordings. Nothing here writes
+# mimeapps.list, so Snipux does not set itself as the default -- though
+# where a type has no default at all, XDG may still pick the first entry
+# that claims it (see docs/PLATFORM-CAPABILITIES.md).
 EDITOR_ENTRIES = {
     "snipux-image-editor.desktop": "image editor",
     "snipux-video-editor.desktop": "video editor",

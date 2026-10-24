@@ -662,7 +662,7 @@ details to `~/.config/snipux/crash.log`, beside its settings.
 | `snipux FILE` | Open FILE in its editor: a recording (`.mp4`, `.webm`, `.mkv`, `.mov`) in the player, an image in the review window |
 | `snipux --image-editor` | Open the image editor empty, to open or drop an image into |
 | `snipux --video-editor` | Open the video editor (the player) empty, to open or drop a recording into |
-| `snipux --setup` | Install desktop integration — including the two editors' app-menu entries and "Open with" — without making Snipux the default app for anything. Safe to re-run |
+| `snipux --setup` | Install desktop integration — including the two editors' app-menu entries and "Open with" — without setting Snipux as the default app for anything. Safe to re-run |
 | `snipux --setup --shortcut '…'` | Same, binding a specific accelerator and remembering it |
 | `snipux --remove` | Undo everything `--setup` wrote |
 | `snipux --update` | Fetch and install the newest Snipux from PyPI, then say what to restart. `py -m snipux --update` is the same thing where `PATH` has no `snipux` on it |

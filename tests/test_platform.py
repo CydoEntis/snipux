@@ -2359,7 +2359,7 @@ class TestWindowsDesktopIntegration:
 class TestWindowsEditorIntegration:
     """The two editors on Windows: a Start Menu shortcut each, and per-user
     "Open with" entries for the files they open -- written by `--setup`,
-    gone after `--remove`, and never the default handler. The registry is
+    gone after `--remove`, and never set as the default handler. The registry is
     conftest's `FakeRegistry`, never this machine's.
     """
 

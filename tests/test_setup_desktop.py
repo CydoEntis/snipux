@@ -489,8 +489,8 @@ class TestIntegrationRevision:
 
 class TestEditorEntries:
     """The image and video editors each get a launcher entry of their own,
-    offered under "Open With" for the files they open -- and never made
-    the default for them.
+    offered under "Open With" for the files they open -- without setting
+    themselves as the default for them.
     """
 
     @staticmethod

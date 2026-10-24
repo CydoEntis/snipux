@@ -40,7 +40,7 @@ global hotkey registers one chord; snipux does not see other keystrokes.
 | `gsettings` (`org.gnome.settings-daemon.plugins.media-keys` custom keybindings; `shell`/`mutter`/`desktop.wm` keybindings to find clashes) | binding the global shortcut and clearing chords that clash | Written by `--setup`; undone by `--remove`. |
 | Hyprland `bindings.lua` / `hyprland.conf`, `hyprctl` | binding and validating the global shortcut on Hyprland | A backed-up, delimited block is written by `--setup` and removed exactly by `--remove`; existing bindings are not overwritten. |
 | `.desktop` files, autostart, hicolor icons | app launcher and start at login | Written by `--setup`; undone by `--remove`. |
-| `MimeType=` in the editors' `.desktop` files | "Snipux Image Editor" / "Snipux Video Editor" under "Open With" for images and recordings | Listed, never the default: nothing writes `mimeapps.list`. The `.deb` also installs both system-wide. |
+| `MimeType=` in the editors' `.desktop` files | "Snipux Image Editor" / "Snipux Video Editor" under "Open With" for images and recordings | Listed; Snipux does not set itself as the default -- nothing writes `mimeapps.list`. But where no default is configured for a type, XDG/GLib may pick the first entry claiming it, and user entries are searched first, so on a bare system Snipux could end up opening that type. Not yet checked: on a bare Hyprland system, run `xdg-mime query default image/png` (and `video/mp4`) after `--setup`. The `.deb` also installs both system-wide. |
 
 Pin is greyed on Wayland: a client cannot place its own window or keep it on
 top there.
@@ -56,7 +56,7 @@ top there.
 | `user32.SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` | keeping snipux's own bars out of a recording | Nothing. Windows 10 2004+. |
 | `kernel32.AttachConsole` | printing `--help`/`--update` output from the windowless launcher | Nothing. |
 | COM `IShellLinkW` / `IPersistFile` (raw `ctypes`) | Start Menu and Startup shortcuts, and the two editors' Start Menu shortcuts (`SetArguments` carries their flag) | Written by `--setup` / first run of the exe; undone by `--remove`. |
-| `winreg`, `HKCU\Software\Classes` | "Open with" for images and recordings: a ProgID per editor, `OpenWithProgids` on each suffix, `Applications\<launcher>.exe` for the name | Per user, no elevation. Never the default handler -- that is `UserChoice`, which nothing here writes. Written by `--setup`; undone by `--remove`, which leaves other apps' values on the same suffixes alone. |
+| `winreg`, `HKCU\Software\Classes` | "Open with" for images and recordings: a ProgID per editor, `OpenWithProgids` on each suffix, `Applications\<launcher>.exe` for the name | Per user, no elevation. Does not set itself as the default -- that is `UserChoice`, which nothing here writes. Written by `--setup`; undone by `--remove`, which leaves other apps' values on the same suffixes alone. |
 | `shell32.SHChangeNotify(SHCNE_ASSOCCHANGED)` | telling Explorer the associations changed | "Open with" updates at once rather than after sign-in. |
 | `Windows.Media.Ocr` via `powershell.exe` | Hide sensitive, text snapping | On-device. The image goes to a temp `.bmp`, which is deleted after the call. Needs an OCR language installed; greyed with the reason if not. |
 | Self-relocation to `%LOCALAPPDATA%\snipux` | the standalone exe survives a Downloads cleanup | First run only. |
