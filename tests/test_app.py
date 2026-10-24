@@ -1151,6 +1151,7 @@ class TestOpenPathArgument:
         state = make_transport_state()
         state["claimed"] = True  # simulates a resident instance already running
         target = tmp_path / "shot.png"
+        QImage(8, 8, QImage.Format.Format_RGB32).save(str(target), "PNG")
 
         exit_code = main([str(target)], transport=FakeTransport(state))
 
@@ -1165,6 +1166,7 @@ class TestOpenPathArgument:
         # one's working directory, so a relative PATH means nothing to it
         # unless it is made absolute here, before it travels.
         monkeypatch.chdir(tmp_path)
+        QImage(8, 8, QImage.Format.Format_RGB32).save("shot.png", "PNG")
         state = make_transport_state()
         state["claimed"] = True
 
@@ -1212,6 +1214,37 @@ class TestOpenPathArgument:
                 for review in list(created[0]._reviews):
                     review.close()
                 created[0]._tray_icon.hide()
+
+    def test_a_recording_is_forwarded_too(self, tmp_path):
+        state = make_transport_state()
+        state["claimed"] = True
+        target = tmp_path / "clip.mp4"
+        target.write_bytes(b"")
+
+        assert main([str(target)], transport=FakeTransport(state)) == 0
+        assert state["forwarded_open_paths"] == [target]
+
+    def test_a_missing_file_is_an_error_here_not_a_forward(self, tmp_path, capsys):
+        state = make_transport_state()
+        state["claimed"] = True
+
+        exit_code = main([str(tmp_path / "typo.png")], transport=FakeTransport(state))
+
+        assert exit_code == 1
+        assert state["forwarded_open_paths"] == []
+        assert "typo.png does not exist" in capsys.readouterr().err
+
+    def test_a_file_no_editor_opens_is_an_error_here(self, tmp_path, capsys):
+        state = make_transport_state()
+        state["claimed"] = True
+        target = tmp_path / "notes.txt"
+        target.write_text("not a picture")
+
+        exit_code = main([str(target)], transport=FakeTransport(state))
+
+        assert exit_code == 1
+        assert state["forwarded_open_paths"] == []
+        assert "notes.txt is not an image or a recording" in capsys.readouterr().err
 
     def test_mutually_exclusive_with_snip(self, tmp_path):
         with pytest.raises(SystemExit) as excinfo:
@@ -1641,6 +1674,7 @@ class TestHandoff:
     def test_a_path_reaches_a_running_resident(self, tmp_path):
         name, heard = self._resident(tmp_path)
         target = tmp_path / "shot.png"
+        target.write_bytes(b"")
 
         assert handoff.forward([str(target)], server_name=name) is True
         self._settle()
@@ -1651,6 +1685,7 @@ class TestHandoff:
     def test_a_relative_path_arrives_absolute(self, tmp_path, monkeypatch):
         name, heard = self._resident(tmp_path)
         monkeypatch.chdir(tmp_path)
+        (tmp_path / "shot.png").write_bytes(b"")
 
         assert handoff.forward(["shot.png"], server_name=name) is True
         self._settle()
@@ -1730,6 +1765,25 @@ class TestHandoff:
         )
 
         assert handoff.forward(arguments) is False
+
+    @pytest.mark.parametrize("name", ["typo.png", "notes.txt"])
+    def test_a_path_the_cli_must_explain_is_not_forwarded(self, monkeypatch, tmp_path, name):
+        # A missing file, or one no editor opens, goes to the full CLI so
+        # the error lands in the terminal it was typed into.
+        def refuse(*args, **kwargs):
+            raise AssertionError("this path belongs to the full CLI")
+
+        monkeypatch.setattr(
+            handoff, "socket", SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=refuse)
+        )
+        (tmp_path / "notes.txt").write_text("not a picture")
+
+        assert handoff.forward([str(tmp_path / name)]) is False
+
+    def test_its_suffix_copy_matches_the_editors(self):
+        assert set(handoff._OPENABLE_SUFFIXES) == set(
+            tokens.EDITOR_IMAGE_SUFFIXES + tokens.EDITOR_RECORDING_SUFFIXES
+        )
 
     @pytest.mark.parametrize("entry", ["cli", "gui"])
     def test_an_undelivered_request_takes_the_full_path(self, monkeypatch, entry):
@@ -6503,6 +6557,83 @@ class TestOpenImagePath:
 
         assert controller._reviews == []
         assert "does-not-exist.png" in capsys.readouterr().out
+
+
+class TestOpenPathRoutesByType:
+    """`AppController.open_path` -- what `snipux PATH` reaches in the
+    resident, whether this process became it or the path was forwarded.
+    A recording goes to the player and anything else to the review window.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+
+    @pytest.mark.parametrize("name", ["clip.mp4", "clip.webm", "clip.MKV", "clip.mov"])
+    def test_a_recording_opens_in_the_player(self, make_controller, monkeypatch, tmp_path, name):
+        controller = self._controller(make_controller)
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        target = tmp_path / name
+        target.write_bytes(b"")
+
+        controller.open_path(target)
+
+        assert opened == [target]
+        assert controller._reviews == []
+
+    def test_an_image_opens_in_the_review_window(self, make_controller, monkeypatch, tmp_path):
+        controller = self._controller(make_controller)
+        monkeypatch.setattr(
+            controller, "_open_player", lambda path: pytest.fail("not a recording")
+        )
+        target = tmp_path / "shot.png"
+        QImage(12, 10, QImage.Format.Format_RGB32).save(str(target), "PNG")
+
+        controller.open_path(target)
+
+        assert [review.title_label.text() for review in controller._reviews] == ["shot.png"]
+
+    def test_a_forwarded_recording_opens_in_the_player(self, make_controller, monkeypatch, tmp_path):
+        state = make_transport_state()
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(state),
+        )
+        opened = []
+        monkeypatch.setattr(controller, "_open_player", opened.append)
+        target = tmp_path / "clip.webm"
+        target.write_bytes(b"")
+        state["claimed"] = True
+
+        FakeTransport(state).send_open_request(target)
+
+        assert opened == [target]
+
+    def test_a_missing_file_is_reported_and_opens_nothing(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        calls = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: calls.append(message),
+        )
+        controller = self._controller(make_controller)
+        monkeypatch.setattr(
+            controller, "_open_player", lambda path: pytest.fail("nothing to play")
+        )
+
+        controller.open_path(tmp_path / "gone.mp4")
+
+        assert controller._reviews == []
+        assert len(calls) == 1
+        assert "gone.mp4" in calls[0]
 
 
 class TestChooserKindIntegration:

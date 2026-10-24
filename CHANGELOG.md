@@ -5,6 +5,14 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **`snipux clip.mp4` opens the recording in the video editor.** Handing
+  Snipux a file now opens it in the right editor: a recording (.mp4, .webm,
+  .mkv, .mov) in the trim editor, anything else in the image editor. A file
+  that is missing, or isn't an image or recording, gets a plain error
+  instead of an empty window.
+
 ## 1.2.3 — 2026-10-24
 
 ### Fixed

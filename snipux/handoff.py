@@ -17,9 +17,9 @@ that byte followed by a path to open. Where there is no such socket to reach
 named pipes -- `forward` says so, and the caller takes the full path, which
 finds or becomes the resident exactly as it always has.
 
-A lone argument that isn't `--snip`/`--settings` and doesn't look like a flag
-is a path to open (`snipux shot.png`), forwarded the same way behind the
-`OPEN_REQUEST_PREFIX` byte. It travels as the bytes `os.fsencode` gives it,
+A lone argument naming an existing image or recording is a path to open
+(`snipux shot.png`), forwarded the same way behind the `OPEN_REQUEST_PREFIX`
+byte; the resident decides which editor it goes to. It travels as the bytes `os.fsencode` gives it,
 made absolute first -- the resident's working directory is not this
 process's -- so a name that isn't valid UTF-8 on Linux, or one with spaces on
 Windows, arrives unharmed.
@@ -59,13 +59,34 @@ def listening_place(server_name: str = SERVER_NAME) -> str:
     return socket_path(server_name) if hasattr(socket, "AF_UNIX") else server_name
 
 
+# A copy of `tokens.EDITOR_IMAGE_SUFFIXES` + `EDITOR_RECORDING_SUFFIXES`,
+# since importing those would load Qt. Only a speed-up: a file this misses
+# takes the full path, which opens it all the same.
+_OPENABLE_SUFFIXES = (
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif",
+    ".mp4", ".webm", ".mkv", ".mov",
+)
+
+
+def _is_quick_to_open(argument: str) -> bool:
+    """Whether a path can be forwarded without the full CLI looking at it
+    first: one that exists, with a suffix an editor opens. Anything else --
+    a typo, a text file -- goes to `app.main`, which says what is wrong in
+    the terminal it was typed into.
+    """
+    return (
+        not argument.startswith("-")
+        and os.path.splitext(argument)[1].lower() in _OPENABLE_SUFFIXES
+        and os.path.isfile(argument)
+    )
+
+
 def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
     """Send the request `arguments` names to a running resident, and say
     whether it was delivered.
 
-    Only a lone `--snip`, `--settings`, or a path (anything else that
-    doesn't start with `-`, i.e. not a flag main() doesn't otherwise know)
-    is a request; anything else belongs to the full CLI. False whenever the
+    Only a lone `--snip`, `--settings`, or the path of an existing file
+    an editor opens is a request; anything else belongs to the full CLI. False whenever the
     resident cannot be reached this way, which is never an error -- it is
     the caller's cue to take the full path.
     """
@@ -74,7 +95,7 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
     argument = arguments[0]
     if argument in _REQUESTS:
         payload = _REQUESTS[argument]
-    elif not argument.startswith("-"):
+    elif _is_quick_to_open(argument):
         # Made absolute here, before it travels anywhere -- the resident's
         # working directory is not this process's.
         payload = OPEN_REQUEST_PREFIX + os.fsencode(os.path.abspath(argument))

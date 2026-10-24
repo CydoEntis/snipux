@@ -529,6 +529,30 @@ _ACTION_FLAGS = (
 )
 
 
+def editor_for(path: Path) -> str:
+    """Which editor opens `path`: "video" for a recording, "image" for
+    anything else -- `QImageReader` is what then decides whether it really
+    is one.
+    """
+    if path.suffix.lower() in design.tokens.EDITOR_RECORDING_SUFFIXES:
+        return "video"
+    return "image"
+
+
+def unopenable_reason(path: Path) -> str | None:
+    """Why `snipux PATH` cannot open `path`, or None when it can.
+
+    Asked in the launching process, before anything is forwarded, so a
+    typo in a terminal is answered in that terminal rather than as a
+    balloon from a resident the user may not know is running.
+    """
+    if not path.is_file():
+        return f"{path} does not exist."
+    if editor_for(path) == "video" or QImageReader(str(path)).canRead():
+        return None
+    return f"{path.name} is not an image or a recording Snipux can open."
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="snipux",
@@ -592,9 +616,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "path",
         nargs="?",
         metavar="PATH",
-        help="open this image in the review window, with the full "
-        "toolbar, instead of re-snipping it off your own screen -- "
-        "forwarded to an already-running Snipux instance the way --snip "
+        help="open this file in its editor -- a recording (.mp4, .webm, "
+        ".mkv, .mov) in the player, an image in the review window with the "
+        "full toolbar -- forwarded to an already-running Snipux instance the way --snip "
         "already is, starting one first if none is running yet",
     )
     # Outside the mutually exclusive group above: this modifies --setup
@@ -853,6 +877,10 @@ def main(
         if transport is None:
             transport = QLocalSocketTransport()
         _ensure_qapplication()
+        reason = unopenable_reason(target)
+        if reason is not None:
+            print(f"snipux: {reason}", file=sys.stderr)
+            return 1
         if transport.try_claim():
             if registry is None:
                 registry = build_default_registry()
@@ -1395,7 +1423,7 @@ class AppController:
                 "quit it, kill this process."
             )
 
-        self._transport.listen(self.start_capture, self.open_settings, self.open_image_path)
+        self._transport.listen(self.start_capture, self.open_settings, self.open_path)
 
     def _rebuild_recent_menu(self) -> None:
         """Refresh the tray's Recent section from what is actually still on
@@ -2046,6 +2074,29 @@ class AppController:
         review.activateWindow()
         platform.current.take_keyboard_focus(review)
 
+    def open_path(self, path: Path) -> None:
+        """`snipux PATH`, here or forwarded over the socket: a recording
+        opens in the player, anything else in the review window.
+
+        Routed in the resident rather than only in the launching process,
+        because a forwarded request carries nothing but the path.
+        """
+        if not path.is_file():
+            self._warn(f"Could not open {path.name}: there is no file there.")
+            return
+        if editor_for(path) == "video":
+            self._open_player(path)
+        else:
+            self.open_image_path(path)
+
+    def _warn(self, message: str) -> None:
+        if self._tray_available:
+            self._tray_icon.showMessage(
+                "Snipux", message, QSystemTrayIcon.MessageIcon.Warning
+            )
+        else:
+            print(message)
+
     def open_image_path(self, path: Path) -> None:
         """Open an image you already have in a fresh review window, with
         the full toolbar -- `snipux PATH`'s and a socket-forwarded PATH's
@@ -2063,13 +2114,7 @@ class AppController:
         reader = QImageReader(str(path))
         image = reader.read()
         if image.isNull():
-            message = f"Could not open {path.name}: {reader.errorString()}"
-            if self._tray_available:
-                self._tray_icon.showMessage(
-                    "Snipux", message, QSystemTrayIcon.MessageIcon.Warning
-                )
-            else:
-                print(message)
+            self._warn(f"Could not open {path.name}: {reader.errorString()}")
             return
         review = ReviewWindow(image, saved_path=path)
         self._reviews.append(review)
@@ -4107,7 +4152,7 @@ def _become_resident(
     if open_settings_immediately:
         controller.open_settings()
     if open_path_immediately is not None:
-        controller.open_image_path(open_path_immediately)
+        controller.open_path(open_path_immediately)
     return app.exec()
 
 

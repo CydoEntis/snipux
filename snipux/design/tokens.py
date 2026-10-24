@@ -1260,6 +1260,14 @@ EXPORT_FOOTNOTE = ("Trimming re-encodes. The untrimmed original stays at its "
 
 PLAYER_FPS = 30
 
+# What the two editors open, by suffix. A recording is told apart this way
+# because QMediaPlayer has no cheap "could I play this?" to ask; an image is
+# whatever QImageReader will read, and this list is only what the file
+# dialogs, desktop entries and Open With registrations offer. handoff.py
+# keeps its own copy for its no-Qt fast path.
+EDITOR_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+EDITOR_RECORDING_SUFFIXES = (".mp4", ".webm", ".mkv", ".mov")
+
 PLAYER_SHORTCUTS = {
     "Space": "play / pause",
     "I": "set the start at the playhead",
