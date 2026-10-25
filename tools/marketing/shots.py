@@ -239,6 +239,12 @@ def place_recording_bar(overlay, region: QRectF):
     bar.set_backdrop_host(overlay)
     bar.adjustSize()
     spot = _place_recording_hud(region, [QRectF(overlay.rect())], bar.sizeHint())
+    if spot is None:
+        # No room by the app's rules, which happens with Linux CI's wider
+        # fonts. The published shots are rendered on Windows (README), so
+        # here it only has to land somewhere for the test to render it.
+        spot = QRectF(region.center().x() - bar.width() / 2, region.bottom(),
+                      bar.width(), bar.height())
     bar.move(QRectF(spot).center().toPoint() - bar.rect().center())
     bar.show()
     bar.raise_()
