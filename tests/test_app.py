@@ -7320,15 +7320,12 @@ class TestSnipRequestProtocol:
         assert fired == [], "a liveness probe must not trigger a capture"
 
     @skip_on_windows(
-        "listen()'s _accept() calls connection.waitForReadyRead() -- a "
-        "nested event loop -- from inside a slot invoked by "
-        "QApplication.processEvents() during newConnection. On Windows' "
-        "named-pipe QLocalSocket backend that nested wait does not reliably "
-        "observe bytes the client already flushed within the timeout, so "
-        "the request is silently missed; this reproduces standalone and "
-        "deterministically, not just under load. The Unix-domain-socket "
-        "backend used on the target platform (Linux) does not have this "
-        "timing gap."
+        "Client and server in one process. On Windows' named-pipe "
+        "QLocalSocket backend a write only completes when the event loop "
+        "runs, and the client socket in `_send()` is gone before it does, "
+        "so the byte never leaves. A real launcher is another process; "
+        "test_another_process_gets_an_ack_for_an_editor_request covers "
+        "that path on Windows too."
     )
     def test_a_real_request_is_delivered(self, tmp_path):
         name = f"snipux-test-req-{tmp_path.name}"
