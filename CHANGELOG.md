@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.8 — 2026-10-25
+
 ### Fixed
 
 - **On Windows, the Image and Video Editor always open in the Snipux that is
