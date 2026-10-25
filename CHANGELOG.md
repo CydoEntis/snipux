@@ -5,6 +5,17 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.6 — 2026-10-25
+
+### Fixed
+
+- **The maximize button looks like one.** It showed four corner brackets,
+  which reads as full screen; it is now a square, and two stacked squares
+  (restore) while the window is maximized.
+- **The video editor says when a recording is empty.** Opening a recording
+  that never got anything saved to it said only "Could not open file". It
+  now says the recording is empty, and Export and Copy are turned off for it.
+
 ## 1.2.5 — 2026-10-24
 
 ### Fixed
