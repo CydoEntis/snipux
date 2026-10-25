@@ -82,6 +82,8 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Standalone Windows exe that installs itself on first run
 - [x] `done` `snipux --update`
 - [x] `done` Crash log instead of a silent exit
+- [ ] `dev` Report a problem (tray and Settings): a prefilled GitHub issue opened in
+      the browser, crash log only if the user says yes; snipux sends nothing
 - [x] `done` Windows installer, shipped beside the portable exe rather than
       instead of it (docs/releasing.md)
 - [x] `done` `winget install snipux`

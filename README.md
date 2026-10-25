@@ -649,7 +649,10 @@ path each time. The folder and filename pattern are both configurable in
 Settings.
 
 If Snipux runs into an error it did not expect, it keeps running and writes the
-details to `~/.config/snipux/crash.log`, beside its settings.
+details to `~/.config/snipux/crash.log`, beside its settings. To tell us about
+it, pick **Report a problem...** in the tray menu or in Settings: it opens a
+GitHub issue in your browser with your versions filled in, and asks first
+before adding the log.
 
 ## Command reference
 
@@ -752,8 +755,10 @@ the process exits.
 
 **Something stopped working partway through a snip.** Look in
 `~/.config/snipux/crash.log` (on Windows, `%USERPROFILE%\.config\snipux\crash.log`).
-Each unexpected error is written there once, with the version it happened in —
-attach that file when you report the problem.
+Each unexpected error is written there once, with the version it happened in.
+**Report a problem...** in the tray menu or Settings opens a GitHub issue in
+your browser with your versions filled in, and offers to add the newest part of
+that log; nothing is posted until you post it.
 
 ## What hasn't been tested yet
 

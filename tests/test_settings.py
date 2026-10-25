@@ -2034,3 +2034,24 @@ class TestTheCursorSwitchIsHonestAboutThePlatform:
         window = SettingsWindow(config_dir=tmp_path)
 
         assert not window._draw_cursor.switch.isEnabled()
+
+
+class TestReportAProblem:
+    def test_the_rail_offers_it_under_the_version(self, tmp_path):
+        window = SettingsWindow(config_dir=tmp_path, on_report_problem=lambda: None)
+
+        assert window.report_button.text() == "Report a problem…"
+        assert not window.report_button.isHidden()
+
+    def test_a_click_is_handed_to_the_controller(self, tmp_path):
+        clicks = []
+        window = SettingsWindow(config_dir=tmp_path, on_report_problem=lambda: clicks.append(1))
+
+        window.report_button.click()
+
+        assert clicks == [1]
+
+    def test_with_no_controller_it_is_not_offered(self, tmp_path):
+        window = SettingsWindow(config_dir=tmp_path)
+
+        assert window.report_button.isHidden()

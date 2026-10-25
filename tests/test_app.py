@@ -5323,8 +5323,43 @@ class TestAppControllerTrayMenu:
             "Settings...",
             "Discard recording",
             "Check for updates",
+            "Report a problem...",
             "Quit",
         ]
+
+    def test_report_a_problem_opens_a_prefilled_issue(self, make_controller, monkeypatch):
+        opened = []
+        monkeypatch.setattr(
+            app.report.QDesktopServices, "openUrl",
+            lambda url: opened.append(bytes(url.toEncoded()).decode()),
+        )
+        monkeypatch.setattr(app.report, "environment", lambda: "ENVIRONMENT")
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+
+        controller.report_action.trigger()
+
+        assert opened == [app.report.issue_url("ENVIRONMENT")]
+
+    def test_settings_report_a_problem_opens_the_same_issue(self, make_controller, monkeypatch):
+        opened = []
+        monkeypatch.setattr(
+            app.report.QDesktopServices, "openUrl",
+            lambda url: opened.append(bytes(url.toEncoded()).decode()),
+        )
+        monkeypatch.setattr(app.report, "environment", lambda: "ENVIRONMENT")
+        controller = make_controller(
+            BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
+        )
+        controller.open_settings()
+
+        try:
+            controller._settings.report_button.click()
+        finally:
+            controller._settings.close()
+
+        assert opened == [app.report.issue_url("ENVIRONMENT")]
 
     def test_discard_action_starts_disabled(self, make_controller):
         controller = make_controller(
