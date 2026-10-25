@@ -86,7 +86,8 @@ only once its scope, acceptance criteria and how to verify it are clear.
       the browser, crash log only if the user says yes; snipux sends nothing
 - [x] `done` Windows installer, shipped beside the portable exe rather than
       instead of it (docs/releasing.md)
-- [x] `done` `winget install snipux`
+- [ ] `next` `winget install snipux` -- the manifests render
+      (packaging/winget/) but have never been submitted to winget-pkgs
 - [x] `done` A `.deb` and an AppImage, built and attached for every release
 - [x] `done` "Check for updates" in the tray -- asked for, never automatic
 - [x] `declined` Code signing -- recurring cost out of proportion for a free tool, for now (docs/releasing.md)

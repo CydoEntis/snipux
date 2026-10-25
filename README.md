@@ -51,7 +51,7 @@ free, on Linux too — and a slightly better one back on Windows.
   you pick the region on *(Linux; Windows' recorder has no cursor option)*.
 - **One shortcut** — Ctrl+Alt+S, on both platforms.
 
-MIT licensed. Install it with `winget install snipux`, a `.deb`, an
+MIT licensed. Install it with the Windows installer, a `.deb`, an
 AppImage, or `pip install snipux` — see [Install](#install). What changed in
 each release is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -256,17 +256,12 @@ downloads below are executables, and both are unsigned — see
 
 ### Or download it
 
-Neither needs Python.
-
-```powershell
-winget install snipux
-```
-
-Or from the [latest release](https://github.com/CydoEntis/snipux/releases/latest):
+Neither needs Python. Both are on the
+[latest release](https://github.com/CydoEntis/snipux/releases/latest):
 
 - **`snipux-setup-<version>.exe`** — the installer. Installs per-user (no
   admin prompt), appears in Add/Remove Programs, and starts Snipux when it
-  finishes. This is what `winget install` runs.
+  finishes.
 - **`snipux.exe`** — the same app as a single portable file. No installer,
   no Add/Remove entry: run it and it sets itself up, moving itself somewhere
   stable first so a tidy-up of Downloads doesn't break it.
