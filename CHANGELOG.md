@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.7 — 2026-10-25
+
 ### Added
 
 - **Report a problem, from the tray or Settings.** It opens a new GitHub issue
