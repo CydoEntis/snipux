@@ -1987,7 +1987,23 @@ class PlayerWindow(WinWindow):
     def _on_media_error(self, _error, message: str) -> None:
         # Without this a file Qt cannot play is a black frame and silence,
         # which reads as a broken window rather than a broken file.
-        self._set_status(f"Could not play this file: {message}", ok=False)
+        self._set_status(self._unplayable_reason(message), ok=False)
+        # Nothing decodes, so an export or a copy would only hand on the
+        # same broken file. Show in Folder stays, to go and delete it.
+        for control in (self.copy_button, self.export_button):
+            control.setEnabled(False)
+
+    def _unplayable_reason(self, message: str) -> str:
+        # Qt reports a zero-byte file as "Could not open file", which sounds
+        # like a permissions problem. An empty file is a recording that
+        # never got any frames written, and saying so ends the hunt.
+        try:
+            empty = self.path is not None and self.path.stat().st_size == 0
+        except OSError:
+            empty = False
+        if empty:
+            return "This recording is empty: nothing was saved to it, so there is nothing to play or trim"
+        return f"Could not play this file: {message}"
 
     def _on_metadata(self) -> None:
         """Adopt the resolution as soon as the container reports it.
