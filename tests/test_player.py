@@ -841,3 +841,30 @@ class TestOpenAnotherRecording:
 
         assert window.path == first
         assert "export" in window.status_label.text().lower()
+
+
+class TestAFileThatWillNotPlay:
+    def test_an_empty_recording_says_it_is_empty(self, windows, tmp_path):
+        window = windows(_recording(tmp_path, "empty.mp4"))
+
+        window._on_media_error(None, "Could not open file")
+
+        assert "recording is empty" in window.status_label.text()
+
+    def test_a_damaged_recording_passes_on_qts_reason(self, windows, tmp_path):
+        path = tmp_path / "damaged.mp4"
+        path.write_bytes(b"not a video")
+        window = windows(path)
+
+        window._on_media_error(None, "Invalid data")
+
+        assert window.status_label.text() == "Could not play this file: Invalid data"
+
+    def test_it_cannot_be_exported_but_can_be_found(self, windows, tmp_path):
+        window = windows(_recording(tmp_path, "empty.mp4"))
+
+        window._on_media_error(None, "Could not open file")
+
+        assert not window.export_button.isEnabled()
+        assert not window.copy_button.isEnabled()
+        assert window.folder_button.isEnabled()

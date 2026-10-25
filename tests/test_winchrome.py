@@ -319,6 +319,17 @@ class TestFramelessWindowsCanStillBeResized:
 
         assert handled is False
 
+    def test_the_maximise_button_shows_restore_while_maximised(self):
+        window = self._window()
+        assert window.maximise_button.glyph == "maximize"
+
+        window.showMaximized()
+        assert window.maximise_button.glyph == "restore"
+        assert window.maximise_button.toolTip() == "Restore"
+
+        window.showNormal()
+        assert window.maximise_button.glyph == "maximize"
+
     def test_widgets_added_after_construction_are_watched_too(self):
         # Subclasses fill `body` well after __init__, so registering only
         # what exists at construction would leave the sides uncovered.

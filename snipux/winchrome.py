@@ -332,7 +332,7 @@ class _TitleBarButton(QPushButton):
         metric = tokens.WinMetric
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(metric.TITLEBAR_BTN, metric.TITLEBAR_BTN)
-        self.setIcon(design.icon(icon_name, tokens.Win.TITLEBAR_ICON))
+        self.set_glyph(icon_name)
         self.setIconSize(QSize(metric.TITLEBAR_ICON, metric.TITLEBAR_ICON))
         hover = tokens.Win.CLOSE_HOVER if danger else tokens.Win.ROW_HOVER
         self.setStyleSheet(
@@ -340,6 +340,10 @@ class _TitleBarButton(QPushButton):
             f" border-radius: {metric.TITLEBAR_BTN_R}px; }}"
             f"QPushButton:hover {{ background: {hover}; }}"
         )
+
+    def set_glyph(self, icon_name: str) -> None:
+        self.glyph = icon_name
+        self.setIcon(design.icon(icon_name, tokens.Win.TITLEBAR_ICON))
 
 
 # Windows' own scrollbar is 17px of grey chrome with two arrow buttons and,
@@ -482,7 +486,8 @@ class WinWindow(QWidget):
         self.minimise_button.clicked.connect(self.showMinimized)
         row.addWidget(self.minimise_button)
 
-        self.maximise_button = _TitleBarButton("expand")
+        self.maximise_button = _TitleBarButton("maximize")
+        self.maximise_button.setToolTip("Maximize")
         self.maximise_button.clicked.connect(self._toggle_maximised)
         row.addWidget(self.maximise_button)
 
@@ -647,6 +652,15 @@ class WinWindow(QWidget):
             self.showNormal()
         else:
             self.showMaximized()
+
+    def changeEvent(self, event) -> None:
+        # Driven by the state change rather than the click, so maximising
+        # by a double-click, Win+Up or a snap also swaps the glyph.
+        if event.type() == QEvent.Type.WindowStateChange:
+            maximised = self.isMaximized()
+            self.maximise_button.set_glyph("restore" if maximised else "maximize")
+            self.maximise_button.setToolTip("Restore" if maximised else "Maximize")
+        super().changeEvent(event)
 
     # -- frameless drag --------------------------------------------------
     #
