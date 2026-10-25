@@ -48,6 +48,7 @@ never an error.
 | ------------------------- | ---------------------------------------------------------- |
 | `QT_QPA_PLATFORM=offscreen` | run with no display. `tests/conftest.py` sets it by default. |
 | `QT_SCALE_FACTOR=1.5`     | the second required test run -- catches coordinate-space bugs |
+| `SNIPUX_DEMO=1`           | demo mode for marketing shots: Settings' footer shows no version number. `tools/marketing/shoot.py` sets it |
 | `QT_QPA_FONTDIR`          | `conftest.py` points it at `C:\Windows\Fonts` on Windows, where the offscreen plugin otherwise finds no fonts at all |
 
 ## Tests and the real machine

@@ -256,7 +256,8 @@ because it was the *only* thing some users could not run; the answer to that
 is to ship both, which is what the Releases page does now. The portable exe
 is not blocked by Smart App Control, so anyone the installer refuses still
 has the route they have always had — and everyone else gets an Add/Remove
-Programs entry, an uninstaller, and `winget install snipux`.
+Programs entry and an uninstaller. (`winget install snipux` needs the
+manifests below submitted first; they have not been yet.)
 
 A certificate remains a few hundred a year plus a hardware token (see below)
 for a tool with a handful of users, which is the trade that has not changed.

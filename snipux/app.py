@@ -1176,30 +1176,60 @@ class QLocalSocketTransport(Transport):
         if self._server is None:
             raise RuntimeError("listen() called before a successful try_claim()")
 
-        def _accept() -> None:
-            connection = self._server.nextPendingConnection()
-            if connection is None:
-                return
-            # A probe sends nothing and simply times out here, which is
-            # exactly how it stays distinguishable from either request.
-            received = (
-                connection.readAll().data()
-                if connection.waitForReadyRead(self._READ_TIMEOUT_MS)
-                else b""
-            )
-            handle = self._recognise(
-                received, on_snip_request, on_settings_request, on_open_request, on_editor_request
-            )
-            # Acked once recognised and before it is acted on: the
-            # launcher is waiting, and opening a window takes a moment.
-            if handle is not None and received[:1] in handoff.ACKED_REQUESTS:
-                connection.write(handoff.ACK)
-                connection.waitForBytesWritten(self._READ_TIMEOUT_MS)
-            connection.disconnectFromServer()
-            if handle is not None:
-                handle()
+        def _serve(connection: QLocalSocket) -> None:
+            # Driven by readyRead rather than a waitForReadyRead() inside
+            # the newConnection slot: on Windows' named-pipe backend that
+            # nested wait could miss bytes the client had already flushed,
+            # so a launcher's editor request was hung up on unread and it
+            # opened a second snipux instead.
+            answered = False
+            # A probe sends nothing; the timeout is what tells it apart from
+            # a request and lets its connection go. Parented to the
+            # connection, so it is deleted with it.
+            timeout = QTimer(connection)
+            timeout.setSingleShot(True)
 
-        self._server.newConnection.connect(_accept)
+            def answer() -> None:
+                nonlocal answered
+                if answered:
+                    return
+                answered = True
+                # Nothing of this connection may call back into Python once
+                # it is answered: a socket being torn down (the server with
+                # it, at exit) still emits, onto a half-destroyed object.
+                timeout.stop()
+                connection.readyRead.disconnect(answer)
+                connection.disconnected.disconnect(answer)
+                timeout.timeout.disconnect(answer)
+                received = connection.readAll().data()
+                handle = self._recognise(
+                    received, on_snip_request, on_settings_request, on_open_request, on_editor_request
+                )
+                # Acked once recognised and before it is acted on: the
+                # launcher is waiting, and opening a window takes a moment.
+                if handle is not None and received[:1] in handoff.ACKED_REQUESTS:
+                    connection.write(handoff.ACK)
+                    connection.waitForBytesWritten(self._READ_TIMEOUT_MS)
+                connection.disconnectFromServer()
+                connection.deleteLater()
+                if handle is not None:
+                    handle()
+
+            connection.readyRead.connect(answer)
+            # A probe hangs up without sending; no need to wait it out.
+            connection.disconnected.connect(answer)
+            timeout.timeout.connect(answer)
+            timeout.start(self._READ_TIMEOUT_MS)
+            if connection.bytesAvailable():
+                answer()
+
+        server = self._server
+
+        def _accept() -> None:
+            while (connection := server.nextPendingConnection()) is not None:
+                _serve(connection)
+
+        server.newConnection.connect(_accept)
 
     def _recognise(
         self,
