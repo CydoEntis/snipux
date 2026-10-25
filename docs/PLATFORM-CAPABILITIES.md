@@ -17,10 +17,12 @@ and only for something the user just asked for.
 | `pip` (subprocess) | `snipux --update` | Only when the user runs it. Refused in the standalone exe. |
 | `ffmpeg` (subprocess) | H.264 and GIF export | Optional, found on `PATH`, never installed by us. |
 | GitHub Releases API (`urllib`, HTTPS) | the update check, and the download behind Update | One unauthenticated GET, at most once a day plus whenever the tray asks; a second GET of the release file only if the user clicks Update. No token, no identifiers, nothing sent about the machine. |
+| Default browser (`QDesktopServices.openUrl`) | Report a problem | Opens a prefilled GitHub new-issue page. Snipux makes no request itself; the user reads the report in the browser and posts it or not. The crash log goes in only if they say yes. |
 
 **Not used anywhere:** telemetry, crash upload, accounts, camera, location,
 keylogging. The only network is the row above: a daily check for a newer
-release, and a download only if the user clicks Update. Nothing installs
+release, and a download only if the user clicks Update. Report a problem
+hands a URL to the browser and sends nothing from snipux. Nothing installs
 itself. The microphone is used only
 when the user picks Mic for a recording. The
 global hotkey registers one chord; snipux does not see other keystrokes.
