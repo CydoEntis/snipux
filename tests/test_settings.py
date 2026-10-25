@@ -1695,6 +1695,12 @@ class TestVersionLine:
 
         assert setup_desktop.version_line() == "Snipux 1.2.3"
 
+    def test_demo_mode_leaves_the_version_out(self, monkeypatch):
+        monkeypatch.setattr("importlib.metadata.version", lambda name: "1.2.3")
+        monkeypatch.setenv("SNIPUX_DEMO", "1")
+
+        assert setup_desktop.version_line() == "Snipux"
+
     def test_the_footer_draws_no_border_of_its_own(self, tmp_path):
         # The rail's border rule used to reach the label and draw a hairline
         # down its right edge, inside the rail.
