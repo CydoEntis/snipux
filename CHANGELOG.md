@@ -5,6 +5,12 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **On Windows, the Image and Video Editor always open in the Snipux that is
+  already running.** Opening one from the Start menu or "Open with" could
+  miss the running Snipux and start a separate copy just for that window.
+
 ## 1.2.7 — 2026-10-25
 
 ### Added
