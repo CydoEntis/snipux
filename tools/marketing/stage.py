@@ -85,8 +85,10 @@ def isolate_snipux(stage: Stage, replace=setattr) -> None:
     replace(setup_desktop, "config_path",
             lambda config_dir=None: real_config_path(throwaway if config_dir is None else config_dir))
     # The person's own snipux holds the real hotkey; probing for it would
-    # report a conflict that only exists on this machine.
-    replace(platform.current, "find_shortcut_conflict", lambda shortcut: None)
+    # report a conflict that only exists on this machine. Only Windows has
+    # this probe; Linux asks GNOME by name, stubbed on the next line.
+    if hasattr(platform.current, "find_shortcut_conflict"):
+        replace(platform.current, "find_shortcut_conflict", lambda shortcut: None)
     replace(setup_desktop, "find_shortcut_conflicts_named", lambda shortcut: [])
     # A shot's Copy must not land on the person's clipboard (wl-copy on
     # Linux reaches the real one even from an offscreen Qt). These three
