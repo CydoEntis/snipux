@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.6 — 2026-10-25
+
 ### Fixed
 
 - **The maximize button looks like one.** It showed four corner brackets,
