@@ -5,6 +5,15 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.7 — 2026-10-25
+
+### Added
+
+- **Report a problem, from the tray or Settings.** It opens a new GitHub issue
+  in your browser with a short form to fill in and your Snipux, system and Qt
+  versions already written down. If there is an error log, Snipux asks first
+  whether to add its newest part. Nothing is sent until you post it yourself.
+
 ## 1.2.6 — 2026-10-25
 
 ### Fixed

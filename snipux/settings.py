@@ -1528,6 +1528,7 @@ class SettingsWindow(WinWindow):
         parent: QWidget | None = None,
         config_dir: Path | None = None,
         on_saved: Callable[[], None] | None = None,
+        on_report_problem: Callable[[], None] | None = None,
     ):
         super().__init__(
             "Snipux Settings",
@@ -1536,6 +1537,7 @@ class SettingsWindow(WinWindow):
         )
         self._config_dir = config_dir
         self._on_saved = on_saved
+        self._on_report_problem = on_report_problem
         self._dirty = False
 
         body = QHBoxLayout(self.body)
@@ -1589,6 +1591,12 @@ class SettingsWindow(WinWindow):
         # single line -- the "unknow" truncation this exists to fix.
         self._version_label.setWordWrap(True)
         column.addWidget(self._version_label)
+        self.report_button = SecondaryButton("Report a problem…")
+        self.report_button.clicked.connect(self._report_problem)
+        # Hidden with no controller to hand the click to, rather than shown
+        # doing nothing.
+        self.report_button.setVisible(self._on_report_problem is not None)
+        column.addWidget(self.report_button)
         return rail
 
     def _build_panes(self) -> QWidget:
@@ -2582,6 +2590,10 @@ class SettingsWindow(WinWindow):
         self._refresh_dirty()
 
     # -- behaviour -------------------------------------------------------
+
+    def _report_problem(self) -> None:
+        if self._on_report_problem is not None:
+            self._on_report_problem()
 
     def _on_recorded(self, accelerator: str) -> None:
         self._conflict.show_for(accelerator)

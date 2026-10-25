@@ -110,6 +110,7 @@ from snipux import (
     hostenv,
     output,
     platform,
+    report,
     setup_desktop,
     updates,
 )
@@ -1493,6 +1494,8 @@ class AppController:
         # running 1.0.0.
         self.update_action = menu.addAction("Check for updates")
         self.update_action.triggered.connect(self._on_update_action)
+        self.report_action = menu.addAction("Report a problem...")
+        self.report_action.triggered.connect(self.report_problem)
         self.quit_action = menu.addAction("Quit")
         self.quit_action.triggered.connect(self._quit)
         # #85: rebuilds on `aboutToShow`, but that alone is not trusted --
@@ -1764,8 +1767,13 @@ class AppController:
         while it is open.
         """
         if self._settings is None or not self._settings.isVisible():
-            self._settings = SettingsDialog(on_saved=self._on_settings_saved)
+            self._settings = SettingsDialog(
+                on_saved=self._on_settings_saved, on_report_problem=self.report_problem
+            )
         _present(self._settings)
+
+    def report_problem(self) -> None:
+        report.open_report(crash_log_path())
 
     def _on_settings_saved(self) -> None:
         """Apply what Settings just wrote.
