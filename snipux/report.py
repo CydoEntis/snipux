@@ -65,11 +65,12 @@ def environment() -> str:
 
 def _os_version() -> str:
     # The distribution's own name ("Ubuntu 24.04.1 LTS") says more than a
-    # kernel number; anywhere without os-release, the OS's version string.
+    # kernel number. Elsewhere, release and build together: Windows 11
+    # still reports its version as "10.0.x", and only `release()` says "11".
     try:
         return stdlib_platform.freedesktop_os_release()["PRETTY_NAME"]
     except (OSError, KeyError):
-        return stdlib_platform.version()
+        return f"{stdlib_platform.release()} ({stdlib_platform.version()})"
 
 
 def issue_url(env: str, crash_log: str | None = None, budget: int = URL_BUDGET) -> str:

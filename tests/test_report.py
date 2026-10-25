@@ -63,6 +63,10 @@ class TestIssueUrl:
         assert query.count("&") == 1
 
 
+def _no_os_release():
+    raise OSError("no os-release here")
+
+
 class TestEnvironment:
     def test_windows_has_no_session_line(self, on_windows):
         env = report.environment()
@@ -71,6 +75,13 @@ class TestEnvironment:
         assert "- OS: Windows " in env
         assert f"- Qt: {QT_VERSION_STR}, PyQt6: {PYQT_VERSION_STR}" in env
         assert "Session" not in env
+
+    def test_windows_names_its_release_beside_the_build(self, on_windows, monkeypatch):
+        monkeypatch.setattr(report.stdlib_platform, "freedesktop_os_release", _no_os_release)
+        monkeypatch.setattr(report.stdlib_platform, "release", lambda: "11")
+        monkeypatch.setattr(report.stdlib_platform, "version", lambda: "10.0.26300")
+
+        assert "- OS: Windows 11 (10.0.26300)" in report.environment()
 
     def test_linux_names_the_session_and_desktop(self, on_linux):
         env = report.environment()
