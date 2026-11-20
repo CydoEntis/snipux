@@ -1389,6 +1389,24 @@ class TestHyprlandShortcut:
         assert bindings.read_text() == original
         assert list(tmp_path.glob("*.snipux.bak*")) == []
 
+    def test_a_commented_out_binding_is_not_a_conflict(self, tmp_path, monkeypatch):
+        # Omarchy's stock bindings.lua carries commented-out examples; they
+        # were read as taken and the shortcut was refused over them.
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+        (tmp_path / "hyprland.lua").write_text("")
+        bindings = tmp_path / "bindings.lua"
+        bindings.write_text(
+            '-- o.bind("CTRL + ALT + S", "Example", "something")\n'
+            '--[[\no.bind("CTRL + ALT + S", "Another", "something")\n]]\n'
+        )
+
+        message = setup_desktop.bind_hyprland_shortcut(
+            Path("/opt/snipux"), config_dir=tmp_path, run=self._run_ok()
+        )
+
+        assert message.startswith("Bound ")
+        assert bindings.read_text().count(setup_desktop._HYPR_LUA_BEGIN) == 1
+
     def test_classic_config_uses_hyprland_conf_syntax(self, tmp_path, monkeypatch):
         monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
         config = tmp_path / "hyprland.conf"

@@ -70,6 +70,9 @@ use it; the commit history has the detail.
   muted, with System or Mic two clicks away each time. The source you pick
   on the recording bar is now what the next recording starts with, after a
   restart too. It is still off until you choose one.
+- **On Hyprland, a commented-out binding no longer blocks the shortcut.**
+  Setting the snip shortcut was refused as "already bound" when the same
+  keys appeared in a line of `bindings.lua` that was commented out.
 
 ## 1.2.9 — 2026-11-20
 

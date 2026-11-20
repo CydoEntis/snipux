@@ -408,6 +408,14 @@ def _hypr_binding_conflict(text: str, shortcut: str, *, lua: bool) -> str | None
     wanted_mods, wanted_key = _hypr_shortcut(shortcut)
     wanted = {part.strip() for part in wanted_mods.split("+")[:-1]}
     if lua:
+        # A bind that has been commented out binds nothing. Omarchy's
+        # stock bindings.lua ships with examples commented out, and those
+        # were being read as taken: the shortcut was refused over a line
+        # that does nothing.
+        text = re.sub(r"--\[\[.*?\]\]", "", text, flags=re.S)
+        text = "\n".join(
+            line for line in text.split("\n") if not line.lstrip().startswith("--")
+        )
         matches = re.finditer(r'o\.bind\(\s*["\']([^"\']+)["\']', text)
         candidates = ((match.group(1), match.group(0)) for match in matches)
     else:
