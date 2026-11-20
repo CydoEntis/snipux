@@ -882,6 +882,40 @@ class TestGpuScreenRecorderBackend:
 
         assert process.signals == [_PAUSE_SIGNAL] * 2
 
+    def test_a_recorder_that_died_is_not_reported_as_a_recording(
+        self, tmp_path, monkeypatch
+    ):
+        # Stop skipped everything for a process that had already exited and
+        # then called the truncated file a saved recording.
+        backend, process = self._started(tmp_path, monkeypatch)
+        assert backend.is_running() is True
+        backend._stderr.write("gsr error: capture device lost\n")
+        process.running = False
+
+        assert backend.is_running() is False
+        with pytest.raises(RuntimeError) as raised:
+            backend.stop()
+
+        assert "stopped by itself" in str(raised.value)
+        assert "capture device lost" in str(raised.value)
+        assert process.signals == []
+
+    def test_an_empty_recording_says_what_the_recorder_said(
+        self, tmp_path, monkeypatch
+    ):
+        backend, process = self._started(tmp_path, monkeypatch)
+        (tmp_path / "recording.mp4").write_bytes(b"")
+        backend._stderr.write('failed to get "default_input" audio device\n')
+
+        with pytest.raises(RuntimeError) as raised:
+            backend.stop()
+
+        assert "no playable output" in str(raised.value)
+        assert "default_input" in str(raised.value)
+
+    def test_nothing_started_counts_as_running(self):
+        assert GpuScreenRecorderBackend(which=lambda name: None).is_running() is True
+
     def test_pause_says_no_when_the_recorder_has_gone(self, tmp_path, monkeypatch):
         backend, process = self._started(tmp_path, monkeypatch)
         process.running = False

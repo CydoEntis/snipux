@@ -1049,6 +1049,46 @@ class TestShortcutConfig:
 
         assert setup_desktop.load_shortcut(tmp_path) == "Super+Shift+X"
 
+    def test_a_config_that_cannot_be_read_is_kept_not_written_over(self, tmp_path):
+        # One stray comma, and the next write of any key -- the last
+        # region, on every snip -- replaced the whole file with that key.
+        path = setup_desktop.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        broken = '{"shortcut": "Super+Shift+X", "save_folder": "/pics",}'
+        path.write_text(broken)
+
+        assert setup_desktop.save_last_region((1, 2, 3, 4), tmp_path)
+
+        kept = path.with_name("config.json.unreadable")
+        assert kept.read_text() == broken
+        assert json.loads(path.read_text()) == {"last_region": [1, 2, 3, 4]}
+
+    def test_a_readable_config_is_never_set_aside(self, tmp_path):
+        setup_desktop.save_shortcut("Super+Shift+X", tmp_path)
+
+        setup_desktop.save_last_region((1, 2, 3, 4), tmp_path)
+
+        path = setup_desktop.config_path(tmp_path)
+        assert not path.with_name("config.json.unreadable").exists()
+        assert setup_desktop.load_shortcut(tmp_path) == "Super+Shift+X"
+
+    def test_a_write_that_fails_leaves_the_old_file_whole(self, tmp_path, monkeypatch):
+        # Written beside and moved over: a write cut short used to leave
+        # half a file, which then read as empty.
+        setup_desktop.save_shortcut("Super+Shift+X", tmp_path)
+        path = setup_desktop.config_path(tmp_path)
+        before = path.read_text()
+
+        def refuse(source, destination):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(setup_desktop.os, "replace", refuse)
+
+        assert setup_desktop.save_last_region((1, 2, 3, 4), tmp_path) is False
+
+        assert path.read_text() == before
+        assert [entry.name for entry in path.parent.iterdir()] == ["config.json"]
+
     def test_a_corrupt_config_falls_back_to_the_default(self, tmp_path):
         # A broken config must never be able to fail --setup, which
         # install.sh runs on every install.
@@ -1348,6 +1388,24 @@ class TestHyprlandShortcut:
         assert "already bound" in message
         assert bindings.read_text() == original
         assert list(tmp_path.glob("*.snipux.bak*")) == []
+
+    def test_a_commented_out_binding_is_not_a_conflict(self, tmp_path, monkeypatch):
+        # Omarchy's stock bindings.lua carries commented-out examples; they
+        # were read as taken and the shortcut was refused over them.
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+        (tmp_path / "hyprland.lua").write_text("")
+        bindings = tmp_path / "bindings.lua"
+        bindings.write_text(
+            '-- o.bind("CTRL + ALT + S", "Example", "something")\n'
+            '--[[\no.bind("CTRL + ALT + S", "Another", "something")\n]]\n'
+        )
+
+        message = setup_desktop.bind_hyprland_shortcut(
+            Path("/opt/snipux"), config_dir=tmp_path, run=self._run_ok()
+        )
+
+        assert message.startswith("Bound ")
+        assert bindings.read_text().count(setup_desktop._HYPR_LUA_BEGIN) == 1
 
     def test_classic_config_uses_hyprland_conf_syntax(self, tmp_path, monkeypatch):
         monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)

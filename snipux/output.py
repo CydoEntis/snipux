@@ -243,22 +243,49 @@ def display_path(path: Path | None) -> str:
         return str(path)
 
 
-def save_image(image: QImage, directory: Path | str | None = None) -> Path:
+def save_image(
+    image: QImage,
+    directory: Path | str | None = None,
+    *,
+    pattern: str | None = None,
+) -> Path:
     """Write `image` as a PNG into `directory` (or `~/Pictures` by default)
-    under a filename derived from the current date and time, and return the
-    path written.
+    under the filename pattern from Settings, and return the path written.
 
     The directory is created if it doesn't exist — "save without naming it"
     implies this must not fail just because `~/Pictures` isn't there yet on
     a fresh machine.
+
+    `pattern` is read from Settings when not given. It used not to be read
+    at all: Settings stored it and previewed the name it would make, and
+    every snip was still called "Screenshot from ...".
+
+    Never over an existing file. The default pattern counts in seconds and
+    a user's own may not count at all, so two saves could land on one name
+    and the second silently replaced the first; a later one gets " (2)".
     """
     if directory is None:
         directory = Path.home() / "Pictures"
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
 
-    filename = datetime.datetime.now().strftime("Screenshot from %Y-%m-%d %H-%M-%S.png")
-    path = directory / filename
+    from . import setup_desktop
+
+    if pattern is None:
+        pattern = setup_desktop.load_filename_pattern()
+    try:
+        path = Path(setup_desktop.preview_filename(directory, pattern))
+    except ValueError:
+        # A pattern strftime refuses is not worth losing the snip over.
+        path = Path(
+            setup_desktop.preview_filename(directory, setup_desktop.tokens.FILENAME_DEFAULT)
+        )
+    stem, number = path.stem, 2
+    while path.exists():
+        path = path.with_name(f"{stem} ({number}){path.suffix}")
+        number += 1
+    # A pattern may name a folder of its own ("%Y-%m/snip %H%M%S").
+    path.parent.mkdir(parents=True, exist_ok=True)
     # QImage.save() reports failure by returning False, not by raising, and a
     # disk that is full or a folder that has been made read-only both land
     # here. Ignoring it returned a path to a file that was never written, and

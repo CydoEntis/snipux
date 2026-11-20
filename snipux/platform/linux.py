@@ -302,6 +302,165 @@ class LinuxPlatform(Platform):
         widget.setAttribute(Qt.WidgetAttribute.WA_X11NetWmWindowTypeSplash, True)
         return True
 
+    # What `set_app_identity` names this process. Wayland's app id, which
+    # Hyprland reports as the window class and every dock and switcher
+    # looks the icon up by; it has to be the installed `snipux.desktop`.
+    APP_ID = "snipux"
+
+    def set_app_identity(self) -> None:
+        """Name the process after its desktop entry.
+
+        Qt otherwise takes the app id from the program's name, which is
+        `snipux` from the AppImage but `__main__.py` or `python3` from a
+        pip install, so docks showed a blank icon and no window rule could
+        tell Snipux's windows from any other Python program's.
+        """
+        QGuiApplication.setDesktopFileName(self.APP_ID)
+
+    def _on_hyprland_wayland(self) -> bool:
+        return (
+            capture.detect_session_type() == "wayland"
+            and QGuiApplication.platformName() == "wayland"
+            and setup_desktop.is_hyprland_session()
+        )
+
+    @staticmethod
+    def _hyprctl_eval(code: str) -> bool:
+        try:
+            result = subprocess.run(
+                ["hyprctl", "eval", code],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0
+
+    def prepare_window(self, widget) -> None:
+        """Hyprland: keep a second title bar off Snipux's own windows.
+
+        Omarchy's floating workspaces draw a title bar, with its own
+        minimise, maximise and close, on every window there. Snipux's
+        windows already have one, so each showed two, stacked. `decorate`
+        is the rule that plugin honours.
+
+        Sent on every show, by name, so it is replaced rather than piled
+        up: a Hyprland reload drops runtime rules, and a resident process
+        outlives many reloads.
+        """
+        if not self._on_hyprland_wayland():
+            return
+        self._hyprctl_eval(
+            "hl.window_rule({ name = 'snipux-own-chrome', enabled = true, "
+            f"match = {{ class = '^{re.escape(self.APP_ID)}$' }}, "
+            "decorate = false })"
+        )
+
+    def maximised(self, widget) -> bool | None:
+        """Hyprland tells every window it is maximised, tiled or floating,
+        so that toolkits square their corners off. Qt believes it, which
+        left Snipux's title bars showing Restore from the start and
+        refusing to be dragged. What is true is what Snipux last asked
+        Hyprland for."""
+        if not self._on_hyprland_wayland():
+            return None
+        return bool(getattr(widget, "_hyprland_maximised", False))
+
+    @staticmethod
+    def _hyprland_own_clients() -> list[dict]:
+        """Every window Hyprland has for this process; empty on failure."""
+        try:
+            result = subprocess.run(
+                ["hyprctl", "clients", "-j"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            clients = json.loads(result.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return []
+        if not isinstance(clients, list):
+            return []
+        return [
+            client
+            for client in clients
+            if isinstance(client, dict)
+            and client.get("pid") == os.getpid()
+            and client.get("address")
+        ]
+
+    def _hyprland_window_of(self, widget) -> dict | None:
+        """Hyprland's record of `widget`, or None when it cannot be told
+        apart. Hyprland names no window by the process's own handle, so it
+        is found among this process's windows by title and size; two
+        editors showing the same file at the same size are settled by
+        which was focused last, which is the one whose button was just
+        clicked."""
+        size = [widget.width(), widget.height()]
+        matches = [
+            client
+            for client in self._hyprland_own_clients()
+            if client.get("title") == widget.windowTitle()
+            and client.get("size") == size
+        ]
+        if not matches:
+            return None
+        return min(matches, key=lambda client: client.get("focusHistoryID", 0))
+
+    def _hyprland_address_of(self, widget) -> str | None:
+        window = self._hyprland_window_of(widget)
+        return None if window is None else window["address"]
+
+    def toggle_maximised(self, widget) -> bool:
+        """Hyprland: maximise through its own dispatcher.
+
+        Omarchy suppresses the maximise request every client sends
+        (`suppress_event = "maximize"`), so the title bar's button did
+        nothing at all, and left Qt believing the window was maximised.
+        """
+        if not self._on_hyprland_wayland():
+            return False
+        address = self._hyprland_address_of(widget)
+        if address is None:
+            return False
+        if not self._hyprctl_eval(
+            "hl.dispatch(hl.dsp.window.fullscreen({ mode = 'maximized', "
+            f"action = 'toggle', window = 'address:{address}' }}))"
+        ):
+            return False
+        # Asked rather than flipped: Omarchy's own maximise key reaches
+        # the same window without Snipux hearing about it.
+        # By address: the widget has not been resized yet, so it can no
+        # longer be found by its size.
+        widget._hyprland_maximised = any(
+            client["address"] == address and client.get("fullscreen") == 1
+            for client in self._hyprland_own_clients()
+        )
+        return True
+
+    def minimise(self, widget) -> bool:
+        """Hyprland has no minimise of its own. Omarchy supplies one for
+        its floating workspaces, where its dock brings the window back, and
+        does nothing on a tiled one -- so where that exists it is used, and
+        elsewhere the button stays Qt's, which Hyprland ignores."""
+        if not self._on_hyprland_wayland():
+            return False
+        if shutil.which("omarchy-hyprland-window-minimize") is None:
+            return False
+        address = self._hyprland_address_of(widget)
+        if address is None:
+            return False
+        try:
+            subprocess.run(
+                ["omarchy-hyprland-window-minimize", address],
+                capture_output=True,
+                timeout=3,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return True
+
     def place_capture_overlay(self, widget, screen) -> bool:
         """Place a capture surface with a retained, output-specific rule.
 

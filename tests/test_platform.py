@@ -28,6 +28,7 @@ reaches the real mechanism, which has its own tests" split
 """
 
 import ctypes
+import os
 import importlib
 import json
 import subprocess
@@ -3300,3 +3301,147 @@ class TestWindowsSkipsTheOverlaysOpeningAnimation:
         self._patch(monkeypatch, -2147024809)  # E_INVALIDARG
 
         assert windows.WindowsPlatform().skip_map_animation(self._Widget()) is False
+
+
+class TestHyprlandTreatsSnipuxWindowsAsItsOwn:
+    """Settings, the editors and the history panel are frameless and draw
+    their own title bar. On an Omarchy floating workspace each also got the
+    compositor's, and Snipux's own maximise button did nothing."""
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self):
+        from PyQt6.QtWidgets import QApplication
+
+        return QApplication.instance() or QApplication([])
+
+    def _hyprland(self, monkeypatch, clients=None):
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "wayland")
+        monkeypatch.setattr(
+            linux.QGuiApplication, "platformName", staticmethod(lambda: "wayland")
+        )
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        calls = []
+        state = {"clients": clients or []}
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv[:2] == ["hyprctl", "clients"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(state["clients"]))
+            return SimpleNamespace(returncode=0, stdout="ok")
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+        return linux.LinuxPlatform(), calls, state
+
+    @staticmethod
+    def _window(title="shot.png", size=(640, 480)):
+        from PyQt6.QtWidgets import QWidget
+
+        widget = QWidget()
+        widget.setWindowTitle(title)
+        widget.resize(*size)
+        return widget
+
+    def _client(self, widget, address="0xabc", **extra):
+        return {
+            "pid": os.getpid(),
+            "address": address,
+            "title": widget.windowTitle(),
+            "size": [widget.width(), widget.height()],
+            "fullscreen": 0,
+            **extra,
+        }
+
+    def test_the_process_is_named_after_its_desktop_entry(self, monkeypatch):
+        named = []
+        monkeypatch.setattr(
+            linux.QGuiApplication, "setDesktopFileName", staticmethod(named.append)
+        )
+
+        linux.LinuxPlatform().set_app_identity()
+
+        assert named == ["snipux"]
+
+    def test_a_window_is_shown_without_a_second_title_bar(self, monkeypatch):
+        platform_impl, calls, _ = self._hyprland(monkeypatch)
+
+        platform_impl.prepare_window(self._window())
+        platform_impl.prepare_window(self._window())
+
+        # Every time, by name: a Hyprland reload drops runtime rules.
+        assert len(calls) == 2
+        assert calls[0][:2] == ["hyprctl", "eval"]
+        assert "name = 'snipux-own-chrome'" in calls[0][2]
+        assert "class = '^snipux$'" in calls[0][2]
+        assert "decorate = false" in calls[0][2]
+
+    def test_nothing_is_asked_of_hyprland_anywhere_else(self, monkeypatch):
+        platform_impl, calls, _ = self._hyprland(monkeypatch)
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
+        widget = self._window()
+
+        platform_impl.prepare_window(widget)
+
+        assert platform_impl.toggle_maximised(widget) is False
+        assert platform_impl.minimise(widget) is False
+        assert platform_impl.maximised(widget) is None
+        assert calls == []
+
+    def test_maximise_goes_through_hyprlands_dispatcher(self, monkeypatch):
+        widget = self._window()
+        platform_impl, calls, state = self._hyprland(monkeypatch)
+        state["clients"] = [
+            {"pid": 1, "address": "0x1", "title": widget.windowTitle(),
+             "size": [640, 480]},
+            self._client(widget),
+        ]
+        # Hyprland calls every window maximised; only a real toggle counts.
+        assert platform_impl.maximised(widget) is False
+
+        original = linux.subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[:2] == ["hyprctl", "eval"]:
+                # The window grows before the widget hears about it.
+                state["clients"] = [
+                    self._client(widget, fullscreen=1) | {"size": [1920, 1050]}
+                ]
+            return original(argv, **kwargs)
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+
+        assert platform_impl.toggle_maximised(widget) is True
+
+        dispatched = [argv[2] for argv in calls if argv[:2] == ["hyprctl", "eval"]]
+        assert len(dispatched) == 1
+        assert "mode = 'maximized'" in dispatched[0]
+        assert "window = 'address:0xabc'" in dispatched[0]
+        assert platform_impl.maximised(widget) is True
+
+    def test_the_window_focused_last_wins_between_two_alike(self, monkeypatch):
+        widget = self._window()
+        platform_impl, _, state = self._hyprland(monkeypatch)
+        state["clients"] = [
+            self._client(widget, address="0xold", focusHistoryID=3),
+            self._client(widget, address="0xnew", focusHistoryID=0),
+        ]
+
+        assert platform_impl._hyprland_address_of(widget) == "0xnew"
+
+    def test_a_window_hyprland_does_not_know_is_left_to_qt(self, monkeypatch):
+        platform_impl, calls, _ = self._hyprland(monkeypatch)
+
+        assert platform_impl.toggle_maximised(self._window()) is False
+        assert not [argv for argv in calls if argv[:2] == ["hyprctl", "eval"]]
+
+    def test_minimise_uses_omarchys_when_it_is_there(self, monkeypatch):
+        widget = self._window()
+        platform_impl, calls, state = self._hyprland(monkeypatch)
+        state["clients"] = [self._client(widget)]
+        monkeypatch.setattr(linux.shutil, "which", lambda name: None)
+
+        assert platform_impl.minimise(widget) is False
+
+        monkeypatch.setattr(linux.shutil, "which", lambda name: "/usr/bin/" + name)
+
+        assert platform_impl.minimise(widget) is True
+        assert calls[-1] == ["omarchy-hyprland-window-minimize", "0xabc"]
