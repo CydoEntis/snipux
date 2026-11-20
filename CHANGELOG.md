@@ -5,6 +5,15 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **A damaged settings file is no longer wiped by the next snip.** If
+  `config.json` could not be read -- a stray comma from a hand edit, or a
+  write cut short -- the next snip replaced it with one setting and
+  everything else was gone. The unreadable file is now kept beside it as
+  `config.json.unreadable`, and settings are written so that an
+  interrupted write leaves the old file intact.
+
 ## 1.2.9 — 2026-11-20
 
 ### Fixed

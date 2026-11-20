@@ -55,6 +55,10 @@ last_region                                             watermark_kind
 
 - **Read and write only through `setup_desktop.load_<key>` /
   `save_<key>`.** Nothing else opens `config.json`.
+- **A write never loses the file.** It goes to a temporary file beside
+  `config.json` and is moved over it, and a `config.json` that exists but
+  cannot be parsed is first renamed `config.json.unreadable` rather than
+  replaced by the one key being written.
 - **Reading never raises.** Missing file, unreadable file, bad JSON, a value
   of the wrong type -- each becomes the default. A hand-edited or truncated
   config must make snipux behave as if that setting were unset, never crash

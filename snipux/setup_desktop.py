@@ -640,15 +640,53 @@ def _write_config(key: str, value, config_dir: Path | None = None) -> bool:
     Reads and rewrites the whole document rather than replacing it, so one
     setting is never dropped by writing another.
     """
-    document = _read_config(config_dir)
-    document[key] = value
     path = config_path(config_dir)
+    document = _read_config(config_dir)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(document, indent=2) + "\n")
+        if not document:
+            _set_aside_if_unreadable(path)
+        document[key] = value
+        # Written beside the file and moved over it, so a process killed
+        # part-way leaves the old file rather than half of a new one --
+        # which the next write would then have read as empty and replaced
+        # with a single key.
+        scratch = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            scratch.write_text(json.dumps(document, indent=2) + "\n")
+            os.replace(scratch, path)
+        finally:
+            scratch.unlink(missing_ok=True)
     except OSError:
         return False
     return True
+
+
+def _set_aside_if_unreadable(path: Path) -> None:
+    """Keep a config file that exists but cannot be parsed, as
+    `config.json.unreadable`, before it is written over.
+
+    `_read_config` answers `{}` for such a file, so the next write of any
+    one key -- the last region, on every snip -- used to replace all of it
+    with that key alone: one stray comma from a hand edit and the shortcut,
+    folders and tool settings were gone, with nothing left to recover them
+    from.
+    """
+    try:
+        text = path.read_text()
+    except OSError:
+        return
+    try:
+        if isinstance(json.loads(text), dict):
+            return
+    except ValueError:
+        pass
+    if not text.strip():
+        return
+    try:
+        os.replace(path, path.with_name(path.name + ".unreadable"))
+    except OSError:
+        pass
 
 
 def version_line() -> str:
