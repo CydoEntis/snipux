@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.9 — 2026-11-20
+
 ### Fixed
 
 - **On Hyprland, the recording bar no longer takes over the screen.** While
