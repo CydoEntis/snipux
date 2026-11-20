@@ -401,7 +401,11 @@ class LinuxPlatform(Platform):
     @classmethod
     def _overlay_rule_code(cls, output: str) -> str:
         suffix = re.sub(r"[^A-Za-z0-9_]", "_", output)
-        variable = f"snipux_capture_overlay_rule_{suffix}"
+        # `_v2`: the rule is kept in the compositor's Lua state under this
+        # name and only built when absent, so a snipux updated while
+        # Hyprland stays up would otherwise go on using the rule an older
+        # build left there, without `decorate`.
+        variable = f"snipux_capture_overlay_rule_v2_{suffix}"
         rule_name = f"snipux-capture-overlay-{output}"
         title_pattern = f"^{re.escape(cls._overlay_title(output))}$"
         return (
@@ -411,7 +415,11 @@ class LinuxPlatform(Platform):
             "no_anim = true, animation = 'none', float = true, "
             f"monitor = {json.dumps(output + ' silent')}, "
             "move = { 0, 0 }, size = { 'monitor_w', 'monitor_h' }, "
-            "border_size = 0, rounding = 0 })"
+            # No decorations: on a workspace in Omarchy's floating mode
+            # every window is given a title bar (hyprbars), and this is not
+            # a window anyone should be able to drag or close by one.
+            "border_size = 0, rounding = 0, decorate = false, "
+            "no_shadow = true })"
         )
 
     # How long to wait for Hyprland to map the overlay before asking for
@@ -591,7 +599,10 @@ class LinuxPlatform(Platform):
             f"monitor = {json.dumps(screen.name() + ' silent')}, "
             f"move = {{ {local_x}, {local_y} }}, "
             f"size = {{ {size.width()}, {size.height()} }}, "
-            "border_size = 0, rounding = 0 })"
+            # Omarchy's floating workspaces put a title bar on every
+            # window; on the outline that is a bar reading
+            # "snipux-recording-frame-0-..." across the top of the region.
+            "border_size = 0, rounding = 0, decorate = false })"
         )
         try:
             result = subprocess.run(
