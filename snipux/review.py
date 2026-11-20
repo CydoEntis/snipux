@@ -384,7 +384,17 @@ class ImageCanvas(QWidget):
         )
         if key != self._composite_key:
             result = self._image
+            # Every spotlight in one pass, where the first one sits: one dim
+            # with several holes, as the saved file has. Taken one at a
+            # time, each dimmed the others' holes.
+            spotlights = [s for s in obscuring if isinstance(s, shapes.Spotlight)]
+            spotlights_done = False
             for shape in obscuring:
+                if isinstance(shape, shapes.Spotlight):
+                    if not spotlights_done:
+                        result = shapes.Spotlight.apply_all(result, spotlights)
+                        spotlights_done = True
+                    continue
                 result = shape.apply(result)
             self._composite_key, self._composite = key, result
         return self._composite
@@ -760,6 +770,7 @@ class ReviewWindow(WinWindow):
         self._canvas.installEventFilter(self)
 
         self._store.changed.connect(self._on_edited)
+        self._store.changed.connect(self._sync_undo_buttons)
 
         self._build_footer_contents()
         self._show_image_page(self._has_image)
@@ -1040,6 +1051,13 @@ class ReviewWindow(WinWindow):
         )
         self._path_label.setEnabled(self._saved_path is not None)
 
+    def _sync_undo_buttons(self) -> None:
+        """The bar builds Undo and Redo disabled and waits to be told. This
+        window never told it, so both stayed grey however much was drawn,
+        and Clear could not be taken back."""
+        self._bar.set_undo_enabled(self._store.can_undo)
+        self._bar.set_redo_enabled(self._store.can_redo)
+
     def _on_edited(self) -> None:
         """Any change to the ink makes the window dirty -- the footer says
         so, and Copy or Save As is what clears it again.
@@ -1092,6 +1110,21 @@ class ReviewWindow(WinWindow):
         if event.matches(QKeySequence.StandardKey.Open) and not self._canvas.has_active_label():
             self.choose_file()
             return
+        # The bar's tooltips promise these. A label being typed keeps its
+        # own Ctrl+Z, which undoes typing.
+        if not self._canvas.has_active_label():
+            control = Qt.KeyboardModifier.ControlModifier
+            shift = Qt.KeyboardModifier.ShiftModifier
+            modifiers = event.modifiers()
+            if event.key() == Qt.Key.Key_Z and modifiers == control | shift:
+                self._store.redo()
+                return
+            if event.key() == Qt.Key.Key_Y and modifiers == control:
+                self._store.redo()
+                return
+            if event.key() == Qt.Key.Key_Z and modifiers == control:
+                self._store.undo()
+                return
         if event.key() == Qt.Key.Key_Escape:
             if self._canvas.has_active_label():
                 self._canvas.abandon_text()
@@ -1300,6 +1333,8 @@ class ReviewWindow(WinWindow):
         self._store.deleteLater()
         self._store = MarkStore(self)
         self._store.changed.connect(self._on_edited)
+        self._store.changed.connect(self._sync_undo_buttons)
+        self._sync_undo_buttons()
         self._bar.undoRequested.connect(self._store.undo)
         self._bar.redoRequested.connect(self._store.redo)
         self._bar.clearRequested.connect(self._store.clear)
@@ -1322,6 +1357,15 @@ class ReviewWindow(WinWindow):
         )
         if chosen:
             self.open_path(Path(chosen))
+
+    def closeEvent(self, event) -> None:
+        """Ask before closing takes unsaved ink with it. The close button
+        and a second Esc both end here, and both used to drop every
+        annotation without a word."""
+        if self._dirty and not self._confirm_discard():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _confirm_discard(self) -> bool:
         """The same "Discard changes?" prompt Settings' own Cancel shows

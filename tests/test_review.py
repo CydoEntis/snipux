@@ -1824,3 +1824,125 @@ class TestCopyGoesThroughOutput:
         # Guards the import itself: a module-local rebinding would satisfy
         # the test above while still bypassing wl-copy in the real app.
         assert review_module.output is output_module
+
+
+class TestUndoWorksInTheEditor:
+    """The bar's Undo and Redo were built disabled and nothing in this
+    window ever enabled them, and Ctrl+Z was not handled at all -- though
+    both tooltips name it."""
+
+    @staticmethod
+    def _pen():
+        return shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+
+    def test_the_buttons_follow_what_can_be_undone(self):
+        window = ReviewWindow(make_image(100, 100))
+        assert not window._bar._undo_button.isEnabled()
+
+        window._store.add(self._pen())
+
+        assert window._bar._undo_button.isEnabled()
+        assert not window._bar._redo_button.isEnabled()
+
+        window._bar.undoRequested.emit()
+
+        assert len(window._store) == 0
+        assert not window._bar._undo_button.isEnabled()
+        assert window._bar._redo_button.isEnabled()
+
+    def test_ctrl_z_and_ctrl_shift_z(self):
+        window = ReviewWindow(make_image(100, 100))
+        window._store.add(self._pen())
+
+        QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+        assert len(window._store) == 0
+
+        QTest.keyClick(
+            window,
+            Qt.Key.Key_Z,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        assert len(window._store) == 1
+
+    def test_the_buttons_follow_a_newly_opened_image(self, tmp_path):
+        window = ReviewWindow(make_image(100, 100))
+        target = tmp_path / "other.png"
+        make_image(10, 10).save(str(target), "PNG")
+        window.open_path(target)
+
+        window._store.add(self._pen())
+
+        assert window._bar._undo_button.isEnabled()
+
+
+class TestClosingAsksBeforeDroppingInk:
+    def _edited(self):
+        window = ReviewWindow(make_image(100, 100))
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
+        window.show()
+        return window
+
+    def test_cancel_keeps_the_window_and_its_ink(self, monkeypatch):
+        window = self._edited()
+        closed = []
+        window.closed.connect(lambda: closed.append(True))
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel
+        )
+
+        window.close()
+
+        assert window.isVisible()
+        assert closed == []
+        assert len(window._store) == 1
+
+    def test_discard_closes(self, monkeypatch):
+        window = self._edited()
+        closed = []
+        window.closed.connect(lambda: closed.append(True))
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Discard
+        )
+
+        window.close()
+
+        assert not window.isVisible()
+        assert closed == [True]
+
+    def test_nothing_is_asked_of_an_unedited_window(self, monkeypatch):
+        window = ReviewWindow(make_image(100, 100))
+        window.show()
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: pytest.fail("asked")
+        )
+
+        window.close()
+
+        assert not window.isVisible()
+
+
+class TestTwoSpotlightsPreviewAsTheySave:
+    def test_each_hole_stays_clear_on_screen(self):
+        image = make_image(300, 300)
+        image.fill(QColor("#ffffff"))
+        window = ReviewWindow(image)
+        for start, end in (((20, 20), (120, 120)), ((180, 180), (280, 280))):
+            window._store.add(
+                shapes.Spotlight(
+                    colour=QColor("#fff"),
+                    stroke_width=4,
+                    start=QPointF(*start),
+                    end=QPointF(*end),
+                )
+            )
+
+        shown = window._canvas._composited()
+        saved = window._canvas.rendered_image()
+
+        for point in ((70, 70), (230, 230), (150, 150)):
+            assert shown.pixelColor(*point) == saved.pixelColor(*point)
+        assert shown.pixelColor(70, 70) == QColor("#ffffff")

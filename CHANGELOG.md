@@ -5,6 +5,17 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **Undo and Redo work in the image editor.** Both buttons stayed grey
+  whatever was drawn, and Ctrl+Z and Ctrl+Shift+Z did nothing, so a slip
+  or a Clear could not be taken back.
+- **Closing the image editor asks before dropping unsaved marks.** The
+  close button, or a second Esc, threw every annotation away without a
+  word.
+- **Two spotlights look the same in the editor as in the saved file.** On
+  screen the second one dimmed the first.
+
 ## 1.2.9 — 2026-11-20
 
 ### Fixed
