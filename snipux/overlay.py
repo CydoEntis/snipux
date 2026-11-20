@@ -4981,6 +4981,22 @@ class OverlayWindow(QWidget):
         # way: framing anything by hand means the bar's actions are about
         # that rectangle again, not about a page.
         self._recalled_selection = False
+        if rect is not None:
+            # Only what was photographed can be selected. A drag carried
+            # past the edge of the screen -- onto the next monitor, where
+            # this overlay's picture ends -- used to keep growing, and the
+            # snip came out wider than the monitor with solid black where
+            # it ran off, its handles out of reach.
+            size = self._frame.logical_size
+            pictured = QRect(0, 0, round(size.width()), round(size.height()))
+            # Callers pass either kind of rectangle, and each is kept as
+            # the kind it came in as.
+            if isinstance(rect, QRectF):
+                clamped = rect.intersected(QRectF(pictured))
+            else:
+                clamped = rect.intersected(pictured)
+            if not clamped.isEmpty():
+                rect = clamped
         self._selection = rect
         self._sync_bar_visibility()
         self._sync_chooser_visibility()

@@ -6829,11 +6829,13 @@ class TestCommitToRecord:
         # feature that does not apply to it: there is no annotate-in-place
         # for a video.
         overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
-        overlay.set_selection(QRectF(10, 10, 793, 458))
+        # Inside the frame this overlay was built on: a selection cannot
+        # run past what was photographed.
+        overlay.set_selection(QRectF(10, 10, 493, 458))
 
         size, marks = overlay._dimension_chip_texts()
 
-        assert size == "793 × 458"
+        assert size == "493 × 458"
         assert marks == ""
 
         # And the chip shrinks to fit: reserving the middot's width would
@@ -14408,3 +14410,43 @@ class TestModeLettersFollowTheRow:
         assert overlay._chooser.phase == "collapsed"
         assert overlay._selection == selection
         assert overlay.isVisible()
+
+
+class TestASelectionStaysOnThePicture:
+    """A drag carried past the edge of the screen kept growing: the snip
+    came out larger than what was photographed, padded with black."""
+
+    def _overlay(self, qapp):
+        overlay = OverlayWindow(make_frame(image_size=(200, 200), logical_size=(200, 200)))
+        overlay.resize(200, 200)
+        return overlay
+
+    def test_a_rectangle_past_the_edge_is_cut_back_to_it(self, qapp):
+        overlay = self._overlay(qapp)
+
+        overlay.set_selection(QRect(150, 120, 400, 300))
+
+        assert QRect(overlay._selection) == QRect(150, 120, 50, 80)
+
+    def test_one_that_starts_before_the_corner_is_cut_back_too(self, qapp):
+        overlay = self._overlay(qapp)
+
+        overlay.set_selection(QRect(-40, -30, 100, 100))
+
+        assert QRect(overlay._selection) == QRect(0, 0, 60, 70)
+
+    def test_the_exported_image_is_only_what_was_pictured(self, qapp):
+        overlay = self._overlay(qapp)
+        overlay.set_selection(QRect(150, 120, 400, 300))
+
+        image = overlay.rendered_image()
+
+        assert (image.width(), image.height()) == (50, 80)
+        assert image.pixelColor(49, 79) == QColor(BASE_COLOR)
+
+    def test_a_rectangle_inside_is_left_exactly_alone(self, qapp):
+        overlay = self._overlay(qapp)
+
+        overlay.set_selection(QRect(20, 30, 100, 90))
+
+        assert overlay._selection == QRect(20, 30, 100, 90)
