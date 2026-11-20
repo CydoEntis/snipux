@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.3.0 — 2026-11-20
+
 ### Fixed
 
 - **One title bar, not two, in Omarchy's floating layout.** Settings, the
