@@ -5,6 +5,22 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **One title bar, not two, in Omarchy's floating layout.** Settings, the
+  image editor and the player draw their own title bar, and on a floating
+  workspace Omarchy added a second one above it, with a second set of
+  buttons.
+- **Maximise works on Hyprland.** The button in Snipux's title bar did
+  nothing there, and showed Restore from the moment the window opened.
+  Minimise works on Omarchy's floating workspaces, where the dock brings
+  the window back.
+- **A Snipux window can be dragged by its title bar on Wayland.** It stayed
+  where the desktop put it.
+- **Snipux's windows have names.** The task switcher and dock listed every
+  one as "snipux"; they now say Snipux Settings or the file that is open,
+  and show Snipux's icon however it was installed.
+
 ## 1.2.9 — 2026-11-20
 
 ### Fixed
