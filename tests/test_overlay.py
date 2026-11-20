@@ -8328,6 +8328,55 @@ class TestLabelEnterDoesNotDismissOverlay:
         assert overlay.isVisible()  # never copied-and-dismissed
         assert calls == []
 
+    def test_a_second_label_does_not_repeat_the_first(self):
+        # Enter left the words in the hidden field, and opening the next
+        # label committed them again, with no position: a mark that raised
+        # on every repaint and every copy from then on.
+        overlay = self._overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
+        QApplication.processEvents()
+
+        assert [mark.text for mark in overlay.marks] == ["hello"]
+        assert overlay._text_edit.text() == ""
+        QTest.keyClicks(overlay._text_edit, "again")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+        assert [mark.text for mark in overlay.marks] == ["hello", "again"]
+        assert all(mark.point is not None for mark in overlay.marks)
+        overlay.rendered_image()  # raised while the stray mark was there
+
+    def test_a_label_still_being_typed_is_in_the_picture(self):
+        # The bar's buttons take no focus, so Copy never ended the edit and
+        # the snip left without the words on screen.
+        overlay = self._overlay()
+        bare = overlay.rendered_image()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+
+        image = overlay.rendered_image()
+
+        assert [mark.text for mark in overlay.marks] == ["hello"]
+        assert image != bare
+
+    def test_choosing_another_tool_keeps_the_label(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+
+        overlay._bar.select_tool("pen")
+
+        assert [mark.text for mark in overlay.marks] == ["hello"]
+        assert overlay._text_edit.isHidden()
+
     def test_escape_abandons_the_label_without_touching_other_marks(self):
         overlay = self._overlay()
         overlay.add_mark(

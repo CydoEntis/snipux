@@ -237,6 +237,9 @@ class ImageCanvas(QWidget):
         export there is no translation step -- which is most of why the
         design puts them in this space.
         """
+        # A label still open is on screen and belongs in the picture: the
+        # bar's Copy takes no focus, so nothing else would have ended it.
+        self._text_editor.commit()
         return shapes.render(self._image, list(self._store.marks))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:

@@ -5010,6 +5010,9 @@ class OverlayWindow(QWidget):
         # a press inside a recalled region draws rather than reframing,
         # which is the whole point of having picked one.
         self._recalled_selection = False
+        # Picking another tool finishes a label being typed, as drawing
+        # with one does in the editor window; it is not thrown away.
+        self._text_editor.commit()
         if tool in design.tokens.OPENING_TOOLS:
             self._last_opening_tool = tool
         if self._selection is not None and not self._picking_window:
@@ -7038,6 +7041,12 @@ class OverlayWindow(QWidget):
         """
         if self._selection is None:
             raise ValueError("no selection to export")
+        # A label still being typed is on screen, so it belongs in the
+        # picture. The bar's buttons take no focus, so clicking Copy never
+        # ended the edit: the snip left without the label, or without the
+        # whole callout, and the mark was added to an overlay already
+        # closing.
+        self._text_editor.commit()
         return render_selection(
             self._frame,
             self._marks,
