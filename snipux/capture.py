@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -1137,25 +1138,156 @@ class GrimBackend(CaptureBackend):
         _available, reason = _wayland_shell_backend_available("grim")
         return reason
 
+    def __init__(self) -> None:
+        # Screen layouts whose per-output grab did not come back usable, so
+        # each one costs a failed attempt once rather than on every snip.
+        self._per_output_refused: set[tuple] = set()
+
     def capture(self) -> Frame:
         virtual_rect = _virtual_desktop_geometry()
 
-        # Raw PPM straight down a pipe: this frame only lives long enough to
-        # be decoded, so any compression or temp file is pure delay. Measured
-        # on a 6400x1440 Omarchy desktop: grim writing a level-0 PNG and Qt
-        # reading it back took ~117ms; PPM over stdout took ~80ms, with
-        # identical pixels and no 37MB file written and deleted per snip.
-        # Final user-facing saves still use output.save_image's encoder.
-        result = subprocess.run(["grim", "-t", "ppm", "-"], check=True, capture_output=True)
-        image = QImage.fromData(result.stdout, "PPM")
-        if image.isNull():
-            raise RuntimeError("grim: produced an unreadable image")
+        image = self._capture_per_output(virtual_rect)
+        if image is None:
+            # Raw PPM straight down a pipe: this frame only lives long
+            # enough to be decoded, so any compression or temp file is pure
+            # delay. Measured on a 6400x1440 Omarchy desktop: grim writing a
+            # level-0 PNG and Qt reading it back took ~117ms; PPM over stdout
+            # took ~80ms, with identical pixels and no 37MB file written and
+            # deleted per snip. Final user-facing saves still use
+            # output.save_image's encoder.
+            result = subprocess.run(
+                ["grim", "-t", "ppm", "-"], check=True, capture_output=True
+            )
+            image = QImage.fromData(result.stdout, "PPM")
+            if image.isNull():
+                raise RuntimeError("grim: produced an unreadable image")
 
         return Frame(
             image=image,
             logical_origin=virtual_rect.topLeft(),
             logical_size=virtual_rect.size(),
         )
+
+    # Long enough for a compositor under load; a grim that has not answered
+    # by then is not going to, and the single grab below gets its turn.
+    _PER_OUTPUT_TIMEOUT_S = 5
+
+    def _capture_per_output(self, virtual_rect: QRectF) -> QImage | None:
+        """Every output grabbed by its own grim, all at once, laid out into
+        one virtual-desktop image (physical pixels) -- or None, and the
+        caller takes the single grab.
+
+        One grim for the whole desktop asks for each output in turn and
+        then composites and writes them through one pipe: ~80-90ms for
+        three monitors (6400x1440) on Omarchy. One grim per output, started
+        together, took ~45ms for the same pixels, and laying them out here
+        ~10ms more. It is still the one grab, up front, before any
+        interaction: the outputs are requested within a millisecond of each
+        other rather than in a single compositor request.
+
+        Only where the outputs can be laid out without guessing: at least
+        two screens, each with a name the compositor knows, and images whose
+        size is the screen's logical size times one ratio shared by all of
+        them. Anything else -- a mixed-scale desk, a name grim does not
+        recognise, one failed process -- is refused for that layout and
+        remembered, so it is not attempted again on the next snip.
+        """
+        screens = QGuiApplication.screens()
+        names = [str(getattr(screen, "name", lambda: "")() or "") for screen in screens]
+        if len(screens) < 2 or not all(names) or len(set(names)) != len(names):
+            return None
+        geometries = [QRectF(screen.geometry()) for screen in screens]
+        layout = tuple(
+            (name, g.x(), g.y(), g.width(), g.height())
+            for name, g in zip(names, geometries)
+        )
+        if layout in self._per_output_refused:
+            return None
+
+        images: list[QImage | None] = [None] * len(names)
+        processes = []
+        try:
+            for name in names:
+                processes.append(
+                    subprocess.Popen(
+                        ["grim", "-t", "ppm", "-o", name, "-"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                    )
+                )
+
+            def read(index: int) -> None:
+                # Each pipe is drained on its own thread: three 6-11MB
+                # images do not fit in a pipe buffer, and reading them in
+                # turn would stall the other two grims mid-write.
+                try:
+                    data, _ = processes[index].communicate(
+                        timeout=self._PER_OUTPUT_TIMEOUT_S
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    return
+                if processes[index].returncode == 0:
+                    decoded = QImage.fromData(data, "PPM")
+                    if not decoded.isNull():
+                        images[index] = decoded
+
+            readers = [
+                threading.Thread(target=read, args=(index,), daemon=True)
+                for index in range(len(processes))
+            ]
+            for reader in readers:
+                reader.start()
+            for reader in readers:
+                reader.join()
+        except OSError:
+            images = [None] * len(names)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
+        composed = self._lay_out(images, geometries, virtual_rect)
+        if composed is None:
+            self._per_output_refused.add(layout)
+        return composed
+
+    @staticmethod
+    def _lay_out(
+        images: "list[QImage | None]", geometries: list[QRectF], virtual_rect: QRectF
+    ) -> QImage | None:
+        """`images` (physical pixels, one per screen) placed at their
+        screens' `geometries` (logical, absolute) inside one image covering
+        `virtual_rect`. None unless every image is its screen's logical size
+        times the same ratio."""
+        if any(image is None for image in images) or not images:
+            return None
+        ratio = images[0].width() / geometries[0].width()
+        for image, geometry in zip(images, geometries):
+            if (
+                abs(image.width() - geometry.width() * ratio) > 1
+                or abs(image.height() - geometry.height() * ratio) > 1
+            ):
+                return None
+        composed = QImage(
+            round(virtual_rect.width() * ratio),
+            round(virtual_rect.height() * ratio),
+            QImage.Format.Format_RGB32,
+        )
+        # Black where no monitor is, as grim's own composite has it.
+        composed.fill(0xFF000000)
+        painter = QPainter(composed)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        for image, geometry in zip(images, geometries):
+            painter.drawImage(
+                QPointF(
+                    round((geometry.x() - virtual_rect.x()) * ratio),
+                    round((geometry.y() - virtual_rect.y()) * ratio),
+                ),
+                image,
+            )
+        painter.end()
+        return composed
 
 
 class PortalScreenshotBackend(CaptureBackend):
