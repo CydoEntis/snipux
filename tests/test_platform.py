@@ -300,8 +300,10 @@ class TestLinuxPlatform:
         assert "prop='decorate'" in argv[2]
         assert "prop='rounding'" in argv[2]
         assert "prop='dim_around'" not in argv[2]
-        assert "hl.dsp.window.float" in argv[2]
-        assert "hl.dsp.window.pin" in argv[2]
+        # Idempotent, because this runs on every tick of a recording: any
+        # action Hyprland does not know ('set' included) is a toggle.
+        assert "hl.dsp.window.float({action='on'" in argv[2]
+        assert "hl.dsp.window.pin({action='on'" in argv[2]
         assert "hl.dsp.window.resize" in argv[2]
         assert "x=420, y=52" in argv[2]
         assert "x=2120, y=36" in argv[2]

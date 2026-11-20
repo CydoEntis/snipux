@@ -5,6 +5,15 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **On Hyprland, the recording bar no longer takes over the screen.** While
+  a recording ran, the bar turned into a full-size window and back about
+  once a second, so the desktop flickered, the flicker was in the video, and
+  the finished bar was often left covering the whole monitor.
+- **Starting a snip takes the "recording saved" bar down first.** It used to
+  be photographed into the snip and stay on top of it.
+
 ## 1.2.8 — 2026-10-25
 
 ### Fixed

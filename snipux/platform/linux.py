@@ -638,8 +638,13 @@ class LinuxPlatform(Platform):
             "hl.dispatch(hl.dsp.window.set_prop({prop='no_shadow', value='1', window=w})); "
             "hl.dispatch(hl.dsp.window.set_prop({prop='decorate', value='0', window=w})); "
             "hl.dispatch(hl.dsp.window.set_prop({prop='rounding', value='0', window=w})); "
-            "hl.dispatch(hl.dsp.window.float({action='set', window=w})); "
-            "hl.dispatch(hl.dsp.window.pin({action='set', window=w})); "
+            # 'on', never 'set': Hyprland takes any action it does not know
+            # as a toggle and says "ok". The bar is placed again on every
+            # tick of a recording, so 'set' tiled it every other second --
+            # across the whole workspace, in the middle of the recording --
+            # and left the finished bar tiled as often as not.
+            "hl.dispatch(hl.dsp.window.float({action='on', window=w})); "
+            "hl.dispatch(hl.dsp.window.pin({action='on', window=w})); "
             f"hl.dispatch(hl.dsp.window.resize({{x={size.width()}, "
             f"y={size.height()}, relative=false, window=w}})); "
             f"hl.dispatch(hl.dsp.window.move({{x={top_left.x()}, y={top_left.y()}, "
