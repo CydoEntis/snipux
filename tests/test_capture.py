@@ -1021,6 +1021,164 @@ class TestGrimBackend:
             capture.GrimBackend().capture()
 
 
+class _NamedScreen(_FakeScreen):
+    def __init__(self, name: str, geometry: QRect):
+        super().__init__(geometry)
+        self._name = name
+
+    def name(self) -> str:
+        return self._name
+
+
+def _ppm(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
+    return f"P6\n{width} {height}\n255\n".encode() + bytes(rgb) * (width * height)
+
+
+class _FakeGrim:
+    """What `subprocess.Popen(["grim", ..., "-o", NAME, "-"])` hands back."""
+
+    def __init__(self, data: bytes, returncode: int = 0):
+        self._data = data
+        self._returncode = returncode
+        self.returncode = None
+
+    def communicate(self, timeout=None):
+        self.returncode = self._returncode
+        return self._data, None
+
+    def poll(self):
+        return self.returncode
+
+
+class TestGrimPerOutput:
+    """Several monitors are grabbed by one grim each, at once, and laid out
+    here -- about half the time of one grim compositing them itself."""
+
+    def _two_screens(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        # A monitor at (0, 10) and a taller one to its right, as on a real
+        # desk: the layout has a hole above the first.
+        screens = [
+            _NamedScreen("DP-1", QRect(0, 10, 4, 2)),
+            _NamedScreen("HDMI-A-1", QRect(4, 0, 6, 4)),
+        ]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+
+    def test_each_output_is_grabbed_and_placed_where_its_screen_is(self, monkeypatch):
+        self._two_screens(monkeypatch)
+        outputs = {"DP-1": _ppm(4, 2, (200, 0, 0)), "HDMI-A-1": _ppm(6, 4, (0, 0, 200))}
+        started = []
+
+        def popen(argv, **kwargs):
+            started.append(argv)
+            return _FakeGrim(outputs[argv[argv.index("-o") + 1]])
+
+        monkeypatch.setattr(capture.subprocess, "Popen", popen)
+        monkeypatch.setattr(
+            capture.subprocess, "run", Mock(side_effect=AssertionError("single grab used"))
+        )
+
+        frame = capture.GrimBackend().capture()
+
+        assert sorted(started) == [
+            ["grim", "-t", "ppm", "-o", "DP-1", "-"],
+            ["grim", "-t", "ppm", "-o", "HDMI-A-1", "-"],
+        ]
+        assert frame.logical_origin == QPointF(0, 0)
+        assert frame.logical_size == QSizeF(10, 12)
+        assert (frame.image.width(), frame.image.height()) == (10, 12)
+        assert QColor(frame.image.pixel(1, 10)).red() == 200
+        assert QColor(frame.image.pixel(5, 1)).blue() == 200
+        # Where no monitor is: black, as grim's own composite has it.
+        assert QColor(frame.image.pixel(1, 1)) == QColor(0, 0, 0)
+
+    def test_a_scaled_desktop_is_laid_out_in_physical_pixels(self, monkeypatch):
+        self._two_screens(monkeypatch)
+        outputs = {"DP-1": _ppm(8, 4, (200, 0, 0)), "HDMI-A-1": _ppm(12, 8, (0, 0, 200))}
+        monkeypatch.setattr(
+            capture.subprocess,
+            "Popen",
+            lambda argv, **kw: _FakeGrim(outputs[argv[argv.index("-o") + 1]]),
+        )
+
+        frame = capture.GrimBackend().capture()
+
+        assert frame.logical_size == QSizeF(10, 12)
+        assert (frame.image.width(), frame.image.height()) == (20, 24)
+        assert QColor(frame.image.pixel(2, 21)).red() == 200
+
+    def _single_grab(self, monkeypatch):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return Mock(returncode=0, stdout=_ppm(10, 12, (0, 200, 0)))
+
+        monkeypatch.setattr(capture.subprocess, "run", run)
+        return calls
+
+    def test_one_failed_output_falls_back_to_the_single_grab(self, monkeypatch):
+        self._two_screens(monkeypatch)
+        started = []
+
+        def popen(argv, **kwargs):
+            started.append(argv)
+            failed = argv[argv.index("-o") + 1] == "DP-1"
+            return _FakeGrim(b"" if failed else _ppm(6, 4, (0, 0, 200)), 1 if failed else 0)
+
+        monkeypatch.setattr(capture.subprocess, "Popen", popen)
+        calls = self._single_grab(monkeypatch)
+        backend = capture.GrimBackend()
+
+        frame = backend.capture()
+
+        assert calls == [["grim", "-t", "ppm", "-"]]
+        assert QColor(frame.image.pixel(1, 1)).green() == 200
+
+        # And that layout is not tried per output again on the next snip.
+        started.clear()
+        backend.capture()
+        assert started == []
+
+    def test_screens_at_different_scales_fall_back_to_the_single_grab(self, monkeypatch):
+        self._two_screens(monkeypatch)
+        outputs = {"DP-1": _ppm(8, 4, (200, 0, 0)), "HDMI-A-1": _ppm(6, 4, (0, 0, 200))}
+        monkeypatch.setattr(
+            capture.subprocess,
+            "Popen",
+            lambda argv, **kw: _FakeGrim(outputs[argv[argv.index("-o") + 1]]),
+        )
+        calls = self._single_grab(monkeypatch)
+
+        capture.GrimBackend().capture()
+
+        assert calls == [["grim", "-t", "ppm", "-"]]
+
+    def test_a_grim_that_cannot_start_falls_back_to_the_single_grab(self, monkeypatch):
+        self._two_screens(monkeypatch)
+        monkeypatch.setattr(
+            capture.subprocess, "Popen", Mock(side_effect=OSError("no grim"))
+        )
+        calls = self._single_grab(monkeypatch)
+
+        capture.GrimBackend().capture()
+
+        assert calls == [["grim", "-t", "ppm", "-"]]
+
+    def test_unnamed_screens_use_the_single_grab(self, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        screens = [_FakeScreen(QRect(0, 0, 4, 2)), _FakeScreen(QRect(4, 0, 6, 4))]
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        monkeypatch.setattr(
+            capture.subprocess, "Popen", Mock(side_effect=AssertionError("per output"))
+        )
+        calls = self._single_grab(monkeypatch)
+
+        capture.GrimBackend().capture()
+
+        assert calls == [["grim", "-t", "ppm", "-"]]
+
+
 class TestHyprlandActiveWindowCache:
     def test_overlays_built_together_share_one_hyprctl_query(self, monkeypatch):
         provider = capture.HyprlandWindowGeometryProvider()

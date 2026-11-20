@@ -18,7 +18,7 @@ import math
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QMimeData, QPoint, QPointF, QSize, Qt, QUrl
+from PyQt6.QtCore import QMimeData, QObject, QPoint, QPointF, QSize, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
@@ -357,6 +357,25 @@ class TestTheFfmpegCommandsSayWhatTheyMean:
         assert args[args.index("-progress") + 1] == "pipe:1"
 
 
+class TestWebmNeedsAnEncoderWheneverItIsNotACopy:
+    def test_a_recording_that_is_not_a_webm_cannot_be_copied_into_one(self):
+        # Untrimmed, but the file is an MP4: "copying" it wrote MP4 bytes
+        # under a .webm name.
+        unavailable = export_availability(
+            trimmed=False, ffmpeg=False, webm_needs_encoding=True
+        )
+        assert "webm" in unavailable
+
+    def test_an_untouched_webm_still_needs_nothing(self):
+        unavailable = export_availability(
+            trimmed=False, ffmpeg=False, webm_needs_encoding=False
+        )
+        assert "webm" not in unavailable
+
+    def test_with_ffmpeg_it_is_always_reachable(self):
+        assert export_availability(trimmed=True, ffmpeg=True, webm_needs_encoding=True) == {}
+
+
 class TestSizeEstimatesFollowTheTrim:
     def test_an_estimate_scales_with_the_kept_duration(self):
         assert estimate_size_mb("mp4", 20.0) == pytest.approx(11.0)
@@ -487,6 +506,25 @@ class TestExportNamesNeverCollideWithTheSource:
     def test_an_untrimmed_export_keeps_the_plain_name(self, tmp_path, monkeypatch):
         window = self._window(tmp_path, monkeypatch, trimmed=False)
         assert window._destination_for("mp4").name.endswith("11-40-21.mp4")
+
+    def test_a_gif_is_named_as_a_gif(self, tmp_path, monkeypatch):
+        # It was handed an .mp4 name, so ffmpeg wrote an H.264 file -- or
+        # refused the GIF options outright -- and no GIF ever appeared.
+        window = self._window(tmp_path, monkeypatch, trimmed=True)
+        assert window._destination_for("gif").name.endswith("(trimmed).gif")
+
+    def test_an_export_is_never_the_recording_itself(self, tmp_path, monkeypatch):
+        # A recording that is already an MP4 (gpu-screen-recorder writes
+        # them), exported untrimmed as MP4: the plain name is the source's
+        # own, and ffmpeg will not write the file it is reading.
+        window = self._window(tmp_path, monkeypatch, trimmed=False)
+        window.path = window.path.with_suffix(".mp4")
+        window.path.write_bytes(b"stand-in")
+
+        destination = window._destination_for("mp4")
+
+        assert destination != window.path
+        assert destination.name.endswith("11-40-21 2.mp4")
 
     def test_a_second_export_does_not_overwrite_the_first(self, tmp_path, monkeypatch):
         window = self._window(tmp_path, monkeypatch, trimmed=True)
@@ -636,6 +674,10 @@ class TestCopyFileGoesThroughOutput:
 
         class Stub:
             path = recording
+            _export_busy = False
+            _saved = True
+            _last_export = None
+            _format = "mp4"
             _report = lambda self, message, ok=False: None
             copy_file = player.PlayerWindow.copy_file
 
@@ -678,6 +720,9 @@ def windows():
 
     yield make
     for window in opened:
+        # A window left with an unexported trim asks before closing, and
+        # there is nobody here to answer.
+        window._confirm_discard = lambda: True
         window.close()
 
 
@@ -868,3 +913,237 @@ class TestAFileThatWillNotPlay:
         assert not window.export_button.isEnabled()
         assert not window.copy_button.isEnabled()
         assert window.folder_button.isEnabled()
+
+
+class _FakeExporter(QObject):
+    """Stands in for `FfmpegExporter`: records what it was asked to write
+    and, on `start()`, writes a file there and says so. No ffmpeg runs."""
+
+    progressed = pyqtSignal(float)
+    finished = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    made: list = []
+    fail_with: str | None = None
+
+    def __init__(self, source, destination, state, format_id, *, muted, binary, fps, parent=None):
+        super().__init__(parent)
+        self.source, self.destination = source, destination
+        self.format_id, self.muted = format_id, muted
+        self.range = (state.start, state.end)
+        type(self).made.append(self)
+
+    def start(self) -> None:
+        if type(self).fail_with is not None:
+            self.failed.emit(type(self).fail_with)
+            return
+        self.destination.write_bytes(b"exported")
+        self.finished.emit(str(self.destination))
+
+
+@pytest.fixture
+def exporting(monkeypatch):
+    """A system ffmpeg that is "there", with `_FakeExporter` behind it."""
+    from snipux import player
+
+    _FakeExporter.made = []
+    _FakeExporter.fail_with = None
+    monkeypatch.setattr(player, "system_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(player, "FfmpegExporter", _FakeExporter)
+    copied = []
+    monkeypatch.setattr(player.output, "copy_file_to_clipboard", copied.append)
+    return copied
+
+
+def _trim(window, start=2.0, end=6.0, duration=10.0) -> None:
+    window.state.duration = duration
+    window.state.start, window.state.end = start, end
+    window._mark_dirty()
+
+
+class TestAnEditReachesAFile:
+    """The recordings Hyprland makes are MP4s, and the editor was built
+    around GNOME's WebMs: its exports named the wrong file, or the source
+    itself, and Copy handed over the recording the edit was made on."""
+
+    def test_a_trim_is_written_to_a_new_file_beside_the_recording(
+        self, windows, tmp_path, exporting
+    ):
+        source = _recording(tmp_path, "clip.mp4")
+        window = windows(source)
+        written = []
+        window.exported.connect(written.append)
+        _trim(window)
+
+        window.run_export()
+
+        exporter = _FakeExporter.made[0]
+        assert exporter.source == source
+        assert exporter.destination == tmp_path / "clip (trimmed).mp4"
+        assert exporter.range == (2.0, 6.0)
+        assert exporter.destination.exists()
+        assert written == [str(exporter.destination)]
+        assert source.read_bytes() == b""  # the recording is never written to
+
+    def test_the_footer_goes_on_saying_where_the_edit_went(
+        self, windows, tmp_path, exporting
+    ):
+        window = windows(_recording(tmp_path, "clip.mp4"))
+        _trim(window)
+
+        window.run_export()
+        # What the footer falls back to once the short-lived message goes.
+        window._sync_chrome()
+
+        assert window.status_label.text() == "Saved to clip (trimmed).mp4"
+        assert "clip (trimmed).mp4" in window.path_label.toolTip()
+
+        # A further edit is a different clip, and that file is not it.
+        _trim(window, 3.0, 5.0)
+        assert window.status_label.text() == "Edited — not exported"
+        assert window.path_label.toolTip().endswith("clip.mp4")
+
+    def test_copy_after_an_export_copies_the_export(self, windows, tmp_path, exporting):
+        window = windows(_recording(tmp_path, "clip.mp4"))
+        _trim(window)
+        window.run_export()
+
+        window.copy_file()
+
+        assert exporting == [tmp_path / "clip (trimmed).mp4"]
+
+    def test_copy_over_an_unexported_trim_exports_it_first(
+        self, windows, tmp_path, exporting
+    ):
+        # It copied the recording, untrimmed, and said "Copied".
+        source = _recording(tmp_path, "clip.mp4")
+        window = windows(source)
+        _trim(window)
+
+        window.copy_file()
+
+        assert exporting == [tmp_path / "clip (trimmed).mp4"]
+        assert window._saved is True
+        assert "copied" in window.status_label.text().lower()
+
+    def test_copy_with_no_edit_copies_the_recording(self, windows, tmp_path, exporting):
+        source = _recording(tmp_path, "clip.mp4")
+        window = windows(source)
+
+        window.copy_file()
+
+        assert exporting == [source]
+        assert _FakeExporter.made == []
+
+    def test_a_failed_export_copies_nothing(self, windows, tmp_path, exporting):
+        _FakeExporter.fail_with = "No space left on device"
+        window = windows(_recording(tmp_path, "clip.mp4"))
+        _trim(window)
+
+        window.copy_file()
+
+        assert exporting == []
+        assert window._saved is False
+        assert window.status_label.text() == "No space left on device"
+        # And the next successful export does not copy behind the user's back.
+        _FakeExporter.fail_with = None
+        window.run_export()
+        assert exporting == []
+
+    def test_a_gif_is_written_as_a_gif(self, windows, tmp_path, exporting):
+        window = windows(_recording(tmp_path, "clip.mp4"))
+        _trim(window)
+        window._choose_format("gif")
+
+        window.run_export()
+
+        assert _FakeExporter.made[0].format_id == "gif"
+        assert _FakeExporter.made[0].destination == tmp_path / "clip (trimmed).gif"
+
+    def test_an_mp4_recording_is_encoded_to_webm_not_renamed(
+        self, windows, tmp_path, exporting
+    ):
+        source = _recording(tmp_path, "clip.mp4")
+        window = windows(source)
+        window._choose_format("webm")
+
+        window.run_export()
+
+        assert _FakeExporter.made[0].format_id == "webm"
+        assert _FakeExporter.made[0].destination == tmp_path / "clip.webm"
+
+    def test_without_ffmpeg_an_mp4_recording_cannot_become_a_webm(
+        self, windows, tmp_path, exporting, monkeypatch
+    ):
+        from snipux import player
+
+        monkeypatch.setattr(player, "system_ffmpeg", lambda: None)
+        window = windows(_recording(tmp_path, "clip.mp4"))
+        window._choose_format("webm")
+
+        window.run_export()
+
+        assert window.status_label.text() == player.EXPORT_UNAVAILABLE["webm"]
+        assert not (tmp_path / "clip.webm").exists()
+
+    def test_exporting_an_unedited_recording_writes_nothing(
+        self, windows, tmp_path, exporting
+    ):
+        # Same container, nothing cut, sound left alone: the file asked for
+        # is the file that is open. It used to be handed to ffmpeg as both
+        # input and output, which failed with "Error opening output files".
+        source = _recording(tmp_path, "clip.mp4")
+        window = windows(source)
+
+        window.run_export()
+
+        assert _FakeExporter.made == []
+        assert list(tmp_path.iterdir()) == [source]
+        assert "clip.mp4" in window.status_label.text()
+
+    def test_dropping_the_sound_is_an_edit_worth_a_file(
+        self, windows, tmp_path, exporting
+    ):
+        source = _recording(tmp_path, "clip.mp4")
+        window = windows(source)
+        window.toggle_mute()
+
+        window.run_export()
+
+        exporter = _FakeExporter.made[0]
+        assert exporter.muted is True
+        assert exporter.destination == tmp_path / "clip 2.mp4"
+
+    def test_ctrl_s_exports(self, windows, tmp_path, exporting):
+        window = windows(_recording(tmp_path, "clip.mp4"))
+        _trim(window)
+
+        QTest.keyClick(window, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+
+        assert len(_FakeExporter.made) == 1
+
+    def test_closing_over_an_unexported_trim_asks_first(
+        self, windows, tmp_path, exporting
+    ):
+        window = windows(_recording(tmp_path, "clip.mp4"))
+        _trim(window)
+        window.show()
+        asked = []
+        window._confirm_discard = lambda: asked.append(True) and False
+
+        window.close()
+
+        assert asked == [True]
+        assert window.isVisible()
+
+        window._confirm_discard = lambda: True
+        window.close()
+        assert not window.isVisible()
+
+    def test_closing_with_nothing_pending_does_not_ask(self, windows, tmp_path, exporting):
+        window = windows(_recording(tmp_path, "clip.mp4"))
+        window.show()
+        window._confirm_discard = lambda: pytest.fail("asked with nothing to lose")
+
+        window.close()
+
+        assert not window.isVisible()

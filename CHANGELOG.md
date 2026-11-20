@@ -5,6 +5,43 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.2.9 — 2026-11-20
+
+### Fixed
+
+- **On Hyprland, the recording bar no longer takes over the screen.** While
+  a recording ran, the bar turned into a full-size window and back about
+  once a second, so the desktop flickered, the flicker was in the video, and
+  the finished bar was often left covering the whole monitor.
+- **No title bar on the recording outline in Omarchy's floating layout.**
+  On a workspace set to float, the red outline around a recording grew a
+  window title bar reading "snipux-recording-frame-0-...".
+- **Starting a snip takes the "recording saved" bar down first.** It used to
+  be photographed into the snip and stay on top of it.
+- **Edits made in the Video Editor reach a file.** On desktops where
+  recordings are MP4s (Hyprland), exporting without a trim failed with
+  "Error opening output files", "Export GIF" wrote an MP4 or nothing, and
+  "Export WebM" renamed the MP4 instead of converting it.
+- **Copy file copies the clip you edited.** After a trim it copied the
+  original, untrimmed recording. It now exports the edit first if needed
+  and copies that.
+- **The Video Editor keeps saying where an export went**, shows it in
+  Recent, exports on Ctrl+S, and asks before closing over a trim that was
+  never exported.
+
+### Changed
+
+- **Snips open sooner on Wayland desks with several monitors.** The
+  screenshot behind the snip area is taken from every monitor at once
+  rather than one after another: about a third less waiting between the
+  shortcut and the snip area on a three-monitor Hyprland desk.
+
+### Added
+
+- **Pause and resume a recording on Hyprland and other Wayland desktops
+  that record with gpu-screen-recorder.** The Pause button was greyed out
+  there. The paused stretch is left out of the video, as on Windows.
+
 ## 1.2.8 — 2026-10-25
 
 ### Fixed
@@ -107,6 +144,7 @@ window of its own beside the old Snipux.
 - **A save that fails no longer says "Copied to clipboard".** It says the
   save failed and why, and puts the snip on the clipboard so it isn't lost.
 
+
 ### Changed
 
 - **Snips open faster on Windows** — about a quarter of a second sooner on
@@ -150,6 +188,7 @@ window of its own beside the old Snipux.
   failed every time it found one, so Snipux never told you an update was
   available.
 
+
 ### Changed
 
 - **Snips open faster on Hyprland** — roughly 330ms down to about 125ms
@@ -185,6 +224,7 @@ window of its own beside the old Snipux.
   and you can clear it yourself sooner.
 - **Edit an image / Edit a recording** in the tray menu. Pick a file and
   it opens in Snipux's editor, without taking a new snip or recording first.
+
 
 ### Changed
 
@@ -253,6 +293,7 @@ window of its own beside the old Snipux.
 - **Useful Linux launcher actions without a system tray.** The application
   menu now exposes New capture and Settings directly.
 
+
 ### Changed
 
 - Finished recording summaries now move to the top-centre of their monitor,
@@ -309,6 +350,7 @@ window of its own beside the old Snipux.
   timer, and no traffic of any kind otherwise -- and it tells you how to
   update the build you are actually running.
 
+
 ### Changed
 
 - **One green, not five.** The accent, the "free to register" tick, the
@@ -343,6 +385,7 @@ window of its own beside the old Snipux.
   the AppImage runs from wherever you save it after a `chmod +x`. Both carry
   their own Python and Qt, so neither cares what the distribution ships.
   Both are built for every release alongside the wheel.
+
 
 ### Changed
 
@@ -477,6 +520,7 @@ so everything it would have carried is here too.
   slider sets how strong the dim is. Several spotlights on one snip all
   stay lit together.
 
+
 ### Changed
 
 - **Settings shows just the Snipux version** at the foot of its sidebar,
@@ -572,6 +616,7 @@ on purpose.
   select text. Switch it back to freehand from the highlighter's style
   button.
 
+
 ### Changed
 
 - **The highlighter is yellow.** It started out orange.
@@ -584,6 +629,7 @@ on purpose.
 ## 0.7.2 — 2026-09-15
 
 The toolbar stays on the monitor you are snipping.
+
 
 ### Changed
 
@@ -601,6 +647,7 @@ there are patch notes now.
 
 - **Patch notes.** What changed in each release is written up in
   CHANGELOG.md, back to 0.2.0.
+
 
 ### Changed
 
@@ -650,6 +697,7 @@ A redesigned capture flow, and snips that open about four times faster.
   whole list.
 - **A one-line installer** for Windows and Linux.
 
+
 ### Changed
 
 - The redaction tool called Solid is now called Blackout.
@@ -695,12 +743,14 @@ The first release on PyPI.
   Blur can be reversed; a solid fill cannot.
 - Clicking the tray icon opens Settings.
 
+
 ### Changed
 
 - A readable font when IBM Plex is not installed, a softer accent green, and
   scrollbars that match the rest of the app.
 
 ## 0.5.0 — 2026-09-05
+
 
 ### Changed
 
@@ -731,6 +781,7 @@ The first release on PyPI.
 
 ## 0.4.3 — 2026-09-05
 
+
 ### Changed
 
 - Full-page capture keeps a green outline on the page while it scrolls, counts
@@ -754,11 +805,13 @@ The first release on PyPI.
 - With *Capture and finish*, choosing Browser captured straight away, before the
   Visible / Full page switch could be used.
 
+
 ### Changed
 
 - The overlay says "Scrolling the page…" before it steps aside.
 
 ## 0.4.0 — 2026-09-05
+
 
 ### Changed
 

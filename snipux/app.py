@@ -1426,6 +1426,9 @@ class AppController:
         # something to remove once there is no recording left to stop.
         self._landed_recording: Path | None = None
         self._done_timer: QTimer | None = None
+        # The bar and geometry last handed to the compositor -- see
+        # `_reposition_recording_bar`.
+        self._recording_bar_placed: tuple | None = None
         # The in-flight "gif" landing's converter -- held explicitly, the
         # same as `player.py`'s own `self._exporter`, because a Qt parent
         # keeps the C++ side alive but not the Python wrapper carrying this
@@ -2026,6 +2029,15 @@ class AppController:
         if self._countdown_timer is not None or self._armed_recording is not None:
             self._cancel_armed_recording()
 
+        # The summary of the last recording is a notification, and this is
+        # the next thing the user asked for. Left up it is photographed
+        # into the frozen frame and then sits on top of it as well.
+        if self._done_timer is not None:
+            self._close_recording_bar()
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+            )
+
         # No mode parameter: an OverlayWindow starts in Region and lets its
         # own capture-mode popover switch to Window/Full screen/Browser, so
         # every caller here -- the tray's own Snip action, the --snip
@@ -2264,6 +2276,7 @@ class AppController:
         if isinstance(window, PlayerWindow):
             self._players.append(window)
             window.closed.connect(lambda w=window: self._forget_player(w))
+            window.exported.connect(self._on_player_exported)
         else:
             self._reviews.append(window)
             window.closed.connect(lambda w=window: self._forget_review(w))
@@ -2494,6 +2507,15 @@ class AppController:
     def _open_player(self, path: Path) -> None:
         """Open a landed recording in the trim editor."""
         self._show_editor(PlayerWindow(path))
+
+    def _on_player_exported(self, written: str) -> None:
+        """An export is a capture like any other: it goes in Recent, where
+        the recording it was cut from already is. Without this the only
+        trace of a trimmed clip was a status line that faded in seconds.
+        """
+        setup_desktop.add_recent_capture(Path(written))
+        self._rebuild_recent_menu()
+        self._refresh_history_panel()
 
     def _forget_player(self, window) -> None:
         if window in self._players:
@@ -3063,7 +3085,14 @@ class AppController:
         bar.resize(desired_size)
         bar.move(top_left)
         if host is None and bar.isVisible() and not platform.current.places_windows():
-            platform.current.place_recording_controls(bar, top_left, desired_size)
+            # Only when it has somewhere new to go. This runs on every tick
+            # of a recording, and asking the compositor is two processes
+            # started from the UI thread each time.
+            wanted = (id(bar), top_left.x(), top_left.y(),
+                      desired_size.width(), desired_size.height())
+            if wanted != self._recording_bar_placed:
+                if platform.current.place_recording_controls(bar, top_left, desired_size):
+                    self._recording_bar_placed = wanted
 
     def _promote_embedded_recording_bar(self, rect: QRectF | None) -> None:
         """Replace the overlay-owned ready bar with live Hyprland controls.
