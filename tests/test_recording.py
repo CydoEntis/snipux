@@ -729,7 +729,9 @@ class _GpuRecorderProcess:
 
     def send_signal(self, number):
         self.signals.append(number)
-        self.running = False
+        # SIGUSR2 pauses and resumes; only SIGINT ends the recorder.
+        if number != recording.signal.SIGUSR2:
+            self.running = False
 
     def wait(self, timeout=None):
         return 0
@@ -831,6 +833,65 @@ class TestGpuScreenRecorderBackend:
         backend.stop()
 
         assert process.signals == [recording.signal.SIGINT]
+
+    def _started(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        processes = []
+
+        def popen(command, **_kwargs):
+            processes.append(_GpuRecorderProcess(command))
+            return processes[-1]
+
+        backend = GpuScreenRecorderBackend(
+            popen=popen, run=Mock(), which=lambda name: f"/usr/bin/{name}"
+        )
+        backend.start(QRectF(0, 0, 20, 10), str(tmp_path / "recording.mp4"))
+        return backend, processes[0]
+
+    def test_pause_and_resume_are_one_signal_each(self, tmp_path, monkeypatch):
+        backend, process = self._started(tmp_path, monkeypatch)
+        usr2 = recording.signal.SIGUSR2
+
+        assert backend.can_pause is True
+        assert backend.pause_unavailable_reason() is None
+        assert backend.pause() is True
+        assert process.signals == [usr2]
+
+        backend.resume()
+        assert process.signals == [usr2, usr2]
+
+    def test_a_second_pause_does_not_resume(self, tmp_path, monkeypatch):
+        # The recorder's signal is a toggle, so the backend has to know
+        # which way it last went.
+        backend, process = self._started(tmp_path, monkeypatch)
+
+        assert backend.pause() is True
+        assert backend.pause() is True
+        backend.resume()
+        backend.resume()
+
+        assert process.signals == [recording.signal.SIGUSR2] * 2
+
+    def test_pause_says_no_when_the_recorder_has_gone(self, tmp_path, monkeypatch):
+        backend, process = self._started(tmp_path, monkeypatch)
+        process.running = False
+
+        assert backend.pause() is False
+        assert process.signals == []
+
+    def test_a_paused_recording_still_stops_and_starts_the_next_one_live(
+        self, tmp_path, monkeypatch
+    ):
+        backend, process = self._started(tmp_path, monkeypatch)
+        backend.pause()
+
+        backend.stop()
+
+        assert process.signals[-1] == recording.signal.SIGINT
+        # Not carried into the next recording, where the first Pause press
+        # would otherwise do nothing.
+        backend.start(QRectF(0, 0, 20, 10), str(tmp_path / "next.mp4"))
+        assert backend.pause() is True
 
 
 # --- WindowsRecorderBackend -------------------------------------------------

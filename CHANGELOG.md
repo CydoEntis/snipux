@@ -24,6 +24,12 @@ use it; the commit history has the detail.
   rather than one after another: about a third less waiting between the
   shortcut and the snip area on a three-monitor Hyprland desk.
 
+### Added
+
+- **Pause and resume a recording on Hyprland and other Wayland desktops
+  that record with gpu-screen-recorder.** The Pause button was greyed out
+  there. The paused stretch is left out of the video, as on Windows.
+
 ## 1.2.8 — 2026-10-25
 
 ### Fixed

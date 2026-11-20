@@ -450,6 +450,11 @@ class GpuScreenRecorderBackend(RecordingBackend):
     """
 
     starts_off_thread = True
+    # gpu-screen-recorder pauses and resumes in place on SIGUSR2, writing
+    # nothing while paused, so the time is absent from the one file rather
+    # than a still frame held across it. Measured on Omarchy: 2s recorded,
+    # 2s paused, 2s recorded came back as a 3.6s video.
+    can_pause = True
 
     def __init__(
         self,
@@ -466,6 +471,7 @@ class GpuScreenRecorderBackend(RecordingBackend):
         self._process = None
         self._path: str | None = None
         self._stderr = None
+        self._paused = False
 
     def name(self) -> str:
         return "gpu-screen-recorder"
@@ -582,10 +588,40 @@ class GpuScreenRecorderBackend(RecordingBackend):
         stderr.close()
         raise RuntimeError("gpu-screen-recorder did not create its output file")
 
+    def _toggle_pause(self) -> bool:
+        """Send the one signal that both pauses and resumes. False when
+        there is no running recorder to send it to."""
+        process = self._process
+        if process is None or process.poll() is not None:
+            return False
+        try:
+            process.send_signal(signal.SIGUSR2)
+        except OSError:
+            return False
+        return True
+
+    def pause(self) -> bool:
+        # The signal is a toggle, so the state is kept here: a second
+        # pause() must not quietly resume.
+        if self._paused:
+            return True
+        if not self._toggle_pause():
+            return False
+        self._paused = True
+        return True
+
+    def resume(self) -> None:
+        if not self._paused:
+            return
+        if not self._toggle_pause():
+            raise RuntimeError("gpu-screen-recorder is no longer running")
+        self._paused = False
+
     def stop(self) -> None:
         process, self._process = self._process, None
         path, self._path = self._path, None
         stderr, self._stderr = self._stderr, None
+        self._paused = False
         if process is None:
             raise RuntimeError("gpu-screen-recorder: stop() called with no recording in progress")
         try:
