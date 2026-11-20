@@ -502,6 +502,16 @@ class TestLinuxPlatform:
         assert "move = { 97, 197 }" in evaluations[0]
         assert "size = { 206, 3 }" in evaluations[0]
         assert "move = { 97, 350 }" in evaluations[1]
+        # One rule per edge, whatever region is being recorded: each edge
+        # replaces the rule the last recording left for it, and anything a
+        # build that named rules after their geometry left is switched off.
+        assert "_G.snipux_recording_v2_frame_0 = hl.window_rule" in evaluations[0]
+        assert "_G.snipux_recording_v2_frame_1 = hl.window_rule" in evaluations[1]
+        for code in evaluations:
+            assert "k:find('^snipux_recording_rule_')" in code
+            assert "set_enabled(false)" in code
+            assert "enabled = true" in code
+        assert "197" not in evaluations[0].split("hl.window_rule")[0]
 
     def test_recording_frame_degrades_when_the_static_rule_fails(
         self, monkeypatch
@@ -899,12 +909,62 @@ class TestSkipMapAnimation:
         assert platform_impl.place_capture_overlay(widget, screen) is True
         assert widget.windowTitle() == "snipux-capture-overlay-HDMI_A_2"
         code = calls[0][0][2]
-        assert "_G.snipux_capture_overlay_rule_v2_HDMI_A_2" in code
+        assert "_G.snipux_capture_overlay_rule_v3_HDMI_A_2" in code
         assert "decorate = false" in code
         assert "monitor = \"HDMI-A-2 silent\"" in code
         assert "float = true" in code
         assert "move = { 0, 0 }" in code
         assert "size = { 'monitor_w', 'monitor_h' }" in code
+
+    def test_hyprland_pins_every_overlay_so_nothing_can_tile_it(self):
+        # Reported on Omarchy with three monitors: snipping with the pointer
+        # on a workspace in floating mode squeezed the windows on the other
+        # monitors into half their width until the snip ended. Hyprland
+        # first matches a new window on the focused workspace, Omarchy's
+        # floating-workspace script claims it there, and then tiles it when
+        # it lands on the tiling workspace this rule sends it to. A pinned
+        # window is the one thing that script (and Hyprland) never tiles.
+        for output in ("DP-2", "HDMI-A-2", "DP-1"):
+            code = linux.LinuxPlatform._overlay_rule_code(output)
+
+            assert "float = true" in code
+            assert "pin = true" in code
+            assert f'monitor = "{output} silent"' in code
+
+    def test_hyprland_retires_the_overlay_rules_older_builds_left(
+        self, monkeypatch
+    ):
+        platform_impl = self._linux(
+            monkeypatch, session="wayland", qt_platform="wayland"
+        )
+        platform_impl._hyprland_overlay_rule_ready = True
+        calls = []
+        monkeypatch.setattr(
+            linux.subprocess,
+            "run",
+            lambda argv, **kwargs: calls.append(argv) or SimpleNamespace(returncode=0),
+        )
+
+        assert (
+            platform_impl.place_capture_overlay(
+                self._widget(), SimpleNamespace(name=lambda: "DP-1")
+            )
+            is True
+        )
+
+        retire, rule = calls[0][2].split("\n")[:2]
+        # Before the rule is built, so an older one for the same title --
+        # unpinned -- is not still matching beside it.
+        assert "set_enabled(false)" in retire
+        assert "_G[k] = nil" in retire
+        # Every per-output rule but this build's own. The trailing
+        # underscore is what spares `skip_map_animation`'s rule.
+        assert "k:find('^snipux_capture_overlay_rule_')" in retire
+        assert "not k:find('^snipux_capture_overlay_rule_v3_')" in retire
+        # A name of its own: Hyprland keys rules by name, and the older
+        # build's is the one just switched off.
+        assert 'name = "snipux-capture-overlay-v3-DP-1"' in rule
+        assert "enabled = true" in rule
 
     def test_hyprland_installs_every_screens_rule_in_one_call_per_snip(
         self, monkeypatch
@@ -931,7 +991,7 @@ class TestSkipMapAnimation:
         # Three overlays, one `hyprctl eval`, a rule for each output...
         assert len(calls) == 1
         for name in ("HDMI_A_2", "DP_2", "DP_1"):
-            assert f"_G.snipux_capture_overlay_rule_v2_{name}" in calls[0][2]
+            assert f"_G.snipux_capture_overlay_rule_v3_{name}" in calls[0][2]
         # ...and every window still carries its own output's title.
         assert [w.windowTitle() for w in widgets] == [
             "snipux-capture-overlay-HDMI_A_2",
