@@ -730,7 +730,7 @@ class _GpuRecorderProcess:
     def send_signal(self, number):
         self.signals.append(number)
         # SIGUSR2 pauses and resumes; only SIGINT ends the recorder.
-        if number != recording.signal.SIGUSR2:
+        if number != _PAUSE_SIGNAL:
             self.running = False
 
     def wait(self, timeout=None):
@@ -741,6 +741,16 @@ class _GpuRecorderProcess:
 
     def communicate(self):
         return "", ""
+
+
+# A stand-in for SIGUSR2, which Windows' `signal` does not have: the tests
+# are about which signal the backend sends, not what the OS calls it.
+_PAUSE_SIGNAL = 12
+
+
+@pytest.fixture(autouse=True)
+def _a_pause_signal_on_every_runner(monkeypatch):
+    monkeypatch.setattr(recording, "_GSR_PAUSE_SIGNAL", _PAUSE_SIGNAL)
 
 
 class TestGpuScreenRecorderBackend:
@@ -850,7 +860,7 @@ class TestGpuScreenRecorderBackend:
 
     def test_pause_and_resume_are_one_signal_each(self, tmp_path, monkeypatch):
         backend, process = self._started(tmp_path, monkeypatch)
-        usr2 = recording.signal.SIGUSR2
+        usr2 = _PAUSE_SIGNAL
 
         assert backend.can_pause is True
         assert backend.pause_unavailable_reason() is None
@@ -870,7 +880,7 @@ class TestGpuScreenRecorderBackend:
         backend.resume()
         backend.resume()
 
-        assert process.signals == [recording.signal.SIGUSR2] * 2
+        assert process.signals == [_PAUSE_SIGNAL] * 2
 
     def test_pause_says_no_when_the_recorder_has_gone(self, tmp_path, monkeypatch):
         backend, process = self._started(tmp_path, monkeypatch)

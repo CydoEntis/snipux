@@ -441,6 +441,12 @@ def _linux_install_hint(package: str) -> str:
     return f"install the {package} package"
 
 
+# gpu-screen-recorder's pause/resume toggle. Looked up rather than named:
+# Windows' `signal` has no SIGUSR2, and this module is imported there too
+# (its tests run on the Windows runner with the platform faked).
+_GSR_PAUSE_SIGNAL = getattr(signal, "SIGUSR2", None)
+
+
 class GpuScreenRecorderBackend(RecordingBackend):
     """Record a Wayland region with gpu-screen-recorder.
 
@@ -592,10 +598,10 @@ class GpuScreenRecorderBackend(RecordingBackend):
         """Send the one signal that both pauses and resumes. False when
         there is no running recorder to send it to."""
         process = self._process
-        if process is None or process.poll() is not None:
+        if _GSR_PAUSE_SIGNAL is None or process is None or process.poll() is not None:
             return False
         try:
-            process.send_signal(signal.SIGUSR2)
+            process.send_signal(_GSR_PAUSE_SIGNAL)
         except OSError:
             return False
         return True
