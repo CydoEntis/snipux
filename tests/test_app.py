@@ -2969,14 +2969,62 @@ class TestAppControllerRecordingAudio:
         assert len(backend.start_calls) == 1
         assert backend.audio_source == "off"
 
-    def test_each_recording_starts_muted(self, make_controller, monkeypatch):
+    def test_the_last_source_is_what_the_next_recording_starts_with(
+        self, make_controller, monkeypatch
+    ):
+        # Every recording used to start muted again, so sound was two
+        # clicks away each time and easy to record without.
         self._platform_reasons(monkeypatch, {})
+        controller = self._controller(make_controller, FakeRecordingBackend())
+        controller._recording_audio = "system"
+
+        controller._on_recording_requested(QRectF(10, 20, 300, 200), "No delay")
+
+        assert controller._recording_audio == "system"
+        assert controller._recording_hud.audio_control().toolTip() == "Audio: System"
+
+    def test_choosing_a_source_is_remembered_across_restarts(
+        self, make_controller, monkeypatch
+    ):
+        self._platform_reasons(monkeypatch, {})
+        chosen = []
+
+        class ChoosingFlowMenu(app.FlowMenu):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                chosen.append(self)
+
+            def open_clear_of(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(app, "FlowMenu", ChoosingFlowMenu)
+        controller = self._controller(make_controller, FakeRecordingBackend())
+        assert controller._recording_audio == "off"
+        controller._on_recording_requested(QRectF(10, 20, 300, 200), "No delay")
+        controller._open_audio_menu()
+
+        chosen[0].chosen.emit("system")
+
+        assert setup_desktop.load_recording_audio() == "system"
+        assert self._controller(
+            make_controller, FakeRecordingBackend()
+        )._recording_audio == "system"
+
+    def test_a_remembered_source_that_went_away_shows_as_muted(
+        self, make_controller, monkeypatch
+    ):
+        self._platform_reasons(monkeypatch, {"mic": "No microphone found"})
         controller = self._controller(make_controller, FakeRecordingBackend())
         controller._recording_audio = "mic"
 
         controller._on_recording_requested(QRectF(10, 20, 300, 200), "No delay")
 
         assert controller._recording_audio == "off"
+
+    def test_a_stored_source_nobody_knows_is_muted(self):
+        setup_desktop._write_config("recording_audio", "loopback")
+
+        assert setup_desktop.load_recording_audio() == "off"
 
 
 class TestAppControllerRecording:
@@ -5147,6 +5195,60 @@ class TestAppControllerRecordingTempFileCleanup:
 
         _rect, path = backend.start_calls[0]
         assert Path(path).parent == app._recording_temp_dir()
+
+
+class TestARecorderThatDiesIsNoticed:
+    """Nothing watched the recorder during a recording, so one that
+    crashed left the bar counting until Stop was pressed."""
+
+    def test_the_next_tick_stops_and_says_so(self, make_controller, monkeypatch):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        backend = FakeRecordingBackend(stop_error=RuntimeError("stopped by itself"))
+        alive = [True]
+        backend.is_running = lambda: alive[0]
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        said = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: said.append(args)
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
+        assert controller._active_recording is not None
+
+        alive[0] = False
+        controller._on_recording_tick()
+
+        assert backend.stop_calls == [True]
+        assert controller._active_recording is None
+        assert any("stopped by itself" in call[1] for call in said)
+
+    def test_a_paused_recording_says_so_on_the_tray(self, make_controller, monkeypatch):
+        backend = FakeRecordingBackend(can_pause=True)
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(0, 0, 100, 100), "No delay")
+
+        controller._on_pause_clicked()
+        controller._on_recording_tick()
+
+        assert controller._tray_icon.toolTip().startswith("Paused")
+        assert controller._recording_hud.is_paused()
+
+        controller._on_pause_clicked()
+        controller._on_recording_tick()
+
+        assert not controller._tray_icon.toolTip().startswith("Paused")
+        assert not controller._recording_hud.is_paused()
 
 
 class TestAppControllerRecordingDiskSpace:

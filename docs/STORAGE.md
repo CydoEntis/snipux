@@ -47,7 +47,7 @@ hints_enabled               recording_folder            watermark_backing
 instant_saves               recording_frame_rate        watermark_color
 integration_revision        remember_tool               watermark_font
 integration_target          reuse_last_region           watermark_image
-last_region                                             watermark_kind
+last_region                 recording_audio             watermark_kind
                                                         watermark_text
 ```
 

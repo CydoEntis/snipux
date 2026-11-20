@@ -1418,10 +1418,9 @@ class AppController:
         # the pointer is over, so clicking Audio while Delay is open
         # still swaps them in one press. See MenuReopenGuard.
         self._flow_menu_guard = MenuReopenGuard()
-        # Per-session, like mode and destination: a snip's own override must
-        # not write back to the stored preferences (the handoff's state
-        # model says so in as many words).
-        self._recording_audio = design.tokens.AUDIO_DEFAULT
+        # Remembered, across recordings and restarts: see
+        # `setup_desktop.load_recording_audio`.
+        self._recording_audio = setup_desktop.load_recording_audio()
         # The file the finished bar is currently describing, so Discard has
         # something to remove once there is no recording left to stop.
         self._landed_recording: Path | None = None
@@ -2682,9 +2681,12 @@ class AppController:
         # Audio is the platform's answer, not the bar's: GNOME's screencast
         # has no audio option at all, so the control is offered inert with
         # the reason on it rather than hidden (divergences.md 2).
-        # Each recording starts muted, so the icon and what gets recorded
-        # never disagree about a choice left over from the last one.
-        if reset_audio:
+        # The last choice, shown on the icon before Record is pressed, so
+        # what the bar says and what gets recorded agree. A source this
+        # machine can no longer offer shows as what will really happen.
+        if reset_audio and platform.current.audio_source_unavailable_reason(
+            self._recording_audio
+        ):
             self._recording_audio = design.tokens.AUDIO_DEFAULT
         bar.set_audio(self._recording_audio)
         bar.set_audio_enabled(platform.current.records_audio())
@@ -2942,6 +2944,7 @@ class AppController:
 
         def choose(value: str) -> None:
             self._recording_audio = value
+            setup_desktop.save_recording_audio(value)
             if self._recording_hud is not None:
                 self._recording_hud.set_audio(value)
 
@@ -3626,8 +3629,18 @@ class AppController:
         `_report_shortcut` already uses for "no tray to hang a message on"
         (SNX-54), applied here so that combination is never silent.
         """
+        # A recorder that has died is not recording, whatever the clock
+        # says. Nothing used to look: the bar went on counting until Stop,
+        # which then called the wreckage a saved recording.
+        if self._active_recording is not None:
+            backend = self._active_recording[0]
+            if not backend.is_running():
+                self._stop_recording()
+                return
         text = self._elapsed_text()
-        self._tray_icon.setToolTip(text)
+        self._tray_icon.setToolTip(
+            f"Paused · {text}" if self._recording_paused else text
+        )
         if self._recording_hud is not None:
             if self._recording_paused:
                 # `set_live` would also reset the Pause control back to
