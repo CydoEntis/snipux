@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.3.1 — 2026-11-20
+
 ### Fixed
 
 - **A snip no longer squeezes the windows on your other monitors.** On
