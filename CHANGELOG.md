@@ -28,6 +28,11 @@ use it; the commit history has the detail.
   finished with Enter, placing another added the first one's words again
   with nowhere to draw them, and the snip could then not be copied or
   saved until that was undone.
+- **The tray icon turns up when Snipux starts before the panel.** Started
+  at login, Snipux was running a few seconds before anything could show a
+  tray icon; it looked once, found nowhere to put one, and went the whole
+  session with no icon, no menu and no notifications -- not "Copied", not
+  "Saved to", not an error. It now keeps looking.
 
 ## 1.2.9 — 2026-11-20
 

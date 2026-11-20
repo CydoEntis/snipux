@@ -1562,6 +1562,15 @@ class AppController:
                 "(e.g. via `snipux --snip`, typically bound to a key); to "
                 "quit it, kill this process."
             )
+            # Not the last word. Started at login, Snipux is up seconds
+            # before the panel that hosts tray icons is, and asking only
+            # once left it without an icon, a menu or a single notification
+            # for the rest of the session -- every "Copied" and "Saved to"
+            # went to a log nobody reads. So it keeps asking.
+            self._tray_watch = QTimer(self._tray_icon)
+            self._tray_watch.setInterval(self._TRAY_WATCH_MS)
+            self._tray_watch.timeout.connect(self._look_for_the_tray)
+            self._tray_watch.start()
 
         self._transport.listen(
             self.start_capture, self.open_settings, self.open_path, self.open_editor
@@ -1821,6 +1830,18 @@ class AppController:
         """
         message = platform.current.bind_shortcut()
         self._report_shortcut(message)
+
+    # How often to look for a tray that was not there at startup. A panel
+    # can also be restarted at any time, so this never gives up; the check
+    # is one cached answer from Qt.
+    _TRAY_WATCH_MS = 3000
+
+    def _look_for_the_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self._tray_watch.stop()
+        self._tray_available = True
+        self._tray_icon.show()
 
     def _report_shortcut(self, message: str) -> None:
         """Show a bind/rebind report to the user -- the tray (or stdout with

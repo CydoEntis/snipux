@@ -5149,6 +5149,56 @@ class TestAppControllerRecordingTempFileCleanup:
         assert Path(path).parent == app._recording_temp_dir()
 
 
+class TestATrayThatArrivesLate:
+    """Started at login, Snipux is running before the panel that hosts
+    tray icons. It asked once, got no, and stayed without an icon, a menu
+    or a notification for the whole session."""
+
+    def _controller(self, make_controller, monkeypatch, available):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: available[0])
+        )
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+
+    def test_the_icon_appears_once_there_is_somewhere_to_put_it(
+        self, make_controller, monkeypatch, capsys
+    ):
+        available = [False]
+        controller = self._controller(make_controller, monkeypatch, available)
+        shown = []
+        monkeypatch.setattr(controller._tray_icon, "show", lambda: shown.append(True))
+        said = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: said.append(args)
+        )
+
+        controller._look_for_the_tray()
+
+        assert shown == []
+        assert controller._tray_watch.isActive()
+
+        available[0] = True
+        controller._look_for_the_tray()
+
+        assert shown == [True]
+        assert controller._tray_available is True
+        assert not controller._tray_watch.isActive()
+        capsys.readouterr()
+        controller._report_shortcut("Copied to clipboard")
+        assert [args[1] for args in said] == ["Copied to clipboard"]
+        assert "Copied" not in capsys.readouterr().out
+
+    def test_nothing_is_watched_when_the_tray_was_there_from_the_start(
+        self, make_controller, monkeypatch
+    ):
+        controller = self._controller(make_controller, monkeypatch, [True])
+
+        assert not hasattr(controller, "_tray_watch")
+
+
 class TestAppControllerRecordingDiskSpace:
     """SNX-124 (recording.md ticket 9): running out of disk during a
     recording is reported, not failed silently -- piggybacked on the
