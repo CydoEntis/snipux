@@ -1426,6 +1426,9 @@ class AppController:
         # something to remove once there is no recording left to stop.
         self._landed_recording: Path | None = None
         self._done_timer: QTimer | None = None
+        # The bar and geometry last handed to the compositor -- see
+        # `_reposition_recording_bar`.
+        self._recording_bar_placed: tuple | None = None
         # The in-flight "gif" landing's converter -- held explicitly, the
         # same as `player.py`'s own `self._exporter`, because a Qt parent
         # keeps the C++ side alive but not the Python wrapper carrying this
@@ -2025,6 +2028,15 @@ class AppController:
         # Enter's.
         if self._countdown_timer is not None or self._armed_recording is not None:
             self._cancel_armed_recording()
+
+        # The summary of the last recording is a notification, and this is
+        # the next thing the user asked for. Left up it is photographed
+        # into the frozen frame and then sits on top of it as well.
+        if self._done_timer is not None:
+            self._close_recording_bar()
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+            )
 
         # No mode parameter: an OverlayWindow starts in Region and lets its
         # own capture-mode popover switch to Window/Full screen/Browser, so
@@ -3063,7 +3075,14 @@ class AppController:
         bar.resize(desired_size)
         bar.move(top_left)
         if host is None and bar.isVisible() and not platform.current.places_windows():
-            platform.current.place_recording_controls(bar, top_left, desired_size)
+            # Only when it has somewhere new to go. This runs on every tick
+            # of a recording, and asking the compositor is two processes
+            # started from the UI thread each time.
+            wanted = (id(bar), top_left.x(), top_left.y(),
+                      desired_size.width(), desired_size.height())
+            if wanted != self._recording_bar_placed:
+                if platform.current.place_recording_controls(bar, top_left, desired_size):
+                    self._recording_bar_placed = wanted
 
     def _promote_embedded_recording_bar(self, rect: QRectF | None) -> None:
         """Replace the overlay-owned ready bar with live Hyprland controls.

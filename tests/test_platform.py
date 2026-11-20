@@ -300,8 +300,10 @@ class TestLinuxPlatform:
         assert "prop='decorate'" in argv[2]
         assert "prop='rounding'" in argv[2]
         assert "prop='dim_around'" not in argv[2]
-        assert "hl.dsp.window.float" in argv[2]
-        assert "hl.dsp.window.pin" in argv[2]
+        # Idempotent, because this runs on every tick of a recording: any
+        # action Hyprland does not know ('set' included) is a toggle.
+        assert "hl.dsp.window.float({action='on'" in argv[2]
+        assert "hl.dsp.window.pin({action='on'" in argv[2]
         assert "hl.dsp.window.resize" in argv[2]
         assert "x=420, y=52" in argv[2]
         assert "x=2120, y=36" in argv[2]
@@ -436,6 +438,8 @@ class TestLinuxPlatform:
         assert "float = true" in code
         assert "pin = true" in code
         assert "no_initial_focus = true" in code
+        # Or Omarchy's floating workspaces give the outline a title bar.
+        assert "decorate = false" in code
         assert 'monitor = "HDMI-A-2 silent"' in code
         assert "move = { 200, 36 }" in code
         assert "size = { 420, 52 }" in code
@@ -894,7 +898,8 @@ class TestSkipMapAnimation:
         assert platform_impl.place_capture_overlay(widget, screen) is True
         assert widget.windowTitle() == "snipux-capture-overlay-HDMI_A_2"
         code = calls[0][0][2]
-        assert "_G.snipux_capture_overlay_rule_HDMI_A_2" in code
+        assert "_G.snipux_capture_overlay_rule_v2_HDMI_A_2" in code
+        assert "decorate = false" in code
         assert "monitor = \"HDMI-A-2 silent\"" in code
         assert "float = true" in code
         assert "move = { 0, 0 }" in code
@@ -925,7 +930,7 @@ class TestSkipMapAnimation:
         # Three overlays, one `hyprctl eval`, a rule for each output...
         assert len(calls) == 1
         for name in ("HDMI_A_2", "DP_2", "DP_1"):
-            assert f"_G.snipux_capture_overlay_rule_{name}" in calls[0][2]
+            assert f"_G.snipux_capture_overlay_rule_v2_{name}" in calls[0][2]
         # ...and every window still carries its own output's title.
         assert [w.windowTitle() for w in widgets] == [
             "snipux-capture-overlay-HDMI_A_2",

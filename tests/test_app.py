@@ -4887,6 +4887,58 @@ class TestTheBarStaysUpAfterARecordingLands:
         assert abs(bar.geometry().center().x() - usable.center().x()) <= 1
         assert bar.geometry().top() == round(usable.top() + 12)
 
+    def test_the_next_snip_takes_the_finished_bar_down_first(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Left up, the summary of the last recording is photographed into
+        # the next snip's frozen frame and then sits on top of it too.
+        controller, _backend = self._stopped_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+        landed = controller._landed_recording
+        assert controller._recording_hud is not None
+        seen = []
+        capture = controller._registry.capture
+
+        def capturing():
+            seen.append(controller._recording_hud)
+            return capture()
+
+        monkeypatch.setattr(controller._registry, "capture", capturing)
+
+        controller.start_capture()
+
+        assert seen == [None]
+        assert controller._done_timer is None
+        # Taken down, not discarded: the recording it described is kept.
+        assert landed.exists()
+        controller._overlay.close()
+
+    def test_a_bar_that_has_not_moved_is_not_placed_again(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # Every tick of a recording repositions the bar. Where the
+        # compositor does the placing that is processes started from the UI
+        # thread, so it is only asked when the answer would differ.
+        controller, _backend = self._stopped_recording(
+            make_controller, monkeypatch, tmp_path
+        )
+        placed = []
+        monkeypatch.setattr(app.platform.current, "places_windows", lambda: False)
+        monkeypatch.setattr(
+            app.platform.current,
+            "place_recording_controls",
+            lambda bar, top_left, size: placed.append((top_left, size)) or True,
+        )
+
+        controller._reposition_recording_bar()
+        controller._reposition_recording_bar()
+        assert len(placed) == 1
+
+        controller._recording_bar_anchor = controller._recording_bar_anchor + QPointF(40, 0)
+        controller._reposition_recording_bar()
+        assert len(placed) == 2
+
     def test_open_uses_the_editor_as_the_only_finished_ui(
         self, make_controller, monkeypatch, tmp_path
     ):
