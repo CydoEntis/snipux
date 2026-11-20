@@ -5,6 +5,12 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **On Hyprland, a commented-out binding no longer blocks the shortcut.**
+  Setting the snip shortcut was refused as "already bound" when the same
+  keys appeared in a line of `bindings.lua` that was commented out.
+
 ## 1.2.9 — 2026-11-20
 
 ### Fixed
