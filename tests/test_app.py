@@ -2975,6 +2975,10 @@ class TestAppControllerRecordingAudio:
         # Every recording used to start muted again, so sound was two
         # clicks away each time and easy to record without.
         self._platform_reasons(monkeypatch, {})
+        # Whether this machine can record sound at all is the platform's
+        # answer too (on Linux: is ffmpeg installed), so it is faked with
+        # the per-source one rather than left to the runner.
+        monkeypatch.setattr(app.platform.current, "records_audio", lambda: True)
         controller = self._controller(make_controller, FakeRecordingBackend())
         controller._recording_audio = "system"
 
