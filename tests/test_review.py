@@ -1015,6 +1015,32 @@ class TestTextTool:
         assert len(window._store) == 1
         assert window._store.marks[0].text == "hello"
 
+    def test_a_second_label_does_not_repeat_the_first(self):
+        window = self._editing()
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 500, 300))
+        canvas._text_editor.field.setText("one")
+        canvas._text_editor.commit()
+
+        canvas.mousePressEvent(_press(canvas, 520, 340))
+
+        assert [mark.text for mark in window._store.marks] == ["one"]
+        assert canvas._text_editor.field.text() == ""
+
+    def test_a_label_still_being_typed_is_in_the_picture(self):
+        # The bar's Copy takes no focus, so nothing ended the edit and the
+        # image was copied without the label.
+        window = self._editing()
+        canvas = window._canvas
+        bare = canvas.rendered_image()
+        canvas.mousePressEvent(_press(canvas, 500, 300))
+        canvas._text_editor.field.setText("hello")
+
+        image = canvas.rendered_image()
+
+        assert [mark.text for mark in window._store.marks] == ["hello"]
+        assert image != bare
+
     def test_the_mark_is_stored_in_image_coordinates(self):
         # The widget point clicked is not the image point stored -- if it
         # were, the label would export somewhere else entirely.

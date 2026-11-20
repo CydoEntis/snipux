@@ -5,6 +5,17 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **A label you are still typing is in the snip.** Clicking Copy, Save or
+  Pin with a text label or a callout still open left it out of the image
+  -- for a callout, box and tail too -- though it was on screen. Choosing
+  another tool keeps the label as well, instead of dropping it.
+- **A second text label no longer repeats the first.** After a label was
+  finished with Enter, placing another added the first one's words again
+  with nowhere to draw them, and the snip could then not be copied or
+  saved until that was undone.
+
 ## 1.2.9 — 2026-11-20
 
 ### Fixed

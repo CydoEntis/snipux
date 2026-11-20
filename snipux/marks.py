@@ -611,9 +611,17 @@ class TextLabelEditor(QObject):
         # focus and re-fires editingFinished synchronously.
         if self._committing or self._field is None:
             return
+        # Nothing is open. `begin` commits whatever came before it, and a
+        # label finished with Enter left its text in the hidden field, so
+        # the next click added the same words a second time with no
+        # position -- a mark that then raised on every repaint and every
+        # copy.
+        if self._point is None and self._on_commit is None:
+            return
         self._committing = True
         try:
             text = self._field.text()
+            self._field.clear()
             if self._on_commit is not None:
                 self._on_commit(text)
             elif text:
@@ -643,3 +651,5 @@ class TextLabelEditor(QObject):
             return
         self._field.clear()
         self._field.hide()
+        self._point = None
+        self._on_commit = None
