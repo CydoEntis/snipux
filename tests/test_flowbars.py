@@ -280,6 +280,22 @@ class TestPause:
     def test_pause_control_is_handed_out_for_a_tooltip(self, bar):
         assert bar.pause_control() is bar._pause
 
+    def test_a_paused_bar_stops_looking_live(self, bar):
+        # Red is what says "live". The paused bar kept its red clock and
+        # red border, so only the word on the button said otherwise.
+        bar.set_live("0:12")
+        assert "background" in bar._clock.styleSheet()
+
+        bar.set_paused("0:12", "0:03")
+
+        assert bar.is_paused()
+        assert "background" not in bar._clock.styleSheet()
+
+        bar.set_live("0:12")
+
+        assert not bar.is_paused()
+        assert "background" in bar._clock.styleSheet()
+
     def test_set_paused_names_resume_and_freezes_the_clock(self, bar):
         bar.set_live("0:12")
 

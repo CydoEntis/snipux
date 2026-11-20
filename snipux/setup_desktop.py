@@ -956,6 +956,25 @@ def save_recording_frame_rate(frame_rate: int, config_dir: Path | None = None) -
     return _write_config("recording_frame_rate", int(frame_rate), config_dir)
 
 
+def load_recording_audio(config_dir: Path | None = None) -> str:
+    """The sound source the last recording was made with -- "system", "mic"
+    or "off" -- which is what the next one starts with.
+
+    Off until something else has been chosen: a recorder that turned the
+    microphone on by itself would be the wrong surprise. But once chosen it
+    stays chosen. Every recording used to start muted again, two clicks
+    away from sound each time, and a recording made without them was
+    silent with nothing to be done about it afterwards.
+    """
+    stored = _read_config(config_dir).get("recording_audio")
+    known = {identifier for identifier, *_ in tokens.AUDIO_SOURCES}
+    return stored if stored in known else tokens.AUDIO_DEFAULT
+
+
+def save_recording_audio(source: str, config_dir: Path | None = None) -> bool:
+    return _write_config("recording_audio", source, config_dir)
+
+
 def load_recording_draw_cursor(config_dir: Path | None = None) -> bool:
     """Whether a recording composites the cursor into the video -- ticket
     9's other new Settings row, consumed by `GnomeScreencastBackend`'s

@@ -55,6 +55,21 @@ use it; the commit history has the detail.
   and the first was lost. The later one now gets " (2)".
 - **Save As writes the kind of file its name says.** Typing `shot.jpg`
   produced a PNG called `.jpg`. JPEG and WebP are offered in the dialog.
+- **A paused recording looks paused.** The bar kept its red border and
+  red clock through a pause, so only the word on the button said it was
+  not recording. Both go neutral until it resumes, and the tray says
+  Paused.
+- **A recording whose recorder crashes is not called saved.** The bar went
+  on counting as if nothing had happened, and Stop then reported an
+  unplayable file as "Recording saved". The recording now ends when the
+  recorder does, and the message says what the recorder reported.
+
+### Changed
+
+- **Recording sound stays how you left it.** Every recording used to start
+  muted, with System or Mic two clicks away each time. The source you pick
+  on the recording bar is now what the next recording starts with, after a
+  restart too. It is still off until you choose one.
 
 ## 1.2.9 — 2026-11-20
 
