@@ -7273,6 +7273,29 @@ class TestOpenEditor:
 
         assert controller._players == []
 
+    def test_a_clip_exported_from_it_joins_recent(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # The only trace of a trimmed clip was a status line that faded.
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+        added = []
+        monkeypatch.setattr(app.setup_desktop, "add_recent_capture", added.append)
+        rebuilt = []
+        monkeypatch.setattr(controller, "_rebuild_recent_menu", lambda: rebuilt.append(True))
+        controller.open_editor("video")
+        clip = tmp_path / "clip (trimmed).mp4"
+
+        try:
+            controller._players[0].exported.emit(str(clip))
+
+            assert added == [clip]
+            assert rebuilt == [True]
+        finally:
+            controller._players[0].close()
+
 
 class TestChooserKindIntegration:
     """SNX-120: the stills/record switch has to remember which side was

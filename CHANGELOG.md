@@ -16,6 +16,16 @@ use it; the commit history has the detail.
   window title bar reading "snipux-recording-frame-0-...".
 - **Starting a snip takes the "recording saved" bar down first.** It used to
   be photographed into the snip and stay on top of it.
+- **Edits made in the Video Editor reach a file.** On desktops where
+  recordings are MP4s (Hyprland), exporting without a trim failed with
+  "Error opening output files", "Export GIF" wrote an MP4 or nothing, and
+  "Export WebM" renamed the MP4 instead of converting it.
+- **Copy file copies the clip you edited.** After a trim it copied the
+  original, untrimmed recording. It now exports the edit first if needed
+  and copies that.
+- **The Video Editor keeps saying where an export went**, shows it in
+  Recent, exports on Ctrl+S, and asks before closing over a trim that was
+  never exported.
 
 ### Changed
 
