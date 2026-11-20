@@ -36,6 +36,48 @@ class TestSaveImage:
 
         assert path.parent == directory
 
+    def test_the_name_comes_from_the_pattern_in_settings(self, tmp_path):
+        # Settings stored the pattern and previewed it; nothing read it.
+        from snipux import setup_desktop
+
+        setup_desktop.save_filename_pattern("Bug %Y")
+
+        path = output.save_image(make_image(), tmp_path)
+
+        assert path.name.startswith("Bug 20")
+        assert path.suffix == ".png"
+
+    def test_a_pattern_nothing_can_format_falls_back_to_the_default(
+        self, tmp_path, monkeypatch
+    ):
+        from snipux import setup_desktop
+
+        real = setup_desktop.preview_filename
+
+        def picky(folder, pattern, extension="png"):
+            if pattern == "broken":
+                raise ValueError("bad pattern")
+            return real(folder, pattern, extension)
+
+        monkeypatch.setattr(setup_desktop, "preview_filename", picky)
+
+        path = output.save_image(make_image(), tmp_path, pattern="broken")
+
+        assert path.name.startswith("Screenshot from ")
+
+    def test_a_second_save_under_the_same_name_keeps_the_first(self, tmp_path):
+        first = output.save_image(make_image(), tmp_path, pattern="snip")
+        blue = make_image()
+        blue.fill(0xFF0000FF)
+
+        second = output.save_image(blue, tmp_path, pattern="snip")
+        third = output.save_image(blue, tmp_path, pattern="snip")
+
+        assert first.name == "snip.png"
+        assert second.name == "snip (2).png"
+        assert third.name == "snip (3).png"
+        assert QImage(str(first)).pixel(0, 0) == 0xFF3366CC
+
     def test_a_write_that_fails_raises_rather_than_returning_a_path(self, tmp_path):
         # QImage.save() reports failure by returning False. That return used
         # to be discarded, so a full disk or a read-only folder produced a

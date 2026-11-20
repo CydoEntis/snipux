@@ -5,6 +5,80 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.3.0 — 2026-11-20
+
+### Fixed
+
+- **One title bar, not two, in Omarchy's floating layout.** Settings, the
+  image editor and the player draw their own title bar, and on a floating
+  workspace Omarchy added a second one above it, with a second set of
+  buttons.
+- **Maximise works on Hyprland.** The button in Snipux's title bar did
+  nothing there, and showed Restore from the moment the window opened.
+  Minimise works on Omarchy's floating workspaces, where the dock brings
+  the window back.
+- **A Snipux window can be dragged by its title bar on Wayland.** It stayed
+  where the desktop put it.
+- **Snipux's windows have names.** The task switcher and dock listed every
+  one as "snipux"; they now say Snipux Settings or the file that is open,
+  and show Snipux's icon however it was installed.
+- **A label you are still typing is in the snip.** Clicking Copy, Save or
+  Pin with a text label or a callout still open left it out of the image
+  -- for a callout, box and tail too -- though it was on screen. Choosing
+  another tool keeps the label as well, instead of dropping it.
+- **A second text label no longer repeats the first.** After a label was
+  finished with Enter, placing another added the first one's words again
+  with nowhere to draw them, and the snip could then not be copied or
+  saved until that was undone.
+- **The tray icon turns up when Snipux starts before the panel.** Started
+  at login, Snipux was running a few seconds before anything could show a
+  tray icon; it looked once, found nowhere to put one, and went the whole
+  session with no icon, no menu and no notifications -- not "Copied", not
+  "Saved to", not an error. It now keeps looking.
+- **A damaged settings file is no longer wiped by the next snip.** If
+  `config.json` could not be read -- a stray comma from a hand edit, or a
+  write cut short -- the next snip replaced it with one setting and
+  everything else was gone. The unreadable file is now kept beside it as
+  `config.json.unreadable`, and settings are written so that an
+  interrupted write leaves the old file intact.
+- **Undo and Redo work in the image editor.** Both buttons stayed grey
+  whatever was drawn, and Ctrl+Z and Ctrl+Shift+Z did nothing, so a slip
+  or a Clear could not be taken back.
+- **Closing the image editor asks before dropping unsaved marks.** The
+  close button, or a second Esc, threw every annotation away without a
+  word.
+- **Two spotlights look the same in the editor as in the saved file.** On
+  screen the second one dimmed the first.
+- **Saved snips use the filename pattern from Settings.** Settings stored
+  the pattern and previewed the name it would give, and every snip was
+  still called "Screenshot from ...".
+- **A save never replaces an earlier snip.** Two saves in the same second
+  -- or any two under a pattern with no time in it -- wrote to one file
+  and the first was lost. The later one now gets " (2)".
+- **Save As writes the kind of file its name says.** Typing `shot.jpg`
+  produced a PNG called `.jpg`. JPEG and WebP are offered in the dialog.
+- **A paused recording looks paused.** The bar kept its red border and
+  red clock through a pause, so only the word on the button said it was
+  not recording. Both go neutral until it resumes, and the tray says
+  Paused.
+- **A recording whose recorder crashes is not called saved.** The bar went
+  on counting as if nothing had happened, and Stop then reported an
+  unplayable file as "Recording saved". The recording now ends when the
+  recorder does, and the message says what the recorder reported.
+
+### Changed
+
+- **Recording sound stays how you left it.** Every recording used to start
+  muted, with System or Mic two clicks away each time. The source you pick
+  on the recording bar is now what the next recording starts with, after a
+  restart too. It is still off until you choose one.
+- **On Hyprland, a commented-out binding no longer blocks the shortcut.**
+  Setting the snip shortcut was refused as "already bound" when the same
+  keys appeared in a line of `bindings.lua` that was commented out.
+- **Dragging a region past the edge of the screen stops at the edge.** The
+  selection kept growing off the monitor, and the snip came out wider
+  than the screen with solid black where it ran off.
+
 ## 1.2.9 — 2026-11-20
 
 ### Fixed

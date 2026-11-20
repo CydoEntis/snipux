@@ -4981,6 +4981,22 @@ class OverlayWindow(QWidget):
         # way: framing anything by hand means the bar's actions are about
         # that rectangle again, not about a page.
         self._recalled_selection = False
+        if rect is not None:
+            # Only what was photographed can be selected. A drag carried
+            # past the edge of the screen -- onto the next monitor, where
+            # this overlay's picture ends -- used to keep growing, and the
+            # snip came out wider than the monitor with solid black where
+            # it ran off, its handles out of reach.
+            size = self._frame.logical_size
+            pictured = QRect(0, 0, round(size.width()), round(size.height()))
+            # Callers pass either kind of rectangle, and each is kept as
+            # the kind it came in as.
+            if isinstance(rect, QRectF):
+                clamped = rect.intersected(QRectF(pictured))
+            else:
+                clamped = rect.intersected(pictured)
+            if not clamped.isEmpty():
+                rect = clamped
         self._selection = rect
         self._sync_bar_visibility()
         self._sync_chooser_visibility()
@@ -5010,6 +5026,9 @@ class OverlayWindow(QWidget):
         # a press inside a recalled region draws rather than reframing,
         # which is the whole point of having picked one.
         self._recalled_selection = False
+        # Picking another tool finishes a label being typed, as drawing
+        # with one does in the editor window; it is not thrown away.
+        self._text_editor.commit()
         if tool in design.tokens.OPENING_TOOLS:
             self._last_opening_tool = tool
         if self._selection is not None and not self._picking_window:
@@ -7038,6 +7057,12 @@ class OverlayWindow(QWidget):
         """
         if self._selection is None:
             raise ValueError("no selection to export")
+        # A label still being typed is on screen, so it belongs in the
+        # picture. The bar's buttons take no focus, so clicking Copy never
+        # ended the edit: the snip left without the label, or without the
+        # whole callout, and the mark was added to an overlay already
+        # closing.
+        self._text_editor.commit()
         return render_selection(
             self._frame,
             self._marks,

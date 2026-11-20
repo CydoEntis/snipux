@@ -385,3 +385,123 @@ class TestTheAppsOwnScrollbar:
         window = winchrome.WinWindow("Test", size=(400, 300))
 
         assert "QScrollBar" in window.styleSheet()
+
+
+class _FakePlatform:
+    """Stands in for a desktop that handles a window's chrome itself."""
+
+    def __init__(self, *, handles=True, places_windows=True):
+        self.handles = handles
+        self._places_windows = places_windows
+        self.prepared = []
+        self.is_maximised = False
+        self.minimised = []
+
+    def prepare_window(self, widget):
+        self.prepared.append(widget)
+
+    def toggle_maximised(self, widget):
+        if self.handles:
+            self.is_maximised = not self.is_maximised
+        return self.handles
+
+    def minimise(self, widget):
+        self.minimised.append(widget)
+        return self.handles
+
+    def maximised(self, widget):
+        return self.is_maximised if self.handles else None
+
+    def places_windows(self):
+        return self._places_windows
+
+
+class TestTheDesktopIsToldAboutTheWindow:
+    """What a window hands to the desktop rather than doing itself: its
+    title, and maximising where Qt's own request goes unheard (Hyprland)."""
+
+    def _window(self, monkeypatch, fake):
+        monkeypatch.setattr(winchrome.platform, "current", fake)
+        return winchrome.WinWindow("Snipux Settings", size=(600, 400))
+
+    def test_the_window_carries_its_title(self, monkeypatch):
+        window = self._window(monkeypatch, _FakePlatform())
+
+        assert window.windowTitle() == "Snipux Settings"
+
+        window.set_title("shot.png")
+
+        assert window.windowTitle() == "shot.png"
+        assert window.title_label.text() == "shot.png"
+
+    def test_the_platform_is_asked_before_each_show(self, monkeypatch):
+        fake = _FakePlatform()
+        window = self._window(monkeypatch, fake)
+
+        window.show()
+        window.hide()
+        window.show()
+
+        assert fake.prepared == [window, window]
+
+    def test_maximise_is_the_platforms_when_it_takes_it(self, monkeypatch):
+        fake = _FakePlatform()
+        window = self._window(monkeypatch, fake)
+        window.show()
+
+        window.maximise_button.click()
+
+        assert fake.is_maximised is True
+        assert not window.isMaximized()
+        assert window.maximise_button.toolTip() == "Restore"
+
+        window.maximise_button.click()
+
+        assert window.maximise_button.toolTip() == "Maximize"
+
+    def test_maximise_is_qts_when_the_platform_declines(self, monkeypatch):
+        window = self._window(monkeypatch, _FakePlatform(handles=False))
+        window.show()
+
+        window.maximise_button.click()
+
+        assert window.isMaximized()
+
+    def test_minimise_is_offered_to_the_platform_first(self, monkeypatch):
+        fake = _FakePlatform()
+        window = self._window(monkeypatch, fake)
+        window.show()
+
+        window.minimise_button.click()
+
+        assert fake.minimised == [window]
+        assert not window.isMinimized()
+
+    def test_the_title_bar_asks_the_compositor_to_move_the_window(self, monkeypatch):
+        # Under Wayland `move()` is ignored, so dragging the bar did nothing.
+        from PyQt6.QtCore import QEvent, QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+
+        window = self._window(monkeypatch, _FakePlatform(places_windows=False))
+        window.show()
+        asked = []
+
+        class _Handle:
+            def startSystemMove(self):
+                asked.append(True)
+                return True
+
+        monkeypatch.setattr(window, "windowHandle", lambda: _Handle())
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(200, 15),
+            QPointF(window.mapToGlobal(QPointF(200, 15))),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+        window.mousePressEvent(press)
+
+        assert asked == [True]
+        assert window._drag_origin is None

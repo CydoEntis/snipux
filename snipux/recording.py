@@ -138,6 +138,15 @@ class RecordingBackend(ABC):
     # stop (#93), not this.
     can_pause: bool = False
 
+    def is_running(self) -> bool:
+        """False once a recording that was started has ended by itself --
+        its recorder crashed, or was killed. True otherwise, including
+        before `start()`: only a backend that can tell says no.
+
+        Asked on every tick of a recording, so it must not block.
+        """
+        return True
+
     def pause_unavailable_reason(self) -> str | None:
         """Why `can_pause` is False, for the bar's greyed Pause control to
         carry -- the same "an option that cannot work says why" rule
@@ -623,6 +632,22 @@ class GpuScreenRecorderBackend(RecordingBackend):
             raise RuntimeError("gpu-screen-recorder is no longer running")
         self._paused = False
 
+    def is_running(self) -> bool:
+        process = self._process
+        return process is None or process.poll() is None
+
+    @staticmethod
+    def _said(stderr) -> str:
+        """The end of what the recorder printed, as ": ..." or nothing."""
+        if stderr is None:
+            return ""
+        try:
+            stderr.seek(0)
+            detail = stderr.read().strip()
+        except (OSError, ValueError):
+            return ""
+        return f": {detail[-500:]}" if detail else ""
+
     def stop(self) -> None:
         process, self._process = self._process, None
         path, self._path = self._path, None
@@ -631,21 +656,32 @@ class GpuScreenRecorderBackend(RecordingBackend):
         if process is None:
             raise RuntimeError("gpu-screen-recorder: stop() called with no recording in progress")
         try:
-            if process.poll() is None:
-                process.send_signal(signal.SIGINT)
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-                    raise RuntimeError(
-                        "gpu-screen-recorder did not stop cleanly; the video may be incomplete"
-                    )
+            if process.poll() is not None:
+                # It ended before anyone asked it to. An MP4 is only
+                # playable once the recorder has closed it properly, so the
+                # file there is not one: reporting it as saved handed the
+                # user a video nothing opens.
+                raise RuntimeError(
+                    "gpu-screen-recorder stopped by itself before the recording "
+                    "was finished, so the video is incomplete"
+                    + self._said(stderr)
+                )
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                raise RuntimeError(
+                    "gpu-screen-recorder did not stop cleanly; the video may be incomplete"
+                )
+            if path is None or not Path(path).is_file() or Path(path).stat().st_size == 0:
+                raise RuntimeError(
+                    "gpu-screen-recorder produced no playable output" + self._said(stderr)
+                )
         finally:
             if stderr is not None:
                 stderr.close()
-        if path is None or not Path(path).is_file() or Path(path).stat().st_size == 0:
-            raise RuntimeError("gpu-screen-recorder produced no playable output")
 
     def discard(self) -> None:
         path = self._path

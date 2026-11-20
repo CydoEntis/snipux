@@ -6829,11 +6829,13 @@ class TestCommitToRecord:
         # feature that does not apply to it: there is no annotate-in-place
         # for a video.
         overlay = self._overlay(on_recording_requested=lambda rect, delay, after: None)
-        overlay.set_selection(QRectF(10, 10, 793, 458))
+        # Inside the frame this overlay was built on: a selection cannot
+        # run past what was photographed.
+        overlay.set_selection(QRectF(10, 10, 493, 458))
 
         size, marks = overlay._dimension_chip_texts()
 
-        assert size == "793 × 458"
+        assert size == "493 × 458"
         assert marks == ""
 
         # And the chip shrinks to fit: reserving the middot's width would
@@ -8327,6 +8329,55 @@ class TestLabelEnterDoesNotDismissOverlay:
         assert overlay._text_edit.isHidden()
         assert overlay.isVisible()  # never copied-and-dismissed
         assert calls == []
+
+    def test_a_second_label_does_not_repeat_the_first(self):
+        # Enter left the words in the hidden field, and opening the next
+        # label committed them again, with no position: a mark that raised
+        # on every repaint and every copy from then on.
+        overlay = self._overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
+        QApplication.processEvents()
+
+        assert [mark.text for mark in overlay.marks] == ["hello"]
+        assert overlay._text_edit.text() == ""
+        QTest.keyClicks(overlay._text_edit, "again")
+        QTest.keyClick(overlay._text_edit, Qt.Key.Key_Return)
+        assert [mark.text for mark in overlay.marks] == ["hello", "again"]
+        assert all(mark.point is not None for mark in overlay.marks)
+        overlay.rendered_image()  # raised while the stray mark was there
+
+    def test_a_label_still_being_typed_is_in_the_picture(self):
+        # The bar's buttons take no focus, so Copy never ended the edit and
+        # the snip left without the words on screen.
+        overlay = self._overlay()
+        bare = overlay.rendered_image()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+
+        image = overlay.rendered_image()
+
+        assert [mark.text for mark in overlay.marks] == ["hello"]
+        assert image != bare
+
+    def test_choosing_another_tool_keeps_the_label(self):
+        overlay = self._overlay()
+        overlay._bar.select_tool("text")
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))
+        QApplication.processEvents()
+        QTest.keyClicks(overlay._text_edit, "hello")
+
+        overlay._bar.select_tool("pen")
+
+        assert [mark.text for mark in overlay.marks] == ["hello"]
+        assert overlay._text_edit.isHidden()
 
     def test_escape_abandons_the_label_without_touching_other_marks(self):
         overlay = self._overlay()
@@ -14359,3 +14410,43 @@ class TestModeLettersFollowTheRow:
         assert overlay._chooser.phase == "collapsed"
         assert overlay._selection == selection
         assert overlay.isVisible()
+
+
+class TestASelectionStaysOnThePicture:
+    """A drag carried past the edge of the screen kept growing: the snip
+    came out larger than what was photographed, padded with black."""
+
+    def _overlay(self, qapp):
+        overlay = OverlayWindow(make_frame(image_size=(200, 200), logical_size=(200, 200)))
+        overlay.resize(200, 200)
+        return overlay
+
+    def test_a_rectangle_past_the_edge_is_cut_back_to_it(self, qapp):
+        overlay = self._overlay(qapp)
+
+        overlay.set_selection(QRect(150, 120, 400, 300))
+
+        assert QRect(overlay._selection) == QRect(150, 120, 50, 80)
+
+    def test_one_that_starts_before_the_corner_is_cut_back_too(self, qapp):
+        overlay = self._overlay(qapp)
+
+        overlay.set_selection(QRect(-40, -30, 100, 100))
+
+        assert QRect(overlay._selection) == QRect(0, 0, 60, 70)
+
+    def test_the_exported_image_is_only_what_was_pictured(self, qapp):
+        overlay = self._overlay(qapp)
+        overlay.set_selection(QRect(150, 120, 400, 300))
+
+        image = overlay.rendered_image()
+
+        assert (image.width(), image.height()) == (50, 80)
+        assert image.pixelColor(49, 79) == QColor(BASE_COLOR)
+
+    def test_a_rectangle_inside_is_left_exactly_alone(self, qapp):
+        overlay = self._overlay(qapp)
+
+        overlay.set_selection(QRect(20, 30, 100, 90))
+
+        assert overlay._selection == QRect(20, 30, 100, 90)

@@ -1055,6 +1055,7 @@ class RecordingBar(QWidget):
         # (`set_backdrop_host`).
         self.glass = glass.Glass(self)
         self._state = self.READY
+        self._paused = False
         # All three are read by `set_ready()` below, so they exist before it
         # runs.
         self._delay_available = True
@@ -1189,6 +1190,7 @@ class RecordingBar(QWidget):
         it moves once, when the recording passes ten minutes.
         """
         self._state = self.LIVE
+        self._paused = False
         self._clock.setText(elapsed)
         self._clock.set_wash("REC_WASH")
         self._summary.setText(size)
@@ -1206,6 +1208,10 @@ class RecordingBar(QWidget):
         self._show(action=True, clock=True, pause=True, audio=True, delay=False,
                    summary=bool(size), cancel=False, discard=False)
 
+    def is_paused(self) -> bool:
+        """True between `set_paused` and the `set_live` that resumes."""
+        return self._state == self.LIVE and self._paused
+
     def set_paused(self, elapsed: str, paused_for: str) -> None:
         """The `live` state's paused sub-state: the clock freezes at
         `elapsed` -- the recorded length so far, paused time already
@@ -1214,8 +1220,15 @@ class RecordingBar(QWidget):
         run. Still `LIVE`: Stop and Discard work exactly as they do while
         recording, per the class docstring.
         """
+        # Red is the one colour that says "live" here, and a paused
+        # recording is not being filmed. The bar used to keep its red
+        # border and red clock through a pause, so the only sign of one was
+        # the word on the button.
+        self._paused = True
         self._clock.setText(elapsed)
+        self._clock.set_wash(None)
         self._pause.set_content("play", f"Resume · {paused_for}")
+        self.update()
 
     def set_done(self, summary: str, *, destination: str | None = None) -> None:
         """Stage 6: what was produced, and a way to decide it was not worth
@@ -1402,7 +1415,7 @@ class RecordingBar(QWidget):
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         _glass(
             painter, self.glass, rect, tokens.FlowMetric.RADIUS,
-            live=self._state == self.LIVE,
+            live=self._state == self.LIVE and not self._paused,
         )
         painter.end()
 

@@ -37,7 +37,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import design
+from . import design, platform
 from .design import tokens
 
 # Every icon size is the same mark drawn at its own resolution -- see
@@ -408,6 +408,10 @@ class WinWindow(QWidget):
         super().__init__(parent)
         metric = tokens.WinMetric
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        # What the desktop calls this window: the task switcher, a dock, a
+        # tiling compositor's own bar. Without it every Snipux window was
+        # listed under the program's name alone.
+        self.setWindowTitle(title)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(*size)
         # A floor, so a window cannot be dragged down to a sliver it can
@@ -483,7 +487,7 @@ class WinWindow(QWidget):
         row.addStretch()
 
         self.minimise_button = _TitleBarButton("minimize")
-        self.minimise_button.clicked.connect(self.showMinimized)
+        self.minimise_button.clicked.connect(self._minimise)
         row.addWidget(self.minimise_button)
 
         self.maximise_button = _TitleBarButton("maximize")
@@ -578,7 +582,7 @@ class WinWindow(QWidget):
         swallowing one that was not a resize would break every button in
         the window.
         """
-        if self.isMaximized() or self.isFullScreen():
+        if self._is_maximised() or self.isFullScreen():
             return False
         try:
             global_point = event.globalPosition().toPoint()
@@ -647,7 +651,26 @@ class WinWindow(QWidget):
             rect.setBottom(max(rect.bottom() + delta.y(), rect.top() + minimum.height() - 1))
         self.setGeometry(rect)
 
+    def set_title(self, title: str) -> None:
+        """The title bar's text and the window's own title, together."""
+        self.title_label.setText(title)
+        self.setWindowTitle(title)
+
+    def showEvent(self, event) -> None:
+        if not event.spontaneous():
+            platform.current.prepare_window(self)
+        super().showEvent(event)
+
+    def _minimise(self) -> None:
+        if not platform.current.minimise(self):
+            self.showMinimized()
+
     def _toggle_maximised(self) -> None:
+        # Asked first: some desktops ignore the request Qt sends, and Qt
+        # would go on believing it had been granted.
+        if platform.current.toggle_maximised(self):
+            self._show_maximised_glyph()
+            return
         if self.isMaximized():
             self.showNormal()
         else:
@@ -657,10 +680,18 @@ class WinWindow(QWidget):
         # Driven by the state change rather than the click, so maximising
         # by a double-click, Win+Up or a snap also swaps the glyph.
         if event.type() == QEvent.Type.WindowStateChange:
-            maximised = self.isMaximized()
-            self.maximise_button.set_glyph("restore" if maximised else "maximize")
-            self.maximise_button.setToolTip("Restore" if maximised else "Maximize")
+            self._show_maximised_glyph()
         super().changeEvent(event)
+
+    def _is_maximised(self) -> bool:
+        """Qt's answer, unless the platform knows better."""
+        known = platform.current.maximised(self)
+        return self.isMaximized() if known is None else known
+
+    def _show_maximised_glyph(self) -> None:
+        maximised = self._is_maximised()
+        self.maximise_button.set_glyph("restore" if maximised else "maximize")
+        self.maximise_button.setToolTip("Restore" if maximised else "Maximize")
 
     # -- frameless drag --------------------------------------------------
     #
@@ -677,12 +708,23 @@ class WinWindow(QWidget):
             and not self._edges_at(event.position().toPoint())
             and event.position().y() <= tokens.WinMetric.TITLEBAR_H
         ):
+            # Where a window cannot move itself -- Wayland -- `move()` below
+            # is ignored and the title bar dragged nothing. The compositor
+            # is the only thing that can, so it is asked.
+            handle = self.windowHandle()
+            if (
+                not platform.current.places_windows()
+                and not self._is_maximised()
+                and handle is not None
+                and handle.startSystemMove()
+            ):
+                return
             self._drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._drag_origin is not None and not self.isMaximized():
+        if self._drag_origin is not None and not self._is_maximised():
             self.move(event.globalPosition().toPoint() - self._drag_origin)
             return
         super().mouseMoveEvent(event)

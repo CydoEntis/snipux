@@ -1975,7 +1975,7 @@ class PlayerWindow(WinWindow):
         self._last_export = None
         self._copy_when_exported = False
         self._autoplay = autoplay
-        self.title_label.setText(path.name)
+        self.set_title(path.name)
         self._show_video_page(True)
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         self._elide_path()

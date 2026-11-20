@@ -401,6 +401,25 @@ class TestExport:
         assert written == tmp_path / "no-extension.png"
         assert written.exists()
 
+    def test_save_as_writes_the_format_the_name_asks_for(self, tmp_path):
+        # It wrote PNG bytes into a file called .jpg.
+        from PyQt6.QtGui import QImageReader
+
+        window = ReviewWindow(make_image(60, 40))
+
+        path = window.save_as(tmp_path / "shot.jpg")
+
+        assert path == tmp_path / "shot.jpg"
+        assert bytes(QImageReader(str(path)).format()) == b"jpeg"
+
+    def test_save_as_keeps_png_for_a_format_qt_cannot_write(self, tmp_path):
+        window = ReviewWindow(make_image(60, 40))
+
+        path = window.save_as(tmp_path / "shot.xyz")
+
+        assert path == tmp_path / "shot.xyz.png"
+        assert path.read_bytes().startswith(b"\x89PNG")
+
     def test_save_as_creates_a_missing_directory(self, tmp_path):
         window = ReviewWindow(make_image())
         target = tmp_path / "not" / "there" / "shot.png"
@@ -1014,6 +1033,32 @@ class TestTextTool:
 
         assert len(window._store) == 1
         assert window._store.marks[0].text == "hello"
+
+    def test_a_second_label_does_not_repeat_the_first(self):
+        window = self._editing()
+        canvas = window._canvas
+        canvas.mousePressEvent(_press(canvas, 500, 300))
+        canvas._text_editor.field.setText("one")
+        canvas._text_editor.commit()
+
+        canvas.mousePressEvent(_press(canvas, 520, 340))
+
+        assert [mark.text for mark in window._store.marks] == ["one"]
+        assert canvas._text_editor.field.text() == ""
+
+    def test_a_label_still_being_typed_is_in_the_picture(self):
+        # The bar's Copy takes no focus, so nothing ended the edit and the
+        # image was copied without the label.
+        window = self._editing()
+        canvas = window._canvas
+        bare = canvas.rendered_image()
+        canvas.mousePressEvent(_press(canvas, 500, 300))
+        canvas._text_editor.field.setText("hello")
+
+        image = canvas.rendered_image()
+
+        assert [mark.text for mark in window._store.marks] == ["hello"]
+        assert image != bare
 
     def test_the_mark_is_stored_in_image_coordinates(self):
         # The widget point clicked is not the image point stored -- if it
@@ -1824,3 +1869,125 @@ class TestCopyGoesThroughOutput:
         # Guards the import itself: a module-local rebinding would satisfy
         # the test above while still bypassing wl-copy in the real app.
         assert review_module.output is output_module
+
+
+class TestUndoWorksInTheEditor:
+    """The bar's Undo and Redo were built disabled and nothing in this
+    window ever enabled them, and Ctrl+Z was not handled at all -- though
+    both tooltips name it."""
+
+    @staticmethod
+    def _pen():
+        return shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+
+    def test_the_buttons_follow_what_can_be_undone(self):
+        window = ReviewWindow(make_image(100, 100))
+        assert not window._bar._undo_button.isEnabled()
+
+        window._store.add(self._pen())
+
+        assert window._bar._undo_button.isEnabled()
+        assert not window._bar._redo_button.isEnabled()
+
+        window._bar.undoRequested.emit()
+
+        assert len(window._store) == 0
+        assert not window._bar._undo_button.isEnabled()
+        assert window._bar._redo_button.isEnabled()
+
+    def test_ctrl_z_and_ctrl_shift_z(self):
+        window = ReviewWindow(make_image(100, 100))
+        window._store.add(self._pen())
+
+        QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+        assert len(window._store) == 0
+
+        QTest.keyClick(
+            window,
+            Qt.Key.Key_Z,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        assert len(window._store) == 1
+
+    def test_the_buttons_follow_a_newly_opened_image(self, tmp_path):
+        window = ReviewWindow(make_image(100, 100))
+        target = tmp_path / "other.png"
+        make_image(10, 10).save(str(target), "PNG")
+        window.open_path(target)
+
+        window._store.add(self._pen())
+
+        assert window._bar._undo_button.isEnabled()
+
+
+class TestClosingAsksBeforeDroppingInk:
+    def _edited(self):
+        window = ReviewWindow(make_image(100, 100))
+        window._store.add(
+            shapes.Pen(colour=QColor("#fff"), stroke_width=4, points=[QPointF(1, 1)])
+        )
+        window.show()
+        return window
+
+    def test_cancel_keeps_the_window_and_its_ink(self, monkeypatch):
+        window = self._edited()
+        closed = []
+        window.closed.connect(lambda: closed.append(True))
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel
+        )
+
+        window.close()
+
+        assert window.isVisible()
+        assert closed == []
+        assert len(window._store) == 1
+
+    def test_discard_closes(self, monkeypatch):
+        window = self._edited()
+        closed = []
+        window.closed.connect(lambda: closed.append(True))
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Discard
+        )
+
+        window.close()
+
+        assert not window.isVisible()
+        assert closed == [True]
+
+    def test_nothing_is_asked_of_an_unedited_window(self, monkeypatch):
+        window = ReviewWindow(make_image(100, 100))
+        window.show()
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: pytest.fail("asked")
+        )
+
+        window.close()
+
+        assert not window.isVisible()
+
+
+class TestTwoSpotlightsPreviewAsTheySave:
+    def test_each_hole_stays_clear_on_screen(self):
+        image = make_image(300, 300)
+        image.fill(QColor("#ffffff"))
+        window = ReviewWindow(image)
+        for start, end in (((20, 20), (120, 120)), ((180, 180), (280, 280))):
+            window._store.add(
+                shapes.Spotlight(
+                    colour=QColor("#fff"),
+                    stroke_width=4,
+                    start=QPointF(*start),
+                    end=QPointF(*end),
+                )
+            )
+
+        shown = window._canvas._composited()
+        saved = window._canvas.rendered_image()
+
+        for point in ((70, 70), (230, 230), (150, 150)):
+            assert shown.pixelColor(*point) == saved.pixelColor(*point)
+        assert shown.pixelColor(70, 70) == QColor("#ffffff")

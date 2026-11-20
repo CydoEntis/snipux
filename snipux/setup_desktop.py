@@ -408,6 +408,14 @@ def _hypr_binding_conflict(text: str, shortcut: str, *, lua: bool) -> str | None
     wanted_mods, wanted_key = _hypr_shortcut(shortcut)
     wanted = {part.strip() for part in wanted_mods.split("+")[:-1]}
     if lua:
+        # A bind that has been commented out binds nothing. Omarchy's
+        # stock bindings.lua ships with examples commented out, and those
+        # were being read as taken: the shortcut was refused over a line
+        # that does nothing.
+        text = re.sub(r"--\[\[.*?\]\]", "", text, flags=re.S)
+        text = "\n".join(
+            line for line in text.split("\n") if not line.lstrip().startswith("--")
+        )
         matches = re.finditer(r'o\.bind\(\s*["\']([^"\']+)["\']', text)
         candidates = ((match.group(1), match.group(0)) for match in matches)
     else:
@@ -640,15 +648,53 @@ def _write_config(key: str, value, config_dir: Path | None = None) -> bool:
     Reads and rewrites the whole document rather than replacing it, so one
     setting is never dropped by writing another.
     """
-    document = _read_config(config_dir)
-    document[key] = value
     path = config_path(config_dir)
+    document = _read_config(config_dir)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(document, indent=2) + "\n")
+        if not document:
+            _set_aside_if_unreadable(path)
+        document[key] = value
+        # Written beside the file and moved over it, so a process killed
+        # part-way leaves the old file rather than half of a new one --
+        # which the next write would then have read as empty and replaced
+        # with a single key.
+        scratch = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            scratch.write_text(json.dumps(document, indent=2) + "\n")
+            os.replace(scratch, path)
+        finally:
+            scratch.unlink(missing_ok=True)
     except OSError:
         return False
     return True
+
+
+def _set_aside_if_unreadable(path: Path) -> None:
+    """Keep a config file that exists but cannot be parsed, as
+    `config.json.unreadable`, before it is written over.
+
+    `_read_config` answers `{}` for such a file, so the next write of any
+    one key -- the last region, on every snip -- used to replace all of it
+    with that key alone: one stray comma from a hand edit and the shortcut,
+    folders and tool settings were gone, with nothing left to recover them
+    from.
+    """
+    try:
+        text = path.read_text()
+    except OSError:
+        return
+    try:
+        if isinstance(json.loads(text), dict):
+            return
+    except ValueError:
+        pass
+    if not text.strip():
+        return
+    try:
+        os.replace(path, path.with_name(path.name + ".unreadable"))
+    except OSError:
+        pass
 
 
 def version_line() -> str:
@@ -916,6 +962,25 @@ def load_recording_frame_rate(config_dir: Path | None = None) -> int:
 
 def save_recording_frame_rate(frame_rate: int, config_dir: Path | None = None) -> bool:
     return _write_config("recording_frame_rate", int(frame_rate), config_dir)
+
+
+def load_recording_audio(config_dir: Path | None = None) -> str:
+    """The sound source the last recording was made with -- "system", "mic"
+    or "off" -- which is what the next one starts with.
+
+    Off until something else has been chosen: a recorder that turned the
+    microphone on by itself would be the wrong surprise. But once chosen it
+    stays chosen. Every recording used to start muted again, two clicks
+    away from sound each time, and a recording made without them was
+    silent with nothing to be done about it afterwards.
+    """
+    stored = _read_config(config_dir).get("recording_audio")
+    known = {identifier for identifier, *_ in tokens.AUDIO_SOURCES}
+    return stored if stored in known else tokens.AUDIO_DEFAULT
+
+
+def save_recording_audio(source: str, config_dir: Path | None = None) -> bool:
+    return _write_config("recording_audio", source, config_dir)
 
 
 def load_recording_draw_cursor(config_dir: Path | None = None) -> bool:

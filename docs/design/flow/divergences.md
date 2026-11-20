@@ -87,6 +87,19 @@ exactly as `RECORD_DISABLED_MODES` already does on the record side.
 
 Windows gets all three.
 
+### The choice is remembered
+
+The handoff has audio persist across snips within a session, with its
+initial value from Settings. As built it did neither: every recording
+started muted again, and there is no Settings row. The source chosen on the
+bar is now stored (`recording_audio`) and is what the next recording starts
+with, across restarts too. That is a per-snip control writing back to a
+preference, which the handoff's state model says not to do; it is done here
+because a recording made without the two clicks is silent and cannot be
+fixed afterwards, and that was happening. Off stays the value until a
+source has been chosen once -- Snipux does not turn a microphone on by
+itself.
+
 ---
 
 ## 3 · What the handoff left open, and where it went
