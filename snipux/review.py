@@ -673,12 +673,12 @@ class ReviewWindow(WinWindow):
         self._store = MarkStore(self)
 
         if self._has_image:
-            self.title_label.setText(
+            self.set_title(
                 saved_path.name if saved_path is not None else "Unsaved snip"
             )
             self.title_detail.setText(f"{image.width()} × {image.height()}")
         else:
-            self.title_label.setText("Image Editor")
+            self.set_title("Image Editor")
 
         body = QVBoxLayout(self.body)
         body.setContentsMargins(0, 0, 0, 0)
@@ -1245,7 +1245,7 @@ class ReviewWindow(WinWindow):
         self._saved_path = path
         self._dirty = False
         self._folder_button.setEnabled(True)
-        self.title_label.setText(path.name)
+        self.set_title(path.name)
         self._refresh_status()
         self._show_toast("save", f"Saved to {self._display_path(path)}")
         return path
@@ -1304,7 +1304,7 @@ class ReviewWindow(WinWindow):
         self._bar.redoRequested.connect(self._store.redo)
         self._bar.clearRequested.connect(self._store.clear)
         self._canvas.set_image(image, self._store)
-        self.title_label.setText(path.name)
+        self.set_title(path.name)
         self.title_detail.setText(f"{image.width()} × {image.height()}")
         self._show_image_page(True)
         self._refresh_badges()

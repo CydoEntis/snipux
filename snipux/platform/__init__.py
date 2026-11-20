@@ -292,6 +292,33 @@ class Platform(ABC):
         """
         return True
 
+    def prepare_window(self, widget) -> None:
+        """Called before an ordinary Snipux window -- Settings, the image
+        editor, the player, the history panel -- is shown, each time.
+
+        Chrome only. These windows are frameless and draw their own title
+        bar, and a desktop that decorates every window regardless puts a
+        second one on top. The default does nothing, which is right
+        wherever a frameless window is left alone.
+        """
+
+    def toggle_maximised(self, widget) -> bool:
+        """Maximise or restore `widget` where Qt's own `showMaximized()`
+        is not listened to, and say whether this did it. False -- the
+        default -- means the caller should ask Qt as usual.
+        """
+        return False
+
+    def minimise(self, widget) -> bool:
+        """`toggle_maximised`'s counterpart for the minimise button."""
+        return False
+
+    def maximised(self, widget) -> bool | None:
+        """Whether `widget` is maximised, where Qt's own answer cannot be
+        trusted; None -- the default -- where it can.
+        """
+        return None
+
     def prefetch_snip_state(self, screen_names: list[str], geometry_provider) -> None:
         """Ask the desktop, ahead of time, what the overlay will need to ask.
 
