@@ -5,6 +5,17 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **Saved snips use the filename pattern from Settings.** Settings stored
+  the pattern and previewed the name it would give, and every snip was
+  still called "Screenshot from ...".
+- **A save never replaces an earlier snip.** Two saves in the same second
+  -- or any two under a pattern with no time in it -- wrote to one file
+  and the first was lost. The later one now gets " (2)".
+- **Save As writes the kind of file its name says.** Typing `shot.jpg`
+  produced a PNG called `.jpg`. JPEG and WebP are offered in the dialog.
+
 ## 1.2.9 — 2026-11-20
 
 ### Fixed

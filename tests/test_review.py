@@ -401,6 +401,25 @@ class TestExport:
         assert written == tmp_path / "no-extension.png"
         assert written.exists()
 
+    def test_save_as_writes_the_format_the_name_asks_for(self, tmp_path):
+        # It wrote PNG bytes into a file called .jpg.
+        from PyQt6.QtGui import QImageReader
+
+        window = ReviewWindow(make_image(60, 40))
+
+        path = window.save_as(tmp_path / "shot.jpg")
+
+        assert path == tmp_path / "shot.jpg"
+        assert bytes(QImageReader(str(path)).format()) == b"jpeg"
+
+    def test_save_as_keeps_png_for_a_format_qt_cannot_write(self, tmp_path):
+        window = ReviewWindow(make_image(60, 40))
+
+        path = window.save_as(tmp_path / "shot.xyz")
+
+        assert path == tmp_path / "shot.xyz.png"
+        assert path.read_bytes().startswith(b"\x89PNG")
+
     def test_save_as_creates_a_missing_directory(self, tmp_path):
         window = ReviewWindow(make_image())
         target = tmp_path / "not" / "there" / "shot.png"
