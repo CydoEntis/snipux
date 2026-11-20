@@ -1160,7 +1160,9 @@ EXPORT_UNAVAILABLE = {
 }
 
 
-def export_availability(trimmed: bool, *, ffmpeg: bool | None = None) -> dict[str, str]:
+def export_availability(
+    trimmed: bool, *, ffmpeg: bool | None = None, webm_needs_encoding: bool | None = None
+) -> dict[str, str]:
     """Format id -> why it is unavailable. Absent means available.
 
     With a system ffmpeg every format the design offers is reachable, so
@@ -1173,6 +1175,11 @@ def export_availability(trimmed: bool, *, ffmpeg: bool | None = None) -> dict[st
     availability depends on the trim, which is exactly what the handoff's
     own note ("no re-encode when untrimmed") is describing.
 
+    `webm_needs_encoding` is that same question asked properly. A trim is
+    one reason a WebM has to be encoded; a recording that is not a WebM to
+    begin with (gpu-screen-recorder writes MP4) is another, and so is
+    dropping its sound. None keeps the old answer, "only when trimmed".
+
     `ffmpeg=None` asks the system; the tests pass it explicitly so both
     worlds are covered on any machine.
     """
@@ -1180,8 +1187,10 @@ def export_availability(trimmed: bool, *, ffmpeg: bool | None = None) -> dict[st
         ffmpeg = system_ffmpeg() is not None
     if ffmpeg:
         return {}
+    if webm_needs_encoding is None:
+        webm_needs_encoding = trimmed
     unavailable = {"gif": EXPORT_UNAVAILABLE["gif"]}
-    if trimmed:
+    if webm_needs_encoding:
         unavailable["webm"] = EXPORT_UNAVAILABLE["webm"]
     return unavailable
 
@@ -1753,6 +1762,13 @@ class PlayerWindow(WinWindow):
         self._speed = "1"
         self._format = tokens.EXPORT_DEFAULT
         self._saved = True
+        # The file the last export wrote, while it still is the clip on
+        # screen: Copy and the footer mean that file, not the recording it
+        # was cut from. Forgotten the moment the trim or sound changes.
+        self._last_export: Path | None = None
+        # Copy pressed over an unexported edit: the export runs first and
+        # its result is what gets copied.
+        self._copy_when_exported = False
         self._menu: FlowMenu | None = None
         # One guard for both menus: it blocks only the button the
         # pointer is actually over, so clicking Export while Speed is
@@ -1909,7 +1925,7 @@ class PlayerWindow(WinWindow):
         self.copy_button = SecondaryButton("Copy file")
         self.copy_button.setToolTip(
             "Copies a file reference -- pastes into a chat or folder, "
-            "not an image editor"
+            "not an image editor. An unexported edit is exported first."
         )
         self.copy_button.clicked.connect(self.copy_file)
         self.footer_right.addWidget(self.copy_button)
@@ -1919,6 +1935,7 @@ class PlayerWindow(WinWindow):
         self.footer_right.addWidget(self.folder_button)
 
         self.export_button = _SplitExportButton()
+        self.export_button.setToolTip("Write the edited clip to a new file (Ctrl+S)")
         self.export_button.triggered.connect(self.run_export)
         self.export_button.menu_requested.connect(self._open_export_menu)
         self.footer_right.addWidget(self.export_button)
@@ -1955,6 +1972,8 @@ class PlayerWindow(WinWindow):
         self.zoom_badge.set_zoom(100)
         self._source_fps = float(tokens.PLAYER_FPS)
         self._saved = True
+        self._last_export = None
+        self._copy_when_exported = False
         self._autoplay = autoplay
         self.title_label.setText(path.name)
         self._show_video_page(True)
@@ -2178,6 +2197,8 @@ class PlayerWindow(WinWindow):
 
     def _mark_dirty(self) -> None:
         self._saved = False
+        self._last_export = None
+        self._elide_path()
         self._sync_chrome()
 
     # -- keeping every readout saying the same thing ---------------------
@@ -2212,9 +2233,16 @@ class PlayerWindow(WinWindow):
         self.pending_label.setText(f"●  {pending}")
         self.pending_label.setStyleSheet(f"color: {colour};")
 
-        self._set_status(
-            "Saved" if self._saved else "Edited — not exported", ok=self._saved
-        )
+        if not self._saved:
+            status = "Edited — not exported"
+        elif self._last_export is not None:
+            # Stays up, rather than giving way to a bare "Saved" after a
+            # few seconds: the name is the only thing that says the edit
+            # went to a new file and where.
+            status = f"Saved to {self._last_export.name}"
+        else:
+            status = "Saved"
+        self._set_status(status, ok=self._saved)
 
         for fid, _glyph, label, _note, _rate in tokens.EXPORT_FORMATS:
             if fid == self._format:
@@ -2300,7 +2328,8 @@ class PlayerWindow(WinWindow):
         what identifies the recording, and a middle elision would cut the
         one part worth reading.
         """
-        full = self._display_path() if self.path is not None else ""
+        shown = self._last_export or self.path
+        full = output.display_path(shown) if shown is not None else ""
         metrics = QFontMetrics(self.path_label.font())
         available = max(80, self.path_label.width())
         self.path_label.setText(
@@ -2335,7 +2364,7 @@ class PlayerWindow(WinWindow):
             # The press that closed this menu, arriving at the button
             # underneath -- not a new click. See MenuReopenGuard.
             return
-        unavailable = export_availability(self.state.trimmed)
+        unavailable = self._export_unavailable()
         real_h264 = system_ffmpeg() is not None
         rows = []
         for fid, _glyph, label, note, _rate in tokens.EXPORT_FORMATS:
@@ -2372,6 +2401,18 @@ class PlayerWindow(WinWindow):
         if event.matches(QKeySequence.StandardKey.Open):
             self.choose_file()
             return
+        # Ctrl+S is what a hand does after an edit. It did nothing, and an
+        # edit that Ctrl+S does not save reads as an edit that cannot be.
+        if self.path is not None and (
+            event.matches(QKeySequence.StandardKey.Save)
+            or (
+                event.key() == Qt.Key.Key_E
+                and event.modifiers() == Qt.KeyboardModifier.ControlModifier
+            )
+        ):
+            self.run_export()
+            event.accept()
+            return
         key = event.key()
         if key == Qt.Key.Key_Escape and self._menu is not None:
             self._close_menu()
@@ -2396,6 +2437,11 @@ class PlayerWindow(WinWindow):
         event.accept()
 
     def closeEvent(self, event) -> None:
+        # The trim lives nowhere but this window, so closing over one that
+        # was never exported asks first -- as opening another file does.
+        if self.path is not None and not self._saved and not self._confirm_discard():
+            event.ignore()
+            return
         # Stopped explicitly: a QMediaPlayer left playing keeps its decoder
         # and its audio device alive after the window is gone.
         self.player.stop()
@@ -2479,7 +2525,9 @@ class PlayerWindow(WinWindow):
         return output.display_path(self.path)
 
     def _destination_for(self, format_id: str) -> Path:
-        suffix = {"frame": ".png", "mp4": ".mp4", "webm": ".webm"}.get(format_id, ".mp4")
+        suffix = {
+            "frame": ".png", "mp4": ".mp4", "webm": ".webm", "gif": ".gif",
+        }.get(format_id, ".mp4")
         stem = self.path.stem
         if self.state.trimmed and format_id != "frame":
             # A trimmed export is a different clip from the recording, so it
@@ -2490,20 +2538,43 @@ class PlayerWindow(WinWindow):
             stem = f"{stem} (trimmed)"
         candidate = self.path.with_name(stem + suffix)
         index = 2
-        while candidate.exists() and candidate != self.path:
+        # Never the recording itself. An untrimmed MP4 export of an MP4
+        # recording used to be handed its own path back, and ffmpeg refuses
+        # to write the file it is reading ("Error opening output files").
+        while candidate.exists() or candidate == self.path:
             candidate = self.path.with_name(f"{stem} {index}{suffix}")
             index += 1
         return candidate
 
+    def _is_the_recording_already(self, format_id: str) -> bool:
+        """Whether exporting `format_id` now would only reproduce the file
+        that is open: same container, nothing cut, sound left alone."""
+        return (
+            format_id in ("mp4", "webm")
+            and self.path.suffix.lower() == f".{format_id}"
+            and not self.state.trimmed
+            and not self._muted
+        )
+
+    def _export_unavailable(self) -> dict[str, str]:
+        """`export_availability` for the recording that is open."""
+        return export_availability(
+            self.state.trimmed,
+            webm_needs_encoding=not self._is_the_recording_already("webm"),
+        )
+
     def run_export(self) -> None:
         self._close_menu()
-        reason = export_availability(self.state.trimmed).get(self._format)
+        if self._export_busy:
+            return
+        reason = self._export_unavailable().get(self._format)
         if reason:
+            self._copy_when_exported = False
             self._report(reason, ok=False)
             return
 
-        destination = self._destination_for(self._format)
         if self._format == "frame":
+            destination = self._destination_for(self._format)
             try:
                 written = export_frame(self.canvas.current_frame(), destination)
             except (ValueError, OSError) as error:
@@ -2512,14 +2583,18 @@ class PlayerWindow(WinWindow):
             self._finish_export(written, mark_saved=False)
             return
 
-        if self._format == "webm" and not self.state.trimmed:
-            # Nothing to change: re-encoding an untrimmed recording would
-            # cost time and a generation of quality to produce the same
-            # clip. True with or without ffmpeg.
-            written = export_copy(self.path, destination)
-            self._finish_export(written)
+        if self._is_the_recording_already(self._format):
+            # Nothing to change, so nothing to write: re-encoding would
+            # cost time and a generation of quality to produce the clip
+            # that is already on disk. True with or without ffmpeg.
+            self._saved = True
+            self._sync_chrome()
+            self._report(
+                f"No edits to export — it is already {self.path.name}", ok=True
+            )
             return
 
+        destination = self._destination_for(self._format)
         self._report("Exporting… 0%", ok=True, busy=True)
         binary = system_ffmpeg()
         if binary is not None:
@@ -2549,6 +2624,7 @@ class PlayerWindow(WinWindow):
 
     def _fail_export(self, why: str) -> None:
         self._export_busy = False
+        self._copy_when_exported = False
         self._report(why, ok=False)
 
     def _finish_export(self, written: str, mark_saved: bool = True) -> None:
@@ -2558,9 +2634,15 @@ class PlayerWindow(WinWindow):
         self._export_busy = False
         if mark_saved:
             self._saved = True
+            self._last_export = Path(written)
+            self._elide_path()
         self._sync_chrome()
         self._report(f"Saved to {Path(written).name}", ok=True)
         self.exported.emit(written)
+        if mark_saved and self._copy_when_exported:
+            self._copy_when_exported = False
+            output.copy_file_to_clipboard(self._last_export)
+            self._report(f"Saved and copied {self._last_export.name}", ok=True)
 
     def _set_status(self, message: str, *, ok: bool) -> None:
         colour = _C.SAVED_FG if ok else _C.DIRTY_FG
@@ -2591,13 +2673,26 @@ class PlayerWindow(WinWindow):
         # is the only one Nautilus reads for a paste, and percent-encodes
         # the URI. Every default filename contains spaces, so a hand-built
         # copy failed to paste into a GNOME file manager every single time.
-        output.copy_file_to_clipboard(self.path)
-        self._report(f"Copied {self.path.name}", ok=True)
+        if self._export_busy:
+            self._set_status("Wait for the export to finish first", ok=False)
+            return
+        if not self._saved and self._format != "frame":
+            # An edit that has not been written anywhere. Copying the
+            # recording it was made on handed over the untrimmed original
+            # with nothing to say so; the clip on screen is what Copy
+            # means, so it is written first and that file is copied.
+            self._copy_when_exported = True
+            self.run_export()
+            return
+        target = self._last_export if self._last_export is not None else self.path
+        output.copy_file_to_clipboard(target)
+        self._report(f"Copied {target.name}", ok=True)
 
     def show_in_folder(self) -> None:
         from PyQt6.QtGui import QDesktopServices
 
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.path.parent)))
+        shown = self._last_export or self.path
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(shown.parent)))
 
 
 class _RowButton(QWidget):

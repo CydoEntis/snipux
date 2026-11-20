@@ -2276,6 +2276,7 @@ class AppController:
         if isinstance(window, PlayerWindow):
             self._players.append(window)
             window.closed.connect(lambda w=window: self._forget_player(w))
+            window.exported.connect(self._on_player_exported)
         else:
             self._reviews.append(window)
             window.closed.connect(lambda w=window: self._forget_review(w))
@@ -2506,6 +2507,15 @@ class AppController:
     def _open_player(self, path: Path) -> None:
         """Open a landed recording in the trim editor."""
         self._show_editor(PlayerWindow(path))
+
+    def _on_player_exported(self, written: str) -> None:
+        """An export is a capture like any other: it goes in Recent, where
+        the recording it was cut from already is. Without this the only
+        trace of a trimmed clip was a status line that faded in seconds.
+        """
+        setup_desktop.add_recent_capture(Path(written))
+        self._rebuild_recent_menu()
+        self._refresh_history_panel()
 
     def _forget_player(self, window) -> None:
         if window in self._players:
