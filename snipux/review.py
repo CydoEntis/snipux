@@ -1263,7 +1263,10 @@ class ReviewWindow(WinWindow):
         """
         if path is None:
             chosen, _ = QFileDialog.getSaveFileName(
-                self, "Save snip", str(self._suggested_path()), "PNG image (*.png)"
+                self,
+                "Save snip",
+                str(self._suggested_path()),
+                self._save_filters()
             )
             if not chosen:
                 return None
@@ -1273,8 +1276,17 @@ class ReviewWindow(WinWindow):
         # PNG that nothing opens by double-click.
         if path.suffix == "":
             path = path.with_suffix(".png")
+        # The format is the one the name asks for. Always writing PNG put
+        # PNG bytes in a file called .jpg, which the next Save then
+        # rewrote as a real JPEG. A suffix Qt cannot write gets .png added
+        # rather than a file that lies about what it is.
+        image_format = path.suffix.lstrip(".").lower()
+        writable = {bytes(f).decode() for f in QImageWriter.supportedImageFormats()}
+        if image_format not in writable:
+            path = path.with_name(path.name + ".png")
+            image_format = "png"
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not self._canvas.rendered_image().save(str(path), "PNG"):
+        if not self._canvas.rendered_image().save(str(path), image_format.upper()):
             self._status.setText(f"Could not write {self._display_path(path)}")
             self._status.setStyleSheet(f"color: {tokens.Win.ERR_FG};")
             return None
@@ -1285,6 +1297,17 @@ class ReviewWindow(WinWindow):
         self._refresh_status()
         self._show_toast("save", f"Saved to {self._display_path(path)}")
         return path
+
+    @staticmethod
+    def _save_filters() -> str:
+        """PNG, then whichever of JPEG and WebP this Qt build can write."""
+        writable = {bytes(f).decode() for f in QImageWriter.supportedImageFormats()}
+        filters = ["PNG image (*.png)"]
+        if "jpg" in writable:
+            filters.append("JPEG image (*.jpg *.jpeg)")
+        if "webp" in writable:
+            filters.append("WebP image (*.webp)")
+        return ";;".join(filters)
 
     def _suggested_path(self) -> Path:
         # A `.png` `_saved_path` is always a real suggestion -- Save As
