@@ -510,7 +510,16 @@ class LinuxPlatform(Platform):
         )
         if fresh:
             return True
-        code = "\n".join(self._overlay_rule_code(name) for name in outputs)
+        code = "\n".join(
+            [
+                # The trailing underscore spares `skip_map_animation`'s own
+                # rule, which has no output in its name.
+                self._retire_rules_code(
+                    "snipux_capture_overlay_rule_", self._OVERLAY_RULE_VARIABLE
+                ),
+                *(self._overlay_rule_code(name) for name in outputs),
+            ]
+        )
         try:
             result = subprocess.run(
                 ["hyprctl", "eval", code],
@@ -557,21 +566,58 @@ class LinuxPlatform(Platform):
     def _overlay_title(output: str) -> str:
         return "snipux-capture-overlay-" + re.sub(r"[^A-Za-z0-9_]", "_", output)
 
+    # Bumped whenever the rule's effects change. The rule lives in the
+    # compositor's Lua state under a name carrying this, and is only built
+    # when absent, so a snipux updated while Hyprland stays up would
+    # otherwise go on using the rule an older build left there.
+    _OVERLAY_RULE_VARIABLE = "snipux_capture_overlay_rule_v3_"
+
+    @classmethod
+    def _retire_rules_code(cls, family: str, keep: str | None = None) -> str:
+        """Lua that switches off every rule this or an older snipux left in
+        Hyprland's Lua state under a name starting with `family`, except
+        those starting with `keep`.
+
+        Hyprland has no "remove rule": a rule object is disabled, then let
+        go so the compositor can collect it. Without this each release that
+        changed a rule left its predecessor matching the same windows, and
+        the recorder left one rule behind for every region ever recorded.
+        """
+        kept = f" and not k:find('^{keep}')" if keep else ""
+        return (
+            "for k, v in pairs(_G) do "
+            f"if type(k) == 'string' and k:find('^{family}'){kept} then "
+            "pcall(function() v:set_enabled(false) end) _G[k] = nil "
+            "end end"
+        )
+
     @classmethod
     def _overlay_rule_code(cls, output: str) -> str:
         suffix = re.sub(r"[^A-Za-z0-9_]", "_", output)
-        # `_v2`: the rule is kept in the compositor's Lua state under this
-        # name and only built when absent, so a snipux updated while
-        # Hyprland stays up would otherwise go on using the rule an older
-        # build left there, without `decorate`.
-        variable = f"snipux_capture_overlay_rule_v2_{suffix}"
-        rule_name = f"snipux-capture-overlay-{output}"
+        variable = f"{cls._OVERLAY_RULE_VARIABLE}{suffix}"
+        # Hyprland keys a rule by its name, so the name carries the version
+        # too: reusing an older build's would hand back the rule that was
+        # just retired.
+        rule_name = f"snipux-capture-overlay-v3-{output}"
         title_pattern = f"^{re.escape(cls._overlay_title(output))}$"
         return (
             f"_G.{variable} = _G.{variable} or hl.window_rule({{ "
-            f"name = {json.dumps(rule_name)}, "
+            f"name = {json.dumps(rule_name)}, enabled = true, "
             f"match = {{ title = {json.dumps(title_pattern)} }}, "
             "no_anim = true, animation = 'none', float = true, "
+            # Pinned, so nothing un-floats it. Hyprland first matches a new
+            # window against the *focused* workspace and only then carries
+            # it to the output this rule names. Omarchy's floating
+            # workspaces (workspace-modes.lua) tag every window that opens
+            # on one as "floated by the mode", and tile any such window
+            # that turns up on a tiling workspace. So with the pointer on a
+            # floating workspace, the overlays for the other monitors were
+            # tiled the instant they mapped: each took half of its monitor
+            # and squeezed every window there into the other half until the
+            # snip ended. That script leaves a pinned window alone, as
+            # anything arranging windows must: tiling one would unpin it.
+            # It also keeps the frozen frame up across a workspace switch.
+            "pin = true, "
             f"monitor = {json.dumps(output + ' silent')}, "
             "move = { 0, 0 }, size = { 'monitor_w', 'monitor_h' }, "
             # No decorations: on a workspace in Omarchy's floating mode
@@ -745,13 +791,21 @@ class LinuxPlatform(Platform):
             f"{role}-{screen.name()}-{top_left.x()}-{top_left.y()}-"
             f"{size.width()}-{size.height()}"
         )
-        suffix = re.sub(r"[^A-Za-z0-9_]", "_", identity)
         title = f"snipux-recording-{identity}"
         title_pattern = f"^{re.escape(title)}$"
-        variable = f"snipux_recording_rule_{suffix}"
+        # One rule per role, replaced each time, not one per geometry: the
+        # geometry is a region somebody dragged, so no two recordings share
+        # one, and Hyprland kept every rule ever made until it restarted.
+        variable = "snipux_recording_v2_" + re.sub(r"[^A-Za-z0-9_]", "_", role)
         code = (
-            f"_G.{variable} = _G.{variable} or hl.window_rule({{ "
-            f"name = {json.dumps(title)}, "
+            self._retire_rules_code("snipux_recording_rule_") + "\n"
+            f"if _G.{variable} then "
+            f"pcall(function() _G.{variable}:set_enabled(false) end) end\n"
+            f"_G.{variable} = hl.window_rule({{ "
+            # Named for the role alone, so Hyprland -- which keys a rule
+            # by name -- updates the last one; `enabled` because that one
+            # was just switched off.
+            f"name = {json.dumps('snipux-recording-' + role)}, enabled = true, "
             f"match = {{ title = {json.dumps(title_pattern)} }}, "
             "no_anim = true, animation = 'none', float = true, pin = true, "
             "no_initial_focus = true, no_blur = true, no_shadow = true, "

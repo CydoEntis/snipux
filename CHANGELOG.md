@@ -5,6 +5,14 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.3.1 — 2026-11-20
+
+### Fixed
+
+- **A snip no longer squeezes the windows on your other monitors.** On
+  Omarchy, with the pointer on a workspace in the floating layout, starting
+  a snip halved every window on the other monitors until the snip ended.
+
 ## 1.3.0 — 2026-11-20
 
 ### Fixed
