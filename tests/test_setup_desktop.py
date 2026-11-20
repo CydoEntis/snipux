@@ -1049,6 +1049,46 @@ class TestShortcutConfig:
 
         assert setup_desktop.load_shortcut(tmp_path) == "Super+Shift+X"
 
+    def test_a_config_that_cannot_be_read_is_kept_not_written_over(self, tmp_path):
+        # One stray comma, and the next write of any key -- the last
+        # region, on every snip -- replaced the whole file with that key.
+        path = setup_desktop.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        broken = '{"shortcut": "Super+Shift+X", "save_folder": "/pics",}'
+        path.write_text(broken)
+
+        assert setup_desktop.save_last_region((1, 2, 3, 4), tmp_path)
+
+        kept = path.with_name("config.json.unreadable")
+        assert kept.read_text() == broken
+        assert json.loads(path.read_text()) == {"last_region": [1, 2, 3, 4]}
+
+    def test_a_readable_config_is_never_set_aside(self, tmp_path):
+        setup_desktop.save_shortcut("Super+Shift+X", tmp_path)
+
+        setup_desktop.save_last_region((1, 2, 3, 4), tmp_path)
+
+        path = setup_desktop.config_path(tmp_path)
+        assert not path.with_name("config.json.unreadable").exists()
+        assert setup_desktop.load_shortcut(tmp_path) == "Super+Shift+X"
+
+    def test_a_write_that_fails_leaves_the_old_file_whole(self, tmp_path, monkeypatch):
+        # Written beside and moved over: a write cut short used to leave
+        # half a file, which then read as empty.
+        setup_desktop.save_shortcut("Super+Shift+X", tmp_path)
+        path = setup_desktop.config_path(tmp_path)
+        before = path.read_text()
+
+        def refuse(source, destination):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(setup_desktop.os, "replace", refuse)
+
+        assert setup_desktop.save_last_region((1, 2, 3, 4), tmp_path) is False
+
+        assert path.read_text() == before
+        assert [entry.name for entry in path.parent.iterdir()] == ["config.json"]
+
     def test_a_corrupt_config_falls_back_to_the_default(self, tmp_path):
         # A broken config must never be able to fail --setup, which
         # install.sh runs on every install.
