@@ -5198,6 +5198,34 @@ class TestAppControllerDiscardRecording:
 
         assert controller._active_recording is None
 
+    def test_a_discard_that_cannot_delete_the_file_says_so(
+        self, make_controller, monkeypatch
+    ):
+        # Windows refuses to delete a file its recorder still holds open.
+        # That used to escape the tray's slot as a PermissionError, after
+        # which the user had been told nothing at all.
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
+        _rect, temp_path = backend.start_calls[0]
+        real_unlink = Path.unlink
+
+        def unlink(path, missing_ok=False):
+            if path == Path(temp_path):
+                raise PermissionError("in use by another process")
+            real_unlink(path, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", unlink)
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller._discard_recording()  # must not raise
+
+        assert len(calls) == 1
+        assert "could not be removed" in calls[0][1]
+        assert controller._active_recording is None
+        assert controller._stopping_recording is False
+
 
 class TestAppControllerRecordingTempFileCleanup:
     """SNX-124 (recording.md ticket 9): a temp file left by a previous

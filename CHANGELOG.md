@@ -65,6 +65,9 @@ use it; the commit history has the detail.
 - **The recording bar says "Saving…" while a recording is finished off.**
   After Stop it went on showing the clock and the Stop button until the
   file was ready, which can take seconds for a recording that was paused.
+- **Discarding a recording on Windows no longer finishes the file first.**
+  It waited for a complete video and then deleted it. If the file cannot
+  be deleted straight away, Snipux now says so instead of saying nothing.
 
 ## 1.3.1 — 2026-11-20
 

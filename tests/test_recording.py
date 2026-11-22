@@ -2417,6 +2417,59 @@ class TestWindowsRecorderBackendStop:
         assert asked == []
 
 
+class TestWindowsRecorderBackendDiscard:
+    """A discarded recording is deleted the moment it stops, so the only
+    thing worth waiting for is the recorder letting go of the file."""
+
+    def test_discard_stops_everything_without_checking_the_file(self, qapp):
+        asked = []
+        backend = _windows_backend(
+            finalised_check=lambda path: asked.append(path) or False,
+            finalise_timeout_seconds=5,
+        )
+        backend.start(QRectF(0, 0, 100, 100), "C:/tmp/out-region.mp4")
+        recorder = backend._recorder
+        screen_capture = backend._screen_capture
+        thread = backend._worker_thread
+
+        backend.discard()
+
+        assert asked == []
+        assert recorder.stop_calls == 1
+        assert screen_capture.active_calls[-1] is False
+        assert thread.quit_calls == 1
+        assert backend._recorder is None
+        assert backend._worker_thread is None
+
+    def test_discard_does_not_report_what_the_encoder_said(self, qapp):
+        # stop() raises for an encoder failure because a broken file must
+        # not be saved. A discard is not saving anything.
+        backend = _windows_backend()
+        backend.start(None, "C:/tmp/out.mp4")
+        recorder = backend._recorder
+        recorder._error = QMediaRecorder.Error.ResourceError
+        recorder._error_string = "Could not initialize encoder"
+        recorder.errorChanged.emit()
+
+        backend.discard()  # must not raise
+
+        backend.start(None, "C:/tmp/out-2.mp4")
+        backend.stop()  # nor leave the failure for the next recording
+
+    def test_discard_raises_when_the_recorder_never_lets_go_of_the_file(self, qapp):
+        # Windows will not delete a file something still has open, so the
+        # caller has to hear that its delete is about to fail.
+        backend = _windows_backend(
+            recorder_factory=_NeverStoppingRecorder, stop_timeout_seconds=0.05
+        )
+        backend.start(None, "C:/tmp/out.mp4")
+
+        with pytest.raises(RuntimeError, match="still has the file open"):
+            backend.discard()
+
+        assert backend._recorder is None
+
+
 def _mp4_box(kind: bytes, payload: bytes = b"", *, wide: bool = False) -> bytes:
     """One MP4 box; `wide` writes the 64-bit size a box over 4GB uses."""
     if wide:

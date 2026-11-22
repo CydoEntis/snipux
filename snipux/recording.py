@@ -2034,29 +2034,57 @@ class WindowsRecorderBackend(RecordingBackend):
         written. Whatever else is wrong, a recording that failed must not
         end quietly.
         """
-        if self._worker_thread is not None:
-            self._stop_region()
-        else:
-            self._stop_full_screen()
-        self._path = None
+        self._tear_down(keep_file=True)
 
         if self._errors:
             failure = self._errors[0]
             self._errors = []
             raise RuntimeError(f"qt-native: {failure}")
 
-    def _stop_full_screen(self) -> None:
+    def discard(self) -> None:
+        """End the recording to throw it away.
+
+        The same teardown as `stop()` without either thing `stop()` does
+        for the file's sake: no wait for it to be whole, and no report of
+        what the encoder said about it -- the caller deletes it next.
+
+        The wait for `StoppedState` stays. Until then the recorder has the
+        file open, and Windows refuses to delete an open file; a recorder
+        that never gets there is the one failure a discard still raises,
+        because the caller's delete is about to fail.
+        """
+        stopped = self._tear_down(keep_file=False)
+        self._errors = []
+        if not stopped:
+            raise RuntimeError(
+                "qt-native: the recorder still has the file open, so it "
+                "cannot be removed yet"
+            )
+
+    def _tear_down(self, *, keep_file: bool) -> bool:
+        """Stop whichever path is live and let go of everything it built.
+        Returns whether the recorder actually stopped."""
+        if self._worker_thread is not None:
+            stopped = self._stop_region(keep_file)
+        else:
+            stopped = self._stop_full_screen(keep_file)
+        self._path = None
+        return stopped
+
+    def _stop_full_screen(self, keep_file: bool) -> bool:
+        stopped = True
         if self._screen_capture is not None:
             self._screen_capture.setActive(False)
         if self._recorder is not None:
             self._recorder.stop()
-            self._wait_for_stopped(self._recorder)
+            stopped = self._wait_for_stopped(self._recorder, keep_file=keep_file)
         self._session = None
         self._screen_capture = None
         self._recorder = None
         self._audio_input = None
+        return stopped
 
-    def _stop_region(self) -> None:
+    def _stop_region(self, keep_file: bool) -> bool:
         # Opposite order from _start_region's wiring: stop new frames from
         # arriving first, then unwind the worker thread (so no crop is
         # left mid-flight when the recorder goes away), then stop the
@@ -2072,9 +2100,10 @@ class WindowsRecorderBackend(RecordingBackend):
         if self._worker_thread is not None:
             self._worker_thread.quit()
             self._worker_thread.wait()
+        stopped = True
         if self._recorder is not None:
             self._recorder.stop()
-            self._wait_for_stopped(self._recorder)
+            stopped = self._wait_for_stopped(self._recorder, keep_file=keep_file)
 
         self._capture_session = None
         self._screen_capture = None
@@ -2085,14 +2114,18 @@ class WindowsRecorderBackend(RecordingBackend):
         self._worker = None
         self._worker_thread = None
         self._audio_input = None
+        return stopped
 
     def _wait_for_stopped(
         self,
         recorder: QMediaRecorder,
+        *,
+        keep_file: bool,
         poll_interval: float = 0.005,
-    ) -> None:
+    ) -> bool:
         """Block until `recorder.recorderState()` reaches `StoppedState`
-        and the file it wrote is whole.
+        and, when `keep_file`, the file it wrote is whole. Returns whether
+        the recorder stopped.
 
         `QMediaRecorder.stop()` is not documented as synchronous, and a
         playable file needs the container's moov atom written before
@@ -2129,7 +2162,7 @@ class WindowsRecorderBackend(RecordingBackend):
         """
         app = QCoreApplication.instance()
         if app is None:
-            return
+            return True
 
         deadline = time.monotonic() + self._stop_timeout_seconds
         reached_stopped = False
@@ -2145,11 +2178,12 @@ class WindowsRecorderBackend(RecordingBackend):
                 "the recorder had not finished writing the file after "
                 f"{self._stop_timeout_seconds:g}s, so the recording may be incomplete"
             )
-            return
-        if self._errors:
-            # The recorder already said what went wrong, and a file it
-            # failed to write is not going to become whole by waiting.
-            return
+            return False
+        if not keep_file or self._errors:
+            # A file about to be deleted need not be whole. And where the
+            # recorder already said what went wrong, a file it failed to
+            # write is not going to become whole by waiting.
+            return True
 
         finalise_deadline = time.monotonic() + self._finalise_timeout_seconds
         while not self._finalised_check(self._path):
@@ -2158,9 +2192,10 @@ class WindowsRecorderBackend(RecordingBackend):
                     "the recorder stopped without finishing the file, so the "
                     "recording will not play"
                 )
-                return
+                return True
             app.processEvents()
             time.sleep(poll_interval)
+        return True
 
 
 def _mp4_is_finalised(path: str) -> bool:

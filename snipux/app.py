@@ -4145,9 +4145,18 @@ class AppController:
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             self._report_shortcut(f"Stopping the recording failed: {exc}")
         finally:
-            Path(path).unlink(missing_ok=True)
             self._active_recording = None
             self._stopping_recording = False
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError as exc:
+            # Windows will not delete a file its recorder still has open.
+            # The startup sweep of the recording temp folder takes it.
+            self._report_shortcut(
+                f"The discarded recording could not be removed yet ({exc}). "
+                "Snipux removes it the next time it starts."
+            )
+            return
         self._report_shortcut("Recording discarded.")
 
     def _on_overlay_dismissed(self) -> None:
