@@ -1909,6 +1909,13 @@ class TestPartialRepaint:
         monkeypatch.setattr(Line, "draw", counting_draw)
         return drawn
 
+    @staticmethod
+    def _ink_at(image, x, y):
+        """The colour at a window-local point of a grabbed overlay, whose
+        image has more pixels than that on a scaled display."""
+        ratio = image.devicePixelRatio()
+        return image.pixelColor(round(x * ratio), round(y * ratio))
+
     def test_ink_is_drawn_once_however_often_the_overlay_repaints(self, monkeypatch):
         overlay = OverlayWindow(make_frame())
         overlay.set_selection(QRect(0, 0, 200, 200))
@@ -1921,7 +1928,7 @@ class TestPartialRepaint:
 
         assert len(drawn) == 2
         assert first == second
-        assert first.pixelColor(100, 100) == QColor(255, 0, 0)
+        assert self._ink_at(first, 100, 100) == QColor(255, 0, 0)
 
     def test_a_new_mark_is_the_only_one_drawn_again(self, monkeypatch):
         overlay = OverlayWindow(make_frame())
@@ -1935,21 +1942,21 @@ class TestPartialRepaint:
         image = overlay.grab().toImage()
 
         assert drawn == [added]
-        assert image.pixelColor(100, 50) == QColor(255, 0, 0)
-        assert image.pixelColor(100, 100) == QColor(255, 0, 0)
+        assert self._ink_at(image, 100, 50) == QColor(255, 0, 0)
+        assert self._ink_at(image, 100, 100) == QColor(255, 0, 0)
 
     def test_an_undone_mark_leaves_the_screen(self):
         overlay = OverlayWindow(make_frame())
         overlay.set_selection(QRect(0, 0, 200, 200))
         overlay.add_mark(self._line(50))
         overlay.add_mark(self._line(100))
-        assert overlay.grab().toImage().pixelColor(100, 100) == QColor(255, 0, 0)
+        assert self._ink_at(overlay.grab().toImage(), 100, 100) == QColor(255, 0, 0)
 
         overlay.undo()
         image = overlay.grab().toImage()
 
-        assert image.pixelColor(100, 100) != QColor(255, 0, 0)
-        assert image.pixelColor(100, 50) == QColor(255, 0, 0)
+        assert self._ink_at(image, 100, 100) != QColor(255, 0, 0)
+        assert self._ink_at(image, 100, 50) == QColor(255, 0, 0)
 
     def test_the_first_selection_repaints_the_whole_window(self, monkeypatch):
         overlay, painted = self._shown_overlay(monkeypatch)
