@@ -134,7 +134,7 @@ class TestStatusAndPath:
 class TestZoomCluster:
     """The canvas's top-right zoom control.
 
-    It shipped as a plain `_Badge`: the "−" and "+" were characters inside
+    It shipped as a plain `Badge`: the "−" and "+" were characters inside
     one QLabel's text with nothing behind them. `ImageCanvas.set_zoom()`
     was fully implemented and *nothing in the app ever called it*, so the
     control the handoff specifies as interactive (minus / percentage /

@@ -80,7 +80,15 @@ from PyQt6.QtWidgets import (
 from . import design, hostenv, output, setup_desktop
 from .design import tokens
 from .flowbars import FlowMenu, MenuReopenGuard
-from .winchrome import EmptyState, WinWindow, _mono_font, _ui_font, open_filter
+from .winchrome import (
+    Badge,
+    EmptyState,
+    WinWindow,
+    ZoomBadge,
+    _mono_font,
+    _ui_font,
+    open_filter,
+)
 
 RECORDING_FILTER = open_filter("Recordings", tokens.EDITOR_RECORDING_SUFFIXES)
 
@@ -1903,10 +1911,8 @@ class PlayerWindow(WinWindow):
         # Floating children of the canvas rather than rows in the column:
         # the design has all three *over* the picture, and a layout row
         # would push the picture up instead.
-        from .review import _Badge, _ZoomBadge
-
-        self.size_badge = _Badge(self.canvas)
-        self.zoom_badge = _ZoomBadge(self.canvas)
+        self.size_badge = Badge(self.canvas)
+        self.zoom_badge = ZoomBadge(self.canvas)
         self.zoom_badge.zoomChanged.connect(self._on_zoom)
 
         self.transport = TransportBar(self.canvas)
