@@ -78,6 +78,8 @@ snipux/
                 it, and `_Chrome`, the press-swallowing base the rest of
                 the overlay's chrome is built on. Views only; never
                 imports overlay.py
+  popovers.py   what opens off that bar: the style popover, the
+                capture-mode popover and the family menus. Views only
   chooser.py    the docked pre-snip chooser row: what to capture, and what
                 happens to it afterwards
   flowbars.py   the post-selection bars from the locked capture-flow handoff

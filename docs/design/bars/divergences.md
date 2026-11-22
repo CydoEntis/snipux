@@ -335,7 +335,7 @@ an open menu paints above the hint pill beneath it and no effect-bearing
 parent can trap it.
 
 **We make them children of the overlay, or of the review window** -- not of
-the bar, and not top-level popups (`FamilyMenu` in `snipux/overlay.py`). As
+the bar, and not top-level popups (`FamilyMenu` in `snipux/popovers.py`). As
 children of the window they still paint above the bar and the strip under
 it, which is what the handoff was guarding against.
 

@@ -64,11 +64,8 @@ from .marks import (
     session_styles,
     snap_to_text,
 )
-from .overlay import (
-    FamilyMenu,
-    StylePopover,
-    Toast,
-)
+from .overlay import Toast
+from .popovers import FamilyMenu, StylePopover
 from .toolbar import FloatingBar, ToolHintStrip
 from .winchrome import (
     AccentButton,
