@@ -14562,3 +14562,48 @@ class TestASelectionStaysOnThePicture:
         overlay.set_selection(QRect(20, 30, 100, 90))
 
         assert overlay._selection == QRect(20, 30, 100, 90)
+
+
+class TestWindowModeShowsNoToolbarWhilePicking:
+    """A hovered window is a preview, not a selection: nothing is chosen
+    until the click. The whole annotation toolbar used to come up under
+    every window the pointer crossed, jump to the next one, and arm the pen
+    while the mode was still asking which window."""
+
+    WINDOW_RECT = QRectF(30, 200, 200, 150)
+    HIT_POINT = QPoint(100, 260)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _picking_overlay(self):
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(
+            frame, geometry_provider=_FakeWindowProvider(self.WINDOW_RECT)
+        )
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._on_chooser_mode("Window")
+        assert overlay._picking_window
+        return overlay
+
+    def test_hovering_a_window_shows_no_toolbar_and_arms_no_tool(self):
+        overlay = self._picking_overlay()
+
+        _send_move(overlay, self.HIT_POINT)
+
+        assert overlay._selection == self.WINDOW_RECT.toRect()
+        assert not overlay._bar.isVisible()
+        assert not overlay._tool_hint.isVisible()
+        assert overlay._bar.active_tool is None
+
+    def test_clicking_the_window_brings_the_toolbar_up(self):
+        overlay = self._picking_overlay()
+        _send_move(overlay, self.HIT_POINT)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        assert not overlay._picking_window
+        assert overlay._bar.isVisible()
+        assert overlay._bar.active_tool is not None

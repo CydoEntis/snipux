@@ -15,6 +15,11 @@ use it; the commit history has the detail.
   changed is redrawn while you drag, resize or nudge a selection, and the
   moving dashes no longer redraw every monitor 30 times a second. With
   nothing selected the overlay now sits completely still.
+### Fixed
+
+- **Window mode no longer shows the toolbar until you click a window.**
+  The whole annotation toolbar came up under every window the pointer
+  passed over, and the pen was armed before anything had been picked.
 
 ## 1.3.1 — 2026-11-20
 

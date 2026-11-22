@@ -6564,9 +6564,13 @@ class OverlayWindow(QWidget):
         # a pen for a snip that is already on its way to the clipboard. What
         # the user asked to see is the region they are cutting, which is
         # what is left once the bar goes.
+        # A hovered window in Window mode is a preview, not a selection:
+        # the bar came up under each one, jumped to the next, and armed the
+        # pen while the mode was still asking which window.
         if (
             not self._session_active
             or self._armed_for_recording
+            or self._picking_window
             or self._chooser.kind == "record"
             or self.outcome == "instant"
         ):
