@@ -6,6 +6,7 @@ answering a different question on every run, would fail on a machine with
 no connection, and would fail again the day a release is cut.
 """
 
+import hashlib
 import json
 
 import pytest
@@ -218,20 +219,28 @@ class TestDownloading:
     def test_it_writes_the_file_and_says_so(self, tmp_path):
         target = tmp_path / "setup.exe"
 
-        assert updates.download("https://example/x", target, lambda _url: b"payload") is True
+        result = updates.download("https://example/x", target, lambda _url: b"payload")
+
+        assert result is updates.DownloadResult.WRITTEN
         assert target.read_bytes() == b"payload"
 
     def test_a_cut_download_leaves_nothing_that_looks_finished(self, tmp_path):
         # Written to a .part and renamed only once it is all there: half an
         # installer that looks like an installer is worse than none.
-        target = tmp_path / "setup.exe"
+        # A folder of its own: the failure is also noted in snipux.log,
+        # which the suite keeps under tmp_path.
+        folder = tmp_path / "download"
+        folder.mkdir()
+        target = folder / "setup.exe"
 
         def die_midway(_url):
             raise OSError("connection reset")
 
-        assert updates.download("https://example/x", target, die_midway) is False
+        result = updates.download("https://example/x", target, die_midway)
+
+        assert result is updates.DownloadResult.FAILED
         assert not target.exists()
-        assert list(tmp_path.iterdir()) == []
+        assert list(folder.iterdir()) == []
 
     def test_it_reports_rather_than_raises(self, tmp_path, capsys):
         def refuse(_url):
@@ -242,6 +251,103 @@ class TestDownloading:
         assert "could not download the update" in capsys.readouterr().out.lower()
 
 
+class TestTheDownloadIsTheFileThatWasPublished:
+    """The installer is run silently with the user's rights, so it is only
+    run if it hashes to what the release says it should."""
+
+    PAYLOAD = b"the real installer"
+    SHA256 = hashlib.sha256(PAYLOAD).hexdigest()
+
+    def _release(self, digest):
+        asset = {"name": "snipux-setup-1.2.0.exe",
+                 "browser_download_url": "https://example/setup.exe"}
+        if digest is not None:
+            asset["digest"] = digest
+        payload = json.dumps({"tag_name": "v1.2.0", "assets": [asset]}).encode()
+        return updates.fetch_latest_release(lambda _url: payload)
+
+    def test_the_release_carries_the_published_sha256(self):
+        release = self._release(f"sha256:{self.SHA256}")
+
+        assert release.sha256("snipux-setup-1.2.0.exe") == self.SHA256
+
+    @pytest.mark.parametrize("digest", [None, "", "md5:abc", "sha256:not-hex", 12345])
+    def test_a_missing_or_unreadable_digest_is_no_digest(self, digest):
+        assert self._release(digest).sha256("snipux-setup-1.2.0.exe") is None
+
+    def test_a_download_that_matches_is_written(self, tmp_path):
+        target = tmp_path / "setup.exe"
+
+        result = updates.download(
+            "https://example/x", target, lambda _url: self.PAYLOAD, sha256=self.SHA256
+        )
+
+        assert result is updates.DownloadResult.WRITTEN
+        assert target.read_bytes() == self.PAYLOAD
+
+    def test_a_download_that_does_not_match_is_never_written(self, tmp_path, capsys):
+        folder = tmp_path / "download"
+        folder.mkdir()
+
+        result = updates.download(
+            "https://example/x", folder / "setup.exe",
+            lambda _url: b"something else", sha256=self.SHA256,
+        )
+
+        assert result is updates.DownloadResult.MISMATCHED
+        assert list(folder.iterdir()) == []
+        assert "not the file the release published" in capsys.readouterr().out
+
+    def test_the_thread_reports_a_mismatch_as_no_file(self, tmp_path):
+        download = updates.Download(
+            "https://example/x", tmp_path / "setup.exe",
+            lambda _url: b"something else", sha256=self.SHA256,
+        )
+        seen = []
+        download.finished.connect(seen.append)
+
+        download._run()
+
+        assert seen == [None]
+        assert download.result is updates.DownloadResult.MISMATCHED
+
+
+class TestWhereDownloadsGo:
+    def test_each_download_gets_a_folder_of_its_own(self, tmp_path):
+        # A fixed name in the shared temp directory is one anybody can
+        # guess, and put a file at first.
+        first = updates.new_download_dir(tmp_path)
+        second = updates.new_download_dir(tmp_path)
+
+        assert first != second
+        assert first.is_dir() and first.parent == tmp_path
+        assert list(first.iterdir()) == []
+
+    def test_old_downloads_are_removed(self, tmp_path):
+        old = updates.new_download_dir(tmp_path)
+        (old / "snipux-setup-1.0.0.exe").write_bytes(b"old")
+        legacy = tmp_path / "snipux-setup-0.9.0.exe"
+        legacy.write_bytes(b"older")
+        cut_short = tmp_path / "snipux-setup-0.9.1.exe.part"
+        cut_short.write_bytes(b"half")
+
+        updates.remove_old_downloads(tmp_path)
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_nothing_else_in_the_temp_directory_is_touched(self, tmp_path):
+        other = tmp_path / "someone-elses.exe"
+        other.write_bytes(b"not ours")
+        folder = tmp_path / "another-app"
+        folder.mkdir()
+
+        updates.remove_old_downloads(tmp_path)
+
+        assert sorted(path.name for path in tmp_path.iterdir()) == [
+            "another-app", "someone-elses.exe"
+        ]
+
+
 class TestDownloadingOverABrokenConnection:
     def test_a_garbled_reply_fails_the_download_instead_of_raising(self, tmp_path):
         import http.client
@@ -249,5 +355,10 @@ class TestDownloadingOverABrokenConnection:
         def garbled(_url):
             raise http.client.BadStatusLine("HTTP/1.1 ???")
 
-        assert updates.download("https://example/x", tmp_path / "setup.exe", garbled) is False
-        assert list(tmp_path.iterdir()) == []
+        folder = tmp_path / "download"
+        folder.mkdir()
+
+        result = updates.download("https://example/x", folder / "setup.exe", garbled)
+
+        assert result is updates.DownloadResult.FAILED
+        assert list(folder.iterdir()) == []

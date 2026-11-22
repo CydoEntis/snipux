@@ -79,6 +79,12 @@ use it; the commit history has the detail.
   on the frame you chose.
 ### Fixed
 
+- **An update is checked before it is run.** The installer Snipux downloads
+  must match the checksum published with the release, or it is discarded
+  and you are told. It is saved to a private folder, and old installers
+  are no longer left behind in your temp folder.
+- **Starting Snipux offline no longer skips that day's update check.** The
+  check is tried again on the next launch until it gets an answer.
 - **Closing a pin, the review window or the player gives its memory back
   straight away.** Left running for days, Snipux could keep every closed
   window's full-size picture.

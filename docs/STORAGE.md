@@ -105,6 +105,12 @@ last_region                 recording_audio             watermark_kind
   longer exists is dropped when the tray menu is rebuilt.
 - Temporary files (OCR input, export intermediates) go in the system temp
   directory and are removed in a `finally`.
+- A downloaded update goes in a folder of its own there, `snipux-update-*`
+  (`updates.new_download_dir`), and only after it has matched the SHA-256
+  the release published. The installer is running from that folder when
+  snipux quits, so it cannot be removed then: the next daily check and the
+  next download remove whatever earlier updates left
+  (`updates.remove_old_downloads`).
 
 ## Tests
 

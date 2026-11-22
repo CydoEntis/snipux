@@ -2460,8 +2460,13 @@ class AppController:
         today = datetime.date.today().isoformat()
         if setup_desktop.load_update_checked_on() == today:
             return False
-        setup_desktop.save_update_checked_on(today)
+        # The date is written when an answer comes back
+        # (`_on_update_checked`), not here: stamped before asking, a launch
+        # with no network used up the day's check without making it.
         self.check_for_updates(opener, quiet=True)
+        # Here because it is once a day at most, and by the launch after an
+        # update the installer is done with the file it was run from.
+        updates.remove_old_downloads()
         return True
 
     def _on_update_checked(self, release, *, quiet: bool = False) -> None:
@@ -2477,6 +2482,7 @@ class AppController:
                     "Could not check for updates. Try again when you are online."
                 )
             return
+        setup_desktop.save_update_checked_on(datetime.date.today().isoformat())
         if not updates.is_newer(release.version, __version__):
             if not quiet:
                 self._report_shortcut(f"Snipux {__version__} is the newest version.")
@@ -2500,13 +2506,20 @@ class AppController:
             how = "Run `snipux --update` to install it."
         self._report_shortcut(f"Snipux {release.version} is available. {how}")
 
-    def install_available_update(self, opener=None) -> None:
+    def install_available_update(self, opener=None, *, temp_dir: Path | None = None) -> None:
         """Download the release the check found, and hand it to the
         platform to apply.
 
         Off the UI thread, for the same reason the check is: this is tens of
         megabytes, and a tray menu frozen for the length of a download looks
         like a crash.
+
+        Only a file the release published a SHA-256 for: what is downloaded
+        is run silently, so one that cannot be checked is not fetched at
+        all and the user is sent to the Releases page instead.
+
+        `opener` and `temp_dir` are passed only by tests, which must reach
+        neither the network nor the real temp directory.
         """
         release = self._available_update
         asset = (
@@ -2518,9 +2531,18 @@ class AppController:
             self.check_for_updates(opener)
             return
 
+        sha256 = release.sha256(asset)
+        if sha256 is None:
+            self._report_shortcut(
+                f"Snipux {release.version} cannot be verified from here, so it "
+                "was not downloaded. Install it from the Releases page."
+            )
+            return
+
         self._report_shortcut(f"Downloading Snipux {release.version}…")
-        destination = Path(tempfile.gettempdir()) / asset
-        download = updates.Download(url, destination, opener)
+        updates.remove_old_downloads(temp_dir)
+        destination = updates.new_download_dir(temp_dir) / asset
+        download = updates.Download(url, destination, opener, sha256=sha256)
         download.finished.connect(self._on_update_downloaded)
         self._update_download = download
         download.start()
@@ -2533,8 +2555,15 @@ class AppController:
         running -- so quitting is the last step of the update rather than
         something left for the user to work out.
         """
-        self._update_download = None
+        download, self._update_download = self._update_download, None
         if path is None:
+            if download is not None and download.result is updates.DownloadResult.MISMATCHED:
+                self._report_shortcut(
+                    "The update that was downloaded is not the file Snipux "
+                    "published, so it was not installed. Try again, or install "
+                    "it from the Releases page."
+                )
+                return
             self._report_shortcut(
                 "Could not download the update. Try again when you are online."
             )

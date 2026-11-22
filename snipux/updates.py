@@ -4,6 +4,12 @@ Two requests at most, both to GitHub and both public: one asking what the
 newest release is, and -- only if the user then clicks Update -- one
 downloading the file for this kind of build.
 
+What is downloaded gets run, silently, so it is checked first: the Releases
+API publishes a SHA-256 for every file (`digest`), the check already has
+it, and a download that does not hash to it is thrown away unwritten. A
+release that publishes no digest for the file is not installed from here at
+all -- see `Release.sha256`.
+
 The check happens at most once a day, on the first launch after that day
 turns over, and otherwise when someone picks it from the tray. It used to
 happen only when asked, on the reasoning that a screenshot tool phoning
@@ -27,16 +33,23 @@ user did anything to cause.
 from __future__ import annotations
 
 import dataclasses
+import enum
+import hashlib
+import hmac
 import http.client
 import json
 import pathlib
 import re
+import shutil
+import tempfile
 import threading
 import urllib.error
 import urllib.request
 from typing import Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
+
+from . import log
 
 LATEST_RELEASE_URL = "https://api.github.com/repos/CydoEntis/snipux/releases/latest"
 
@@ -50,6 +63,15 @@ _TIMEOUT_SECONDS = 6.0
 # The download is an installer, tens of megabytes of it, over whatever
 # connection the user has.
 _DOWNLOAD_TIMEOUT_SECONDS = 300.0
+
+# Each download gets a folder of its own under the temp directory, named
+# with this and a random suffix (`tempfile.mkdtemp`, readable by this user
+# only). It used to be `%TEMP%\snipux-setup-X.exe`: a name anyone could
+# predict and put a file at first.
+_DOWNLOAD_DIR_PREFIX = "snipux-update-"
+_LEGACY_DOWNLOAD_GLOBS = ("snipux-setup-*.exe", "snipux-setup-*.exe.part")
+
+_DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
 
 _VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)")
 
@@ -119,13 +141,30 @@ class Release:
     `assets` maps a filename to its download URL -- the platform seam picks
     which one belongs to the running build, because that is the one thing
     this module cannot know. A pip install has no file here at all.
+
+    `digests` maps a filename to the `digest` GitHub publishes for it,
+    `"sha256:<hex>"`, for the files that have one.
     """
 
     version: str
     assets: dict[str, str] = dataclasses.field(default_factory=dict)
+    digests: dict[str, str] = dataclasses.field(default_factory=dict)
 
     def asset(self, name: str) -> str | None:
         return self.assets.get(name)
+
+    def sha256(self, name: str) -> str | None:
+        """The SHA-256 GitHub published for `name`, as lowercase hex, or
+        None when it published none or one in a form not understood.
+
+        None means "cannot be verified", and the caller must not install on
+        it: this file is run silently with the user's rights, and HTTPS
+        alone says only that some GitHub host answered. GitHub has attached
+        a digest to every release file uploaded since mid-2025, so in
+        practice this is None only if that changes.
+        """
+        match = _DIGEST_RE.match(self.digests.get(name, "").strip().lower())
+        return match.group(1) if match else None
 
 
 def fetch_latest_release(opener: Callable[[str], bytes] | None = None) -> Release | None:
@@ -150,34 +189,93 @@ def fetch_latest_release(opener: Callable[[str], bytes] | None = None) -> Releas
         return None
 
     assets = {}
+    digests = {}
     for asset in body.get("assets") or []:
         try:
             assets[asset["name"]] = asset["browser_download_url"]
         except (KeyError, TypeError):
             continue  # one malformed entry is not a reason to know nothing
-    return Release(version=tag.lstrip("v"), assets=assets)
+        digest = asset.get("digest")
+        if isinstance(digest, str):
+            digests[asset["name"]] = digest
+    return Release(version=tag.lstrip("v"), assets=assets, digests=digests)
+
+
+class DownloadResult(enum.Enum):
+    """How a download ended."""
+
+    WRITTEN = "written"
+    FAILED = "failed"           # the network, or the disk
+    MISMATCHED = "mismatched"   # arrived, and is not the published file
 
 
 def download(url: str, destination: pathlib.Path,
-             opener: Callable[[str], bytes] | None = None) -> bool:
+             opener: Callable[[str], bytes] | None = None,
+             *, sha256: str | None = None) -> DownloadResult:
     """Fetch `url` into `destination`, and say whether it arrived.
 
     Written to a `.part` beside the target and renamed only once the whole
     body is there, so a download cut halfway through cannot leave something
     that looks like an installer and is not one.
+
+    `sha256` is what the body must hash to (lowercase hex, from
+    `Release.sha256`). A body that does not is never written anywhere.
     """
     fetch = opener if opener is not None else _read_url
     part = destination.with_suffix(destination.suffix + ".part")
     try:
         body = fetch(url)
+        if sha256 is not None:
+            actual = hashlib.sha256(body).hexdigest()
+            if not hmac.compare_digest(actual, sha256):
+                log.note(
+                    "Note: the downloaded update is not the file the release "
+                    f"published (SHA-256 {actual}, expected {sha256}). It was "
+                    "not saved and will not be run."
+                )
+                return DownloadResult.MISMATCHED
         part.parent.mkdir(parents=True, exist_ok=True)
         part.write_bytes(body)
         part.replace(destination)
     except _NETWORK_ERRORS as exc:
-        print(f"Note: could not download the update: {exc}")
+        log.note(f"Note: could not download the update: {exc}")
         part.unlink(missing_ok=True)
-        return False
-    return True
+        return DownloadResult.FAILED
+    return DownloadResult.WRITTEN
+
+
+def new_download_dir(temp_dir: pathlib.Path | None = None) -> pathlib.Path:
+    """A fresh folder for one download, private to this user."""
+    return pathlib.Path(tempfile.mkdtemp(prefix=_DOWNLOAD_DIR_PREFIX, dir=temp_dir))
+
+
+def remove_old_downloads(temp_dir: pathlib.Path | None = None) -> None:
+    """Delete what earlier updates downloaded: nothing else ever did, so
+    every update left its installer -- tens of megabytes -- in the temp
+    directory for good. Includes the fixed-name files from before
+    downloads had folders of their own.
+    """
+    root = pathlib.Path(temp_dir) if temp_dir is not None else pathlib.Path(tempfile.gettempdir())
+    try:
+        leftovers = [
+            path for path in root.glob(_DOWNLOAD_DIR_PREFIX + "*") if path.is_dir()
+        ]
+        for pattern in _LEGACY_DOWNLOAD_GLOBS:
+            leftovers.extend(path for path in root.glob(pattern) if path.is_file())
+    except OSError as exc:
+        log.note(f"Note: could not look for old update downloads in {root}: {exc}")
+        return
+    for path in leftovers:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError:
+            # Still in use: the installer that has just restarted snipux is
+            # usually this very file, not yet exited. The next launch or
+            # the next update removes it.
+            continue
 
 
 def _read_url(url: str) -> bytes:
@@ -236,18 +334,22 @@ class Download(QObject):
     tens of megabytes over whatever connection the user has, and the tray
     menu it was started from must not sit frozen for the length of it.
 
-    `finished` carries the path on success and None on any failure, which
-    are the two outcomes `download` has.
+    `finished` carries the path on success and None on any failure;
+    `result` then says which failure it was.
     """
 
     finished = pyqtSignal(object)
 
     def __init__(self, url: str, destination: pathlib.Path,
-                 opener: Callable[[str], bytes] | None = None, parent=None):
+                 opener: Callable[[str], bytes] | None = None, parent=None,
+                 *, sha256: str | None = None):
         super().__init__(parent)
         self._url = url
         self._destination = destination
         self._opener = opener
+        self._sha256 = sha256
+        # Set before `finished` is emitted, read after it arrives.
+        self.result: DownloadResult | None = None
 
     def start(self) -> None:
         thread = threading.Thread(target=self._run, name="snipux-update-download")
@@ -258,5 +360,8 @@ class Download(QObject):
         thread.start()
 
     def _run(self) -> None:
-        ok = download(self._url, self._destination, self._opener)
-        self.finished.emit(str(self._destination) if ok else None)
+        self.result = download(
+            self._url, self._destination, self._opener, sha256=self._sha256
+        )
+        written = self.result is DownloadResult.WRITTEN
+        self.finished.emit(str(self._destination) if written else None)

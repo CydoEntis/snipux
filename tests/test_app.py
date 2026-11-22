@@ -8994,16 +8994,49 @@ class TestTheDailyCheck:
                 pass
 
         monkeypatch.setattr(app.updates, "UpdateCheck", FakeCheck)
+        # The daily check also tidies up after earlier updates, and a test
+        # must not do that to this machine's real temp directory.
+        self.tidied = []
+        monkeypatch.setattr(
+            app.updates, "remove_old_downloads",
+            lambda temp_dir=None: self.tidied.append(temp_dir), raising=False,
+        )
         return started
 
     def test_it_runs_on_the_first_launch_of_a_new_day(self, make_controller, monkeypatch):
         controller, _said = self._controller(make_controller, monkeypatch)
-        written = self._checked_on(monkeypatch, "2020-01-01")
+        self._checked_on(monkeypatch, "2020-01-01")
         started = self._never_reaches_the_network(monkeypatch)
 
         assert controller.check_for_updates_daily() is True
         assert started, "the check never ran"
+
+    def test_the_day_is_only_used_up_by_a_check_that_got_an_answer(
+        self, make_controller, monkeypatch
+    ):
+        # Stamped before asking, a launch with no network skipped the
+        # whole day's check without ever making it.
+        controller, _said = self._controller(make_controller, monkeypatch)
+        written = self._checked_on(monkeypatch, "2020-01-01")
+        self._never_reaches_the_network(monkeypatch)
+
+        controller.check_for_updates_daily()
+        assert written == []
+
+        controller._on_update_checked(None, quiet=True)
+        assert written == []
+
+        controller._on_update_checked(updates.Release(version=app.__version__), quiet=True)
         assert written == [datetime.date.today().isoformat()]
+
+    def test_it_clears_out_what_earlier_updates_downloaded(self, make_controller, monkeypatch):
+        controller, _said = self._controller(make_controller, monkeypatch)
+        self._checked_on(monkeypatch, "2020-01-01")
+        self._never_reaches_the_network(monkeypatch)
+
+        controller.check_for_updates_daily()
+
+        assert self.tidied == [None]
 
     def test_a_second_launch_the_same_day_does_not(self, make_controller, monkeypatch):
         controller, _said = self._controller(make_controller, monkeypatch)
@@ -9099,6 +9132,107 @@ class TestOneClickUpdate:
         controller._on_update_action()
 
         assert asked == [1]
+
+    SHA256 = "ab" * 32
+
+    def _downloads(self, monkeypatch):
+        """Stands in for the download thread, and records what it was
+        asked to fetch and where to."""
+        asked = []
+
+        class FakeDownload:
+            class finished:
+                @staticmethod
+                def connect(_slot):
+                    pass
+
+            result = None
+
+            def __init__(self, url, destination, opener=None, *, sha256=None):
+                asked.append((url, destination, sha256))
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(app.updates, "Download", FakeDownload)
+        return asked
+
+    def test_the_download_is_checked_against_the_published_sha256(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="snipux-setup-99.0.0.exe", url="https://example/setup.exe",
+        )
+        release.digests["snipux-setup-99.0.0.exe"] = f"sha256:{self.SHA256}"
+        controller._available_update = release
+        asked = self._downloads(monkeypatch)
+
+        controller.install_available_update(temp_dir=tmp_path)
+
+        assert [(url, sha256) for url, _destination, sha256 in asked] == [
+            ("https://example/setup.exe", self.SHA256)
+        ]
+
+    def test_it_downloads_into_a_fresh_folder_not_a_guessable_path(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="snipux-setup-99.0.0.exe", url="https://example/setup.exe",
+        )
+        release.digests["snipux-setup-99.0.0.exe"] = f"sha256:{self.SHA256}"
+        controller._available_update = release
+        asked = self._downloads(monkeypatch)
+        left_behind = tmp_path / "snipux-setup-98.0.0.exe"
+        left_behind.write_bytes(b"the last update's installer")
+
+        controller.install_available_update(temp_dir=tmp_path)
+
+        destination = asked[0][1]
+        assert destination.name == "snipux-setup-99.0.0.exe"
+        assert destination.parent != tmp_path
+        assert destination.parent.parent == tmp_path
+        assert not left_behind.exists()
+
+    def test_a_release_with_no_digest_is_not_downloaded(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # It would be run silently, and there is nothing to check it against.
+        controller, said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="snipux-setup-99.0.0.exe", url="https://example/setup.exe",
+        )
+        controller._available_update = release
+        asked = self._downloads(monkeypatch)
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+
+        controller.install_available_update(temp_dir=temp_dir)
+
+        assert asked == []
+        assert "cannot be verified" in said[-1] and "Releases page" in said[-1]
+        assert list(temp_dir.iterdir()) == []
+
+    def test_a_download_that_is_not_the_published_file_is_not_run(
+        self, make_controller, monkeypatch
+    ):
+        controller, said, _release = self._controller(make_controller, monkeypatch)
+        ran = []
+        monkeypatch.setattr(
+            app.platform.current, "install_update", lambda path: ran.append(path) or True
+        )
+        quit_calls = []
+        monkeypatch.setattr(controller, "_quit", lambda: quit_calls.append(1))
+
+        class Mismatched:
+            result = updates.DownloadResult.MISMATCHED
+
+        controller._update_download = Mismatched()
+        controller._on_update_downloaded(None)
+
+        assert ran == [] and quit_calls == []
+        assert "not the file Snipux published" in said[-1]
 
     def test_downloading_hands_the_file_to_the_platform(
         self, make_controller, monkeypatch, tmp_path
