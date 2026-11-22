@@ -251,6 +251,27 @@ class TestDownloading:
         assert "could not download the update" in capsys.readouterr().out.lower()
 
 
+class TestImportingItIsCheap:
+    def test_the_network_stack_is_not_loaded_until_a_request_is_made(self):
+        # app.py imports this module at startup; urllib.request and
+        # http.client bring ssl and email with them, 19 ms measured, for a
+        # request made once a day.
+        import subprocess
+        import sys
+
+        loaded = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sys, snipux.updates; "
+                "print(sorted({'http.client', 'urllib.request', 'ssl'}"
+                " & set(sys.modules)))",
+            ],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        assert loaded == "[]"
+
+
 class TestTheDownloadIsTheFileThatWasPublished:
     """The installer is run silently with the user's rights, so it is only
     run if it hashes to what the release says it should."""

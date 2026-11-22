@@ -34,17 +34,12 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-import hashlib
-import hmac
-import http.client
 import json
 import pathlib
 import re
 import shutil
 import tempfile
 import threading
-import urllib.error
-import urllib.request
 from typing import Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -75,11 +70,21 @@ _DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
 
 _VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)")
 
-# What a request can fail with. `HTTPException` is not an `OSError`: a reply
-# cut off mid-body (`IncompleteRead`) or a garbled status line raises it, and
-# letting it out kills the worker thread before it reports -- the tray then
-# says "Checking for updates..." and nothing ever follows.
-_NETWORK_ERRORS = (OSError, urllib.error.URLError, http.client.HTTPException)
+def _network_errors() -> tuple[type[BaseException], ...]:
+    """What a request can fail with. `HTTPException` is not an `OSError`: a
+    reply cut off mid-body (`IncompleteRead`) or a garbled status line
+    raises it, and letting it out kills the worker thread before it reports
+    -- the tray then says "Checking for updates..." and nothing ever
+    follows. (`URLError` is an `OSError`.)
+
+    A function, and `urllib`, `http.client` and `hashlib` imported where
+    they are used, because `app.py` imports this module at startup and
+    those three cost it 19 ms of a 150 ms import -- `ssl` and `email`
+    among them -- for a request made once a day, off the UI thread.
+    """
+    import http.client
+
+    return (OSError, http.client.HTTPException)
 
 
 def parse_version(text: str) -> tuple[int, ...] | None:
@@ -121,7 +126,7 @@ def fetch_latest_version(opener: Callable[[str], bytes] | None = None) -> str | 
     fetch = opener if opener is not None else _read_latest_release
     try:
         payload = fetch(LATEST_RELEASE_URL)
-    except _NETWORK_ERRORS:
+    except _network_errors():
         return None
 
     try:
@@ -177,7 +182,7 @@ def fetch_latest_release(opener: Callable[[str], bytes] | None = None) -> Releas
     fetch = opener if opener is not None else _read_latest_release
     try:
         payload = fetch(LATEST_RELEASE_URL)
-    except _NETWORK_ERRORS:
+    except _network_errors():
         return None
 
     try:
@@ -226,6 +231,9 @@ def download(url: str, destination: pathlib.Path,
     try:
         body = fetch(url)
         if sha256 is not None:
+            import hashlib
+            import hmac
+
             actual = hashlib.sha256(body).hexdigest()
             if not hmac.compare_digest(actual, sha256):
                 log.note(
@@ -237,7 +245,7 @@ def download(url: str, destination: pathlib.Path,
         part.parent.mkdir(parents=True, exist_ok=True)
         part.write_bytes(body)
         part.replace(destination)
-    except _NETWORK_ERRORS as exc:
+    except _network_errors() as exc:
         log.note(f"Note: could not download the update: {exc}")
         part.unlink(missing_ok=True)
         return DownloadResult.FAILED
@@ -279,6 +287,8 @@ def remove_old_downloads(temp_dir: pathlib.Path | None = None) -> None:
 
 
 def _read_url(url: str) -> bytes:
+    import urllib.request
+
     request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     # No timeout as tight as the check's: this is 50 MB over whatever
     # connection the user has, and giving up on it after six seconds would
@@ -288,6 +298,8 @@ def _read_url(url: str) -> bytes:
 
 
 def _read_latest_release(url: str) -> bytes:
+    import urllib.request
+
     request = urllib.request.Request(
         url,
         headers={"User-Agent": _USER_AGENT, "Accept": "application/vnd.github+json"},
