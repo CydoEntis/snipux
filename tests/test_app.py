@@ -5621,6 +5621,9 @@ class TestAppControllerTrayMenu:
             lambda url: opened.append(bytes(url.toEncoded()).decode()),
         )
         monkeypatch.setattr(app.report, "environment", lambda: "ENVIRONMENT")
+        # A controller built with no tray has already noted that in
+        # snipux.log, so there is a log to be asked about.
+        monkeypatch.setattr(app.report, "ask_to_include_log", lambda: False)
         controller = make_controller(
             BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
         )
@@ -5636,6 +5639,9 @@ class TestAppControllerTrayMenu:
             lambda url: opened.append(bytes(url.toEncoded()).decode()),
         )
         monkeypatch.setattr(app.report, "environment", lambda: "ENVIRONMENT")
+        # A controller built with no tray has already noted that in
+        # snipux.log, so there is a log to be asked about.
+        monkeypatch.setattr(app.report, "ask_to_include_log", lambda: False)
         controller = make_controller(
             BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
         )

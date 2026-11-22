@@ -108,6 +108,7 @@ from snipux import (
     handoff,
     history,
     hostenv,
+    log,
     output,
     platform,
     report,
@@ -1558,7 +1559,7 @@ class AppController:
             # `ps`/pkill: the keybinding (--snip) is still the way in with
             # no tray, but quitting needs a real answer now that there's no
             # Quit menu item visible to click.
-            print(
+            log.note(
                 "No system tray detected -- Snipux will run without a tray "
                 "icon or menu. It is still listening for snip requests "
                 "(e.g. via `snipux --snip`, typically bound to a key); to "
@@ -1831,7 +1832,7 @@ class AppController:
         _present(self._settings)
 
     def report_problem(self) -> None:
-        report.open_report(crash_log_path())
+        report.open_report(crash_log_path(), log.notes_path())
 
     def _on_settings_saved(self) -> None:
         """Apply what Settings just wrote.
@@ -2151,7 +2152,7 @@ class AppController:
                     QSystemTrayIcon.MessageIcon.Warning,
                 )
             else:
-                print(f"Snip failed: {exc}")
+                log.note(f"Snip failed: {exc}")
             return
 
         geometries = (
@@ -2329,7 +2330,7 @@ class AppController:
                 "Snipux", message, QSystemTrayIcon.MessageIcon.Warning
             )
         else:
-            print(message)
+            log.note(message)
 
     def open_image_path(self, path: Path) -> None:
         """Open an image you already have in a fresh review window, with
@@ -4312,8 +4313,8 @@ def install_crash_log(
             path.parent.mkdir(parents=True, exist_ok=True)
             _trim_crash_log(path)
             stamp = datetime.datetime.now().isoformat(timespec="seconds")
-            with path.open("a", encoding="utf-8") as log:
-                log.write(f"--- {stamp} snipux {__version__}\n{text}\n")
+            with path.open("a", encoding="utf-8") as crash_log:
+                crash_log.write(f"--- {stamp} snipux {__version__}\n{text}\n")
         except OSError:
             # A log that cannot be written must not raise from the hook:
             # that would put the error back in Qt's hands.
@@ -4331,7 +4332,7 @@ def install_crash_log(
             except Exception as notify_error:  # noqa: BLE001 - must not leave the hook
                 # Raising here would put the error back in Qt's hands; the
                 # log already has the original.
-                print(f"Note: could not show the error notice: {notify_error}")
+                log.note(f"Note: could not show the error notice: {notify_error}")
 
     sys.excepthook = log_unhandled
 

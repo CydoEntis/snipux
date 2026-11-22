@@ -109,7 +109,7 @@ from typing import TYPE_CHECKING, Callable
 from PyQt6.QtCore import QAbstractNativeEventFilter
 from PyQt6.QtMultimedia import QMediaDevices
 
-from snipux import capture, recording, setup_desktop
+from snipux import capture, log, recording, setup_desktop
 from snipux.design import tokens
 
 from . import Platform, UnimplementedPlatformError, windows_ocr
@@ -591,7 +591,7 @@ def _ensure_stable_copy() -> Path | None:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(current, target)
     except OSError as exc:
-        print(f"Note: could not copy snipux to {target}: {exc}", file=sys.stderr)
+        log.note(f"Note: could not copy snipux to {target}: {exc}", to_stderr=True)
         return None
 
     print(f"snipux copied to {target}")
@@ -615,7 +615,7 @@ def _remove_stable_copy(exe_path: Path) -> bool:
     try:
         exe_path.unlink()
     except OSError as exc:
-        print(f"Note: could not remove {exe_path}: {exc}")
+        log.note(f"Note: could not remove {exe_path}: {exc}")
         return False
     print(f"Removed {exe_path}")
     return True
@@ -630,13 +630,13 @@ def _write_icon(icon_path: Path) -> bool:
     """
     data = setup_desktop.render_ico()
     if data is None:
-        print("Note: no vendored icon found -- shortcuts will use a generic icon.")
+        log.note("Note: no vendored icon found -- shortcuts will use a generic icon.")
         return False
     try:
         icon_path.parent.mkdir(parents=True, exist_ok=True)
         icon_path.write_bytes(data)
     except OSError as exc:
-        print(f"Note: could not write the icon to {icon_path}: {exc}")
+        log.note(f"Note: could not write the icon to {icon_path}: {exc}")
         return False
     print(f"Icon written to {icon_path}")
     return True
@@ -654,7 +654,7 @@ def _remove_icon(icon_path: Path) -> bool:
     try:
         icon_path.unlink()
     except OSError as exc:
-        print(f"Note: could not remove the icon at {icon_path}: {exc}")
+        log.note(f"Note: could not remove the icon at {icon_path}: {exc}")
         return False
     print(f"Icon removed from {icon_path}")
     return True
@@ -685,12 +685,12 @@ def _write_shortcut(
     try:
         lnk_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        print(f"Note: could not create {lnk_path.parent} for the {label} entry: {exc}")
+        log.note(f"Note: could not create {lnk_path.parent} for the {label} entry: {exc}")
         return False
     if not _create_shortcut(
         lnk_path, target, icon_path=icon_path, description=description, arguments=arguments, app_id=app_id
     ):
-        print(f"Note: could not write the {label} entry at {lnk_path}.")
+        log.note(f"Note: could not write the {label} entry at {lnk_path}.")
         return False
     print(f"{label} entry written to {lnk_path} (target={target})")
     return True
@@ -707,7 +707,7 @@ def _remove_shortcut(lnk_path: Path, label: str) -> bool:
     try:
         lnk_path.unlink()
     except OSError as exc:
-        print(f"Note: could not remove the {label} entry at {lnk_path}: {exc}")
+        log.note(f"Note: could not remove the {label} entry at {lnk_path}: {exc}")
         return False
     print(f"{label} entry removed from {lnk_path}")
     return True
@@ -794,7 +794,7 @@ def _register_open_with(exec_path: Path, icon_path: Path | None) -> bool:
             with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_WRITE) as handle:
                 winreg.SetValueEx(handle, name, 0, winreg.REG_SZ, data)
     except OSError as exc:
-        print(f"Note: could not add Snipux to Open with: {exc}")
+        log.note(f"Note: could not add Snipux to Open with: {exc}")
         return False
     _announce_association_change()
     print("Added Snipux to Open with for images and recordings")
@@ -814,7 +814,7 @@ def _delete_if_empty(key: str) -> bool:
     except FileNotFoundError:
         return True
     except OSError as exc:
-        print(f"Note: could not tidy up HKCU\\{key}: {exc}")
+        log.note(f"Note: could not tidy up HKCU\\{key}: {exc}")
         return False
     return True
 
@@ -832,7 +832,7 @@ def _unregister_open_with() -> bool:
             except FileNotFoundError:
                 pass
             except OSError as exc:
-                print(f"Note: could not remove Snipux from Open with for {suffix}: {exc}")
+                log.note(f"Note: could not remove Snipux from Open with for {suffix}: {exc}")
                 ok = False
             ok = _delete_if_empty(key) and ok
             ok = _delete_if_empty(rf"{_CLASSES_KEY}\{suffix}") and ok
@@ -843,7 +843,7 @@ def _unregister_open_with() -> bool:
             except FileNotFoundError:
                 pass
             except OSError as exc:
-                print(f"Note: could not remove HKCU\\{key}: {exc}")
+                log.note(f"Note: could not remove HKCU\\{key}: {exc}")
                 ok = False
     _announce_association_change()
     print("Removed Snipux from Open with")
@@ -860,11 +860,11 @@ def _launcher_for_integration() -> Path | None:
         _WINDOWLESS_LAUNCHER
     )
     if exec_path is None:
-        print(
+        log.note(
             f"error: could not locate the installed {_WINDOWLESS_LAUNCHER} launcher -- "
             "is snipux actually installed (pip install), rather than just "
             "being run from a checkout?",
-            file=sys.stderr,
+            to_stderr=True,
         )
         return None
     stable_copy = _ensure_stable_copy()
@@ -1222,10 +1222,10 @@ class WindowsPlatform(Platform):
                 print(f"error: {problem}", file=sys.stderr)
                 return 1
             if not setup_desktop.save_shortcut(shortcut):
-                print(
+                log.note(
                     f"Note: could not remember {setup_desktop.human_shortcut(shortcut)} -- "
                     "it will be bound this run, but a future --setup will revert it.",
-                    file=sys.stderr,
+                    to_stderr=True,
                 )
 
         exec_path = _launcher_for_integration()
@@ -1532,7 +1532,7 @@ class WindowsPlatform(Platform):
                 close_fds=True,
             )
         except OSError as exc:
-            print(f"Note: could not start the update installer: {exc}")
+            log.note(f"Note: could not start the update installer: {exc}")
             return False
         return True
 
@@ -1550,7 +1550,7 @@ class WindowsPlatform(Platform):
         try:
             hwnd = int(widget.winId())
         except (RuntimeError, TypeError, ValueError) as exc:
-            print(f"Note: could not read the window handle to skip its animation: {exc}")
+            log.note(f"Note: could not read the window handle to skip its animation: {exc}")
             return False
         disabled = ctypes.c_int(1)
         result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -1570,7 +1570,7 @@ class WindowsPlatform(Platform):
         except (RuntimeError, TypeError, ValueError) as exc:
             # No native window yet, or its C++ side has gone. Reported
             # rather than raised, like every other best-effort step here.
-            print(f"Note: could not read the window handle for focus: {exc}")
+            log.note(f"Note: could not read the window handle for focus: {exc}")
             return False
         return _take_foreground(handle)
 

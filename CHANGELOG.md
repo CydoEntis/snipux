@@ -79,6 +79,10 @@ use it; the commit history has the detail.
   on the frame you chose.
 ### Fixed
 
+- **Problems Snipux worked around are now written down.** Notes such as a
+  shortcut that could not be created used to go to a console the Windows
+  app does not have. They are kept in `snipux.log` beside `crash.log`, and
+  "Report a problem" offers to include them.
 - **Recent copies no longer hold on to hundreds of megabytes.** The list
   still keeps your last ten copies, but drops the oldest pictures once
   they add up to more than 128 MB -- a handful of full-desktop snips.

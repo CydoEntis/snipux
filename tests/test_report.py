@@ -145,7 +145,43 @@ class TestUrlWithLog:
         assert "### crash.log (most recent part)\n\n```\nonly line\n```\n" in body
 
 
+    def test_handled_failures_go_in_after_the_crash_log(self):
+        body = _body(report.issue_url("env\n", "Traceback\n", notes="Note: no shortcut\n"))
+
+        assert "### snipux.log (most recent part)\n\n```\nNote: no shortcut\n```\n" in body
+        assert body.index("Traceback") < body.index("Note: no shortcut")
+
+    def test_long_notes_leave_most_of_the_room_to_the_crash_log(self):
+        crash = "".join(f"crash {n}\n" for n in range(5000))
+        notes = "".join(f"note {n}\n" for n in range(5000))
+
+        url = report.issue_url("env\n", crash, notes=notes)
+
+        body = _body(url)
+        assert len(url) <= report.URL_BUDGET
+        assert "crash 4999\n" in body and "note 4999\n" in body
+        assert body.count("crash ") > body.count("note ")
+
+
 class TestOpenReport:
+    def test_yes_includes_what_snipux_noted_without_a_crash(self, tmp_path, opened, monkeypatch):
+        # The windowless build has no console: these notes used to go
+        # nowhere, and a report with no crash had nothing to attach.
+        (tmp_path / "snipux.log").write_text("Note: could not bind\n", encoding="utf-8")
+        monkeypatch.setattr(report, "ask_to_include_log", lambda: True)
+
+        url = report.open_report(tmp_path / "crash.log", tmp_path / "snipux.log")
+
+        assert "Note: could not bind" in _body(url)
+
+    def test_no_leaves_the_notes_out_too(self, tmp_path, opened, monkeypatch):
+        (tmp_path / "snipux.log").write_text("Note: could not bind\n", encoding="utf-8")
+        monkeypatch.setattr(report, "ask_to_include_log", lambda: False)
+
+        url = report.open_report(tmp_path / "crash.log", tmp_path / "snipux.log")
+
+        assert "could not bind" not in _body(url)
+
     def test_no_log_opens_without_asking(self, tmp_path, opened, monkeypatch):
         monkeypatch.setattr(report, "ask_to_include_log", lambda: pytest.fail("asked"))
 

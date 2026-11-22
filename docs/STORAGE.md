@@ -15,6 +15,7 @@ issue that shows a problem the current approach cannot handle.
 | Hide list              | `hide-list.txt`, beside `config.json`                    |
 | Watermark image        | `watermark/`, beside `config.json`                       |
 | Unexpected errors      | `crash.log`, beside `config.json`                        |
+| Handled failures       | `snipux.log`, beside `config.json`                       |
 | Snips                  | `save_folder` setting, default `~/Pictures/snipux`       |
 | Recordings             | `recording_folder` setting, default `~/Videos/snipux`    |
 | Linux desktop entries  | `$XDG_DATA_HOME/applications` (`snipux.desktop` and the two editors' `snipux-image-editor.desktop`, `snipux-video-editor.desktop`), `$XDG_CONFIG_HOME/autostart`, `$XDG_DATA_HOME/icons/hicolor` |
@@ -25,6 +26,14 @@ issue that shows a problem the current approach cannot handle.
 The settings folder is `$XDG_CONFIG_HOME/snipux`, falling back to
 `~/.config/snipux` -- on every OS, Windows included, so one folder backs up
 everything. `setup_desktop.config_path()` is the one function that knows it.
+
+`crash.log` holds unhandled exceptions. `snipux.log` holds the failures
+snipux dealt with and would once only have printed -- a shortcut that could
+not be written, a snip that failed with no tray to say so -- one dated line
+each, written through `log.note()`. Both are cut back to their newest half
+once they pass 256 KB, both can contain paths with the user's name in them,
+and "Report a problem" offers the end of each. Nothing else is logged, and
+neither file ever leaves the machine unless the user posts that report.
 
 **Not stored anywhere:** the tray's Copy history -- the last 10 things snipux
 copied, and no more than 128 MB of pictures among them, oldest dropped
