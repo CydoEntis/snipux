@@ -79,6 +79,12 @@ use it; the commit history has the detail.
   on the frame you chose.
 ### Fixed
 
+- **Hide sensitive now tells you when it could not check a snip.** If text
+  recognition times out, cannot start, or Windows has no recognition
+  language installed, Snipux says nothing was hidden and why -- and an
+  instant snip waits for your yes before it is copied or saved. Before,
+  the snip went out unredacted with no warning. Recognition also gives up
+  after 5 seconds rather than 10.
 - **An update is checked before it is run.** The installer Snipux downloads
   must match the checksum published with the release, or it is discarded
   and you are told. It is saved to a private folder, and old installers

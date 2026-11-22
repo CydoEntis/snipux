@@ -49,6 +49,18 @@ from dataclasses import dataclass
 from PyQt6.QtCore import QRectF
 
 
+class RecognitionFailed(Exception):
+    """Text recognition could not read the picture at all: it timed out,
+    could not start, or the OS has no recognition language installed.
+
+    An exception and not an empty result, because an empty result already
+    has a meaning -- "read it, and there are no words" -- and the two must
+    never be confused: after the first, nothing was checked and nothing was
+    hidden. The message is the reason, written to finish the sentence
+    "Sensitive text was not hidden: ...".
+    """
+
+
 @dataclass(frozen=True)
 class RecognizedWord:
     """One word OCR returned. `image_rect` is in recognised-image pixels."""

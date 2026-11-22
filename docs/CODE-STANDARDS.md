@@ -71,8 +71,12 @@ developer's 1.0 display -- which is why the suite must also pass at
 ## Errors
 
 - **A failure that has a safe outcome returns it**, rather than raising: a
-  corrupt `config.json` reads as `{}`, OCR that cannot run finds no words, a
-  config write that fails returns `False`.
+  corrupt `config.json` reads as `{}`, a config write that fails returns
+  `False`.
+- **Unless that outcome already means something else.** OCR that cannot run
+  used to "find no words", which is also what a picture with nothing
+  sensitive in it finds -- so a failure hid nothing and said nothing. It
+  raises `sensitive.RecognitionFailed`, and the overlay tells the user.
 - Catch the specific exceptions you expect (`OSError`, `ValueError`,
   `subprocess.SubprocessError`). No bare `except:`; `except Exception` only
   at a boundary that must keep the app alive, and it must log.

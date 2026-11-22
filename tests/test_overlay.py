@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
 import snipux.app as app_module
 import snipux.output as output_module
 import snipux.overlay as overlay_module
-from snipux.sensitive import RecognizedWord
+from snipux.sensitive import RecognitionFailed, RecognizedWord
 from conftest import skip_on_windows
 from snipux import capture as capture_module
 from snipux import design
@@ -9548,6 +9548,103 @@ class TestHideSensitiveText:
         # Centre of the value, in exported pixels: the recognised rect's own.
         assert image.pixelColor(140, 35) == QColor(0, 0, 0)
         assert image.pixelColor(700, 500) == QColor(BASE_COLOR)
+
+    def _failing(self, recognizer, monkeypatch, reason="text recognition took longer than 5 seconds"):
+        def fails(image):
+            recognizer.calls.append(QImage(image))
+            raise RecognitionFailed(reason)
+
+        monkeypatch.setattr(overlay_module.platform.current, "recognize_text", fails)
+
+    def test_a_failed_recognition_says_nothing_was_hidden(self, recognizer, monkeypatch):
+        # It came back as "no words", which reads as "nothing sensitive
+        # here": the snip went out unredacted and nothing said so.
+        self._failing(recognizer, monkeypatch)
+        overlay = self._overlay()
+        said = []
+        monkeypatch.setattr(overlay, "_show_toast", lambda icon, text: said.append(text))
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert overlay._marks == ()
+        assert said == [
+            "Sensitive text was not hidden: text recognition took longer than 5 seconds"
+        ]
+
+    def test_a_failure_before_the_overlay_is_on_screen_is_said_once_it_is(
+        self, recognizer, monkeypatch
+    ):
+        # Last region is recognised while the overlay is still being
+        # built, when a toast has nowhere to show.
+        self._failing(recognizer, monkeypatch)
+        overlay = self._overlay()
+        overlay._commit_selection(self.SELECTION)
+        said = []
+        monkeypatch.setattr(overlay, "_show_toast", lambda icon, text: said.append(text))
+
+        overlay.show()
+        try:
+            QApplication.processEvents()
+        finally:
+            overlay.close()
+
+        assert [text for text in said if "was not hidden" in text] == [
+            "Sensitive text was not hidden: text recognition took longer than 5 seconds"
+        ]
+
+    def test_an_instant_snip_is_not_copied_unhidden_without_being_asked(
+        self, recognizer, monkeypatch
+    ):
+        self._failing(recognizer, monkeypatch)
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay()
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+        asked = []
+        monkeypatch.setattr(
+            overlay, "_finish_unhidden_snip_anyway", lambda reason: asked.append(reason) or False
+        )
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert asked == ["text recognition took longer than 5 seconds"]
+        assert copied == []
+        assert overlay._selection is None
+
+    def test_an_instant_snip_goes_ahead_unhidden_when_the_user_says_so(
+        self, recognizer, monkeypatch
+    ):
+        self._failing(recognizer, monkeypatch)
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay()
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+        monkeypatch.setattr(overlay, "_finish_unhidden_snip_anyway", lambda reason: True)
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert len(copied) == 1
+
+    def test_an_instant_snip_that_was_checked_is_never_questioned(self, recognizer, monkeypatch):
+        recognizer.words = [("Deploy", 10, 10, 60, 20)]
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay()
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+        monkeypatch.setattr(
+            overlay, "_finish_unhidden_snip_anyway",
+            lambda reason: pytest.fail("asked about a snip that was checked"),
+        )
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert len(copied) == 1
 
     def test_nothing_is_read_when_the_toggle_is_off(self, recognizer):
         overlay = self._overlay(hide=False)

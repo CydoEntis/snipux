@@ -62,6 +62,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -69,7 +70,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from snipux import design, glass, output, platform, sensitive, setup_desktop
+from snipux import design, glass, log, output, platform, sensitive, setup_desktop
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.flowbars import FlowMenu, MenuReopenGuard
@@ -5680,8 +5681,16 @@ class OverlayWindow(QWidget):
                     self._armed_for_recording = False
                     self._sync_chooser_visibility()
             return
-        self._hide_sensitive_text()
+        unhidden_because = self._hide_sensitive_text()
         if self.outcome == "instant":
+            # Instant finishes and closes in one step, with no bar and no
+            # time to read a toast -- so a snip that could not be checked
+            # waits for a yes rather than leaving unredacted and unseen.
+            if unhidden_because is not None and not self._finish_unhidden_snip_anyway(
+                unhidden_because
+            ):
+                self.set_selection(None)
+                return
             if setup_desktop.load_instant_saves():
                 self._on_bar_save()
             else:
@@ -5718,9 +5727,48 @@ class OverlayWindow(QWidget):
             return None
         return selection, cropped
 
-    def _hide_sensitive_text(self) -> None:
+    _UNHIDDEN_NOTICE_MS = 8000
+
+    def _finish_unhidden_snip_anyway(self, reason: str) -> bool:
+        """Ask whether an instant snip should still be copied or saved when
+        Hide sensitive is on and its text could not be read."""
+        verb = "Save" if setup_desktop.load_instant_saves() else "Copy"
+        answer = QMessageBox.warning(
+            self,
+            "Sensitive text was not hidden",
+            f"Snipux could not check this snip for sensitive text: {reason}.\n\n"
+            f"Nothing in it has been hidden. {verb} it anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _say_nothing_was_hidden(self, reason: str) -> None:
+        """Tell the user Hide sensitive did nothing for this selection, and
+        why -- before anything is copied or saved."""
+        notice = f"Sensitive text was not hidden: {reason}"
+        log.note(f"Note: {notice}")
+
+        def warn() -> None:
+            self._show_toast("blur", notice)
+            # Longer than a confirmation stays up: this one has to be read
+            # and acted on before the snip is copied.
+            self._toast._timer.start(self._UNHIDDEN_NOTICE_MS)
+
+        warn()
+        if not self.isVisible():
+            # Last region is read while the overlay is still being built,
+            # when a toast has nowhere to show. Said again once it has.
+            QTimer.singleShot(0, warn)
+
+    def _hide_sensitive_text(self) -> "str | None":
         """Black out sensitive text inside the current selection, when Hide
         sensitive is on.
+
+        Returns None, or -- when the text could not be read at all, so that
+        nothing was checked and nothing hidden -- the reason, having
+        already told the user (`_say_nothing_was_hidden`). Finding nothing
+        to hide is not that: it returns None like any other success.
 
         Reads the selection's pixels out of the frozen frame -- never the
         live screen, per CLAUDE.md's one rule -- asks the platform for the
@@ -5739,14 +5787,14 @@ class OverlayWindow(QWidget):
         scaled display, where the two spaces differ by that ratio.
         """
         if self._selection is None or not self._chooser.hide_sensitive:
-            return
+            return None
         current = platform.current
         if not current.recognizes_text():
-            return
+            return None
 
         crop = self._selection_crop()
         if crop is None:
-            return
+            return None
         selection, cropped = crop
         scale_x = cropped.image.width() / cropped.logical_size.width()
         scale_y = cropped.image.height() / cropped.logical_size.height()
@@ -5761,8 +5809,13 @@ class OverlayWindow(QWidget):
             mine = sensitive.custom_list(None)
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        # On the UI thread: the commit that follows needs the boxes before
+        # it copies. Bounded by the platform's own timeout.
         try:
             lines = current.recognize_text(cropped.image)
+        except sensitive.RecognitionFailed as failure:
+            self._say_nothing_was_hidden(str(failure))
+            return str(failure)
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -5797,6 +5850,7 @@ class OverlayWindow(QWidget):
         if boxes:
             count = len(boxes)
             self._show_toast("blur", f"Hid {count} item{'' if count == 1 else 's'}")
+        return None
 
     @classmethod
     def _merge_same_values(cls, rects: list[QRectF]) -> list[QRectF]:

@@ -551,8 +551,14 @@ class Platform(ABC):
     def recognize_text(self, image) -> list:
         """The words in `image` (a `QImage`), as a list of lines, each a
         list of `sensitive.RecognizedWord` with rects in `image`'s own
-        pixels. Never raises: a platform that cannot recognise, or a
-        recognition that fails, returns no lines."""
+        pixels.
+
+        No lines means the picture was read and holds no words. A
+        recognition that could not be carried out raises
+        `sensitive.RecognitionFailed` instead, so the caller cannot take
+        "nothing was checked" for "nothing to hide". A platform with no
+        recognition at all (`recognizes_text()` False) returns no lines.
+        """
         return []
 
 
