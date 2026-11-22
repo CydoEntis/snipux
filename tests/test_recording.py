@@ -1706,11 +1706,9 @@ def _windows_backend(**overrides):
         video_sink_factory=FakeVideoSink,
         video_frame_input_factory=FakeVideoFrameInput,
         thread_factory=FakeThread,
-        # FakeRecorder.stop() settles synchronously, so these tests don't
-        # need (and shouldn't pay for) the real settle delay
-        # _wait_for_stopped() uses against the actual asynchronous muxer
-        # -- see that method's docstring in recording.py.
-        stop_settle_seconds=0,
+        # No fake writes a file, so there is nothing for the real check
+        # to read; the tests about finalising pass their own.
+        finalised_check=lambda path: True,
     )
     factories.update(overrides)
     return WindowsRecorderBackend(**factories)
@@ -2363,6 +2361,115 @@ class TestWindowsRecorderBackendStop:
 
         assert backend._recorder is None
         assert backend._worker_thread is None
+
+
+    def test_stop_returns_once_the_file_is_finalised(self, qapp):
+        # It used to hold for a fixed second after StoppedState, on every
+        # stop, whether or not the file was already whole.
+        asked = []
+
+        def finalised(path):
+            asked.append(path)
+            return True
+
+        backend = _windows_backend(finalised_check=finalised)
+        backend.start(None, "C:/tmp/out.mp4")
+
+        backend.stop()
+
+        assert asked == ["C:/tmp/out.mp4"]
+
+    def test_stop_waits_for_a_file_that_is_finalised_late(self, qapp):
+        answers = [False, False, True]
+        backend = _windows_backend(finalised_check=lambda path: answers.pop(0))
+        backend.start(None, "C:/tmp/out.mp4")
+
+        backend.stop()  # must not raise
+
+        assert answers == []
+
+    def test_stop_raises_when_the_file_is_never_finalised(self, qapp):
+        backend = _windows_backend(
+            finalised_check=lambda path: False, finalise_timeout_seconds=0.05
+        )
+        backend.start(None, "C:/tmp/out.mp4")
+
+        with pytest.raises(RuntimeError, match="will not play"):
+            backend.stop()
+
+    def test_a_failed_recording_is_not_also_waited_on_to_finalise(self, qapp):
+        # The encoder's own failure is the one worth reporting, and a file
+        # it never wrote is not going to grow a moov atom.
+        asked = []
+        backend = _windows_backend(
+            finalised_check=lambda path: asked.append(path) or False,
+            finalise_timeout_seconds=5,
+        )
+        backend.start(None, "C:/tmp/out.mp4")
+        recorder = backend._recorder
+        recorder._error = QMediaRecorder.Error.ResourceError
+        recorder._error_string = "Could not initialize encoder"
+        recorder.errorChanged.emit()
+
+        with pytest.raises(RuntimeError, match="Could not initialize encoder"):
+            backend.stop()
+
+        assert asked == []
+
+
+def _mp4_box(kind: bytes, payload: bytes = b"", *, wide: bool = False) -> bytes:
+    """One MP4 box; `wide` writes the 64-bit size a box over 4GB uses."""
+    if wide:
+        return (1).to_bytes(4, "big") + kind + (16 + len(payload)).to_bytes(8, "big") + payload
+    return (8 + len(payload)).to_bytes(4, "big") + kind + payload
+
+
+class TestMp4IsFinalised:
+    """The moov atom is the index a player needs, and the recorder writes
+    it last -- so its presence is what "the file is finished" means."""
+
+    def test_a_file_ending_in_a_moov_atom_is_finalised(self, tmp_path):
+        path = tmp_path / "whole.mp4"
+        path.write_bytes(
+            _mp4_box(b"ftyp", b"isom") + _mp4_box(b"free")
+            + _mp4_box(b"mdat", b"x" * 64) + _mp4_box(b"moov", b"y" * 32)
+        )
+
+        assert recording._mp4_is_finalised(str(path)) is True
+
+    def test_a_file_with_no_moov_atom_is_not(self, tmp_path):
+        path = tmp_path / "unfinished.mp4"
+        path.write_bytes(_mp4_box(b"ftyp", b"isom") + _mp4_box(b"mdat", b"x" * 64))
+
+        assert recording._mp4_is_finalised(str(path)) is False
+
+    def test_the_word_moov_inside_the_video_data_does_not_count(self, tmp_path):
+        path = tmp_path / "unfinished.mp4"
+        path.write_bytes(_mp4_box(b"ftyp", b"isom") + _mp4_box(b"mdat", b"\x00\x00\x00\x08moov"))
+
+        assert recording._mp4_is_finalised(str(path)) is False
+
+    def test_a_moov_atom_after_a_wide_box_is_found(self, tmp_path):
+        path = tmp_path / "long.mp4"
+        path.write_bytes(
+            _mp4_box(b"ftyp", b"isom") + _mp4_box(b"mdat", b"x" * 64, wide=True)
+            + _mp4_box(b"moov", b"y" * 32)
+        )
+
+        assert recording._mp4_is_finalised(str(path)) is True
+
+    def test_a_moov_atom_cut_short_is_not_finalised(self, tmp_path):
+        path = tmp_path / "cut.mp4"
+        path.write_bytes(_mp4_box(b"ftyp", b"isom") + _mp4_box(b"moov", b"y" * 32)[:-8])
+
+        assert recording._mp4_is_finalised(str(path)) is False
+
+    def test_an_empty_or_missing_file_is_not_finalised(self, tmp_path):
+        empty = tmp_path / "empty.mp4"
+        empty.write_bytes(b"")
+
+        assert recording._mp4_is_finalised(str(empty)) is False
+        assert recording._mp4_is_finalised(str(tmp_path / "absent.mp4")) is False
 
 
 class _NeverStoppingRecorder(FakeRecorder):

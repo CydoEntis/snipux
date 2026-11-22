@@ -1653,7 +1653,8 @@ class WindowsRecorderBackend(RecordingBackend):
         video_frame_input_factory=QVideoFrameInput,
         thread_factory=QThread,
         audio_input_factory=None,
-        stop_settle_seconds: float = 1.0,
+        finalised_check=None,
+        finalise_timeout_seconds: float = 2.0,
         stop_timeout_seconds: float = 10.0,
     ):
         self._screen_capture_factory = screen_capture_factory
@@ -1671,11 +1672,16 @@ class WindowsRecorderBackend(RecordingBackend):
         # recording's lifetime: a session does not keep its input alive, and
         # a collected one ends the audio track without a word.
         self._audio_input = None
-        # See _wait_for_stopped()'s docstring: real, load-bearing settle
-        # time for the muxer's asynchronous finalization, not a cosmetic
-        # default -- tests that don't care about it pass 0 here rather
-        # than eating the real delay.
-        self._stop_settle_seconds = stop_settle_seconds
+        # What says the file stop() is about to hand back is whole, and how
+        # long a recorder that has already stopped is given to make it so
+        # -- see _wait_for_stopped(). Injected like the factories above: a
+        # fake recorder writes no file for the real check to read.
+        self._finalised_check = (
+            finalised_check if finalised_check is not None else _mp4_is_finalised
+        )
+        self._finalise_timeout_seconds = finalise_timeout_seconds
+        # The file being written, for that check.
+        self._path: str | None = None
         # How long stop() waits for the recorder to say it has stopped
         # before calling the recording incomplete. Measured on Windows 11
         # (Qt 6.11, 3s recordings up to 2560x1440) that takes 20-40ms; the
@@ -1792,6 +1798,7 @@ class WindowsRecorderBackend(RecordingBackend):
             self._start_full_screen(path)
         else:
             self._start_region(rect, path)
+        self._path = path
         return path
 
     def _unwind_failed_start(self, screen_capture, recorder, path: str) -> None:
@@ -2031,6 +2038,7 @@ class WindowsRecorderBackend(RecordingBackend):
             self._stop_region()
         else:
             self._stop_full_screen()
+        self._path = None
 
         if self._errors:
             failure = self._errors[0]
@@ -2081,49 +2089,43 @@ class WindowsRecorderBackend(RecordingBackend):
     def _wait_for_stopped(
         self,
         recorder: QMediaRecorder,
-        poll_interval: float = 0.02,
+        poll_interval: float = 0.005,
     ) -> None:
-        """Block until `recorder.recorderState()` actually reaches
-        `StoppedState`, then hold for a further, real, wall-clock settle
-        period before returning.
+        """Block until `recorder.recorderState()` reaches `StoppedState`
+        and the file it wrote is whole.
 
-        `QMediaRecorder.stop()` is not documented as synchronous, and the
-        "playable file" acceptance criterion needs the container's moov
-        atom actually written before `stop()` returns, not just the call
-        having been made -- so the first loop checks state rather than
+        `QMediaRecorder.stop()` is not documented as synchronous, and a
+        playable file needs the container's moov atom written before
+        `stop()` returns -- so the first loop checks state rather than
         assuming. Polling needs an actual `time.sleep()` between checks,
         not just repeated `processEvents()` calls with no pause between
         them -- confirmed by hand that spinning `processEvents()` back to
         back with no sleep never once observes the state change, even
-        after 50 calls, because the real transition happens on a Windows
-        Media Foundation worker thread that needs actual elapsed wall time
-        to post its result back, not just event-loop turns to *deliver*
-        one if it were already queued.
+        after 50 calls, because the real transition happens on a worker
+        thread that needs actual elapsed wall time to post its result
+        back, not just event-loop turns to *deliver* one if it were
+        already queued. `recorderStateChanged` cannot be waited on
+        instead: connecting anything to it raises in this PyQt6 build
+        (see `_wire_errors()`).
 
-        Reaching `StoppedState` alone turned out not to be enough either,
-        confirmed the same way: a file opened with `QMediaPlayer`
-        immediately after `stop()` returned came back "moov atom not
-        found" and unplayable, even though the state machine already said
-        stopped, while the same file opened a couple of seconds later (a
-        fresh process, plenty more wall time elapsed) played fine. There
-        is no more precise signal to wait on instead of a further timed
-        hold: `recorderStateChanged` and `errorOccurred` both carry a
-        nested `QMediaRecorder` enum argument, and connecting *anything*
-        to either -- confirmed independent of the slot's own signature --
-        raises `TypeError: connect() failed ... and unislot()` in this
-        exact PyQt6 6.11.0 / Qt 6.11.1 build (see `_wire_errors()`), and
-        `actualLocationChanged` did not fire at all in the same manual
-        check. So this holds, still pumping the event loop, for
-        `self._stop_settle_seconds` (empirically ~1s was enough) after
-        `StoppedState` first appears -- a real, load-bearing wait, not a
-        cosmetic one; shortening or dropping it reintroduces the
-        unplayable-file failure this was written to fix.
+        This used to hold for a fixed second after `StoppedState`, on the
+        strength of one file that came back "moov atom not found" when
+        opened straight away. Measured since, on Windows 11 with PyQt6
+        6.11.0 over 13 recordings (1.5-3s, 1280x720 and 2560x1440, both
+        paths): `StoppedState` arrived 20-41ms after `stop()`, and every
+        file already had its moov atom, opened in `QMediaPlayer` at once,
+        and was byte-for-byte the same a second later. So the second is
+        gone, and what it was guarding is checked directly instead: the
+        file is read for its moov atom (`_finalised_check`), and only one
+        that lacks it is waited on, for at most
+        `_finalise_timeout_seconds`.
 
         Bounded rather than looped forever. A recorder that never reports
-        `StoppedState` within `_stop_timeout_seconds` is recorded in
-        `_errors`, which `stop()` raises from once the teardown is done:
-        its file has no moov atom yet, and returning as though it had
-        landed an unplayable file as a saved recording.
+        `StoppedState` within `_stop_timeout_seconds`, or a file still not
+        whole after the second wait, is recorded in `_errors`, which
+        `stop()` raises from once the teardown is done: returning as
+        though it had worked landed an unplayable file as a saved
+        recording.
         """
         app = QCoreApplication.instance()
         if app is None:
@@ -2144,11 +2146,53 @@ class WindowsRecorderBackend(RecordingBackend):
                 f"{self._stop_timeout_seconds:g}s, so the recording may be incomplete"
             )
             return
+        if self._errors:
+            # The recorder already said what went wrong, and a file it
+            # failed to write is not going to become whole by waiting.
+            return
 
-        settle_deadline = time.monotonic() + self._stop_settle_seconds
-        while time.monotonic() < settle_deadline:
+        finalise_deadline = time.monotonic() + self._finalise_timeout_seconds
+        while not self._finalised_check(self._path):
+            if time.monotonic() >= finalise_deadline:
+                self._errors.append(
+                    "the recorder stopped without finishing the file, so the "
+                    "recording will not play"
+                )
+                return
             app.processEvents()
             time.sleep(poll_interval)
+
+
+def _mp4_is_finalised(path: str) -> bool:
+    """Whether the MP4 at `path` has its moov atom, complete.
+
+    The recorder writes the video data first and the moov atom -- the
+    index no player can do without -- last, so a file that has one is a
+    file the recorder finished. Only the box headers are read, eight or
+    sixteen bytes each, so this costs the same for an hour as for a
+    second. An unreadable or missing file is not finalised.
+    """
+    try:
+        with open(path, "rb") as file:
+            size_on_disk = os.fstat(file.fileno()).st_size
+            offset = 0
+            while offset + 8 <= size_on_disk:
+                file.seek(offset)
+                header = file.read(16)
+                box_size = int.from_bytes(header[:4], "big")
+                if box_size == 1:
+                    # A box over 4GB keeps its real size after its type.
+                    box_size = int.from_bytes(header[8:16], "big")
+                elif box_size == 0:
+                    box_size = size_on_disk - offset  # "to the end of the file"
+                if box_size < 8:
+                    return False
+                if header[4:8] == b"moov":
+                    return offset + box_size <= size_on_disk
+                offset += box_size
+    except OSError:
+        return False
+    return False
 
 
 def build_windows_registry() -> RecorderRegistry:
