@@ -14901,3 +14901,51 @@ class TestTheOverlayTakesTheKeyboardBackAfterADelay:
         overlay, asked = self._reopened_after_a_delay(monkeypatch, _FailingCaptureBackend())
 
         assert asked == [overlay]
+
+
+class TestARefusedRecordingLeavesTheOverlayUsable:
+    """`app.py` can refuse a recording -- no recorder on this machine, or
+    one already running -- and says why. The overlay had already marked
+    itself armed by then, which hides the toolbar and the chooser both: the
+    user was left looking at a selection with nothing to act on it."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay_after_a_record_drag(self, answer):
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(
+            frame, on_recording_requested=lambda rect, delay, after: answer
+        )
+        overlay._chooser.set_kind("record")
+        overlay.setGeometry(0, 0, 600, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 200))
+        _send_move(overlay, QPoint(400, 450), Qt.MouseButton.LeftButton)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(400, 450))
+        return overlay
+
+    def test_a_refusal_leaves_it_unarmed_with_the_chooser_back(self):
+        overlay = self._overlay_after_a_record_drag(False)
+
+        assert overlay._armed_for_recording is False
+        assert overlay._selection == QRect(100, 200, 300, 250)
+        assert overlay._chooser.tab.isVisible()
+
+    def test_escape_then_steps_back_to_the_chooser_row(self):
+        overlay = self._overlay_after_a_record_drag(False)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._selection is None
+        assert overlay.isVisible()
+        assert overlay._chooser.row.isVisible()
+
+    def test_an_accepted_recording_is_armed_with_the_chooser_away(self):
+        overlay = self._overlay_after_a_record_drag(True)
+
+        assert overlay._armed_for_recording is True
+        assert not overlay._chooser.tab.isVisible()
+        assert not overlay._chooser.row.isVisible()

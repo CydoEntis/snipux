@@ -8971,3 +8971,67 @@ class TestOneClickUpdate:
 
         assert "Could not start the update" in said[-1]
         assert quit_calls == [], "nothing was replaced, so nothing should close"
+
+
+class TestARefusedRecordingAnswersNo:
+    """`_on_recording_requested` says whether it armed the recording. The
+    overlay marks itself armed before it asks, so a refusal it never heard
+    about left it showing a selection with no bar and no chooser."""
+
+    RECT = QRectF(10, 20, 300, 200)
+
+    def _controller(self, make_controller, monkeypatch, recorder_registry=None):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=recorder_registry,
+        )
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        return controller, said
+
+    def _without_a_recorder(self, make_controller, monkeypatch):
+        def no_recorder():
+            raise app.platform.UnimplementedPlatformError("this platform", "recording")
+
+        monkeypatch.setattr(app.platform.current, "build_recording_registry", no_recorder)
+        return self._controller(make_controller, monkeypatch)
+
+    def test_an_armed_recording_answers_yes(self, make_controller, monkeypatch):
+        controller, _said = self._controller(
+            make_controller, monkeypatch, RecorderRegistry([FakeRecordingBackend()])
+        )
+
+        assert controller._on_recording_requested(self.RECT, "No delay") is True
+
+    def test_no_recorder_answers_no_and_says_why(self, make_controller, monkeypatch):
+        controller, said = self._without_a_recorder(make_controller, monkeypatch)
+
+        assert controller._on_recording_requested(self.RECT, "No delay") is False
+        assert len(said) == 1
+
+    def test_a_second_request_while_one_is_armed_answers_no(self, make_controller, monkeypatch):
+        controller, said = self._controller(
+            make_controller, monkeypatch, RecorderRegistry([FakeRecordingBackend()])
+        )
+        controller._on_recording_requested(self.RECT, "No delay")
+        armed = controller._armed_recording
+
+        assert controller._on_recording_requested(self.RECT, "No delay") is False
+        assert controller._armed_recording == armed
+        assert len(said) == 1
+
+    def test_the_overlay_it_refuses_is_left_unarmed(self, make_controller, monkeypatch):
+        controller, _said = self._without_a_recorder(make_controller, monkeypatch)
+        overlay = OverlayWindow(
+            make_capture_frame(), on_recording_requested=controller._on_recording_requested
+        )
+        overlay._chooser.set_kind("record")
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        overlay._commit_selection(QRect(10, 20, 60, 40))
+
+        assert overlay._armed_for_recording is False
+        assert overlay._chooser.tab.isVisible()
+        overlay.close()

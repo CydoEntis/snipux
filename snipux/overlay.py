@@ -4371,7 +4371,7 @@ class OverlayWindow(QWidget):
         on_dismissed: Callable[[], None] | None = None,
         on_captured: "Callable[[QImage, Path | None], None] | None" = None,
         on_pin_requested: "Callable[[QImage, QRect], None] | None" = None,
-        on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
+        on_recording_requested: "Callable[[QRectF | None, str, str], bool | None] | None" = None,
         on_recording_start: "Callable[[], None] | None" = None,
         on_recording_reframed: "Callable[[QRectF], None] | None" = None,
         interaction_gate: "Callable[[OverlayWindow, bool], bool] | None" = None,
@@ -4401,7 +4401,8 @@ class OverlayWindow(QWidget):
         # `tokens.RECORDING_AFTER`'s ids) -- app.py owns starting/stopping the actual
         # recorder, per CLAUDE.md's split between this file (widget/
         # painting) and app.py (subprocess/filesystem/stateful side
-        # effects).
+        # effects). It answers False when it refuses the recording, which
+        # un-arms this window; anything else is taken as armed.
         self._on_recording_requested = on_recording_requested
         self._on_recording_start = on_recording_start
         # Fired with the new absolute rect whenever the selection changes
@@ -5661,7 +5662,16 @@ class OverlayWindow(QWidget):
                 # `tokens.RECORDING_AFTER`'s ids here -- `_land_recording` is what
                 # actually acts on it, once the file is real; this branch
                 # only ever hands the choice along.
-                self._on_recording_requested(record_rect, self._delay, self.outcome)
+                armed = self._on_recording_requested(record_rect, self._delay, self.outcome)
+                if armed is False:
+                    # Refused, and app.py has said why: no recorder here,
+                    # or one already running. Armed with no recording bar
+                    # coming, this window showed a selection and nothing to
+                    # do with it -- no toolbar, no chooser, and an Esc that
+                    # closed the snip. Un-armed, the chooser's tab is back
+                    # and Esc steps back to the row.
+                    self._armed_for_recording = False
+                    self._sync_chooser_visibility()
             return
         self._hide_sensitive_text()
         if self.outcome == "instant":
@@ -9633,7 +9643,7 @@ def open_overlay(
     # rect, delay, and the chooser's after-capture destination (one of
     # `tokens.RECORDING_AFTER`'s ids) -- see `OverlayWindow.__init__`'s own comment on the same
     # parameter.
-    on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
+    on_recording_requested: "Callable[[QRectF | None, str, str], bool | None] | None" = None,
     # Enter, while a recording is armed. Fires the stage's primary action,
     # which on the record side is Record -- see `OverlayWindow`'s own
     # keyPressEvent, where the alternative was copying a screenshot of the

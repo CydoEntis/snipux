@@ -2553,7 +2553,7 @@ class AppController:
         rect: QRectF | None,
         delay: str,
         after: str = design.tokens.RECORD_AFTER_DEFAULT,
-    ) -> None:
+    ) -> bool:
         """*Arm* a recording of `rect` (absolute logical virtual-desktop
         coordinates, or None for the whole desktop) --
         `OverlayWindow._commit_selection`'s record branch calls this and
@@ -2581,10 +2581,14 @@ class AppController:
         `_begin_armed_recording()`, which is the one place that needs a
         number -- `design.tokens.DELAYS` values ("No delay"/"3s"/"5s"/"10s")
         pass through overlay.py unparsed everywhere else.
+
+        Returns whether the recording was armed. False is a refusal, already
+        reported: the overlay has marked itself armed by the time it asks,
+        and has to be told to stand down.
         """
         if self._recorder_registry is None:
             self._report_shortcut(self._recorder_unavailable_message)
-            return
+            return False
 
         # `start_capture`'s re-entrancy guard only blocks a second overlay
         # while the first is genuinely still open -- and the record branch
@@ -2606,7 +2610,7 @@ class AppController:
                 "Snipux is already recording, or about to start -- finish that "
                 "recording before starting another."
             )
-            return
+            return False
 
         # The real filename/save-folder convention only applies once the
         # recording lands (`_land_recording`) -- while it's in progress the
@@ -2632,6 +2636,7 @@ class AppController:
             self._report_shortcut(
                 "Ready to record -- press the capture shortcut to start."
             )
+        return True
 
     def _show_recording_hud(self, rect: QRectF | None) -> None:
         """Put the pill up in its armed state, if there is anywhere to put

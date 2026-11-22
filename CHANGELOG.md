@@ -37,6 +37,10 @@ use it; the commit history has the detail.
   overlay returned after the countdown without the keyboard, so Esc,
   Enter and the tool letters went to the window behind it until you
   clicked.
+- **A recording Snipux cannot start no longer strands the overlay.**
+  With no recorder available, or a recording already under way, the
+  overlay was left showing the region with no toolbar and no chooser.
+  The chooser now comes back and Esc steps back to it.
 
 ## 1.3.1 — 2026-11-20
 
