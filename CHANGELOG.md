@@ -33,6 +33,10 @@ use it; the commit history has the detail.
   where nothing showed them; they now move just inside the selection.
   On a narrow selection they sit side by side instead of on top of each
   other.
+- **Keys work again when a delayed capture comes back.** On Windows the
+  overlay returned after the countdown without the keyboard, so Esc,
+  Enter and the tool letters went to the window behind it until you
+  clicked.
 
 ## 1.3.1 — 2026-11-20
 

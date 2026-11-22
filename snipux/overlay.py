@@ -5497,7 +5497,7 @@ class OverlayWindow(QWidget):
         except CaptureError as exc:
             if self._on_session_restore is not None:
                 self._on_session_restore(self, None)
-            self.show()
+            self._show_again()
             self._show_toast("timer", str(exc))
             return
 
@@ -5518,8 +5518,22 @@ class OverlayWindow(QWidget):
             )
 
         self.replace_frame(frame)
-        self.show()
+        self._show_again()
         self._dispatch_capture_mode(mode)
+
+    def _show_again(self) -> None:
+        """Back on screen after the delay, in front and with the keyboard.
+
+        A plain `show()` put the window back and no more. The countdown is
+        for setting something up in another window, so that window has the
+        foreground by now, and on Windows it kept every key: Esc, Enter and
+        the tool letters did nothing until the overlay was clicked. The same
+        three steps `show_on_screen` ends on, for the same reason.
+        """
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        platform.current.take_keyboard_focus(self)
 
     def replace_frame(self, frame: Frame) -> None:
         """Replace the frozen pixels while preserving this surface's state."""

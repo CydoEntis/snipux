@@ -14858,3 +14858,46 @@ class TestChipsStayOnTheSelectionsMonitor:
 
         for chip in self._chips(overlay):
             assert chip.top() >= self._local(self.LEFT).top() + 32, chip
+
+
+class TestTheOverlayTakesTheKeyboardBackAfterADelay:
+    """A delayed capture hides the overlay, counts down and shows it again.
+    Coming back, it has to ask for the keyboard as it did when it opened:
+    whatever the user set up during the countdown has the foreground by
+    then, and on Windows the keys went on going to that."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _reopened_after_a_delay(self, monkeypatch, backend):
+        asked = []
+        monkeypatch.setattr(
+            overlay_module.platform.current, "take_keyboard_focus",
+            lambda widget: asked.append(widget) or True,
+        )
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(frame, registry=BackendRegistry([backend]))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._on_delay_changed(tokens.DELAYS[1])
+        overlay._on_chooser_mode(tokens.CAPTURE_MODES[0][0])
+        assert not overlay.isVisible() and asked == []
+
+        for _ in range(int(tokens.DELAYS[1].rstrip("s"))):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay.isVisible()
+        return overlay, asked
+
+    def test_reopening_over_the_fresh_frame_asks_for_the_keyboard(self, monkeypatch):
+        fresh = make_frame(image_size=(600, 600), logical_size=(600, 600))
+
+        overlay, asked = self._reopened_after_a_delay(monkeypatch, _FakeCaptureBackend(fresh))
+
+        assert asked == [overlay]
+
+    def test_reopening_after_a_failed_grab_asks_for_it_too(self, monkeypatch):
+        overlay, asked = self._reopened_after_a_delay(monkeypatch, _FailingCaptureBackend())
+
+        assert asked == [overlay]
