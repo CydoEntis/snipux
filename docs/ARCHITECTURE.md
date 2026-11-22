@@ -34,7 +34,7 @@ entry        handoff.py  ->  app.py (CLI, tray, controller)
 views        chooser.py  overlay.py  flowbars.py  review.py  player.py
              pin.py  history.py  settings.py  winchrome.py  glass.py
              toolbar.py  popovers.py  watermark.py  overlaychrome.py
-             selectionframe.py
+             selectionframe.py  inklayers.py
                |
 model        shapes.py  marks.py  sensitive.py  textsnap.py
                |
@@ -101,6 +101,7 @@ snipux/
   watermark.py      the watermark's session choice, Settings content and menu
   overlaychrome.py  the hint HUD, toast, close button and delay countdown
   selectionframe.py handles, brackets, hit targets and chip placement, as geometry
+  inklayers.py      the overlay's cached layers of frame and ink, and mark bounds
   chooser.py        the pre-snip row
   flowbars.py       the post-selection bars (views only)
   shapes.py         annotation data model and flattening renderer

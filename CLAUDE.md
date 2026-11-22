@@ -89,6 +89,10 @@ snipux/
   selectionframe.py  where the selection's frame is: handles, corner
                 brackets, hit targets and the two chips' placement, as
                 functions of a rectangle. No state, no painting
+  inklayers.py  the overlay's ink caches: the base layer with obscuring
+                marks baked in, ink an obscuring mark covers, the ink
+                layer, and mark bounds -- built when the marks or the
+                frame change, not on every repaint
   chooser.py    the docked pre-snip chooser row: what to capture, and what
                 happens to it afterwards
   flowbars.py   the post-selection bars from the locked capture-flow handoff
