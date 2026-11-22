@@ -10,6 +10,19 @@ in this module asks for a fresh screen read while the user is dragging.
 coordinates, and converts to absolute logical virtual-desktop coordinates
 (the space `Frame` and `GeometryProvider` use) only at the edges -- see
 `_to_absolute` and `absolute_selection`.
+
+This module is the window: what the selection is, what a press or a key
+means, what gets painted and in what order. What it builds and what it
+asks live beside it, and none of them imports this module back:
+
+  toolbar.py         the floating bar, its buttons and the tool hint strip
+  popovers.py        the style popover, capture-mode popover, family menus
+  watermark.py       the watermark's choice, Settings content and menu
+  overlaychrome.py   the hint HUD, toast, close button, delay countdown
+  selectionframe.py  where handles, brackets and the chips are (geometry)
+  inklayers.py       the cached layers of frame and ink, and mark bounds
+  loupe.py           what the eyedropper magnifies and where its box goes
+  sensitivecheck.py  one Hide sensitive read: record, worker, rects to cover
 """
 
 from __future__ import annotations

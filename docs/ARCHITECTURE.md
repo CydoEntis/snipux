@@ -150,8 +150,9 @@ is the window in front of it, are its intended callers. The backends and
 the model do not import it: a recorder is handed what it needs as
 `recording.RecordingOptions`.
 
-- **Views read settings themselves.** `overlay.py` has 27 `setup_desktop`
-  calls (most `load_*`, some `save_*` for remembered choices), `review.py`
+- **Views read settings themselves.** `overlay.py` has about twenty
+  `setup_desktop` calls (most `load_*`, some `save_*` for remembered
+  choices), `watermark.py` the seven that moved out of it, `review.py`
   three, and `pin.py` and `player.py` one each. The rule is that the
   controller reads a setting and hands it to the view.
 - **Views write files and pick where.** `review.py`'s Save and Save As
