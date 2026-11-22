@@ -107,7 +107,7 @@ snipux/
   settings.py       the Settings window
   setup_desktop.py  config.json, desktop entries, icons, the GNOME shortcut
   glass.py          cached blur behind bars and menus
-  winchrome.py      frameless title bar and controls
+  winchrome.py      frameless title bar, controls and the editors' canvas badges
   design/           icons, logo, fonts, design tokens
   platform/         the seam (see above)
 tests/              pytest, one file per module
@@ -127,6 +127,46 @@ packaging/          the one-line installers, the Linux .deb and AppImage, the
   `output.py`, below the views; `app.py` re-exports them.
 - `shapes.py` imports `capture.py` for `Frame`, which `apply_crop()` builds
   at runtime. That is a model using a lower layer's data type, and allowed.
+
+## Known drift
+
+Where the code does not yet match the rules above. Each is a refactor
+ticket, not a precedent: do not add to one, and take an entry off this list
+in the change that fixes it.
+
+`setup_desktop.py` owns `config.json` and sits beside the seam
+(`platform/linux.py` adapts it). The entry layer and `settings.py`, which
+is the window in front of it, are its intended callers. The backends and
+the model do not import it: a recorder is handed what it needs as
+`recording.RecordingOptions`.
+
+- **Views read settings themselves.** `overlay.py` has 27 `setup_desktop`
+  calls (most `load_*`, some `save_*` for remembered choices), `review.py`
+  three, and `pin.py` and `player.py` one each. The rule is that the
+  controller reads a setting and hands it to the view.
+- **Views write files and pick where.** `review.py`'s Save and Save As
+  call `QImage.save()` and `mkdir()` directly instead of going through
+  `output.py`. `pin.py` saves through `output.save_image()` but chooses
+  the folder itself, and `player.py` holds its exporters and copies the
+  recording on an untrimmed export.
+- **`setup_desktop.py` imports `handoff.py`**, an entry-layer module, for
+  the socket name and the snip request byte that the Hyprland shortcut
+  writes directly. `handoff.py` imports only the standard library, so
+  nothing comes with it, but the two constants belong somewhere both can
+  reach without pointing up.
+- **`settings.py` imports `player.py`** for `export_availability()`, to
+  grey the GIF destination with the player's wording. That question, with
+  `system_ffmpeg()` and `EXPORT_UNAVAILABLE` (which `app.py` also takes
+  from the player), belongs in `ffmpeg.py`, below the views.
+- **`output.py` imports `setup_desktop.py`**, inside `save_image()`, for
+  the filename pattern.
+- **`review.py` imports widgets from `overlay.py`** (`FamilyMenu`,
+  `FloatingBar`, `StylePopover`, `Toast`, `ToolHintStrip`). They are
+  shared annotation chrome and should live in a module of their own.
+- **Private names cross modules.** `review.py`, `player.py` and
+  `history.py` import `_ui_font` and `_mono_font` from `winchrome.py`.
+- **`marks.py` is listed as model and holds a widget**:
+  `TextLabelEditor` drives a `QLineEdit`.
 
 ## Security and privacy
 
