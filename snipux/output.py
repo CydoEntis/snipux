@@ -47,6 +47,11 @@ def _settle_clipboard() -> None:
 # copy to disk without being asked would keep it long after the user
 # thought it was gone. Quitting snipux forgets all of it.
 COPY_HISTORY_MAX = 10
+# And no more pixels than this, whatever the count. Each picture is kept at
+# full resolution -- 33 MB for a 4K desktop, 59 MB for a 5K one -- so ten of
+# them was most of a gigabyte held until quit. This is room for a few
+# full-desktop copies or a great many ordinary region snips.
+COPY_HISTORY_MAX_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True, eq=False)
@@ -104,7 +109,22 @@ def _remember(kind: str, value: QImage | str | Path) -> None:
             break
     _copy_history.insert(0, CopiedItem(kind, value, datetime.datetime.now()))
     del _copy_history[COPY_HISTORY_MAX:]
+    # The newest is kept whatever its size: it is what was just copied, and
+    # a history that cannot give back the last copy is not one.
+    while _copy_history_bytes() > COPY_HISTORY_MAX_BYTES:
+        older_pictures = [item for item in _copy_history[1:] if item.kind == "image"]
+        if not older_pictures:
+            break
+        _copy_history.remove(older_pictures[-1])
     _notify_copy_history()
+
+
+def _copy_history_bytes() -> int:
+    """What the kept pictures weigh. Text and file references are not
+    counted: next to one picture they are nothing."""
+    return sum(
+        item.value.sizeInBytes() for item in _copy_history if item.kind == "image"
+    )
 
 
 def _notify_copy_history() -> None:

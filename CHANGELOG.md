@@ -79,6 +79,9 @@ use it; the commit history has the detail.
   on the frame you chose.
 ### Fixed
 
+- **Recent copies no longer hold on to hundreds of megabytes.** The list
+  still keeps your last ten copies, but drops the oldest pictures once
+  they add up to more than 128 MB -- a handful of full-desktop snips.
 - **Snipux starts without stopping to read your recent saves,** and saving
   a snip no longer reads the picture back from the file it just wrote. The
   tray menu's previews are prepared in the background instead.

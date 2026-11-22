@@ -149,6 +149,39 @@ class TestCopyHistory:
         assert values[0] == f"copy {output.COPY_HISTORY_MAX + 2}"
         assert "copy 0" not in values
 
+    def test_pictures_past_the_memory_budget_drop_the_oldest(self, monkeypatch):
+        # Ten full-desktop copies at 5120x2880 were 590 MB held until quit.
+        one = make_image(100, 100).sizeInBytes()
+        monkeypatch.setattr(output, "COPY_HISTORY_MAX_BYTES", 3 * one)
+
+        for shade in range(5):
+            image = make_image(100, 100)
+            image.fill(0xFF000000 + shade)
+            output.copy_image_to_clipboard(image)
+
+        kept = [item.value.pixel(0, 0) & 0xFF for item in output.copy_history()]
+        assert kept == [4, 3, 2]
+
+    def test_the_newest_copy_is_kept_even_when_it_alone_is_over_budget(self, monkeypatch):
+        monkeypatch.setattr(output, "COPY_HISTORY_MAX_BYTES", 1000)
+        output.copy_image_to_clipboard(make_image(90, 90))
+        output.copy_text_to_clipboard("small and old")
+
+        output.copy_image_to_clipboard(make_image(100, 100))
+
+        assert [item.kind for item in output.copy_history()] == ["image", "text"]
+        assert output.copy_history()[0].value.width() == 100
+
+    def test_text_and_files_do_not_use_up_the_picture_budget(self, monkeypatch, tmp_path):
+        one = make_image(100, 100).sizeInBytes()
+        monkeypatch.setattr(output, "COPY_HISTORY_MAX_BYTES", one + 1000)
+        output.copy_image_to_clipboard(make_image(100, 100))
+
+        output.copy_text_to_clipboard("hello")
+        output.copy_file_to_clipboard(tmp_path / "clip.webm")
+
+        assert [item.kind for item in output.copy_history()] == ["file", "text", "image"]
+
     def test_the_kept_image_is_not_the_callers(self):
         # The caller's image may be backed by a buffer it is about to free.
         image = make_image()
