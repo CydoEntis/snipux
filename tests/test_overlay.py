@@ -53,6 +53,7 @@ from snipux.design import tokens
 from snipux.shapes import (
     Redact,
     Arrow,
+    Blackout,
     Blur,
     Callout,
     Ellipse,
@@ -14680,3 +14681,80 @@ class TestARegionDragCanBeCancelled:
         QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(300, 420))
 
         assert overlay._selection == QRect(200, 300, 100, 120)
+
+
+class TestMarksPaintInTheOrderDrawn:
+    """What is on screen is what is exported: marks apply in the order they
+    were drawn. A blackout or blur drawn over earlier ink used to show that
+    ink on top of it on screen, while the copy had it covered."""
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, selection=QRect(0, 0, 200, 200)):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def _ink(self):
+        # A box whose left border runs down x=20.
+        return Rectangle(
+            colour=self.RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(180, 180)
+        )
+
+    def _blackout(self):
+        return Blackout(
+            colour=QColor("#000000"), stroke_width=4, start=QPointF(5, 40), end=QPointF(60, 80)
+        )
+
+    def test_a_blackout_drawn_later_covers_earlier_ink_on_screen(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._ink())
+        overlay.add_mark(self._blackout())
+
+        on_screen = overlay.grab().toImage()
+
+        assert pixel(on_screen, 20, 60) == QColor(tokens.BLACKOUT_FILL)
+        # The same border, clear of the blackout, is still there.
+        assert pixel(on_screen, 20, 120) == self.RED
+
+    def test_the_screen_and_the_export_agree_under_a_blur_over_ink(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._ink())
+        overlay.add_mark(
+            Blur(colour=self.RED, stroke_width=4, start=QPointF(5, 40), end=QPointF(60, 80))
+        )
+
+        on_screen = overlay.grab().toImage()
+        exported = overlay.rendered_image()
+
+        for point in (QPoint(20, 60), QPoint(30, 50), QPoint(20, 120)):
+            assert pixel(on_screen, point) == pixel(exported, point), point
+
+    def test_ink_drawn_after_a_blackout_still_shows_over_it(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._blackout())
+        overlay.add_mark(self._ink())
+
+        on_screen = overlay.grab().toImage()
+
+        assert pixel(on_screen, 20, 60) == self.RED
+
+    def test_covered_ink_outside_the_selection_stays_clipped(self):
+        overlay = self._overlay(selection=QRect(100, 0, 100, 200))
+        overlay.add_mark(self._ink())
+        overlay.add_mark(self._blackout())
+
+        on_screen = overlay.grab().toImage()
+
+        assert pixel(on_screen, 20, 120) != self.RED
+
+    def test_undoing_the_blackout_brings_the_ink_back(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._ink())
+        overlay.add_mark(self._blackout())
+        overlay.grab()
+
+        overlay.undo()
+
+        assert pixel(overlay.grab().toImage(), 20, 60) == self.RED

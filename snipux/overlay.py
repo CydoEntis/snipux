@@ -4593,6 +4593,11 @@ class OverlayWindow(QWidget):
         # covers and why equality against it is enough to know the cached
         # image is still correct.
         self._base_layer_cache: tuple[tuple, QImage] | None = None
+        # Cached output of `_covered_ink_image`, with what it was built
+        # from: the frame, the marks themselves and each obscuring mark's
+        # geometry. Holding the marks rather than their ids is what makes
+        # an identity check safe after one of them has been freed.
+        self._covered_ink_cache: "tuple[Frame, tuple[Shape, ...], tuple, QImage] | None" = None
         # Undo/redo history (SNX-39; SNX-70 folds the eraser into it): a
         # stack of `_MarkAction`s, one per `add_mark`/`erase_at` call, in
         # the order they happened. `undo()` pops `_undo`, inverts the
@@ -8744,6 +8749,58 @@ class OverlayWindow(QWidget):
         self._base_layer_cache = (key, image)
         return image
 
+    def _covered_mark_count(self) -> int:
+        """How many leading marks have to be flattened together because an
+        obscuring mark was drawn over ink: everything up to and including
+        the last obscuring mark, or 0 when no ink comes before one.
+
+        0 is the ordinary case, and leaves painting exactly as it was:
+        obscuring marks baked into Layer 1, ink drawn live over them.
+        """
+        marks = self._marks
+        last = max(
+            (index for index, shape in enumerate(marks) if isinstance(shape, ObscuringShape)),
+            default=-1,
+        )
+        if any(not isinstance(shape, ObscuringShape) for shape in marks[:last]):
+            return last + 1
+        return 0
+
+    def _covered_ink_image(self, count: int) -> QImage:
+        """The frame with the first `count` marks flattened onto it in the
+        order they were drawn, in the frame's own pixels.
+
+        Marks apply in order, so a blackout or blur drawn after a pen
+        stroke covers it -- that is what `shapes.render` exports. On screen
+        the stroke used to show on top: every obscuring mark is baked into
+        Layer 1 and all ink is painted over that, whichever came first.
+        This is the export's own flattening, run over the whole frame, so
+        the two cannot disagree; `_paint_marks` draws it clipped to the
+        selection in place of those marks.
+
+        Cached like `_base_layer_image`, and only ever built when ink sits
+        under an obscuring mark.
+        """
+        covered = self._marks[:count]
+        obscuring_key = tuple(
+            (shape.start.x(), shape.start.y(), shape.end.x(), shape.end.y(), shape.strength)
+            for shape in covered
+            if isinstance(shape, ObscuringShape)
+        )
+        cache = self._covered_ink_cache
+        if (
+            cache is not None
+            and cache[0] is self._frame
+            and len(cache[1]) == count
+            and all(was is now for was, now in zip(cache[1], covered))
+            and cache[2] == obscuring_key
+        ):
+            return cache[3]
+        whole_frame = QRectF(QPointF(0, 0), self._frame.logical_size)
+        image = render_selection(self._frame, list(covered), whole_frame)
+        self._covered_ink_cache = (self._frame, covered, obscuring_key, image)
+        return image
+
     def _paint_marks(self, painter: QPainter) -> None:
         """The ink layer: `_marks`, clipped to the selection.
 
@@ -8768,7 +8825,13 @@ class OverlayWindow(QWidget):
         # list order on every repaint, and `Shape` is a plain dataclass, so
         # the write stuck: `rendered_image()` exported the renumbered badges
         # and the documented behaviour did not survive its own paint.
-        for shape in self._marks:
+        covered = self._covered_mark_count()
+        if covered:
+            # Ink an obscuring mark was drawn over, already flattened in
+            # order with it. Inside the selection's clip, like the ink it
+            # stands in for.
+            painter.drawImage(QRectF(self.rect()), self._covered_ink_image(covered))
+        for shape in self._marks[covered:]:
             if isinstance(shape, ObscuringShape):
                 # Already baked into Layer 1 by `_base_layer_image` above,
                 # in list order alongside every other obscuring mark --

@@ -24,6 +24,9 @@ use it; the commit history has the detail.
   right-click used to take the box as it stood -- with Instant, it
   captured it and closed -- and after Esc the box came back on the next
   mouse move.
+- **A blackout or blur drawn over earlier ink covers it on screen too.**
+  The copy always had the ink covered; the overlay showed the pen stroke
+  on top of the blackout, so what you saw was not what you got.
 
 ## 1.3.1 — 2026-11-20
 
