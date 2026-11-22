@@ -1121,10 +1121,12 @@ class OverlayWindow(QWidget):
         # Follows the selection onto its monitor, like every other piece of
         # chrome -- see `_reposition_close_button`.
         self._reposition_close_button()
-        if chrome_before.isEmpty() or rect is None:
+        if chrome_before.isEmpty() or rect is None or self._picking_window:
             # Into or out of having a selection at all: the scrim, the
             # hover previews and the eyedropper all change with that, so
-            # everything is repainted.
+            # everything is repainted. So is a window being hovered in
+            # Window mode: its title chip sits outside the chrome region,
+            # and a hover is a handful of repaints, not one per mouse move.
             self.update()
         else:
             # One selection to another -- every step of a drag. Repainting
