@@ -1441,6 +1441,8 @@ class AppController:
         self._region_frame = RegionFrame()
 
         self._overlay: OverlayWindow | None = None
+        # How long the last snip took to open -- see `_note_slow_snip`.
+        self.last_snip_timing_ms: dict[str, float] = {}
         # Held for the same reason `_overlay` is: a parentless widget is
         # fair game for the GC while its window is still on screen.
         self._settings: SettingsDialog | None = None
@@ -2133,6 +2135,7 @@ class AppController:
             name="snipux-prefetch",
             daemon=True,
         ).start()
+        requested = time.perf_counter()
         try:
             frame = self._registry.capture()
         except CaptureError as exc:
@@ -2156,6 +2159,7 @@ class AppController:
                 log.note(f"Snip failed: {exc}")
             return
 
+        captured = time.perf_counter()
         geometries = (
             self._monitor_geometries
             if self._monitor_geometries is not None
@@ -2218,6 +2222,32 @@ class AppController:
         # any Wayland multi-monitor veil companions), so there's no
         # separate .show() to call here.
         self._overlay = overlay
+        self._note_slow_snip(requested, captured, time.perf_counter())
+
+    # Above this, the wait between the shortcut and the frozen screen is
+    # long enough to be felt. A desk of three 1440p monitors measures about
+    # 80 ms, and about 200 ms for the first snip after launch.
+    _SLOW_SNIP_MS = 300
+
+    def _note_slow_snip(self, requested: float, captured: float, shown: float) -> None:
+        """Keep how long the last snip took to open, and write it down when
+        it was slow.
+
+        "Snipping feels slow" used to be unanswerable: nothing recorded
+        whether the time went on reading the screen or on building and
+        showing the overlay, and the two have different causes. Every snip
+        is timed; only a slow one reaches snipux.log, so the file a problem
+        report attaches says which half it was.
+        """
+        capture_ms = (captured - requested) * 1000
+        overlay_ms = (shown - captured) * 1000
+        self.last_snip_timing_ms = {"capture": capture_ms, "overlay": overlay_ms}
+        if capture_ms + overlay_ms >= self._SLOW_SNIP_MS:
+            log.note(
+                f"Note: slow snip: {capture_ms + overlay_ms:.0f} ms to open "
+                f"(reading the screen {capture_ms:.0f} ms, "
+                f"showing the overlay {overlay_ms:.0f} ms)"
+            )
 
     def _on_overlay_activated(self, overlay: OverlayWindow) -> None:
         """Track the surface currently handling a Wayland capture session."""

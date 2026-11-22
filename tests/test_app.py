@@ -2479,6 +2479,41 @@ class TestAppControllerCapture:
         # constructs the old editor.py window either.
         assert isinstance(controller._overlay, OverlayWindow)
 
+    def test_a_snip_that_opens_quickly_is_timed_but_not_logged(
+        self, make_controller, monkeypatch
+    ):
+        notes = []
+        monkeypatch.setattr(app.log, "note", lambda message, **_: notes.append(message))
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        monkeypatch.setattr(controller, "_SLOW_SNIP_MS", 60_000)
+
+        controller.start_capture()
+
+        assert set(controller.last_snip_timing_ms) == {"capture", "overlay"}
+        assert [note for note in notes if "slow snip" in note] == []
+
+    def test_a_slow_snip_is_logged_with_where_the_time_went(
+        self, make_controller, monkeypatch
+    ):
+        notes = []
+        monkeypatch.setattr(app.log, "note", lambda message, **_: notes.append(message))
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        monkeypatch.setattr(controller, "_SLOW_SNIP_MS", 0)
+
+        controller.start_capture()
+
+        (note,) = [note for note in notes if "slow snip" in note]
+        assert "reading the screen" in note
+        assert "showing the overlay" in note
+
     def test_start_capture_reads_the_hint_bar_preference_fresh_from_settings(
         self, make_controller, monkeypatch
     ):
