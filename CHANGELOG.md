@@ -36,6 +36,10 @@ use it; the commit history has the detail.
   portable file as well wrote it over the installed program. It now runs
   from where it is and leaves the installed one alone, and
   `snipux --remove` leaves it for the uninstaller.
+- **Ctrl+C no longer takes a screenshot while you are setting up a
+  recording.** With the chooser on Record and a region the recorder had
+  turned down, Ctrl+C copied a still of it and closed the snip. It now
+  does nothing there, the same as Enter never takes one.
 - **Window mode no longer shows the toolbar until you click a window.**
   The whole annotation toolbar came up under every window the pointer
   passed over, and the pen was armed before anything had been picked.

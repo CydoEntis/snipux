@@ -15183,6 +15183,31 @@ class TestSwitchingToRecordOverASelection:
         assert copied == []
         assert overlay.isVisible()
 
+    def test_ctrl_c_after_a_refusal_takes_no_screenshot(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay, requests = self._overlay_with_the_row_reopened(answer=False)
+        overlay._chooser.set_kind("record")
+        assert overlay._armed_for_recording is False
+
+        QTest.keyClick(overlay, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+
+        assert copied == []
+        assert len(requests) == 1
+        assert overlay.isVisible()
+
+    def test_ctrl_c_while_a_recording_is_armed_takes_no_screenshot(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay, _requests = self._overlay_with_the_row_reopened(answer=True)
+        overlay._chooser.set_kind("record")
+        assert overlay._armed_for_recording is True
+
+        QTest.keyClick(overlay, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+
+        assert copied == []
+        assert overlay.isVisible()
+
     def test_switching_back_to_stills_after_a_refusal_restores_the_toolbar(self):
         overlay, _requests = self._overlay_with_the_row_reopened(answer=False)
         overlay._chooser.set_kind("record")

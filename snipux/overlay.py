@@ -7994,8 +7994,17 @@ class OverlayWindow(QWidget):
         # users press it by habit. Without this it fell through to C, the
         # Callout letter: the snip armed a tool and the clipboard kept
         # whatever it held before.
+        #
+        # Nothing on the record side, armed or not: a still of the region a
+        # recording is being set up around is the wrong capture, exactly as
+        # it was for Enter above. The handoff gives Ctrl+C no meaning there,
+        # so it has none.
         if key == Qt.Key.Key_C and modifiers == Qt.KeyboardModifier.ControlModifier:
-            if self._selection is not None and not self._armed_for_recording:
+            if (
+                self._selection is not None
+                and not self._armed_for_recording
+                and self._chooser.kind != "record"
+            ):
                 self.copy()
                 self.close()
             return
