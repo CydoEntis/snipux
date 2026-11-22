@@ -1803,7 +1803,10 @@ class TestPartialRepaint:
         paint = OverlayWindow.paintEvent
 
         def recording_paint(self, event):
-            painted.append(event.region().boundingRect())
+            # Only this overlay's: one left open by an earlier test can
+            # still be handed a late expose of its own.
+            if self is overlay:
+                painted.append(event.region().boundingRect())
             paint(self, event)
 
         monkeypatch.setattr(OverlayWindow, "paintEvent", recording_paint)
