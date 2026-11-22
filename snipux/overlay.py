@@ -7673,17 +7673,20 @@ class OverlayWindow(QWidget):
         is None until it does -- so `setScreen` has something to act on.
         """
         if screen is None:
-            # Rendered once before mapping: `grab()` runs a full paintEvent
-            # into an offscreen pixmap, so the backing store already holds
-            # the frozen frame when the window appears rather than being
-            # filled on the first exposure.
-            self.grab()
             if self._map_animation_skipped:
                 # A window type the compositor maps without animating
                 # (`Platform.skip_map_animation`): nothing to wait out, so
-                # nothing to hide.
+                # nothing to hide. And nothing rendered beforehand: `grab()`
+                # paints into a pixmap of its own, not this window's
+                # backing store, so the exposure paints the whole frame
+                # again regardless. Measured on Windows, the frozen screen
+                # appears about 8 ms sooner without it.
                 self.show()
             else:
+                # Rendered once before mapping, so everything the first
+                # paint needs is already built by the time the window is
+                # revealed.
+                self.grab()
                 # Mapped transparent, then revealed. Mutter stages a newly
                 # mapped window by scaling it up into place, and over a frozen
                 # desktop that reads as a page expanding across the very area
