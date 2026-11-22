@@ -33,7 +33,7 @@ entry        handoff.py  ->  app.py (CLI, tray, controller)
                |
 views        chooser.py  overlay.py  flowbars.py  review.py  player.py
              pin.py  history.py  settings.py  winchrome.py  glass.py
-             toolbar.py  popovers.py  watermark.py
+             toolbar.py  popovers.py  watermark.py  overlaychrome.py
                |
 model        shapes.py  marks.py  sensitive.py  textsnap.py
                |
@@ -98,6 +98,7 @@ snipux/
   toolbar.py        the floating annotation bar, its buttons and hint strip
   popovers.py       the style popover, capture-mode popover and family menus
   watermark.py      the watermark's session choice, Settings content and menu
+  overlaychrome.py  the hint HUD, toast, close button and delay countdown
   chooser.py        the pre-snip row
   flowbars.py       the post-selection bars (views only)
   shapes.py         annotation data model and flattening renderer
@@ -164,16 +165,13 @@ the model do not import it: a recorder is handed what it needs as
   from the player), belongs in `ffmpeg.py`, below the views.
 - **`output.py` imports `setup_desktop.py`**, inside `save_image()`, for
   the filename pattern.
-- **`review.py` imports `Toast` from `overlay.py`.** It is shared chrome
-  and should live in a module of its own, as the bar and its menus now do
-  in `toolbar.py` and `popovers.py`.
 - **Private names cross modules.** `review.py`, `player.py` and
   `history.py` import `_ui_font` and `_mono_font` from `winchrome.py`.
-  `overlay.py` takes `_Chrome` and `_bar_keys` from `toolbar.py` and
-  `_STEP_KEY_CODES` from `popovers.py`, `popovers.py` and `watermark.py`
-  build on `toolbar._Chrome`, and `overlay.py` re-exports a handful of the bar's
-  and the menus' private widgets for the tests that still import them
-  from it.
+  `overlay.py` takes `_STEP_KEY_CODES` from `popovers.py` and
+  `_CloseButton` from `overlaychrome.py`; `popovers.py`, `watermark.py`
+  and `overlaychrome.py` build on `toolbar._Chrome`; and `overlay.py`
+  re-exports a handful of the bar's and the menus' private widgets for
+  the tests that still import them from it.
 - **`marks.py` is listed as model and holds a widget**:
   `TextLabelEditor` drives a `QLineEdit`.
 

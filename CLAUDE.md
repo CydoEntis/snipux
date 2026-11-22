@@ -83,6 +83,9 @@ snipux/
   watermark.py  the watermark's own pieces: the shape of the session's
                 choice, what Settings says the mark is, and the menu for
                 its corner and opacity
+  overlaychrome.py  the overlay's small chrome: the hint HUD, the toast
+                (review.py shows the same one), the close button and the
+                delay countdown
   chooser.py    the docked pre-snip chooser row: what to capture, and what
                 happens to it afterwards
   flowbars.py   the post-selection bars from the locked capture-flow handoff
