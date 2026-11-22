@@ -79,6 +79,9 @@ use it; the commit history has the detail.
   on the frame you chose.
 ### Fixed
 
+- **Snipux starts without stopping to read your recent saves,** and saving
+  a snip no longer reads the picture back from the file it just wrote. The
+  tray menu's previews are prepared in the background instead.
 - **Snipux no longer keeps a preview of every snip you ever saved.** Left
   running for days, it held one for each save until it quit.
 - **A second, different problem is no longer kept quiet.** After one error

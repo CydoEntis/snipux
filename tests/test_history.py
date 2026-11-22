@@ -46,6 +46,57 @@ class TestSavedThumbnail:
 
         assert thumb.width() == history._THUMB_EDGE
 
+    def test_the_file_is_decoded_at_thumbnail_size(self, tmp_path, monkeypatch):
+        # Reading the whole picture and then shrinking it holds a full-size
+        # copy of every recent save, on the UI thread, to make a 640px one.
+        path = save_png(tmp_path / "big.png", make_image(2000, 1000))
+        asked_for = []
+
+        class WatchedReader(history.QImageReader):
+            def read(self):
+                asked_for.append(self.scaledSize())
+                return super().read()
+
+        monkeypatch.setattr(history, "QImageReader", WatchedReader)
+
+        thumb = history.saved_thumbnail(path)
+
+        assert (thumb.width(), thumb.height()) == (history._THUMB_EDGE, history._THUMB_EDGE // 2)
+        assert [(size.width(), size.height()) for size in asked_for] == [
+            (history._THUMB_EDGE, history._THUMB_EDGE // 2)
+        ]
+
+    def test_a_small_image_is_not_scaled_up(self, tmp_path):
+        path = save_png(tmp_path / "small.png", make_image(40, 30))
+
+        thumb = history.saved_thumbnail(path)
+
+        assert (thumb.width(), thumb.height()) == (40, 30)
+
+    def test_a_capture_just_saved_is_not_read_back_from_its_file(self, tmp_path, monkeypatch):
+        image = make_image(2000, 1000)
+        path = save_png(tmp_path / "just saved.png", image)
+
+        history.remember_thumbnail(path, image)
+
+        def never(*_args):
+            raise AssertionError("the file was read again")
+
+        monkeypatch.setattr(history, "QImageReader", never)
+        thumb = history.saved_thumbnail(path)
+        assert (thumb.width(), thumb.height()) == (history._THUMB_EDGE, history._THUMB_EDGE // 2)
+
+    def test_a_file_changed_since_it_was_remembered_is_read_again(self, tmp_path):
+        import os
+
+        path = save_png(tmp_path / "edited.png", make_image(2000, 1000))
+        history.remember_thumbnail(path, make_image(2000, 1000))
+        save_png(path, make_image(300, 300))
+        stamp = path.stat().st_mtime_ns + 5_000_000_000
+        os.utime(path, ns=(stamp, stamp))
+
+        assert history.saved_thumbnail(path).width() == 300
+
     def test_the_cache_holds_a_bounded_number_of_thumbnails(self, tmp_path):
         # Days of saves used to leave a thumbnail behind for every one.
         paths = [
@@ -73,6 +124,17 @@ class TestSavedThumbnail:
 
         assert paths[0] in history._thumbnails
         assert paths[1] not in history._thumbnails
+
+    def test_warming_fills_the_cache_and_then_says_so(self, tmp_path):
+        path = save_png(tmp_path / "recent.png", make_image(2000, 1000))
+        warmup = history.ThumbnailWarmup([path, tmp_path / "gone.png"])
+        done = []
+        warmup.finished.connect(lambda: done.append(True))
+
+        warmup._run()
+
+        assert done == [True]
+        assert path in history._thumbnails
 
     def test_a_recording_or_missing_file_has_none(self, tmp_path):
         video = tmp_path / "clip.mp4"

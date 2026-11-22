@@ -5951,6 +5951,52 @@ class TestAppControllerRecentCaptures:
         assert self._recent_texts(controller) == [second.name, first.name]
         assert controller._recent_menu.menuAction() in controller._tray_menu.actions()
 
+    def test_starting_up_lists_recent_saves_without_decoding_them(
+        self, make_controller, tmp_path, monkeypatch
+    ):
+        # Every recent save was decoded full-size before the tray icon was
+        # even shown.
+        saved = tmp_path / "Screenshot from 2026-09-16 10-00-00.png"
+        make_image().save(str(saved), "PNG")
+        setup_desktop.save_recent_captures([saved])
+        decoded = []
+        monkeypatch.setattr(
+            app.history, "saved_thumbnail", lambda path: decoded.append(path)
+        )
+
+        controller = self._make(make_controller)
+
+        assert self._recent_texts(controller) == [saved.name]
+        assert decoded == []
+
+    def test_opening_the_menu_gives_the_rows_their_pictures(
+        self, make_controller, tmp_path
+    ):
+        saved = tmp_path / "Screenshot from 2026-09-16 10-00-00.png"
+        make_image().save(str(saved), "PNG")
+        setup_desktop.save_recent_captures([saved])
+        controller = self._make(make_controller)
+
+        controller._tray_menu.aboutToShow.emit()
+
+        assert not controller._recent_menu.actions()[0].icon().isNull()
+
+    def test_a_snip_just_saved_is_not_decoded_again_for_its_row(
+        self, make_controller, tmp_path, monkeypatch
+    ):
+        controller = self._make(make_controller)
+        saved = tmp_path / "Screenshot from 2026-09-16 10-00-00.png"
+        image = make_image()
+        image.save(str(saved), "PNG")
+
+        def never(*_args):
+            raise AssertionError("the saved file was read back")
+
+        monkeypatch.setattr(app.history, "QImageReader", never)
+        controller._on_captured(image, saved)
+
+        assert not controller._recent_menu.actions()[0].icon().isNull()
+
     def test_a_clipboard_only_still_adds_nothing(self, make_controller):
         controller = self._make(make_controller)
 

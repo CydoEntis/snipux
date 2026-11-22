@@ -1545,7 +1545,10 @@ class AppController:
         # the icon before, so clicking it did nothing at all -- and the
         # menu's own Settings item is a right-click plus a click away.
         self._tray_icon.activated.connect(self._on_tray_activated)
-        self._rebuild_recent_menu()
+        # Rows only. Their pictures mean decoding every recent save -- about
+        # 70 ms for each 4K PNG -- and that was paid here, before the tray
+        # icon was on screen. `warm_recent_thumbnails` adds them afterwards.
+        self._rebuild_recent_menu(thumbnails=False)
         self._rebuild_copy_history_menu()
 
         if self._tray_available:
@@ -1575,7 +1578,7 @@ class AppController:
             self.start_capture, self.open_settings, self.open_path, self.open_editor
         )
 
-    def _rebuild_recent_menu(self) -> None:
+    def _rebuild_recent_menu(self, *, thumbnails: bool = True) -> None:
         """Refresh the tray's Recent section from what is actually still on
         disk (#85).
 
@@ -1596,6 +1599,9 @@ class AppController:
         The section itself is a submenu (`self._recent_menu`), inserted
         before Settings only while it has rows and removed outright when it
         doesn't -- nothing greyed out, nothing shown for an empty list.
+
+        `thumbnails` is False for the one build made while starting up --
+        see `warm_recent_thumbnails`.
         """
         stored = setup_desktop.load_recent_captures()
         survivors = [path for path in stored if path.exists()]
@@ -1605,7 +1611,7 @@ class AppController:
         self._recent_menu.clear()
         for path in survivors:
             action = self._recent_menu.addAction(path.name)
-            thumbnail = history.saved_thumbnail(path)
+            thumbnail = history.saved_thumbnail(path) if thumbnails else None
             if thumbnail is not None:
                 action.setIcon(self._menu_thumbnail(thumbnail))
             action.triggered.connect(lambda checked=False, p=path: self._open_recent_capture(p))
@@ -1623,6 +1629,17 @@ class AppController:
                 self._tray_menu.insertMenu(before, self._recent_menu)
         elif menu_action in self._tray_menu.actions():
             self._tray_menu.removeAction(menu_action)
+
+    def warm_recent_thumbnails(self) -> None:
+        """Make the Recent rows' pictures off the UI thread, then put them
+        on the rows. Called once by the process that becomes resident, after
+        the tray icon is up. The rebuild that follows is not left to the
+        menu's `aboutToShow`, which GNOME's indicator may never send."""
+        warmup = history.ThumbnailWarmup(self._existing_recent_captures())
+        warmup.finished.connect(self._rebuild_recent_menu)
+        # Held: the signal is delivered through this object.
+        self._thumbnail_warmup = warmup
+        warmup.start()
 
     _COPY_HISTORY_LABEL_CHARS = 40
     _COPY_HISTORY_THUMBNAIL = 48
@@ -2226,6 +2243,9 @@ class AppController:
         # there is nothing to reopen, so nothing is added.
         if path is not None:
             setup_desktop.add_recent_capture(path)
+            # The picture is already in hand; without this the rebuild reads
+            # it back out of the file it was just written to.
+            history.remember_thumbnail(Path(path), image)
             self._rebuild_recent_menu()
 
         # The chooser is the authority: it is seeded from Settings when the
@@ -4423,6 +4443,7 @@ def _become_resident(
     # day snipux is not opened. Says nothing unless there is something to
     # say (`check_for_updates_daily`).
     controller.check_for_updates_daily()
+    controller.warm_recent_thumbnails()
     # Reading the system font list is ~120ms on Windows and the first
     # overlay needs it. Once the loop is idle, so the first snip after
     # launch is not the one that pays for it.
