@@ -38,6 +38,11 @@ finishes, and one left by a run that was killed is deleted by the next. A
 folder with `unins000.exe` in it is the installer's, and the portable exe
 writes nothing to it.
 
+A snip is written as `<name>.png.part` beside where it is going and renamed
+once it is complete (`output.write_image`), so the real name never holds
+half a picture. A `.part` file left in the save folder is a write that was
+cut off -- by a crash or a power loss -- and is safe to delete.
+
 `crash.log` holds unhandled exceptions. `snipux.log` holds the failures
 snipux dealt with and would once only have printed -- a shortcut that could
 not be written, a snip that failed with no tray to say so -- one dated line

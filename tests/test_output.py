@@ -7,10 +7,14 @@ used to be reported to the user as a success.
 """
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
 from PyQt6.QtGui import QImage
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication
 
 from snipux import output
 
@@ -19,6 +23,134 @@ def make_image(width: int = 20, height: int = 12) -> QImage:
     image = QImage(width, height, QImage.Format.Format_RGB32)
     image.fill(0xFF3366CC)
     return image
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    return QApplication.instance() or QApplication([])
+
+
+def wait_until(condition, timeout_ms: int = 10_000) -> None:
+    """Run the event loop until `condition()` holds, and fail rather than
+    hang if it never does."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while not condition():
+        assert time.monotonic() < deadline, "waited too long"
+        QTest.qWait(1)
+
+
+class TestWriteImage:
+    def test_a_failed_write_leaves_nothing_under_either_name(self, tmp_path):
+        path = tmp_path / "snip.png"
+
+        with pytest.raises(OSError):
+            output.write_image(QImage(), path)
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_real_name_never_holds_a_partial_file(self, tmp_path, monkeypatch):
+        # Quitting part-way through must not leave a truncated PNG where
+        # the snip was meant to be: the bytes go to another name first.
+        path = tmp_path / "snip.png"
+        seen_while_encoding = []
+        really_save = QImage.save
+
+        def save(image, target, fmt):
+            seen_while_encoding.append((Path(target), path.exists()))
+            return really_save(image, target, fmt)
+
+        monkeypatch.setattr(QImage, "save", save)
+
+        output.write_image(make_image(), path)
+
+        [(target, real_name_existed)] = seen_while_encoding
+        assert target != path and target.parent == path.parent
+        assert not real_name_existed
+        assert [entry.name for entry in tmp_path.iterdir()] == ["snip.png"]
+
+
+class TestSaveImageLater:
+    """`save_image_later`: the name now, the bytes on a worker thread, the
+    answer back on the UI thread. The write is held by a stand-in that
+    waits for the test, never by a sleep."""
+
+    @pytest.fixture
+    def held(self, qapp, monkeypatch):
+        go = threading.Event()
+        really_write = output.write_image
+
+        def write_image(image, path):
+            assert go.wait(10), "the test never let the write finish"
+            really_write(image, path)
+
+        monkeypatch.setattr(output, "write_image", write_image)
+        yield go
+        go.set()
+        wait_until(lambda: not output.saves_in_flight())
+
+    def test_it_returns_the_path_before_the_file_is_written(self, held, tmp_path):
+        landed = []
+
+        path = output.save_image_later(
+            make_image(), tmp_path, pattern="snip", on_written=lambda *a: landed.append(a)
+        )
+
+        assert path == tmp_path / "snip.png"
+        assert not path.exists() and landed == []
+        held.set()
+        wait_until(lambda: landed)
+        assert landed == [(path, None)]
+        assert not QImage(str(path)).isNull()
+
+    def test_the_answer_comes_back_on_the_calling_thread(self, held, tmp_path):
+        threads = []
+        output.save_image_later(
+            make_image(), tmp_path, on_written=lambda *a: threads.append(threading.current_thread())
+        )
+
+        held.set()
+        wait_until(lambda: threads)
+
+        assert threads == [threading.current_thread()]
+
+    def test_two_saves_in_one_second_never_share_a_name(self, held, tmp_path):
+        # Nothing is on disk under the first name yet to say it is taken.
+        landed = []
+        first = output.save_image_later(
+            make_image(), tmp_path, pattern="snip", on_written=lambda *a: landed.append(a)
+        )
+        second = output.save_image_later(
+            make_image(), tmp_path, pattern="snip", on_written=lambda *a: landed.append(a)
+        )
+        held.set()
+        third = output.save_image(make_image(), tmp_path, pattern="snip")
+        wait_until(lambda: len(landed) == 2)
+
+        assert len({first, second, third}) == 3
+        assert all(path.is_file() for path in (first, second, third))
+
+    def test_a_name_is_free_again_once_its_write_has_failed(self, qapp, tmp_path):
+        landed = []
+        first = output.save_image_later(
+            QImage(), tmp_path, pattern="snip", on_written=lambda *a: landed.append(a)
+        )
+        wait_until(lambda: landed)
+
+        [(path, error)] = landed
+        assert path == first and isinstance(error, OSError)
+        assert list(tmp_path.iterdir()) == []
+        assert output.save_image(make_image(), tmp_path, pattern="snip") == first
+
+    def test_a_folder_that_cannot_be_made_raises_before_anything_starts(self, qapp, tmp_path):
+        blocker = tmp_path / "not-a-folder"
+        blocker.write_text("in the way")
+
+        with pytest.raises(OSError):
+            output.save_image_later(
+                make_image(), blocker / "snips", on_written=lambda *a: pytest.fail("reported")
+            )
+
+        assert output.saves_in_flight() == 0
 
 
 class TestSaveImage:

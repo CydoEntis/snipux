@@ -7552,7 +7552,52 @@ class OverlayWindow(QWidget):
         """The floating bar's Save button: save, then dismiss."""
         if self._held_for_sensitive_check(self._on_bar_save):
             return
-        self.save()
+        self._save_after_closing()
+
+    def _save_after_closing(self) -> None:
+        """Save as `save()` does, but take this window off the screen
+        before the file is written rather than after.
+
+        `save()` encodes the PNG before it returns -- 130-190 ms for a 4K
+        selection, over 300 ms for a 5120x2880 desktop -- and with the
+        close behind it, the frozen frame sat there for all of that after
+        the user had let go. Here the name is chosen, the window closes,
+        and `output.save_image_later` writes the file on a worker thread.
+
+        The caller's `on_captured` is told only once the write has landed,
+        never at the close: the Recent list, the review window and the
+        "Saved to" notice all take the path as a file that exists. So it
+        arrives after `on_dismissed`, and brings `outcome` and `save_error`
+        with it -- by then the caller can no longer ask a window that has
+        gone, and may already have another one open.
+
+        A write that fails ends the way `save()`'s does: the picture goes
+        to the clipboard and is reported with no path.
+        """
+        directory = setup_desktop.load_save_folder()
+        # A copy this window has no part in: the worker thread encodes it
+        # and the report carries it, both after this window has closed.
+        image = self.rendered_image().copy()
+        on_captured, outcome = self._on_captured, self.outcome
+        self._remember_last_region()
+
+        def report(path: "Path | None", error: "OSError | None") -> None:
+            if error is not None:
+                output.copy_image_to_clipboard(image)
+            if on_captured is not None:
+                on_captured(
+                    image,
+                    None if error is not None else path,
+                    outcome=outcome,
+                    save_error=None if error is None else str(error),
+                )
+
+        try:
+            output.save_image_later(image, directory, on_written=report)
+        except OSError as exc:
+            # The folder itself could not be made, so nothing was started.
+            self.save_error = str(exc)
+            report(None, exc)
         self.close()
 
     def _on_bar_open(self) -> None:
@@ -7569,8 +7614,7 @@ class OverlayWindow(QWidget):
         if self._held_for_sensitive_check(self._on_bar_open):
             return
         self._chooser.set_after("review")
-        self.save()
-        self.close()
+        self._save_after_closing()
 
     def _on_bar_pin(self) -> None:
         """Pin (SNX-83): hand the render and the selection's own absolute

@@ -10008,7 +10008,8 @@ class TestHideSensitiveText:
     def test_a_save_asked_for_during_the_check_waits_for_the_boxes(
         self, recognizer, monkeypatch, tmp_path
     ):
-        monkeypatch.setattr(setup_desktop, "load_save_folder", lambda *a, **k: tmp_path)
+        folder = tmp_path / "snips"
+        monkeypatch.setattr(setup_desktop, "load_save_folder", lambda *a, **k: folder)
         recognizer.hold()
         overlay = self._shown(self._overlay())
         saved = []
@@ -10017,7 +10018,7 @@ class TestHideSensitiveText:
 
         overlay._bar.saveRequested.emit()
 
-        assert saved == [] and list(tmp_path.iterdir()) == []
+        assert saved == [] and not folder.exists()
         recognizer.release()
         _settle_sensitive_check(overlay)
         _wait_until(lambda: saved)
@@ -13226,9 +13227,12 @@ class TestTheDestinationMenuChangesTheDestination:
     def test_choosing_save_stops_the_review_window_opening(self, monkeypatch, tmp_path):
         overlay = self._overlay(monkeypatch, tmp_path, "review")
         seen = []
-        overlay._on_captured = lambda image, path: seen.append(overlay.outcome)
+        # A save reports once its file is written, after the overlay has
+        # closed, and says itself what the snip was headed for.
+        overlay._on_captured = lambda image, path, outcome, save_error: seen.append(outcome)
 
         overlay._on_destination_chosen("Save")
+        _wait_until(lambda: seen)
 
         assert seen == ["save"]
 
@@ -13236,9 +13240,10 @@ class TestTheDestinationMenuChangesTheDestination:
         # The other direction, from a chooser that did *not* ask for it.
         overlay = self._overlay(monkeypatch, tmp_path, "instant")
         seen = []
-        overlay._on_captured = lambda image, path: seen.append(overlay.outcome)
+        overlay._on_captured = lambda image, path, outcome, save_error: seen.append(outcome)
 
         overlay._on_destination_chosen("Open")
+        _wait_until(lambda: seen)
 
         assert seen == ["review"]
 
@@ -14816,6 +14821,162 @@ class TestASaveThatCannotBeWritten:
         assert len(captured) == 1
         assert captured[0][1] is None
         assert not captured[0][0].isNull()
+
+
+class TestASaveDoesNotHoldTheOverlayOpen:
+    """Save, Open and an instant save close the overlay and write the file
+    afterwards: encoding a 4K PNG takes 130-190 ms, and the frozen frame
+    used to sit on screen for all of it after the user had let go.
+
+    The write is held open here by a stand-in for `output.write_image`
+    that waits to be released, so "while the file is being written" is a
+    state the test stands in, not a race."""
+
+    SELECTION = QRect(100, 100, 300, 250)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    @pytest.fixture
+    def writing(self, monkeypatch, tmp_path):
+        folder = tmp_path / "snips"
+        monkeypatch.setattr(setup_desktop, "load_save_folder", lambda *a, **k: folder)
+        state = SimpleNamespace(folder=folder, go=threading.Event(), error=None)
+        really_write = output_module.write_image
+
+        def write_image(image, path):
+            assert state.go.wait(10), "the test never let the write finish"
+            if state.error is not None:
+                raise state.error
+            really_write(image, path)
+
+        monkeypatch.setattr(output_module, "write_image", write_image)
+        yield state
+        state.go.set()
+        _wait_until(lambda: not output_module.saves_in_flight())
+
+    def _overlay(self, after="edit"):
+        events = []
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(
+            frame,
+            on_dismissed=lambda: events.append("dismissed"),
+            on_captured=lambda image, path, **facts: events.append(("captured", image, path, facts)),
+        )
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._chooser.set_after(after)
+        overlay.set_selection(self.SELECTION)
+        return overlay, events
+
+    def _finish(self, writing, events):
+        writing.go.set()
+        _wait_until(lambda: len(events) == 2)
+        return events[1]
+
+    def test_the_overlay_closes_before_the_file_is_written(self, writing):
+        overlay, events = self._overlay()
+
+        overlay._bar.saveRequested.emit()
+
+        assert not overlay.isVisible()
+        assert events == ["dismissed"]
+        assert list(writing.folder.iterdir()) == []
+
+    def test_the_capture_is_reported_once_the_file_exists(self, writing):
+        overlay, events = self._overlay()
+        overlay._bar.saveRequested.emit()
+
+        _kind, image, path, facts = self._finish(writing, events)
+
+        assert path.parent == writing.folder and path.is_file()
+        assert QImage(str(path)).size() == QSize(300, 250)
+        assert image.size() == QSize(300, 250)
+        assert facts == {"outcome": "edit", "save_error": None}
+        assert [entry.name for entry in writing.folder.iterdir()] == [path.name]
+
+    def test_open_hands_over_the_file_only_once_it_exists(self, writing):
+        overlay, events = self._overlay()
+        overlay._bar.openRequested.emit()
+        assert events == ["dismissed"]
+
+        _kind, _image, path, facts = self._finish(writing, events)
+
+        assert path.is_file()
+        assert facts["outcome"] == "review"
+
+    def test_an_instant_save_closes_first_too(self, writing, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda *a, **k: True)
+        overlay, events = self._overlay(after="instant")
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert events == ["dismissed"]
+        _kind, _image, path, facts = self._finish(writing, events)
+        assert path.is_file()
+        assert facts["outcome"] == "instant"
+
+    def test_a_write_that_fails_copies_the_snip_and_says_why(self, writing, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        writing.error = OSError("no space left on device")
+        overlay, events = self._overlay()
+        overlay._bar.saveRequested.emit()
+        assert copied == []
+
+        _kind, image, path, facts = self._finish(writing, events)
+
+        assert path is None
+        assert facts == {"outcome": "edit", "save_error": "no space left on device"}
+        assert [shot.size() for shot in copied] == [QSize(300, 250)]
+        assert not image.isNull()
+        assert list(writing.folder.iterdir()) == []
+
+    def test_a_folder_that_cannot_be_made_is_reported_before_closing(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+
+        def refuse(image, directory=None, *, on_written, pattern=None):
+            raise PermissionError("access denied")
+
+        monkeypatch.setattr(output_module, "save_image_later", refuse)
+        overlay, events = self._overlay()
+
+        overlay._bar.saveRequested.emit()
+
+        [(_kind, _image, path, facts), dismissed] = events
+        assert dismissed == "dismissed"
+        assert path is None and facts["save_error"] == "access denied"
+        assert len(copied) == 1
+
+    def test_the_marks_on_screen_at_the_press_are_the_ones_saved(self, writing):
+        # The picture is flattened at the press, on its own copy: nothing
+        # done to the overlay while the file is written can reach it.
+        overlay, events = self._overlay()
+        overlay.add_mark(Redact(
+            colour=QColor("#000000"), stroke_width=2,
+            start=QPointF(150, 150), end=QPointF(250, 250),
+        ))
+        overlay._bar.saveRequested.emit()
+        overlay.clear()
+
+        _kind, _image, path, _facts = self._finish(writing, events)
+
+        assert QImage(str(path)).pixelColor(100, 100) == QColor(0, 0, 0)
+
+    def test_saving_directly_still_writes_before_it_returns(self, writing):
+        # `save()` itself is unchanged: a caller that wants the path back
+        # gets a file that is already there.
+        writing.go.set()
+        overlay, events = self._overlay()
+
+        path = overlay.save()
+
+        assert path.is_file()
+        assert overlay.isVisible()
+        assert events[0][2] == path
 
 
 class TestAnInstantSnipShowsNoToolbar:

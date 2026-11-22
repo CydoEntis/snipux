@@ -2345,7 +2345,9 @@ class AppController:
             self._armed_recording = None
         self._teardown_recording_ui()
 
-    def _on_captured(self, image, path) -> None:
+    def _on_captured(
+        self, image, path, *, outcome: str | None = None, save_error: str | None = None
+    ) -> None:
         """Open the review window for a finished snip, when it is turned on.
 
         Off unless asked for: the overlay already annotates in place, so a
@@ -2353,6 +2355,12 @@ class AppController:
         a default to inherit. Read fresh each time rather than cached at
         startup, so toggling it in Settings takes effect on the next snip
         instead of the next launch.
+
+        `outcome` and `save_error` come with a save that was written after
+        its overlay closed (`OverlayWindow._save_after_closing`): that
+        overlay is no longer `self._overlay` to ask, and a newer snip's may
+        be. Any other capture arrives while its overlay is still open, and
+        the two are read from it.
         """
         # #85: a still with nowhere else to reopen it from goes on the tray's
         # Recent list. `path` is None for a clipboard-only destination --
@@ -2368,11 +2376,12 @@ class AppController:
         # overlay opens, so its value is either what Settings says or what
         # the user changed it to for this snip. Either way it is the more
         # current answer.
-        if self._overlay is not None:
-            opening_review = self._overlay.outcome == "review"
+        if outcome is None and self._overlay is not None:
+            outcome, save_error = self._overlay.outcome, self._overlay.save_error
+        if outcome is not None:
+            opening_review = outcome == "review"
         else:
             opening_review = setup_desktop.load_review_window()
-        save_error = self._overlay.save_error if self._overlay is not None else None
         if opening_review and save_error is not None:
             # The review window shows the snip but not that its save failed.
             self._notify_capture(None, save_error=save_error)

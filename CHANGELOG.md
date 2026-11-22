@@ -29,6 +29,14 @@ use it; the commit history has the detail.
 - **The first snip after starting Snipux is as quick as the rest.** It
   used to take about twice as long to open as every snip after it.
 
+- **Saving a snip hands the screen back at once.** The frozen screen used
+  to stay up while the picture was written to disk -- a third of a second
+  for a large desktop. It now goes the moment you save, and the file is
+  written behind it; the "Saved to" notice, the Recent list and the review
+  window follow as soon as the file is really there. A save that fails
+  still puts the snip on the clipboard and says why, and a save cut off
+  part-way no longer leaves a broken picture behind.
+
 ### Fixed
 
 - **Running the portable `snipux.exe` no longer damages an installed

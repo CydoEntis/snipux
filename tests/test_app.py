@@ -7240,6 +7240,138 @@ class TestACaptureIsConfirmed:
         assert said == []
 
 
+class TestASaveLandsAfterItsOverlayHasGone:
+    """Save and Open close the overlay first and write the file after, so
+    the controller hears about the capture with no overlay left to ask --
+    and must not hear about a file before it exists."""
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    @pytest.fixture
+    def writing(self, monkeypatch, tmp_path):
+        """The background write, held until the test lets it go."""
+        folder = tmp_path / "snips"
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_save_folder", lambda *a, **k: folder)
+        state = SimpleNamespace(folder=folder, go=threading.Event(), error=None)
+        really_write = overlay_module.output.write_image
+
+        def write_image(image, path):
+            assert state.go.wait(10), "the test never let the write finish"
+            if state.error is not None:
+                raise state.error
+            really_write(image, path)
+
+        monkeypatch.setattr(overlay_module.output, "write_image", write_image)
+        yield state
+        state.go.set()
+        self._landed()
+
+    def _landed(self):
+        deadline = time.monotonic() + 10
+        while overlay_module.output.saves_in_flight():
+            assert time.monotonic() < deadline, "the save never reported back"
+            QTest.qWait(1)
+
+    def _snip(self, controller, monkeypatch, after):
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_after_capture", lambda cd=None: after
+        )
+        controller.start_capture()
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        overlay = controller._overlay
+        overlay.set_selection(QRect(10, 10, 100, 80))
+        return overlay, said
+
+    def test_nothing_is_said_or_listed_until_the_file_exists(
+        self, make_controller, monkeypatch, writing
+    ):
+        controller = self._controller(make_controller)
+        overlay, said = self._snip(controller, monkeypatch, "edit")
+
+        overlay._bar.saveRequested.emit()
+
+        assert controller._overlay is None
+        assert said == []
+        assert setup_desktop.load_recent_captures() == []
+        writing.go.set()
+        self._landed()
+        [path] = writing.folder.iterdir()
+        assert said == [f"Saved to {path.parent.name}/{path.name}"]
+        assert setup_desktop.load_recent_captures() == [path]
+
+    def test_a_save_opens_no_review_window_though_settings_ask_for_one(
+        self, make_controller, monkeypatch, writing
+    ):
+        # With the overlay gone the controller used to fall back to the
+        # stored preference -- which is not what this snip chose.
+        monkeypatch.setattr(setup_desktop, "load_review_window", lambda cd=None: True)
+        controller = self._controller(make_controller)
+        overlay, said = self._snip(controller, monkeypatch, "edit")
+
+        overlay._bar.saveRequested.emit()
+        writing.go.set()
+        self._landed()
+
+        assert controller._reviews == []
+        assert len(said) == 1 and said[0].startswith("Saved to ")
+
+    def test_open_shows_the_review_window_with_the_written_file(
+        self, make_controller, monkeypatch, writing
+    ):
+        monkeypatch.setattr(setup_desktop, "load_review_window", lambda cd=None: False)
+        controller = self._controller(make_controller)
+        overlay, _said = self._snip(controller, monkeypatch, "edit")
+
+        overlay._bar.openRequested.emit()
+        assert controller._reviews == []
+        writing.go.set()
+        self._landed()
+
+        [review] = controller._reviews
+        [path] = writing.folder.iterdir()
+        assert path.is_file()
+        review.close()
+
+    def test_a_newer_snip_does_not_decide_what_an_older_save_does(
+        self, make_controller, monkeypatch, writing
+    ):
+        controller = self._controller(make_controller)
+        overlay, _said = self._snip(controller, monkeypatch, "edit")
+        overlay._bar.saveRequested.emit()
+        # The next snip is already open, and headed for the review window,
+        # when the first one's file lands.
+        newer, _ = self._snip(controller, monkeypatch, "review")
+
+        writing.go.set()
+        self._landed()
+
+        assert controller._reviews == []
+        newer.close()
+
+    def test_a_write_that_fails_says_so_and_keeps_the_snip(
+        self, make_controller, monkeypatch, writing
+    ):
+        writing.error = PermissionError("access denied")
+        controller = self._controller(make_controller)
+        overlay, said = self._snip(controller, monkeypatch, "edit")
+        QGuiApplication.clipboard().clear()
+
+        overlay._bar.saveRequested.emit()
+        writing.go.set()
+        self._landed()
+
+        assert len(said) == 1
+        assert "Could not save" in said[0] and "access denied" in said[0]
+        assert QGuiApplication.clipboard().image().size() == QSize(100, 80)
+        assert setup_desktop.load_recent_captures() == []
+
+
 class TestReviewWindowIntegration:
     """The review window is off unless Settings turns it on, and opens only
     for a real capture -- never for a cancelled snip.
