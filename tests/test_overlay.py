@@ -15092,3 +15092,75 @@ class TestAWindowPickStaysOnThePicture:
         _send_move(overlay, self.HIT_POINT)
 
         assert overlay._selection == QRect(0, 300, 320, 200)
+
+
+class TestOneWindowPerScreenKeepsToItsOwnScreen:
+    """Where each monitor gets its own window -- several outputs on
+    Wayland, or screens of different scale -- every window is told about
+    every monitor but can only draw on its own."""
+
+    FIRST = QRectF(0, 0, 1600, 1000)
+    SECOND = QRectF(1600, 0, 1600, 1000)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self, monkeypatch):
+        _close_stray_toplevel_windows()
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_margins", lambda screen: QMargins()
+        )
+
+    def _open(self):
+        frame = make_frame(image_size=(3200, 1000), logical_size=(3200, 1000))
+        active = open_overlay(
+            frame,
+            [self.FIRST, self.SECOND],
+            wayland=True,
+            geometry_provider=_FakeWindowProvider(QRectF(100, 400, 300, 200)),
+        )
+        members = {
+            widget._frame.logical_origin.x(): widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow)
+            and widget._on_dismissed is active._on_dismissed
+        }
+        assert active is members[0.0]
+        return members[0.0], members[1600.0]
+
+    def test_a_bar_remembered_on_the_other_monitor_stays_in_this_window(self):
+        # Dragged to the next monitor on a desk where one window spanned
+        # both. This window covers one, so the next monitor is nowhere it
+        # can put a bar.
+        setup_desktop.save_bar_position(
+            setup_desktop.BarPosition(setup_desktop.BAR_ON_OTHER_MONITOR, (0.5, 0.5))
+        )
+        first, _second = self._open()
+
+        first.set_selection(QRect(0, 0, 1600, 1000))  # no room beside it
+
+        assert first._bar.isVisible()
+        assert QRectF(first.rect()).contains(QRectF(first._bar.geometry()))
+
+    def test_a_recalled_region_on_the_other_screen_survives_the_pointer_arriving(self):
+        setup_desktop.save_last_region((1800, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+        _first, second = self._open()
+        assert second._selection == QRect(200, 300, 640, 480)
+
+        _send_move(second, QPoint(900, 900))
+
+        assert second._selection == QRect(200, 300, 640, 480)
+        assert second._recalled_selection is True
+        assert second._bar.isVisible()
+
+    def test_a_mode_armed_on_the_first_screen_still_replaces_it(self):
+        # Window mode chosen before crossing over: the pick is what the
+        # user is doing now, and the offered rectangle gives way to it.
+        setup_desktop.save_last_region((1800, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+        first, second = self._open()
+        first._on_chooser_mode("Window")
+        assert first._picking_window
+
+        _send_move(second, QPoint(900, 900))
+
+        assert second._selection is None

@@ -6315,7 +6315,16 @@ class OverlayWindow(QWidget):
         selection = self._to_absolute_rect(QRectF(self._selection))
         size = self._bar.sizeHint()
         margin = design.tokens.BarMetric.BAR_EDGE_MARGIN
-        for other in other_screens_nearest_first(own, self._monitor_geometries, selection):
+        # Where each monitor has a window of its own, this one is still
+        # handed every monitor's geometry and draws on one. A bar sent to
+        # another was placed outside this window, where nothing shows it.
+        pictured = QRectF(self._frame.logical_origin, self._frame.logical_size)
+        covered = [
+            geometry
+            for geometry in self._monitor_geometries
+            if pictured.contains(geometry.center())
+        ]
+        for other in other_screens_nearest_first(own, covered, selection):
             usable = self._usable_area(other)
             if (
                 usable.width() >= size.width() + 2 * margin
@@ -6588,12 +6597,25 @@ class OverlayWindow(QWidget):
         """
         if self is other:
             return
+        # A rectangle this window recalled as it opened is the one thing
+        # here that is not `other`'s to replace: it is on this screen
+        # because the last snip was, and it used to vanish the moment the
+        # pointer arrived to use it. It gives way only to something the
+        # user has since armed on the other screen.
+        keeps_recalled = (
+            self._recalled_selection
+            and self._selection is not None
+            and other._chooser.kind == "stills"
+            and not other._picking_window
+            and not other._picking_monitor
+        )
         self._capture_mode = other._capture_mode
         self._delay = other._delay
         self._chooser.set_kind(other._chooser.kind)
         self._chooser.set_after(other._chooser.after)
         self._chooser.set_delay(other._chooser.delay)
-        self._chooser.set_mode(other._chooser.mode, announce=False)
+        if not keeps_recalled:
+            self._chooser.set_mode(other._chooser.mode, announce=False)
         self._chooser.set_hide_sensitive(other._chooser.hide_sensitive)
         self._chooser.set_record_cursor(other._chooser.record_cursor)
         self._bar.set_capture_mode(other._capture_mode)
@@ -6602,8 +6624,9 @@ class OverlayWindow(QWidget):
         self._picking_monitor = other._picking_monitor
         self._hovered_window = None
         self._hovered_monitor = None
-        self.set_selection(None)
-        self._chooser.reopen()
+        if not keeps_recalled:
+            self.set_selection(None)
+            self._chooser.reopen()
         self._sync_chooser_visibility()
         self._apply_idle_cursor()
 

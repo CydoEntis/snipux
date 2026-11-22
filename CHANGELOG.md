@@ -44,6 +44,11 @@ use it; the commit history has the detail.
 - **Switching to Record over a region you already selected sets up the
   recording.** The screenshot toolbar used to stay, nothing was ready to
   record, and Enter took a screenshot instead.
+- **Two fixes where each monitor has its own overlay** (several monitors
+  on Wayland, or monitors set to different scales). A toolbar you had
+  once dragged to the next monitor could be placed off screen, and a
+  last region recalled on the other monitor disappeared as the pointer
+  reached it.
 
 ## 1.3.1 — 2026-11-20
 
