@@ -472,6 +472,58 @@ class OverlayWindow(QWidget):
             else [QRectF(frame.logical_origin, frame.logical_size)]
         )
 
+        # The rest is built in the order below, and the order matters: each
+        # step's own comments say what it needs to exist before it. The
+        # steps are methods only so that this reads as a list; none is
+        # called from anywhere else.
+        self._configure_window(frame)
+        self._init_interaction_state()
+        self._build_bar()
+        self._build_style_popover_and_tool_hint()
+        self._build_chooser()
+        self._build_bar_menus()
+
+        # The delayed re-capture (SNX-50): `_registry` is what
+        # `_finish_delayed_capture` re-grabs through -- an empty
+        # `BackendRegistry` by default, the same "an inert default degrades
+        # instead of needing a None-check everywhere" shape
+        # `UnsupportedGeometryProvider` already gives `_geometry_provider`
+        # above (an empty registry's own `capture()` raises `CaptureError`
+        # with its own "no capture backend is available" message, which
+        # `_finish_delayed_capture` already has to handle for a real,
+        # non-empty registry that simply fails). `_countdown`/`_delay_timer`
+        # are built lazily, on the first delay actually confirmed, rather
+        # than unconditionally here -- unlike `_toast`/`_hud`, `_countdown`
+        # is not a child of this window (see its own docstring for why) and
+        # every `OverlayWindow` this file's tests build would otherwise
+        # leave a real, if hidden, extra top-level widget behind it.
+        # `_pending_capture_mode` is the mode `_on_capture_mode_selected`
+        # was confirming when the delay started, re-dispatched once the
+        # fresh frame is in.
+        self._registry = registry if registry is not None else BackendRegistry()
+        self._countdown: DelayCountdown | None = None
+        self._delay_timer: QTimer | None = None
+        self._delay_remaining = 0
+        self._pending_capture_mode: str | None = None
+
+        self._build_notices_and_close_button(hints_enabled)
+
+        # Last, once every piece of chrome above exists to react to it: the
+        # overlay opens on the previous snip's rectangle when the
+        # preference asks for it. Region is the mode a fresh overlay starts
+        # in (`tokens.CAPTURE_MODES[0]`), so this is that mode's opening
+        # state rather than a separate step -- and it is a no-op for
+        # everyone who has left the preference off.
+        #
+        # `_sync_bar_visibility` is gated on `self.isVisible()`, which is
+        # still false here, so the bar catches up in `showEvent` -- which
+        # already handles exactly this case for the same reason.
+        self._preselect_last_region()
+
+    def _configure_window(self, frame: Frame) -> None:
+        """`__init__`, step one: window flags, opaque painting, and a geometry
+        pinned to `frame`'s span of the virtual desktop.
+        """
         # Deliberately NOT X11BypassWindowManagerHint, tempting though it
         # is: an override-redirect window is not the window manager's to
         # stage, so it would skip Mutter's scale-up-on-map animation --
@@ -534,6 +586,11 @@ class OverlayWindow(QWidget):
         # not just while a button is held.
         self.setMouseTracking(True)
 
+    def _init_interaction_state(self) -> None:
+        """`__init__`, step two: everything this window tracks about the
+        selection, the pointer, the picking modes, drags, ink and the tools
+        -- all at rest. No chrome yet.
+        """
         # Window coordinates, per the class docstring -- None until
         # set_selection is called.
         self._selection: QRect | None = None
@@ -685,6 +742,10 @@ class OverlayWindow(QWidget):
         self._ants_timer.setInterval(self._ANTS_TIMER_INTERVAL_MS)
         self._ants_timer.timeout.connect(self._advance_ants)
 
+    def _build_bar(self) -> None:
+        """`__init__`, step three: the floating bar, hidden, and what each of
+        its signals does.
+        """
         # The floating bar (SNX-40): a real child widget, positioned under
         # the selection by `_sync_bar` below rather than drawn in this
         # class's own paintEvent. Starts hidden -- shown only once this
@@ -718,6 +779,10 @@ class OverlayWindow(QWidget):
         self._bar.dragMoved.connect(self._on_bar_dragged)
         self._bar.positionRemembered.connect(self._remember_bar_position)
 
+    def _build_style_popover_and_tool_hint(self) -> None:
+        """`__init__`, step four: the session's tool styles, the popover that
+        edits them and the strip that names the active tool.
+        """
         # Each tool's style -- the session's, so what was set on the last
         # snip is still set on this one -- and the popover the style dot
         # opens to change it. Its keys work whether it is open or not; see
@@ -738,6 +803,11 @@ class OverlayWindow(QWidget):
         self._tool_hint = ToolHintStrip(self)
         self._tool_hint.hide()
 
+    def _build_chooser(self) -> None:
+        """`__init__`, step five: the pre-snip chooser, seeded from what is
+        stored and from what this desktop can do. The order of seeding and
+        connecting inside is deliberate; see the comments.
+        """
         # The pre-snip chooser: what to capture, and what should happen to
         # it. Shown while there is no selection, which is exactly when the
         # floating bar is not -- the two never share the screen. See
@@ -824,6 +894,11 @@ class OverlayWindow(QWidget):
         self._chooser.reuseLastRegionChanged.connect(setup_desktop.save_reuse_last_region)
         self._chooser.hide_all()
 
+    def _build_bar_menus(self) -> None:
+        """`__init__`, step six: the capture-mode popover with the capture
+        state it reads back, then the family menus and the watermark menu.
+        After the bar and the chooser, which it connects to.
+        """
         # The capture-mode popover: opened from the bar's chip click via
         # `_toggle_capture_popover`, positioned by the popover's own
         # `reposition` against `_bar`'s geometry. `_capture_mode`/`_delay`
@@ -910,29 +985,10 @@ class OverlayWindow(QWidget):
         self._bar.toolHovered.connect(self._preview_tool)
         self._bar.toolUnhovered.connect(self._sync_tool_hint)
 
-        # The delayed re-capture (SNX-50): `_registry` is what
-        # `_finish_delayed_capture` re-grabs through -- an empty
-        # `BackendRegistry` by default, the same "an inert default degrades
-        # instead of needing a None-check everywhere" shape
-        # `UnsupportedGeometryProvider` already gives `_geometry_provider`
-        # above (an empty registry's own `capture()` raises `CaptureError`
-        # with its own "no capture backend is available" message, which
-        # `_finish_delayed_capture` already has to handle for a real,
-        # non-empty registry that simply fails). `_countdown`/`_delay_timer`
-        # are built lazily, on the first delay actually confirmed, rather
-        # than unconditionally here -- unlike `_toast`/`_hud`, `_countdown`
-        # is not a child of this window (see its own docstring for why) and
-        # every `OverlayWindow` this file's tests build would otherwise
-        # leave a real, if hidden, extra top-level widget behind it.
-        # `_pending_capture_mode` is the mode `_on_capture_mode_selected`
-        # was confirming when the delay started, re-dispatched once the
-        # fresh frame is in.
-        self._registry = registry if registry is not None else BackendRegistry()
-        self._countdown: DelayCountdown | None = None
-        self._delay_timer: QTimer | None = None
-        self._delay_remaining = 0
-        self._pending_capture_mode: str | None = None
-
+    def _build_notices_and_close_button(self, hints_enabled: bool) -> None:
+        """`__init__`, last of the chrome: the toast, the destination menu's
+        slot and guard, the hint HUD and the close button.
+        """
         # The toast (SNX-45): the single `Toast` instance `copy`/`save`/
         # `clear`/`discard` below all share -- see `_show_toast` for the
         # `self.isVisible()` gate that keeps it from painting into this
@@ -983,18 +1039,6 @@ class OverlayWindow(QWidget):
         self._close_button.clicked.connect(self._cancel)
         self._close_button.hide()
         self._reposition_close_button()
-
-        # Last, once every piece of chrome above exists to react to it: the
-        # overlay opens on the previous snip's rectangle when the
-        # preference asks for it. Region is the mode a fresh overlay starts
-        # in (`tokens.CAPTURE_MODES[0]`), so this is that mode's opening
-        # state rather than a separate step -- and it is a no-op for
-        # everyone who has left the preference off.
-        #
-        # `_sync_bar_visibility` is gated on `self.isVisible()`, which is
-        # still false here, so the bar catches up in `showEvent` -- which
-        # already handles exactly this case for the same reason.
-        self._preselect_last_region()
 
     def _remember_destination(self, after: str) -> None:
         """Persist the destination the user just picked, so the next snip
