@@ -77,6 +77,11 @@ use it; the commit history has the detail.
   encoded again to drop the audio, which took longer and lost a little
   quality. An export that is trimmed is still encoded, so the cut lands
   on the frame you chose.
+### Fixed
+
+- **A second, different problem is no longer kept quiet.** After one error
+  notice, later errors of the same kind from somewhere else were written
+  to the log without telling you.
 
 ## 1.3.1 — 2026-11-20
 

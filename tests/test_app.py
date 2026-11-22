@@ -2254,6 +2254,21 @@ class TestCrashLog:
 
         assert len(told) == 1
 
+    def test_a_second_failure_of_the_same_type_elsewhere_is_announced(self, tmp_path):
+        # Days into a session the second AttributeError is rarely the first
+        # one again; keyed on the type alone it was logged and never shown.
+        told = []
+        install_crash_log(lambda: tmp_path / "crash.log", notify=told.append)
+
+        self._raise_and_report("the overlay would not open")
+        try:
+            raise ValueError("the recording would not start")
+        except ValueError as error:
+            sys.excepthook(type(error), error, error.__traceback__)
+
+        assert len(told) == 2
+        assert "the recording would not start" in told[1]
+
     def test_a_tray_already_gone_does_not_raise_from_the_hook(self, tmp_path):
         def gone(_message):
             raise RuntimeError("wrapped C/C++ object has been deleted")

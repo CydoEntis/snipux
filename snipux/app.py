@@ -4266,13 +4266,14 @@ def install_crash_log(
     `log_path` is a callable rather than a path so the location is resolved
     when an exception happens, not when the hook is installed.
 
-    `notify`, when given, also tells the user, once per distinct error. A
+    `notify`, when given, also tells the user, once per distinct failure
+    (its type and the line that raised it). A
     log alone was not enough: a snip that failed to open looked exactly like
     a hotkey that had stopped working, with nothing on screen to say
     otherwise.
     """
     already_logged: set[str] = set()
-    notified: set[type] = set()
+    notified: set[tuple[type, str, int]] = set()
 
     def log_unhandled(exc_type, exc, tb) -> None:
         text = "".join(traceback.format_exception(exc_type, exc, tb))
@@ -4297,10 +4298,14 @@ def install_crash_log(
             # A log that cannot be written must not raise from the hook:
             # that would put the error back in Qt's hands.
             pass
-        # One notice per kind of error: a message that changes each time (a
-        # position in a paint error) would otherwise be a balloon per frame.
-        if notify is not None and exc_type not in notified:
-            notified.add(exc_type)
+        # One notice per failure, where a failure is its type and the line
+        # that raised it: a message that changes each time (a position in a
+        # paint error) would otherwise be a balloon per frame. Not the type
+        # alone -- in a session lasting days the second AttributeError is
+        # almost never the first one again, and it was logged and never shown.
+        failure = (exc_type, *_raised_at(tb))
+        if notify is not None and failure not in notified:
+            notified.add(failure)
             try:
                 notify(f"Something went wrong: {exc}. Details are in {log_path()}.")
             except Exception as notify_error:  # noqa: BLE001 - must not leave the hook
@@ -4309,6 +4314,15 @@ def install_crash_log(
                 print(f"Note: could not show the error notice: {notify_error}")
 
     sys.excepthook = log_unhandled
+
+
+def _raised_at(tb) -> tuple[str, int]:
+    """The file and line an exception was raised from: the innermost frame
+    of its traceback, or nowhere for one that has none."""
+    frames = traceback.extract_tb(tb)
+    if not frames:
+        return ("", 0)
+    return (frames[-1].filename, frames[-1].lineno or 0)
 
 
 def _trim_crash_log(path: Path) -> None:
