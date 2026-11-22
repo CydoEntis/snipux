@@ -1654,6 +1654,7 @@ class WindowsRecorderBackend(RecordingBackend):
         thread_factory=QThread,
         audio_input_factory=None,
         stop_settle_seconds: float = 1.0,
+        stop_timeout_seconds: float = 10.0,
     ):
         self._screen_capture_factory = screen_capture_factory
         self._capture_session_factory = capture_session_factory
@@ -1675,6 +1676,13 @@ class WindowsRecorderBackend(RecordingBackend):
         # default -- tests that don't care about it pass 0 here rather
         # than eating the real delay.
         self._stop_settle_seconds = stop_settle_seconds
+        # How long stop() waits for the recorder to say it has stopped
+        # before calling the recording incomplete. Measured on Windows 11
+        # (Qt 6.11, 3s recordings up to 2560x1440) that takes 20-40ms; the
+        # rest is room for a long recording on a slow disk, because running
+        # out of it now fails the recording rather than passing it off as
+        # finished.
+        self._stop_timeout_seconds = stop_timeout_seconds
 
         # Full screen: one session, no interception.
         self._session = None
@@ -2073,7 +2081,6 @@ class WindowsRecorderBackend(RecordingBackend):
     def _wait_for_stopped(
         self,
         recorder: QMediaRecorder,
-        stopped_timeout: float = 3.0,
         poll_interval: float = 0.02,
     ) -> None:
         """Block until `recorder.recorderState()` actually reaches
@@ -2112,17 +2119,17 @@ class WindowsRecorderBackend(RecordingBackend):
         cosmetic one; shortening or dropping it reintroduces the
         unplayable-file failure this was written to fix.
 
-        Bounded rather than looped forever throughout: with no
-        `QCoreApplication` instance, or a recorder that never reports
-        `StoppedState` within `stopped_timeout`, there's nothing more this
-        can usefully wait on, and a bounded wait fails visibly (an
-        unplayable file) instead of hanging the process.
+        Bounded rather than looped forever. A recorder that never reports
+        `StoppedState` within `_stop_timeout_seconds` is recorded in
+        `_errors`, which `stop()` raises from once the teardown is done:
+        its file has no moov atom yet, and returning as though it had
+        landed an unplayable file as a saved recording.
         """
         app = QCoreApplication.instance()
         if app is None:
             return
 
-        deadline = time.monotonic() + stopped_timeout
+        deadline = time.monotonic() + self._stop_timeout_seconds
         reached_stopped = False
         while time.monotonic() < deadline:
             app.processEvents()
@@ -2132,6 +2139,10 @@ class WindowsRecorderBackend(RecordingBackend):
             time.sleep(poll_interval)
 
         if not reached_stopped:
+            self._errors.append(
+                "the recorder had not finished writing the file after "
+                f"{self._stop_timeout_seconds:g}s, so the recording may be incomplete"
+            )
             return
 
         settle_deadline = time.monotonic() + self._stop_settle_seconds

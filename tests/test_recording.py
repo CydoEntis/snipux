@@ -2350,6 +2350,28 @@ class TestWindowsRecorderBackendStop:
 
         backend.stop()  # must not raise
 
+    def test_stop_raises_when_the_recorder_never_finishes(self, qapp):
+        # A recorder still writing when the wait runs out used to be
+        # treated as finished, and its file landed as a saved recording.
+        backend = _windows_backend(
+            recorder_factory=_NeverStoppingRecorder, stop_timeout_seconds=0.05
+        )
+        backend.start(QRectF(0, 0, 100, 100), "C:/tmp/out-region.mp4")
+
+        with pytest.raises(RuntimeError, match="may be incomplete"):
+            backend.stop()
+
+        assert backend._recorder is None
+        assert backend._worker_thread is None
+
+
+class _NeverStoppingRecorder(FakeRecorder):
+    """A recorder that is asked to stop and goes on reporting that it is
+    recording, as one stuck finalising its file does."""
+
+    def stop(self):
+        self.stop_calls += 1
+
 
 class TestBuildWindowsRegistry:
     def test_registers_the_qt_native_backend(self):

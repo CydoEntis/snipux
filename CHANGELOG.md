@@ -53,6 +53,12 @@ use it; the commit history has the detail.
   selection somewhere else, the size label still counted the marks left
   behind in the old one, and Esc spent a press "discarding" them before
   it would step back.
+### Fixed
+
+- **A recording that could not be finished says so.** On Windows, if the
+  recorder was still writing when Snipux stopped waiting for it, the file
+  was saved as though it were whole. Snipux now waits longer, and reports
+  that the recording may be incomplete rather than saving it.
 
 ## 1.3.1 — 2026-11-20
 
