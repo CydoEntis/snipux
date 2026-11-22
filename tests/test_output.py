@@ -216,6 +216,56 @@ class TestCopyHistory:
         assert heard == [1, 0]
 
 
+class TestWlCopyThatDoesNotAnswer:
+    """`wl-copy` runs on the UI thread; a compositor that never takes the
+    selection used to hang Snipux there for good."""
+
+    @pytest.fixture(autouse=True)
+    def _wl_copy_that_hangs(self, qapp_for_clipboard, monkeypatch):
+        import subprocess
+
+        self.timeouts = []
+
+        def hangs(argv, input=None, check=None, timeout=None):
+            self.timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        monkeypatch.setattr(output.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(output.subprocess, "run", hangs)
+
+    def test_a_picture_is_still_copied_and_the_wait_is_bounded(self, qapp_for_clipboard):
+        output.copy_image_to_clipboard(make_image())
+
+        assert self.timeouts == [output.WL_COPY_TIMEOUT_SECONDS]
+        assert qapp_for_clipboard.clipboard().image().size() == make_image().size()
+
+    def test_text_and_a_file_are_bounded_the_same_way(self, qapp_for_clipboard, tmp_path):
+        output.copy_text_to_clipboard("hello")
+        output.copy_file_to_clipboard(tmp_path / "clip.webm")
+
+        assert self.timeouts == [output.WL_COPY_TIMEOUT_SECONDS] * 2
+        assert [item.kind for item in output.copy_history()] == ["file", "text"]
+
+    def test_it_says_what_that_means_for_the_copy(self, capsys):
+        output.copy_text_to_clipboard("hello")
+
+        said = capsys.readouterr().out
+        assert "wl-copy" in said and "did not finish" in said
+        assert "may not still be there after Snipux quits" in said
+
+    def test_a_wl_copy_that_fails_says_so_too(self, monkeypatch, capsys):
+        import subprocess
+
+        def fails(argv, input=None, check=None, timeout=None):
+            raise subprocess.CalledProcessError(1, argv)
+
+        monkeypatch.setattr(output.subprocess, "run", fails)
+
+        output.copy_text_to_clipboard("hello")
+
+        assert "wl-copy" in capsys.readouterr().out
+
+
 @pytest.fixture
 def qapp_for_clipboard():
     from PyQt6.QtWidgets import QApplication

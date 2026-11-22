@@ -79,6 +79,9 @@ use it; the commit history has the detail.
   on the frame you chose.
 ### Fixed
 
+- **A copy on Wayland can no longer hang Snipux.** If `wl-copy` does not
+  answer within three seconds Snipux stops waiting; the copy is still on
+  the clipboard.
 - **Problems Snipux worked around are now written down.** Notes such as a
   shortcut that could not be created used to go to a console the Windows
   app does not have. They are kept in `snipux.log` beside `crash.log`, and

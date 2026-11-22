@@ -547,7 +547,7 @@ class TestCopyImageToClipboard:
         monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         calls = []
 
-        def fake_run(argv, input=None, check=None):
+        def fake_run(argv, input=None, check=None, timeout=None):
             calls.append((argv, input))
 
         monkeypatch.setattr(app.subprocess, "run", fake_run)
@@ -613,7 +613,7 @@ class TestCopyTextToClipboard:
         monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         calls = []
 
-        def fake_run(argv, input=None, check=None):
+        def fake_run(argv, input=None, check=None, timeout=None):
             calls.append((argv, input))
 
         monkeypatch.setattr(app.subprocess, "run", fake_run)
@@ -704,7 +704,7 @@ class TestCopyFileToClipboard:
         monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         calls = []
 
-        def fake_run(argv, input=None, check=None):
+        def fake_run(argv, input=None, check=None, timeout=None):
             calls.append((argv, input))
 
         monkeypatch.setattr(app.subprocess, "run", fake_run)

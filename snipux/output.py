@@ -23,6 +23,8 @@ from typing import Callable
 from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QUrl
 from PyQt6.QtGui import QGuiApplication, QImage
 
+from . import log
+
 
 def _settle_clipboard() -> None:
     """Make sure the compositor has taken what was just put on the clipboard
@@ -132,6 +134,38 @@ def _notify_copy_history() -> None:
         _copy_history_listener()
 
 
+# `wl-copy` hands the data to a child of its own and returns in a few
+# milliseconds. It runs on the UI thread, straight after a copy, so one that
+# never returns -- a compositor that will not take the selection -- froze
+# Snipux for good. Long enough for a loaded machine, short enough to sit
+# through once.
+WL_COPY_TIMEOUT_SECONDS = 3.0
+
+
+def _pipe_to_wl_copy(mime_type: str, data: bytes) -> None:
+    """Hand `data` to `wl-copy` so the copy outlives this process. Best
+    effort: the Qt clipboard already holds it, so a failure here is noted
+    and never raised."""
+    try:
+        subprocess.run(
+            ["wl-copy", "--type", mime_type],
+            input=data,
+            check=True,
+            timeout=WL_COPY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        log.note(
+            f"Note: wl-copy did not finish within {WL_COPY_TIMEOUT_SECONDS:g} "
+            "seconds and was stopped. The copy is on the clipboard now, but "
+            "may not still be there after Snipux quits."
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        log.note(
+            f"Note: wl-copy could not take the copy ({exc}). It is on the "
+            "clipboard now, but may not still be there after Snipux quits."
+        )
+
+
 def copy_image_to_clipboard(image: QImage) -> None:
     """Place `image` on the clipboard: the in-process Qt clipboard always,
     and (best-effort) `wl-copy` as well when it's on PATH.
@@ -158,14 +192,7 @@ def copy_image_to_clipboard(image: QImage) -> None:
     buffer = QBuffer()
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     image.save(buffer, "PNG")
-    png_bytes = buffer.data().data()
-
-    try:
-        subprocess.run(
-            ["wl-copy", "--type", "image/png"], input=png_bytes, check=True
-        )
-    except (OSError, subprocess.CalledProcessError):
-        pass  # Qt clipboard already holds the image; this sink is best-effort
+    _pipe_to_wl_copy("image/png", buffer.data().data())
 
 
 def copy_text_to_clipboard(text: str) -> None:
@@ -181,12 +208,7 @@ def copy_text_to_clipboard(text: str) -> None:
     if shutil.which("wl-copy") is None:
         return
 
-    try:
-        subprocess.run(
-            ["wl-copy", "--type", "text/plain"], input=text.encode("utf-8"), check=True
-        )
-    except (OSError, subprocess.CalledProcessError):
-        pass  # Qt clipboard already holds the text; this sink is best-effort
+    _pipe_to_wl_copy("text/plain", text.encode("utf-8"))
 
 
 def copy_file_to_clipboard(path: Path) -> None:
@@ -230,17 +252,9 @@ def copy_file_to_clipboard(path: Path) -> None:
     if shutil.which("wl-copy") is None:
         return
 
-    try:
-        subprocess.run(
-            ["wl-copy", "--type", "text/uri-list"],
-            # Percent-encoded, for the same reason the GNOME flavour
-            # above is: text/uri-list carries URIs, and a raw space is
-            # not one.
-            input=bytes(url.toEncoded()) + b"\n",
-            check=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        pass  # Qt clipboard already holds the file reference; best-effort sink
+    # Percent-encoded, for the same reason the GNOME flavour above is:
+    # text/uri-list carries URIs, and a raw space is not one.
+    _pipe_to_wl_copy("text/uri-list", bytes(url.toEncoded()) + b"\n")
 
 
 def display_path(path: Path | None) -> str:
