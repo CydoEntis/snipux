@@ -4351,6 +4351,9 @@ class OverlayWindow(QWidget):
     _FROZEN_INNER_GAP = 7  # frozen pill: gap between the pin icon and its label
     _FROZEN_ICON_SIZE = 13
     _FROZEN_LABEL = "Frozen"
+    # The least space between the two chips, and what separates them once
+    # the pill has to sit beside the size chip instead of at the far corner.
+    _CHIP_GAP = 6
     _EYEDROPPER_READOUT_GAP = 6  # eyedropper: gap between the loupe box and its hex chip
 
     def __init__(
@@ -9092,12 +9095,65 @@ class OverlayWindow(QWidget):
         """Bounding rect of the dimension chip, in window coordinates:
         left-aligned to the selection's left edge, its own top edge
         `CHIP_OFFSET_Y` above the selection's top edge -- per the README's
-        "left:0; top:-38px" -- sized to fit its current text exactly, the
-        same way `_bracket_path`/`_edge_handle_rect` above expose their
-        geometry separately from painting it.
+        "left:0; top:-38px" -- wherever the selection's monitor has room for
+        that. See `_chip_rects`.
         """
-        metric = design.tokens.Metric
+        return self._chip_rects()[0]
+
+    def _frozen_pill_rect(self) -> QRectF:
+        """Bounding rect of the Frozen pill, in window coordinates:
+        right-aligned to the selection's right edge, level with the
+        dimension chip -- per the README's "right:0; top:-38px" -- wherever
+        there is room for that. See `_chip_rects`.
+        """
+        return self._chip_rects()[1]
+
+    def _chip_rects(self) -> tuple[QRectF, QRectF]:
+        """Where the dimension chip and the Frozen pill go, in window
+        coordinates (logical): above the selection's two top corners, as the
+        handoff has them, for as long as that is on the selection's own
+        monitor and leaves the two apart.
+
+        They used to go there regardless. A selection touching the top of
+        its monitor -- Full screen always does -- put them on the monitor
+        above, in the gap beside it, or off the desk altogether; and on a
+        selection narrower than the pair they were drawn over each other.
+
+        With no room above, both move inside the selection's top-left
+        corner, inset by the gap they keep from its edge when above. The
+        pill goes beside the chip there rather than to the far corner,
+        which on a selection the size of its monitor is where the close
+        button is. It goes beside the chip too whenever the selection is
+        too narrow to hold them apart. Either way the pair is then held
+        inside `_chrome_bounds`, the usable area of the selection's monitor.
+        """
         sel = QRectF(self._selection)
+        bounds = self._chrome_bounds()
+        chip_size = self._dimension_chip_size()
+        pill_size = self._frozen_pill_size()
+
+        top = sel.top() - design.tokens.Metric.CHIP_OFFSET_Y
+        left = sel.left()
+        above = top >= bounds.top()
+        if not above:
+            inset = design.tokens.Metric.CHIP_OFFSET_Y - chip_size.height()
+            top = max(sel.top(), bounds.top()) + inset
+            left += inset
+        left = max(bounds.left(), min(left, bounds.right() - chip_size.width()))
+        chip = QRectF(QPointF(left, top), chip_size)
+        pill = QRectF(QPointF(sel.right() - pill_size.width(), top), pill_size)
+        if above and pill.left() >= chip.right() + self._CHIP_GAP:
+            pill.moveRight(min(pill.right(), bounds.right()))
+            return chip, pill
+
+        pill.moveLeft(chip.right() + self._CHIP_GAP)
+        overhang = max(0.0, pill.right() - bounds.right())
+        chip.translate(-overhang, 0)
+        pill.translate(-overhang, 0)
+        return chip, pill
+
+    def _dimension_chip_size(self) -> QSizeF:
+        """The dimension chip's size, fitted to its current text exactly."""
         size_text, mark_text = self._dimension_chip_texts()
         mono = design.font_families().mono
         size_fm = QFontMetricsF(self._chip_font(design.tokens.Font.DIM_CHIP, mono))
@@ -9117,16 +9173,10 @@ class OverlayWindow(QWidget):
         content_height = max(size_fm.height(), mute_fm.height())
         width = content_width + 2 * self._CHIP_PAD_H
         height = content_height + 2 * self._CHIP_PAD_V
-        return QRectF(sel.left(), sel.top() - metric.CHIP_OFFSET_Y, width, height)
+        return QSizeF(width, height)
 
-    def _frozen_pill_rect(self) -> QRectF:
-        """Bounding rect of the Frozen pill, in window coordinates:
-        right-aligned to the selection's right edge, its own top edge
-        `CHIP_OFFSET_Y` above the selection's top edge -- per the README's
-        "right:0; top:-38px" -- sized to fit the pin icon and its label.
-        """
-        metric = design.tokens.Metric
-        sel = QRectF(self._selection)
+    def _frozen_pill_size(self) -> QSizeF:
+        """The Frozen pill's size, fitted to the pin icon and its label."""
         ui = design.font_families().ui
         fm = QFontMetricsF(self._chip_font(design.tokens.Font.FROZEN, ui))
 
@@ -9138,8 +9188,7 @@ class OverlayWindow(QWidget):
         content_height = max(self._FROZEN_ICON_SIZE, fm.height())
         width = content_width + 2 * self._CHIP_PAD_H
         height = content_height + 2 * self._CHIP_PAD_V
-        top = sel.top() - metric.CHIP_OFFSET_Y
-        return QRectF(sel.right() - width, top, width, height)
+        return QSizeF(width, height)
 
     def _paint_dimension_chip(self, painter: QPainter) -> None:
         """The left-hand chip: `WIDTH × HEIGHT`, a muted middot, then the

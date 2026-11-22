@@ -429,13 +429,15 @@ class TestOverlayWindowMarks:
         frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
         overlay = OverlayWindow(frame)
         overlay.set_selection(QRect(100, 100, 50, 50))
-        overlay.add_mark(self._mark((10, 10), (30, 30)))
+        # Below the band the chips take inside a selection that starts at
+        # the top of its monitor, which this one grows into.
+        overlay.add_mark(self._mark((10, 50), (30, 70)))
         overlay.grab()  # one paint pass while hidden by the narrow selection
 
         overlay.set_selection(QRect(0, 0, 200, 200))
         rendered = overlay.grab().toImage()
 
-        assert pixel(rendered, 10, 20) == self.RED  # left border
+        assert pixel(rendered, 10, 60) == self.RED  # left border
 
     def test_reframing_leaves_a_mark_over_the_same_content(self):
         # A mark drawn inside the selection must stay over the same pixels
@@ -445,12 +447,13 @@ class TestOverlayWindowMarks:
         frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
         overlay = OverlayWindow(frame)
         overlay.set_selection(QRect(0, 0, 100, 100))
-        overlay.add_mark(self._mark((20, 20), (40, 40)))
+        # Below the chips, which sit inside a selection at the monitor's top.
+        overlay.add_mark(self._mark((20, 50), (40, 70)))
 
-        before = pixel(overlay.grab().toImage(), 20, 30)
+        before = pixel(overlay.grab().toImage(), 20, 60)
 
         overlay.set_selection(QRect(0, 0, 150, 150))
-        after = pixel(overlay.grab().toImage(), 20, 30)
+        after = pixel(overlay.grab().toImage(), 20, 60)
 
         assert before == self.RED
         assert after == self.RED
@@ -625,7 +628,9 @@ class TestOverlayWindowObscuringMarks:
 
         rendered = overlay.grab().toImage()
 
-        assert pixel(rendered, 30, 30) == pixel(frame.image, 30, 30)
+        # y=45: inside the first hole, and below the chips, which sit inside
+        # a selection that starts at the top of its monitor.
+        assert pixel(rendered, 30, 45) == pixel(frame.image, 30, 45)
         assert pixel(rendered, 140, 140) == pixel(frame.image, 140, 140)
         assert pixel(rendered, 90, 90) != pixel(frame.image, 90, 90)
 
@@ -14758,3 +14763,98 @@ class TestMarksPaintInTheOrderDrawn:
         overlay.undo()
 
         assert pixel(overlay.grab().toImage(), 20, 60) == self.RED
+
+
+class TestChipsStayOnTheSelectionsMonitor:
+    """The size chip and the Frozen pill sat a fixed distance above the
+    selection wherever that put them. A selection touching the top of its
+    monitor -- Full screen always does -- drew them on the monitor above,
+    in a gap between monitors, or off the desk; and on a narrow selection
+    the two were drawn over each other.
+
+    The desk is two monitors side by side with a third above them. Every
+    rect is window-local logical, the space the chips are painted in.
+    """
+
+    # Absolute logical: the window's origin is the desk's top-left.
+    LEFT = QRectF(0, 0, 2560, 1440)
+    RIGHT = QRectF(2560, 0, 2560, 1440)
+    ABOVE = QRectF(1219, -1440, 2560, 1440)
+    ORIGIN = QPointF(0, -1440)
+
+    @pytest.fixture(autouse=True)
+    def _no_desktop_chrome(self, monkeypatch):
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_margins", lambda screen: QMargins()
+        )
+
+    def _overlay(self, absolute_selection: QRectF) -> OverlayWindow:
+        # A small image stretched over the desk: only geometry is read here.
+        frame = make_frame(
+            image_size=(512, 288),
+            logical_size=(5120, 2880),
+            logical_origin=(self.ORIGIN.x(), self.ORIGIN.y()),
+        )
+        overlay = OverlayWindow(
+            frame, monitor_geometries=[self.LEFT, self.RIGHT, self.ABOVE]
+        )
+        overlay.set_selection(absolute_selection.translated(-self.ORIGIN).toRect())
+        return overlay
+
+    def _chips(self, overlay):
+        return overlay._dimension_chip_rect(), overlay._frozen_pill_rect()
+
+    def _local(self, monitor: QRectF) -> QRectF:
+        return monitor.translated(-self.ORIGIN)
+
+    @pytest.mark.parametrize("monitor", [LEFT, RIGHT, ABOVE])
+    def test_full_screen_keeps_both_chips_on_that_monitor(self, monitor):
+        overlay = self._overlay(monitor)
+
+        for chip in self._chips(overlay):
+            assert self._local(monitor).contains(chip), chip
+
+    def test_a_selection_under_the_gap_beside_the_upper_monitor_keeps_them(self):
+        # Top-left of the left monitor: above it is no monitor at all.
+        overlay = self._overlay(QRectF(100, 0, 800, 400))
+
+        for chip in self._chips(overlay):
+            assert self._local(self.LEFT).contains(chip), chip
+
+    def test_with_room_above_they_sit_above_the_selection_as_before(self):
+        overlay = self._overlay(QRectF(300, 500, 800, 400))
+        selection = QRectF(overlay._selection)
+
+        chip, pill = self._chips(overlay)
+
+        assert chip.topLeft() == QPointF(
+            selection.left(), selection.top() - tokens.Metric.CHIP_OFFSET_Y
+        )
+        assert pill.right() == pytest.approx(selection.right())
+        assert pill.top() == pytest.approx(chip.top())
+
+    def test_on_a_narrow_selection_they_do_not_overlap(self):
+        overlay = self._overlay(QRectF(300, 500, 90, 400))
+
+        chip, pill = self._chips(overlay)
+
+        assert not chip.intersects(pill)
+        assert chip.left() == pytest.approx(QRectF(overlay._selection).left())
+
+    def test_a_narrow_selection_at_the_desks_right_edge_keeps_both_on_it(self):
+        overlay = self._overlay(QRectF(5020, 500, 90, 400))
+
+        chip, pill = self._chips(overlay)
+
+        assert not chip.intersects(pill)
+        for rect in (chip, pill):
+            assert self._local(self.RIGHT).contains(rect), rect
+
+    def test_they_clear_what_the_desktop_reserves_along_the_top(self, monkeypatch):
+        monkeypatch.setattr(
+            OverlayWindow, "_reserved_margins", lambda _self, monitor: QMargins(0, 32, 0, 0)
+        )
+        overlay = self._overlay(self.LEFT)
+
+        for chip in self._chips(overlay):
+            assert chip.top() >= self._local(self.LEFT).top() + 32, chip

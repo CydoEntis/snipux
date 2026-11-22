@@ -27,6 +27,12 @@ use it; the commit history has the detail.
 - **A blackout or blur drawn over earlier ink covers it on screen too.**
   The copy always had the ink covered; the overlay showed the pen stroke
   on top of the blackout, so what you saw was not what you got.
+- **The size and "Frozen" labels stay on the monitor you are snipping.**
+  On a selection that reached the top of its monitor -- Full screen
+  always does -- they were drawn on the monitor above, or off the desk
+  where nothing showed them; they now move just inside the selection.
+  On a narrow selection they sit side by side instead of on top of each
+  other.
 
 ## 1.3.1 — 2026-11-20
 
