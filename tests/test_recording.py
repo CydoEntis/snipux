@@ -1371,11 +1371,9 @@ class TestCropFrame:
         # that had already returned successfully. Region recording on
         # Windows produced nothing at all, 3 runs out of 3.
         #
-        # setVideoFrameRate() on the recorder does not cover this: it is
-        # only called once _RegionCropWorker has 15 arrivals to average,
-        # long after the encoder has had to commit -- which is why the
-        # failure was intermittent rather than total, and why the fix has
-        # to be on the frame itself.
+        # setVideoFrameRate() on the recorder cannot cover this: nothing
+        # told to a recorder after record() reaches the encoder, so the
+        # fix has to be on the frame itself.
         source_format = QVideoFrameFormat(
             QSize(4, 4), QVideoFrameFormat.PixelFormat.Format_BGRA8888
         )
@@ -1752,9 +1750,7 @@ class TestWindowsRecorderBackendFullScreenStart:
     timestamps by construction; the region path only broke once
     `_crop_frame()` started constructing fresh, unstamped frames instead
     of passing one of Qt's own through. There's no code left on this path
-    for that bug to live in, so it gets no symmetrical
-    `setVideoFrameRate()` call either -- that would pay the path that
-    already works for a fix aimed at the one that didn't.
+    for that bug to live in.
     """
 
     PATH = "C:/tmp/snipux-recording.mp4"
@@ -1925,39 +1921,24 @@ class TestWindowsRecorderBackendRegionStart:
         with pytest.raises(RuntimeError, match="disk full"):
             backend.start(self.RECT, self.PATH)
 
-    def test_does_not_declare_a_frame_rate_before_any_frame_has_arrived(self):
-        # No hardcoded 30fps (or any other nominal value): until the
-        # worker has actually measured something, there's nothing genuine
-        # to declare, so setVideoFrameRate() must not have been called yet.
-        backend = _windows_backend()
-
-        backend.start(self.RECT, self.PATH)
-
-        assert backend._recorder.set_video_frame_rate_calls == []
-
-    def test_declares_the_measured_frame_rate_once_enough_frames_have_arrived(self, qapp):
+    def test_never_sets_a_frame_rate_on_a_recorder_that_is_rolling(self, qapp):
+        # It used to measure the arrival rate over the first 15 frames and
+        # set it on the recorder. Measured against a real recorder, that
+        # changed what the recorder reported and nothing in the file: each
+        # frame is already written at its own capture time.
         backend = _windows_backend()
         backend.start(self.RECT, self.PATH)
 
-        # ~15fps -- distinctly different from any nominal 30fps-class
-        # default, so a test that hardcoded either the old default or an
-        # unrelated guess would fail this.
         interval_us = round(1_000_000 / 15)
-        sample_count = _RegionCropWorker._FRAME_RATE_SAMPLE_FRAMES
-        for i in range(sample_count):
+        for i in range(40):
             frame = _make_frame(4, 4, lambda row, col: i % 251)
             frame.setStartTime(i * interval_us)
             frame.setEndTime((i + 1) * interval_us)
             backend._worker.on_frame(frame)
-
-        # frame_rate_measured is delivered via an explicit QueuedConnection
-        # (see _start_region) -- it lands once the event loop it's queued
-        # on is pumped, same as any other cross-thread Qt signal.
+        # The old call arrived through a queued connection.
         qapp.processEvents()
 
-        assert backend._recorder.set_video_frame_rate_calls == pytest.approx(
-            [15.0], rel=0.01
-        )
+        assert backend._recorder.set_video_frame_rate_calls == []
 
 
 class _FakeScreen:

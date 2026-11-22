@@ -950,8 +950,8 @@ def load_recording_frame_rate(config_dir: Path | None = None) -> int:
     """The frame rate a recording asks its backend for -- ticket 9's
     Settings row, consumed today by `GnomeScreencastBackend`'s `framerate`
     D-Bus option. `WindowsRecorderBackend` deliberately never calls this
-    (see its own docstring): its frame rate is measured from real
-    inter-arrival timing (SNX-125), not a nominal request.
+    (see its own docstring): its frames are written at the times they
+    were captured, not at a nominal rate.
 
     Falls back to `tokens.RECORDING_FRAME_RATE_DEFAULT`, the same
     "nothing stored yet" shape as `load_filename_pattern`.

@@ -38,7 +38,6 @@ from PyQt6.QtCore import (
     Qt,
     QThread,
     QUrl,
-    pyqtSignal,
 )
 from PyQt6.QtGui import QGuiApplication, QImage
 from PyQt6.QtMultimedia import (
@@ -1370,13 +1369,10 @@ def _crop_frame(frame: QVideoFrame, pixel_rect: QRect) -> QVideoFrame:
     # Media Foundation's H264 encoder refuses a type whose frame rate is 0
     # ("could not set output type (80004005)" -> "Could not initialize
     # encoder"). The recording then lands as a 0-byte file while start()
-    # has already returned successfully. `_apply_measured_frame_rate` does
-    # tell the *recorder* a real rate, but only after
-    # _FRAME_RATE_SAMPLE_FRAMES arrivals -- long after the encoder has
-    # already had to commit -- which is why this failed intermittently
-    # rather than always, depending on which won the race. Carrying the
-    # source's own rate here means the very first frame already describes
-    # itself correctly. The colour fields are copied for the same
+    # has already returned successfully. Carrying the source's own rate
+    # here means the very first frame already describes itself correctly;
+    # nothing said to the recorder after record() reaches the encoder (see
+    # `_start_region`). The colour fields are copied for the same
     # "describe the frame honestly" reason; QScreenCapture reports them
     # Undefined/Unknown today, so they cost nothing and stop this from
     # silently mattering if it ever reports otherwise.
@@ -1466,18 +1462,6 @@ class _RegionCropWorker(QObject):
     coalescing itself for that bug -- the bug was the missing timing on the
     frames that *did* survive, not the dropping.
 
-    Also measures the real inter-arrival rate of source frames and emits it
-    once via `frame_rate_measured`, so `WindowsRecorderBackend` can declare
-    a frame rate the container header actually matches (the ticket's other
-    half: per-frame timing alone fixes duration/speed, but a container's
-    stream-level frame-rate metadata is separate from per-frame PTS and
-    nothing else in this class touches it). The measurement is taken in
-    `on_frame`, before `_send_pending()`'s coalescing drops anything --
-    deliberately: it wants the rate frames genuinely arrived at from
-    `QScreenCapture`, not the smaller rate that survives to the encoder,
-    since coalescing is a deliberate output-side choice that must not feed
-    back into what rate this claims frames arrived at.
-
     `pause()`/`resume()` (#87) are how the region path answers
     `RecordingBackend.can_pause`: `QScreenCapture` never stops delivering
     frames, so pausing here means simply not forwarding them, and resuming
@@ -1495,24 +1479,12 @@ class _RegionCropWorker(QObject):
     frame early or late.
     """
 
-    # How many genuine arrivals to average over before emitting
-    # frame_rate_measured -- large enough to smooth out one-off jitter
-    # between individual frames, small enough to produce an answer well
-    # before a short recording ends. Exposed as a class attribute so tests
-    # can drive exactly this many synthetic arrivals rather than a magic
-    # number duplicated on both sides.
-    _FRAME_RATE_SAMPLE_FRAMES = 15
-
-    frame_rate_measured = pyqtSignal(float)
-
     def __init__(self, frame_input: QVideoFrameInput, pixel_rect: QRect):
         super().__init__()
         self._frame_input = frame_input
         self._pixel_rect = pixel_rect
         self._pending: QVideoFrame | None = None
         self._ready = False
-        self._arrival_start_times: list[int] = []
-        self._rate_measured = False
         self._paused = False
         # The most recent frame's own startTime() -- the clock pause()/
         # resume() measure the paused span in, since it is the one clock
@@ -1523,7 +1495,6 @@ class _RegionCropWorker(QObject):
         self._pause_offset_us = 0
 
     def on_frame(self, frame: QVideoFrame) -> None:
-        self._record_arrival(frame)
         if frame.startTime() >= 0:
             self._last_frame_time = frame.startTime()
         if self._paused:
@@ -1563,26 +1534,6 @@ class _RegionCropWorker(QObject):
         self._ready = True
         if self._pending is not None:
             self._send_pending()
-
-    def _record_arrival(self, frame: QVideoFrame) -> None:
-        """Accumulate real arrival timestamps toward a one-shot frame-rate
-        estimate; see the class docstring for why this runs here rather
-        than in `_send_pending()`.
-        """
-        if self._rate_measured:
-            return
-        start_time = frame.startTime()
-        if start_time < 0:
-            return  # untimed source frame -- nothing to measure from
-        self._arrival_start_times.append(start_time)
-        if len(self._arrival_start_times) < self._FRAME_RATE_SAMPLE_FRAMES:
-            return
-        span = self._arrival_start_times[-1] - self._arrival_start_times[0]
-        intervals = len(self._arrival_start_times) - 1
-        if span <= 0:
-            return  # clock didn't advance across the sample -- try again later
-        self._rate_measured = True
-        self.frame_rate_measured.emit(intervals * 1_000_000 / span)
 
     def _send_pending(self) -> None:
         frame, self._pending = self._pending, None
@@ -1624,12 +1575,10 @@ class WindowsRecorderBackend(RecordingBackend):
     monitor under the cursor and comes through as an ordinary rect.
 
     Deliberately does not read either of ticket 9's Settings rows the way
-    `GnomeScreencastBackend` does. Frame rate: SNX-125 measures the real
-    inter-arrival rate off `_RegionCropWorker` and declares exactly that to
-    the container (see `_apply_measured_frame_rate` in `_start_region`) --
-    a nominal request from Settings would be a second, conflicting opinion
-    about a number this class has already gone to real effort to get right
-    from measurement instead of a guess. Draw-cursor: `QScreenCapture`
+    `GnomeScreencastBackend` does. Frame rate: there is none to request.
+    `QScreenCapture` delivers a frame when the screen changes, up to about
+    30 a second, and each is written at its own capture time (see
+    `_start_region` for the measured numbers). Draw-cursor: `QScreenCapture`
     exposes no such toggle at all -- there is nothing here to wire it to,
     not an oversight.
 
@@ -1862,17 +1811,22 @@ class WindowsRecorderBackend(RecordingBackend):
         """Wire and start the region (crop) path -- see the class
         docstring's two-session description.
 
-        `recorder.setVideoFrameRate()` is called late, from
-        `_apply_measured_frame_rate()` below, once `_RegionCropWorker` has
-        actually measured a real inter-arrival rate -- not up front here.
-        There is no real rate to declare before any source frame has
-        arrived, and `QScreen.refreshRate()` was deliberately rejected as a
-        substitute (SNX-125): it's the display's nominal Hz, not what
-        `QScreenCapture` delivers, and the two are already known to differ
-        (~28.8fps measured against a 30fps-class request). `record()` is
-        still called immediately, same as before -- recording starts with
-        no visible delay, and the declared rate updates in place once the
-        measurement is ready, a few frames in.
+        `recorder.setVideoFrameRate()` is never called. The file's frame
+        rate is whatever the frames' own timestamps make it: measured on
+        Windows 11 (PyQt6 6.11.0), 28-30 frames a second while the screen
+        is changing and about 10 while it is still, in a track whose
+        timescale (119000 on a 119Hz monitor) comes from the stream frame
+        rate each frame already carries.
+
+        This used to measure the arrival rate over the first 15 frames and
+        hand it to the recorder, about 0.6s after `record()`. That did
+        nothing: the recorder reported the new value back (rounded to a
+        whole number), and files recorded with and without the call had
+        the same timescale and the same frame timing. Setting a rate
+        *before* `record()` does reach the file -- it changes the
+        timescale and nothing else -- but there is no real rate to give
+        before a frame has arrived, and `QScreen.refreshRate()` is the
+        display's nominal Hz, not what `QScreenCapture` delivers.
         """
         # The screen the region is on, not the primary one. These two
         # calls are a pair: `setScreen()` below decides which monitor's
@@ -1917,21 +1871,6 @@ class WindowsRecorderBackend(RecordingBackend):
             worker.on_ready_to_send, Qt.ConnectionType.QueuedConnection
         )
 
-        # Declares the container's frame rate from the worker's own
-        # measurement of real inter-arrival timing, once it has enough
-        # samples -- not a hardcoded nominal value, and not called until
-        # genuine data exists. `_apply_measured_frame_rate` is a plain
-        # function rather than a bound method so this doesn't need
-        # `WindowsRecorderBackend` itself to be a QObject; queued the same
-        # explicit way as the other two connections, so
-        # `recorder.setVideoFrameRate()` only ever runs on this object's
-        # own thread even though the measurement happens on the worker's.
-        def _apply_measured_frame_rate(fps: float) -> None:
-            recorder.setVideoFrameRate(fps)
-
-        worker.frame_rate_measured.connect(
-            _apply_measured_frame_rate, Qt.ConnectionType.QueuedConnection
-        )
         worker_thread.start()
 
         capture_session.setScreenCapture(screen_capture)
