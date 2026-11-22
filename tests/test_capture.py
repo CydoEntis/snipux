@@ -3171,3 +3171,36 @@ class TestTheHoverPathQueriesCannotHang:
 
         assert calls, "xwininfo was never run"
         assert all(timeout is not None for _name, timeout in calls), calls
+
+
+class TestPairMonitorsWithScreens:
+    """Which Win32 monitor's pixels belong on which Qt screen."""
+
+    def test_same_sized_monitors_listed_in_another_order_are_paired_by_place(self):
+        from snipux.capture import _pair_monitors_with_screens
+
+        left = QRectF(0, 0, 1920, 1080)
+        right = QRectF(1920, 0, 1920, 1080)
+        # Qt lists the primary (here the right-hand one) first.
+        mapping = _pair_monitors_with_screens(
+            [(left, 1.0), (right, 1.0)], [QRectF(right), QRectF(left)]
+        )
+        assert [(physical, logical) for physical, logical, _ in mapping] == [
+            (right, right), (left, left),
+        ]
+
+    def test_screens_whose_corners_do_not_line_up_are_paired_by_index(self):
+        from snipux.capture import _pair_monitors_with_screens
+
+        mapping = _pair_monitors_with_screens(
+            [(QRectF(0, 0, 3840, 2160), 2.0), (QRectF(3840, 0, 1920, 1080), 1.0)],
+            [QRectF(0, 0, 1920, 1080), QRectF(1920, 0, 1920, 1080)],
+        )
+        assert [scale for _, _, scale in mapping] == [2.0, 1.0]
+
+    def test_a_pair_whose_sizes_disagree_gives_no_map(self):
+        from snipux.capture import _pair_monitors_with_screens
+
+        assert _pair_monitors_with_screens(
+            [(QRectF(0, 0, 1920, 1080), 1.0)], [QRectF(0, 0, 2560, 1440)]
+        ) == []

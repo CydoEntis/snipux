@@ -2037,6 +2037,46 @@ class _MonitorInfo(ctypes.Structure):
     ]
 
 
+def _pair_monitors_with_screens(
+    monitors: "list[tuple[QRectF, float]]", screens: "list[QRectF]"
+) -> "list[tuple[QRectF, QRectF, float]]":
+    """Pair each Win32 monitor `(physical rect, scale)` with the logical
+    rect of the Qt screen showing it, or `[]` when a pair fails to verify.
+
+    Paired by **top-left corner** where every screen has a monitor at its
+    own: Qt scales a screen's size but leaves its origin where Windows put
+    it. That matters for two monitors of the same size, which pass the size
+    check either way round -- and Qt lists the primary first while
+    `EnumDisplayMonitors` uses the system's order, so paired by index their
+    pixels could land on each other's screens. Where the corners do not
+    line up for every screen, the lists are paired by index as before.
+
+    Either way each pair is then verified by size, rounded: a 150% scale
+    on an odd pixel count does not divide evenly and Qt rounds too, so a
+    pixel of disagreement is arithmetic, not a mismatched monitor.
+    """
+    if not monitors or len(monitors) != len(screens):
+        return []
+    by_corner = {
+        (round(physical.x()), round(physical.y())): (physical, scale)
+        for physical, scale in monitors
+    }
+    corners = [(round(screen.x()), round(screen.y())) for screen in screens]
+    if len(by_corner) == len(monitors) and all(c in by_corner for c in corners):
+        ordered = [by_corner[corner] for corner in corners]
+    else:
+        ordered = monitors
+    mapping: list[tuple[QRectF, QRectF, float]] = []
+    for (physical, scale), logical in zip(ordered, screens):
+        if (
+            round(physical.width() / scale) != round(logical.width())
+            or round(physical.height() / scale) != round(logical.height())
+        ):
+            return []
+        mapping.append((physical, logical, scale))
+    return mapping
+
+
 class WindowsWindowGeometryProvider:
     """Real per-window geometry source for Windows' window-selection mode
     (SNX-90).
@@ -2331,14 +2371,11 @@ class WindowsWindowGeometryProvider:
 
         The map is built rather than computed from a formula, and then
         checked. Qt's logical layout is not a simple global divide once
-        monitors differ in scale, so each Win32 monitor is paired with the
-        `QScreen` at the same index and the pair is *verified*: the
-        monitor's physical size divided by its own DPI scale must equal
-        that screen's logical size. Index order matching was confirmed on a
-        real three-monitor desk (`EnumDisplayMonitors` and
-        `QGuiApplication.screens()` agreed, including a monitor mounted
-        above the others at a negative y), but it is not promised by either
-        API -- so the verification is what makes relying on it safe.
+        monitors differ in scale, so each Win32 monitor is paired with a
+        `QScreen` and the pair is *verified*: the monitor's physical size
+        divided by its own DPI scale must equal that screen's logical size
+        (`_pair_monitors_with_screens`, which also says how they are
+        paired).
 
         `[]` when any pair fails to verify, when the DPI cannot be read, or
         when the counts differ. `_to_logical` then returns rects unchanged,
@@ -2370,8 +2407,8 @@ class WindowsWindowGeometryProvider:
         if not handles or len(handles) != len(screens):
             return []
 
-        mapping: list[tuple[QRectF, QRectF, float]] = []
-        for handle, screen in zip(handles, screens):
+        monitors: list[tuple[QRectF, float]] = []
+        for handle in handles:
             info = _MonitorInfoExW()
             info.cbSize = ctypes.sizeof(_MonitorInfoExW)
             if not user32.GetMonitorInfoW(handle, ctypes.byref(info)):
@@ -2383,24 +2420,14 @@ class WindowsWindowGeometryProvider:
                 return []
             if dpi_x.value <= 0:
                 return []
-            scale = dpi_x.value / 96.0
-
             rect = info.rcMonitor
-            physical = QRectF(
-                rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
-            )
-            logical = QRectF(screen.geometry())
-            # The check that makes index pairing safe. Rounded, because a
-            # 150% scale on an odd pixel count does not divide evenly and
-            # Qt rounds too -- a pixel of disagreement is arithmetic, not a
-            # mismatched monitor.
-            if (
-                round(physical.width() / scale) != round(logical.width())
-                or round(physical.height() / scale) != round(logical.height())
-            ):
-                return []
-            mapping.append((physical, logical, scale))
-        return mapping
+            monitors.append((
+                QRectF(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top),
+                dpi_x.value / 96.0,
+            ))
+        return _pair_monitors_with_screens(
+            monitors, [QRectF(screen.geometry()) for screen in screens]
+        )
 
     def _to_logical(self, physical: QRectF, mapping=None) -> QRectF:
         """A physical-pixel rect -> the absolute logical rect this class
