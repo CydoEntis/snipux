@@ -86,6 +86,9 @@ snipux/
   overlaychrome.py  the overlay's small chrome: the hint HUD, the toast
                 (review.py shows the same one), the close button and the
                 delay countdown
+  selectionframe.py  where the selection's frame is: handles, corner
+                brackets, hit targets and the two chips' placement, as
+                functions of a rectangle. No state, no painting
   chooser.py    the docked pre-snip chooser row: what to capture, and what
                 happens to it afterwards
   flowbars.py   the post-selection bars from the locked capture-flow handoff

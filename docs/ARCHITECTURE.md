@@ -34,6 +34,7 @@ entry        handoff.py  ->  app.py (CLI, tray, controller)
 views        chooser.py  overlay.py  flowbars.py  review.py  player.py
              pin.py  history.py  settings.py  winchrome.py  glass.py
              toolbar.py  popovers.py  watermark.py  overlaychrome.py
+             selectionframe.py
                |
 model        shapes.py  marks.py  sensitive.py  textsnap.py
                |
@@ -99,6 +100,7 @@ snipux/
   popovers.py       the style popover, capture-mode popover and family menus
   watermark.py      the watermark's session choice, Settings content and menu
   overlaychrome.py  the hint HUD, toast, close button and delay countdown
+  selectionframe.py handles, brackets, hit targets and chip placement, as geometry
   chooser.py        the pre-snip row
   flowbars.py       the post-selection bars (views only)
   shapes.py         annotation data model and flattening renderer
@@ -167,8 +169,10 @@ the model do not import it: a recorder is handed what it needs as
   the filename pattern.
 - **Private names cross modules.** `review.py`, `player.py` and
   `history.py` import `_ui_font` and `_mono_font` from `winchrome.py`.
-  `overlay.py` takes `_STEP_KEY_CODES` from `popovers.py` and
-  `_CloseButton` from `overlaychrome.py`; `popovers.py`, `watermark.py`
+  `overlay.py` takes `_STEP_KEY_CODES` from `popovers.py`,
+  `_CloseButton` from `overlaychrome.py` and the handle tables
+  (`_CORNER_HANDLES`, `_HANDLE_CURSORS` and the rest) from
+  `selectionframe.py`; `popovers.py`, `watermark.py`
   and `overlaychrome.py` build on `toolbar._Chrome`; and `overlay.py`
   re-exports a handful of the bar's and the menus' private widgets for
   the tests that still import them from it.
