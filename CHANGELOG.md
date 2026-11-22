@@ -68,6 +68,11 @@ use it; the commit history has the detail.
 - **Discarding a recording on Windows no longer finishes the file first.**
   It waited for a complete video and then deleted it. If the file cannot
   be deleted straight away, Snipux now says so instead of saying nothing.
+- **Exporting a recording with only its sound removed keeps the picture
+  exactly as recorded.** With ffmpeg installed, the whole video was
+  encoded again to drop the audio, which took longer and lost a little
+  quality. An export that is trimmed is still encoded, so the cut lands
+  on the frame you chose.
 
 ## 1.3.1 — 2026-11-20
 

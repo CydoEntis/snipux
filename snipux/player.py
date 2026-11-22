@@ -1241,11 +1241,36 @@ class FfmpegExporter(QObject):
         # has to work around. Anything outside a plausible range is not a
         # frame rate, it is a timebase, and gets replaced.
         self._fps = fps if 1 <= fps <= 120 else float(tokens.PLAYER_FPS)
+        # Nothing cut, and the container the recording is already in: every
+        # video frame the export would hold is one the file already has.
+        # Only then -- a copy can start and end on keyframes alone, so a
+        # trim copied would not land where the handles were put. In
+        # practice this is "the same clip without its sound", since the
+        # window writes nothing at all when the sound is kept too.
+        self._copies_video = (
+            format_id in ("mp4", "webm")
+            and source.suffix.lower() == f".{format_id}"
+            and not state.trimmed
+        )
         self._process = None
         self._tail: list[str] = []
         self._diagnosis = ""
 
+    def _copy_arguments(self) -> list[str]:
+        """The whole source with its video stream untouched: no seek, no
+        filter and no frame rate, none of which a copied stream can take.
+        Seconds instead of the clip's own length, and no generation lost.
+        """
+        args = ["-hide_banner", "-nostdin", "-y", "-i", str(self._source),
+                "-c:v", "copy"]
+        args += ["-an"] if self._muted else ["-c:a", "copy"]
+        if self._format == "mp4":
+            args += ["-movflags", "+faststart"]
+        return args + ["-progress", "pipe:1", "-nostats", str(self._destination)]
+
     def _arguments(self) -> list[str]:
+        if self._copies_video:
+            return self._copy_arguments()
         # `-ss` before `-i` seeks by keyframe, which is fast; the re-encode
         # that follows is what makes the cut land on the exact frame, so
         # there is no accuracy to trade away here.

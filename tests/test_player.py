@@ -340,6 +340,52 @@ class TestTheFfmpegCommandsSayWhatTheyMean:
     def test_a_trimmed_webm_is_really_re_encoded(self):
         assert "libvpx-vp9" in self._args("webm")
 
+    def test_only_dropping_the_sound_copies_the_video_as_it_is(self):
+        # The whole of a WebM, into a WebM, minus its sound: every video
+        # frame in the result is one the recording already has. Encoding
+        # them again took as long as the clip and cost a generation.
+        args = self._args("webm", muted=True, start=0.0, end=27.4)
+
+        assert args[args.index("-c:v") + 1] == "copy"
+        assert "libvpx-vp9" not in args
+        assert "-an" in args
+        # Nothing that only a re-encode can honour: a copy cut at -ss or -t
+        # lands on a keyframe, not on the frame asked for, and a copied
+        # stream cannot be given a new frame rate or a filter.
+        for flag in ("-ss", "-t", "-r", "-fps_mode", "-vf"):
+            assert flag not in args
+        assert args[args.index("-i") + 1] == str(self.SOURCE)
+        assert args[-1] == str(self.DEST)
+
+    def test_a_muted_trim_is_still_re_encoded(self):
+        # A cut has to land on the frame it was made at, which a copy
+        # cannot promise.
+        args = self._args("webm", muted=True)
+
+        assert "libvpx-vp9" in args
+        assert "copy" not in args
+
+    def test_a_change_of_container_is_still_re_encoded(self):
+        args = self._args("mp4", muted=True, start=0.0, end=27.4)
+
+        assert "libx264" in args
+        assert "copy" not in args
+
+    def test_a_copied_mp4_still_starts_playing_before_it_has_downloaded(self):
+        from snipux.player import FfmpegExporter
+
+        args = FfmpegExporter(
+            Path("/in.MP4"),
+            self.DEST,
+            TrimState(duration=27.4, start=0.0, end=27.4),
+            "mp4",
+            muted=True,
+            binary="/usr/bin/ffmpeg",
+        )._arguments()
+
+        assert args[args.index("-c:v") + 1] == "copy"
+        assert args[args.index("-movflags") + 1] == "+faststart"
+
     def test_gif_builds_its_own_palette(self):
         # A palette from this clip beats the fixed web palette by a wide
         # margin on the flat colour a screen recording is mostly made of.
