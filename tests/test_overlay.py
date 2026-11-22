@@ -15045,3 +15045,50 @@ class TestSwitchingToRecordOverASelection:
 
         assert requests == []
         assert overlay._armed_for_recording is False
+
+
+class TestAWindowPickStaysOnThePicture:
+    """A window can hang off the edge of the desk. Picked in Window mode it
+    is cut back to what was photographed, as Active window and Browser
+    are, rather than exported with black where the frame ends."""
+
+    # Absolute logical, 80px of it off the left edge of a 600x600 desk.
+    WINDOW_RECT = QRectF(-80, 300, 400, 200)
+    HIT_POINT = QPoint(100, 400)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _picking_overlay(self):
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(
+            frame, geometry_provider=_FakeWindowProvider(self.WINDOW_RECT)
+        )
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._on_chooser_mode("Window")
+        return overlay
+
+    def test_the_picked_window_is_cut_back_to_the_frame(self):
+        overlay = self._picking_overlay()
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        assert overlay._selection == QRect(0, 300, 320, 200)
+
+    def test_its_export_has_no_black_band(self):
+        overlay = self._picking_overlay()
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        image = overlay.rendered_image()
+
+        assert (image.width(), image.height()) == (320, 200)
+        assert image.pixelColor(0, 100) == QColor(BASE_COLOR)
+
+    def test_the_hover_preview_is_cut_back_too(self):
+        overlay = self._picking_overlay()
+
+        _send_move(overlay, self.HIT_POINT)
+
+        assert overlay._selection == QRect(0, 300, 320, 200)
