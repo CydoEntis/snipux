@@ -1193,3 +1193,51 @@ class TestAnEditReachesAFile:
         window.close()
 
         assert not window.isVisible()
+
+
+class TestAFilmstripThumbnailIsKeptSmall:
+    """Sixteen frames are read when a recording opens. Each was kept at
+    full size -- 14MB for a 2560x1440 monitor -- to be drawn 44 pixels
+    tall."""
+
+    def test_a_full_screen_frame_is_shrunk_to_what_a_cell_can_show(self):
+        frame = QImage(2560, 1440, QImage.Format.Format_RGB32)
+        frame.fill(QColor("#336699"))
+
+        thumbnail = _player_module._thumbnail(frame)
+
+        # Still covers the tallest and widest cell there is...
+        assert thumbnail.height() >= tokens.PlayerMetric.RAIL_H
+        assert thumbnail.width() >= 240
+        # ...at the frame's own shape...
+        assert thumbnail.width() / thumbnail.height() == pytest.approx(16 / 9, rel=0.02)
+        # ...and a small fraction of its size.
+        assert thumbnail.sizeInBytes() < frame.sizeInBytes() / 50
+        assert thumbnail.pixelColor(10, 10) == QColor("#336699")
+
+    def test_a_frame_already_small_is_not_enlarged(self):
+        frame = QImage(200, 120, QImage.Format.Format_RGB32)
+        frame.fill(QColor("#336699"))
+
+        assert _player_module._thumbnail(frame).size() == QSize(200, 120)
+
+    def test_a_tall_narrow_frame_keeps_enough_width_to_fill_a_cell(self):
+        # A cell is filled by expanding, so a thumbnail shrunk on height
+        # alone would be stretched back up across the cell's width.
+        frame = QImage(400, 3000, QImage.Format.Format_RGB32)
+        frame.fill(QColor("#336699"))
+
+        thumbnail = _player_module._thumbnail(frame)
+
+        assert thumbnail.width() >= 240
+        assert thumbnail.height() < 3000
+
+    def test_the_thumbnail_does_not_share_the_frames_memory(self):
+        # The decoder reuses a frame's buffer once the signal returns.
+        frame = QImage(200, 120, QImage.Format.Format_RGB32)
+        frame.fill(QColor("#336699"))
+
+        thumbnail = _player_module._thumbnail(frame)
+        frame.fill(QColor("#000000"))
+
+        assert thumbnail.pixelColor(10, 10) == QColor("#336699")
