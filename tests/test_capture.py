@@ -2133,6 +2133,112 @@ class TestMixedScaleWindowsCapture:
             capture.Win32GdiBackend().capture()
 
 
+def _bgrx_bytes(image: QImage) -> bytes:
+    """An RGB32 image as the top-down BGRX bytes a GDI blit hands back."""
+    image = image.convertToFormat(QImage.Format.Format_RGB32)
+    return image.constBits().asstring(image.sizeInBytes())
+
+
+class TestWin32MonitorsBackend:
+    """Every monitor is grabbed on its own thread and placed by its logical
+    rect. The blit itself is faked: what is under test is which rect each
+    grab asks for and where its pixels land."""
+
+    def _fake_grabs(self, monkeypatch, by_physical_origin):
+        asked = []
+
+        def grab(x, y, width, height):
+            asked.append((x, y, width, height))
+            return _bgrx_bytes(by_physical_origin[(x, y)])
+
+        monkeypatch.setattr(capture, "_gdi_grab_rect", grab)
+        return asked
+
+    def test_each_monitor_lands_at_its_own_place_in_the_frame(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        # One monitor above the other two and offset, so the union has a
+        # negative origin and corners no monitor covers.
+        left = _patterned_image(40, 20, blue=10)
+        right = _patterned_image(40, 20, blue=120)
+        above = _patterned_image(40, 20, blue=240)
+        rects = [QRect(0, 0, 40, 20), QRect(40, 0, 40, 20), QRect(19, -20, 40, 20)]
+        monkeypatch.setattr(
+            capture,
+            "QGuiApplication",
+            _FakeQGuiApplication([_FakeScreen(rect) for rect in rects]),
+        )
+        monkeypatch.setattr(
+            WindowsWindowGeometryProvider,
+            "monitor_map",
+            lambda self: [(QRectF(rect), QRectF(rect), 1.0) for rect in rects],
+        )
+        asked = self._fake_grabs(
+            monkeypatch, {(0, 0): left, (40, 0): right, (19, -20): above}
+        )
+
+        frame = capture.Win32MonitorsBackend().capture()
+
+        assert sorted(asked) == [(0, 0, 40, 20), (19, -20, 40, 20), (40, 0, 40, 20)]
+        assert frame.logical_origin == QPointF(0, -20)
+        assert frame.logical_size == QSizeF(80, 40)
+        assert _same_pixels(frame.crop(QRectF(0, 0, 40, 20)).image, left)
+        assert _same_pixels(frame.crop(QRectF(40, 0, 40, 20)).image, right)
+        assert _same_pixels(frame.crop(QRectF(19, -20, 40, 20)).image, above)
+
+    def test_mixed_scale_keeps_each_monitor_at_native_resolution(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        screens = _mixed_scale_screens()
+        monkeypatch.setattr(capture, "QGuiApplication", _FakeQGuiApplication(screens))
+        monkeypatch.setattr(
+            WindowsWindowGeometryProvider,
+            "monitor_map",
+            lambda self: [
+                (QRectF(0, 0, 300, 150), QRectF(0, 0, 200, 100), 1.5),
+                (QRectF(300, 0, 200, 100), QRectF(300, 0, 200, 100), 1.0),
+            ],
+        )
+        self._fake_grabs(
+            monkeypatch, {(0, 0): screens[0].native, (300, 0): screens[1].native}
+        )
+
+        frame = capture.Win32MonitorsBackend().capture()
+
+        assert len(frame.screen_frames) == 2
+        assert _same_pixels(frame.crop(QRectF(0, 0, 200, 100)).image, screens[0].native)
+        assert _same_pixels(frame.crop(QRectF(300, 0, 200, 100)).image, screens[1].native)
+
+    def test_refuses_when_the_monitors_cannot_be_mapped(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(WindowsWindowGeometryProvider, "monitor_map", lambda self: [])
+
+        with pytest.raises(RuntimeError, match="could not be matched"):
+            capture.Win32MonitorsBackend().capture()
+
+    def test_one_failed_monitor_fails_the_whole_capture(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        rects = [QRect(0, 0, 40, 20), QRect(40, 0, 40, 20)]
+        monkeypatch.setattr(
+            capture,
+            "QGuiApplication",
+            _FakeQGuiApplication([_FakeScreen(rect) for rect in rects]),
+        )
+        monkeypatch.setattr(
+            WindowsWindowGeometryProvider,
+            "monitor_map",
+            lambda self: [(QRectF(rect), QRectF(rect), 1.0) for rect in rects],
+        )
+
+        def grab(x, y, width, height):
+            if x == 40:
+                raise RuntimeError("win32-monitors: BitBlt failed")
+            return _bgrx_bytes(_patterned_image(width, height, blue=1))
+
+        monkeypatch.setattr(capture, "_gdi_grab_rect", grab)
+
+        with pytest.raises(RuntimeError, match="BitBlt failed"):
+            capture.Win32MonitorsBackend().capture()
+
+
 class TestBuildWindowsRegistry:
     """SNX-88: `platform.windows.WindowsPlatform.build_capture_registry()`
     forwards here, the same way Linux's does to `build_linux_registry()`.
@@ -2141,7 +2247,11 @@ class TestBuildWindowsRegistry:
     def test_registers_backends_in_the_required_order(self):
         registry = capture.build_windows_registry()
 
-        assert [backend.name() for backend in registry] == ["qt-native", "win32-gdi"]
+        assert [backend.name() for backend in registry] == [
+            "win32-monitors",
+            "qt-native",
+            "win32-gdi",
+        ]
 
     def test_capture_falls_through_from_qt_native_to_the_gdi_backend(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")

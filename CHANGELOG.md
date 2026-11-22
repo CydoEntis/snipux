@@ -5,6 +5,13 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Changed
+
+- **A snip opens sooner on Windows.** Every monitor is now photographed at
+  the same moment instead of one after the other, which roughly halves the
+  wait between the shortcut and the frozen screen on a desk of several
+  monitors.
+
 ## 1.3.1 — 2026-11-20
 
 ### Fixed
