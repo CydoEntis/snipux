@@ -1781,6 +1781,83 @@ class TestSelectionStroke:
         assert not overlay._ants_timer.isActive()
 
 
+class TestPartialRepaint:
+    """The overlay covers every monitor, so what a change asks to have
+    repainted is most of what it costs. These watch the region each
+    `paintEvent` is handed."""
+
+    def _shown_overlay(self, monkeypatch, size=(1600, 1200)):
+        overlay = OverlayWindow(make_frame(image_size=size, logical_size=size))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        QApplication.processEvents()
+        painted = []
+        paint = OverlayWindow.paintEvent
+
+        def recording_paint(self, event):
+            painted.append(event.region().boundingRect())
+            paint(self, event)
+
+        monkeypatch.setattr(OverlayWindow, "paintEvent", recording_paint)
+        return overlay, painted
+
+    def test_an_ants_tick_without_a_selection_repaints_nothing(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+
+        overlay._advance_ants()
+        QApplication.processEvents()
+
+        assert painted == []
+
+    def test_an_ants_tick_repaints_only_the_selection_outline(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+        overlay.set_selection(QRect(300, 200, 100, 80))
+        QApplication.processEvents()
+        painted.clear()
+        asked = []
+        monkeypatch.setattr(overlay, "update", lambda *args: asked.append(args))
+
+        overlay._advance_ants()
+
+        (region,) = asked[0]
+        outline = QRect(300, 200, 100, 80)
+        assert region.contains(outline.topLeft())
+        assert region.contains(outline.bottomRight())
+        # The inside of the selection and the rest of the desktop are not
+        # part of a tick.
+        assert not region.contains(outline.center())
+        assert not region.contains(QPoint(10, 10))
+
+    def test_moving_a_selection_repaints_only_where_it_was_and_is(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+        overlay.set_selection(QRect(300, 250, 100, 80))
+        QApplication.processEvents()
+        painted.clear()
+
+        overlay.set_selection(QRect(320, 260, 100, 80))
+        QApplication.processEvents()
+
+        assert painted, "the move was never repainted"
+        union = painted[0]
+        for rect in painted[1:]:
+            union = union.united(rect)
+        assert union.contains(QRect(300, 250, 120, 90))
+        # Both chips sit above the selection and move with it.
+        assert union.contains(overlay._dimension_chip_rect().toAlignedRect())
+        assert union.contains(overlay._frozen_pill_rect().toAlignedRect())
+        # The bar and the hint under the selection move with it and are
+        # repainted too, so this is a share of the window, not an exact rect.
+        assert union.width() * union.height() < overlay.width() * overlay.height() / 4
+
+    def test_the_first_selection_repaints_the_whole_window(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+
+        overlay.set_selection(QRect(300, 250, 100, 80))
+        QApplication.processEvents()
+
+        assert painted and painted[-1] == overlay.rect()
+
+
 class TestCornerBrackets:
     """SNX-32: the L-shaped corner brackets, which double as the corner
     handles' only visible chrome.

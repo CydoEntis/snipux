@@ -11,6 +11,10 @@ use it; the commit history has the detail.
   the same moment instead of one after the other, which roughly halves the
   wait between the shortcut and the frozen screen on a desk of several
   monitors.
+- **Dragging a selection is smoother.** Only the part of the screen that
+  changed is redrawn while you drag, resize or nudge a selection, and the
+  moving dashes no longer redraw every monitor 30 times a second. With
+  nothing selected the overlay now sits completely still.
 
 ## 1.3.1 — 2026-11-20
 

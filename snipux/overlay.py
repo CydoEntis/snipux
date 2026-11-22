@@ -49,6 +49,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QRegion,
     QScreen,
     QTransform,
 )
@@ -4316,6 +4317,9 @@ class OverlayWindow(QWidget):
     # in the README's prose (and the HTML reference) rather than as a named
     # `tokens.Metric` constant -- unlike arm length/thickness and handle
     # dimensions, which *are* tokenized and read from there below.
+    # Antialiased edges and a pen's half-width reach a pixel or two past
+    # the geometry they are drawn from; a partial repaint is padded by this.
+    _CHROME_REPAINT_MARGIN = 4
     _CORNER_BRACKET_OFFSET = 2
     _CORNER_BRACKET_RADIUS = 3
     _EDGE_HANDLE_OFFSET = 5
@@ -4973,6 +4977,7 @@ class OverlayWindow(QWidget):
 
     def set_selection(self, rect: QRect | None) -> None:
         """Set the current selection (window coordinates) and repaint."""
+        chrome_before = self._selection_chrome_region()
         if rect is None:
             self._selection_anchor = None
         # Every other route to a selection is one the user asked for, so
@@ -5009,7 +5014,16 @@ class OverlayWindow(QWidget):
         # Follows the selection onto its monitor, like every other piece of
         # chrome -- see `_reposition_close_button`.
         self._reposition_close_button()
-        self.update()
+        if chrome_before.isEmpty() or rect is None:
+            # Into or out of having a selection at all: the scrim, the
+            # hover previews and the eyedropper all change with that, so
+            # everything is repainted.
+            self.update()
+        else:
+            # One selection to another -- every step of a drag. Repainting
+            # the whole window here pushed every monitor's pixels to the
+            # screen on each mouse move.
+            self.update(chrome_before + self._selection_chrome_region())
 
     def _on_tool_selected(self, tool: str) -> None:
         """Wire the bar's tool buttons to the eraser's hit-testing
@@ -7840,7 +7854,49 @@ class OverlayWindow(QWidget):
         cycle = sum(metric.ANTS_DASH)
         step = cycle * self._ANTS_TIMER_INTERVAL_MS / metric.ANTS_PERIOD_MS
         self._dash_offset = (self._dash_offset + step) % cycle
-        self.update()
+        if self._selection is None:
+            # No stroke, so nothing on screen changed. This tick used to
+            # repaint every monitor 30 times a second for as long as the
+            # overlay was open.
+            return
+        self.update(self._selection_stroke_region())
+
+    def _selection_stroke_region(self) -> QRegion:
+        """The band the selection's stroke is drawn in, window-local --
+        all a marching-ants tick changes."""
+        reach = math.ceil(design.tokens.Metric.SEL_STROKE_W) + 1
+        selection = QRectF(self._selection).toAlignedRect()
+        return QRegion(selection.adjusted(-reach, -reach, reach, reach)) - QRegion(
+            selection.adjusted(reach, reach, -reach, -reach)
+        )
+
+    def _selection_chrome_region(self) -> QRegion:
+        """Everything `paintEvent` draws because of the current selection,
+        window-local: the undimmed hole, the stroke, the handles and
+        brackets that overhang it, and the two chips above it. Empty with
+        no selection.
+
+        What a change of selection has to repaint is this region before the
+        change joined with this region after it. The rest of the window --
+        most of several monitors -- is the same dimmed frame either way.
+        """
+        if self._selection is None:
+            return QRegion()
+        reach = (
+            max(
+                self._CORNER_BRACKET_OFFSET,
+                self._EDGE_HANDLE_OFFSET,
+                self._CORNER_HIT_OFFSET,
+            )
+            + self._CHROME_REPAINT_MARGIN
+        )
+        region = QRegion(
+            QRectF(self._selection).toAlignedRect().adjusted(-reach, -reach, reach, reach)
+        )
+        margin = self._CHROME_REPAINT_MARGIN
+        for chip in (self._dimension_chip_rect(), self._frozen_pill_rect()):
+            region += chip.toAlignedRect().adjusted(-margin, -margin, margin, margin)
+        return region
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if not self._accept_session_interaction(replace_selection=True):
