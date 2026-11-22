@@ -188,17 +188,28 @@ it, which is what the installer ships. Onefile unpacks the whole bundle into
 `%TEMP%\_MEI*` on every launch and Defender scans each DLL as it lands: on
 the build machine `--list-backends` took about 1.1 s that way against about
 0.15 s from the onedir tree (about 2.2 s for an installed onefile 1.2.2).
-The portable exe still pays that, since being a single file is its point.
+The portable exe pays that only when the downloaded file itself is run: it
+carries the onedir exe inside it (`_folder_build\snipux.exe`, about 3.5 MB)
+and on first run lays down the same onedir tree in `%LOCALAPPDATA%\snipux`
+from what its bootloader has just unpacked, then finishes every launch from
+there (`snipux/platform/windows_portable.py`). Measured with `--help` on
+the build machine: 1.06 s for the old portable exe on every start; now
+1.75 s once per version, 0.13 s from the shortcuts afterwards, and 1.15 s
+if the downloaded file is run again. The download grew from 37.6 to
+41.0 MB and the install it makes is 89 MB, the same as the installer's.
 Both builds also leave out what PyQt6's hooks collect but snipux never
 loads — software OpenGL, the PDF image plugin and Qt6Pdf, Qt's TLS
 backends and their OpenSSL, Qt's translations; the list and the reason for
 each entry are in the spec. Python's own OpenSSL, which the update check's
 HTTPS uses, stays.
 
-Only the onefile build relocates itself to
-`%LOCALAPPDATA%\snipux\snipux.exe` (below). The onedir build is safe to
-run from `dist\snipux\`: its exe cannot start without the `_internal\`
-beside it, so it never copies itself over an install.
+Only the onefile build installs itself to `%LOCALAPPDATA%\snipux` (below),
+and it does so on any launch, `--list-backends` included. Set
+`SNIPUX_INSTALL_DIR` to a scratch folder to try a build without that, and
+note it leaves a folder holding the installer's `unins000.exe` alone. The
+onedir build is safe to run from `dist\snipux\`: its exe cannot start
+without the `_internal\` beside it, so it never copies itself over an
+install.
 
 That is all the build does — there is no
 Add/Remove Programs entry to stamp a version into the way the installer
@@ -206,10 +217,11 @@ used to, so the build itself carries no version. The version bump belongs to
 [Cutting a release](#cutting-a-release) above, which is also what produces the
 tag this exe gets attached to.
 
-What running `snipux.exe` actually does on first launch: relocates itself
+What running `snipux.exe` actually does on first launch: installs itself
 to a stable location under the user's own `%LocalAppData%\snipux` (so a
 later cleanup of the Downloads folder it was likely run from doesn't break
-it), and sets up a Start Menu shortcut, a Startup entry, and the Ctrl+Alt+S
+it, and so nothing is unpacked on later starts), starts Snipux from there,
+and that copy sets up a Start Menu shortcut, a Startup entry, and the Ctrl+Alt+S
 hotkey binding (SNX-95/103) — the same three things `snipux --setup` writes
 for a pip/pipx install. `snipux --remove` undoes all of it.
 

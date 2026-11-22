@@ -32,8 +32,9 @@ from pathlib import Path
 # installer ships, because a onefile exe unpacks the whole bundle -- ~300
 # files, Qt included -- into %TEMP%\_MEI* on *every* launch, and Defender
 # scans each DLL as it lands: about 2.2 s before main() on a real install,
-# against ~0.25 s from source. An installed copy has no reason to pay that;
-# the portable one keeps paying it because being one file is its point.
+# against ~0.25 s from source. An installed copy has no reason to pay that,
+# and the portable one pays it only when the downloaded file itself is run:
+# its first run installs it as this same onedir build (the EXEs, below).
 _parser = argparse.ArgumentParser()
 _parser.add_argument("--onedir", action="store_true")
 _ONEDIR = _parser.parse_args().onedir
@@ -117,17 +118,7 @@ a.datas = [entry for entry in a.datas if _needed(entry)]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-# The onefile exe carries everything inside itself; the onedir one carries
-# only the scripts, with the binaries and data beside it in _internal\
-# (COLLECT, at the bottom).
-_bundled = [] if _ONEDIR else [a.binaries, a.zipfiles, a.datas]
-
-exe = EXE(
-    pyz,
-    a.scripts,
-    *_bundled,
-    [],
-    exclude_binaries=_ONEDIR,
+_EXE_OPTIONS = dict(
     name="snipux",
     debug=False,
     bootloader_ignore_signals=False,
@@ -160,9 +151,33 @@ exe = EXE(
     icon=str(_icon_path) if _icon_path.is_file() else None,
 )
 
+# The onedir exe carries only the scripts, with the binaries and data
+# beside it in _internal\ (COLLECT, at the bottom). Both builds make one:
+# an EXE that excludes its binaries is written to the work directory, not
+# to dist\, so the one the onefile build makes here never lands on the
+# portable exe of the same name.
+folder_exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **_EXE_OPTIONS)
+
+if not _ONEDIR:
+    # The onefile exe carries everything inside itself -- and the onedir
+    # exe too, as plain data. On first run it copies what its bootloader
+    # has just unpacked to %LOCALAPPDATA%\snipux\_internal, puts this exe
+    # beside it, and from then on starts from there with nothing to unpack
+    # (snipux/platform/windows_portable.py, whose FOLDER_EXE is this path).
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas + [("_folder_build/snipux.exe", folder_exe.name, "DATA")],
+        [],
+        exclude_binaries=False,
+        **_EXE_OPTIONS,
+    )
+
 if _ONEDIR:
     coll = COLLECT(
-        exe,
+        folder_exe,
         a.binaries,
         a.zipfiles,
         a.datas,

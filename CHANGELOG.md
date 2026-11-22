@@ -7,6 +7,13 @@ use it; the commit history has the detail.
 
 ### Changed
 
+- **The portable `snipux.exe` starts as fast as the installed one.** It
+  used to unpack itself into a temporary folder every time it started --
+  at every login, about a second. It now does that once: the first run
+  installs it in `%LOCALAPPDATA%\snipux` (about 90 MB) and starts Snipux
+  from there, and after that it opens in a fraction of a second. It is
+  still one file with no installer. Running a newer `snipux.exe` replaces
+  the old version; quit Snipux from the tray first.
 - **A snip opens sooner on Windows.** Every monitor is now photographed at
   the same moment instead of one after the other, which roughly halves the
   wait between the shortcut and the frozen screen on a desk of several

@@ -173,6 +173,14 @@ class Platform(ABC):
         """
         return None
 
+    def hand_off_to_stable_install(self, arguments: list[str]) -> int | None:
+        """Finish this launch from the stable install instead of from this
+        process, where a build has one that starts faster than it does.
+        The exit code to end with, or `None` to carry on here -- the answer
+        everywhere but a portable Windows exe. Never raises.
+        """
+        return None
+
     def relaunch_without_console(self) -> bool:
         """#52: start the resident app again in a process that no console
         can take down, and return True so the caller can simply exit.

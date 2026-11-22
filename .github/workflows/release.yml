@@ -131,7 +131,9 @@ jobs:
       # The same smoke test the Linux bundle gets: a build that cannot start
       # should fail here rather than on the first person to download it.
       # Both builds, since they are packed differently and either can break
-      # alone. Start-Process -Wait, because PowerShell does not wait for a
+      # alone. The portable one installs itself to %LOCALAPPDATA%\snipux
+      # and runs the command from there, so this covers that too.
+      # Start-Process -Wait, because PowerShell does not wait for a
       # windowed exe started bare, and so would never see it fail.
       - name: Check the exes run
         env:

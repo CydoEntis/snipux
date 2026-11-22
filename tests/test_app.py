@@ -1759,6 +1759,30 @@ class TestCli:
 
         assert calls == [("reattach", {"attach": False}), "relaunch", "run_resident_app"]
 
+    def test_a_launch_handed_to_the_stable_install_ends_with_its_exit_code(self, monkeypatch):
+        # The portable Windows exe finishes every launch from the folder
+        # build it installed. Doing the work here as well would be two.
+        calls = _stub_dispatch(monkeypatch, ["snipux", "--list-backends"])
+        handed = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "hand_off_to_stable_install",
+            lambda arguments: handed.append(arguments) or 3,
+        )
+
+        assert cli() == 3
+        assert handed == [["--list-backends"]]
+        assert calls == []
+
+    def test_a_launch_that_is_not_handed_off_carries_on(self, monkeypatch):
+        calls = _stub_dispatch(monkeypatch, ["snipux", "--list-backends"])
+        monkeypatch.setattr(
+            app.platform.current, "hand_off_to_stable_install", lambda arguments: None
+        )
+
+        assert cli() == 0
+        assert calls == [("reattach", {"attach": True}), "main"]
+
     def test_reattaches_the_console_before_dispatching(self, monkeypatch):
         # Order matters (SNX-100's own acceptance criterion): main()/
         # run_resident_app() may print before returning, so the console

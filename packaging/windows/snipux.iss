@@ -23,11 +23,14 @@
 ; application's own behaviour:
 ;
 ; 1. It installs into %LOCALAPPDATA%\snipux, which is not an arbitrary
-;    choice -- it is `platform.windows._portable_exe_path()`, the location a
-;    frozen snipux.exe copies itself to on first run (SNX-103). Install
-;    anywhere else and `_ensure_stable_copy()` would duplicate the exe on
-;    first launch, leave the shortcuts pointing at its copy rather than at
-;    the installed file, and leave that copy behind at uninstall.
+;    choice -- it is `platform.windows._portable_exe_path()`, the location
+;    the portable snipux.exe installs itself to on first run (SNX-103), as
+;    this same onedir tree. Install anywhere else and a machine that has
+;    run both would have two copies, with the shortcuts on whichever ran
+;    last. Sharing the folder is safe in both directions: this replaces a
+;    portable install like any older version ([InstallDelete], below), and
+;    the portable exe leaves a folder with unins000.exe in it alone
+;    (`platform/windows_portable.py`).
 ;
 ; 2. Per-user, so there is no UAC prompt and no admin account needed. A
 ;    screen-capture tool that demands elevation to install is asking for

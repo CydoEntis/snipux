@@ -4712,6 +4712,10 @@ def _dispatch(*, may_relaunch: bool) -> int:
     instead of through a console-stub launcher.
     """
     arguments = sys.argv[1:]
+    # Ahead of the console on purpose: see the Windows implementation.
+    handed_off = platform.current.hand_off_to_stable_install(arguments)
+    if handed_off is not None:
+        return handed_off
     reattach_console(attach=bool(arguments))
     # Before anything starts a program: from inside a bundle they would
     # inherit its libraries and fail -- see snipux/hostenv.py.

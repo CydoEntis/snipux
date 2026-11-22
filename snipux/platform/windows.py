@@ -93,6 +93,13 @@ already been set from the first launch onward. Both are no-ops off a
 portable build (`sys.frozen` unset, e.g. a pip/pipx install or a source
 checkout), which is what keeps this off the one case the ticket says must
 be untouched.
+
+That copy is now the fallback. A single-file exe unpacks itself into
+%TEMP% on every start wherever it is kept, so `hand_off_to_stable_install()`
+has the portable exe install itself in that same folder as a folder build
+instead, and finish each launch from it -- `windows_portable.py` has the
+whole of it. `_ensure_stable_copy()` is what still runs when that cannot be
+done.
 """
 
 from __future__ import annotations
@@ -112,7 +119,7 @@ from PyQt6.QtMultimedia import QMediaDevices
 from snipux import capture, log, recording, setup_desktop
 from snipux.design import tokens
 
-from . import Platform, UnimplementedPlatformError, windows_ocr
+from . import Platform, UnimplementedPlatformError, windows_ocr, windows_portable
 
 try:
     import winreg
@@ -515,8 +522,13 @@ def _portable_exe_path() -> Path:
     sitting side by side, which is the whole of what makes "a newer
     version replaces an older install" true: nothing has to notice or
     clean up the old one, because there never is one once the copy lands.
+
+    `SNIPUX_INSTALL_DIR` names another folder for it. That is for trying a
+    build's first run without touching the install the machine really has.
     """
-    return _local_app_data_dir() / "snipux" / "snipux.exe"
+    override = os.environ.get("SNIPUX_INSTALL_DIR")
+    folder = Path(override) if override else _local_app_data_dir() / "snipux"
+    return folder / "snipux.exe"
 
 
 def _ensure_stable_copy() -> Path | None:
@@ -613,7 +625,10 @@ def _remove_stable_copy(exe_path: Path) -> bool:
         print(f"{exe_path} not found -- nothing to remove")
         return True
     try:
+        # The exe first: Windows refuses while that build is running, and
+        # its libraries are then left alone too, so what remains still starts.
         exe_path.unlink()
+        windows_portable.remove_libraries(exe_path)
     except OSError as exc:
         log.note(f"Note: could not remove {exe_path}: {exc}")
         return False
@@ -1307,6 +1322,21 @@ class WindowsPlatform(Platform):
         acceptance criterion.
         """
         return _ensure_stable_copy()
+
+    def hand_off_to_stable_install(self, arguments: list[str]) -> int | None:
+        """Run this launch from the folder build the portable exe installs
+        itself as (`windows_portable`), so only the first run of a version
+        pays for unpacking it.
+
+        The console is joined only once the install is settled. Installing
+        starts the new copy once to prove it runs, and a copy started from
+        a process that already had the terminal would print into it.
+        """
+        return windows_portable.hand_off(
+            _portable_exe_path(),
+            arguments,
+            before_start=lambda: reattach_console(attach=bool(arguments)),
+        )
 
     def relaunch_without_console(self) -> bool:
         """#52: start the resident app again under `windowless_launcher()`

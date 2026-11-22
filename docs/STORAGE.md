@@ -21,11 +21,22 @@ issue that shows a problem the current approach cannot handle.
 | Linux desktop entries  | `$XDG_DATA_HOME/applications` (`snipux.desktop` and the two editors' `snipux-image-editor.desktop`, `snipux-video-editor.desktop`), `$XDG_CONFIG_HOME/autostart`, `$XDG_DATA_HOME/icons/hicolor` |
 | Windows shortcuts      | `%APPDATA%\Microsoft\Windows\Start Menu\Programs` (`snipux.lnk`, `Snipux Image Editor.lnk`, `Snipux Video Editor.lnk`, + Startup) |
 | Windows Open with      | `HKCU\Software\Classes`: `Snipux.ImageEditor`, `Snipux.VideoEditor`, `Applications\<launcher>.exe`, and one value under each suffix's `OpenWithProgids` |
-| Windows exe + icon     | `%LOCALAPPDATA%\snipux`                                  |
+| Windows exe + icon     | `%LOCALAPPDATA%\snipux`: `snipux.exe`, its libraries in `_internal\`, `snipux.ico` |
 
 The settings folder is `$XDG_CONFIG_HOME/snipux`, falling back to
 `~/.config/snipux` -- on every OS, Windows included, so one folder backs up
 everything. `setup_desktop.config_path()` is the one function that knows it.
+
+`%LOCALAPPDATA%\snipux` holds the same thing whichever download put it
+there. The installer writes `snipux.exe`, `_internal\` and its own
+`unins000.*`. The portable `snipux.exe` writes the first two itself on its
+first run (`platform/windows_portable.py`), about 90 MB, and replaces them
+when a different version of the portable exe is run; there is never more
+than one version there. While it does, `.staging\` holds the copy being
+prepared and `.replaced\` the one being swapped out; both are gone when it
+finishes, and one left by a run that was killed is deleted by the next. A
+folder with `unins000.exe` in it is the installer's, and the portable exe
+writes nothing to it.
 
 `crash.log` holds unhandled exceptions. `snipux.log` holds the failures
 snipux dealt with and would once only have printed -- a shortcut that could
