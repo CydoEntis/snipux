@@ -1,6 +1,8 @@
 import ctypes
 import os
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -35,7 +37,7 @@ from PyQt6.QtWidgets import (
 import snipux.app as app_module
 import snipux.output as output_module
 import snipux.overlay as overlay_module
-from snipux.sensitive import RecognizedWord
+from snipux.sensitive import RecognitionFailed, RecognizedWord
 from conftest import skip_on_windows
 from snipux import capture as capture_module
 from snipux import design
@@ -53,6 +55,7 @@ from snipux.design import tokens
 from snipux.shapes import (
     Redact,
     Arrow,
+    Blackout,
     Blur,
     Callout,
     Ellipse,
@@ -428,13 +431,15 @@ class TestOverlayWindowMarks:
         frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
         overlay = OverlayWindow(frame)
         overlay.set_selection(QRect(100, 100, 50, 50))
-        overlay.add_mark(self._mark((10, 10), (30, 30)))
+        # Below the band the chips take inside a selection that starts at
+        # the top of its monitor, which this one grows into.
+        overlay.add_mark(self._mark((10, 50), (30, 70)))
         overlay.grab()  # one paint pass while hidden by the narrow selection
 
         overlay.set_selection(QRect(0, 0, 200, 200))
         rendered = overlay.grab().toImage()
 
-        assert pixel(rendered, 10, 20) == self.RED  # left border
+        assert pixel(rendered, 10, 60) == self.RED  # left border
 
     def test_reframing_leaves_a_mark_over_the_same_content(self):
         # A mark drawn inside the selection must stay over the same pixels
@@ -444,12 +449,13 @@ class TestOverlayWindowMarks:
         frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
         overlay = OverlayWindow(frame)
         overlay.set_selection(QRect(0, 0, 100, 100))
-        overlay.add_mark(self._mark((20, 20), (40, 40)))
+        # Below the chips, which sit inside a selection at the monitor's top.
+        overlay.add_mark(self._mark((20, 50), (40, 70)))
 
-        before = pixel(overlay.grab().toImage(), 20, 30)
+        before = pixel(overlay.grab().toImage(), 20, 60)
 
         overlay.set_selection(QRect(0, 0, 150, 150))
-        after = pixel(overlay.grab().toImage(), 20, 30)
+        after = pixel(overlay.grab().toImage(), 20, 60)
 
         assert before == self.RED
         assert after == self.RED
@@ -624,7 +630,9 @@ class TestOverlayWindowObscuringMarks:
 
         rendered = overlay.grab().toImage()
 
-        assert pixel(rendered, 30, 30) == pixel(frame.image, 30, 30)
+        # y=45: inside the first hole, and below the chips, which sit inside
+        # a selection that starts at the top of its monitor.
+        assert pixel(rendered, 30, 45) == pixel(frame.image, 30, 45)
         assert pixel(rendered, 140, 140) == pixel(frame.image, 140, 140)
         assert pixel(rendered, 90, 90) != pixel(frame.image, 90, 90)
 
@@ -1779,6 +1787,184 @@ class TestSelectionStroke:
 
         overlay.hide()
         assert not overlay._ants_timer.isActive()
+
+
+class TestPartialRepaint:
+    """The overlay covers every monitor, so what a change asks to have
+    repainted is most of what it costs. These watch the region each
+    `paintEvent` is handed."""
+
+    def _shown_overlay(self, monkeypatch, size=(1600, 1200)):
+        overlay = OverlayWindow(make_frame(image_size=size, logical_size=size))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        QApplication.processEvents()
+        painted = []
+        paint = OverlayWindow.paintEvent
+
+        def recording_paint(self, event):
+            # Only this overlay's: one left open by an earlier test can
+            # still be handed a late expose of its own.
+            if self is overlay:
+                painted.append(event.region().boundingRect())
+            paint(self, event)
+
+        monkeypatch.setattr(OverlayWindow, "paintEvent", recording_paint)
+        return overlay, painted
+
+    def test_an_ants_tick_without_a_selection_repaints_nothing(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+
+        overlay._advance_ants()
+        QApplication.processEvents()
+
+        assert painted == []
+
+    def test_an_ants_tick_repaints_only_the_selection_outline(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+        overlay.set_selection(QRect(300, 200, 100, 80))
+        QApplication.processEvents()
+        painted.clear()
+        asked = []
+        monkeypatch.setattr(overlay, "update", lambda *args: asked.append(args))
+
+        overlay._advance_ants()
+
+        (region,) = asked[0]
+        outline = QRect(300, 200, 100, 80)
+        assert region.contains(outline.topLeft())
+        assert region.contains(outline.bottomRight())
+        # The inside of the selection and the rest of the desktop are not
+        # part of a tick.
+        assert not region.contains(outline.center())
+        assert not region.contains(QPoint(10, 10))
+
+    def test_moving_a_selection_repaints_only_where_it_was_and_is(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+        overlay.set_selection(QRect(300, 250, 100, 80))
+        QApplication.processEvents()
+        painted.clear()
+
+        overlay.set_selection(QRect(320, 260, 100, 80))
+        QApplication.processEvents()
+
+        assert painted, "the move was never repainted"
+        union = painted[0]
+        for rect in painted[1:]:
+            union = union.united(rect)
+        assert union.contains(QRect(300, 250, 120, 90))
+        # Both chips sit above the selection and move with it.
+        assert union.contains(overlay._dimension_chip_rect().toAlignedRect())
+        assert union.contains(overlay._frozen_pill_rect().toAlignedRect())
+        # The bar and the hint under the selection move with it and are
+        # repainted too, so this is a share of the window, not an exact rect.
+        assert union.width() * union.height() < overlay.width() * overlay.height() / 4
+
+    def test_the_eyedropper_repaints_only_around_the_loupe(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+        overlay.set_selection(QRect(200, 200, 800, 600))
+        overlay.set_eyedropper_active(True)
+
+        def hover(x, y):
+            position = QPointF(x, y)
+            QApplication.sendEvent(
+                overlay,
+                QMouseEvent(
+                    QEvent.Type.MouseMove,
+                    position,
+                    position,
+                    Qt.MouseButton.NoButton,
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                ),
+            )
+            QApplication.processEvents()
+
+        hover(500, 500)
+        painted.clear()
+        hover(510, 505)
+
+        assert painted, "the loupe never followed the pointer"
+        union = painted[0]
+        for rect in painted[1:]:
+            union = union.united(rect)
+        box, readout = overlay._eyedropper_rects(
+            QPointF(510, 505), overlay.color_at(QPointF(510, 505))
+        )
+        assert union.contains(box.toAlignedRect())
+        assert union.contains(readout.toAlignedRect())
+        assert union.width() * union.height() < overlay.width() * overlay.height() / 4
+
+    def _line(self, y, colour=QColor(255, 0, 0)):
+        return Line(colour, 6.0, start=QPointF(40, y), end=QPointF(160, y))
+
+    def _count_line_draws(self, monkeypatch):
+        drawn = []
+        draw = Line.draw
+
+        def counting_draw(shape, painter):
+            drawn.append(shape)
+            draw(shape, painter)
+
+        monkeypatch.setattr(Line, "draw", counting_draw)
+        return drawn
+
+    @staticmethod
+    def _ink_at(image, x, y):
+        """The colour at a window-local point of a grabbed overlay, whose
+        image has more pixels than that on a scaled display."""
+        ratio = image.devicePixelRatio()
+        return image.pixelColor(round(x * ratio), round(y * ratio))
+
+    def test_ink_is_drawn_once_however_often_the_overlay_repaints(self, monkeypatch):
+        overlay = OverlayWindow(make_frame())
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(self._line(50))
+        overlay.add_mark(self._line(100))
+        drawn = self._count_line_draws(monkeypatch)
+
+        first = overlay.grab().toImage()
+        second = overlay.grab().toImage()
+
+        assert len(drawn) == 2
+        assert first == second
+        assert self._ink_at(first, 100, 100) == QColor(255, 0, 0)
+
+    def test_a_new_mark_is_the_only_one_drawn_again(self, monkeypatch):
+        overlay = OverlayWindow(make_frame())
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(self._line(50))
+        overlay.grab()
+        drawn = self._count_line_draws(monkeypatch)
+        added = self._line(100)
+
+        overlay.add_mark(added)
+        image = overlay.grab().toImage()
+
+        assert drawn == [added]
+        assert self._ink_at(image, 100, 50) == QColor(255, 0, 0)
+        assert self._ink_at(image, 100, 100) == QColor(255, 0, 0)
+
+    def test_an_undone_mark_leaves_the_screen(self):
+        overlay = OverlayWindow(make_frame())
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(self._line(50))
+        overlay.add_mark(self._line(100))
+        assert self._ink_at(overlay.grab().toImage(), 100, 100) == QColor(255, 0, 0)
+
+        overlay.undo()
+        image = overlay.grab().toImage()
+
+        assert self._ink_at(image, 100, 100) != QColor(255, 0, 0)
+        assert self._ink_at(image, 100, 50) == QColor(255, 0, 0)
+
+    def test_the_first_selection_repaints_the_whole_window(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+
+        overlay.set_selection(QRect(300, 250, 100, 80))
+        QApplication.processEvents()
+
+        assert painted and painted[-1] == overlay.rect()
 
 
 class TestCornerBrackets:
@@ -6337,6 +6523,20 @@ class TestPopoverChildrenAreNeverClippedBelowSizeHint:
             self._assert_no_child_is_clipped(popover)
 
 
+def _wait_until(condition, timeout_ms: int = 10_000) -> None:
+    """Run the event loop until `condition()` holds -- bounded, so a wait
+    for something that never happens fails instead of hanging the run."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while not condition():
+        assert time.monotonic() < deadline, "waited too long"
+        QTest.qWait(1)
+
+
+def _settle_sensitive_check(overlay) -> None:
+    """Let a Hide sensitive read that is out come back and be applied."""
+    _wait_until(lambda: overlay._sensitive_check is None)
+
+
 def _close_stray_toplevel_windows() -> None:
     """Close every top-level widget still alive from an earlier test.
 
@@ -7383,7 +7583,9 @@ class TestADelayPickedOnTheChooserRowDelaysTheCapture:
         assert overlay._picking_window
 
 
-def _mark(start=(10, 10), end=(20, 20)):
+def _mark(start=(150, 210), end=(170, 230)):
+    # Inside the selection of every test that counts it: the chip counts
+    # the ink that shows, and ink is only ever drawn inside a selection.
     return Rectangle(
         colour=QColor(255, 0, 0), stroke_width=4, start=QPointF(*start), end=QPointF(*end)
     )
@@ -9291,16 +9493,28 @@ class TestHideSensitiveText:
             ("Email:", 0, 20, 30, 30),
             ("bob.smith@gmail.com", 40, 20, 200, 30),
         ])
+        # Recognition runs on a worker thread. It answers at once unless a
+        # test calls `hold()`, and then not until that test calls
+        # `release()` -- which is how "while the read is out" is made a
+        # state a test can stand in rather than a race it has to win.
+        state.answer = threading.Event()
+        state.answer.set()
+        state.hold = state.answer.clear
+        state.release = state.answer.set
+        state.wait_for_answer = lambda: state.answer.wait(10)
         current = overlay_module.platform.current
 
         def recognize_text(image):
             state.calls.append(QImage(image))
+            assert state.wait_for_answer(), "the test never released the recogniser"
             return [[RecognizedWord(text, QRectF(x, y, w, h)) for text, x, y, w, h in state.words]]
 
         monkeypatch.setattr(current, "recognizes_text", lambda: state.available)
         monkeypatch.setattr(current, "text_recognition_unavailable_reason", lambda: "")
         monkeypatch.setattr(current, "recognize_text", recognize_text)
-        return state
+        yield state
+        # No worker is left waiting on a test that has ended.
+        state.release()
 
     def _overlay(self, *, hide=True):
         size = self.LOGICAL
@@ -9318,6 +9532,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         [box] = overlay._marks
         assert isinstance(box, Redact)
         # Image rect (40, 20, 200x30) at 2x, offset by the selection's
@@ -9334,12 +9550,16 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert len(overlay._marks) == 1
 
     def test_the_recognizer_reads_the_selection_at_full_resolution(self, recognizer):
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         [image] = recognizer.calls
         assert (image.width(), image.height()) == (800, 600)
@@ -9353,6 +9573,8 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
         assert len(overlay._marks) == 3
 
         overlay.undo()
@@ -9368,15 +9590,126 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         [image] = copied
         # Centre of the value, in exported pixels: the recognised rect's own.
         assert image.pixelColor(140, 35) == QColor(0, 0, 0)
         assert image.pixelColor(700, 500) == QColor(BASE_COLOR)
 
+    def _failing(self, recognizer, monkeypatch, reason="text recognition took longer than 5 seconds"):
+        def fails(image):
+            recognizer.calls.append(QImage(image))
+            assert recognizer.wait_for_answer(), "the test never released the recogniser"
+            raise RecognitionFailed(reason)
+
+        monkeypatch.setattr(overlay_module.platform.current, "recognize_text", fails)
+
+    def test_a_failed_recognition_says_nothing_was_hidden(self, recognizer, monkeypatch):
+        # It came back as "no words", which reads as "nothing sensitive
+        # here": the snip went out unredacted and nothing said so.
+        self._failing(recognizer, monkeypatch)
+        overlay = self._overlay()
+        said = []
+        monkeypatch.setattr(overlay, "_show_toast", lambda icon, text: said.append(text))
+
+        overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
+
+        assert overlay._marks == ()
+        assert said == [
+            "Sensitive text was not hidden: text recognition took longer than 5 seconds"
+        ]
+
+    def test_a_failure_before_the_overlay_is_on_screen_is_said_once_it_is(
+        self, recognizer, monkeypatch
+    ):
+        # Last region is recognised while the overlay is still being
+        # built, when a toast has nowhere to show.
+        self._failing(recognizer, monkeypatch)
+        overlay = self._overlay()
+        overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
+        said = []
+        monkeypatch.setattr(overlay, "_show_toast", lambda icon, text: said.append(text))
+
+        overlay.show()
+        try:
+            QApplication.processEvents()
+        finally:
+            overlay.close()
+
+        assert [text for text in said if "was not hidden" in text] == [
+            "Sensitive text was not hidden: text recognition took longer than 5 seconds"
+        ]
+
+    def test_an_instant_snip_is_not_copied_unhidden_without_being_asked(
+        self, recognizer, monkeypatch
+    ):
+        self._failing(recognizer, monkeypatch)
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay()
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+        asked = []
+        monkeypatch.setattr(
+            overlay, "_finish_unhidden_snip_anyway", lambda reason: asked.append(reason) or False
+        )
+
+        overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
+
+        assert asked == ["text recognition took longer than 5 seconds"]
+        assert copied == []
+        assert overlay._selection is None
+
+    def test_an_instant_snip_goes_ahead_unhidden_when_the_user_says_so(
+        self, recognizer, monkeypatch
+    ):
+        self._failing(recognizer, monkeypatch)
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay()
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+        monkeypatch.setattr(overlay, "_finish_unhidden_snip_anyway", lambda reason: True)
+
+        overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
+
+        assert len(copied) == 1
+
+    def test_an_instant_snip_that_was_checked_is_never_questioned(self, recognizer, monkeypatch):
+        recognizer.words = [("Deploy", 10, 10, 60, 20)]
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        overlay = self._overlay()
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+        monkeypatch.setattr(
+            overlay, "_finish_unhidden_snip_anyway",
+            lambda reason: pytest.fail("asked about a snip that was checked"),
+        )
+
+        overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
+
+        assert len(copied) == 1
+
     def test_nothing_is_read_when_the_toggle_is_off(self, recognizer):
         overlay = self._overlay(hide=False)
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         assert recognizer.calls == []
         assert overlay._marks == ()
@@ -9387,6 +9720,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert recognizer.calls == []
 
     def test_nothing_is_read_when_the_platform_cannot(self, recognizer):
@@ -9394,6 +9729,8 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         assert recognizer.calls == []
         assert overlay._marks == ()
@@ -9404,6 +9741,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert overlay._marks == ()
         assert not overlay._mark_store.can_undo
 
@@ -9411,7 +9750,10 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
         overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
 
         assert len(overlay._marks) == 1
 
@@ -9425,6 +9767,8 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         [box] = overlay._marks
         rect = QRectF(box.start, box.end).normalized()
@@ -9441,6 +9785,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert len(overlay._marks) == 2
 
     def test_it_says_how_many_it_hid(self, recognizer):
@@ -9454,6 +9800,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert said == ["Hid 2 items"]
 
     def test_a_recalled_last_region_is_scanned_too(self, recognizer):
@@ -9464,6 +9812,7 @@ class TestHideSensitiveText:
         overlay._chooser.set_reuse_last_region(True)
 
         overlay._preselect_last_region()
+        _settle_sensitive_check(overlay)
 
         assert overlay._selection == self.SELECTION
         assert len(overlay._marks) == 1
@@ -9477,6 +9826,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert len(overlay._marks) == 1
 
     def test_a_label_from_the_users_own_list_hides_its_value(self, recognizer):
@@ -9488,6 +9839,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         [box] = overlay._marks
         # The value only: 190/2 + the selection's own x, less the padding.
         assert QRectF(box.start, box.end).normalized().left() == pytest.approx(
@@ -9498,11 +9851,13 @@ class TestHideSensitiveText:
         recognizer.words = [("Acme", 40, 20, 90, 30)]
         overlay = self._overlay()
         overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
         assert overlay._marks == ()
 
         setup_desktop.save_hide_list(["Acme"], [], [])
         again = self._overlay()
         again._commit_selection(self.SELECTION)
+        _settle_sensitive_check(again)
 
         assert len(again._marks) == 1
 
@@ -9511,6 +9866,8 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         # The fixture's own words: the built-in email rule, and nothing else.
         assert len(overlay._marks) == 1
@@ -9527,6 +9884,7 @@ class TestHideSensitiveText:
         # The capture itself must still finish: the loader is the only thing
         # allowed to know the file is broken.
         overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
 
     def test_the_toggle_is_seeded_from_and_saved_to_config(self, recognizer):
         setup_desktop.save_hide_sensitive(True)
@@ -9547,6 +9905,240 @@ class TestHideSensitiveText:
         assert overlay._chooser.hide_sensitive_available is False
         overlay._chooser._on_control_hovered(overlay._chooser.row.hide_flag, True)
         assert overlay._chooser.hint.text == "Windows only for now"
+
+    # -- the read happens off the UI thread ---------------------------------
+
+    def _shown(self, overlay):
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _copies(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        return copied
+
+    def test_committing_does_not_wait_for_the_text_to_be_read(self, recognizer):
+        recognizer.hold()
+        overlay = self._overlay()
+
+        # Returning at all is the point: the recogniser has not answered.
+        overlay._commit_selection(self.SELECTION)
+
+        assert overlay._marks == ()
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert len(overlay._marks) == 1
+
+    def test_it_says_it_is_checking_until_the_read_comes_back(self, recognizer):
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Checking for sensitive text\u2026"
+        # It stays for as long as the read does, not for a toast's few seconds.
+        assert not overlay._toast._timer.isActive()
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert overlay._toast._text_label.text() == "Hid 1 item"
+        overlay.close()
+
+    def test_the_checking_notice_goes_when_nothing_needed_hiding(self, recognizer):
+        recognizer.words = [("Deploy", 10, 10, 60, 20)]
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._commit_selection(self.SELECTION)
+        assert overlay._toast.isVisible()
+
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+
+        assert not overlay._toast.isVisible()
+        overlay.close()
+
+    def test_a_check_begun_before_the_overlay_is_on_screen_is_said_once_it_is(
+        self, recognizer
+    ):
+        recognizer.hold()
+        overlay = self._overlay()
+        overlay._commit_selection(self.SELECTION)
+
+        self._shown(overlay)
+
+        assert overlay._toast._text_label.text() == "Checking for sensitive text\u2026"
+        overlay.close()
+
+    def test_an_instant_snip_is_not_copied_until_its_check_comes_back(
+        self, recognizer, monkeypatch
+    ):
+        copied = self._copies(monkeypatch)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert copied == []
+        assert overlay.isVisible()
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        [image] = copied
+        assert image.pixelColor(140, 35) == QColor(0, 0, 0)
+        assert not overlay.isVisible()
+
+    @pytest.mark.parametrize("press", ["copy button", "enter", "ctrl+c"])
+    def test_a_copy_asked_for_during_the_check_waits_for_the_boxes(
+        self, recognizer, monkeypatch, press
+    ):
+        copied = self._copies(monkeypatch)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._on_captured = lambda image, path: None
+        overlay._commit_selection(self.SELECTION)
+
+        if press == "copy button":
+            overlay._bar.copyRequested.emit()
+        elif press == "enter":
+            QTest.keyClick(overlay, Qt.Key.Key_Return)
+        else:
+            QTest.keyClick(overlay, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+
+        assert copied == []
+        assert overlay.isVisible()
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        [image] = copied
+        assert image.pixelColor(140, 35) == QColor(0, 0, 0)
+        assert not overlay.isVisible()
+
+    def test_a_save_asked_for_during_the_check_waits_for_the_boxes(
+        self, recognizer, monkeypatch, tmp_path
+    ):
+        folder = tmp_path / "snips"
+        monkeypatch.setattr(setup_desktop, "load_save_folder", lambda *a, **k: folder)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        saved = []
+        overlay._on_captured = lambda image, path, **facts: saved.append((image, path))
+        overlay._commit_selection(self.SELECTION)
+
+        overlay._bar.saveRequested.emit()
+
+        assert saved == [] and not folder.exists()
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        _wait_until(lambda: saved)
+        [(image, path)] = saved
+        assert path is not None and path.exists()
+        assert image.pixelColor(140, 35) == QColor(0, 0, 0)
+
+    def test_a_pin_asked_for_during_the_check_waits_for_the_boxes(self, recognizer):
+        recognizer.hold()
+        pinned = []
+        overlay = self._shown(self._overlay())
+        overlay._on_pin_requested = lambda image, rect: pinned.append(QImage(image))
+        overlay._commit_selection(self.SELECTION)
+
+        overlay._bar.pinRequested.emit()
+
+        assert pinned == []
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        [image] = pinned
+        assert image.pixelColor(140, 35) == QColor(0, 0, 0)
+
+    def test_a_copy_held_for_a_check_that_fails_is_not_made(self, recognizer, monkeypatch):
+        # The bar is still there with the notice above it: pressing Copy
+        # again, having read why nothing was hidden, is the user's yes.
+        self._failing(recognizer, monkeypatch)
+        copied = self._copies(monkeypatch)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._commit_selection(self.SELECTION)
+        overlay._bar.copyRequested.emit()
+
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+
+        assert copied == []
+        assert overlay.isVisible()
+        assert "was not hidden" in overlay._toast._text_label.text()
+        overlay._bar.copyRequested.emit()
+        assert len(copied) == 1
+
+    def test_escape_during_the_check_cancels_the_snip(self, recognizer, monkeypatch):
+        copied = self._copies(monkeypatch)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._on_captured = lambda image, path: pytest.fail("a cancelled snip was captured")
+        overlay._chooser.set_after("instant")
+        overlay._commit_selection(self.SELECTION)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay.isVisible()
+        # The read comes back to a window that has gone, and changes nothing.
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert copied == []
+        assert overlay._marks == ()
+
+    def test_a_second_commit_during_a_check_starts_no_second_recognition(self, recognizer):
+        recognizer.hold()
+        overlay = self._overlay()
+        overlay._commit_selection(self.SELECTION)
+        _wait_until(lambda: len(recognizer.calls) == 1)
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert len(recognizer.calls) == 1
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert len(recognizer.calls) == 1
+        assert len(overlay._marks) == 1
+
+    def test_another_selection_committed_during_a_check_is_read_after_it(self, recognizer):
+        recognizer.hold()
+        overlay = self._overlay()
+        overlay._commit_selection(self.SELECTION)
+        _wait_until(lambda: len(recognizer.calls) == 1)
+        elsewhere = QRect(600, 400, 400, 300)
+
+        overlay._commit_selection(elsewhere)
+
+        # Never two at once: the second waits for the first to come back.
+        assert len(recognizer.calls) == 1
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert len(recognizer.calls) == 2
+        # Only the selection still on screen got boxes: the first read's
+        # answer was for pixels nobody is looking at any more.
+        [box] = overlay._marks
+        assert QRectF(elsewhere).contains(QRectF(box.start, box.end).normalized())
+
+    def test_a_recogniser_that_breaks_is_reported_like_one_that_fails(
+        self, recognizer, monkeypatch
+    ):
+        # An answer has to come back whatever happens in the worker, or the
+        # overlay would hold the snip waiting for one for ever.
+        def breaks(image):
+            raise ValueError("not what recognition is supposed to raise")
+
+        monkeypatch.setattr(overlay_module.platform.current, "recognize_text", breaks)
+        monkeypatch.setattr(overlay_module.log, "note", lambda text: None)
+        overlay = self._overlay()
+        said = []
+        monkeypatch.setattr(overlay, "_show_toast", lambda icon, text: said.append(text))
+
+        overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
+
+        assert overlay._marks == ()
+        assert said == ["Sensitive text was not hidden: text recognition stopped unexpectedly"]
 
 
 class _FakeBrowserProvider(UnsupportedGeometryProvider):
@@ -12645,9 +13237,12 @@ class TestTheDestinationMenuChangesTheDestination:
     def test_choosing_save_stops_the_review_window_opening(self, monkeypatch, tmp_path):
         overlay = self._overlay(monkeypatch, tmp_path, "review")
         seen = []
-        overlay._on_captured = lambda image, path: seen.append(overlay.outcome)
+        # A save reports once its file is written, after the overlay has
+        # closed, and says itself what the snip was headed for.
+        overlay._on_captured = lambda image, path, outcome, save_error: seen.append(outcome)
 
         overlay._on_destination_chosen("Save")
+        _wait_until(lambda: seen)
 
         assert seen == ["save"]
 
@@ -12655,9 +13250,10 @@ class TestTheDestinationMenuChangesTheDestination:
         # The other direction, from a chooser that did *not* ask for it.
         overlay = self._overlay(monkeypatch, tmp_path, "instant")
         seen = []
-        overlay._on_captured = lambda image, path: seen.append(overlay.outcome)
+        overlay._on_captured = lambda image, path, outcome, save_error: seen.append(outcome)
 
         overlay._on_destination_chosen("Open")
+        _wait_until(lambda: seen)
 
         assert seen == ["review"]
 
@@ -14237,6 +14833,162 @@ class TestASaveThatCannotBeWritten:
         assert not captured[0][0].isNull()
 
 
+class TestASaveDoesNotHoldTheOverlayOpen:
+    """Save, Open and an instant save close the overlay and write the file
+    afterwards: encoding a 4K PNG takes 130-190 ms, and the frozen frame
+    used to sit on screen for all of it after the user had let go.
+
+    The write is held open here by a stand-in for `output.write_image`
+    that waits to be released, so "while the file is being written" is a
+    state the test stands in, not a race."""
+
+    SELECTION = QRect(100, 100, 300, 250)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    @pytest.fixture
+    def writing(self, monkeypatch, tmp_path):
+        folder = tmp_path / "snips"
+        monkeypatch.setattr(setup_desktop, "load_save_folder", lambda *a, **k: folder)
+        state = SimpleNamespace(folder=folder, go=threading.Event(), error=None)
+        really_write = output_module.write_image
+
+        def write_image(image, path):
+            assert state.go.wait(10), "the test never let the write finish"
+            if state.error is not None:
+                raise state.error
+            really_write(image, path)
+
+        monkeypatch.setattr(output_module, "write_image", write_image)
+        yield state
+        state.go.set()
+        _wait_until(lambda: not output_module.saves_in_flight())
+
+    def _overlay(self, after="edit"):
+        events = []
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(
+            frame,
+            on_dismissed=lambda: events.append("dismissed"),
+            on_captured=lambda image, path, **facts: events.append(("captured", image, path, facts)),
+        )
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._chooser.set_after(after)
+        overlay.set_selection(self.SELECTION)
+        return overlay, events
+
+    def _finish(self, writing, events):
+        writing.go.set()
+        _wait_until(lambda: len(events) == 2)
+        return events[1]
+
+    def test_the_overlay_closes_before_the_file_is_written(self, writing):
+        overlay, events = self._overlay()
+
+        overlay._bar.saveRequested.emit()
+
+        assert not overlay.isVisible()
+        assert events == ["dismissed"]
+        assert list(writing.folder.iterdir()) == []
+
+    def test_the_capture_is_reported_once_the_file_exists(self, writing):
+        overlay, events = self._overlay()
+        overlay._bar.saveRequested.emit()
+
+        _kind, image, path, facts = self._finish(writing, events)
+
+        assert path.parent == writing.folder and path.is_file()
+        assert QImage(str(path)).size() == QSize(300, 250)
+        assert image.size() == QSize(300, 250)
+        assert facts == {"outcome": "edit", "save_error": None}
+        assert [entry.name for entry in writing.folder.iterdir()] == [path.name]
+
+    def test_open_hands_over_the_file_only_once_it_exists(self, writing):
+        overlay, events = self._overlay()
+        overlay._bar.openRequested.emit()
+        assert events == ["dismissed"]
+
+        _kind, _image, path, facts = self._finish(writing, events)
+
+        assert path.is_file()
+        assert facts["outcome"] == "review"
+
+    def test_an_instant_save_closes_first_too(self, writing, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda *a, **k: True)
+        overlay, events = self._overlay(after="instant")
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert events == ["dismissed"]
+        _kind, _image, path, facts = self._finish(writing, events)
+        assert path.is_file()
+        assert facts["outcome"] == "instant"
+
+    def test_a_write_that_fails_copies_the_snip_and_says_why(self, writing, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        writing.error = OSError("no space left on device")
+        overlay, events = self._overlay()
+        overlay._bar.saveRequested.emit()
+        assert copied == []
+
+        _kind, image, path, facts = self._finish(writing, events)
+
+        assert path is None
+        assert facts == {"outcome": "edit", "save_error": "no space left on device"}
+        assert [shot.size() for shot in copied] == [QSize(300, 250)]
+        assert not image.isNull()
+        assert list(writing.folder.iterdir()) == []
+
+    def test_a_folder_that_cannot_be_made_is_reported_before_closing(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+
+        def refuse(image, directory=None, *, on_written, pattern=None):
+            raise PermissionError("access denied")
+
+        monkeypatch.setattr(output_module, "save_image_later", refuse)
+        overlay, events = self._overlay()
+
+        overlay._bar.saveRequested.emit()
+
+        [(_kind, _image, path, facts), dismissed] = events
+        assert dismissed == "dismissed"
+        assert path is None and facts["save_error"] == "access denied"
+        assert len(copied) == 1
+
+    def test_the_marks_on_screen_at_the_press_are_the_ones_saved(self, writing):
+        # The picture is flattened at the press, on its own copy: nothing
+        # done to the overlay while the file is written can reach it.
+        overlay, events = self._overlay()
+        overlay.add_mark(Redact(
+            colour=QColor("#000000"), stroke_width=2,
+            start=QPointF(150, 150), end=QPointF(250, 250),
+        ))
+        overlay._bar.saveRequested.emit()
+        overlay.clear()
+
+        _kind, _image, path, _facts = self._finish(writing, events)
+
+        assert QImage(str(path)).pixelColor(100, 100) == QColor(0, 0, 0)
+
+    def test_saving_directly_still_writes_before_it_returns(self, writing):
+        # `save()` itself is unchanged: a caller that wants the path back
+        # gets a file that is already there.
+        writing.go.set()
+        overlay, events = self._overlay()
+
+        path = overlay.save()
+
+        assert path.is_file()
+        assert overlay.isVisible()
+        assert events[0][2] == path
+
+
 class TestAnInstantSnipShowsNoToolbar:
     """Reported: "if its gonna just instantly capture ... it should just
     show the capture region".
@@ -14450,3 +15202,697 @@ class TestASelectionStaysOnThePicture:
         overlay.set_selection(QRect(20, 30, 100, 90))
 
         assert overlay._selection == QRect(20, 30, 100, 90)
+
+
+class TestWindowModeShowsNoToolbarWhilePicking:
+    """A hovered window is a preview, not a selection: nothing is chosen
+    until the click. The whole annotation toolbar used to come up under
+    every window the pointer crossed, jump to the next one, and arm the pen
+    while the mode was still asking which window."""
+
+    WINDOW_RECT = QRectF(30, 200, 200, 150)
+    HIT_POINT = QPoint(100, 260)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _picking_overlay(self):
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(
+            frame, geometry_provider=_FakeWindowProvider(self.WINDOW_RECT)
+        )
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._on_chooser_mode("Window")
+        assert overlay._picking_window
+        return overlay
+
+    def test_hovering_a_window_shows_no_toolbar_and_arms_no_tool(self):
+        overlay = self._picking_overlay()
+
+        _send_move(overlay, self.HIT_POINT)
+
+        assert overlay._selection == self.WINDOW_RECT.toRect()
+        assert not overlay._bar.isVisible()
+        assert not overlay._tool_hint.isVisible()
+        assert overlay._bar.active_tool is None
+
+    def test_clicking_the_window_brings_the_toolbar_up(self):
+        overlay = self._picking_overlay()
+        _send_move(overlay, self.HIT_POINT)
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        assert not overlay._picking_window
+        assert overlay._bar.isVisible()
+        assert overlay._bar.active_tool is not None
+
+
+class TestARegionDragCanBeCancelled:
+    """Right-click and Escape both call a region drag off. A right-click
+    used to commit the box as it stood -- with Instant, capturing it and
+    closing -- and Escape cleared a box the next mouse move drew again."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _dragging_overlay(self, outcome="edit"):
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._chooser.set_after(outcome)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        _send_move(overlay, QPoint(400, 350), Qt.MouseButton.LeftButton)
+        assert overlay._selection == QRect(100, 100, 300, 250)
+        return overlay
+
+    def test_a_right_click_drops_the_box(self):
+        overlay = self._dragging_overlay()
+
+        QTest.mousePress(overlay, Qt.MouseButton.RightButton, pos=QPoint(400, 350))
+
+        assert overlay._selection is None
+        assert not overlay._bar.isVisible()
+        assert overlay._chooser.phase == "choosing"
+
+    def test_a_right_click_with_instant_captures_nothing(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._dragging_overlay(outcome="instant")
+
+        QTest.mousePress(overlay, Qt.MouseButton.RightButton, pos=QPoint(400, 350))
+
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_the_box_stays_gone_after_a_right_click(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._dragging_overlay(outcome="instant")
+        QTest.mousePress(overlay, Qt.MouseButton.RightButton, pos=QPoint(400, 350))
+
+        _send_move(overlay, QPoint(450, 400), Qt.MouseButton.LeftButton)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(450, 400))
+
+        assert overlay._selection is None
+        assert copied == []
+
+    def test_escape_drops_the_box_and_a_move_does_not_bring_it_back(self):
+        overlay = self._dragging_overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+        _send_move(overlay, QPoint(450, 400), Qt.MouseButton.LeftButton)
+
+        assert overlay._selection is None
+        assert overlay.isVisible()
+
+    def test_a_new_drag_works_after_a_cancelled_one(self):
+        overlay = self._dragging_overlay()
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(400, 350))
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(200, 300))
+        _send_move(overlay, QPoint(300, 420), Qt.MouseButton.LeftButton)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(300, 420))
+
+        assert overlay._selection == QRect(200, 300, 100, 120)
+
+
+class TestMarksPaintInTheOrderDrawn:
+    """What is on screen is what is exported: marks apply in the order they
+    were drawn. A blackout or blur drawn over earlier ink used to show that
+    ink on top of it on screen, while the copy had it covered."""
+
+    RED = QColor(255, 0, 0)
+
+    def _overlay(self, selection=QRect(0, 0, 200, 200)):
+        frame = make_frame(image_size=(200, 200), logical_size=(200, 200))
+        overlay = OverlayWindow(frame)
+        overlay.set_selection(selection)
+        return overlay
+
+    def _ink(self):
+        # A box whose left border runs down x=20.
+        return Rectangle(
+            colour=self.RED, stroke_width=6, start=QPointF(20, 20), end=QPointF(180, 180)
+        )
+
+    def _blackout(self):
+        return Blackout(
+            colour=QColor("#000000"), stroke_width=4, start=QPointF(5, 40), end=QPointF(60, 80)
+        )
+
+    def test_a_blackout_drawn_later_covers_earlier_ink_on_screen(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._ink())
+        overlay.add_mark(self._blackout())
+
+        on_screen = overlay.grab().toImage()
+
+        assert pixel(on_screen, 20, 60) == QColor(tokens.BLACKOUT_FILL)
+        # The same border, clear of the blackout, is still there.
+        assert pixel(on_screen, 20, 120) == self.RED
+
+    def test_the_screen_and_the_export_agree_under_a_blur_over_ink(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._ink())
+        overlay.add_mark(
+            Blur(colour=self.RED, stroke_width=4, start=QPointF(5, 40), end=QPointF(60, 80))
+        )
+
+        on_screen = overlay.grab().toImage()
+        exported = overlay.rendered_image()
+
+        for point in (QPoint(20, 60), QPoint(30, 50), QPoint(20, 120)):
+            assert pixel(on_screen, point) == pixel(exported, point), point
+
+    def test_ink_drawn_after_a_blackout_still_shows_over_it(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._blackout())
+        overlay.add_mark(self._ink())
+
+        on_screen = overlay.grab().toImage()
+
+        assert pixel(on_screen, 20, 60) == self.RED
+
+    def test_covered_ink_outside_the_selection_stays_clipped(self):
+        overlay = self._overlay(selection=QRect(100, 0, 100, 200))
+        overlay.add_mark(self._ink())
+        overlay.add_mark(self._blackout())
+
+        on_screen = overlay.grab().toImage()
+
+        assert pixel(on_screen, 20, 120) != self.RED
+
+    def test_undoing_the_blackout_brings_the_ink_back(self):
+        overlay = self._overlay()
+        overlay.add_mark(self._ink())
+        overlay.add_mark(self._blackout())
+        overlay.grab()
+
+        overlay.undo()
+
+        assert pixel(overlay.grab().toImage(), 20, 60) == self.RED
+
+
+class TestChipsStayOnTheSelectionsMonitor:
+    """The size chip and the Frozen pill sat a fixed distance above the
+    selection wherever that put them. A selection touching the top of its
+    monitor -- Full screen always does -- drew them on the monitor above,
+    in a gap between monitors, or off the desk; and on a narrow selection
+    the two were drawn over each other.
+
+    The desk is two monitors side by side with a third above them. Every
+    rect is window-local logical, the space the chips are painted in.
+    """
+
+    # Absolute logical: the window's origin is the desk's top-left.
+    LEFT = QRectF(0, 0, 2560, 1440)
+    RIGHT = QRectF(2560, 0, 2560, 1440)
+    ABOVE = QRectF(1219, -1440, 2560, 1440)
+    ORIGIN = QPointF(0, -1440)
+
+    @pytest.fixture(autouse=True)
+    def _no_desktop_chrome(self, monkeypatch):
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_margins", lambda screen: QMargins()
+        )
+
+    def _overlay(self, absolute_selection: QRectF) -> OverlayWindow:
+        # A small image stretched over the desk: only geometry is read here.
+        frame = make_frame(
+            image_size=(512, 288),
+            logical_size=(5120, 2880),
+            logical_origin=(self.ORIGIN.x(), self.ORIGIN.y()),
+        )
+        overlay = OverlayWindow(
+            frame, monitor_geometries=[self.LEFT, self.RIGHT, self.ABOVE]
+        )
+        overlay.set_selection(absolute_selection.translated(-self.ORIGIN).toRect())
+        return overlay
+
+    def _chips(self, overlay):
+        return overlay._dimension_chip_rect(), overlay._frozen_pill_rect()
+
+    def _local(self, monitor: QRectF) -> QRectF:
+        return monitor.translated(-self.ORIGIN)
+
+    @pytest.mark.parametrize("monitor", [LEFT, RIGHT, ABOVE])
+    def test_full_screen_keeps_both_chips_on_that_monitor(self, monitor):
+        overlay = self._overlay(monitor)
+
+        for chip in self._chips(overlay):
+            assert self._local(monitor).contains(chip), chip
+
+    def test_a_selection_under_the_gap_beside_the_upper_monitor_keeps_them(self):
+        # Top-left of the left monitor: above it is no monitor at all.
+        overlay = self._overlay(QRectF(100, 0, 800, 400))
+
+        for chip in self._chips(overlay):
+            assert self._local(self.LEFT).contains(chip), chip
+
+    def test_with_room_above_they_sit_above_the_selection_as_before(self):
+        overlay = self._overlay(QRectF(300, 500, 800, 400))
+        selection = QRectF(overlay._selection)
+
+        chip, pill = self._chips(overlay)
+
+        assert chip.topLeft() == QPointF(
+            selection.left(), selection.top() - tokens.Metric.CHIP_OFFSET_Y
+        )
+        assert pill.right() == pytest.approx(selection.right())
+        assert pill.top() == pytest.approx(chip.top())
+
+    def test_on_a_narrow_selection_they_do_not_overlap(self):
+        overlay = self._overlay(QRectF(300, 500, 90, 400))
+
+        chip, pill = self._chips(overlay)
+
+        assert not chip.intersects(pill)
+        assert chip.left() == pytest.approx(QRectF(overlay._selection).left())
+
+    def test_a_narrow_selection_at_the_desks_right_edge_keeps_both_on_it(self):
+        overlay = self._overlay(QRectF(5020, 500, 90, 400))
+
+        chip, pill = self._chips(overlay)
+
+        assert not chip.intersects(pill)
+        for rect in (chip, pill):
+            assert self._local(self.RIGHT).contains(rect), rect
+
+    def test_they_clear_what_the_desktop_reserves_along_the_top(self, monkeypatch):
+        monkeypatch.setattr(
+            OverlayWindow, "_reserved_margins", lambda _self, monitor: QMargins(0, 32, 0, 0)
+        )
+        overlay = self._overlay(self.LEFT)
+
+        for chip in self._chips(overlay):
+            assert chip.top() >= self._local(self.LEFT).top() + 32, chip
+
+
+class TestTheOverlayTakesTheKeyboardBackAfterADelay:
+    """A delayed capture hides the overlay, counts down and shows it again.
+    Coming back, it has to ask for the keyboard as it did when it opened:
+    whatever the user set up during the countdown has the foreground by
+    then, and on Windows the keys went on going to that."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _reopened_after_a_delay(self, monkeypatch, backend):
+        asked = []
+        monkeypatch.setattr(
+            overlay_module.platform.current, "take_keyboard_focus",
+            lambda widget: asked.append(widget) or True,
+        )
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(frame, registry=BackendRegistry([backend]))
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._on_delay_changed(tokens.DELAYS[1])
+        overlay._on_chooser_mode(tokens.CAPTURE_MODES[0][0])
+        assert not overlay.isVisible() and asked == []
+
+        for _ in range(int(tokens.DELAYS[1].rstrip("s"))):
+            overlay._delay_timer.timeout.emit()
+
+        assert overlay.isVisible()
+        return overlay, asked
+
+    def test_reopening_over_the_fresh_frame_asks_for_the_keyboard(self, monkeypatch):
+        fresh = make_frame(image_size=(600, 600), logical_size=(600, 600))
+
+        overlay, asked = self._reopened_after_a_delay(monkeypatch, _FakeCaptureBackend(fresh))
+
+        assert asked == [overlay]
+
+    def test_reopening_after_a_failed_grab_asks_for_it_too(self, monkeypatch):
+        overlay, asked = self._reopened_after_a_delay(monkeypatch, _FailingCaptureBackend())
+
+        assert asked == [overlay]
+
+
+class TestARefusedRecordingLeavesTheOverlayUsable:
+    """`app.py` can refuse a recording -- no recorder on this machine, or
+    one already running -- and says why. The overlay had already marked
+    itself armed by then, which hides the toolbar and the chooser both: the
+    user was left looking at a selection with nothing to act on it."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay_after_a_record_drag(self, answer):
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(
+            frame, on_recording_requested=lambda rect, delay, after: answer
+        )
+        overlay._chooser.set_kind("record")
+        overlay.setGeometry(0, 0, 600, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 200))
+        _send_move(overlay, QPoint(400, 450), Qt.MouseButton.LeftButton)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(400, 450))
+        return overlay
+
+    def test_a_refusal_leaves_it_unarmed_with_the_chooser_back(self):
+        overlay = self._overlay_after_a_record_drag(False)
+
+        assert overlay._armed_for_recording is False
+        assert overlay._selection == QRect(100, 200, 300, 250)
+        assert overlay._chooser.tab.isVisible()
+
+    def test_escape_then_steps_back_to_the_chooser_row(self):
+        overlay = self._overlay_after_a_record_drag(False)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._selection is None
+        assert overlay.isVisible()
+        assert overlay._chooser.row.isVisible()
+
+    def test_an_accepted_recording_is_armed_with_the_chooser_away(self):
+        overlay = self._overlay_after_a_record_drag(True)
+
+        assert overlay._armed_for_recording is True
+        assert not overlay._chooser.tab.isVisible()
+        assert not overlay._chooser.row.isVisible()
+
+
+class TestSwitchingToRecordOverASelection:
+    """The chooser's row reopens over a selection, and its stills/record
+    switch is on it. Flipping to Record there used to do nothing useful:
+    the stills toolbar stayed, nothing was armed, and Enter took a
+    screenshot of the region a recording had just been asked for."""
+
+    SELECTION = QRect(100, 200, 300, 250)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay_with_the_row_reopened(self, answer=None, logical_origin=(0, 0)):
+        requests = []
+
+        def on_recording_requested(rect, delay, after):
+            requests.append(rect)
+            return answer
+
+        frame = make_frame(
+            image_size=(600, 600), logical_size=(600, 600), logical_origin=logical_origin
+        )
+        overlay = OverlayWindow(frame, on_recording_requested=on_recording_requested)
+        overlay.setGeometry(0, 0, 600, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(self.SELECTION)
+        assert overlay._bar.isVisible()
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+        assert overlay._chooser.phase == "choosing"
+        return overlay, requests
+
+    def test_it_arms_a_recording_of_the_selection(self):
+        overlay, requests = self._overlay_with_the_row_reopened(logical_origin=(-600, 40))
+
+        overlay._chooser.set_kind("record")
+
+        # Absolute: the selection moved by the frame's origin.
+        assert requests == [QRectF(-500, 240, 300, 250)]
+        assert overlay._armed_for_recording is True
+        assert overlay._selection == self.SELECTION
+
+    def test_the_stills_toolbar_goes(self):
+        overlay, _requests = self._overlay_with_the_row_reopened()
+
+        overlay._chooser.set_kind("record")
+
+        assert not overlay._bar.isVisible()
+        assert not overlay._tool_hint.isVisible()
+
+    def test_enter_then_starts_the_recording_and_takes_no_screenshot(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        started = []
+        overlay, _requests = self._overlay_with_the_row_reopened()
+        overlay._on_recording_start = lambda: started.append(True)
+        overlay._chooser.set_kind("record")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert started == [True]
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_enter_after_a_refusal_asks_again_and_takes_no_screenshot(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay, requests = self._overlay_with_the_row_reopened(answer=False)
+        overlay._chooser.set_kind("record")
+        assert overlay._armed_for_recording is False
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert len(requests) == 2
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_ctrl_c_after_a_refusal_takes_no_screenshot(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay, requests = self._overlay_with_the_row_reopened(answer=False)
+        overlay._chooser.set_kind("record")
+        assert overlay._armed_for_recording is False
+
+        QTest.keyClick(overlay, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+
+        assert copied == []
+        assert len(requests) == 1
+        assert overlay.isVisible()
+
+    def test_ctrl_c_while_a_recording_is_armed_takes_no_screenshot(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay, _requests = self._overlay_with_the_row_reopened(answer=True)
+        overlay._chooser.set_kind("record")
+        assert overlay._armed_for_recording is True
+
+        QTest.keyClick(overlay, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_switching_back_to_stills_after_a_refusal_restores_the_toolbar(self):
+        overlay, _requests = self._overlay_with_the_row_reopened(answer=False)
+        overlay._chooser.set_kind("record")
+        assert not overlay._bar.isVisible()
+
+        overlay._chooser.set_kind("stills")
+
+        assert overlay._bar.isVisible()
+
+    def test_with_nothing_selected_it_arms_nothing(self):
+        overlay, requests = self._overlay_with_the_row_reopened()
+        overlay.set_selection(None)
+
+        overlay._chooser.set_kind("record")
+
+        assert requests == []
+        assert overlay._armed_for_recording is False
+
+
+class TestAWindowPickStaysOnThePicture:
+    """A window can hang off the edge of the desk. Picked in Window mode it
+    is cut back to what was photographed, as Active window and Browser
+    are, rather than exported with black where the frame ends."""
+
+    # Absolute logical, 80px of it off the left edge of a 600x600 desk.
+    WINDOW_RECT = QRectF(-80, 300, 400, 200)
+    HIT_POINT = QPoint(100, 400)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _picking_overlay(self):
+        frame = make_frame(image_size=(600, 600), logical_size=(600, 600))
+        overlay = OverlayWindow(
+            frame, geometry_provider=_FakeWindowProvider(self.WINDOW_RECT)
+        )
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._on_chooser_mode("Window")
+        return overlay
+
+    def test_the_picked_window_is_cut_back_to_the_frame(self):
+        overlay = self._picking_overlay()
+
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        assert overlay._selection == QRect(0, 300, 320, 200)
+
+    def test_its_export_has_no_black_band(self):
+        overlay = self._picking_overlay()
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=self.HIT_POINT)
+
+        image = overlay.rendered_image()
+
+        assert (image.width(), image.height()) == (320, 200)
+        assert image.pixelColor(0, 100) == QColor(BASE_COLOR)
+
+    def test_the_hover_preview_is_cut_back_too(self):
+        overlay = self._picking_overlay()
+
+        _send_move(overlay, self.HIT_POINT)
+
+        assert overlay._selection == QRect(0, 300, 320, 200)
+
+
+class TestOneWindowPerScreenKeepsToItsOwnScreen:
+    """Where each monitor gets its own window -- several outputs on
+    Wayland, or screens of different scale -- every window is told about
+    every monitor but can only draw on its own."""
+
+    FIRST = QRectF(0, 0, 1600, 1000)
+    SECOND = QRectF(1600, 0, 1600, 1000)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self, monkeypatch):
+        _close_stray_toplevel_windows()
+        monkeypatch.setattr(
+            overlay_module.platform.current, "reserved_margins", lambda screen: QMargins()
+        )
+
+    def _open(self):
+        frame = make_frame(image_size=(3200, 1000), logical_size=(3200, 1000))
+        active = open_overlay(
+            frame,
+            [self.FIRST, self.SECOND],
+            wayland=True,
+            geometry_provider=_FakeWindowProvider(QRectF(100, 400, 300, 200)),
+        )
+        members = {
+            widget._frame.logical_origin.x(): widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, OverlayWindow)
+            and widget._on_dismissed is active._on_dismissed
+        }
+        assert active is members[0.0]
+        return members[0.0], members[1600.0]
+
+    def test_a_bar_remembered_on_the_other_monitor_stays_in_this_window(self):
+        # Dragged to the next monitor on a desk where one window spanned
+        # both. This window covers one, so the next monitor is nowhere it
+        # can put a bar.
+        setup_desktop.save_bar_position(
+            setup_desktop.BarPosition(setup_desktop.BAR_ON_OTHER_MONITOR, (0.5, 0.5))
+        )
+        first, _second = self._open()
+
+        first.set_selection(QRect(0, 0, 1600, 1000))  # no room beside it
+
+        assert first._bar.isVisible()
+        assert QRectF(first.rect()).contains(QRectF(first._bar.geometry()))
+
+    def test_a_recalled_region_on_the_other_screen_survives_the_pointer_arriving(self):
+        setup_desktop.save_last_region((1800, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+        _first, second = self._open()
+        assert second._selection == QRect(200, 300, 640, 480)
+
+        _send_move(second, QPoint(900, 900))
+
+        assert second._selection == QRect(200, 300, 640, 480)
+        assert second._recalled_selection is True
+        assert second._bar.isVisible()
+
+    def test_a_mode_armed_on_the_first_screen_still_replaces_it(self):
+        # Window mode chosen before crossing over: the pick is what the
+        # user is doing now, and the offered rectangle gives way to it.
+        setup_desktop.save_last_region((1800, 300, 640, 480))
+        setup_desktop.save_reuse_last_region(True)
+        first, second = self._open()
+        first._on_chooser_mode("Window")
+        assert first._picking_window
+
+        _send_move(second, QPoint(900, 900))
+
+        assert second._selection is None
+
+
+class TestInkOutsideTheSelectionIsNotCounted:
+    """Marks stay where they were drawn when the selection is redrawn
+    somewhere else, on purpose: selecting the old area again brings them
+    back. But ink nobody can see was still counted in the size chip, and
+    still cost an Escape press to "discard" before Escape would step back.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay_with_ink_at_the_top_left(self):
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(0, 100, 300, 200))
+        overlay.add_mark(
+            Rectangle(
+                colour=self.RED, stroke_width=4, start=QPointF(40, 140), end=QPointF(120, 200)
+            )
+        )
+        return overlay
+
+    def test_the_chip_counts_ink_inside_the_selection(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+
+        assert overlay._dimension_chip_texts()[1] == "1 mark"
+
+    def test_the_chip_does_not_count_ink_the_new_selection_left_behind(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+
+        overlay.set_selection(QRect(500, 350, 200, 150))
+
+        assert overlay._dimension_chip_texts()[1] == "0 marks"
+
+    def test_ink_only_partly_inside_still_counts(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+
+        overlay.set_selection(QRect(100, 150, 300, 200))
+
+        assert overlay._dimension_chip_texts()[1] == "1 mark"
+
+    def test_escape_steps_back_without_stopping_for_ink_nobody_can_see(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+        overlay.set_selection(QRect(500, 350, 200, 150))
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._selection is None
+        assert not overlay._toast.isVisible()
+
+    def test_the_ink_left_behind_comes_back_with_its_area(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+        overlay.set_selection(QRect(500, 350, 200, 150))
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        overlay.set_selection(QRect(0, 100, 300, 200))
+
+        assert overlay._dimension_chip_texts()[1] == "1 mark"
+
+    def test_escape_still_discards_ink_that_is_showing(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay.marks == ()
+        assert overlay._selection == QRect(0, 100, 300, 200)

@@ -200,7 +200,7 @@ class Glass:
     """One surface's glass: the blurred crop of the frozen frame behind it,
     cached, and the paint that puts it under the surface's fill.
 
-    Built by the base every surface shares -- `overlay._Chrome`,
+    Built by the base every surface shares -- `toolbar._Chrome`,
     `chooser._Surface` -- and by the few that are plain widgets, so a surface
     has only to call `paint` from its `paintEvent`.
     """

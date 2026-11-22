@@ -25,6 +25,7 @@ the other.
 
 import os
 import sys
+import time
 
 # CLAUDE.md requires this suite to pass headless -- a build machine has no
 # display, and neither does an agent's worktree -- so the QPA platform is
@@ -264,6 +265,27 @@ def _restore_excepthook():
         yield
     finally:
         sys.excepthook = hook
+
+
+@pytest.fixture(autouse=True)
+def _no_save_outlives_its_test():
+    """Let a background save a test started report back before the next
+    test begins.
+
+    `output.save_image_later` answers on the event loop, some milliseconds
+    after the overlay that asked has closed. A test that ends first would
+    leave that answer to arrive in the middle of a later one -- adding a
+    file to its Recent list, or raising a notice it then counts.
+    """
+    yield
+    from PyQt6.QtTest import QTest
+
+    from snipux import output
+
+    deadline = time.monotonic() + 10
+    while output.saves_in_flight():
+        assert time.monotonic() < deadline, "a background save never reported back"
+        QTest.qWait(1)
 
 
 @pytest.fixture(autouse=True)

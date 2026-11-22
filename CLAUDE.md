@@ -73,6 +73,31 @@ snipux/
   overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
                 (its pre-snip chooser diverges from the handoff -- see
                  docs/design/pre-snip-chooser.md)
+  toolbar.py    the floating annotation bar the overlay and the review
+                window both build: its buttons, the tool hint strip under
+                it, and `_Chrome`, the press-swallowing base the rest of
+                the overlay's chrome is built on. Views only; never
+                imports overlay.py
+  popovers.py   what opens off that bar: the style popover, the
+                capture-mode popover and the family menus. Views only
+  watermark.py  the watermark's own pieces: the shape of the session's
+                choice, what Settings says the mark is, and the menu for
+                its corner and opacity
+  overlaychrome.py  the overlay's small chrome: the hint HUD, the toast
+                (review.py shows the same one), the close button and the
+                delay countdown
+  selectionframe.py  where the selection's frame is: handles, corner
+                brackets, hit targets and the two chips' placement, as
+                functions of a rectangle. No state, no painting
+  inklayers.py  the overlay's ink caches: the base layer with obscuring
+                marks baked in, ink an obscuring mark covers, the ink
+                layer, and mark bounds -- built when the marks or the
+                frame change, not on every repaint
+  loupe.py      the eyedropper's loupe: which pixels it magnifies and
+                where the box and its hex chip go around the pointer
+  sensitivecheck.py  one Hide sensitive read: its record, the worker
+                thread and relay that carry it, and which rects its
+                answer says to cover. The state machine stays in overlay.py
   chooser.py    the docked pre-snip chooser row: what to capture, and what
                 happens to it afterwards
   flowbars.py   the post-selection bars from the locked capture-flow handoff

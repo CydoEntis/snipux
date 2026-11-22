@@ -2169,6 +2169,113 @@ class TestPortableSelfInstall:
         assert result is True
         assert "nothing to remove" in capsys.readouterr().out
 
+    def test_removing_the_folder_build_takes_its_libraries_too(self, monkeypatch, tmp_path):
+        exe_path = tmp_path / "Local" / "snipux" / "snipux.exe"
+        (exe_path.parent / "_internal" / "PyQt6").mkdir(parents=True)
+        (exe_path.parent / "_internal" / "PyQt6" / "Qt6Core.dll").write_bytes(b"qt")
+        exe_path.write_bytes(b"x")
+        (exe_path.parent / "snipux.ico").write_bytes(b"icon")
+
+        assert windows._remove_stable_copy(exe_path) is True
+
+        # The icon is another step's to remove.
+        assert [p.name for p in exe_path.parent.iterdir()] == ["snipux.ico"]
+
+    def test_a_running_folder_build_keeps_its_libraries(self, monkeypatch, tmp_path, capsys):
+        # Windows will not delete the exe of a running process. Deleting
+        # the libraries anyway would leave an exe that cannot start.
+        exe_path = tmp_path / "Local" / "snipux" / "snipux.exe"
+        (exe_path.parent / "_internal").mkdir(parents=True)
+        exe_path.write_bytes(b"x")
+
+        def running(self, *args, **kwargs):
+            raise PermissionError("access is denied")
+
+        monkeypatch.setattr(pathlib.Path, "unlink", running)
+
+        assert windows._remove_stable_copy(exe_path) is False
+        assert (exe_path.parent / "_internal").is_dir()
+        assert "could not remove" in capsys.readouterr().out
+
+    def test_the_portable_exe_never_overwrites_the_installers_exe(self, monkeypatch, tmp_path):
+        # Both downloads use this folder. The single file copied over the
+        # installed exe left an install the uninstaller and the updater
+        # still took for theirs.
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        download = tmp_path / "Downloads" / "snipux.exe"
+        self._make_frozen(monkeypatch, download)
+        download.write_bytes(b"the-whole-single-file-exe")
+        target = tmp_path / "Local" / "snipux" / "snipux.exe"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"installed")
+        (target.parent / "unins000.exe").write_bytes(b"uninstaller")
+
+        # The installed exe, so the shortcuts stay on it.
+        assert windows._ensure_stable_copy() == target
+        assert target.read_bytes() == b"installed"
+
+    def test_removing_leaves_the_installers_install_to_its_uninstaller(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        exe_path = tmp_path / "Local" / "snipux" / "snipux.exe"
+        (exe_path.parent / "_internal").mkdir(parents=True)
+        exe_path.write_bytes(b"installed")
+        (exe_path.parent / "unins000.exe").write_bytes(b"uninstaller")
+
+        assert windows._remove_stable_copy(exe_path) is True
+
+        assert exe_path.read_bytes() == b"installed"
+        assert (exe_path.parent / "_internal").is_dir()
+        assert "uninstall Snipux" in capsys.readouterr().out
+
+    def test_the_install_folder_can_be_pointed_somewhere_else(self, monkeypatch, tmp_path):
+        # What lets a build's first run be tried without touching the
+        # install the machine really has.
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        monkeypatch.setenv("SNIPUX_INSTALL_DIR", str(tmp_path / "elsewhere"))
+
+        assert windows._portable_exe_path() == tmp_path / "elsewhere" / "snipux.exe"
+
+    def test_the_hand_off_goes_to_the_stable_exe_with_the_launchs_arguments(self, monkeypatch, tmp_path):
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        asked = []
+        monkeypatch.setattr(
+            windows.windows_portable,
+            "hand_off",
+            lambda target, arguments, **kwargs: asked.append((target, arguments)) or 7,
+        )
+
+        assert windows.WindowsPlatform().hand_off_to_stable_install(["--snip"]) == 7
+        assert asked == [(tmp_path / "Local" / "snipux" / "snipux.exe", ["--snip"])]
+
+    def test_the_console_is_joined_only_when_the_stable_exe_is_about_to_start(
+        self, monkeypatch, tmp_path
+    ):
+        # Installing starts the new copy once to prove it runs. Joined any
+        # earlier, that trial run would print its --help into the terminal.
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        order = []
+        monkeypatch.setattr(
+            windows, "reattach_console", lambda *, attach: order.append(("console", attach))
+        )
+
+        def hand_off(target, arguments, *, before_start):
+            order.append("installed")
+            before_start()
+            order.append("started")
+            return 0
+
+        monkeypatch.setattr(windows.windows_portable, "hand_off", hand_off)
+
+        windows.WindowsPlatform().hand_off_to_stable_install(["--list-backends"])
+
+        assert order == ["installed", ("console", True), "started"]
+
+    def test_only_the_portable_exe_hands_off(self):
+        # This test process is not a frozen build of any kind.
+        assert windows.WindowsPlatform().hand_off_to_stable_install(["--snip"]) is None
+        assert linux.LinuxPlatform().hand_off_to_stable_install(["--snip"]) is None
+
     def test_ensure_stable_install_forwards_to_ensure_stable_copy(self, monkeypatch):
         monkeypatch.setattr(windows, "_ensure_stable_copy", lambda: Path("C:/stable/snipux.exe"))
 

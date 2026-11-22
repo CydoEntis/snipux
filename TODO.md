@@ -399,6 +399,29 @@ given), both recording paths land a playable file at the right speed, and
 pill placement question above and the overlay/annotation flow end to end;
 only recording was driven.
 
+**The portable exe's first run as the tray app.** The portable exe now
+installs itself as the onedir build and finishes every launch from it
+(`platform/windows_portable.py`). Driven for real with `--help` only,
+against a scratch `SNIPUX_INSTALL_DIR`: a first run, a run over an old
+single-file copy, over an older folder build, beside the installer's
+`unins000.exe`, and into a folder that cannot be made. Not watched,
+because each needs the tray app started:
+
+- a double-click from Downloads leaving one Snipux running from
+  `%LOCALAPPDATA%\snipux`, with the Start Menu and Startup shortcuts on
+  it, and the downloaded file then deletable;
+- a newer portable exe run while the old one is in the tray. It cannot
+  replace a running install: it says so in snipux.log and pokes the
+  running one, so updating is still quit, then run the new file. The tray's
+  Update still sends a portable user to the Releases page for the same
+  reason;
+- `snipux.exe --list-backends` typed in a terminal printing there, once;
+- Smart App Control. The portable exe exists for the machines it refuses
+  the installer on, and nobody has seen whether it lets the folder exe the
+  portable one writes start. If it does not, the trial start fails, the
+  log says so, and the exe runs as it did before -- but that fallback has
+  only been tested, not watched there.
+
 **Wayland: driven headless, not yet on a physical desk.** On 2026-09-21
 snipux ran end to end in a real GNOME 46 Wayland session. It was
 `gnome-shell --headless` with one 1280x800 virtual monitor, beside the
@@ -487,6 +510,15 @@ than instead of it: the machines SAC refuses still have the route they always
 had, and everyone else gets an Add/Remove Programs entry and
 `winget install snipux`. Do not delete either one to solve the other's
 problem -- `docs/releasing.md` has the reasoning in full.
+
+**The portable exe stays one self-contained file, and installs the onedir
+build itself.** A onefile exe unpacks on every start and PyInstaller has no
+way to keep what it unpacked, so the portable exe carries the onedir exe
+and copies its own unpacked libraries beside it, once per version, into the
+folder and layout the installer uses. One folder, not one per version: the
+shortcuts never move and the installer upgrades it like any install. It
+never writes over a folder the installer owns, and every failure falls back
+to running as the single file.
 
 **Checking is daily; installing is never automatic.** The check runs on the
 first launch after the day turns over, and otherwise when the tray asks. That

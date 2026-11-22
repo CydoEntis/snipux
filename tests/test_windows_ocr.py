@@ -17,6 +17,7 @@ from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QApplication
 
 from snipux.platform import windows_ocr
+from snipux.sensitive import RecognitionFailed
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -113,30 +114,57 @@ class TestParsing:
         assert word.text == "two\tparts"
 
 
-class TestFailuresReturnNothing:
-    def test_empty_output(self):
+class TestNothingToRead:
+    def test_a_page_with_no_words_is_no_lines(self):
         assert windows_ocr.recognize(image(), runner=FakeRunner(stdout=b"")) == []
-
-    def test_non_zero_exit(self):
-        runner = FakeRunner(code=1, stdout=b"0\t0\t1\t2\t3\t4\tignored\n")
-
-        assert windows_ocr.recognize(image(), runner=runner) == []
-
-    def test_timeout(self):
-        runner = FakeRunner(raises=subprocess.TimeoutExpired("powershell.exe", 10))
-
-        assert windows_ocr.recognize(image(), runner=runner) == []
-
-    def test_powershell_missing(self):
-        runner = FakeRunner(raises=FileNotFoundError("powershell.exe"))
-
-        assert windows_ocr.recognize(image(), runner=runner) == []
 
     def test_a_null_image_never_starts_a_process(self):
         runner = FakeRunner()
 
         assert windows_ocr.recognize(QImage(), runner=runner) == []
         assert runner.commands == []
+
+
+class TestAFailureIsNotAnEmptyPage:
+    """"Could not read the picture" used to come back as no words -- the
+    same answer as "read it, nothing sensitive here" -- so a snip went out
+    unredacted with Hide sensitive on and nothing said."""
+
+    def test_a_script_error_says_so(self):
+        runner = FakeRunner(code=1, stdout=b"0\t0\t1\t2\t3\t4\tignored\n")
+
+        with pytest.raises(RecognitionFailed, match="exit code 1"):
+            windows_ocr.recognize(image(), runner=runner)
+
+    def test_a_timeout_says_how_long_it_waited(self):
+        runner = FakeRunner(raises=subprocess.TimeoutExpired("powershell.exe", 5))
+
+        with pytest.raises(RecognitionFailed, match="longer than 5 seconds"):
+            windows_ocr.recognize(image(), runner=runner, timeout=5)
+
+    def test_powershell_missing_says_it_could_not_start(self):
+        runner = FakeRunner(raises=FileNotFoundError("powershell.exe"))
+
+        with pytest.raises(RecognitionFailed, match="could not start"):
+            windows_ocr.recognize(image(), runner=runner)
+
+    def test_no_recognition_language_is_told_apart_from_no_text(self):
+        runner = FakeRunner(code=windows_ocr.NO_LANGUAGE_EXIT_CODE)
+
+        with pytest.raises(RecognitionFailed, match="language"):
+            windows_ocr.recognize(image(), runner=runner)
+
+    def test_the_script_reports_a_missing_language_with_that_code(self):
+        runner = FakeRunner()
+
+        windows_ocr.recognize(image(), runner=runner)
+
+        script = script_of(runner.commands[0])
+        assert f"if ($null -eq $engine) {{ exit {windows_ocr.NO_LANGUAGE_EXIT_CODE} }}" in script
+
+    def test_the_wait_is_shorter_than_it_was(self):
+        # It is spent on the UI thread, with the overlay frozen.
+        assert windows_ocr.TIMEOUT_SECONDS <= 5
 
 
 class TestTheTemporaryFiles:
@@ -152,8 +180,10 @@ class TestTheTemporaryFiles:
     def test_they_are_gone_after_a_failure_too(self):
         runner = FakeRunner(raises=subprocess.TimeoutExpired("powershell.exe", 10))
 
-        windows_ocr.recognize(image(800, 400), runner=runner)
+        with pytest.raises(RecognitionFailed):
+            windows_ocr.recognize(image(800, 400), runner=runner)
 
+        assert runner.paths
         assert not any(os.path.exists(path) for path in runner.paths)
 
     def test_the_paths_handed_to_windows_are_absolute(self):

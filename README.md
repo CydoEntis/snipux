@@ -263,8 +263,9 @@ Neither needs Python. Both are on the
   admin prompt), appears in Add/Remove Programs, and starts Snipux when it
   finishes.
 - **`snipux.exe`** — the same app as a single portable file. No installer,
-  no Add/Remove entry: run it and it sets itself up, moving itself somewhere
-  stable first so a tidy-up of Downloads doesn't break it.
+  no Add/Remove entry: run it and it sets itself up, installing itself
+  somewhere stable first so a tidy-up of Downloads doesn't break it and
+  later starts are as quick as the installer's.
 
 ### A word on the warnings
 

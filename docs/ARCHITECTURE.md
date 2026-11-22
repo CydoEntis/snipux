@@ -33,6 +33,8 @@ entry        handoff.py  ->  app.py (CLI, tray, controller)
                |
 views        chooser.py  overlay.py  flowbars.py  review.py  player.py
              pin.py  history.py  settings.py  winchrome.py  glass.py
+             toolbar.py  popovers.py  watermark.py  overlaychrome.py
+             selectionframe.py  inklayers.py  loupe.py  sensitivecheck.py
                |
 model        shapes.py  marks.py  sensitive.py  textsnap.py
                |
@@ -94,6 +96,14 @@ snipux/
   capture.py        Frame, capture backends and their registry
   recording.py      recording backends and their registry
   overlay.py        the frozen-frame overlay: selection and in-place annotation
+  toolbar.py        the floating annotation bar, its buttons and hint strip
+  popovers.py       the style popover, capture-mode popover and family menus
+  watermark.py      the watermark's session choice, Settings content and menu
+  overlaychrome.py  the hint HUD, toast, close button and delay countdown
+  selectionframe.py handles, brackets, hit targets and chip placement, as geometry
+  inklayers.py      the overlay's cached layers of frame and ink, and mark bounds
+  loupe.py          the eyedropper's loupe: what it magnifies and where it goes
+  sensitivecheck.py one Hide sensitive read: record, worker thread, rects to cover
   chooser.py        the pre-snip row
   flowbars.py       the post-selection bars (views only)
   shapes.py         annotation data model and flattening renderer
@@ -107,7 +117,7 @@ snipux/
   settings.py       the Settings window
   setup_desktop.py  config.json, desktop entries, icons, the GNOME shortcut
   glass.py          cached blur behind bars and menus
-  winchrome.py      frameless title bar and controls
+  winchrome.py      frameless title bar, controls and the editors' canvas badges
   design/           icons, logo, fonts, design tokens
   platform/         the seam (see above)
 tests/              pytest, one file per module
@@ -127,6 +137,52 @@ packaging/          the one-line installers, the Linux .deb and AppImage, the
   `output.py`, below the views; `app.py` re-exports them.
 - `shapes.py` imports `capture.py` for `Frame`, which `apply_crop()` builds
   at runtime. That is a model using a lower layer's data type, and allowed.
+
+## Known drift
+
+Where the code does not yet match the rules above. Each is a refactor
+ticket, not a precedent: do not add to one, and take an entry off this list
+in the change that fixes it.
+
+`setup_desktop.py` owns `config.json` and sits beside the seam
+(`platform/linux.py` adapts it). The entry layer and `settings.py`, which
+is the window in front of it, are its intended callers. The backends and
+the model do not import it: a recorder is handed what it needs as
+`recording.RecordingOptions`.
+
+- **Views read settings themselves.** `overlay.py` has about twenty
+  `setup_desktop` calls (most `load_*`, some `save_*` for remembered
+  choices), `watermark.py` the seven that moved out of it, `review.py`
+  three, and `pin.py` and `player.py` one each. The rule is that the
+  controller reads a setting and hands it to the view.
+- **Views write files and pick where.** `review.py`'s Save and Save As
+  call `QImage.save()` and `mkdir()` directly instead of going through
+  `output.py`. `pin.py` saves through `output.save_image()` but chooses
+  the folder itself, and `player.py` holds its exporters and copies the
+  recording on an untrimmed export.
+- **`setup_desktop.py` imports `handoff.py`**, an entry-layer module, for
+  the socket name and the snip request byte that the Hyprland shortcut
+  writes directly. `handoff.py` imports only the standard library, so
+  nothing comes with it, but the two constants belong somewhere both can
+  reach without pointing up.
+- **`settings.py` imports `player.py`** for `export_availability()`, to
+  grey the GIF destination with the player's wording. That question, with
+  `system_ffmpeg()` and `EXPORT_UNAVAILABLE` (which `app.py` also takes
+  from the player), belongs in `ffmpeg.py`, below the views.
+- **`output.py` imports `setup_desktop.py`**, inside `save_image()`, for
+  the filename pattern.
+- **Private names cross modules.** `review.py`, `player.py` and
+  `history.py` import `_ui_font` and `_mono_font` from `winchrome.py`.
+  `overlay.py` takes `_STEP_KEY_CODES` from `popovers.py`,
+  `_CloseButton` from `overlaychrome.py`, `_hex_of` from `loupe.py`,
+  `_SensitiveCheck` and its worker from `sensitivecheck.py`, and
+  the handle tables (`_CORNER_HANDLES`, `_HANDLE_CURSORS` and the rest)
+  from `selectionframe.py`; `popovers.py`, `watermark.py`
+  and `overlaychrome.py` build on `toolbar._Chrome`; and `overlay.py`
+  re-exports a handful of the bar's and the menus' private widgets for
+  the tests that still import them from it.
+- **`marks.py` is listed as model and holds a widget**:
+  `TextLabelEditor` drives a `QLineEdit`.
 
 ## Security and privacy
 

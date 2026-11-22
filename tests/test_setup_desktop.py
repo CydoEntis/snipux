@@ -2152,7 +2152,7 @@ class TestRecordingDestinationPersistence:
 class TestRecordingFrameRatePersistence:
     """SNX-124 ticket 9: `GnomeScreencastBackend` reads this back to build
     its `framerate` D-Bus option; `WindowsRecorderBackend` never does (its
-    own docstring explains why -- SNX-125's measured rate).
+    own docstring explains why -- frames keep their own capture times).
     """
 
     def test_nothing_stored_means_the_documented_default(self, tmp_path):

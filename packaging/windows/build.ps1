@@ -17,7 +17,9 @@
 # The exe installs itself --
 # Start Menu/Startup shortcut, hotkey, a stable install location -- the
 # first time it runs (SNX-95/103), which is what let the installer go
-# without losing what it was for. Every path below is resolved relative to
+# without losing what it was for. That install is the onedir build too:
+# the portable exe carries the onedir exe inside it and lays the same
+# tree down itself (snipux/platform/windows_portable.py). Every path below is resolved relative to
 # this script, not the caller's working directory, so it can be run from
 # anywhere.
 

@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from . import handoff
+from . import handoff, log
 from .design import PACKAGE_DIR, tokens
 
 # PACKAGE_DIR (snipux/design/__init__.py) rather than a second
@@ -223,7 +223,7 @@ def _write_entry(
         path = directory / filename
         path.write_text(contents, encoding="utf-8")
     except OSError as exc:
-        print(f"Note: could not write the {label} entry into {directory}: {exc}")
+        log.note(f"Note: could not write the {label} entry into {directory}: {exc}")
         return False
     print(f"{label.capitalize()} entry written to {path} (Exec={exec_path})")
     return True
@@ -246,7 +246,7 @@ def _remove_entry(directory: Path, label: str, filename: str = "snipux.desktop")
     try:
         path.unlink()
     except OSError as exc:
-        print(f"Note: could not remove the {label} entry at {path}: {exc}")
+        log.note(f"Note: could not remove the {label} entry at {path}: {exc}")
         return False
     print(f"{label.capitalize()} entry removed from {path}")
     return True
@@ -279,14 +279,14 @@ def remove_icons(hicolor_dir: Path | None = None) -> bool:
         try:
             target.unlink()
         except OSError as exc:
-            print(f"Note: could not remove the {size} icon at {target}: {exc}")
+            log.note(f"Note: could not remove the {size} icon at {target}: {exc}")
             continue
         removed_sizes.append(size)
 
     if removed_sizes:
         print(f"Icon theme entries ({', '.join(removed_sizes)}) removed from {hicolor_dir}")
     else:
-        print(f"Note: no icon theme entries were found under {hicolor_dir}")
+        log.note(f"Note: no icon theme entries were found under {hicolor_dir}")
 
     return bool(removed_sizes)
 
@@ -950,8 +950,8 @@ def load_recording_frame_rate(config_dir: Path | None = None) -> int:
     """The frame rate a recording asks its backend for -- ticket 9's
     Settings row, consumed today by `GnomeScreencastBackend`'s `framerate`
     D-Bus option. `WindowsRecorderBackend` deliberately never calls this
-    (see its own docstring): its frame rate is measured from real
-    inter-arrival timing (SNX-125), not a nominal request.
+    (see its own docstring): its frames are written at the times they
+    were captured, not at a nominal rate.
 
     Falls back to `tokens.RECORDING_FRAME_RATE_DEFAULT`, the same
     "nothing stored yet" shape as `load_filename_pattern`.
@@ -2034,14 +2034,14 @@ def install_icons(hicolor_dir: Path | None = None) -> bool:
             target_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target_dir / "snipux.png")
         except OSError as exc:
-            print(f"Note: could not install the {size}x{size} icon into {target_dir}: {exc}")
+            log.note(f"Note: could not install the {size}x{size} icon into {target_dir}: {exc}")
             continue
         installed_sizes.append(size)
 
     if installed_sizes:
         print(f"Icon theme entries ({', '.join(installed_sizes)}px) written under {hicolor_dir}")
     else:
-        print(f"Note: no icon theme entries were written under {hicolor_dir}")
+        log.note(f"Note: no icon theme entries were written under {hicolor_dir}")
 
     return bool(installed_sizes)
 
@@ -2136,11 +2136,11 @@ def run_setup(
     if exec_path is None:
         exec_path = find_console_script()
     if exec_path is None:
-        print(
+        log.note(
             "error: could not locate the installed snipux console script -- "
             "is snipux actually installed (pip install / pipx install), "
             "rather than just being run from a checkout?",
-            file=sys.stderr,
+            to_stderr=True,
         )
         return 1
 
@@ -2167,11 +2167,11 @@ def run_setup(
             print(f"error: {problem}", file=sys.stderr)
             return 1
         if not save_shortcut(shortcut, config_dir):
-            print(
+            log.note(
                 f"Note: could not write {config_path(config_dir)} -- "
                 f"{human_shortcut(shortcut)} will be bound now, but the next --setup "
                 "(which every install.sh run performs) will revert it.",
-                file=sys.stderr,
+                to_stderr=True,
             )
 
     _write_entry(
@@ -2209,7 +2209,7 @@ def install_editor_entries(
     if exec_path is None:
         exec_path = find_console_script()
     if exec_path is None:
-        print("error: could not locate the installed snipux console script", file=sys.stderr)
+        log.note("error: could not locate the installed snipux console script", to_stderr=True)
         return 1
     if applications_dir is None:
         applications_dir = (

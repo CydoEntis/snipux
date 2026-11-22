@@ -340,6 +340,52 @@ class TestTheFfmpegCommandsSayWhatTheyMean:
     def test_a_trimmed_webm_is_really_re_encoded(self):
         assert "libvpx-vp9" in self._args("webm")
 
+    def test_only_dropping_the_sound_copies_the_video_as_it_is(self):
+        # The whole of a WebM, into a WebM, minus its sound: every video
+        # frame in the result is one the recording already has. Encoding
+        # them again took as long as the clip and cost a generation.
+        args = self._args("webm", muted=True, start=0.0, end=27.4)
+
+        assert args[args.index("-c:v") + 1] == "copy"
+        assert "libvpx-vp9" not in args
+        assert "-an" in args
+        # Nothing that only a re-encode can honour: a copy cut at -ss or -t
+        # lands on a keyframe, not on the frame asked for, and a copied
+        # stream cannot be given a new frame rate or a filter.
+        for flag in ("-ss", "-t", "-r", "-fps_mode", "-vf"):
+            assert flag not in args
+        assert args[args.index("-i") + 1] == str(self.SOURCE)
+        assert args[-1] == str(self.DEST)
+
+    def test_a_muted_trim_is_still_re_encoded(self):
+        # A cut has to land on the frame it was made at, which a copy
+        # cannot promise.
+        args = self._args("webm", muted=True)
+
+        assert "libvpx-vp9" in args
+        assert "copy" not in args
+
+    def test_a_change_of_container_is_still_re_encoded(self):
+        args = self._args("mp4", muted=True, start=0.0, end=27.4)
+
+        assert "libx264" in args
+        assert "copy" not in args
+
+    def test_a_copied_mp4_still_starts_playing_before_it_has_downloaded(self):
+        from snipux.player import FfmpegExporter
+
+        args = FfmpegExporter(
+            Path("/in.MP4"),
+            self.DEST,
+            TrimState(duration=27.4, start=0.0, end=27.4),
+            "mp4",
+            muted=True,
+            binary="/usr/bin/ffmpeg",
+        )._arguments()
+
+        assert args[args.index("-c:v") + 1] == "copy"
+        assert args[args.index("-movflags") + 1] == "+faststart"
+
     def test_gif_builds_its_own_palette(self):
         # A palette from this clip beats the fixed web palette by a wide
         # margin on the flat colour a screen recording is mostly made of.
@@ -1147,3 +1193,75 @@ class TestAnEditReachesAFile:
         window.close()
 
         assert not window.isVisible()
+
+
+class TestAFilmstripThumbnailIsKeptSmall:
+    """Sixteen frames are read when a recording opens. Each was kept at
+    full size -- 14MB for a 2560x1440 monitor -- to be drawn 44 pixels
+    tall."""
+
+    def test_a_full_screen_frame_is_shrunk_to_what_a_cell_can_show(self):
+        frame = QImage(2560, 1440, QImage.Format.Format_RGB32)
+        frame.fill(QColor("#336699"))
+
+        thumbnail = _player_module._thumbnail(frame)
+
+        # Still covers the tallest and widest cell there is...
+        assert thumbnail.height() >= tokens.PlayerMetric.RAIL_H
+        assert thumbnail.width() >= 240
+        # ...at the frame's own shape...
+        assert thumbnail.width() / thumbnail.height() == pytest.approx(16 / 9, rel=0.02)
+        # ...and a small fraction of its size.
+        assert thumbnail.sizeInBytes() < frame.sizeInBytes() / 50
+        assert thumbnail.pixelColor(10, 10) == QColor("#336699")
+
+    def test_a_frame_already_small_is_not_enlarged(self):
+        frame = QImage(200, 120, QImage.Format.Format_RGB32)
+        frame.fill(QColor("#336699"))
+
+        assert _player_module._thumbnail(frame).size() == QSize(200, 120)
+
+    def test_a_tall_narrow_frame_keeps_enough_width_to_fill_a_cell(self):
+        # A cell is filled by expanding, so a thumbnail shrunk on height
+        # alone would be stretched back up across the cell's width.
+        frame = QImage(400, 3000, QImage.Format.Format_RGB32)
+        frame.fill(QColor("#336699"))
+
+        thumbnail = _player_module._thumbnail(frame)
+
+        assert thumbnail.width() >= 240
+        assert thumbnail.height() < 3000
+
+    def test_the_thumbnail_does_not_share_the_frames_memory(self):
+        # The decoder reuses a frame's buffer once the signal returns.
+        frame = QImage(200, 120, QImage.Format.Format_RGB32)
+        frame.fill(QColor("#336699"))
+
+        thumbnail = _player_module._thumbnail(frame)
+        frame.fill(QColor("#000000"))
+
+        assert thumbnail.pixelColor(10, 10) == QColor("#336699")
+
+
+class TestTheLoudestSampleInABuffer:
+    """What one decoded buffer contributes to the waveform."""
+
+    @staticmethod
+    def _floats(*values):
+        from array import array
+
+        return array("f", values).tobytes()
+
+    def test_it_is_the_largest_sample(self):
+        assert _player_module._loudest(self._floats(0.1, 0.5, 0.25)) == pytest.approx(0.5)
+
+    def test_a_swing_below_zero_is_as_loud_as_one_above(self):
+        # Sound swings both ways; taking only the maximum would draw a
+        # buffer that peaks downwards as nearly silent.
+        assert _player_module._loudest(self._floats(0.1, -0.75, 0.25)) == pytest.approx(0.75)
+
+    def test_a_buffer_that_is_not_whole_samples_is_skipped(self):
+        assert _player_module._loudest(self._floats(0.5)[:-1]) is None
+
+    def test_an_empty_buffer_is_skipped(self):
+        assert _player_module._loudest(b"") is None
