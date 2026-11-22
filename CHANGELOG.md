@@ -19,6 +19,8 @@ use it; the commit history has the detail.
   and the rest are drawn once and kept, rather than redrawn from scratch
   many times a second, so a snip with a lot of ink on it no longer makes
   the overlay drag.
+- **The first snip after starting Snipux is as quick as the rest.** It
+  used to take about twice as long to open as every snip after it.
 
 ### Fixed
 

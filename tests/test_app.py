@@ -2479,6 +2479,43 @@ class TestAppControllerCapture:
         # constructs the old editor.py window either.
         assert isinstance(controller._overlay, OverlayWindow)
 
+    def test_warming_the_first_snip_shows_nothing_and_captures_nothing(
+        self, make_controller
+    ):
+        backend = FakeCaptureBackend(make_capture_frame())
+        captures = []
+        capture = backend.capture
+        backend.capture = lambda: captures.append(1) or capture()
+        controller = make_controller(
+            BackendRegistry([backend]), FakeTransport(make_transport_state())
+        )
+        before = set(QApplication.topLevelWidgets())
+
+        controller.warm_first_snip()
+
+        assert captures == []
+        assert controller._overlay is None
+        opened = [
+            widget
+            for widget in set(QApplication.topLevelWidgets()) - before
+            if widget.isVisible()
+        ]
+        assert opened == []
+
+    def test_warming_leaves_an_open_snip_alone(self, make_controller):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        controller.start_capture()
+        overlay = controller._overlay
+
+        controller.warm_first_snip()
+
+        assert controller._overlay is overlay
+        assert overlay.isVisible()
+
     def test_a_snip_that_opens_quickly_is_timed_but_not_logged(
         self, make_controller, monkeypatch
     ):

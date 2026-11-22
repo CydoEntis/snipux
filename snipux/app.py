@@ -51,6 +51,7 @@ from PyQt6.QtCore import (
     QRect,
     QRectF,
     QSize,
+    QSizeF,
     Qt,
     QThreadPool,
     QTimer,
@@ -92,6 +93,7 @@ from snipux.capture import (
     XwininfoWindowGeometryProvider,
     BackendRegistry,
     CaptureError,
+    Frame,
     WindowsWindowGeometryProvider,
     X11WindowGeometryProvider,
     detect_session_type,
@@ -2223,6 +2225,37 @@ class AppController:
         # separate .show() to call here.
         self._overlay = overlay
         self._note_slow_snip(requested, captured, time.perf_counter())
+
+    def warm_first_snip(self) -> None:
+        """Build one overlay nobody sees, so the first real one is as quick
+        as every later one.
+
+        The first overlay of a process pays for things the rest reuse: the
+        first native window Qt creates on this platform, the toolbar's
+        icons, the stylesheets every bar parses. Measured on Windows, the
+        first snip after launch took about 250 ms to open and the ones
+        after it about 120; with this done at startup the first matches
+        the rest. It costs about 100 ms once, when nothing is waiting.
+
+        Nothing is captured for it -- the overlay is built over a blank
+        frame, never shown, and closed. Skipped if a snip is already open.
+        """
+        if self._overlay is not None:
+            return
+        blank = QImage(64, 64, QImage.Format.Format_RGB32)
+        blank.fill(0)
+        overlay = OverlayWindow(
+            Frame(image=blank, logical_origin=QPointF(0, 0), logical_size=QSizeF(64, 64)),
+            hints_enabled=False,
+            geometry_provider=self._geometry_provider,
+            registry=self._registry,
+        )
+        # The native window and one full paint are what the first real
+        # overlay would otherwise be the one to wait for.
+        overlay.winId()
+        overlay.grab()
+        overlay.close()
+        overlay.deleteLater()
 
     # Above this, the wait between the shortcut and the frozen screen is
     # long enough to be felt. A desk of three 1440p monitors measures about
@@ -4514,6 +4547,9 @@ def _become_resident(
     QTimer.singleShot(0, design.font_families)
     if start_capture_immediately:
         controller.start_capture()
+    else:
+        # After the fonts, and never ahead of a snip already asked for.
+        QTimer.singleShot(0, controller.warm_first_snip)
     if open_settings_immediately:
         controller.open_settings()
     if open_path_immediately is not None:
