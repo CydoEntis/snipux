@@ -31,6 +31,11 @@ use it; the commit history has the detail.
 
 ### Fixed
 
+- **Running the portable `snipux.exe` no longer damages an installed
+  Snipux.** On a PC that had Snipux from the installer, running the
+  portable file as well wrote it over the installed program. It now runs
+  from where it is and leaves the installed one alone, and
+  `snipux --remove` leaves it for the uninstaller.
 - **Window mode no longer shows the toolbar until you click a window.**
   The whole annotation toolbar came up under every window the pointer
   passed over, and the pen was armed before anything had been picked.

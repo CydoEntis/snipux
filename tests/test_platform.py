@@ -2197,6 +2197,37 @@ class TestPortableSelfInstall:
         assert (exe_path.parent / "_internal").is_dir()
         assert "could not remove" in capsys.readouterr().out
 
+    def test_the_portable_exe_never_overwrites_the_installers_exe(self, monkeypatch, tmp_path):
+        # Both downloads use this folder. The single file copied over the
+        # installed exe left an install the uninstaller and the updater
+        # still took for theirs.
+        self._use_tmp_local_app_data(monkeypatch, tmp_path)
+        download = tmp_path / "Downloads" / "snipux.exe"
+        self._make_frozen(monkeypatch, download)
+        download.write_bytes(b"the-whole-single-file-exe")
+        target = tmp_path / "Local" / "snipux" / "snipux.exe"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"installed")
+        (target.parent / "unins000.exe").write_bytes(b"uninstaller")
+
+        # The installed exe, so the shortcuts stay on it.
+        assert windows._ensure_stable_copy() == target
+        assert target.read_bytes() == b"installed"
+
+    def test_removing_leaves_the_installers_install_to_its_uninstaller(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        exe_path = tmp_path / "Local" / "snipux" / "snipux.exe"
+        (exe_path.parent / "_internal").mkdir(parents=True)
+        exe_path.write_bytes(b"installed")
+        (exe_path.parent / "unins000.exe").write_bytes(b"uninstaller")
+
+        assert windows._remove_stable_copy(exe_path) is True
+
+        assert exe_path.read_bytes() == b"installed"
+        assert (exe_path.parent / "_internal").is_dir()
+        assert "uninstall Snipux" in capsys.readouterr().out
+
     def test_the_install_folder_can_be_pointed_somewhere_else(self, monkeypatch, tmp_path):
         # What lets a build's first run be tried without touching the
         # install the machine really has.

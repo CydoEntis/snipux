@@ -599,6 +599,13 @@ def _ensure_stable_copy() -> Path | None:
     if bundle is not None and Path(bundle).resolve() == current.parent / "_internal":
         return None
 
+    # The installer's install is not this file's to write over: one exe
+    # swapped for a single-file build leaves an install the uninstaller
+    # and the updater both still take for theirs. Answering with it keeps
+    # the shortcuts on the installed copy.
+    if target.exists() and windows_portable.owned_by_installer(target):
+        return target
+
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(current, target)
@@ -614,13 +621,17 @@ def _remove_stable_copy(exe_path: Path) -> bool:
     """The counterpart to `_ensure_stable_copy()` (SNX-103): removes the
     portable build's relocated copy, the exact "report plainly, don't
     fail on an already-gone file" shape `_remove_icon()` above already
-    uses. Deleting a file this very process may currently be running as
-    (`snipux --remove` invoked from the relocated copy itself) is
-    ordinarily still allowed by Windows -- unlinking a running exe's
-    directory entry does not require the still-mapped image underneath it
-    to be unlocked -- but any refusal is still a note here, not raised,
-    the same as every other removal step in this module.
+    uses. Windows refuses to delete the exe of a running process
+    (`snipux --remove` run from the relocated copy itself, or with the
+    tray app still up; checked, WinError 5), and that refusal is a note
+    here, not raised, the same as every other removal step in this module.
+
+    The installer's install is left for its uninstaller, which calls
+    `--remove` itself and then deletes the folder.
     """
+    if windows_portable.owned_by_installer(exe_path):
+        print(f"{exe_path} belongs to the Snipux installer -- uninstall Snipux to remove it")
+        return True
     if not exe_path.exists():
         print(f"{exe_path} not found -- nothing to remove")
         return True
