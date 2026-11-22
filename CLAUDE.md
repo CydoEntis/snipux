@@ -73,6 +73,11 @@ snipux/
   overlay.py    the frozen-frame overlay: selection, chrome, annotation in place
                 (its pre-snip chooser diverges from the handoff -- see
                  docs/design/pre-snip-chooser.md)
+  toolbar.py    the floating annotation bar the overlay and the review
+                window both build: its buttons, the tool hint strip under
+                it, and `_Chrome`, the press-swallowing base the rest of
+                the overlay's chrome is built on. Views only; never
+                imports overlay.py
   chooser.py    the docked pre-snip chooser row: what to capture, and what
                 happens to it afterwards
   flowbars.py   the post-selection bars from the locked capture-flow handoff

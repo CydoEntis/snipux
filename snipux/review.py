@@ -66,11 +66,10 @@ from .marks import (
 )
 from .overlay import (
     FamilyMenu,
-    FloatingBar,
     StylePopover,
     Toast,
-    ToolHintStrip,
 )
+from .toolbar import FloatingBar, ToolHintStrip
 from .winchrome import (
     AccentButton,
     Badge,

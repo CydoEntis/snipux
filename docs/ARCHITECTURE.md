@@ -33,6 +33,7 @@ entry        handoff.py  ->  app.py (CLI, tray, controller)
                |
 views        chooser.py  overlay.py  flowbars.py  review.py  player.py
              pin.py  history.py  settings.py  winchrome.py  glass.py
+             toolbar.py
                |
 model        shapes.py  marks.py  sensitive.py  textsnap.py
                |
@@ -94,6 +95,7 @@ snipux/
   capture.py        Frame, capture backends and their registry
   recording.py      recording backends and their registry
   overlay.py        the frozen-frame overlay: selection and in-place annotation
+  toolbar.py        the floating annotation bar, its buttons and hint strip
   chooser.py        the pre-snip row
   flowbars.py       the post-selection bars (views only)
   shapes.py         annotation data model and flattening renderer
@@ -161,10 +163,13 @@ the model do not import it: a recorder is handed what it needs as
 - **`output.py` imports `setup_desktop.py`**, inside `save_image()`, for
   the filename pattern.
 - **`review.py` imports widgets from `overlay.py`** (`FamilyMenu`,
-  `FloatingBar`, `StylePopover`, `Toast`, `ToolHintStrip`). They are
-  shared annotation chrome and should live in a module of their own.
+  `StylePopover`, `Toast`). They are shared annotation chrome and should
+  live in a module of their own, as the bar now does in `toolbar.py`.
 - **Private names cross modules.** `review.py`, `player.py` and
   `history.py` import `_ui_font` and `_mono_font` from `winchrome.py`.
+  `overlay.py` takes `_Chrome` and `_bar_keys` from `toolbar.py`, and
+  re-exports a handful of the bar's private widgets for the tests that
+  still import them from it.
 - **`marks.py` is listed as model and holds a widget**:
   `TextLabelEditor` drives a `QLineEdit`.
 
