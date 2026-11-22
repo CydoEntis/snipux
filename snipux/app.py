@@ -3842,6 +3842,7 @@ class AppController:
             # landed there is nothing left that knows.
             elapsed = self._elapsed_text()
             self._teardown_recording_ui(keep_bar=True)
+            self._show_saving_bar()
             try:
                 backend.stop()
             except RecordingPartsError as exc:
@@ -3874,6 +3875,28 @@ class AppController:
             self._close_recording_bar()
         else:
             self._show_finished_bar(landed, elapsed, copied=after == "instant")
+
+    def _show_saving_bar(self) -> None:
+        """Put "Saving…" on the bar, on screen, before `backend.stop()`.
+
+        `stop()` blocks this thread until the file is finished: tens of
+        milliseconds on Windows (measured), but seconds when GNOME's pieces
+        are joined with ffmpeg or a recorder is slow to let go. Nothing
+        paints while it does, so whatever the bar reads when the call
+        begins is what it reads until it ends -- and that was the running
+        clock beside a Stop button that had already been pressed.
+        """
+        bar = self._recording_hud
+        if bar is None:
+            return
+        bar.set_saving()
+        self._reposition_recording_bar()
+        # repaint(), not update(): update() only schedules a paint for the
+        # next turn of the event loop, and the next turn is after stop().
+        # The layout is activated first for the same reason -- the controls
+        # the new state shows are otherwise placed by a queued event.
+        bar.layout().activate()
+        bar.repaint()
 
     def _keep_recording_parts(self, parts: list[str]) -> None:
         """A paused recording whose pieces could not be joined: save each

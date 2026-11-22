@@ -4047,6 +4047,42 @@ class TestAppControllerRecordingHud:
         assert hud.state() == RecordingBar.DONE
         assert backend.stop_calls == [True]
 
+    def test_the_bar_reads_saving_on_screen_before_the_recorder_is_stopped(
+        self, make_controller, monkeypatch
+    ):
+        # stop() blocks until the file is finished -- seconds, for a paused
+        # GNOME recording being joined. Whatever the bar shows when that
+        # call begins is what it shows until it ends, so "Saving…" has to
+        # have been painted by then, not merely asked for.
+        controller, backend = self._start_a_recording(
+            make_controller,
+            monkeypatch,
+            QRectF(50, 50, 200, 150),
+            monitor_geometries=[QRectF(0, 0, 1000, 800)],
+        )
+        hud = controller._recording_hud
+        painted = []
+        real_paint = RecordingBar.paintEvent
+
+        def paint(bar, event):
+            painted.append(bar.state())
+            real_paint(bar, event)
+
+        monkeypatch.setattr(RecordingBar, "paintEvent", paint)
+        seen_when_stop_began = []
+        monkeypatch.setattr(
+            backend,
+            "stop",
+            lambda: seen_when_stop_began.append((list(painted), hud._summary.text())),
+        )
+
+        controller._stop_recording()
+
+        [(painted_before_stop, text)] = seen_when_stop_began
+        assert RecordingBar.SAVING in painted_before_stop
+        assert text == "Saving…"
+        assert hud.state() == RecordingBar.DONE
+
     def test_stopping_recording_reports_a_backend_failure_without_raising(
         self, make_controller, monkeypatch
     ):

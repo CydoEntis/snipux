@@ -981,8 +981,9 @@ class FlowMenu(QWidget):
 class RecordingBar(QWidget):
     """The recording side of the flow, stages 3b through 6.
 
-    Four states on one widget -- `ready`, `counting`, `live`, `done` -- and
-    every control for all four is built in `__init__` and then shown or
+    Five states on one widget -- `ready`, `counting`, `live`, `saving`,
+    `done` -- and every control for all of them is built in `__init__` and
+    then shown or
     hidden. Rebuilding the layout per state would change the bar's width and
     therefore move both its edges, which rule 1 forbids; it is also what
     makes a control's identity survive a state change, so a click already in
@@ -1019,6 +1020,7 @@ class RecordingBar(QWidget):
     READY = "ready"
     COUNTING = "counting"
     LIVE = "live"
+    SAVING = "saving"
     DONE = "done"
 
     def __init__(self, parent: QWidget | None = None):
@@ -1229,6 +1231,24 @@ class RecordingBar(QWidget):
         self._clock.set_wash(None)
         self._pause.set_content("play", f"Resume · {paused_for}")
         self.update()
+
+    def set_saving(self) -> None:
+        """Between Stop and the file landing: the recorder is finishing the
+        file and there is nothing to press.
+
+        Not in the handoff, which goes from stage 5 straight to 6. Stopping
+        is not instant -- a paused GNOME recording is joined with ffmpeg
+        first, and a recorder that will not finish is waited on for
+        seconds -- and through all of it the bar read "0:12 Stop", which
+        asks for a second press. No Stop and no Discard here: the first is
+        already happening and the second would race it.
+        """
+        self._state = self.SAVING
+        self._paused = False
+        self._summary.setText("Saving…")
+        self._clock.set_wash(None)
+        self._show(action=False, clock=False, pause=False, audio=False, delay=False,
+                   summary=True, cancel=False, discard=False)
 
     def set_done(self, summary: str, *, destination: str | None = None) -> None:
         """Stage 6: what was produced, and a way to decide it was not worth

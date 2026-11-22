@@ -62,6 +62,9 @@ use it; the commit history has the detail.
 - **Stopping a recording on Windows is a second quicker.** Snipux waited a
   full second after every recording in case the file was not finished. It
   now looks at the file instead, and waits only if it is not.
+- **The recording bar says "Saving…" while a recording is finished off.**
+  After Stop it went on showing the clock and the Stop button until the
+  file was ready, which can take seconds for a recording that was paused.
 
 ## 1.3.1 — 2026-11-20
 
