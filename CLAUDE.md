@@ -80,6 +80,9 @@ snipux/
                 imports overlay.py
   popovers.py   what opens off that bar: the style popover, the
                 capture-mode popover and the family menus. Views only
+  watermark.py  the watermark's own pieces: the shape of the session's
+                choice, what Settings says the mark is, and the menu for
+                its corner and opacity
   chooser.py    the docked pre-snip chooser row: what to capture, and what
                 happens to it afterwards
   flowbars.py   the post-selection bars from the locked capture-flow handoff

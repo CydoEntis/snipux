@@ -37,7 +37,7 @@ The scope is the area the change is about, usually the module name without
 
 | Scope        | Covers                                                        |
 | ------------ | ------------------------------------------------------------- |
-| `overlay`    | `overlay.py` -- selection, in-place annotation, the frozen frame -- and the chrome split out of it: `toolbar.py`, `popovers.py` |
+| `overlay`    | `overlay.py` -- selection, in-place annotation, the frozen frame -- and the chrome split out of it: `toolbar.py`, `popovers.py`, `watermark.py` |
 | `chooser`    | `chooser.py` -- the pre-snip row                              |
 | `flowbars`   | `flowbars.py` -- the post-selection bars                      |
 | `shapes`     | `shapes.py`, `marks.py` -- annotation model, ink, undo        |
