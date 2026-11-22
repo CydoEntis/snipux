@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import sys
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7233,6 +7234,58 @@ class TestReviewWindowIntegration:
         controller._reviews[0].close()
 
         assert controller._reviews == []
+
+
+class TestClosedWindowsAreReleased:
+    """A closed pin, review window or player goes at once, with the
+    full-size picture it holds. Each used to be kept alive by its own
+    `closed` connection -- a lambda holding the window, held by the window
+    -- until Python's cycle collector happened to run, if it could see the
+    cycle at all. Nothing here calls `gc.collect()`.
+    """
+
+    @staticmethod
+    def _controller(make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+
+    @staticmethod
+    def _close_and_let_the_loop_turn(windows):
+        """Closes the one window in `windows` and returns a weak reference
+        to it, with no strong one left behind in the test."""
+        gone = weakref.ref(windows[0])
+        windows[0].close()
+        QCoreApplication.processEvents()
+        return gone
+
+    def test_a_closed_pin_is_gone(self, make_controller):
+        controller = self._controller(make_controller)
+        controller._on_pin_requested(make_image(), QRect(10, 10, 100, 80))
+
+        gone = self._close_and_let_the_loop_turn(controller._pins)
+
+        assert controller._pins == []
+        assert gone() is None
+
+    def test_a_closed_review_window_is_gone(self, make_controller):
+        controller = self._controller(make_controller)
+        controller.open_editor("image")
+
+        gone = self._close_and_let_the_loop_turn(controller._reviews)
+
+        assert controller._reviews == []
+        assert gone() is None
+
+    def test_a_closed_player_is_gone(self, make_controller):
+        controller = self._controller(make_controller)
+        controller.open_editor("video")
+
+        gone = self._close_and_let_the_loop_turn(controller._players)
+
+        assert controller._players == []
+        assert gone() is None
 
 
 class TestOpenImagePath:

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import gc
 import os
 import shutil
 import subprocess
@@ -2373,6 +2374,7 @@ class AppController:
     def _forget_pin(self, window) -> None:
         if window in self._pins:
             self._pins.remove(window)
+            _release_closed()
 
     def _notify_capture(self, path: "Path | None", *, save_error: str | None = None) -> None:
         """Confirm, through the tray, that a snip actually happened.
@@ -2561,6 +2563,7 @@ class AppController:
     def _forget_player(self, window) -> None:
         if window in self._players:
             self._players.remove(window)
+            _release_closed()
 
     def _forget_review(self, window) -> None:
         """Drop a closed review window, so a long session doesn't
@@ -2568,6 +2571,7 @@ class AppController:
         """
         if window in self._reviews:
             self._reviews.remove(window)
+            _release_closed()
 
     def _on_recording_requested(
         self,
@@ -4458,6 +4462,30 @@ def _become_resident(
     if open_editor_immediately is not None:
         controller.open_editor(open_editor_immediately)
     return app.exec()
+
+
+def _release_closed() -> None:
+    """Free a closed pin, review window or player now, not whenever the
+    cycle collector gets to it.
+
+    Dropping it from the controller's list does not free it. The `closed`
+    connection that got us here is a lambda holding the window, kept alive
+    by the window, and the windows wire lambdas and callbacks of their own
+    the same way -- so only the collector can free one, and with it the
+    full-size picture or decoder it holds: 59 MB for one pinned 5K desktop.
+    Left alone, the collector's full passes get rarer the longer the
+    process lives, and in a session of days a closed window stayed.
+
+    So one pass is asked for, on the next turn of the event loop -- not
+    here, which is inside the window's own `closeEvent` and no place to
+    delete it. Measured at 2.5 ms with ~35,000 objects alive.
+
+    Not `deleteLater()`: once the Qt object is gone PyQt can no longer
+    show the collector the window's connections, and the Python half --
+    the half holding the picture -- is then never freed at all. Measured,
+    and worse than what this replaces.
+    """
+    QTimer.singleShot(0, gc.collect)
 
 
 def _present(window: QWidget) -> None:

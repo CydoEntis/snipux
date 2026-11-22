@@ -79,6 +79,9 @@ use it; the commit history has the detail.
   on the frame you chose.
 ### Fixed
 
+- **Closing a pin, the review window or the player gives its memory back
+  straight away.** Left running for days, Snipux could keep every closed
+  window's full-size picture.
 - **A copy on Wayland can no longer hang Snipux.** If `wl-copy` does not
   answer within three seconds Snipux stops waiting; the copy is still on
   the clipboard.
