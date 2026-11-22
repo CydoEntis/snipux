@@ -4787,6 +4787,9 @@ class OverlayWindow(QWidget):
         # that started filming because the session before had been a
         # recording (bars/divergences.md 25). The chooser's own default is
         # `tokens.KIND_DEFAULT`, so there is nothing to set here.
+        # Not remembered, but acted on: the switch is on a row that reopens
+        # over a selection.
+        self._chooser.kindChanged.connect(self._on_chooser_kind_changed)
         # Last region is a mode (#66). What it would restore is worked out
         # against this frame. The stored reuse-last-region preference was a
         # toggle meaning "open on the last region", and is now that mode
@@ -6495,6 +6498,37 @@ class OverlayWindow(QWidget):
     def _on_chooser_after_changed(self, _after: str) -> None:
         self._sync_bar_destination()
 
+    def _on_chooser_kind_changed(self, kind: str) -> None:
+        """The stills/record switch flipped.
+
+        Over a selection that is already made, Record is the user choosing
+        to film it, so it is committed the way a drag on the record side
+        is: armed, with the stills bar away. Nothing listened for the flip
+        before, so the toolbar stayed up, nothing was armed and Enter took
+        a screenshot of the region a recording had just been asked for.
+
+        Only a selection the user made. A rectangle this window recalled
+        by itself is an offer, and arming a recording of it because the
+        side was flipped is not something anyone asked for
+        (`_preselect_last_region`). Nor on a surface the session is not on:
+        `adopt_preselection_state` seeds the kind on one, and seeding must
+        not arm anything.
+        """
+        if (
+            kind == "record"
+            and self._session_active
+            and self._selection is not None
+            and not self._recalled_selection
+            and not self._picking_window
+            and self._region_drag_anchor is None
+        ):
+            self._commit_selection(self._selection)
+            return
+        # The stills bar is gated on the kind, and the size chip words
+        # itself by it.
+        self._sync_bar_visibility()
+        self.update()
+
     def _on_chooser_mode(self, mode: str) -> None:
         """A mode armed from the chooser. One piece of state, two surfaces:
         the bar's own chip is seeded from the same value.
@@ -7824,10 +7858,19 @@ class OverlayWindow(QWidget):
                 if self._on_recording_start is not None:
                     self._on_recording_start()
                 return
-            # Nothing to copy (and dismiss) without a selection yet.
-            if self._selection is not None:
-                self.copy()
-                self.close()
+            if self._selection is None:
+                # Nothing to copy (and dismiss) without a selection yet.
+                return
+            if self._chooser.kind == "record":
+                # On the record side and not armed: the recording was
+                # refused, or the region is one this window recalled. Enter
+                # asks for the recording; it never means a screenshot here.
+                # A drag still open commits on its own release.
+                if self._region_drag_anchor is None:
+                    self._commit_selection(self._selection)
+                return
+            self.copy()
+            self.close()
             return
 
         # Ctrl+C means copy everywhere else on the desktop, and Snipping Tool

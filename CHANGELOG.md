@@ -41,6 +41,9 @@ use it; the commit history has the detail.
   With no recorder available, or a recording already under way, the
   overlay was left showing the region with no toolbar and no chooser.
   The chooser now comes back and Esc steps back to it.
+- **Switching to Record over a region you already selected sets up the
+  recording.** The screenshot toolbar used to stay, nothing was ready to
+  record, and Enter took a screenshot instead.
 
 ## 1.3.1 — 2026-11-20
 

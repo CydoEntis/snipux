@@ -14949,3 +14949,99 @@ class TestARefusedRecordingLeavesTheOverlayUsable:
         assert overlay._armed_for_recording is True
         assert not overlay._chooser.tab.isVisible()
         assert not overlay._chooser.row.isVisible()
+
+
+class TestSwitchingToRecordOverASelection:
+    """The chooser's row reopens over a selection, and its stills/record
+    switch is on it. Flipping to Record there used to do nothing useful:
+    the stills toolbar stayed, nothing was armed, and Enter took a
+    screenshot of the region a recording had just been asked for."""
+
+    SELECTION = QRect(100, 200, 300, 250)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay_with_the_row_reopened(self, answer=None, logical_origin=(0, 0)):
+        requests = []
+
+        def on_recording_requested(rect, delay, after):
+            requests.append(rect)
+            return answer
+
+        frame = make_frame(
+            image_size=(600, 600), logical_size=(600, 600), logical_origin=logical_origin
+        )
+        overlay = OverlayWindow(frame, on_recording_requested=on_recording_requested)
+        overlay.setGeometry(0, 0, 600, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(self.SELECTION)
+        assert overlay._bar.isVisible()
+        QTest.keyClick(overlay, Qt.Key.Key_Space)
+        assert overlay._chooser.phase == "choosing"
+        return overlay, requests
+
+    def test_it_arms_a_recording_of_the_selection(self):
+        overlay, requests = self._overlay_with_the_row_reopened(logical_origin=(-600, 40))
+
+        overlay._chooser.set_kind("record")
+
+        # Absolute: the selection moved by the frame's origin.
+        assert requests == [QRectF(-500, 240, 300, 250)]
+        assert overlay._armed_for_recording is True
+        assert overlay._selection == self.SELECTION
+
+    def test_the_stills_toolbar_goes(self):
+        overlay, _requests = self._overlay_with_the_row_reopened()
+
+        overlay._chooser.set_kind("record")
+
+        assert not overlay._bar.isVisible()
+        assert not overlay._tool_hint.isVisible()
+
+    def test_enter_then_starts_the_recording_and_takes_no_screenshot(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        started = []
+        overlay, _requests = self._overlay_with_the_row_reopened()
+        overlay._on_recording_start = lambda: started.append(True)
+        overlay._chooser.set_kind("record")
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert started == [True]
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_enter_after_a_refusal_asks_again_and_takes_no_screenshot(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay, requests = self._overlay_with_the_row_reopened(answer=False)
+        overlay._chooser.set_kind("record")
+        assert overlay._armed_for_recording is False
+
+        QTest.keyClick(overlay, Qt.Key.Key_Return)
+
+        assert len(requests) == 2
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_switching_back_to_stills_after_a_refusal_restores_the_toolbar(self):
+        overlay, _requests = self._overlay_with_the_row_reopened(answer=False)
+        overlay._chooser.set_kind("record")
+        assert not overlay._bar.isVisible()
+
+        overlay._chooser.set_kind("stills")
+
+        assert overlay._bar.isVisible()
+
+    def test_with_nothing_selected_it_arms_nothing(self):
+        overlay, requests = self._overlay_with_the_row_reopened()
+        overlay.set_selection(None)
+
+        overlay._chooser.set_kind("record")
+
+        assert requests == []
+        assert overlay._armed_for_recording is False
