@@ -27,7 +27,6 @@ from PyQt6.QtCore import (
     QEventLoop,
     QMargins,
     QMarginsF,
-    QObject,
     QPoint,
     QPointF,
     QRect,
@@ -36,7 +35,6 @@ from PyQt6.QtCore import (
     QSizeF,
     Qt,
     QTimer,
-    pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor,
@@ -61,7 +59,17 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from snipux import design, log, loupe, output, platform, selectionframe, sensitive, setup_desktop
+from snipux import (
+    design,
+    log,
+    loupe,
+    output,
+    platform,
+    selectionframe,
+    sensitive,
+    sensitivecheck,
+    setup_desktop,
+)
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.flowbars import FlowMenu, MenuReopenGuard
@@ -88,6 +96,7 @@ from snipux.selectionframe import (
     _RIGHT_HANDLES,
     _TOP_HANDLES,
 )
+from snipux.sensitivecheck import _SensitiveCheck, _SensitiveCheckRelay, _recognize_for_check
 from snipux.shapes import (
     Callout,
     Crop,
@@ -258,63 +267,6 @@ class _MarkAction:
     kind: str
     index: int
     shape: Shape | tuple[Shape, ...]
-
-
-@dataclass(eq=False)
-class _SensitiveCheck:
-    """One Hide sensitive read that is still out with the recogniser.
-
-    Compared by identity: it is also the token its own result comes back
-    with, which is how a late answer is told from the current one.
-    """
-
-    # The selection that was read, in window coordinates, and that crop's
-    # image pixels per logical unit on each axis -- what turns a word's
-    # rect in the recognised image back into a place on this window.
-    selection: QRectF
-    scale_x: float
-    scale_y: float
-    custom: "sensitive.CustomList"
-    # What Copy, Save, Open, Pin or an instant snip asked for while this
-    # was out. Run once the boxes are on, never before.
-    then: "Callable[[], None] | None" = None
-    # The selection this read was for is gone or was replaced: its answer
-    # is thrown away...
-    discarded: bool = False
-    # ...and, when another selection was committed meanwhile, that one is
-    # read as soon as this comes back. One recognition at a time.
-    recheck: bool = False
-
-
-class _SensitiveCheckRelay(QObject):
-    """Carries a recognition result from its worker thread to the UI thread.
-
-    Its own object with no parent, not a signal on the overlay: a worker
-    can outlive the window it read for, and emitting through a window Qt
-    has already deleted raises in the worker. This one lives as long as
-    anything still refers to it, and a connection to a deleted overlay is
-    simply gone.
-    """
-
-    finished = pyqtSignal(object, object, object)  # check, lines | None, reason | None
-
-
-def _recognize_for_check(recognize, image: QImage, check: _SensitiveCheck, relay) -> None:
-    """The worker thread's whole job: read `image`, and say what came of it.
-
-    `image` is this thread's own copy and nothing here touches a widget;
-    the result goes back as a queued signal.
-    """
-    try:
-        lines, reason = recognize(image), None
-    except sensitive.RecognitionFailed as failure:
-        lines, reason = None, str(failure)
-    except Exception as exc:  # noqa: BLE001 -- the thread's outer boundary
-        # Anything left uncaught would end the thread with no answer, and
-        # the overlay would wait for one for ever with the snip held.
-        log.note(f"Note: text recognition stopped unexpectedly: {exc!r}")
-        lines, reason = None, "text recognition stopped unexpectedly"
-    relay.finished.emit(check, lines, reason)
 
 
 class OverlayWindow(QWidget):
@@ -1772,21 +1724,12 @@ class OverlayWindow(QWidget):
             else:
                 self._on_bar_copy()
 
-    # Logical pixels added around each hidden value. OCR's word boxes sit
-    # tight on the glyphs, and the anti-aliased edges, descenders and
-    # accents that fall just outside them are exactly the slivers that
-    # make a covered value guessable.
-    _HIDE_PADDING = 2.0
-
-    # A found value already this much covered by an existing solid box is
-    # not boxed again -- selecting a second region over the same text must
-    # not stack a duplicate of every box, each needing its own erase.
-    _HIDE_ALREADY_COVERED = 0.9
-
-    # Two found boxes overlapping this much (of the smaller) are one value
-    # found twice -- recognition reads small selections at two sizes, and
-    # both reads usually find the same words -- and become one box.
-    _HIDE_SAME_VALUE = 0.5
+    # Hide sensitive's padding and overlap thresholds are `sensitivecheck`'s,
+    # with the reasoning for each; these are the names this class and its
+    # tests read them by.
+    _HIDE_PADDING = sensitivecheck.HIDE_PADDING
+    _HIDE_ALREADY_COVERED = sensitivecheck.HIDE_ALREADY_COVERED
+    _HIDE_SAME_VALUE = sensitivecheck.HIDE_SAME_VALUE
 
     def _selection_crop(self) -> "tuple[QRectF, Frame] | None":
         """The current selection, in window coordinates, and its own pixels
@@ -1996,82 +1939,28 @@ class OverlayWindow(QWidget):
         history: the user can erase any one of them, and a single undo
         takes the whole batch away.
 
-        Coordinates: recognition happened on `Frame.crop`'s image, so every
-        rect comes back in *cropped-image pixels*. Marks live in window
-        coordinates. The mapping is the exact inverse of the one
-        `shapes.render_selection` applies at export -- divide by that crop's
-        own per-axis image-pixels-per-logical-unit ratio, then add the
-        selection's origin -- which is what keeps a box over its word on a
-        scaled display, where the two spaces differ by that ratio.
+        Which rects, and how a word's place in the recognised image maps
+        back to this window, is `sensitivecheck.rects_to_hide`.
         """
-        selection, scale_x, scale_y = check.selection, check.scale_x, check.scale_y
         existing = [
             QRectF(mark.start, mark.end).normalized()
             for mark in self._marks
             if isinstance(mark, Redact)
         ]
-        pad = self._HIDE_PADDING
-        found = [
-            QRectF(
-                selection.x() + image_rect.x() / scale_x - pad,
-                selection.y() + image_rect.y() / scale_y - pad,
-                image_rect.width() / scale_x + 2 * pad,
-                image_rect.height() / scale_y + 2 * pad,
-            )
-            for image_rect in (
-                finding.image_rect for finding in sensitive.find_sensitive(lines, check.custom)
-            )
-        ]
-        boxes = []
-        for window_rect in self._merge_same_values(found):
-            if self._already_covered(window_rect, existing):
-                continue
-            existing.append(window_rect)
-            boxes.append(Redact(
+        boxes = [
+            Redact(
                 colour=QColor("#000000"),
                 stroke_width=design.tokens.Metric.STROKE_DEFAULT,
                 start=window_rect.topLeft(),
                 end=window_rect.bottomRight(),
-            ))
+            )
+            for window_rect in sensitivecheck.rects_to_hide(check, lines, existing)
+        ]
 
         self._mark_store.add_all(boxes)
         if boxes:
             count = len(boxes)
             self._show_toast("blur", f"Hid {count} item{'' if count == 1 else 's'}")
-
-    @classmethod
-    def _merge_same_values(cls, rects: list[QRectF]) -> list[QRectF]:
-        """`rects` with every pair that is the same value found twice
-        replaced by their union. The union, not either one: the two reads
-        rarely agree to the pixel, and covering both is what guarantees
-        neither leaves an edge of the value showing."""
-        merged: list[QRectF] = []
-        for rect in rects:
-            rect = QRectF(rect)
-            joined = True
-            while joined:
-                joined = False
-                for other in merged:
-                    overlap = rect.intersected(other)
-                    smaller = min(rect.width() * rect.height(), other.width() * other.height())
-                    if smaller > 0 and overlap.width() * overlap.height() >= smaller * cls._HIDE_SAME_VALUE:
-                        merged.remove(other)
-                        rect = rect.united(other)
-                        joined = True
-                        break
-            merged.append(rect)
-        return merged
-
-    @classmethod
-    def _already_covered(cls, rect: QRectF, covers: list[QRectF]) -> bool:
-        area = rect.width() * rect.height()
-        if area <= 0:
-            return True
-        for cover in covers:
-            overlap = rect.intersected(cover)
-            if overlap.width() * overlap.height() >= area * cls._HIDE_ALREADY_COVERED:
-                return True
-        return False
 
     def absolute_selection(self) -> QRectF | None:
         """The current selection in absolute virtual-desktop coordinates,

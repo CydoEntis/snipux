@@ -95,6 +95,9 @@ snipux/
                 frame change, not on every repaint
   loupe.py      the eyedropper's loupe: which pixels it magnifies and
                 where the box and its hex chip go around the pointer
+  sensitivecheck.py  one Hide sensitive read: its record, the worker
+                thread and relay that carry it, and which rects its
+                answer says to cover. The state machine stays in overlay.py
   chooser.py    the docked pre-snip chooser row: what to capture, and what
                 happens to it afterwards
   flowbars.py   the post-selection bars from the locked capture-flow handoff
