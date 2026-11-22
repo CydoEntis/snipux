@@ -121,6 +121,14 @@ class RecordingBackend(ABC):
         `stop()` returns.
         """
 
+    # Whether `stop()` can take long enough to freeze the window, and is
+    # safe to call from a worker thread so it need not. Opt-in for the same
+    # reason `starts_off_thread` is: the Windows recorder is QObjects that
+    # belong to the UI thread, and its stop is tens of milliseconds anyway.
+    # `app.AppController` asks the backend that is actually recording, and
+    # keeps the bar on "Saving…" with the event loop alive until it returns.
+    stops_off_thread: bool = False
+
     @abstractmethod
     def stop(self) -> None:
         """End a recording started by this backend's `start()`."""
@@ -464,6 +472,9 @@ class GpuScreenRecorderBackend(RecordingBackend):
     """
 
     starts_off_thread = True
+    # stop() waits up to five seconds for the recorder to close its file,
+    # and touches nothing but the child process.
+    stops_off_thread = True
     # gpu-screen-recorder pauses and resumes in place on SIGUSR2, writing
     # nothing while paused, so the time is absent from the one file rather
     # than a still frame held across it. Measured on Omarchy: 2s recorded,
@@ -777,6 +788,10 @@ class GnomeScreencastBackend(RecordingBackend):
     # ordered by the completion signal. This is the backend the off-thread
     # start was measured for.
     starts_off_thread = True
+    # stop() joins a paused recording's pieces and muxes its sound with
+    # ffmpeg, each run allowed up to two minutes. The same socket-and-
+    # subprocess reasoning holds: nothing in it belongs to a thread.
+    stops_off_thread = True
 
     def name(self) -> str:
         return "gnome-screencast"

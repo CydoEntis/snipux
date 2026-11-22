@@ -223,6 +223,49 @@ class _RecorderStarter(QObject):
         self.done.emit()
 
 
+class _RecorderStopper(QObject):
+    """Runs a recorder's blocking `stop()` off the UI thread -- the twin of
+    `_RecorderStarter`, for a backend that says `stops_off_thread`.
+
+    GNOME's stop joins a paused recording's pieces and muxes its sound with
+    ffmpeg, synchronously, and gpu-screen-recorder's waits for the recorder
+    to close its file. On the UI thread the bar sat on "Saving…" with the
+    whole app unresponsive for as long as that took.
+
+    Only the backend's `stop()` runs here. Landing the file -- the move,
+    the player, every message -- stays on the UI thread, after this
+    reports back.
+    """
+
+    done = pyqtSignal()
+
+    def __init__(self, backend):
+        super().__init__()
+        self._backend = backend
+        self.error: Exception | None = None
+        self._finished = threading.Event()
+
+    def run(self) -> None:
+        """Worker thread. Never touches a widget."""
+        try:
+            self._backend.stop()
+        except Exception as exc:  # noqa: BLE001 - handed back, not swallowed
+            self.error = exc
+        finally:
+            self._finished.set()
+        self.done.emit()
+
+    def wait_until_finished(self) -> None:
+        """Block until `stop()` has returned, however the wait for it ended.
+
+        `QApplication.quit()` ends every running event loop, the nested one
+        waiting on `done` included, so that loop returning does not mean
+        the file is finished. Nothing may move or report on it until this
+        says so.
+        """
+        self._finished.wait()
+
+
 def _recording_temp_dir() -> Path:
     """The one dedicated subdirectory a recording's working file lives
     under while it is in progress (recording.md ticket 9) -- created on
@@ -3848,7 +3891,9 @@ class AppController:
         (`_show_recording_chrome`/`_start_recording_ui`), so a genuine
         click can only land once a backend really is running.
         """
-        if self._active_recording is None:
+        if self._active_recording is None or self._stopping_recording:
+            # A stop running on a worker thread owns the backend until it
+            # reports back; a pause from here would race it.
             return
         backend, _path, _after = self._active_recording
         if self._recording_paused:
@@ -3961,7 +4006,7 @@ class AppController:
             self._teardown_recording_ui(keep_bar=True)
             self._show_saving_bar()
             try:
-                backend.stop()
+                self._stop_recorder_responsively(backend)
             except RecordingPartsError as exc:
                 stopped = False
                 self._keep_recording_parts(exc.parts)
@@ -3993,15 +4038,51 @@ class AppController:
         else:
             self._show_finished_bar(landed, elapsed, copied=after == "instant")
 
+    def _stop_recorder_responsively(self, backend) -> None:
+        """`backend.stop()`, with the interface still alive while it runs
+        if the backend says its stop can be slow.
+
+        The same nested event loop as `_start_recorder_responsively`, for
+        the same reason: `_stop_recording` still returns with the file
+        landed, so its callers and its error handling are unchanged, and a
+        failure is re-raised here on the UI thread exactly as an inline
+        `stop()` would have raised it.
+
+        Re-entrancy is `_stopping_recording`'s job, which is already set:
+        a second Stop, the shortcut and Discard all reach its check and do
+        nothing, so the recording being saved is neither stopped twice nor
+        deleted. Quitting ends the nested loop early, so the wait below is
+        what keeps the file from being moved before it is finished -- the
+        app leaves once it has landed.
+
+        A backend that has not opted in stops inline. Windows' recorder is
+        QObjects owned by this thread, and its stop was measured at
+        22-49ms.
+        """
+        if not backend.stops_off_thread:
+            backend.stop()
+            return
+
+        stopper = _RecorderStopper(backend)
+        loop = QEventLoop()
+        stopper.done.connect(loop.quit)
+        QThreadPool.globalInstance().start(stopper.run)
+        loop.exec()
+        stopper.wait_until_finished()
+        if stopper.error is not None:
+            raise stopper.error
+
     def _show_saving_bar(self) -> None:
         """Put "Saving…" on the bar, on screen, before `backend.stop()`.
 
-        `stop()` blocks this thread until the file is finished: tens of
-        milliseconds on Windows (measured), but seconds when GNOME's pieces
-        are joined with ffmpeg or a recorder is slow to let go. Nothing
-        paints while it does, so whatever the bar reads when the call
-        begins is what it reads until it ends -- and that was the running
-        clock beside a Stop button that had already been pressed.
+        An inline `stop()` blocks this thread until the file is finished,
+        and nothing paints while it does, so whatever the bar reads when
+        the call begins is what it reads until it ends -- and that was the
+        running clock beside a Stop button that had already been pressed.
+        That is tens of milliseconds on Windows (measured). The Linux
+        recorders, which can take seconds, stop on a worker instead (see
+        `_stop_recorder_responsively`) and this is what the bar reads
+        throughout.
         """
         bar = self._recording_hud
         if bar is None:

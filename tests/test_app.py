@@ -8088,6 +8088,8 @@ class TestTheHotkeyCannotBeLeftDead:
         monkeypatch.setattr(controller, "_report_shortcut", said.append)
 
         class Backend:
+            stops_off_thread = False
+
             def stop(self):
                 pass
 
@@ -8701,6 +8703,271 @@ class TestTheInterfaceStaysAliveWhileTheRecorderStarts:
 
         assert controller._active_recording is None
         assert controller._starting_recording is False
+
+
+class _HeldStopBackend(FakeRecordingBackend):
+    """A recorder whose `stop()` does not return until the test lets it,
+    which is what makes "while the stop is in flight" a moment a test can
+    stand in rather than a sleep it hopes to land inside.
+    """
+
+    stops_off_thread = True
+
+    # Only reached when the code under test is wrong (the stop ran on the
+    # UI thread, so nothing could release it). Bounded so that fails
+    # rather than hangs.
+    _GIVE_UP_AFTER_S = 5
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.stop_threads = []
+        self.finished = False
+
+    def stop(self):
+        self.stop_threads.append(threading.current_thread())
+        self.entered.set()
+        if not self.release.wait(self._GIVE_UP_AFTER_S):
+            raise RuntimeError("the test never released the stop")
+        try:
+            super().stop()
+        finally:
+            self.finished = True
+
+
+class TestTheInterfaceStaysAliveWhileTheRecorderStops:
+    """GNOME's `stop()` joins a paused recording's pieces and muxes its
+    sound with ffmpeg before it returns, and gpu-screen-recorder's waits
+    for the recorder to close its file. Called on the UI thread, the bar
+    read "Saving…" over an app that answered nothing until it was done.
+
+    The stop is no quicker now. These cover the interface staying alive
+    while it runs, and everything that became reachable as a result --
+    a second Stop, the shortcut, Discard, Pause, Quit -- leaving the file
+    being saved alone.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _a_tray(self, monkeypatch):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+
+    def _recording(self, make_controller, monkeypatch, backend, after="save"):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(50, 50, 200, 150), "No delay", after)
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        return controller, said
+
+    @staticmethod
+    def _stop_and_meanwhile(controller, backend, act):
+        """Press Stop, run `act` on the UI thread once the backend's stop
+        is genuinely in flight on its worker, then let the stop finish."""
+        def meanwhile():
+            assert backend.entered.wait(backend._GIVE_UP_AFTER_S)
+            try:
+                act()
+            finally:
+                backend.release.set()
+
+        QTimer.singleShot(0, meanwhile)
+        controller._stop_recording()
+
+    def test_an_opted_in_backend_stops_off_the_ui_thread(
+        self, make_controller, monkeypatch
+    ):
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, lambda: None)
+
+        assert backend.stop_threads
+        assert backend.stop_threads[0] is not threading.main_thread()
+
+    def test_a_backend_that_has_not_opted_in_stops_on_the_ui_thread(
+        self, make_controller, monkeypatch
+    ):
+        # The Windows recorder is QObjects that belong to the UI thread,
+        # and its stop was measured at 22-49ms: nothing to fix, and a
+        # worker thread would break it.
+        threads = []
+        backend = FakeRecordingBackend()
+        assert backend.stops_off_thread is False, "the default must be off"
+        original = backend.stop
+        def stop():
+            threads.append(threading.current_thread())
+            return original()
+        backend.stop = stop
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+
+        controller._stop_recording()
+
+        assert threads == [threading.main_thread()]
+
+    def test_the_event_loop_keeps_running_during_the_stop(
+        self, make_controller, monkeypatch
+    ):
+        # A frozen loop fires no timers, so a stop only a timer can release
+        # never would be.
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+        ticks = []
+        heartbeat = QTimer()
+        heartbeat.setInterval(10)
+        def tick():
+            ticks.append(1)
+            backend.release.set()
+        heartbeat.timeout.connect(tick)
+        heartbeat.start()
+
+        controller._stop_recording()
+        heartbeat.stop()
+
+        assert ticks, "the UI thread was blocked for the whole stop"
+        assert backend.stop_calls == [True]
+
+    def test_the_bar_reads_saving_and_the_file_stays_put_until_the_stop_returns(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+        _rect, temp_path = backend.start_calls[0]
+        seen = {}
+        def look():
+            seen["temp file still there"] = Path(temp_path).exists()
+            seen["landed"] = list(tmp_path.glob("*.mp4"))
+            seen["still the active recording"] = controller._active_recording is not None
+            seen["bar"] = controller._recording_hud.state()
+
+        self._stop_and_meanwhile(controller, backend, look)
+
+        assert seen == {
+            "temp file still there": True,
+            "landed": [],
+            "still the active recording": True,
+            "bar": RecordingBar.SAVING,
+        }
+        assert len(list(tmp_path.glob("*.mp4"))) == 1
+        assert not Path(temp_path).exists()
+        assert controller._active_recording is None
+        assert controller._stopping_recording is False
+
+    def test_a_second_stop_during_the_stop_does_not_stop_it_twice(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        backend = _HeldStopBackend()
+        controller, said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, controller._stop_recording)
+
+        assert backend.stop_calls == [True]
+        assert len(list(tmp_path.glob("*.mp4"))) == 1
+        assert len([line for line in said if "saved to" in line]) == 1
+
+    def test_the_shortcut_during_the_stop_neither_stops_again_nor_opens_a_snip(
+        self, make_controller, monkeypatch
+    ):
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, controller.start_capture)
+
+        assert controller._overlay is None
+        assert backend.stop_calls == [True]
+
+    def test_discard_during_the_stop_leaves_the_recording_to_be_saved(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # The user pressed Stop first, and the recording is already being
+        # written out. The bar that follows offers Discard for the file.
+        backend = _HeldStopBackend()
+        controller, said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, controller._on_discard_clicked)
+
+        assert len(list(tmp_path.glob("*.mp4"))) == 1
+        assert "Recording discarded." not in said
+        assert backend.stop_calls == [True]
+
+    def test_pause_during_the_stop_does_not_reach_the_backend(
+        self, make_controller, monkeypatch
+    ):
+        # The worker thread owns the backend until it reports back.
+        backend = _HeldStopBackend(can_pause=True)
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, controller._on_pause_clicked)
+
+        assert backend.pause_calls == []
+
+    def test_a_stop_that_fails_off_the_ui_thread_is_reported_and_lands_nothing(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        backend = _HeldStopBackend(
+            stop_error=RuntimeError("did not stop cleanly; the video may be incomplete")
+        )
+        controller, said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, lambda: None)
+
+        assert said == [
+            "Stopping the recording failed: "
+            "did not stop cleanly; the video may be incomplete"
+        ]
+        assert list(tmp_path.glob("*.mp4")) == []
+        assert controller._active_recording is None
+        assert controller._stopping_recording is False
+
+    def test_pieces_that_could_not_be_joined_off_thread_are_still_kept(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        piece = tmp_path / "staging" / "take.webm"
+        piece.parent.mkdir()
+        piece.write_bytes(b"a piece")
+        backend = _HeldStopBackend(
+            stop_error=RecordingPartsError("could not join", [str(piece)])
+        )
+        controller, said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, lambda: None)
+
+        assert len(list(tmp_path.glob("*(part 1).webm"))) == 1
+        assert len(said) == 1 and "saved separately" in said[0]
+
+    def test_quitting_during_the_stop_waits_for_the_file_before_landing_it(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # `QApplication.quit()` comes down to `exit()`, which ends every
+        # running event loop -- the one waiting on the worker included. So
+        # that loop returning is not the stop returning.
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+        finished_when_waited_on = []
+        wait = app._RecorderStopper.wait_until_finished
+        def release_then_wait(stopper):
+            finished_when_waited_on.append(backend.finished)
+            backend.release.set()
+            wait(stopper)
+        monkeypatch.setattr(
+            app._RecorderStopper, "wait_until_finished", release_then_wait
+        )
+        def quit_mid_stop():
+            assert backend.entered.wait(backend._GIVE_UP_AFTER_S)
+            QCoreApplication.exit(0)
+
+        QTimer.singleShot(0, quit_mid_stop)
+        controller._stop_recording()
+
+        assert finished_when_waited_on == [False]
+        assert backend.finished
+        assert len(list(tmp_path.glob("*.mp4"))) == 1
 
 
 class TestTheUpdateCommand:

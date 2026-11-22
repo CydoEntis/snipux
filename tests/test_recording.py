@@ -120,6 +120,24 @@ class TestRecordingBackendPauseCapability:
             backend.resume()
 
 
+class TestWhichRecordersStopOffTheUiThread:
+    """`stops_off_thread` is the stop twin of `starts_off_thread`: off
+    unless a backend says its stop can be slow and belongs to no thread.
+    """
+
+    def test_defaults_to_false(self):
+        assert FakeBackend("a", True).stops_off_thread is False
+
+    def test_gnome_does_because_its_stop_can_run_ffmpeg(self):
+        assert recording.GnomeScreencastBackend.stops_off_thread is True
+
+    def test_gpu_screen_recorder_does_because_its_stop_waits_on_the_recorder(self):
+        assert recording.GpuScreenRecorderBackend.stops_off_thread is True
+
+    def test_windows_does_not_because_its_recorder_belongs_to_the_ui_thread(self):
+        assert recording.WindowsRecorderBackend.stops_off_thread is False
+
+
 class TestRecorderRegistryAvailable:
     def test_available_filters_to_available_backends_only(self):
         available_backend = FakeBackend("a", True)

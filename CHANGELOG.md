@@ -68,6 +68,11 @@ use it; the commit history has the detail.
   once dragged to the next monitor could be placed off screen, and a
   last region recalled on the other monitor disappeared as the pointer
   reached it.
+- **Snipux no longer freezes while a Linux recording is saved.** Stopping
+  a recording that had been paused, or one with sound, left the whole app
+  unresponsive on "Saving…" until the pieces were joined. It still reads
+  "Saving…" for as long, but the tray and every other window keep
+  working.
 - **Marks you can no longer see are not counted.** After drawing a new
   selection somewhere else, the size label still counted the marks left
   behind in the old one, and Esc spent a press "discarding" them before
