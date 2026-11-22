@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.4.0 — 2026-11-22
+
 ### Changed
 
 - **The portable `snipux.exe` starts as fast as the installed one.** It
@@ -28,7 +30,6 @@ use it; the commit history has the detail.
   the overlay drag.
 - **The first snip after starting Snipux is as quick as the rest.** It
   used to take about twice as long to open as every snip after it.
-
 - **Saving a snip hands the screen back at once.** The frozen screen used
   to stay up while the picture was written to disk -- a third of a second
   for a large desktop. It now goes the moment you save, and the file is
