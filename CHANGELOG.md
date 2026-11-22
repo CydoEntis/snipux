@@ -20,6 +20,10 @@ use it; the commit history has the detail.
 - **Window mode no longer shows the toolbar until you click a window.**
   The whole annotation toolbar came up under every window the pointer
   passed over, and the pen was armed before anything had been picked.
+- **Right-click or Esc cancels a region you are still dragging.** A
+  right-click used to take the box as it stood -- with Instant, it
+  captured it and closed -- and after Esc the box came back on the next
+  mouse move.
 
 ## 1.3.1 — 2026-11-20
 

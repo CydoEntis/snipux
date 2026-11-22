@@ -7677,6 +7677,9 @@ class OverlayWindow(QWidget):
         if key == Qt.Key.Key_Escape and self._picking_monitor:
             self._leave_monitor_mode()
             return
+        if key == Qt.Key.Key_Escape and self._region_drag_anchor is not None:
+            self._cancel_region_drag()
+            return
 
         # The chooser's shortcuts are live whenever its row is: while
         # nothing is selected, and again if Space reopens the row over a
@@ -7904,6 +7907,15 @@ class OverlayWindow(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if not self._accept_session_interaction(replace_selection=True):
+            return
+        if (
+            event.button() == Qt.MouseButton.RightButton
+            and self._region_drag_anchor is not None
+        ):
+            # Ahead of `_end_drags`, which reads any press as a lost release
+            # and commits the box as it stands -- with Instant, a right-click
+            # meant to call the drag off captured it and closed instead.
+            self._cancel_region_drag()
             return
         # A press while a drag is still open means that drag's release never
         # arrived. It ends here, as it stands, before this press can start
@@ -8360,6 +8372,17 @@ class OverlayWindow(QWidget):
             self.set_selection(None)
             return
         self._commit_selection(rect)
+
+    def _cancel_region_drag(self) -> None:
+        """Call off a Region drag-to-create: no selection, and back to the
+        chooser, as if the press had never happened.
+
+        The anchor goes with the box. Clearing the box alone left the drag
+        armed, and the next mouse move drew it again.
+        """
+        self._region_drag_anchor = None
+        self.set_selection(None)
+        self._apply_idle_cursor()
 
     def _nudge_selection(self, key: int, modifiers) -> None:
         """One arrow-key press (#88): move the selection by one logical

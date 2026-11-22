@@ -14607,3 +14607,76 @@ class TestWindowModeShowsNoToolbarWhilePicking:
         assert not overlay._picking_window
         assert overlay._bar.isVisible()
         assert overlay._bar.active_tool is not None
+
+
+class TestARegionDragCanBeCancelled:
+    """Right-click and Escape both call a region drag off. A right-click
+    used to commit the box as it stood -- with Instant, capturing it and
+    closing -- and Escape cleared a box the next mouse move drew again."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _dragging_overlay(self, outcome="edit"):
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay._chooser.set_after(outcome)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        _send_move(overlay, QPoint(400, 350), Qt.MouseButton.LeftButton)
+        assert overlay._selection == QRect(100, 100, 300, 250)
+        return overlay
+
+    def test_a_right_click_drops_the_box(self):
+        overlay = self._dragging_overlay()
+
+        QTest.mousePress(overlay, Qt.MouseButton.RightButton, pos=QPoint(400, 350))
+
+        assert overlay._selection is None
+        assert not overlay._bar.isVisible()
+        assert overlay._chooser.phase == "choosing"
+
+    def test_a_right_click_with_instant_captures_nothing(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._dragging_overlay(outcome="instant")
+
+        QTest.mousePress(overlay, Qt.MouseButton.RightButton, pos=QPoint(400, 350))
+
+        assert copied == []
+        assert overlay.isVisible()
+
+    def test_the_box_stays_gone_after_a_right_click(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        overlay = self._dragging_overlay(outcome="instant")
+        QTest.mousePress(overlay, Qt.MouseButton.RightButton, pos=QPoint(400, 350))
+
+        _send_move(overlay, QPoint(450, 400), Qt.MouseButton.LeftButton)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(450, 400))
+
+        assert overlay._selection is None
+        assert copied == []
+
+    def test_escape_drops_the_box_and_a_move_does_not_bring_it_back(self):
+        overlay = self._dragging_overlay()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+        _send_move(overlay, QPoint(450, 400), Qt.MouseButton.LeftButton)
+
+        assert overlay._selection is None
+        assert overlay.isVisible()
+
+    def test_a_new_drag_works_after_a_cancelled_one(self):
+        overlay = self._dragging_overlay()
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(400, 350))
+
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=QPoint(200, 300))
+        _send_move(overlay, QPoint(300, 420), Qt.MouseButton.LeftButton)
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=QPoint(300, 420))
+
+        assert overlay._selection == QRect(200, 300, 100, 120)
