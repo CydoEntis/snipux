@@ -4602,6 +4602,10 @@ class OverlayWindow(QWidget):
         # geometry. Holding the marks rather than their ids is what makes
         # an identity check safe after one of them has been freed.
         self._covered_ink_cache: "tuple[Frame, tuple[Shape, ...], tuple, QImage] | None" = None
+        # id(mark) -> its bounds; dropped whenever the marks change.
+        self._mark_bounds_cache: "dict[int, QRectF | None] | None" = None
+        # (key, the marks drawn on it, the image) -- see `_ink_layer_image`.
+        self._ink_layer_cache: "tuple[tuple, tuple[Shape, ...], QImage] | None" = None
         # Undo/redo history (SNX-39; SNX-70 folds the eraser into it): a
         # stack of `_MarkAction`s, one per `add_mark`/`erase_at` call, in
         # the order they happened. `undo()` pops `_undo`, inverts the
@@ -6957,13 +6961,26 @@ class OverlayWindow(QWidget):
         if self._selection is None:
             return []
         selection = QRectF(self._selection)
-        return [shape for shape in self._marks if _mark_reaches(shape, selection)]
+        marks = self._marks
+        # Each mark's bounds are worked out once per change to the marks,
+        # not once per paint: the size chip asks this on every repaint, and
+        # walking every point of every pen stroke was most of a repaint
+        # once a snip had some ink on it.
+        if self._mark_bounds_cache is None:
+            self._mark_bounds_cache = {id(shape): _mark_bounds(shape) for shape in marks}
+        bounds = self._mark_bounds_cache
+        return [
+            shape
+            for shape in marks
+            if (reach := bounds[id(shape)]) is None or reach.intersects(selection)
+        ]
 
     def _on_marks_changed(self) -> None:
         """The single place anything reacts to the ink layer changing --
         the bar's undo/redo buttons and a repaint, once, however the change
         arrived.
         """
+        self._mark_bounds_cache = None
         self._sync_bar_undo_redo()
         self.update()
 
@@ -7465,6 +7482,8 @@ class OverlayWindow(QWidget):
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
         self._ants_timer.stop()
+        # A window-sized image; not worth holding while nothing shows it.
+        self._ink_layer_cache = None
         self._bar.hide()
         self._style_popover.hide()
         self._tool_hint.hide()
@@ -8942,23 +8961,70 @@ class OverlayWindow(QWidget):
             # order with it. Inside the selection's clip, like the ink it
             # stands in for.
             painter.drawImage(QRectF(self.rect()), self._covered_ink_image(covered))
-        for shape in self._marks[covered:]:
-            if isinstance(shape, ObscuringShape):
-                # Already baked into Layer 1 by `_base_layer_image` above,
-                # in list order alongside every other obscuring mark --
-                # painting it again here would double its effect, and
-                # `draw()` isn't a real implementation to call anyway (see
-                # its own docstring). An *in-progress* blur/pixelate drag
-                # still gets a lightweight marquee instead -- see
-                # `_paint_in_progress_shape` below -- baking a live preview
-                # into Layer 1 on every mouse-move would be the exact
-                # per-frame cost this ticket's performance criterion rules
-                # out.
-                continue
-            shape.draw(painter)
+        # Obscuring marks are not in this layer: `_base_layer_image` baked
+        # them into Layer 1, in list order, and `draw()` is not a real
+        # implementation for them anyway. An *in-progress* blur/pixelate
+        # drag gets a lightweight marquee instead -- see
+        # `_paint_in_progress_shape` below.
+        ink = self._ink_layer_image(covered)
+        if ink is not None:
+            painter.drawImage(QPointF(0, 0), ink)
         if self._in_progress_shape is not None:
             self._paint_in_progress_shape(painter, self._in_progress_shape)
         painter.restore()
+
+    def _ink_layer_image(self, covered: int) -> QImage | None:
+        """Every committed mark from `covered` on that draws itself, on a
+        transparent image the size of this window. None when there is
+        nothing to draw.
+
+        Stroking the marks from their vectors was most of a repaint once a
+        snip had some ink on it -- 61% of the profile with 40 pen strokes,
+        and a repaint happens on every mouse move of a drag and every tick
+        of the marching ants. Marks only change through `_mark_store`, so
+        they are drawn once here and blitted after that.
+
+        A mark added to the end is drawn onto the image already held, which
+        is the whole cost of finishing a stroke; any other change starts the
+        image again.
+        """
+        marks = tuple(
+            shape
+            for shape in self._marks[covered:]
+            if not isinstance(shape, ObscuringShape)
+        )
+        if not marks:
+            self._ink_layer_cache = None
+            return None
+        ratio = self.devicePixelRatioF()
+        key = (covered, self.width(), self.height(), ratio)
+        cached = self._ink_layer_cache
+        drawn: tuple[Shape, ...] = ()
+        image = None
+        if cached is not None and cached[0] == key:
+            _key, held, image = cached
+            if len(held) <= len(marks) and all(
+                a is b for a, b in zip(held, marks)
+            ):
+                drawn = held
+            else:
+                image = None
+        if image is None:
+            image = QImage(
+                math.ceil(self.width() * ratio),
+                math.ceil(self.height() * ratio),
+                QImage.Format.Format_ARGB32_Premultiplied,
+            )
+            image.setDevicePixelRatio(ratio)
+            image.fill(Qt.GlobalColor.transparent)
+        if len(drawn) < len(marks):
+            ink_painter = QPainter(image)
+            for shape in marks[len(drawn):]:
+                shape.draw(ink_painter)
+            # Closed before the image is read by the caller's drawImage.
+            ink_painter.end()
+        self._ink_layer_cache = (key, marks, image)
+        return image
 
     def _paint_in_progress_shape(self, painter: QPainter, shape: Shape) -> None:
         """Live preview of the mark `_start_stroke`/`_extend_stroke` are
@@ -9642,21 +9708,20 @@ class OverlayWindow(QWidget):
         painter.drawText(QPointF(text_x, baseline), hex_text)
 
 
-def _mark_reaches(shape: Shape, selection: QRectF) -> bool:
-    """Whether any of `shape` can show inside `selection`, both in the same
-    space.
+def _mark_bounds(shape: Shape) -> QRectF | None:
+    """Everything `shape` can paint on, in its own space, or None for a
+    mark that shows everywhere.
 
-    Judged from the mark's own points, widened by what it paints around
-    them, so it errs toward yes: the question is only ever whether ink is
-    certainly out of sight. Dispatches on field name, as
+    Taken from the mark's own points, widened by what it paints around
+    them, so it errs toward too large: the question it answers is only ever
+    whether ink is certainly out of sight. Dispatches on field name, as
     `shapes._transformed` does.
     """
     if isinstance(shape, Spotlight):
-        # Dims everything outside its own rect, so it shows wherever the
-        # selection is.
-        return True
+        # Dims everything outside its own rect.
+        return None
     if isinstance(shape, Text):
-        return shape.chip_rect().intersects(selection)
+        return QRectF(shape.chip_rect())
     reach = shape.stroke_width
     if hasattr(shape, "points"):
         xs = [point.x() for point in shape.points]
@@ -9673,7 +9738,14 @@ def _mark_reaches(shape: Shape, selection: QRectF) -> bool:
         reach = StepMarker.RADIUS
     # At least a pixel: a rect with no width intersects nothing.
     reach = max(reach, 1.0)
-    return bounds.adjusted(-reach, -reach, reach, reach).intersects(selection)
+    return bounds.adjusted(-reach, -reach, reach, reach)
+
+
+def _mark_reaches(shape: Shape, selection: QRectF) -> bool:
+    """Whether any of `shape` can show inside `selection`, both in the same
+    space."""
+    bounds = _mark_bounds(shape)
+    return bounds is None or bounds.intersects(selection)
 
 
 def _screen_for_geometry(geometry: QRectF) -> QScreen | None:

@@ -15,6 +15,10 @@ use it; the commit history has the detail.
   changed is redrawn while you drag, resize or nudge a selection, and the
   moving dashes no longer redraw every monitor 30 times a second. With
   nothing selected the overlay now sits completely still.
+- **Annotating stays quick however much you draw.** Pen strokes, arrows
+  and the rest are drawn once and kept, rather than redrawn from scratch
+  many times a second, so a snip with a lot of ink on it no longer makes
+  the overlay drag.
 ### Fixed
 
 - **Window mode no longer shows the toolbar until you click a window.**

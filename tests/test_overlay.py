@@ -1890,6 +1890,62 @@ class TestPartialRepaint:
         assert union.contains(readout.toAlignedRect())
         assert union.width() * union.height() < overlay.width() * overlay.height() / 4
 
+    def _line(self, y, colour=QColor(255, 0, 0)):
+        return Line(colour, 6.0, start=QPointF(40, y), end=QPointF(160, y))
+
+    def _count_line_draws(self, monkeypatch):
+        drawn = []
+        draw = Line.draw
+
+        def counting_draw(shape, painter):
+            drawn.append(shape)
+            draw(shape, painter)
+
+        monkeypatch.setattr(Line, "draw", counting_draw)
+        return drawn
+
+    def test_ink_is_drawn_once_however_often_the_overlay_repaints(self, monkeypatch):
+        overlay = OverlayWindow(make_frame())
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(self._line(50))
+        overlay.add_mark(self._line(100))
+        drawn = self._count_line_draws(monkeypatch)
+
+        first = overlay.grab().toImage()
+        second = overlay.grab().toImage()
+
+        assert len(drawn) == 2
+        assert first == second
+        assert first.pixelColor(100, 100) == QColor(255, 0, 0)
+
+    def test_a_new_mark_is_the_only_one_drawn_again(self, monkeypatch):
+        overlay = OverlayWindow(make_frame())
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(self._line(50))
+        overlay.grab()
+        drawn = self._count_line_draws(monkeypatch)
+        added = self._line(100)
+
+        overlay.add_mark(added)
+        image = overlay.grab().toImage()
+
+        assert drawn == [added]
+        assert image.pixelColor(100, 50) == QColor(255, 0, 0)
+        assert image.pixelColor(100, 100) == QColor(255, 0, 0)
+
+    def test_an_undone_mark_leaves_the_screen(self):
+        overlay = OverlayWindow(make_frame())
+        overlay.set_selection(QRect(0, 0, 200, 200))
+        overlay.add_mark(self._line(50))
+        overlay.add_mark(self._line(100))
+        assert overlay.grab().toImage().pixelColor(100, 100) == QColor(255, 0, 0)
+
+        overlay.undo()
+        image = overlay.grab().toImage()
+
+        assert image.pixelColor(100, 100) != QColor(255, 0, 0)
+        assert image.pixelColor(100, 50) == QColor(255, 0, 0)
+
     def test_the_first_selection_repaints_the_whole_window(self, monkeypatch):
         overlay, painted = self._shown_overlay(monkeypatch)
 
