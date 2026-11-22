@@ -8770,6 +8770,16 @@ class TestTheInterfaceStaysAliveWhileTheRecorderStops:
             QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
         )
 
+    @pytest.fixture(autouse=True)
+    def _a_recording_temp_folder_of_its_own(self, monkeypatch, tmp_path):
+        # These tests look at the temp file while a stop is in flight. The
+        # real folder is shared with every other snipux on the machine,
+        # and each one empties it when it starts -- another test run
+        # included.
+        folder = tmp_path / "recording-temp"
+        folder.mkdir()
+        monkeypatch.setattr(app, "_recording_temp_dir", lambda: folder)
+
     def _recording(self, make_controller, monkeypatch, backend, after="save"):
         controller = make_controller(
             BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
