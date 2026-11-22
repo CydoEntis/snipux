@@ -127,7 +127,12 @@ from snipux.output import (
     save_image,
 )
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
-from snipux.recording import RecorderRegistry, RecordingError, RecordingPartsError
+from snipux.recording import (
+    RecorderRegistry,
+    RecordingError,
+    RecordingOptions,
+    RecordingPartsError,
+)
 from snipux.pin import PinWindow
 from snipux.player import (
     EXPORT_UNAVAILABLE,
@@ -203,19 +208,22 @@ class _RecorderStarter(QObject):
 
     done = pyqtSignal()
 
-    def __init__(self, registry, rect, path, audio_source="off"):
+    def __init__(self, registry, rect, path, audio_source="off", options=None):
         super().__init__()
         self._registry = registry
         self._rect = rect
         self._path = path
         self._audio_source = audio_source
+        self._options = options
         self.result: tuple | None = None
         self.error: Exception | None = None
 
     def run(self) -> None:
         """Worker thread. Never touches a widget."""
         try:
-            self.result = self._registry.start(self._rect, self._path, self._audio_source)
+            self.result = self._registry.start(
+                self._rect, self._path, self._audio_source, self._options
+            )
         except Exception as exc:  # noqa: BLE001 - handed back, not swallowed
             self.error = exc
         # Queued, because this object lives on the UI thread: the receiver
@@ -3563,6 +3571,12 @@ class AppController:
         audio = self._recording_audio
         if platform.current.audio_source_unavailable_reason(audio):
             audio = design.tokens.AUDIO_DEFAULT
+        # Read here, per recording, and handed down: the recorders are
+        # backends and do not read config themselves.
+        options = RecordingOptions(
+            frame_rate=setup_desktop.load_recording_frame_rate(),
+            draw_cursor=setup_desktop.load_recording_draw_cursor(),
+        )
         # Only when every backend that could run says it is safe. The
         # Windows recorder builds a QScreenCapture, a QMediaCaptureSession
         # and a QMediaRecorder in start(); created on a worker thread, they
@@ -3573,9 +3587,9 @@ class AppController:
             backend.starts_off_thread
             for backend in self._recorder_registry.available()
         ):
-            return self._recorder_registry.start(rect, path, audio)
+            return self._recorder_registry.start(rect, path, audio, options)
 
-        starter = _RecorderStarter(self._recorder_registry, rect, path, audio)
+        starter = _RecorderStarter(self._recorder_registry, rect, path, audio, options)
         loop = QEventLoop()
         starter.done.connect(loop.quit)
 

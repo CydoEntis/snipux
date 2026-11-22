@@ -50,7 +50,7 @@ from PyQt6.QtMultimedia import (
     QVideoSink,
 )
 
-from . import ffmpeg, platform, setup_desktop
+from . import ffmpeg, platform
 
 
 def _jeepney():
@@ -88,9 +88,34 @@ AUDIO_MIC = "mic"
 AUDIO_SYSTEM = "system"
 
 
+@dataclass(frozen=True)
+class RecordingOptions:
+    """The two Settings choices a recorder acts on.
+
+    Handed in by whoever starts the recording rather than read here: this
+    module is a backend, and `config.json` belongs to `setup_desktop`,
+    which a backend has no business importing. The defaults are the
+    Settings window's own -- `tokens.RECORDING_FRAME_RATE_DEFAULT`, cursor
+    drawn -- repeated because this module does not import the design
+    package either.
+    """
+
+    frame_rate: int = 30
+    draw_cursor: bool = True
+
+
 class RecordingBackend(ABC):
     """A way of recording a region of the virtual desktop on a particular
     session type."""
+
+    # What the next `start()` records with. Set through `set_options()`
+    # for the same reason `audio_source` below is set rather than passed:
+    # `start()` keeps its two arguments, and a backend with no use for an
+    # option never reads it.
+    options: RecordingOptions = RecordingOptions()
+
+    def set_options(self, options: RecordingOptions) -> None:
+        self.options = options
 
     # Which of the bar's audio sources the next `start()` should record.
     # Set through `set_audio_source()` rather than a `start()` argument, so
@@ -323,7 +348,11 @@ class RecorderRegistry:
         return [(b.name(), b.unavailable_reason()) for b in self._backends if not b.is_available()]
 
     def start(
-        self, rect: QRectF | None, path: str, audio_source: str = AUDIO_OFF
+        self,
+        rect: QRectF | None,
+        path: str,
+        audio_source: str = AUDIO_OFF,
+        options: RecordingOptions | None = None,
     ) -> tuple[RecordingBackend, str]:
         """Try available backends in order; return the first that starts
         recording `rect` (or the whole virtual desktop, when `rect` is
@@ -342,11 +371,17 @@ class RecorderRegistry:
         `RecordingError` never has to call back into the registry to see
         which backends existed and why each was unavailable -- both are
         already on the exception, whether `failures` ended up empty or not.
+
+        `options` is the caller's frame rate and cursor choice, read by it
+        for each recording so a change in Settings takes effect on the next
+        one. Left out, a backend keeps the options it already has.
         """
         failures: list[tuple[str, Exception]] = []
         for backend in self.available():
             try:
                 backend.set_audio_source(audio_source)
+                if options is not None:
+                    backend.set_options(options)
                 return backend, backend.start(rect, path)
             except Exception as exc:  # noqa: BLE001 - collected, not swallowed
                 failures.append((backend.name(), exc))
@@ -590,10 +625,10 @@ class GpuScreenRecorderBackend(RecordingBackend):
             binary,
             *self._target_arguments(rect),
             "-k", "auto",
-            "-f", str(setup_desktop.load_recording_frame_rate()),
+            "-f", str(self.options.frame_rate),
             "-fm", "cfr",
             "-fallback-cpu-encoding", "yes",
-            "-cursor", "yes" if setup_desktop.load_recording_draw_cursor() else "no",
+            "-cursor", "yes" if self.options.draw_cursor else "no",
         ]
         if self.audio_source in (AUDIO_SYSTEM, AUDIO_MIC):
             device = "default_output" if self.audio_source == AUDIO_SYSTEM else "default_input"
@@ -997,13 +1032,11 @@ class GnomeScreencastBackend(RecordingBackend):
         audio.start()
         return audio
 
-    @staticmethod
-    def _screencast_options() -> dict:
+    def _screencast_options(self) -> dict:
         """The `a{sv}` options dict shared by `ScreencastArea` and
-        `Screencast` -- ticket 9's settings, read fresh on every call the
-        same way `overlay.py` re-reads `load_hints_enabled()` per snip,
-        rather than cached at construction: a Settings change must take
-        effect on the next recording, not the next process restart.
+        `Screencast`, from this recording's `options` -- which the caller
+        sets at each start, so a Settings change takes effect on the next
+        recording, and which every piece of a paused one then shares.
 
         jeepney's low-level API wants each `a{sv}` entry as its own
         `(dbus-signature, value)` pair, not a bare value. `draw-cursor` is
@@ -1014,8 +1047,8 @@ class GnomeScreencastBackend(RecordingBackend):
         clock producing a 5028ms file).
         """
         return {
-            "draw-cursor": ("b", setup_desktop.load_recording_draw_cursor()),
-            "framerate": ("i", setup_desktop.load_recording_frame_rate()),
+            "draw-cursor": ("b", self.options.draw_cursor),
+            "framerate": ("i", self.options.frame_rate),
         }
 
     def _call_screencast_area(self, connection, shell, rect: QRectF, path: str):

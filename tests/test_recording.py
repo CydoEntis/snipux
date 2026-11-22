@@ -22,6 +22,7 @@ from snipux.recording import (
     RecorderRegistry,
     RecordingBackend,
     RecordingError,
+    RecordingOptions,
     WindowsRecorderBackend,
     _bytes_per_pixel,
     _clamp_rect_to_frame,
@@ -40,20 +41,6 @@ def qapp():
     if app is None:
         app = QApplication([])
     return app
-
-
-@pytest.fixture(autouse=True)
-def _pinned_recording_settings(monkeypatch):
-    """`GnomeScreencastBackend._screencast_options()` (SNX-124 ticket 9)
-    reads `setup_desktop.load_recording_draw_cursor`/`load_recording_frame_rate`
-    fresh on every call -- with no override, that hits whatever config
-    directory this box's real user happens to have, which is exactly the
-    kind of environment-dependent read a test suite must not depend on.
-    Pinned here to the documented defaults; individual tests override
-    either one to check the value actually reaches the D-Bus call.
-    """
-    monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
-    monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
 
 
 class FakeBackend(RecordingBackend):
@@ -175,6 +162,32 @@ class TestJeepneyIsLoadedOnlyWhenDBusIsUsed:
 
         assert recording.open_dbus_connection(bus="SESSION") == "the connection"
         assert asked == ["SESSION"]
+
+
+class TestRecordingOptionsAreHandedInNotReadFromConfig:
+    """A recorder is told the frame rate and whether to draw the cursor.
+    It used to import the config module and read them itself, which put a
+    backend above the thing that owns `config.json`.
+    """
+
+    def test_the_registry_hands_the_options_to_the_backend_it_starts(self):
+        backend = FakeBackend("a", True)
+        options = RecordingOptions(frame_rate=15, draw_cursor=False)
+
+        RecorderRegistry([backend]).start(QRectF(0, 0, 10, 10), "out.mp4", options=options)
+
+        assert backend.options == options
+
+    def test_a_backend_started_without_any_keeps_the_settings_defaults(self):
+        from snipux.design import tokens
+
+        options = FakeBackend("a", True).options
+
+        assert options.frame_rate == tokens.RECORDING_FRAME_RATE_DEFAULT
+        assert options.draw_cursor is True
+
+    def test_the_module_does_not_import_the_config_module(self):
+        assert not hasattr(recording, "setup_desktop")
 
 
 class TestRecorderRegistryAvailable:
@@ -541,10 +554,8 @@ class TestGnomeScreencastBackendStart:
     def test_calls_screencast_area_with_rounded_geometry_and_configured_options(
         self, monkeypatch
     ):
-        # SNX-124 ticket 9: draw-cursor/framerate now come from Settings
-        # (setup_desktop), not the `{}` placeholder ticket 1 left behind.
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
+        # draw-cursor/framerate are the backend's `options`, not the `{}`
+        # placeholder the first version sent.
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
@@ -569,14 +580,12 @@ class TestGnomeScreencastBackendStart:
     def test_screencast_area_options_reflect_disabled_cursor_and_a_different_rate(
         self, monkeypatch
     ):
-        monkeypatch.setattr(
-            recording.setup_desktop, "load_recording_draw_cursor", lambda: False
-        )
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 15)
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+        backend = GnomeScreencastBackend()
+        backend.set_options(RecordingOptions(frame_rate=15, draw_cursor=False))
 
-        GnomeScreencastBackend().start(self.RECT, self.PATH)
+        backend.start(self.RECT, self.PATH)
 
         message = connection.send_and_get_reply.call_args[0][0]
         options = message.body[-1]
@@ -652,8 +661,6 @@ class TestGnomeScreencastBackendStartWholeScreen:
     def test_calls_screencast_with_no_geometry_and_configured_options(self, monkeypatch):
         # SNX-124 ticket 9: same options as ScreencastArea -- see that
         # class's own test for why this is no longer a bare `{}`.
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
@@ -848,10 +855,9 @@ class TestGpuScreenRecorderBackend:
 
     def test_region_uses_snipux_geometry_and_recording_options(self, tmp_path, monkeypatch):
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: False)
         commands = []
         backend = self._backend(commands)
+        backend.set_options(RecordingOptions(frame_rate=30, draw_cursor=False))
         backend.set_audio_source(recording.AUDIO_SYSTEM)
         path = str(tmp_path / "recording.mp4")
 
@@ -2765,8 +2771,6 @@ def linux_recorder(monkeypatch, shell_dir):
     `shell_dir`, with a system ffmpeg that can record sound."""
     shell = _FakeShell()
     monkeypatch.setattr(recording, "open_dbus_connection", shell.open)
-    monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
-    monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
     monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
     run = _FakeFfmpeg(shell)
     popen = Mock(side_effect=_FakeAudioProcess)

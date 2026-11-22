@@ -8690,6 +8690,22 @@ class TestTheInterfaceStaysAliveWhileTheRecorderStarts:
 
         assert threads and threads[0] is not threading.main_thread()
 
+    def test_the_recorder_is_handed_the_frame_rate_and_cursor_from_settings(
+        self, make_controller, monkeypatch
+    ):
+        # Read by the controller at each start, so a change in Settings
+        # takes effect on the next recording, and handed to the recorder
+        # rather than left for it to look up.
+        monkeypatch.setattr(app.setup_desktop, "load_recording_frame_rate", lambda: 15)
+        monkeypatch.setattr(app.setup_desktop, "load_recording_draw_cursor", lambda: False)
+        backend = FakeRecordingBackend()
+        controller = self._controller(make_controller, backend)
+
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert backend.options.frame_rate == 15
+        assert backend.options.draw_cursor is False
+
     def test_a_failed_start_still_raises_through_the_nested_loop(
         self, make_controller
     ):
