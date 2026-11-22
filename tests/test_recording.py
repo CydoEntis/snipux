@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import jeepney
 from jeepney import HeaderFields
 
 from PyQt6.QtCore import QRect, QRectF, QSize, Qt, QThread
@@ -136,6 +137,44 @@ class TestWhichRecordersStopOffTheUiThread:
 
     def test_windows_does_not_because_its_recorder_belongs_to_the_ui_thread(self):
         assert recording.WindowsRecorderBackend.stops_off_thread is False
+
+
+class TestJeepneyIsLoadedOnlyWhenDBusIsUsed:
+    """jeepney speaks a bus only Linux has, and this module is imported on
+    every platform. Windows paid 5-6ms for the import at every start.
+    """
+
+    def test_importing_the_module_does_not_import_jeepney(self, tmp_path):
+        import os
+        import subprocess
+
+        loaded = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sys, snipux.recording; "
+                "print(sorted(m for m in sys.modules if m.startswith('jeepney')))",
+            ],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "XDG_CONFIG_HOME": str(tmp_path)},
+        ).stdout.strip()
+
+        assert loaded == "[]"
+
+    def test_opening_a_connection_goes_to_jeepney_for_the_bus_asked_for(
+        self, monkeypatch
+    ):
+        # The name the other tests here replace has to be the one that
+        # reaches jeepney, or replacing it proves nothing.
+        import jeepney.io.blocking
+
+        asked = []
+        def open_connection(bus):
+            asked.append(bus)
+            return "the connection"
+        monkeypatch.setattr(jeepney.io.blocking, "open_dbus_connection", open_connection)
+
+        assert recording.open_dbus_connection(bus="SESSION") == "the connection"
+        assert asked == ["SESSION"]
 
 
 class TestRecorderRegistryAvailable:
@@ -338,7 +377,7 @@ def _error_reply(message):
     has, which is exactly why one used to get unpacked as the other.
     """
     reply = Mock(body=(message,))
-    reply.header.message_type = recording.MessageType.error
+    reply.header.message_type = jeepney.MessageType.error
     return reply
 
 

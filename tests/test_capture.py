@@ -5,6 +5,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import jeepney
 from jeepney import HeaderFields
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF
@@ -1383,7 +1384,7 @@ class TestGnomeShellHelperBackend:
     @staticmethod
     def _shell_owner_connection(monkeypatch, owned=True):
         reply = Mock(body=(owned,))
-        reply.header.message_type = capture.MessageType.method_return
+        reply.header.message_type = jeepney.MessageType.method_return
         connection = Mock()
         connection.send_and_get_reply.return_value = reply
         monkeypatch.setattr(capture, "open_dbus_connection", lambda bus: connection)
@@ -1496,7 +1497,7 @@ class TestGnomeShellHelperBackendAnswers:
     @staticmethod
     def _error(text):
         reply = Mock(body=(text,))
-        reply.header.message_type = capture.MessageType.error
+        reply.header.message_type = jeepney.MessageType.error
         return reply
 
     def _backend(self, monkeypatch, replies):
@@ -2598,6 +2599,44 @@ class TestUnsupportedPlatformBackend:
             registry.capture()
 
         assert excinfo.value.failures == []
+
+
+class TestJeepneyIsLoadedOnlyWhenDBusIsUsed:
+    """jeepney speaks a bus only Linux has, and this module is imported on
+    every platform. Windows paid 5-6ms for the import at every start.
+    """
+
+    def test_importing_the_module_does_not_import_jeepney(self, tmp_path):
+        import os
+        import subprocess
+
+        loaded = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sys, snipux.capture; "
+                "print(sorted(m for m in sys.modules if m.startswith('jeepney')))",
+            ],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "XDG_CONFIG_HOME": str(tmp_path)},
+        ).stdout.strip()
+
+        assert loaded == "[]"
+
+    def test_opening_a_connection_goes_to_jeepney_for_the_bus_asked_for(
+        self, monkeypatch
+    ):
+        # The name the other tests here replace has to be the one that
+        # reaches jeepney, or replacing it proves nothing.
+        import jeepney.io.blocking
+
+        asked = []
+        def open_connection(bus):
+            asked.append(bus)
+            return "the connection"
+        monkeypatch.setattr(jeepney.io.blocking, "open_dbus_connection", open_connection)
+
+        assert capture.open_dbus_connection(bus="SESSION") == "the connection"
+        assert asked == ["SESSION"]
 
 
 class TestWin32RectsAreConvertedToLogicalCoordinates:

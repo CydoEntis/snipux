@@ -27,9 +27,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from jeepney import DBusAddress, MessageType, new_method_call
-from jeepney.io.blocking import open_dbus_connection
-
 from PyQt6.QtCore import (
     QCoreApplication,
     QObject,
@@ -54,6 +51,32 @@ from PyQt6.QtMultimedia import (
 )
 
 from . import ffmpeg, platform, setup_desktop
+
+
+def _jeepney():
+    """The jeepney module, imported the first time D-Bus is actually used.
+
+    Not at the top of the file: this module is imported on every platform
+    and jeepney speaks a bus only Linux has, so Windows paid for the import
+    (5-6ms measured, more with its blocking I/O) at every start and never
+    called it.
+    """
+    import jeepney
+
+    return jeepney
+
+
+def open_dbus_connection(bus: str = "SESSION"):
+    """jeepney's blocking `open_dbus_connection`, imported on first use for
+    the reason `_jeepney()` gives.
+
+    A function of this module's own, rather than the import it used to be,
+    so every caller still goes through one name here -- which is the name
+    the tests replace to keep a real session bus out of them.
+    """
+    from jeepney.io.blocking import open_dbus_connection as open_connection
+
+    return open_connection(bus=bus)
 
 
 # The recording bar's audio choices, by the identifiers
@@ -815,7 +838,7 @@ class GnomeScreencastBackend(RecordingBackend):
         to unpack (expected 2)`, discarding the one sentence that said
         what was actually wrong.
         """
-        if getattr(reply.header, "message_type", None) is not MessageType.error:
+        if getattr(reply.header, "message_type", None) is not _jeepney().MessageType.error:
             return None
         body = getattr(reply, "body", None) or ()
         return str(body[0]) if body else "unspecified D-Bus error"
@@ -869,12 +892,12 @@ class GnomeScreencastBackend(RecordingBackend):
     def _query_supported(self, connection, bus_name: str, object_path: str) -> bool | str:
         """Ask one address whether screencasting is supported."""
         try:
-            properties = DBusAddress(
+            properties = _jeepney().DBusAddress(
                 object_path,
                 bus_name=bus_name,
                 interface=self._PROPERTIES_INTERFACE,
             )
-            message = new_method_call(
+            message = _jeepney().new_method_call(
                 properties, "Get", "ss", (self._INTERFACE, "ScreencastSupported")
             )
             reply = connection.send_and_get_reply(message)
@@ -936,7 +959,7 @@ class GnomeScreencastBackend(RecordingBackend):
         bus_name, object_path = self._address_or_default()
         connection = open_dbus_connection(bus="SESSION")
         try:
-            shell = DBusAddress(
+            shell = _jeepney().DBusAddress(
                 object_path, bus_name=bus_name, interface=self._INTERFACE
             )
             if self._rect is None:
@@ -1006,7 +1029,7 @@ class GnomeScreencastBackend(RecordingBackend):
         right = round(rect.left() + rect.width())
         bottom = round(rect.top() + rect.height())
 
-        message = new_method_call(
+        message = _jeepney().new_method_call(
             shell,
             "ScreencastArea",
             "iiiisa{sv}",
@@ -1023,7 +1046,7 @@ class GnomeScreencastBackend(RecordingBackend):
 
     def _call_screencast(self, connection, shell, path: str):
         """Issue whole-desktop `Screencast(sa{sv})` and return the reply."""
-        message = new_method_call(
+        message = _jeepney().new_method_call(
             shell,
             "Screencast",
             "sa{sv}",
@@ -1127,11 +1150,11 @@ class GnomeScreencastBackend(RecordingBackend):
         connection = self._connection
         bus_name, object_path = self._address_or_default()
         try:
-            shell = DBusAddress(
+            shell = _jeepney().DBusAddress(
                 object_path, bus_name=bus_name, interface=self._INTERFACE
             )
             reply = connection.send_and_get_reply(
-                new_method_call(shell, "StopScreencast")
+                _jeepney().new_method_call(shell, "StopScreencast")
             )
         finally:
             connection.close()

@@ -24,13 +24,36 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from jeepney import DBusAddress, MatchRule, MessageType, new_method_call
-from jeepney.io.blocking import open_dbus_connection
-
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF, QUrl
 from PyQt6.QtGui import QGuiApplication, QImage, QPainter
 
 from snipux import platform
+
+
+def _jeepney():
+    """The jeepney module, imported the first time D-Bus is actually used.
+
+    Not at the top of the file: this module is imported on every platform
+    and jeepney speaks a bus only Linux has, so Windows paid for the import
+    (5-6ms measured, more with its blocking I/O) at every start and never
+    called it.
+    """
+    import jeepney
+
+    return jeepney
+
+
+def open_dbus_connection(bus: str = "SESSION"):
+    """jeepney's blocking `open_dbus_connection`, imported on first use for
+    the reason `_jeepney()` gives.
+
+    A function of this module's own, rather than the import it used to be,
+    so every caller still goes through one name here -- which is the name
+    the tests replace to keep a real session bus out of them.
+    """
+    from jeepney.io.blocking import open_dbus_connection as open_connection
+
+    return open_connection(bus=bus)
 
 
 @dataclass
@@ -1345,7 +1368,7 @@ class PortalScreenshotBackend(CaptureBackend):
         before `_send_request()` — the ordering the portal's documented
         failure mode depends on.
         """
-        rule = MatchRule(
+        rule = _jeepney().MatchRule(
             type="signal",
             interface=self._REQUEST_INTERFACE,
             member="Response",
@@ -1355,10 +1378,10 @@ class PortalScreenshotBackend(CaptureBackend):
 
     def _send_request(self, connection, handle_token: str) -> None:
         """Send the `Screenshot` method call. Must run after `_subscribe`."""
-        portal = DBusAddress(
+        portal = _jeepney().DBusAddress(
             self._OBJECT_PATH, bus_name=self._BUS_NAME, interface=self._INTERFACE
         )
-        message = new_method_call(
+        message = _jeepney().new_method_call(
             portal,
             "Screenshot",
             "sa{sv}",
@@ -1491,15 +1514,15 @@ class GnomeShellHelperBackend(CaptureBackend):
         except Exception as exc:  # noqa: BLE001 - availability is reported
             return f"cannot reach the session bus: {type(exc).__name__}: {exc}"
         try:
-            dbus = DBusAddress(
+            dbus = _jeepney().DBusAddress(
                 "/org/freedesktop/DBus",
                 bus_name="org.freedesktop.DBus",
                 interface="org.freedesktop.DBus",
             )
             reply = connection.send_and_get_reply(
-                new_method_call(dbus, "NameHasOwner", "s", ("org.gnome.Shell",))
+                _jeepney().new_method_call(dbus, "NameHasOwner", "s", ("org.gnome.Shell",))
             )
-            if reply.header.message_type is MessageType.error:
+            if reply.header.message_type is _jeepney().MessageType.error:
                 body = reply.body or ("unspecified D-Bus error",)
                 return f"cannot query GNOME Shell: {body[0]}"
             (owned,) = reply.body
@@ -1542,11 +1565,11 @@ class GnomeShellHelperBackend(CaptureBackend):
         connection = open_dbus_connection(bus="SESSION")
         try:
             for bus_name, object_path, interface in self._ADDRESSES:
-                shell = DBusAddress(object_path, bus_name=bus_name, interface=interface)
+                shell = _jeepney().DBusAddress(object_path, bus_name=bus_name, interface=interface)
                 reply = connection.send_and_get_reply(
-                    new_method_call(shell, "Screenshot", "bbs", (False, False, path))
+                    _jeepney().new_method_call(shell, "Screenshot", "bbs", (False, False, path))
                 )
-                if reply.header.message_type is MessageType.error:
+                if reply.header.message_type is _jeepney().MessageType.error:
                     body = reply.body or ("unspecified D-Bus error",)
                     answers.append(f"{bus_name}: {body[0]}")
                     continue
