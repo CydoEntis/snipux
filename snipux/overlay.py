@@ -8153,6 +8153,7 @@ class OverlayWindow(QWidget):
         # "which display is the cursor on" from -- see its own docstring
         # for why this beats `QCursor.pos()`. Before the eraser's branch,
         # which returns early, so its sweep can fade the chrome it crosses.
+        previous_cursor = self._cursor_pos
         self._cursor_pos = event.position()
         if self._erasing:
             self.erase_at(event.position())
@@ -8166,8 +8167,12 @@ class OverlayWindow(QWidget):
             # Nothing else here already repaints on a plain hover (no
             # button held) -- the loupe (`_paint_eyedropper`) needs one on
             # every move to actually follow the cursor, and to disappear
-            # the instant it leaves the selection.
-            self.update()
+            # the instant it leaves the selection. Only where the loupe was
+            # and where it is now: the rest of the desktop has not changed.
+            self.update(
+                self._eyedropper_region(previous_cursor)
+                + self._eyedropper_region(self._cursor_pos)
+            )
 
         if self._picking_window:
             # Live preview while armed: a hit sets `_selection` to that
@@ -9170,6 +9175,20 @@ class OverlayWindow(QWidget):
         painter.drawLine(QPointF(center.x(), box_rect.top()), QPointF(center.x(), box_rect.bottom()))
 
         self._paint_eyedropper_readout(painter, readout_rect, colour)
+
+    def _eyedropper_region(self, cursor: QPointF | None) -> QRegion:
+        """What `_paint_eyedropper` draws with the pointer at `cursor`,
+        window-local: the loupe and its readout chip. Empty wherever it
+        draws nothing."""
+        if cursor is None or self._selection is None:
+            return QRegion()
+        if not QRectF(self._selection).contains(cursor):
+            return QRegion()
+        margin = self._CHROME_REPAINT_MARGIN
+        region = QRegion()
+        for rect in self._eyedropper_rects(cursor, self.color_at(cursor)):
+            region += rect.toAlignedRect().adjusted(-margin, -margin, margin, margin)
+        return region
 
     def _eyedropper_readout_font(self) -> QFont:
         return self._chip_font(design.tokens.Font.FROZEN, design.font_families().ui)

@@ -1849,6 +1849,41 @@ class TestPartialRepaint:
         # repainted too, so this is a share of the window, not an exact rect.
         assert union.width() * union.height() < overlay.width() * overlay.height() / 4
 
+    def test_the_eyedropper_repaints_only_around_the_loupe(self, monkeypatch):
+        overlay, painted = self._shown_overlay(monkeypatch)
+        overlay.set_selection(QRect(200, 200, 800, 600))
+        overlay.set_eyedropper_active(True)
+
+        def hover(x, y):
+            position = QPointF(x, y)
+            QApplication.sendEvent(
+                overlay,
+                QMouseEvent(
+                    QEvent.Type.MouseMove,
+                    position,
+                    position,
+                    Qt.MouseButton.NoButton,
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                ),
+            )
+            QApplication.processEvents()
+
+        hover(500, 500)
+        painted.clear()
+        hover(510, 505)
+
+        assert painted, "the loupe never followed the pointer"
+        union = painted[0]
+        for rect in painted[1:]:
+            union = union.united(rect)
+        box, readout = overlay._eyedropper_rects(
+            QPointF(510, 505), overlay.color_at(QPointF(510, 505))
+        )
+        assert union.contains(box.toAlignedRect())
+        assert union.contains(readout.toAlignedRect())
+        assert union.width() * union.height() < overlay.width() * overlay.height() / 4
+
     def test_the_first_selection_repaints_the_whole_window(self, monkeypatch):
         overlay, painted = self._shown_overlay(monkeypatch)
 
