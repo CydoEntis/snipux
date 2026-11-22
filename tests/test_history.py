@@ -33,12 +33,46 @@ def save_png(path: Path, image: QImage | None = None) -> Path:
 
 
 class TestSavedThumbnail:
+    @pytest.fixture(autouse=True)
+    def _empty_cache(self):
+        history._thumbnails.clear()
+        yield
+        history._thumbnails.clear()
+
     def test_an_image_is_scaled_down_to_the_thumbnail_edge(self, tmp_path):
         path = save_png(tmp_path / "big.png", make_image(2000, 1000))
 
         thumb = history.saved_thumbnail(path)
 
         assert thumb.width() == history._THUMB_EDGE
+
+    def test_the_cache_holds_a_bounded_number_of_thumbnails(self, tmp_path):
+        # Days of saves used to leave a thumbnail behind for every one.
+        paths = [
+            save_png(tmp_path / f"snip {n}.png", make_image(20, 20))
+            for n in range(history._THUMBNAIL_CACHE_MAX + 5)
+        ]
+
+        for path in paths:
+            history.saved_thumbnail(path)
+
+        assert len(history._thumbnails) == history._THUMBNAIL_CACHE_MAX
+        assert paths[-1] in history._thumbnails
+        assert paths[0] not in history._thumbnails
+
+    def test_a_thumbnail_just_asked_for_outlives_older_ones(self, tmp_path):
+        paths = [
+            save_png(tmp_path / f"snip {n}.png", make_image(20, 20))
+            for n in range(history._THUMBNAIL_CACHE_MAX)
+        ]
+        for path in paths:
+            history.saved_thumbnail(path)
+
+        history.saved_thumbnail(paths[0])
+        history.saved_thumbnail(save_png(tmp_path / "one more.png", make_image(20, 20)))
+
+        assert paths[0] in history._thumbnails
+        assert paths[1] not in history._thumbnails
 
     def test_a_recording_or_missing_file_has_none(self, tmp_path):
         video = tmp_path / "clip.mp4"

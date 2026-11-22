@@ -15,6 +15,7 @@ here keeps a list of its own.
 from __future__ import annotations
 
 import datetime
+from collections import OrderedDict
 from pathlib import Path
 
 from PyQt6.QtCore import QRect, Qt, pyqtSignal
@@ -48,7 +49,13 @@ _THUMB_EDGE = 640
 
 VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov"}
 
-_thumbnails: dict[tuple[Path, int], QImage | None] = {}
+# Path -> (the file's mtime when the thumbnail was made, the thumbnail),
+# least recently used first. Bounded: a session runs for days, and one entry
+# per save ever made is ~1 MB each that nothing would ever ask for again. The
+# Recent list is five long (`setup_desktop.RECENT_CAPTURES_MAX`); the slack
+# is for files edited in place and a panel open while a save lands.
+_THUMBNAIL_CACHE_MAX = 16
+_thumbnails: OrderedDict[Path, tuple[int, QImage | None]] = OrderedDict()
 
 
 def saved_thumbnail(path: Path) -> QImage | None:
@@ -60,22 +67,35 @@ def saved_thumbnail(path: Path) -> QImage | None:
         stamp = path.stat().st_mtime_ns
     except OSError:
         return None
-    key = (path, stamp)
-    if key not in _thumbnails:
-        image = QImage()
-        if path.suffix.lower() not in VIDEO_SUFFIXES:
-            image = QImageReader(str(path)).read()
-        if image.isNull():
-            _thumbnails[key] = None
-        else:
-            if image.width() > _THUMB_EDGE or image.height() > _THUMB_EDGE:
-                image = image.scaled(
-                    _THUMB_EDGE, _THUMB_EDGE,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            _thumbnails[key] = image
-    return _thumbnails[key]
+    cached = _thumbnails.get(path)
+    if cached is not None and cached[0] == stamp:
+        _thumbnails.move_to_end(path)
+        return cached[1]
+    thumbnail = _read_thumbnail(path)
+    _cache_thumbnail(path, stamp, thumbnail)
+    return thumbnail
+
+
+def _read_thumbnail(path: Path) -> QImage | None:
+    if path.suffix.lower() in VIDEO_SUFFIXES:
+        return None
+    image = QImageReader(str(path)).read()
+    if image.isNull():
+        return None
+    if image.width() > _THUMB_EDGE or image.height() > _THUMB_EDGE:
+        image = image.scaled(
+            _THUMB_EDGE, _THUMB_EDGE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    return image
+
+
+def _cache_thumbnail(path: Path, stamp: int, thumbnail: QImage | None) -> None:
+    _thumbnails[path] = (stamp, thumbnail)
+    _thumbnails.move_to_end(path)
+    while len(_thumbnails) > _THUMBNAIL_CACHE_MAX:
+        _thumbnails.popitem(last=False)
 
 
 def _when(moment: datetime.datetime) -> str:

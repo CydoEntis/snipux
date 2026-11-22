@@ -79,6 +79,8 @@ use it; the commit history has the detail.
   on the frame you chose.
 ### Fixed
 
+- **Snipux no longer keeps a preview of every snip you ever saved.** Left
+  running for days, it held one for each save until it quit.
 - **A second, different problem is no longer kept quiet.** After one error
   notice, later errors of the same kind from somewhere else were written
   to the log without telling you.
