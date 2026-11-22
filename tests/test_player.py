@@ -1241,3 +1241,27 @@ class TestAFilmstripThumbnailIsKeptSmall:
         frame.fill(QColor("#000000"))
 
         assert thumbnail.pixelColor(10, 10) == QColor("#336699")
+
+
+class TestTheLoudestSampleInABuffer:
+    """What one decoded buffer contributes to the waveform."""
+
+    @staticmethod
+    def _floats(*values):
+        from array import array
+
+        return array("f", values).tobytes()
+
+    def test_it_is_the_largest_sample(self):
+        assert _player_module._loudest(self._floats(0.1, 0.5, 0.25)) == pytest.approx(0.5)
+
+    def test_a_swing_below_zero_is_as_loud_as_one_above(self):
+        # Sound swings both ways; taking only the maximum would draw a
+        # buffer that peaks downwards as nearly silent.
+        assert _player_module._loudest(self._floats(0.1, -0.75, 0.25)) == pytest.approx(0.75)
+
+    def test_a_buffer_that_is_not_whole_samples_is_skipped(self):
+        assert _player_module._loudest(self._floats(0.5)[:-1]) is None
+
+    def test_an_empty_buffer_is_skipped(self):
+        assert _player_module._loudest(b"") is None
