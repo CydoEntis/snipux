@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import sys
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -547,7 +548,7 @@ class TestCopyImageToClipboard:
         monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         calls = []
 
-        def fake_run(argv, input=None, check=None):
+        def fake_run(argv, input=None, check=None, timeout=None):
             calls.append((argv, input))
 
         monkeypatch.setattr(app.subprocess, "run", fake_run)
@@ -613,7 +614,7 @@ class TestCopyTextToClipboard:
         monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         calls = []
 
-        def fake_run(argv, input=None, check=None):
+        def fake_run(argv, input=None, check=None, timeout=None):
             calls.append((argv, input))
 
         monkeypatch.setattr(app.subprocess, "run", fake_run)
@@ -704,7 +705,7 @@ class TestCopyFileToClipboard:
         monkeypatch.setattr(app.shutil, "which", lambda binary: f"/usr/bin/{binary}")
         calls = []
 
-        def fake_run(argv, input=None, check=None):
+        def fake_run(argv, input=None, check=None, timeout=None):
             calls.append((argv, input))
 
         monkeypatch.setattr(app.subprocess, "run", fake_run)
@@ -1758,6 +1759,30 @@ class TestCli:
 
         assert calls == [("reattach", {"attach": False}), "relaunch", "run_resident_app"]
 
+    def test_a_launch_handed_to_the_stable_install_ends_with_its_exit_code(self, monkeypatch):
+        # The portable Windows exe finishes every launch from the folder
+        # build it installed. Doing the work here as well would be two.
+        calls = _stub_dispatch(monkeypatch, ["snipux", "--list-backends"])
+        handed = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "hand_off_to_stable_install",
+            lambda arguments: handed.append(arguments) or 3,
+        )
+
+        assert cli() == 3
+        assert handed == [["--list-backends"]]
+        assert calls == []
+
+    def test_a_launch_that_is_not_handed_off_carries_on(self, monkeypatch):
+        calls = _stub_dispatch(monkeypatch, ["snipux", "--list-backends"])
+        monkeypatch.setattr(
+            app.platform.current, "hand_off_to_stable_install", lambda arguments: None
+        )
+
+        assert cli() == 0
+        assert calls == [("reattach", {"attach": True}), "main"]
+
     def test_reattaches_the_console_before_dispatching(self, monkeypatch):
         # Order matters (SNX-100's own acceptance criterion): main()/
         # run_resident_app() may print before returning, so the console
@@ -2254,6 +2279,21 @@ class TestCrashLog:
 
         assert len(told) == 1
 
+    def test_a_second_failure_of_the_same_type_elsewhere_is_announced(self, tmp_path):
+        # Days into a session the second AttributeError is rarely the first
+        # one again; keyed on the type alone it was logged and never shown.
+        told = []
+        install_crash_log(lambda: tmp_path / "crash.log", notify=told.append)
+
+        self._raise_and_report("the overlay would not open")
+        try:
+            raise ValueError("the recording would not start")
+        except ValueError as error:
+            sys.excepthook(type(error), error, error.__traceback__)
+
+        assert len(told) == 2
+        assert "the recording would not start" in told[1]
+
     def test_a_tray_already_gone_does_not_raise_from_the_hook(self, tmp_path):
         def gone(_message):
             raise RuntimeError("wrapped C/C++ object has been deleted")
@@ -2462,6 +2502,78 @@ class TestAppControllerCapture:
         # picks Region/Window/Full screen/Browser now, so nothing here
         # constructs the old editor.py window either.
         assert isinstance(controller._overlay, OverlayWindow)
+
+    def test_warming_the_first_snip_shows_nothing_and_captures_nothing(
+        self, make_controller
+    ):
+        backend = FakeCaptureBackend(make_capture_frame())
+        captures = []
+        capture = backend.capture
+        backend.capture = lambda: captures.append(1) or capture()
+        controller = make_controller(
+            BackendRegistry([backend]), FakeTransport(make_transport_state())
+        )
+        before = set(QApplication.topLevelWidgets())
+
+        controller.warm_first_snip()
+
+        assert captures == []
+        assert controller._overlay is None
+        opened = [
+            widget
+            for widget in set(QApplication.topLevelWidgets()) - before
+            if widget.isVisible()
+        ]
+        assert opened == []
+
+    def test_warming_leaves_an_open_snip_alone(self, make_controller):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        controller.start_capture()
+        overlay = controller._overlay
+
+        controller.warm_first_snip()
+
+        assert controller._overlay is overlay
+        assert overlay.isVisible()
+
+    def test_a_snip_that_opens_quickly_is_timed_but_not_logged(
+        self, make_controller, monkeypatch
+    ):
+        notes = []
+        monkeypatch.setattr(app.log, "note", lambda message, **_: notes.append(message))
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        monkeypatch.setattr(controller, "_SLOW_SNIP_MS", 60_000)
+
+        controller.start_capture()
+
+        assert set(controller.last_snip_timing_ms) == {"capture", "overlay"}
+        assert [note for note in notes if "slow snip" in note] == []
+
+    def test_a_slow_snip_is_logged_with_where_the_time_went(
+        self, make_controller, monkeypatch
+    ):
+        notes = []
+        monkeypatch.setattr(app.log, "note", lambda message, **_: notes.append(message))
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 200, 200)],
+        )
+        monkeypatch.setattr(controller, "_SLOW_SNIP_MS", 0)
+
+        controller.start_capture()
+
+        (note,) = [note for note in notes if "slow snip" in note]
+        assert "reading the screen" in note
+        assert "showing the overlay" in note
 
     def test_start_capture_reads_the_hint_bar_preference_fresh_from_settings(
         self, make_controller, monkeypatch
@@ -4047,6 +4159,42 @@ class TestAppControllerRecordingHud:
         assert hud.state() == RecordingBar.DONE
         assert backend.stop_calls == [True]
 
+    def test_the_bar_reads_saving_on_screen_before_the_recorder_is_stopped(
+        self, make_controller, monkeypatch
+    ):
+        # stop() blocks until the file is finished -- seconds, for a paused
+        # GNOME recording being joined. Whatever the bar shows when that
+        # call begins is what it shows until it ends, so "Saving…" has to
+        # have been painted by then, not merely asked for.
+        controller, backend = self._start_a_recording(
+            make_controller,
+            monkeypatch,
+            QRectF(50, 50, 200, 150),
+            monitor_geometries=[QRectF(0, 0, 1000, 800)],
+        )
+        hud = controller._recording_hud
+        painted = []
+        real_paint = RecordingBar.paintEvent
+
+        def paint(bar, event):
+            painted.append(bar.state())
+            real_paint(bar, event)
+
+        monkeypatch.setattr(RecordingBar, "paintEvent", paint)
+        seen_when_stop_began = []
+        monkeypatch.setattr(
+            backend,
+            "stop",
+            lambda: seen_when_stop_began.append((list(painted), hud._summary.text())),
+        )
+
+        controller._stop_recording()
+
+        [(painted_before_stop, text)] = seen_when_stop_began
+        assert RecordingBar.SAVING in painted_before_stop
+        assert text == "Saving…"
+        assert hud.state() == RecordingBar.DONE
+
     def test_stopping_recording_reports_a_backend_failure_without_raising(
         self, make_controller, monkeypatch
     ):
@@ -5162,6 +5310,34 @@ class TestAppControllerDiscardRecording:
 
         assert controller._active_recording is None
 
+    def test_a_discard_that_cannot_delete_the_file_says_so(
+        self, make_controller, monkeypatch
+    ):
+        # Windows refuses to delete a file its recorder still holds open.
+        # That used to escape the tray's slot as a PermissionError, after
+        # which the user had been told nothing at all.
+        controller, backend = self._start_a_recording(make_controller, monkeypatch)
+        _rect, temp_path = backend.start_calls[0]
+        real_unlink = Path.unlink
+
+        def unlink(path, missing_ok=False):
+            if path == Path(temp_path):
+                raise PermissionError("in use by another process")
+            real_unlink(path, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", unlink)
+        calls = []
+        monkeypatch.setattr(
+            controller._tray_icon, "showMessage", lambda *args, **kwargs: calls.append(args)
+        )
+
+        controller._discard_recording()  # must not raise
+
+        assert len(calls) == 1
+        assert "could not be removed" in calls[0][1]
+        assert controller._active_recording is None
+        assert controller._stopping_recording is False
+
 
 class TestAppControllerRecordingTempFileCleanup:
     """SNX-124 (recording.md ticket 9): a temp file left by a previous
@@ -5542,6 +5718,9 @@ class TestAppControllerTrayMenu:
             lambda url: opened.append(bytes(url.toEncoded()).decode()),
         )
         monkeypatch.setattr(app.report, "environment", lambda: "ENVIRONMENT")
+        # A controller built with no tray has already noted that in
+        # snipux.log, so there is a log to be asked about.
+        monkeypatch.setattr(app.report, "ask_to_include_log", lambda: False)
         controller = make_controller(
             BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
         )
@@ -5557,6 +5736,9 @@ class TestAppControllerTrayMenu:
             lambda url: opened.append(bytes(url.toEncoded()).decode()),
         )
         monkeypatch.setattr(app.report, "environment", lambda: "ENVIRONMENT")
+        # A controller built with no tray has already noted that in
+        # snipux.log, so there is a log to be asked about.
+        monkeypatch.setattr(app.report, "ask_to_include_log", lambda: False)
         controller = make_controller(
             BackendRegistry(), FakeTransport(make_transport_state()), monitor_geometries=[]
         )
@@ -5871,6 +6053,52 @@ class TestAppControllerRecentCaptures:
 
         assert self._recent_texts(controller) == [second.name, first.name]
         assert controller._recent_menu.menuAction() in controller._tray_menu.actions()
+
+    def test_starting_up_lists_recent_saves_without_decoding_them(
+        self, make_controller, tmp_path, monkeypatch
+    ):
+        # Every recent save was decoded full-size before the tray icon was
+        # even shown.
+        saved = tmp_path / "Screenshot from 2026-09-16 10-00-00.png"
+        make_image().save(str(saved), "PNG")
+        setup_desktop.save_recent_captures([saved])
+        decoded = []
+        monkeypatch.setattr(
+            app.history, "saved_thumbnail", lambda path: decoded.append(path)
+        )
+
+        controller = self._make(make_controller)
+
+        assert self._recent_texts(controller) == [saved.name]
+        assert decoded == []
+
+    def test_opening_the_menu_gives_the_rows_their_pictures(
+        self, make_controller, tmp_path
+    ):
+        saved = tmp_path / "Screenshot from 2026-09-16 10-00-00.png"
+        make_image().save(str(saved), "PNG")
+        setup_desktop.save_recent_captures([saved])
+        controller = self._make(make_controller)
+
+        controller._tray_menu.aboutToShow.emit()
+
+        assert not controller._recent_menu.actions()[0].icon().isNull()
+
+    def test_a_snip_just_saved_is_not_decoded_again_for_its_row(
+        self, make_controller, tmp_path, monkeypatch
+    ):
+        controller = self._make(make_controller)
+        saved = tmp_path / "Screenshot from 2026-09-16 10-00-00.png"
+        image = make_image()
+        image.save(str(saved), "PNG")
+
+        def never(*_args):
+            raise AssertionError("the saved file was read back")
+
+        monkeypatch.setattr(app.history, "QImageReader", never)
+        controller._on_captured(image, saved)
+
+        assert not controller._recent_menu.actions()[0].icon().isNull()
 
     def test_a_clipboard_only_still_adds_nothing(self, make_controller):
         controller = self._make(make_controller)
@@ -7012,6 +7240,138 @@ class TestACaptureIsConfirmed:
         assert said == []
 
 
+class TestASaveLandsAfterItsOverlayHasGone:
+    """Save and Open close the overlay first and write the file after, so
+    the controller hears about the capture with no overlay left to ask --
+    and must not hear about a file before it exists."""
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    @pytest.fixture
+    def writing(self, monkeypatch, tmp_path):
+        """The background write, held until the test lets it go."""
+        folder = tmp_path / "snips"
+        monkeypatch.setattr(overlay_module.setup_desktop, "load_save_folder", lambda *a, **k: folder)
+        state = SimpleNamespace(folder=folder, go=threading.Event(), error=None)
+        really_write = overlay_module.output.write_image
+
+        def write_image(image, path):
+            assert state.go.wait(10), "the test never let the write finish"
+            if state.error is not None:
+                raise state.error
+            really_write(image, path)
+
+        monkeypatch.setattr(overlay_module.output, "write_image", write_image)
+        yield state
+        state.go.set()
+        self._landed()
+
+    def _landed(self):
+        deadline = time.monotonic() + 10
+        while overlay_module.output.saves_in_flight():
+            assert time.monotonic() < deadline, "the save never reported back"
+            QTest.qWait(1)
+
+    def _snip(self, controller, monkeypatch, after):
+        monkeypatch.setattr(
+            overlay_module.setup_desktop, "load_after_capture", lambda cd=None: after
+        )
+        controller.start_capture()
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        overlay = controller._overlay
+        overlay.set_selection(QRect(10, 10, 100, 80))
+        return overlay, said
+
+    def test_nothing_is_said_or_listed_until_the_file_exists(
+        self, make_controller, monkeypatch, writing
+    ):
+        controller = self._controller(make_controller)
+        overlay, said = self._snip(controller, monkeypatch, "edit")
+
+        overlay._bar.saveRequested.emit()
+
+        assert controller._overlay is None
+        assert said == []
+        assert setup_desktop.load_recent_captures() == []
+        writing.go.set()
+        self._landed()
+        [path] = writing.folder.iterdir()
+        assert said == [f"Saved to {path.parent.name}/{path.name}"]
+        assert setup_desktop.load_recent_captures() == [path]
+
+    def test_a_save_opens_no_review_window_though_settings_ask_for_one(
+        self, make_controller, monkeypatch, writing
+    ):
+        # With the overlay gone the controller used to fall back to the
+        # stored preference -- which is not what this snip chose.
+        monkeypatch.setattr(setup_desktop, "load_review_window", lambda cd=None: True)
+        controller = self._controller(make_controller)
+        overlay, said = self._snip(controller, monkeypatch, "edit")
+
+        overlay._bar.saveRequested.emit()
+        writing.go.set()
+        self._landed()
+
+        assert controller._reviews == []
+        assert len(said) == 1 and said[0].startswith("Saved to ")
+
+    def test_open_shows_the_review_window_with_the_written_file(
+        self, make_controller, monkeypatch, writing
+    ):
+        monkeypatch.setattr(setup_desktop, "load_review_window", lambda cd=None: False)
+        controller = self._controller(make_controller)
+        overlay, _said = self._snip(controller, monkeypatch, "edit")
+
+        overlay._bar.openRequested.emit()
+        assert controller._reviews == []
+        writing.go.set()
+        self._landed()
+
+        [review] = controller._reviews
+        [path] = writing.folder.iterdir()
+        assert path.is_file()
+        review.close()
+
+    def test_a_newer_snip_does_not_decide_what_an_older_save_does(
+        self, make_controller, monkeypatch, writing
+    ):
+        controller = self._controller(make_controller)
+        overlay, _said = self._snip(controller, monkeypatch, "edit")
+        overlay._bar.saveRequested.emit()
+        # The next snip is already open, and headed for the review window,
+        # when the first one's file lands.
+        newer, _ = self._snip(controller, monkeypatch, "review")
+
+        writing.go.set()
+        self._landed()
+
+        assert controller._reviews == []
+        newer.close()
+
+    def test_a_write_that_fails_says_so_and_keeps_the_snip(
+        self, make_controller, monkeypatch, writing
+    ):
+        writing.error = PermissionError("access denied")
+        controller = self._controller(make_controller)
+        overlay, said = self._snip(controller, monkeypatch, "edit")
+        QGuiApplication.clipboard().clear()
+
+        overlay._bar.saveRequested.emit()
+        writing.go.set()
+        self._landed()
+
+        assert len(said) == 1
+        assert "Could not save" in said[0] and "access denied" in said[0]
+        assert QGuiApplication.clipboard().image().size() == QSize(100, 80)
+        assert setup_desktop.load_recent_captures() == []
+
+
 class TestReviewWindowIntegration:
     """The review window is off unless Settings turns it on, and opens only
     for a real capture -- never for a cancelled snip.
@@ -7102,6 +7462,58 @@ class TestReviewWindowIntegration:
         controller._reviews[0].close()
 
         assert controller._reviews == []
+
+
+class TestClosedWindowsAreReleased:
+    """A closed pin, review window or player goes at once, with the
+    full-size picture it holds. Each used to be kept alive by its own
+    `closed` connection -- a lambda holding the window, held by the window
+    -- until Python's cycle collector happened to run, if it could see the
+    cycle at all. Nothing here calls `gc.collect()`.
+    """
+
+    @staticmethod
+    def _controller(make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+        )
+
+    @staticmethod
+    def _close_and_let_the_loop_turn(windows):
+        """Closes the one window in `windows` and returns a weak reference
+        to it, with no strong one left behind in the test."""
+        gone = weakref.ref(windows[0])
+        windows[0].close()
+        QCoreApplication.processEvents()
+        return gone
+
+    def test_a_closed_pin_is_gone(self, make_controller):
+        controller = self._controller(make_controller)
+        controller._on_pin_requested(make_image(), QRect(10, 10, 100, 80))
+
+        gone = self._close_and_let_the_loop_turn(controller._pins)
+
+        assert controller._pins == []
+        assert gone() is None
+
+    def test_a_closed_review_window_is_gone(self, make_controller):
+        controller = self._controller(make_controller)
+        controller.open_editor("image")
+
+        gone = self._close_and_let_the_loop_turn(controller._reviews)
+
+        assert controller._reviews == []
+        assert gone() is None
+
+    def test_a_closed_player_is_gone(self, make_controller):
+        controller = self._controller(make_controller)
+        controller.open_editor("video")
+
+        gone = self._close_and_let_the_loop_turn(controller._players)
+
+        assert controller._players == []
+        assert gone() is None
 
 
 class TestOpenImagePath:
@@ -7808,6 +8220,8 @@ class TestTheHotkeyCannotBeLeftDead:
         monkeypatch.setattr(controller, "_report_shortcut", said.append)
 
         class Backend:
+            stops_off_thread = False
+
             def stop(self):
                 pass
 
@@ -8408,6 +8822,22 @@ class TestTheInterfaceStaysAliveWhileTheRecorderStarts:
 
         assert threads and threads[0] is not threading.main_thread()
 
+    def test_the_recorder_is_handed_the_frame_rate_and_cursor_from_settings(
+        self, make_controller, monkeypatch
+    ):
+        # Read by the controller at each start, so a change in Settings
+        # takes effect on the next recording, and handed to the recorder
+        # rather than left for it to look up.
+        monkeypatch.setattr(app.setup_desktop, "load_recording_frame_rate", lambda: 15)
+        monkeypatch.setattr(app.setup_desktop, "load_recording_draw_cursor", lambda: False)
+        backend = FakeRecordingBackend()
+        controller = self._controller(make_controller, backend)
+
+        _record(controller, QRectF(50, 50, 200, 150))
+
+        assert backend.options.frame_rate == 15
+        assert backend.options.draw_cursor is False
+
     def test_a_failed_start_still_raises_through_the_nested_loop(
         self, make_controller
     ):
@@ -8421,6 +8851,281 @@ class TestTheInterfaceStaysAliveWhileTheRecorderStarts:
 
         assert controller._active_recording is None
         assert controller._starting_recording is False
+
+
+class _HeldStopBackend(FakeRecordingBackend):
+    """A recorder whose `stop()` does not return until the test lets it,
+    which is what makes "while the stop is in flight" a moment a test can
+    stand in rather than a sleep it hopes to land inside.
+    """
+
+    stops_off_thread = True
+
+    # Only reached when the code under test is wrong (the stop ran on the
+    # UI thread, so nothing could release it). Bounded so that fails
+    # rather than hangs.
+    _GIVE_UP_AFTER_S = 5
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.stop_threads = []
+        self.finished = False
+
+    def stop(self):
+        self.stop_threads.append(threading.current_thread())
+        self.entered.set()
+        if not self.release.wait(self._GIVE_UP_AFTER_S):
+            raise RuntimeError("the test never released the stop")
+        try:
+            super().stop()
+        finally:
+            self.finished = True
+
+
+class TestTheInterfaceStaysAliveWhileTheRecorderStops:
+    """GNOME's `stop()` joins a paused recording's pieces and muxes its
+    sound with ffmpeg before it returns, and gpu-screen-recorder's waits
+    for the recorder to close its file. Called on the UI thread, the bar
+    read "Saving…" over an app that answered nothing until it was done.
+
+    The stop is no quicker now. These cover the interface staying alive
+    while it runs, and everything that became reachable as a result --
+    a second Stop, the shortcut, Discard, Pause, Quit -- leaving the file
+    being saved alone.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _a_tray(self, monkeypatch):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+
+    @pytest.fixture(autouse=True)
+    def _a_recording_temp_folder_of_its_own(self, monkeypatch, tmp_path):
+        # These tests look at the temp file while a stop is in flight. The
+        # real folder is shared with every other snipux on the machine,
+        # and each one empties it when it starts -- another test run
+        # included.
+        folder = tmp_path / "recording-temp"
+        folder.mkdir()
+        monkeypatch.setattr(app, "_recording_temp_dir", lambda: folder)
+
+    def _recording(self, make_controller, monkeypatch, backend, after="save"):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=RecorderRegistry([backend]),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+        )
+        _record(controller, QRectF(50, 50, 200, 150), "No delay", after)
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        return controller, said
+
+    @staticmethod
+    def _stop_and_meanwhile(controller, backend, act):
+        """Press Stop, run `act` on the UI thread once the backend's stop
+        is genuinely in flight on its worker, then let the stop finish."""
+        def meanwhile():
+            assert backend.entered.wait(backend._GIVE_UP_AFTER_S)
+            try:
+                act()
+            finally:
+                backend.release.set()
+
+        QTimer.singleShot(0, meanwhile)
+        controller._stop_recording()
+
+    def test_an_opted_in_backend_stops_off_the_ui_thread(
+        self, make_controller, monkeypatch
+    ):
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, lambda: None)
+
+        assert backend.stop_threads
+        assert backend.stop_threads[0] is not threading.main_thread()
+
+    def test_a_backend_that_has_not_opted_in_stops_on_the_ui_thread(
+        self, make_controller, monkeypatch
+    ):
+        # The Windows recorder is QObjects that belong to the UI thread,
+        # and its stop was measured at 22-49ms: nothing to fix, and a
+        # worker thread would break it.
+        threads = []
+        backend = FakeRecordingBackend()
+        assert backend.stops_off_thread is False, "the default must be off"
+        original = backend.stop
+        def stop():
+            threads.append(threading.current_thread())
+            return original()
+        backend.stop = stop
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+
+        controller._stop_recording()
+
+        assert threads == [threading.main_thread()]
+
+    def test_the_event_loop_keeps_running_during_the_stop(
+        self, make_controller, monkeypatch
+    ):
+        # A frozen loop fires no timers, so a stop only a timer can release
+        # never would be.
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+        ticks = []
+        heartbeat = QTimer()
+        heartbeat.setInterval(10)
+        def tick():
+            ticks.append(1)
+            backend.release.set()
+        heartbeat.timeout.connect(tick)
+        heartbeat.start()
+
+        controller._stop_recording()
+        heartbeat.stop()
+
+        assert ticks, "the UI thread was blocked for the whole stop"
+        assert backend.stop_calls == [True]
+
+    def test_the_bar_reads_saving_and_the_file_stays_put_until_the_stop_returns(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+        _rect, temp_path = backend.start_calls[0]
+        seen = {}
+        def look():
+            seen["temp file still there"] = Path(temp_path).exists()
+            seen["landed"] = list(tmp_path.glob("*.mp4"))
+            seen["still the active recording"] = controller._active_recording is not None
+            seen["bar"] = controller._recording_hud.state()
+
+        self._stop_and_meanwhile(controller, backend, look)
+
+        assert seen == {
+            "temp file still there": True,
+            "landed": [],
+            "still the active recording": True,
+            "bar": RecordingBar.SAVING,
+        }
+        assert len(list(tmp_path.glob("*.mp4"))) == 1
+        assert not Path(temp_path).exists()
+        assert controller._active_recording is None
+        assert controller._stopping_recording is False
+
+    def test_a_second_stop_during_the_stop_does_not_stop_it_twice(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        backend = _HeldStopBackend()
+        controller, said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, controller._stop_recording)
+
+        assert backend.stop_calls == [True]
+        assert len(list(tmp_path.glob("*.mp4"))) == 1
+        assert len([line for line in said if "saved to" in line]) == 1
+
+    def test_the_shortcut_during_the_stop_neither_stops_again_nor_opens_a_snip(
+        self, make_controller, monkeypatch
+    ):
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, controller.start_capture)
+
+        assert controller._overlay is None
+        assert backend.stop_calls == [True]
+
+    def test_discard_during_the_stop_leaves_the_recording_to_be_saved(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # The user pressed Stop first, and the recording is already being
+        # written out. The bar that follows offers Discard for the file.
+        backend = _HeldStopBackend()
+        controller, said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, controller._on_discard_clicked)
+
+        assert len(list(tmp_path.glob("*.mp4"))) == 1
+        assert "Recording discarded." not in said
+        assert backend.stop_calls == [True]
+
+    def test_pause_during_the_stop_does_not_reach_the_backend(
+        self, make_controller, monkeypatch
+    ):
+        # The worker thread owns the backend until it reports back.
+        backend = _HeldStopBackend(can_pause=True)
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, controller._on_pause_clicked)
+
+        assert backend.pause_calls == []
+
+    def test_a_stop_that_fails_off_the_ui_thread_is_reported_and_lands_nothing(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        backend = _HeldStopBackend(
+            stop_error=RuntimeError("did not stop cleanly; the video may be incomplete")
+        )
+        controller, said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, lambda: None)
+
+        assert said == [
+            "Stopping the recording failed: "
+            "did not stop cleanly; the video may be incomplete"
+        ]
+        assert list(tmp_path.glob("*.mp4")) == []
+        assert controller._active_recording is None
+        assert controller._stopping_recording is False
+
+    def test_pieces_that_could_not_be_joined_off_thread_are_still_kept(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        piece = tmp_path / "staging" / "take.webm"
+        piece.parent.mkdir()
+        piece.write_bytes(b"a piece")
+        backend = _HeldStopBackend(
+            stop_error=RecordingPartsError("could not join", [str(piece)])
+        )
+        controller, said = self._recording(make_controller, monkeypatch, backend)
+
+        self._stop_and_meanwhile(controller, backend, lambda: None)
+
+        assert len(list(tmp_path.glob("*(part 1).webm"))) == 1
+        assert len(said) == 1 and "saved separately" in said[0]
+
+    def test_quitting_during_the_stop_waits_for_the_file_before_landing_it(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # `QApplication.quit()` comes down to `exit()`, which ends every
+        # running event loop -- the one waiting on the worker included. So
+        # that loop returning is not the stop returning.
+        backend = _HeldStopBackend()
+        controller, _said = self._recording(make_controller, monkeypatch, backend)
+        finished_when_waited_on = []
+        wait = app._RecorderStopper.wait_until_finished
+        def release_then_wait(stopper):
+            finished_when_waited_on.append(backend.finished)
+            backend.release.set()
+            wait(stopper)
+        monkeypatch.setattr(
+            app._RecorderStopper, "wait_until_finished", release_then_wait
+        )
+        def quit_mid_stop():
+            assert backend.entered.wait(backend._GIVE_UP_AFTER_S)
+            QCoreApplication.exit(0)
+
+        QTimer.singleShot(0, quit_mid_stop)
+        controller._stop_recording()
+
+        assert finished_when_waited_on == [False]
+        assert backend.finished
+        assert len(list(tmp_path.glob("*.mp4"))) == 1
 
 
 class TestTheUpdateCommand:
@@ -8810,16 +9515,49 @@ class TestTheDailyCheck:
                 pass
 
         monkeypatch.setattr(app.updates, "UpdateCheck", FakeCheck)
+        # The daily check also tidies up after earlier updates, and a test
+        # must not do that to this machine's real temp directory.
+        self.tidied = []
+        monkeypatch.setattr(
+            app.updates, "remove_old_downloads",
+            lambda temp_dir=None: self.tidied.append(temp_dir), raising=False,
+        )
         return started
 
     def test_it_runs_on_the_first_launch_of_a_new_day(self, make_controller, monkeypatch):
         controller, _said = self._controller(make_controller, monkeypatch)
-        written = self._checked_on(monkeypatch, "2020-01-01")
+        self._checked_on(monkeypatch, "2020-01-01")
         started = self._never_reaches_the_network(monkeypatch)
 
         assert controller.check_for_updates_daily() is True
         assert started, "the check never ran"
+
+    def test_the_day_is_only_used_up_by_a_check_that_got_an_answer(
+        self, make_controller, monkeypatch
+    ):
+        # Stamped before asking, a launch with no network skipped the
+        # whole day's check without ever making it.
+        controller, _said = self._controller(make_controller, monkeypatch)
+        written = self._checked_on(monkeypatch, "2020-01-01")
+        self._never_reaches_the_network(monkeypatch)
+
+        controller.check_for_updates_daily()
+        assert written == []
+
+        controller._on_update_checked(None, quiet=True)
+        assert written == []
+
+        controller._on_update_checked(updates.Release(version=app.__version__), quiet=True)
         assert written == [datetime.date.today().isoformat()]
+
+    def test_it_clears_out_what_earlier_updates_downloaded(self, make_controller, monkeypatch):
+        controller, _said = self._controller(make_controller, monkeypatch)
+        self._checked_on(monkeypatch, "2020-01-01")
+        self._never_reaches_the_network(monkeypatch)
+
+        controller.check_for_updates_daily()
+
+        assert self.tidied == [None]
 
     def test_a_second_launch_the_same_day_does_not(self, make_controller, monkeypatch):
         controller, _said = self._controller(make_controller, monkeypatch)
@@ -8916,6 +9654,107 @@ class TestOneClickUpdate:
 
         assert asked == [1]
 
+    SHA256 = "ab" * 32
+
+    def _downloads(self, monkeypatch):
+        """Stands in for the download thread, and records what it was
+        asked to fetch and where to."""
+        asked = []
+
+        class FakeDownload:
+            class finished:
+                @staticmethod
+                def connect(_slot):
+                    pass
+
+            result = None
+
+            def __init__(self, url, destination, opener=None, *, sha256=None):
+                asked.append((url, destination, sha256))
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(app.updates, "Download", FakeDownload)
+        return asked
+
+    def test_the_download_is_checked_against_the_published_sha256(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="snipux-setup-99.0.0.exe", url="https://example/setup.exe",
+        )
+        release.digests["snipux-setup-99.0.0.exe"] = f"sha256:{self.SHA256}"
+        controller._available_update = release
+        asked = self._downloads(monkeypatch)
+
+        controller.install_available_update(temp_dir=tmp_path)
+
+        assert [(url, sha256) for url, _destination, sha256 in asked] == [
+            ("https://example/setup.exe", self.SHA256)
+        ]
+
+    def test_it_downloads_into_a_fresh_folder_not_a_guessable_path(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, _said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="snipux-setup-99.0.0.exe", url="https://example/setup.exe",
+        )
+        release.digests["snipux-setup-99.0.0.exe"] = f"sha256:{self.SHA256}"
+        controller._available_update = release
+        asked = self._downloads(monkeypatch)
+        left_behind = tmp_path / "snipux-setup-98.0.0.exe"
+        left_behind.write_bytes(b"the last update's installer")
+
+        controller.install_available_update(temp_dir=tmp_path)
+
+        destination = asked[0][1]
+        assert destination.name == "snipux-setup-99.0.0.exe"
+        assert destination.parent != tmp_path
+        assert destination.parent.parent == tmp_path
+        assert not left_behind.exists()
+
+    def test_a_release_with_no_digest_is_not_downloaded(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # It would be run silently, and there is nothing to check it against.
+        controller, said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="snipux-setup-99.0.0.exe", url="https://example/setup.exe",
+        )
+        controller._available_update = release
+        asked = self._downloads(monkeypatch)
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+
+        controller.install_available_update(temp_dir=temp_dir)
+
+        assert asked == []
+        assert "cannot be verified" in said[-1] and "Releases page" in said[-1]
+        assert list(temp_dir.iterdir()) == []
+
+    def test_a_download_that_is_not_the_published_file_is_not_run(
+        self, make_controller, monkeypatch
+    ):
+        controller, said, _release = self._controller(make_controller, monkeypatch)
+        ran = []
+        monkeypatch.setattr(
+            app.platform.current, "install_update", lambda path: ran.append(path) or True
+        )
+        quit_calls = []
+        monkeypatch.setattr(controller, "_quit", lambda: quit_calls.append(1))
+
+        class Mismatched:
+            result = updates.DownloadResult.MISMATCHED
+
+        controller._update_download = Mismatched()
+        controller._on_update_downloaded(None)
+
+        assert ran == [] and quit_calls == []
+        assert "not the file Snipux published" in said[-1]
+
     def test_downloading_hands_the_file_to_the_platform(
         self, make_controller, monkeypatch, tmp_path
     ):
@@ -8971,3 +9810,67 @@ class TestOneClickUpdate:
 
         assert "Could not start the update" in said[-1]
         assert quit_calls == [], "nothing was replaced, so nothing should close"
+
+
+class TestARefusedRecordingAnswersNo:
+    """`_on_recording_requested` says whether it armed the recording. The
+    overlay marks itself armed before it asks, so a refusal it never heard
+    about left it showing a selection with no bar and no chooser."""
+
+    RECT = QRectF(10, 20, 300, 200)
+
+    def _controller(self, make_controller, monkeypatch, recorder_registry=None):
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            recorder_registry=recorder_registry,
+        )
+        said = []
+        monkeypatch.setattr(controller, "_report_shortcut", said.append)
+        return controller, said
+
+    def _without_a_recorder(self, make_controller, monkeypatch):
+        def no_recorder():
+            raise app.platform.UnimplementedPlatformError("this platform", "recording")
+
+        monkeypatch.setattr(app.platform.current, "build_recording_registry", no_recorder)
+        return self._controller(make_controller, monkeypatch)
+
+    def test_an_armed_recording_answers_yes(self, make_controller, monkeypatch):
+        controller, _said = self._controller(
+            make_controller, monkeypatch, RecorderRegistry([FakeRecordingBackend()])
+        )
+
+        assert controller._on_recording_requested(self.RECT, "No delay") is True
+
+    def test_no_recorder_answers_no_and_says_why(self, make_controller, monkeypatch):
+        controller, said = self._without_a_recorder(make_controller, monkeypatch)
+
+        assert controller._on_recording_requested(self.RECT, "No delay") is False
+        assert len(said) == 1
+
+    def test_a_second_request_while_one_is_armed_answers_no(self, make_controller, monkeypatch):
+        controller, said = self._controller(
+            make_controller, monkeypatch, RecorderRegistry([FakeRecordingBackend()])
+        )
+        controller._on_recording_requested(self.RECT, "No delay")
+        armed = controller._armed_recording
+
+        assert controller._on_recording_requested(self.RECT, "No delay") is False
+        assert controller._armed_recording == armed
+        assert len(said) == 1
+
+    def test_the_overlay_it_refuses_is_left_unarmed(self, make_controller, monkeypatch):
+        controller, _said = self._without_a_recorder(make_controller, monkeypatch)
+        overlay = OverlayWindow(
+            make_capture_frame(), on_recording_requested=controller._on_recording_requested
+        )
+        overlay._chooser.set_kind("record")
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+
+        overlay._commit_selection(QRect(10, 20, 60, 40))
+
+        assert overlay._armed_for_recording is False
+        assert overlay._chooser.tab.isVisible()
+        overlay.close()

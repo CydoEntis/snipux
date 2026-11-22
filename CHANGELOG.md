@@ -5,6 +5,149 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.4.0 — 2026-11-22
+
+### Changed
+
+- **The portable `snipux.exe` starts as fast as the installed one.** It
+  used to unpack itself into a temporary folder every time it started --
+  at every login, about a second. It now does that once: the first run
+  installs it in `%LOCALAPPDATA%\snipux` (about 90 MB) and starts Snipux
+  from there, and after that it opens in a fraction of a second. It is
+  still one file with no installer. Running a newer `snipux.exe` replaces
+  the old version; quit Snipux from the tray first.
+- **A snip opens sooner on Windows.** Every monitor is now photographed at
+  the same moment instead of one after the other, which roughly halves the
+  wait between the shortcut and the frozen screen on a desk of several
+  monitors.
+- **Dragging a selection is smoother.** Only the part of the screen that
+  changed is redrawn while you drag, resize or nudge a selection, and the
+  moving dashes no longer redraw every monitor 30 times a second. With
+  nothing selected the overlay now sits completely still.
+- **Annotating stays quick however much you draw.** Pen strokes, arrows
+  and the rest are drawn once and kept, rather than redrawn from scratch
+  many times a second, so a snip with a lot of ink on it no longer makes
+  the overlay drag.
+- **The first snip after starting Snipux is as quick as the rest.** It
+  used to take about twice as long to open as every snip after it.
+- **Saving a snip hands the screen back at once.** The frozen screen used
+  to stay up while the picture was written to disk -- a third of a second
+  for a large desktop. It now goes the moment you save, and the file is
+  written behind it; the "Saved to" notice, the Recent list and the review
+  window follow as soon as the file is really there. A save that fails
+  still puts the snip on the clipboard and says why, and a save cut off
+  part-way no longer leaves a broken picture behind.
+
+### Fixed
+
+- **Running the portable `snipux.exe` no longer damages an installed
+  Snipux.** On a PC that had Snipux from the installer, running the
+  portable file as well wrote it over the installed program. It now runs
+  from where it is and leaves the installed one alone, and
+  `snipux --remove` leaves it for the uninstaller.
+- **Hide sensitive no longer freezes the screen while it reads.** The
+  overlay used to lock up, with nothing to say why, for as long as the
+  text in a selection took to read -- several seconds when that went
+  badly. It now says "Checking for sensitive text…" and stays usable:
+  Esc cancels the snip, and a Copy, Save, Open or Pin pressed meanwhile
+  waits for the boxes rather than sending the picture off without them.
+- **Ctrl+C no longer takes a screenshot while you are setting up a
+  recording.** With the chooser on Record and a region the recorder had
+  turned down, Ctrl+C copied a still of it and closed the snip. It now
+  does nothing there, the same as Enter never takes one.
+- **Window mode no longer shows the toolbar until you click a window.**
+  The whole annotation toolbar came up under every window the pointer
+  passed over, and the pen was armed before anything had been picked.
+- **Right-click or Esc cancels a region you are still dragging.** A
+  right-click used to take the box as it stood -- with Instant, it
+  captured it and closed -- and after Esc the box came back on the next
+  mouse move.
+- **A blackout or blur drawn over earlier ink covers it on screen too.**
+  The copy always had the ink covered; the overlay showed the pen stroke
+  on top of the blackout, so what you saw was not what you got.
+- **The size and "Frozen" labels stay on the monitor you are snipping.**
+  On a selection that reached the top of its monitor -- Full screen
+  always does -- they were drawn on the monitor above, or off the desk
+  where nothing showed them; they now move just inside the selection.
+  On a narrow selection they sit side by side instead of on top of each
+  other.
+- **Keys work again when a delayed capture comes back.** On Windows the
+  overlay returned after the countdown without the keyboard, so Esc,
+  Enter and the tool letters went to the window behind it until you
+  clicked.
+- **A recording Snipux cannot start no longer strands the overlay.**
+  With no recorder available, or a recording already under way, the
+  overlay was left showing the region with no toolbar and no chooser.
+  The chooser now comes back and Esc steps back to it.
+- **Switching to Record over a region you already selected sets up the
+  recording.** The screenshot toolbar used to stay, nothing was ready to
+  record, and Enter took a screenshot instead.
+- **Two fixes where each monitor has its own overlay** (several monitors
+  on Wayland, or monitors set to different scales). A toolbar you had
+  once dragged to the next monitor could be placed off screen, and a
+  last region recalled on the other monitor disappeared as the pointer
+  reached it.
+- **Snipux no longer freezes while a Linux recording is saved.** Stopping
+  a recording that had been paused, or one with sound, left the whole app
+  unresponsive on "Saving…" until the pieces were joined. It still reads
+  "Saving…" for as long, but the tray and every other window keep
+  working.
+- **Marks you can no longer see are not counted.** After drawing a new
+  selection somewhere else, the size label still counted the marks left
+  behind in the old one, and Esc spent a press "discarding" them before
+  it would step back.
+- **A recording that could not be finished says so.** On Windows, if the
+  recorder was still writing when Snipux stopped waiting for it, the file
+  was saved as though it were whole. Snipux now waits longer, and reports
+  that the recording may be incomplete rather than saving it.
+- **Stopping a recording on Windows is a second quicker.** Snipux waited a
+  full second after every recording in case the file was not finished. It
+  now looks at the file instead, and waits only if it is not.
+- **The recording bar says "Saving…" while a recording is finished off.**
+  After Stop it went on showing the clock and the Stop button until the
+  file was ready, which can take seconds for a recording that was paused.
+- **Discarding a recording on Windows no longer finishes the file first.**
+  It waited for a complete video and then deleted it. If the file cannot
+  be deleted straight away, Snipux now says so instead of saying nothing.
+- **Exporting a recording with only its sound removed keeps the picture
+  exactly as recorded.** With ffmpeg installed, the whole video was
+  encoded again to drop the audio, which took longer and lost a little
+  quality. An export that is trimmed is still encoded, so the cut lands
+  on the frame you chose.
+- **Hide sensitive now tells you when it could not check a snip.** If text
+  recognition times out, cannot start, or Windows has no recognition
+  language installed, Snipux says nothing was hidden and why -- and an
+  instant snip waits for your yes before it is copied or saved. Before,
+  the snip went out unredacted with no warning. Recognition also gives up
+  after 5 seconds rather than 10.
+- **An update is checked before it is run.** The installer Snipux downloads
+  must match the checksum published with the release, or it is discarded
+  and you are told. It is saved to a private folder, and old installers
+  are no longer left behind in your temp folder.
+- **Starting Snipux offline no longer skips that day's update check.** The
+  check is tried again on the next launch until it gets an answer.
+- **Closing a pin, the review window or the player gives its memory back
+  straight away.** Left running for days, Snipux could keep every closed
+  window's full-size picture.
+- **A copy on Wayland can no longer hang Snipux.** If `wl-copy` does not
+  answer within three seconds Snipux stops waiting; the copy is still on
+  the clipboard.
+- **Problems Snipux worked around are now written down.** Notes such as a
+  shortcut that could not be created used to go to a console the Windows
+  app does not have. They are kept in `snipux.log` beside `crash.log`, and
+  "Report a problem" offers to include them.
+- **Recent copies no longer hold on to hundreds of megabytes.** The list
+  still keeps your last ten copies, but drops the oldest pictures once
+  they add up to more than 128 MB -- a handful of full-desktop snips.
+- **Snipux starts without stopping to read your recent saves,** and saving
+  a snip no longer reads the picture back from the file it just wrote. The
+  tray menu's previews are prepared in the background instead.
+- **Snipux no longer keeps a preview of every snip you ever saved.** Left
+  running for days, it held one for each save until it quit.
+- **A second, different problem is no longer kept quiet.** After one error
+  notice, later errors of the same kind from somewhere else were written
+  to the log without telling you.
+
 ## 1.3.1 — 2026-11-20
 
 ### Fixed

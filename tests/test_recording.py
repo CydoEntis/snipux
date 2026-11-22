@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import jeepney
 from jeepney import HeaderFields
 
 from PyQt6.QtCore import QRect, QRectF, QSize, Qt, QThread
@@ -21,6 +22,7 @@ from snipux.recording import (
     RecorderRegistry,
     RecordingBackend,
     RecordingError,
+    RecordingOptions,
     WindowsRecorderBackend,
     _bytes_per_pixel,
     _clamp_rect_to_frame,
@@ -39,20 +41,6 @@ def qapp():
     if app is None:
         app = QApplication([])
     return app
-
-
-@pytest.fixture(autouse=True)
-def _pinned_recording_settings(monkeypatch):
-    """`GnomeScreencastBackend._screencast_options()` (SNX-124 ticket 9)
-    reads `setup_desktop.load_recording_draw_cursor`/`load_recording_frame_rate`
-    fresh on every call -- with no override, that hits whatever config
-    directory this box's real user happens to have, which is exactly the
-    kind of environment-dependent read a test suite must not depend on.
-    Pinned here to the documented defaults; individual tests override
-    either one to check the value actually reaches the D-Bus call.
-    """
-    monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
-    monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
 
 
 class FakeBackend(RecordingBackend):
@@ -118,6 +106,88 @@ class TestRecordingBackendPauseCapability:
             backend.pause()
         with pytest.raises(NotImplementedError):
             backend.resume()
+
+
+class TestWhichRecordersStopOffTheUiThread:
+    """`stops_off_thread` is the stop twin of `starts_off_thread`: off
+    unless a backend says its stop can be slow and belongs to no thread.
+    """
+
+    def test_defaults_to_false(self):
+        assert FakeBackend("a", True).stops_off_thread is False
+
+    def test_gnome_does_because_its_stop_can_run_ffmpeg(self):
+        assert recording.GnomeScreencastBackend.stops_off_thread is True
+
+    def test_gpu_screen_recorder_does_because_its_stop_waits_on_the_recorder(self):
+        assert recording.GpuScreenRecorderBackend.stops_off_thread is True
+
+    def test_windows_does_not_because_its_recorder_belongs_to_the_ui_thread(self):
+        assert recording.WindowsRecorderBackend.stops_off_thread is False
+
+
+class TestJeepneyIsLoadedOnlyWhenDBusIsUsed:
+    """jeepney speaks a bus only Linux has, and this module is imported on
+    every platform. Windows paid 5-6ms for the import at every start.
+    """
+
+    def test_importing_the_module_does_not_import_jeepney(self, tmp_path):
+        import os
+        import subprocess
+
+        loaded = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sys, snipux.recording; "
+                "print(sorted(m for m in sys.modules if m.startswith('jeepney')))",
+            ],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "XDG_CONFIG_HOME": str(tmp_path)},
+        ).stdout.strip()
+
+        assert loaded == "[]"
+
+    def test_opening_a_connection_goes_to_jeepney_for_the_bus_asked_for(
+        self, monkeypatch
+    ):
+        # The name the other tests here replace has to be the one that
+        # reaches jeepney, or replacing it proves nothing.
+        import jeepney.io.blocking
+
+        asked = []
+        def open_connection(bus):
+            asked.append(bus)
+            return "the connection"
+        monkeypatch.setattr(jeepney.io.blocking, "open_dbus_connection", open_connection)
+
+        assert recording.open_dbus_connection(bus="SESSION") == "the connection"
+        assert asked == ["SESSION"]
+
+
+class TestRecordingOptionsAreHandedInNotReadFromConfig:
+    """A recorder is told the frame rate and whether to draw the cursor.
+    It used to import the config module and read them itself, which put a
+    backend above the thing that owns `config.json`.
+    """
+
+    def test_the_registry_hands_the_options_to_the_backend_it_starts(self):
+        backend = FakeBackend("a", True)
+        options = RecordingOptions(frame_rate=15, draw_cursor=False)
+
+        RecorderRegistry([backend]).start(QRectF(0, 0, 10, 10), "out.mp4", options=options)
+
+        assert backend.options == options
+
+    def test_a_backend_started_without_any_keeps_the_settings_defaults(self):
+        from snipux.design import tokens
+
+        options = FakeBackend("a", True).options
+
+        assert options.frame_rate == tokens.RECORDING_FRAME_RATE_DEFAULT
+        assert options.draw_cursor is True
+
+    def test_the_module_does_not_import_the_config_module(self):
+        assert not hasattr(recording, "setup_desktop")
 
 
 class TestRecorderRegistryAvailable:
@@ -320,7 +390,7 @@ def _error_reply(message):
     has, which is exactly why one used to get unpacked as the other.
     """
     reply = Mock(body=(message,))
-    reply.header.message_type = recording.MessageType.error
+    reply.header.message_type = jeepney.MessageType.error
     return reply
 
 
@@ -484,10 +554,8 @@ class TestGnomeScreencastBackendStart:
     def test_calls_screencast_area_with_rounded_geometry_and_configured_options(
         self, monkeypatch
     ):
-        # SNX-124 ticket 9: draw-cursor/framerate now come from Settings
-        # (setup_desktop), not the `{}` placeholder ticket 1 left behind.
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
+        # draw-cursor/framerate are the backend's `options`, not the `{}`
+        # placeholder the first version sent.
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
@@ -512,14 +580,12 @@ class TestGnomeScreencastBackendStart:
     def test_screencast_area_options_reflect_disabled_cursor_and_a_different_rate(
         self, monkeypatch
     ):
-        monkeypatch.setattr(
-            recording.setup_desktop, "load_recording_draw_cursor", lambda: False
-        )
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 15)
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
+        backend = GnomeScreencastBackend()
+        backend.set_options(RecordingOptions(frame_rate=15, draw_cursor=False))
 
-        GnomeScreencastBackend().start(self.RECT, self.PATH)
+        backend.start(self.RECT, self.PATH)
 
         message = connection.send_and_get_reply.call_args[0][0]
         options = message.body[-1]
@@ -595,8 +661,6 @@ class TestGnomeScreencastBackendStartWholeScreen:
     def test_calls_screencast_with_no_geometry_and_configured_options(self, monkeypatch):
         # SNX-124 ticket 9: same options as ScreencastArea -- see that
         # class's own test for why this is no longer a bare `{}`.
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
         connection = _fake_connection(reply=Mock(body=(True, self.PATH)))
         monkeypatch.setattr(recording, "open_dbus_connection", lambda bus: connection)
 
@@ -791,10 +855,9 @@ class TestGpuScreenRecorderBackend:
 
     def test_region_uses_snipux_geometry_and_recording_options(self, tmp_path, monkeypatch):
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
-        monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: False)
         commands = []
         backend = self._backend(commands)
+        backend.set_options(RecordingOptions(frame_rate=30, draw_cursor=False))
         backend.set_audio_source(recording.AUDIO_SYSTEM)
         path = str(tmp_path / "recording.mp4")
 
@@ -1371,11 +1434,9 @@ class TestCropFrame:
         # that had already returned successfully. Region recording on
         # Windows produced nothing at all, 3 runs out of 3.
         #
-        # setVideoFrameRate() on the recorder does not cover this: it is
-        # only called once _RegionCropWorker has 15 arrivals to average,
-        # long after the encoder has had to commit -- which is why the
-        # failure was intermittent rather than total, and why the fix has
-        # to be on the frame itself.
+        # setVideoFrameRate() on the recorder cannot cover this: nothing
+        # told to a recorder after record() reaches the encoder, so the
+        # fix has to be on the frame itself.
         source_format = QVideoFrameFormat(
             QSize(4, 4), QVideoFrameFormat.PixelFormat.Format_BGRA8888
         )
@@ -1706,11 +1767,9 @@ def _windows_backend(**overrides):
         video_sink_factory=FakeVideoSink,
         video_frame_input_factory=FakeVideoFrameInput,
         thread_factory=FakeThread,
-        # FakeRecorder.stop() settles synchronously, so these tests don't
-        # need (and shouldn't pay for) the real settle delay
-        # _wait_for_stopped() uses against the actual asynchronous muxer
-        # -- see that method's docstring in recording.py.
-        stop_settle_seconds=0,
+        # No fake writes a file, so there is nothing for the real check
+        # to read; the tests about finalising pass their own.
+        finalised_check=lambda path: True,
     )
     factories.update(overrides)
     return WindowsRecorderBackend(**factories)
@@ -1754,9 +1813,7 @@ class TestWindowsRecorderBackendFullScreenStart:
     timestamps by construction; the region path only broke once
     `_crop_frame()` started constructing fresh, unstamped frames instead
     of passing one of Qt's own through. There's no code left on this path
-    for that bug to live in, so it gets no symmetrical
-    `setVideoFrameRate()` call either -- that would pay the path that
-    already works for a fix aimed at the one that didn't.
+    for that bug to live in.
     """
 
     PATH = "C:/tmp/snipux-recording.mp4"
@@ -1927,39 +1984,24 @@ class TestWindowsRecorderBackendRegionStart:
         with pytest.raises(RuntimeError, match="disk full"):
             backend.start(self.RECT, self.PATH)
 
-    def test_does_not_declare_a_frame_rate_before_any_frame_has_arrived(self):
-        # No hardcoded 30fps (or any other nominal value): until the
-        # worker has actually measured something, there's nothing genuine
-        # to declare, so setVideoFrameRate() must not have been called yet.
-        backend = _windows_backend()
-
-        backend.start(self.RECT, self.PATH)
-
-        assert backend._recorder.set_video_frame_rate_calls == []
-
-    def test_declares_the_measured_frame_rate_once_enough_frames_have_arrived(self, qapp):
+    def test_never_sets_a_frame_rate_on_a_recorder_that_is_rolling(self, qapp):
+        # It used to measure the arrival rate over the first 15 frames and
+        # set it on the recorder. Measured against a real recorder, that
+        # changed what the recorder reported and nothing in the file: each
+        # frame is already written at its own capture time.
         backend = _windows_backend()
         backend.start(self.RECT, self.PATH)
 
-        # ~15fps -- distinctly different from any nominal 30fps-class
-        # default, so a test that hardcoded either the old default or an
-        # unrelated guess would fail this.
         interval_us = round(1_000_000 / 15)
-        sample_count = _RegionCropWorker._FRAME_RATE_SAMPLE_FRAMES
-        for i in range(sample_count):
+        for i in range(40):
             frame = _make_frame(4, 4, lambda row, col: i % 251)
             frame.setStartTime(i * interval_us)
             frame.setEndTime((i + 1) * interval_us)
             backend._worker.on_frame(frame)
-
-        # frame_rate_measured is delivered via an explicit QueuedConnection
-        # (see _start_region) -- it lands once the event loop it's queued
-        # on is pumped, same as any other cross-thread Qt signal.
+        # The old call arrived through a queued connection.
         qapp.processEvents()
 
-        assert backend._recorder.set_video_frame_rate_calls == pytest.approx(
-            [15.0], rel=0.01
-        )
+        assert backend._recorder.set_video_frame_rate_calls == []
 
 
 class _FakeScreen:
@@ -2350,6 +2392,190 @@ class TestWindowsRecorderBackendStop:
 
         backend.stop()  # must not raise
 
+    def test_stop_raises_when_the_recorder_never_finishes(self, qapp):
+        # A recorder still writing when the wait runs out used to be
+        # treated as finished, and its file landed as a saved recording.
+        backend = _windows_backend(
+            recorder_factory=_NeverStoppingRecorder, stop_timeout_seconds=0.05
+        )
+        backend.start(QRectF(0, 0, 100, 100), "C:/tmp/out-region.mp4")
+
+        with pytest.raises(RuntimeError, match="may be incomplete"):
+            backend.stop()
+
+        assert backend._recorder is None
+        assert backend._worker_thread is None
+
+
+    def test_stop_returns_once_the_file_is_finalised(self, qapp):
+        # It used to hold for a fixed second after StoppedState, on every
+        # stop, whether or not the file was already whole.
+        asked = []
+
+        def finalised(path):
+            asked.append(path)
+            return True
+
+        backend = _windows_backend(finalised_check=finalised)
+        backend.start(None, "C:/tmp/out.mp4")
+
+        backend.stop()
+
+        assert asked == ["C:/tmp/out.mp4"]
+
+    def test_stop_waits_for_a_file_that_is_finalised_late(self, qapp):
+        answers = [False, False, True]
+        backend = _windows_backend(finalised_check=lambda path: answers.pop(0))
+        backend.start(None, "C:/tmp/out.mp4")
+
+        backend.stop()  # must not raise
+
+        assert answers == []
+
+    def test_stop_raises_when_the_file_is_never_finalised(self, qapp):
+        backend = _windows_backend(
+            finalised_check=lambda path: False, finalise_timeout_seconds=0.05
+        )
+        backend.start(None, "C:/tmp/out.mp4")
+
+        with pytest.raises(RuntimeError, match="will not play"):
+            backend.stop()
+
+    def test_a_failed_recording_is_not_also_waited_on_to_finalise(self, qapp):
+        # The encoder's own failure is the one worth reporting, and a file
+        # it never wrote is not going to grow a moov atom.
+        asked = []
+        backend = _windows_backend(
+            finalised_check=lambda path: asked.append(path) or False,
+            finalise_timeout_seconds=5,
+        )
+        backend.start(None, "C:/tmp/out.mp4")
+        recorder = backend._recorder
+        recorder._error = QMediaRecorder.Error.ResourceError
+        recorder._error_string = "Could not initialize encoder"
+        recorder.errorChanged.emit()
+
+        with pytest.raises(RuntimeError, match="Could not initialize encoder"):
+            backend.stop()
+
+        assert asked == []
+
+
+class TestWindowsRecorderBackendDiscard:
+    """A discarded recording is deleted the moment it stops, so the only
+    thing worth waiting for is the recorder letting go of the file."""
+
+    def test_discard_stops_everything_without_checking_the_file(self, qapp):
+        asked = []
+        backend = _windows_backend(
+            finalised_check=lambda path: asked.append(path) or False,
+            finalise_timeout_seconds=5,
+        )
+        backend.start(QRectF(0, 0, 100, 100), "C:/tmp/out-region.mp4")
+        recorder = backend._recorder
+        screen_capture = backend._screen_capture
+        thread = backend._worker_thread
+
+        backend.discard()
+
+        assert asked == []
+        assert recorder.stop_calls == 1
+        assert screen_capture.active_calls[-1] is False
+        assert thread.quit_calls == 1
+        assert backend._recorder is None
+        assert backend._worker_thread is None
+
+    def test_discard_does_not_report_what_the_encoder_said(self, qapp):
+        # stop() raises for an encoder failure because a broken file must
+        # not be saved. A discard is not saving anything.
+        backend = _windows_backend()
+        backend.start(None, "C:/tmp/out.mp4")
+        recorder = backend._recorder
+        recorder._error = QMediaRecorder.Error.ResourceError
+        recorder._error_string = "Could not initialize encoder"
+        recorder.errorChanged.emit()
+
+        backend.discard()  # must not raise
+
+        backend.start(None, "C:/tmp/out-2.mp4")
+        backend.stop()  # nor leave the failure for the next recording
+
+    def test_discard_raises_when_the_recorder_never_lets_go_of_the_file(self, qapp):
+        # Windows will not delete a file something still has open, so the
+        # caller has to hear that its delete is about to fail.
+        backend = _windows_backend(
+            recorder_factory=_NeverStoppingRecorder, stop_timeout_seconds=0.05
+        )
+        backend.start(None, "C:/tmp/out.mp4")
+
+        with pytest.raises(RuntimeError, match="still has the file open"):
+            backend.discard()
+
+        assert backend._recorder is None
+
+
+def _mp4_box(kind: bytes, payload: bytes = b"", *, wide: bool = False) -> bytes:
+    """One MP4 box; `wide` writes the 64-bit size a box over 4GB uses."""
+    if wide:
+        return (1).to_bytes(4, "big") + kind + (16 + len(payload)).to_bytes(8, "big") + payload
+    return (8 + len(payload)).to_bytes(4, "big") + kind + payload
+
+
+class TestMp4IsFinalised:
+    """The moov atom is the index a player needs, and the recorder writes
+    it last -- so its presence is what "the file is finished" means."""
+
+    def test_a_file_ending_in_a_moov_atom_is_finalised(self, tmp_path):
+        path = tmp_path / "whole.mp4"
+        path.write_bytes(
+            _mp4_box(b"ftyp", b"isom") + _mp4_box(b"free")
+            + _mp4_box(b"mdat", b"x" * 64) + _mp4_box(b"moov", b"y" * 32)
+        )
+
+        assert recording._mp4_is_finalised(str(path)) is True
+
+    def test_a_file_with_no_moov_atom_is_not(self, tmp_path):
+        path = tmp_path / "unfinished.mp4"
+        path.write_bytes(_mp4_box(b"ftyp", b"isom") + _mp4_box(b"mdat", b"x" * 64))
+
+        assert recording._mp4_is_finalised(str(path)) is False
+
+    def test_the_word_moov_inside_the_video_data_does_not_count(self, tmp_path):
+        path = tmp_path / "unfinished.mp4"
+        path.write_bytes(_mp4_box(b"ftyp", b"isom") + _mp4_box(b"mdat", b"\x00\x00\x00\x08moov"))
+
+        assert recording._mp4_is_finalised(str(path)) is False
+
+    def test_a_moov_atom_after_a_wide_box_is_found(self, tmp_path):
+        path = tmp_path / "long.mp4"
+        path.write_bytes(
+            _mp4_box(b"ftyp", b"isom") + _mp4_box(b"mdat", b"x" * 64, wide=True)
+            + _mp4_box(b"moov", b"y" * 32)
+        )
+
+        assert recording._mp4_is_finalised(str(path)) is True
+
+    def test_a_moov_atom_cut_short_is_not_finalised(self, tmp_path):
+        path = tmp_path / "cut.mp4"
+        path.write_bytes(_mp4_box(b"ftyp", b"isom") + _mp4_box(b"moov", b"y" * 32)[:-8])
+
+        assert recording._mp4_is_finalised(str(path)) is False
+
+    def test_an_empty_or_missing_file_is_not_finalised(self, tmp_path):
+        empty = tmp_path / "empty.mp4"
+        empty.write_bytes(b"")
+
+        assert recording._mp4_is_finalised(str(empty)) is False
+        assert recording._mp4_is_finalised(str(tmp_path / "absent.mp4")) is False
+
+
+class _NeverStoppingRecorder(FakeRecorder):
+    """A recorder that is asked to stop and goes on reporting that it is
+    recording, as one stuck finalising its file does."""
+
+    def stop(self):
+        self.stop_calls += 1
+
 
 class TestBuildWindowsRegistry:
     def test_registers_the_qt_native_backend(self):
@@ -2545,8 +2771,6 @@ def linux_recorder(monkeypatch, shell_dir):
     `shell_dir`, with a system ffmpeg that can record sound."""
     shell = _FakeShell()
     monkeypatch.setattr(recording, "open_dbus_connection", shell.open)
-    monkeypatch.setattr(recording.setup_desktop, "load_recording_draw_cursor", lambda: True)
-    monkeypatch.setattr(recording.setup_desktop, "load_recording_frame_rate", lambda: 30)
     monkeypatch.setattr(ffmpeg_module, "probe", _ffmpeg_that_records_sound)
     run = _FakeFfmpeg(shell)
     popen = Mock(side_effect=_FakeAudioProcess)

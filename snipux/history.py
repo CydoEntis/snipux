@@ -15,9 +15,11 @@ here keeps a list of its own.
 from __future__ import annotations
 
 import datetime
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
-from PyQt6.QtCore import QRect, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QCursor, QImage, QImageReader, QKeyEvent, QPixmap
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -48,7 +50,15 @@ _THUMB_EDGE = 640
 
 VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov"}
 
-_thumbnails: dict[tuple[Path, int], QImage | None] = {}
+# Path -> (the file's mtime when the thumbnail was made, the thumbnail),
+# least recently used first. Bounded: a session runs for days, and one entry
+# per save ever made is ~1 MB each that nothing would ever ask for again. The
+# Recent list is five long (`setup_desktop.RECENT_CAPTURES_MAX`); the slack
+# is for files edited in place and a panel open while a save lands.
+_THUMBNAIL_CACHE_MAX = 16
+_thumbnails: OrderedDict[Path, tuple[int, QImage | None]] = OrderedDict()
+# `ThumbnailWarmup` fills the cache from its own thread.
+_thumbnails_lock = threading.Lock()
 
 
 def saved_thumbnail(path: Path) -> QImage | None:
@@ -60,22 +70,92 @@ def saved_thumbnail(path: Path) -> QImage | None:
         stamp = path.stat().st_mtime_ns
     except OSError:
         return None
-    key = (path, stamp)
-    if key not in _thumbnails:
-        image = QImage()
-        if path.suffix.lower() not in VIDEO_SUFFIXES:
-            image = QImageReader(str(path)).read()
-        if image.isNull():
-            _thumbnails[key] = None
-        else:
-            if image.width() > _THUMB_EDGE or image.height() > _THUMB_EDGE:
-                image = image.scaled(
-                    _THUMB_EDGE, _THUMB_EDGE,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            _thumbnails[key] = image
-    return _thumbnails[key]
+    with _thumbnails_lock:
+        cached = _thumbnails.get(path)
+        if cached is not None and cached[0] == stamp:
+            _thumbnails.move_to_end(path)
+            return cached[1]
+    thumbnail = _read_thumbnail(path)
+    _cache_thumbnail(path, stamp, thumbnail)
+    return thumbnail
+
+
+def remember_thumbnail(path: Path, image: QImage) -> None:
+    """Make the thumbnail for `path` from `image`, the picture just written
+    there, so the tray menu rebuilt a moment later does not decode the file
+    it was saved to -- about 70 ms for a 4K PNG, on the UI thread, measured
+    on Windows."""
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return
+    if image.isNull():
+        return
+    size = _thumbnail_size(image.size())
+    thumbnail = image.copy() if size == image.size() else image.scaled(
+        size,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    _cache_thumbnail(path, stamp, thumbnail)
+
+
+def _thumbnail_size(size: QSize) -> QSize:
+    """`size` fitted inside the thumbnail edge, never scaled up. Pixels of
+    the image, not of any screen."""
+    if size.width() <= _THUMB_EDGE and size.height() <= _THUMB_EDGE:
+        return size
+    return size.scaled(_THUMB_EDGE, _THUMB_EDGE, Qt.AspectRatioMode.KeepAspectRatio)
+
+
+def _read_thumbnail(path: Path) -> QImage | None:
+    if path.suffix.lower() in VIDEO_SUFFIXES:
+        return None
+    reader = QImageReader(str(path))
+    size = reader.size()
+    if size.isValid():
+        # Scaled by the reader, so no full-size copy is handed back here to
+        # shrink. A format that can decode small (JPEG) also reads faster;
+        # PNG cannot, and takes as long as it did -- which is why a fresh
+        # save goes through `remember_thumbnail` instead.
+        reader.setScaledSize(_thumbnail_size(size))
+    image = reader.read()
+    return None if image.isNull() else image
+
+
+def _cache_thumbnail(path: Path, stamp: int, thumbnail: QImage | None) -> None:
+    with _thumbnails_lock:
+        _thumbnails[path] = (stamp, thumbnail)
+        _thumbnails.move_to_end(path)
+        while len(_thumbnails) > _THUMBNAIL_CACHE_MAX:
+            _thumbnails.popitem(last=False)
+
+
+class ThumbnailWarmup(QObject):
+    """Makes the thumbnails for `paths` off the UI thread, then says so.
+
+    For launch: the Recent list survives a restart and the cache does not,
+    so the first tray menu after one decoded every recent save before it
+    could appear -- about 70 ms each for a 4K PNG. `QImageReader` and
+    `QImage` need no GUI thread; the same plain daemon thread and signal
+    `updates.UpdateCheck` uses, for the same reasons.
+    """
+
+    finished = pyqtSignal()
+
+    def __init__(self, paths: list[Path], parent: QObject | None = None):
+        super().__init__(parent)
+        self._paths = list(paths)
+
+    def start(self) -> None:
+        thread = threading.Thread(target=self._run, name="snipux-thumbnails")
+        thread.daemon = True
+        thread.start()
+
+    def _run(self) -> None:
+        for path in self._paths:
+            saved_thumbnail(path)
+        self.finished.emit()
 
 
 def _when(moment: datetime.datetime) -> str:

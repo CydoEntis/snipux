@@ -18,10 +18,13 @@ value either reading finds is a value to hide, and since PowerShell's start
 dominates the cost, the second read is nearly free. The same value found
 twice comes back as two words in the same place; the caller merges them.
 
-Everything that can fail here -- no PowerShell, no OCR language installed,
-a script error, a timeout, output that cannot be read -- comes back as no
-words at all rather than an exception. Recognition only ever *adds* boxes;
-failing to add any is always a safe outcome, and one the user can see.
+Everything that stops the picture being read -- no PowerShell, no OCR
+language installed, a script error, a timeout -- raises
+`sensitive.RecognitionFailed` with the reason. These used to come back as
+no words at all, on the reasoning that recognition only ever *adds* boxes.
+But no words is also what a picture with nothing sensitive in it returns,
+so a snip full of keys was copied unredacted with nothing said. A line of
+output that cannot be parsed is still only skipped.
 
 Nothing here imports anything Windows-only, so the parsing, scaling and
 clean-up can be tested on any OS with the subprocess call faked.
@@ -39,7 +42,7 @@ import tempfile
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QImage
 
-from snipux.sensitive import RecognizedWord
+from snipux.sensitive import RecognitionFailed, RecognizedWord
 
 # `OcrEngine.MaxImageDimension`: the engine refuses anything larger.
 MAX_DIMENSION = 10000
@@ -49,7 +52,17 @@ MAX_DIMENSION = 10000
 # file for text that is already big enough to read.
 UPSCALE_LONGEST_EDGE = 2000
 
-TIMEOUT_SECONDS = 10.0
+# Spent on the UI thread, with the overlay frozen under a wait cursor, so
+# this is the longest a snip can hang. A call takes about 0.3 s (above);
+# five seconds leaves room for a cold PowerShell start on a slow disk. It
+# was ten, when running out of time looked the same as finding nothing --
+# now it is reported, so cutting a slow machine off costs a question rather
+# than a leak.
+TIMEOUT_SECONDS = 5.0
+
+# What the script exits with when Windows has no recognition language to
+# make an engine from -- its own code, so it can be said in those words.
+NO_LANGUAGE_EXIT_CODE = 2
 
 # `CREATE_NO_WINDOW`: without it, snipux running under `pythonw` flashes a
 # console window on screen for every recognition.
@@ -72,7 +85,7 @@ try {
   $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
   $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
   $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-  if ($null -eq $engine) { exit 0 }
+  if ($null -eq $engine) { exit __NO_LANGUAGE__ }
   $culture = [Globalization.CultureInfo]::InvariantCulture
   $paths = @(__PATHS__)
   for ($pass = 0; $pass -lt $paths.Count; $pass++) {
@@ -120,6 +133,9 @@ def recognize(image: QImage, *, runner=None, timeout: float = TIMEOUT_SECONDS) -
 
     `runner(command, timeout) -> (returncode, stdout_bytes)` is the process
     call, injected so tests can drive this without PowerShell.
+
+    Raises `RecognitionFailed` when the image could not be read at all. An
+    empty list means it was read and has no words in it.
     """
     if image.isNull() or image.width() == 0 or image.height() == 0:
         return []
@@ -142,10 +158,16 @@ def recognize(image: QImage, *, runner=None, timeout: float = TIMEOUT_SECONDS) -
             # encoding a full-desktop PNG would cost more than the
             # recognition itself.
             if not sent.save(path, "BMP"):
-                return []
+                raise RecognitionFailed(
+                    "the snip could not be written out for text recognition"
+                )
         code, stdout = run(_command_for(paths), timeout)
-    except (OSError, subprocess.SubprocessError):
-        return []
+    except subprocess.TimeoutExpired as exc:
+        raise RecognitionFailed(
+            f"text recognition took longer than {timeout:g} seconds"
+        ) from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RecognitionFailed(f"text recognition could not start ({exc})") from exc
     finally:
         for path in paths:
             try:
@@ -153,8 +175,10 @@ def recognize(image: QImage, *, runner=None, timeout: float = TIMEOUT_SECONDS) -
             except OSError:
                 pass
 
+    if code == NO_LANGUAGE_EXIT_CODE:
+        raise RecognitionFailed("Windows has no text recognition language installed")
     if code != 0:
-        return []
+        raise RecognitionFailed(f"text recognition failed (PowerShell exit code {code})")
     return _parse(stdout, scales)
 
 
@@ -173,7 +197,9 @@ def _command_for(paths: list[str]) -> list[str]:
     # quoting of the script or the paths can be got wrong by a shell; each
     # path is escaped for the single-quoted PowerShell string it lands in.
     quoted = ",".join("'" + path.replace("'", "''") + "'" for path in paths)
-    script = _SCRIPT.replace("__PATHS__", quoted)
+    script = _SCRIPT.replace("__PATHS__", quoted).replace(
+        "__NO_LANGUAGE__", str(NO_LANGUAGE_EXIT_CODE)
+    )
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     return [
         "powershell.exe", "-NoProfile", "-NonInteractive",

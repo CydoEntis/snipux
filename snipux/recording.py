@@ -27,9 +27,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from jeepney import DBusAddress, MessageType, new_method_call
-from jeepney.io.blocking import open_dbus_connection
-
 from PyQt6.QtCore import (
     QCoreApplication,
     QObject,
@@ -38,7 +35,6 @@ from PyQt6.QtCore import (
     Qt,
     QThread,
     QUrl,
-    pyqtSignal,
 )
 from PyQt6.QtGui import QGuiApplication, QImage
 from PyQt6.QtMultimedia import (
@@ -54,7 +50,33 @@ from PyQt6.QtMultimedia import (
     QVideoSink,
 )
 
-from . import ffmpeg, platform, setup_desktop
+from . import ffmpeg, platform
+
+
+def _jeepney():
+    """The jeepney module, imported the first time D-Bus is actually used.
+
+    Not at the top of the file: this module is imported on every platform
+    and jeepney speaks a bus only Linux has, so Windows paid for the import
+    (5-6ms measured, more with its blocking I/O) at every start and never
+    called it.
+    """
+    import jeepney
+
+    return jeepney
+
+
+def open_dbus_connection(bus: str = "SESSION"):
+    """jeepney's blocking `open_dbus_connection`, imported on first use for
+    the reason `_jeepney()` gives.
+
+    A function of this module's own, rather than the import it used to be,
+    so every caller still goes through one name here -- which is the name
+    the tests replace to keep a real session bus out of them.
+    """
+    from jeepney.io.blocking import open_dbus_connection as open_connection
+
+    return open_connection(bus=bus)
 
 
 # The recording bar's audio choices, by the identifiers
@@ -66,9 +88,34 @@ AUDIO_MIC = "mic"
 AUDIO_SYSTEM = "system"
 
 
+@dataclass(frozen=True)
+class RecordingOptions:
+    """The two Settings choices a recorder acts on.
+
+    Handed in by whoever starts the recording rather than read here: this
+    module is a backend, and `config.json` belongs to `setup_desktop`,
+    which a backend has no business importing. The defaults are the
+    Settings window's own -- `tokens.RECORDING_FRAME_RATE_DEFAULT`, cursor
+    drawn -- repeated because this module does not import the design
+    package either.
+    """
+
+    frame_rate: int = 30
+    draw_cursor: bool = True
+
+
 class RecordingBackend(ABC):
     """A way of recording a region of the virtual desktop on a particular
     session type."""
+
+    # What the next `start()` records with. Set through `set_options()`
+    # for the same reason `audio_source` below is set rather than passed:
+    # `start()` keeps its two arguments, and a backend with no use for an
+    # option never reads it.
+    options: RecordingOptions = RecordingOptions()
+
+    def set_options(self, options: RecordingOptions) -> None:
+        self.options = options
 
     # Which of the bar's audio sources the next `start()` should record.
     # Set through `set_audio_source()` rather than a `start()` argument, so
@@ -121,6 +168,14 @@ class RecordingBackend(ABC):
         what comes back -- it is the only file that will exist when
         `stop()` returns.
         """
+
+    # Whether `stop()` can take long enough to freeze the window, and is
+    # safe to call from a worker thread so it need not. Opt-in for the same
+    # reason `starts_off_thread` is: the Windows recorder is QObjects that
+    # belong to the UI thread, and its stop is tens of milliseconds anyway.
+    # `app.AppController` asks the backend that is actually recording, and
+    # keeps the bar on "Saving…" with the event loop alive until it returns.
+    stops_off_thread: bool = False
 
     @abstractmethod
     def stop(self) -> None:
@@ -293,7 +348,11 @@ class RecorderRegistry:
         return [(b.name(), b.unavailable_reason()) for b in self._backends if not b.is_available()]
 
     def start(
-        self, rect: QRectF | None, path: str, audio_source: str = AUDIO_OFF
+        self,
+        rect: QRectF | None,
+        path: str,
+        audio_source: str = AUDIO_OFF,
+        options: RecordingOptions | None = None,
     ) -> tuple[RecordingBackend, str]:
         """Try available backends in order; return the first that starts
         recording `rect` (or the whole virtual desktop, when `rect` is
@@ -312,11 +371,17 @@ class RecorderRegistry:
         `RecordingError` never has to call back into the registry to see
         which backends existed and why each was unavailable -- both are
         already on the exception, whether `failures` ended up empty or not.
+
+        `options` is the caller's frame rate and cursor choice, read by it
+        for each recording so a change in Settings takes effect on the next
+        one. Left out, a backend keeps the options it already has.
         """
         failures: list[tuple[str, Exception]] = []
         for backend in self.available():
             try:
                 backend.set_audio_source(audio_source)
+                if options is not None:
+                    backend.set_options(options)
                 return backend, backend.start(rect, path)
             except Exception as exc:  # noqa: BLE001 - collected, not swallowed
                 failures.append((backend.name(), exc))
@@ -465,6 +530,9 @@ class GpuScreenRecorderBackend(RecordingBackend):
     """
 
     starts_off_thread = True
+    # stop() waits up to five seconds for the recorder to close its file,
+    # and touches nothing but the child process.
+    stops_off_thread = True
     # gpu-screen-recorder pauses and resumes in place on SIGUSR2, writing
     # nothing while paused, so the time is absent from the one file rather
     # than a still frame held across it. Measured on Omarchy: 2s recorded,
@@ -557,10 +625,10 @@ class GpuScreenRecorderBackend(RecordingBackend):
             binary,
             *self._target_arguments(rect),
             "-k", "auto",
-            "-f", str(setup_desktop.load_recording_frame_rate()),
+            "-f", str(self.options.frame_rate),
             "-fm", "cfr",
             "-fallback-cpu-encoding", "yes",
-            "-cursor", "yes" if setup_desktop.load_recording_draw_cursor() else "no",
+            "-cursor", "yes" if self.options.draw_cursor else "no",
         ]
         if self.audio_source in (AUDIO_SYSTEM, AUDIO_MIC):
             device = "default_output" if self.audio_source == AUDIO_SYSTEM else "default_input"
@@ -778,6 +846,10 @@ class GnomeScreencastBackend(RecordingBackend):
     # ordered by the completion signal. This is the backend the off-thread
     # start was measured for.
     starts_off_thread = True
+    # stop() joins a paused recording's pieces and muxes its sound with
+    # ffmpeg, each run allowed up to two minutes. The same socket-and-
+    # subprocess reasoning holds: nothing in it belongs to a thread.
+    stops_off_thread = True
 
     def name(self) -> str:
         return "gnome-screencast"
@@ -801,7 +873,7 @@ class GnomeScreencastBackend(RecordingBackend):
         to unpack (expected 2)`, discarding the one sentence that said
         what was actually wrong.
         """
-        if getattr(reply.header, "message_type", None) is not MessageType.error:
+        if getattr(reply.header, "message_type", None) is not _jeepney().MessageType.error:
             return None
         body = getattr(reply, "body", None) or ()
         return str(body[0]) if body else "unspecified D-Bus error"
@@ -855,12 +927,12 @@ class GnomeScreencastBackend(RecordingBackend):
     def _query_supported(self, connection, bus_name: str, object_path: str) -> bool | str:
         """Ask one address whether screencasting is supported."""
         try:
-            properties = DBusAddress(
+            properties = _jeepney().DBusAddress(
                 object_path,
                 bus_name=bus_name,
                 interface=self._PROPERTIES_INTERFACE,
             )
-            message = new_method_call(
+            message = _jeepney().new_method_call(
                 properties, "Get", "ss", (self._INTERFACE, "ScreencastSupported")
             )
             reply = connection.send_and_get_reply(message)
@@ -922,7 +994,7 @@ class GnomeScreencastBackend(RecordingBackend):
         bus_name, object_path = self._address_or_default()
         connection = open_dbus_connection(bus="SESSION")
         try:
-            shell = DBusAddress(
+            shell = _jeepney().DBusAddress(
                 object_path, bus_name=bus_name, interface=self._INTERFACE
             )
             if self._rect is None:
@@ -960,13 +1032,11 @@ class GnomeScreencastBackend(RecordingBackend):
         audio.start()
         return audio
 
-    @staticmethod
-    def _screencast_options() -> dict:
+    def _screencast_options(self) -> dict:
         """The `a{sv}` options dict shared by `ScreencastArea` and
-        `Screencast` -- ticket 9's settings, read fresh on every call the
-        same way `overlay.py` re-reads `load_hints_enabled()` per snip,
-        rather than cached at construction: a Settings change must take
-        effect on the next recording, not the next process restart.
+        `Screencast`, from this recording's `options` -- which the caller
+        sets at each start, so a Settings change takes effect on the next
+        recording, and which every piece of a paused one then shares.
 
         jeepney's low-level API wants each `a{sv}` entry as its own
         `(dbus-signature, value)` pair, not a bare value. `draw-cursor` is
@@ -977,8 +1047,8 @@ class GnomeScreencastBackend(RecordingBackend):
         clock producing a 5028ms file).
         """
         return {
-            "draw-cursor": ("b", setup_desktop.load_recording_draw_cursor()),
-            "framerate": ("i", setup_desktop.load_recording_frame_rate()),
+            "draw-cursor": ("b", self.options.draw_cursor),
+            "framerate": ("i", self.options.frame_rate),
         }
 
     def _call_screencast_area(self, connection, shell, rect: QRectF, path: str):
@@ -992,7 +1062,7 @@ class GnomeScreencastBackend(RecordingBackend):
         right = round(rect.left() + rect.width())
         bottom = round(rect.top() + rect.height())
 
-        message = new_method_call(
+        message = _jeepney().new_method_call(
             shell,
             "ScreencastArea",
             "iiiisa{sv}",
@@ -1009,7 +1079,7 @@ class GnomeScreencastBackend(RecordingBackend):
 
     def _call_screencast(self, connection, shell, path: str):
         """Issue whole-desktop `Screencast(sa{sv})` and return the reply."""
-        message = new_method_call(
+        message = _jeepney().new_method_call(
             shell,
             "Screencast",
             "sa{sv}",
@@ -1113,11 +1183,11 @@ class GnomeScreencastBackend(RecordingBackend):
         connection = self._connection
         bus_name, object_path = self._address_or_default()
         try:
-            shell = DBusAddress(
+            shell = _jeepney().DBusAddress(
                 object_path, bus_name=bus_name, interface=self._INTERFACE
             )
             reply = connection.send_and_get_reply(
-                new_method_call(shell, "StopScreencast")
+                _jeepney().new_method_call(shell, "StopScreencast")
             )
         finally:
             connection.close()
@@ -1370,13 +1440,10 @@ def _crop_frame(frame: QVideoFrame, pixel_rect: QRect) -> QVideoFrame:
     # Media Foundation's H264 encoder refuses a type whose frame rate is 0
     # ("could not set output type (80004005)" -> "Could not initialize
     # encoder"). The recording then lands as a 0-byte file while start()
-    # has already returned successfully. `_apply_measured_frame_rate` does
-    # tell the *recorder* a real rate, but only after
-    # _FRAME_RATE_SAMPLE_FRAMES arrivals -- long after the encoder has
-    # already had to commit -- which is why this failed intermittently
-    # rather than always, depending on which won the race. Carrying the
-    # source's own rate here means the very first frame already describes
-    # itself correctly. The colour fields are copied for the same
+    # has already returned successfully. Carrying the source's own rate
+    # here means the very first frame already describes itself correctly;
+    # nothing said to the recorder after record() reaches the encoder (see
+    # `_start_region`). The colour fields are copied for the same
     # "describe the frame honestly" reason; QScreenCapture reports them
     # Undefined/Unknown today, so they cost nothing and stop this from
     # silently mattering if it ever reports otherwise.
@@ -1466,18 +1533,6 @@ class _RegionCropWorker(QObject):
     coalescing itself for that bug -- the bug was the missing timing on the
     frames that *did* survive, not the dropping.
 
-    Also measures the real inter-arrival rate of source frames and emits it
-    once via `frame_rate_measured`, so `WindowsRecorderBackend` can declare
-    a frame rate the container header actually matches (the ticket's other
-    half: per-frame timing alone fixes duration/speed, but a container's
-    stream-level frame-rate metadata is separate from per-frame PTS and
-    nothing else in this class touches it). The measurement is taken in
-    `on_frame`, before `_send_pending()`'s coalescing drops anything --
-    deliberately: it wants the rate frames genuinely arrived at from
-    `QScreenCapture`, not the smaller rate that survives to the encoder,
-    since coalescing is a deliberate output-side choice that must not feed
-    back into what rate this claims frames arrived at.
-
     `pause()`/`resume()` (#87) are how the region path answers
     `RecordingBackend.can_pause`: `QScreenCapture` never stops delivering
     frames, so pausing here means simply not forwarding them, and resuming
@@ -1495,24 +1550,12 @@ class _RegionCropWorker(QObject):
     frame early or late.
     """
 
-    # How many genuine arrivals to average over before emitting
-    # frame_rate_measured -- large enough to smooth out one-off jitter
-    # between individual frames, small enough to produce an answer well
-    # before a short recording ends. Exposed as a class attribute so tests
-    # can drive exactly this many synthetic arrivals rather than a magic
-    # number duplicated on both sides.
-    _FRAME_RATE_SAMPLE_FRAMES = 15
-
-    frame_rate_measured = pyqtSignal(float)
-
     def __init__(self, frame_input: QVideoFrameInput, pixel_rect: QRect):
         super().__init__()
         self._frame_input = frame_input
         self._pixel_rect = pixel_rect
         self._pending: QVideoFrame | None = None
         self._ready = False
-        self._arrival_start_times: list[int] = []
-        self._rate_measured = False
         self._paused = False
         # The most recent frame's own startTime() -- the clock pause()/
         # resume() measure the paused span in, since it is the one clock
@@ -1523,7 +1566,6 @@ class _RegionCropWorker(QObject):
         self._pause_offset_us = 0
 
     def on_frame(self, frame: QVideoFrame) -> None:
-        self._record_arrival(frame)
         if frame.startTime() >= 0:
             self._last_frame_time = frame.startTime()
         if self._paused:
@@ -1563,26 +1605,6 @@ class _RegionCropWorker(QObject):
         self._ready = True
         if self._pending is not None:
             self._send_pending()
-
-    def _record_arrival(self, frame: QVideoFrame) -> None:
-        """Accumulate real arrival timestamps toward a one-shot frame-rate
-        estimate; see the class docstring for why this runs here rather
-        than in `_send_pending()`.
-        """
-        if self._rate_measured:
-            return
-        start_time = frame.startTime()
-        if start_time < 0:
-            return  # untimed source frame -- nothing to measure from
-        self._arrival_start_times.append(start_time)
-        if len(self._arrival_start_times) < self._FRAME_RATE_SAMPLE_FRAMES:
-            return
-        span = self._arrival_start_times[-1] - self._arrival_start_times[0]
-        intervals = len(self._arrival_start_times) - 1
-        if span <= 0:
-            return  # clock didn't advance across the sample -- try again later
-        self._rate_measured = True
-        self.frame_rate_measured.emit(intervals * 1_000_000 / span)
 
     def _send_pending(self) -> None:
         frame, self._pending = self._pending, None
@@ -1624,12 +1646,10 @@ class WindowsRecorderBackend(RecordingBackend):
     monitor under the cursor and comes through as an ordinary rect.
 
     Deliberately does not read either of ticket 9's Settings rows the way
-    `GnomeScreencastBackend` does. Frame rate: SNX-125 measures the real
-    inter-arrival rate off `_RegionCropWorker` and declares exactly that to
-    the container (see `_apply_measured_frame_rate` in `_start_region`) --
-    a nominal request from Settings would be a second, conflicting opinion
-    about a number this class has already gone to real effort to get right
-    from measurement instead of a guess. Draw-cursor: `QScreenCapture`
+    `GnomeScreencastBackend` does. Frame rate: there is none to request.
+    `QScreenCapture` delivers a frame when the screen changes, up to about
+    30 a second, and each is written at its own capture time (see
+    `_start_region` for the measured numbers). Draw-cursor: `QScreenCapture`
     exposes no such toggle at all -- there is nothing here to wire it to,
     not an oversight.
 
@@ -1653,7 +1673,9 @@ class WindowsRecorderBackend(RecordingBackend):
         video_frame_input_factory=QVideoFrameInput,
         thread_factory=QThread,
         audio_input_factory=None,
-        stop_settle_seconds: float = 1.0,
+        finalised_check=None,
+        finalise_timeout_seconds: float = 2.0,
+        stop_timeout_seconds: float = 10.0,
     ):
         self._screen_capture_factory = screen_capture_factory
         self._capture_session_factory = capture_session_factory
@@ -1670,11 +1692,23 @@ class WindowsRecorderBackend(RecordingBackend):
         # recording's lifetime: a session does not keep its input alive, and
         # a collected one ends the audio track without a word.
         self._audio_input = None
-        # See _wait_for_stopped()'s docstring: real, load-bearing settle
-        # time for the muxer's asynchronous finalization, not a cosmetic
-        # default -- tests that don't care about it pass 0 here rather
-        # than eating the real delay.
-        self._stop_settle_seconds = stop_settle_seconds
+        # What says the file stop() is about to hand back is whole, and how
+        # long a recorder that has already stopped is given to make it so
+        # -- see _wait_for_stopped(). Injected like the factories above: a
+        # fake recorder writes no file for the real check to read.
+        self._finalised_check = (
+            finalised_check if finalised_check is not None else _mp4_is_finalised
+        )
+        self._finalise_timeout_seconds = finalise_timeout_seconds
+        # The file being written, for that check.
+        self._path: str | None = None
+        # How long stop() waits for the recorder to say it has stopped
+        # before calling the recording incomplete. Measured on Windows 11
+        # (Qt 6.11, 3s recordings up to 2560x1440) that takes 20-40ms; the
+        # rest is room for a long recording on a slow disk, because running
+        # out of it now fails the recording rather than passing it off as
+        # finished.
+        self._stop_timeout_seconds = stop_timeout_seconds
 
         # Full screen: one session, no interception.
         self._session = None
@@ -1784,6 +1818,7 @@ class WindowsRecorderBackend(RecordingBackend):
             self._start_full_screen(path)
         else:
             self._start_region(rect, path)
+        self._path = path
         return path
 
     def _unwind_failed_start(self, screen_capture, recorder, path: str) -> None:
@@ -1847,17 +1882,22 @@ class WindowsRecorderBackend(RecordingBackend):
         """Wire and start the region (crop) path -- see the class
         docstring's two-session description.
 
-        `recorder.setVideoFrameRate()` is called late, from
-        `_apply_measured_frame_rate()` below, once `_RegionCropWorker` has
-        actually measured a real inter-arrival rate -- not up front here.
-        There is no real rate to declare before any source frame has
-        arrived, and `QScreen.refreshRate()` was deliberately rejected as a
-        substitute (SNX-125): it's the display's nominal Hz, not what
-        `QScreenCapture` delivers, and the two are already known to differ
-        (~28.8fps measured against a 30fps-class request). `record()` is
-        still called immediately, same as before -- recording starts with
-        no visible delay, and the declared rate updates in place once the
-        measurement is ready, a few frames in.
+        `recorder.setVideoFrameRate()` is never called. The file's frame
+        rate is whatever the frames' own timestamps make it: measured on
+        Windows 11 (PyQt6 6.11.0), 28-30 frames a second while the screen
+        is changing and about 10 while it is still, in a track whose
+        timescale (119000 on a 119Hz monitor) comes from the stream frame
+        rate each frame already carries.
+
+        This used to measure the arrival rate over the first 15 frames and
+        hand it to the recorder, about 0.6s after `record()`. That did
+        nothing: the recorder reported the new value back (rounded to a
+        whole number), and files recorded with and without the call had
+        the same timescale and the same frame timing. Setting a rate
+        *before* `record()` does reach the file -- it changes the
+        timescale and nothing else -- but there is no real rate to give
+        before a frame has arrived, and `QScreen.refreshRate()` is the
+        display's nominal Hz, not what `QScreenCapture` delivers.
         """
         # The screen the region is on, not the primary one. These two
         # calls are a pair: `setScreen()` below decides which monitor's
@@ -1902,21 +1942,6 @@ class WindowsRecorderBackend(RecordingBackend):
             worker.on_ready_to_send, Qt.ConnectionType.QueuedConnection
         )
 
-        # Declares the container's frame rate from the worker's own
-        # measurement of real inter-arrival timing, once it has enough
-        # samples -- not a hardcoded nominal value, and not called until
-        # genuine data exists. `_apply_measured_frame_rate` is a plain
-        # function rather than a bound method so this doesn't need
-        # `WindowsRecorderBackend` itself to be a QObject; queued the same
-        # explicit way as the other two connections, so
-        # `recorder.setVideoFrameRate()` only ever runs on this object's
-        # own thread even though the measurement happens on the worker's.
-        def _apply_measured_frame_rate(fps: float) -> None:
-            recorder.setVideoFrameRate(fps)
-
-        worker.frame_rate_measured.connect(
-            _apply_measured_frame_rate, Qt.ConnectionType.QueuedConnection
-        )
         worker_thread.start()
 
         capture_session.setScreenCapture(screen_capture)
@@ -2019,28 +2044,57 @@ class WindowsRecorderBackend(RecordingBackend):
         written. Whatever else is wrong, a recording that failed must not
         end quietly.
         """
-        if self._worker_thread is not None:
-            self._stop_region()
-        else:
-            self._stop_full_screen()
+        self._tear_down(keep_file=True)
 
         if self._errors:
             failure = self._errors[0]
             self._errors = []
             raise RuntimeError(f"qt-native: {failure}")
 
-    def _stop_full_screen(self) -> None:
+    def discard(self) -> None:
+        """End the recording to throw it away.
+
+        The same teardown as `stop()` without either thing `stop()` does
+        for the file's sake: no wait for it to be whole, and no report of
+        what the encoder said about it -- the caller deletes it next.
+
+        The wait for `StoppedState` stays. Until then the recorder has the
+        file open, and Windows refuses to delete an open file; a recorder
+        that never gets there is the one failure a discard still raises,
+        because the caller's delete is about to fail.
+        """
+        stopped = self._tear_down(keep_file=False)
+        self._errors = []
+        if not stopped:
+            raise RuntimeError(
+                "qt-native: the recorder still has the file open, so it "
+                "cannot be removed yet"
+            )
+
+    def _tear_down(self, *, keep_file: bool) -> bool:
+        """Stop whichever path is live and let go of everything it built.
+        Returns whether the recorder actually stopped."""
+        if self._worker_thread is not None:
+            stopped = self._stop_region(keep_file)
+        else:
+            stopped = self._stop_full_screen(keep_file)
+        self._path = None
+        return stopped
+
+    def _stop_full_screen(self, keep_file: bool) -> bool:
+        stopped = True
         if self._screen_capture is not None:
             self._screen_capture.setActive(False)
         if self._recorder is not None:
             self._recorder.stop()
-            self._wait_for_stopped(self._recorder)
+            stopped = self._wait_for_stopped(self._recorder, keep_file=keep_file)
         self._session = None
         self._screen_capture = None
         self._recorder = None
         self._audio_input = None
+        return stopped
 
-    def _stop_region(self) -> None:
+    def _stop_region(self, keep_file: bool) -> bool:
         # Opposite order from _start_region's wiring: stop new frames from
         # arriving first, then unwind the worker thread (so no crop is
         # left mid-flight when the recorder goes away), then stop the
@@ -2056,9 +2110,10 @@ class WindowsRecorderBackend(RecordingBackend):
         if self._worker_thread is not None:
             self._worker_thread.quit()
             self._worker_thread.wait()
+        stopped = True
         if self._recorder is not None:
             self._recorder.stop()
-            self._wait_for_stopped(self._recorder)
+            stopped = self._wait_for_stopped(self._recorder, keep_file=keep_file)
 
         self._capture_session = None
         self._screen_capture = None
@@ -2069,60 +2124,57 @@ class WindowsRecorderBackend(RecordingBackend):
         self._worker = None
         self._worker_thread = None
         self._audio_input = None
+        return stopped
 
     def _wait_for_stopped(
         self,
         recorder: QMediaRecorder,
-        stopped_timeout: float = 3.0,
-        poll_interval: float = 0.02,
-    ) -> None:
-        """Block until `recorder.recorderState()` actually reaches
-        `StoppedState`, then hold for a further, real, wall-clock settle
-        period before returning.
+        *,
+        keep_file: bool,
+        poll_interval: float = 0.005,
+    ) -> bool:
+        """Block until `recorder.recorderState()` reaches `StoppedState`
+        and, when `keep_file`, the file it wrote is whole. Returns whether
+        the recorder stopped.
 
-        `QMediaRecorder.stop()` is not documented as synchronous, and the
-        "playable file" acceptance criterion needs the container's moov
-        atom actually written before `stop()` returns, not just the call
-        having been made -- so the first loop checks state rather than
+        `QMediaRecorder.stop()` is not documented as synchronous, and a
+        playable file needs the container's moov atom written before
+        `stop()` returns -- so the first loop checks state rather than
         assuming. Polling needs an actual `time.sleep()` between checks,
         not just repeated `processEvents()` calls with no pause between
         them -- confirmed by hand that spinning `processEvents()` back to
         back with no sleep never once observes the state change, even
-        after 50 calls, because the real transition happens on a Windows
-        Media Foundation worker thread that needs actual elapsed wall time
-        to post its result back, not just event-loop turns to *deliver*
-        one if it were already queued.
+        after 50 calls, because the real transition happens on a worker
+        thread that needs actual elapsed wall time to post its result
+        back, not just event-loop turns to *deliver* one if it were
+        already queued. `recorderStateChanged` cannot be waited on
+        instead: connecting anything to it raises in this PyQt6 build
+        (see `_wire_errors()`).
 
-        Reaching `StoppedState` alone turned out not to be enough either,
-        confirmed the same way: a file opened with `QMediaPlayer`
-        immediately after `stop()` returned came back "moov atom not
-        found" and unplayable, even though the state machine already said
-        stopped, while the same file opened a couple of seconds later (a
-        fresh process, plenty more wall time elapsed) played fine. There
-        is no more precise signal to wait on instead of a further timed
-        hold: `recorderStateChanged` and `errorOccurred` both carry a
-        nested `QMediaRecorder` enum argument, and connecting *anything*
-        to either -- confirmed independent of the slot's own signature --
-        raises `TypeError: connect() failed ... and unislot()` in this
-        exact PyQt6 6.11.0 / Qt 6.11.1 build (see `_wire_errors()`), and
-        `actualLocationChanged` did not fire at all in the same manual
-        check. So this holds, still pumping the event loop, for
-        `self._stop_settle_seconds` (empirically ~1s was enough) after
-        `StoppedState` first appears -- a real, load-bearing wait, not a
-        cosmetic one; shortening or dropping it reintroduces the
-        unplayable-file failure this was written to fix.
+        This used to hold for a fixed second after `StoppedState`, on the
+        strength of one file that came back "moov atom not found" when
+        opened straight away. Measured since, on Windows 11 with PyQt6
+        6.11.0 over 13 recordings (1.5-3s, 1280x720 and 2560x1440, both
+        paths): `StoppedState` arrived 20-41ms after `stop()`, and every
+        file already had its moov atom, opened in `QMediaPlayer` at once,
+        and was byte-for-byte the same a second later. So the second is
+        gone, and what it was guarding is checked directly instead: the
+        file is read for its moov atom (`_finalised_check`), and only one
+        that lacks it is waited on, for at most
+        `_finalise_timeout_seconds`.
 
-        Bounded rather than looped forever throughout: with no
-        `QCoreApplication` instance, or a recorder that never reports
-        `StoppedState` within `stopped_timeout`, there's nothing more this
-        can usefully wait on, and a bounded wait fails visibly (an
-        unplayable file) instead of hanging the process.
+        Bounded rather than looped forever. A recorder that never reports
+        `StoppedState` within `_stop_timeout_seconds`, or a file still not
+        whole after the second wait, is recorded in `_errors`, which
+        `stop()` raises from once the teardown is done: returning as
+        though it had worked landed an unplayable file as a saved
+        recording.
         """
         app = QCoreApplication.instance()
         if app is None:
-            return
+            return True
 
-        deadline = time.monotonic() + stopped_timeout
+        deadline = time.monotonic() + self._stop_timeout_seconds
         reached_stopped = False
         while time.monotonic() < deadline:
             app.processEvents()
@@ -2132,12 +2184,60 @@ class WindowsRecorderBackend(RecordingBackend):
             time.sleep(poll_interval)
 
         if not reached_stopped:
-            return
+            self._errors.append(
+                "the recorder had not finished writing the file after "
+                f"{self._stop_timeout_seconds:g}s, so the recording may be incomplete"
+            )
+            return False
+        if not keep_file or self._errors:
+            # A file about to be deleted need not be whole. And where the
+            # recorder already said what went wrong, a file it failed to
+            # write is not going to become whole by waiting.
+            return True
 
-        settle_deadline = time.monotonic() + self._stop_settle_seconds
-        while time.monotonic() < settle_deadline:
+        finalise_deadline = time.monotonic() + self._finalise_timeout_seconds
+        while not self._finalised_check(self._path):
+            if time.monotonic() >= finalise_deadline:
+                self._errors.append(
+                    "the recorder stopped without finishing the file, so the "
+                    "recording will not play"
+                )
+                return True
             app.processEvents()
             time.sleep(poll_interval)
+        return True
+
+
+def _mp4_is_finalised(path: str) -> bool:
+    """Whether the MP4 at `path` has its moov atom, complete.
+
+    The recorder writes the video data first and the moov atom -- the
+    index no player can do without -- last, so a file that has one is a
+    file the recorder finished. Only the box headers are read, eight or
+    sixteen bytes each, so this costs the same for an hour as for a
+    second. An unreadable or missing file is not finalised.
+    """
+    try:
+        with open(path, "rb") as file:
+            size_on_disk = os.fstat(file.fileno()).st_size
+            offset = 0
+            while offset + 8 <= size_on_disk:
+                file.seek(offset)
+                header = file.read(16)
+                box_size = int.from_bytes(header[:4], "big")
+                if box_size == 1:
+                    # A box over 4GB keeps its real size after its type.
+                    box_size = int.from_bytes(header[8:16], "big")
+                elif box_size == 0:
+                    box_size = size_on_disk - offset  # "to the end of the file"
+                if box_size < 8:
+                    return False
+                if header[4:8] == b"moov":
+                    return offset + box_size <= size_on_disk
+                offset += box_size
+    except OSError:
+        return False
+    return False
 
 
 def build_windows_registry() -> RecorderRegistry:

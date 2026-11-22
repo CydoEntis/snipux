@@ -173,6 +173,14 @@ class Platform(ABC):
         """
         return None
 
+    def hand_off_to_stable_install(self, arguments: list[str]) -> int | None:
+        """Finish this launch from the stable install instead of from this
+        process, where a build has one that starts faster than it does.
+        The exit code to end with, or `None` to carry on here -- the answer
+        everywhere but a portable Windows exe. Never raises.
+        """
+        return None
+
     def relaunch_without_console(self) -> bool:
         """#52: start the resident app again in a process that no console
         can take down, and return True so the caller can simply exit.
@@ -551,8 +559,14 @@ class Platform(ABC):
     def recognize_text(self, image) -> list:
         """The words in `image` (a `QImage`), as a list of lines, each a
         list of `sensitive.RecognizedWord` with rects in `image`'s own
-        pixels. Never raises: a platform that cannot recognise, or a
-        recognition that fails, returns no lines."""
+        pixels.
+
+        No lines means the picture was read and holds no words. A
+        recognition that could not be carried out raises
+        `sensitive.RecognitionFailed` instead, so the caller cannot take
+        "nothing was checked" for "nothing to hide". A platform with no
+        recognition at all (`recognizes_text()` False) returns no lines.
+        """
         return []
 
 

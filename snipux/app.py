@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import gc
 import os
 import shutil
 import subprocess
@@ -50,6 +51,7 @@ from PyQt6.QtCore import (
     QRect,
     QRectF,
     QSize,
+    QSizeF,
     Qt,
     QThreadPool,
     QTimer,
@@ -91,6 +93,7 @@ from snipux.capture import (
     XwininfoWindowGeometryProvider,
     BackendRegistry,
     CaptureError,
+    Frame,
     WindowsWindowGeometryProvider,
     X11WindowGeometryProvider,
     detect_session_type,
@@ -108,6 +111,7 @@ from snipux import (
     handoff,
     history,
     hostenv,
+    log,
     output,
     platform,
     report,
@@ -123,7 +127,12 @@ from snipux.output import (
     save_image,
 )
 from snipux.platform.windows import HotkeyEventFilter, reattach_console
-from snipux.recording import RecorderRegistry, RecordingError, RecordingPartsError
+from snipux.recording import (
+    RecorderRegistry,
+    RecordingError,
+    RecordingOptions,
+    RecordingPartsError,
+)
 from snipux.pin import PinWindow
 from snipux.player import (
     EXPORT_UNAVAILABLE,
@@ -199,24 +208,70 @@ class _RecorderStarter(QObject):
 
     done = pyqtSignal()
 
-    def __init__(self, registry, rect, path, audio_source="off"):
+    def __init__(self, registry, rect, path, audio_source="off", options=None):
         super().__init__()
         self._registry = registry
         self._rect = rect
         self._path = path
         self._audio_source = audio_source
+        self._options = options
         self.result: tuple | None = None
         self.error: Exception | None = None
 
     def run(self) -> None:
         """Worker thread. Never touches a widget."""
         try:
-            self.result = self._registry.start(self._rect, self._path, self._audio_source)
+            self.result = self._registry.start(
+                self._rect, self._path, self._audio_source, self._options
+            )
         except Exception as exc:  # noqa: BLE001 - handed back, not swallowed
             self.error = exc
         # Queued, because this object lives on the UI thread: the receiver
         # runs there, which is what makes the result safe to read.
         self.done.emit()
+
+
+class _RecorderStopper(QObject):
+    """Runs a recorder's blocking `stop()` off the UI thread -- the twin of
+    `_RecorderStarter`, for a backend that says `stops_off_thread`.
+
+    GNOME's stop joins a paused recording's pieces and muxes its sound with
+    ffmpeg, synchronously, and gpu-screen-recorder's waits for the recorder
+    to close its file. On the UI thread the bar sat on "Saving…" with the
+    whole app unresponsive for as long as that took.
+
+    Only the backend's `stop()` runs here. Landing the file -- the move,
+    the player, every message -- stays on the UI thread, after this
+    reports back.
+    """
+
+    done = pyqtSignal()
+
+    def __init__(self, backend):
+        super().__init__()
+        self._backend = backend
+        self.error: Exception | None = None
+        self._finished = threading.Event()
+
+    def run(self) -> None:
+        """Worker thread. Never touches a widget."""
+        try:
+            self._backend.stop()
+        except Exception as exc:  # noqa: BLE001 - handed back, not swallowed
+            self.error = exc
+        finally:
+            self._finished.set()
+        self.done.emit()
+
+    def wait_until_finished(self) -> None:
+        """Block until `stop()` has returned, however the wait for it ended.
+
+        `QApplication.quit()` ends every running event loop, the nested one
+        waiting on `done` included, so that loop returning does not mean
+        the file is finished. Nothing may move or report on it until this
+        says so.
+        """
+        self._finished.wait()
 
 
 def _recording_temp_dir() -> Path:
@@ -1439,6 +1494,8 @@ class AppController:
         self._region_frame = RegionFrame()
 
         self._overlay: OverlayWindow | None = None
+        # How long the last snip took to open -- see `_note_slow_snip`.
+        self.last_snip_timing_ms: dict[str, float] = {}
         # Held for the same reason `_overlay` is: a parentless widget is
         # fair game for the GC while its window is still on screen.
         self._settings: SettingsDialog | None = None
@@ -1545,7 +1602,10 @@ class AppController:
         # the icon before, so clicking it did nothing at all -- and the
         # menu's own Settings item is a right-click plus a click away.
         self._tray_icon.activated.connect(self._on_tray_activated)
-        self._rebuild_recent_menu()
+        # Rows only. Their pictures mean decoding every recent save -- about
+        # 70 ms for each 4K PNG -- and that was paid here, before the tray
+        # icon was on screen. `warm_recent_thumbnails` adds them afterwards.
+        self._rebuild_recent_menu(thumbnails=False)
         self._rebuild_copy_history_menu()
 
         if self._tray_available:
@@ -1555,7 +1615,7 @@ class AppController:
             # `ps`/pkill: the keybinding (--snip) is still the way in with
             # no tray, but quitting needs a real answer now that there's no
             # Quit menu item visible to click.
-            print(
+            log.note(
                 "No system tray detected -- Snipux will run without a tray "
                 "icon or menu. It is still listening for snip requests "
                 "(e.g. via `snipux --snip`, typically bound to a key); to "
@@ -1575,7 +1635,7 @@ class AppController:
             self.start_capture, self.open_settings, self.open_path, self.open_editor
         )
 
-    def _rebuild_recent_menu(self) -> None:
+    def _rebuild_recent_menu(self, *, thumbnails: bool = True) -> None:
         """Refresh the tray's Recent section from what is actually still on
         disk (#85).
 
@@ -1596,6 +1656,9 @@ class AppController:
         The section itself is a submenu (`self._recent_menu`), inserted
         before Settings only while it has rows and removed outright when it
         doesn't -- nothing greyed out, nothing shown for an empty list.
+
+        `thumbnails` is False for the one build made while starting up --
+        see `warm_recent_thumbnails`.
         """
         stored = setup_desktop.load_recent_captures()
         survivors = [path for path in stored if path.exists()]
@@ -1605,7 +1668,7 @@ class AppController:
         self._recent_menu.clear()
         for path in survivors:
             action = self._recent_menu.addAction(path.name)
-            thumbnail = history.saved_thumbnail(path)
+            thumbnail = history.saved_thumbnail(path) if thumbnails else None
             if thumbnail is not None:
                 action.setIcon(self._menu_thumbnail(thumbnail))
             action.triggered.connect(lambda checked=False, p=path: self._open_recent_capture(p))
@@ -1623,6 +1686,17 @@ class AppController:
                 self._tray_menu.insertMenu(before, self._recent_menu)
         elif menu_action in self._tray_menu.actions():
             self._tray_menu.removeAction(menu_action)
+
+    def warm_recent_thumbnails(self) -> None:
+        """Make the Recent rows' pictures off the UI thread, then put them
+        on the rows. Called once by the process that becomes resident, after
+        the tray icon is up. The rebuild that follows is not left to the
+        menu's `aboutToShow`, which GNOME's indicator may never send."""
+        warmup = history.ThumbnailWarmup(self._existing_recent_captures())
+        warmup.finished.connect(self._rebuild_recent_menu)
+        # Held: the signal is delivered through this object.
+        self._thumbnail_warmup = warmup
+        warmup.start()
 
     _COPY_HISTORY_LABEL_CHARS = 40
     _COPY_HISTORY_THUMBNAIL = 48
@@ -1814,7 +1888,7 @@ class AppController:
         _present(self._settings)
 
     def report_problem(self) -> None:
-        report.open_report(crash_log_path())
+        report.open_report(crash_log_path(), log.notes_path())
 
     def _on_settings_saved(self) -> None:
         """Apply what Settings just wrote.
@@ -2114,6 +2188,7 @@ class AppController:
             name="snipux-prefetch",
             daemon=True,
         ).start()
+        requested = time.perf_counter()
         try:
             frame = self._registry.capture()
         except CaptureError as exc:
@@ -2134,9 +2209,10 @@ class AppController:
                     QSystemTrayIcon.MessageIcon.Warning,
                 )
             else:
-                print(f"Snip failed: {exc}")
+                log.note(f"Snip failed: {exc}")
             return
 
+        captured = time.perf_counter()
         geometries = (
             self._monitor_geometries
             if self._monitor_geometries is not None
@@ -2199,6 +2275,63 @@ class AppController:
         # any Wayland multi-monitor veil companions), so there's no
         # separate .show() to call here.
         self._overlay = overlay
+        self._note_slow_snip(requested, captured, time.perf_counter())
+
+    def warm_first_snip(self) -> None:
+        """Build one overlay nobody sees, so the first real one is as quick
+        as every later one.
+
+        The first overlay of a process pays for things the rest reuse: the
+        first native window Qt creates on this platform, the toolbar's
+        icons, the stylesheets every bar parses. Measured on Windows, the
+        first snip after launch took about 250 ms to open and the ones
+        after it about 120; with this done at startup the first matches
+        the rest. It costs about 100 ms once, when nothing is waiting.
+
+        Nothing is captured for it -- the overlay is built over a blank
+        frame, never shown, and closed. Skipped if a snip is already open.
+        """
+        if self._overlay is not None:
+            return
+        blank = QImage(64, 64, QImage.Format.Format_RGB32)
+        blank.fill(0)
+        overlay = OverlayWindow(
+            Frame(image=blank, logical_origin=QPointF(0, 0), logical_size=QSizeF(64, 64)),
+            hints_enabled=False,
+            geometry_provider=self._geometry_provider,
+            registry=self._registry,
+        )
+        # The native window and one full paint are what the first real
+        # overlay would otherwise be the one to wait for.
+        overlay.winId()
+        overlay.grab()
+        overlay.close()
+        overlay.deleteLater()
+
+    # Above this, the wait between the shortcut and the frozen screen is
+    # long enough to be felt. A desk of three 1440p monitors measures about
+    # 80 ms, and about 200 ms for the first snip after launch.
+    _SLOW_SNIP_MS = 300
+
+    def _note_slow_snip(self, requested: float, captured: float, shown: float) -> None:
+        """Keep how long the last snip took to open, and write it down when
+        it was slow.
+
+        "Snipping feels slow" used to be unanswerable: nothing recorded
+        whether the time went on reading the screen or on building and
+        showing the overlay, and the two have different causes. Every snip
+        is timed; only a slow one reaches snipux.log, so the file a problem
+        report attaches says which half it was.
+        """
+        capture_ms = (captured - requested) * 1000
+        overlay_ms = (shown - captured) * 1000
+        self.last_snip_timing_ms = {"capture": capture_ms, "overlay": overlay_ms}
+        if capture_ms + overlay_ms >= self._SLOW_SNIP_MS:
+            log.note(
+                f"Note: slow snip: {capture_ms + overlay_ms:.0f} ms to open "
+                f"(reading the screen {capture_ms:.0f} ms, "
+                f"showing the overlay {overlay_ms:.0f} ms)"
+            )
 
     def _on_overlay_activated(self, overlay: OverlayWindow) -> None:
         """Track the surface currently handling a Wayland capture session."""
@@ -2212,7 +2345,9 @@ class AppController:
             self._armed_recording = None
         self._teardown_recording_ui()
 
-    def _on_captured(self, image, path) -> None:
+    def _on_captured(
+        self, image, path, *, outcome: str | None = None, save_error: str | None = None
+    ) -> None:
         """Open the review window for a finished snip, when it is turned on.
 
         Off unless asked for: the overlay already annotates in place, so a
@@ -2220,23 +2355,33 @@ class AppController:
         a default to inherit. Read fresh each time rather than cached at
         startup, so toggling it in Settings takes effect on the next snip
         instead of the next launch.
+
+        `outcome` and `save_error` come with a save that was written after
+        its overlay closed (`OverlayWindow._save_after_closing`): that
+        overlay is no longer `self._overlay` to ask, and a newer snip's may
+        be. Any other capture arrives while its overlay is still open, and
+        the two are read from it.
         """
         # #85: a still with nowhere else to reopen it from goes on the tray's
         # Recent list. `path` is None for a clipboard-only destination --
         # there is nothing to reopen, so nothing is added.
         if path is not None:
             setup_desktop.add_recent_capture(path)
+            # The picture is already in hand; without this the rebuild reads
+            # it back out of the file it was just written to.
+            history.remember_thumbnail(Path(path), image)
             self._rebuild_recent_menu()
 
         # The chooser is the authority: it is seeded from Settings when the
         # overlay opens, so its value is either what Settings says or what
         # the user changed it to for this snip. Either way it is the more
         # current answer.
-        if self._overlay is not None:
-            opening_review = self._overlay.outcome == "review"
+        if outcome is None and self._overlay is not None:
+            outcome, save_error = self._overlay.outcome, self._overlay.save_error
+        if outcome is not None:
+            opening_review = outcome == "review"
         else:
             opening_review = setup_desktop.load_review_window()
-        save_error = self._overlay.save_error if self._overlay is not None else None
         if opening_review and save_error is not None:
             # The review window shows the snip but not that its save failed.
             self._notify_capture(None, save_error=save_error)
@@ -2309,7 +2454,7 @@ class AppController:
                 "Snipux", message, QSystemTrayIcon.MessageIcon.Warning
             )
         else:
-            print(message)
+            log.note(message)
 
     def open_image_path(self, path: Path) -> None:
         """Open an image you already have in a fresh review window, with
@@ -2352,6 +2497,7 @@ class AppController:
     def _forget_pin(self, window) -> None:
         if window in self._pins:
             self._pins.remove(window)
+            _release_closed()
 
     def _notify_capture(self, path: "Path | None", *, save_error: str | None = None) -> None:
         """Confirm, through the tray, that a snip actually happened.
@@ -2437,8 +2583,13 @@ class AppController:
         today = datetime.date.today().isoformat()
         if setup_desktop.load_update_checked_on() == today:
             return False
-        setup_desktop.save_update_checked_on(today)
+        # The date is written when an answer comes back
+        # (`_on_update_checked`), not here: stamped before asking, a launch
+        # with no network used up the day's check without making it.
         self.check_for_updates(opener, quiet=True)
+        # Here because it is once a day at most, and by the launch after an
+        # update the installer is done with the file it was run from.
+        updates.remove_old_downloads()
         return True
 
     def _on_update_checked(self, release, *, quiet: bool = False) -> None:
@@ -2454,6 +2605,7 @@ class AppController:
                     "Could not check for updates. Try again when you are online."
                 )
             return
+        setup_desktop.save_update_checked_on(datetime.date.today().isoformat())
         if not updates.is_newer(release.version, __version__):
             if not quiet:
                 self._report_shortcut(f"Snipux {__version__} is the newest version.")
@@ -2477,13 +2629,20 @@ class AppController:
             how = "Run `snipux --update` to install it."
         self._report_shortcut(f"Snipux {release.version} is available. {how}")
 
-    def install_available_update(self, opener=None) -> None:
+    def install_available_update(self, opener=None, *, temp_dir: Path | None = None) -> None:
         """Download the release the check found, and hand it to the
         platform to apply.
 
         Off the UI thread, for the same reason the check is: this is tens of
         megabytes, and a tray menu frozen for the length of a download looks
         like a crash.
+
+        Only a file the release published a SHA-256 for: what is downloaded
+        is run silently, so one that cannot be checked is not fetched at
+        all and the user is sent to the Releases page instead.
+
+        `opener` and `temp_dir` are passed only by tests, which must reach
+        neither the network nor the real temp directory.
         """
         release = self._available_update
         asset = (
@@ -2495,9 +2654,18 @@ class AppController:
             self.check_for_updates(opener)
             return
 
+        sha256 = release.sha256(asset)
+        if sha256 is None:
+            self._report_shortcut(
+                f"Snipux {release.version} cannot be verified from here, so it "
+                "was not downloaded. Install it from the Releases page."
+            )
+            return
+
         self._report_shortcut(f"Downloading Snipux {release.version}…")
-        destination = Path(tempfile.gettempdir()) / asset
-        download = updates.Download(url, destination, opener)
+        updates.remove_old_downloads(temp_dir)
+        destination = updates.new_download_dir(temp_dir) / asset
+        download = updates.Download(url, destination, opener, sha256=sha256)
         download.finished.connect(self._on_update_downloaded)
         self._update_download = download
         download.start()
@@ -2510,8 +2678,15 @@ class AppController:
         running -- so quitting is the last step of the update rather than
         something left for the user to work out.
         """
-        self._update_download = None
+        download, self._update_download = self._update_download, None
         if path is None:
+            if download is not None and download.result is updates.DownloadResult.MISMATCHED:
+                self._report_shortcut(
+                    "The update that was downloaded is not the file Snipux "
+                    "published, so it was not installed. Try again, or install "
+                    "it from the Releases page."
+                )
+                return
             self._report_shortcut(
                 "Could not download the update. Try again when you are online."
             )
@@ -2540,6 +2715,7 @@ class AppController:
     def _forget_player(self, window) -> None:
         if window in self._players:
             self._players.remove(window)
+            _release_closed()
 
     def _forget_review(self, window) -> None:
         """Drop a closed review window, so a long session doesn't
@@ -2547,13 +2723,14 @@ class AppController:
         """
         if window in self._reviews:
             self._reviews.remove(window)
+            _release_closed()
 
     def _on_recording_requested(
         self,
         rect: QRectF | None,
         delay: str,
         after: str = design.tokens.RECORD_AFTER_DEFAULT,
-    ) -> None:
+    ) -> bool:
         """*Arm* a recording of `rect` (absolute logical virtual-desktop
         coordinates, or None for the whole desktop) --
         `OverlayWindow._commit_selection`'s record branch calls this and
@@ -2581,10 +2758,14 @@ class AppController:
         `_begin_armed_recording()`, which is the one place that needs a
         number -- `design.tokens.DELAYS` values ("No delay"/"3s"/"5s"/"10s")
         pass through overlay.py unparsed everywhere else.
+
+        Returns whether the recording was armed. False is a refusal, already
+        reported: the overlay has marked itself armed by the time it asks,
+        and has to be told to stand down.
         """
         if self._recorder_registry is None:
             self._report_shortcut(self._recorder_unavailable_message)
-            return
+            return False
 
         # `start_capture`'s re-entrancy guard only blocks a second overlay
         # while the first is genuinely still open -- and the record branch
@@ -2606,7 +2787,7 @@ class AppController:
                 "Snipux is already recording, or about to start -- finish that "
                 "recording before starting another."
             )
-            return
+            return False
 
         # The real filename/save-folder convention only applies once the
         # recording lands (`_land_recording`) -- while it's in progress the
@@ -2632,6 +2813,7 @@ class AppController:
             self._report_shortcut(
                 "Ready to record -- press the capture shortcut to start."
             )
+        return True
 
     def _show_recording_hud(self, rect: QRectF | None) -> None:
         """Put the pill up in its armed state, if there is anywhere to put
@@ -3398,6 +3580,12 @@ class AppController:
         audio = self._recording_audio
         if platform.current.audio_source_unavailable_reason(audio):
             audio = design.tokens.AUDIO_DEFAULT
+        # Read here, per recording, and handed down: the recorders are
+        # backends and do not read config themselves.
+        options = RecordingOptions(
+            frame_rate=setup_desktop.load_recording_frame_rate(),
+            draw_cursor=setup_desktop.load_recording_draw_cursor(),
+        )
         # Only when every backend that could run says it is safe. The
         # Windows recorder builds a QScreenCapture, a QMediaCaptureSession
         # and a QMediaRecorder in start(); created on a worker thread, they
@@ -3408,9 +3596,9 @@ class AppController:
             backend.starts_off_thread
             for backend in self._recorder_registry.available()
         ):
-            return self._recorder_registry.start(rect, path, audio)
+            return self._recorder_registry.start(rect, path, audio, options)
 
-        starter = _RecorderStarter(self._recorder_registry, rect, path, audio)
+        starter = _RecorderStarter(self._recorder_registry, rect, path, audio, options)
         loop = QEventLoop()
         starter.done.connect(loop.quit)
 
@@ -3726,7 +3914,9 @@ class AppController:
         (`_show_recording_chrome`/`_start_recording_ui`), so a genuine
         click can only land once a backend really is running.
         """
-        if self._active_recording is None:
+        if self._active_recording is None or self._stopping_recording:
+            # A stop running on a worker thread owns the backend until it
+            # reports back; a pause from here would race it.
             return
         backend, _path, _after = self._active_recording
         if self._recording_paused:
@@ -3837,8 +4027,9 @@ class AppController:
             # landed there is nothing left that knows.
             elapsed = self._elapsed_text()
             self._teardown_recording_ui(keep_bar=True)
+            self._show_saving_bar()
             try:
-                backend.stop()
+                self._stop_recorder_responsively(backend)
             except RecordingPartsError as exc:
                 stopped = False
                 self._keep_recording_parts(exc.parts)
@@ -3869,6 +4060,64 @@ class AppController:
             self._close_recording_bar()
         else:
             self._show_finished_bar(landed, elapsed, copied=after == "instant")
+
+    def _stop_recorder_responsively(self, backend) -> None:
+        """`backend.stop()`, with the interface still alive while it runs
+        if the backend says its stop can be slow.
+
+        The same nested event loop as `_start_recorder_responsively`, for
+        the same reason: `_stop_recording` still returns with the file
+        landed, so its callers and its error handling are unchanged, and a
+        failure is re-raised here on the UI thread exactly as an inline
+        `stop()` would have raised it.
+
+        Re-entrancy is `_stopping_recording`'s job, which is already set:
+        a second Stop, the shortcut and Discard all reach its check and do
+        nothing, so the recording being saved is neither stopped twice nor
+        deleted. Quitting ends the nested loop early, so the wait below is
+        what keeps the file from being moved before it is finished -- the
+        app leaves once it has landed.
+
+        A backend that has not opted in stops inline. Windows' recorder is
+        QObjects owned by this thread, and its stop was measured at
+        22-49ms.
+        """
+        if not backend.stops_off_thread:
+            backend.stop()
+            return
+
+        stopper = _RecorderStopper(backend)
+        loop = QEventLoop()
+        stopper.done.connect(loop.quit)
+        QThreadPool.globalInstance().start(stopper.run)
+        loop.exec()
+        stopper.wait_until_finished()
+        if stopper.error is not None:
+            raise stopper.error
+
+    def _show_saving_bar(self) -> None:
+        """Put "Saving…" on the bar, on screen, before `backend.stop()`.
+
+        An inline `stop()` blocks this thread until the file is finished,
+        and nothing paints while it does, so whatever the bar reads when
+        the call begins is what it reads until it ends -- and that was the
+        running clock beside a Stop button that had already been pressed.
+        That is tens of milliseconds on Windows (measured). The Linux
+        recorders, which can take seconds, stop on a worker instead (see
+        `_stop_recorder_responsively`) and this is what the bar reads
+        throughout.
+        """
+        bar = self._recording_hud
+        if bar is None:
+            return
+        bar.set_saving()
+        self._reposition_recording_bar()
+        # repaint(), not update(): update() only schedules a paint for the
+        # next turn of the event loop, and the next turn is after stop().
+        # The layout is activated first for the same reason -- the controls
+        # the new state shows are otherwise placed by a queued event.
+        bar.layout().activate()
+        bar.repaint()
 
     def _keep_recording_parts(self, parts: list[str]) -> None:
         """A paused recording whose pieces could not be joined: save each
@@ -4117,9 +4366,18 @@ class AppController:
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             self._report_shortcut(f"Stopping the recording failed: {exc}")
         finally:
-            Path(path).unlink(missing_ok=True)
             self._active_recording = None
             self._stopping_recording = False
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError as exc:
+            # Windows will not delete a file its recorder still has open.
+            # The startup sweep of the recording temp folder takes it.
+            self._report_shortcut(
+                f"The discarded recording could not be removed yet ({exc}). "
+                "Snipux removes it the next time it starts."
+            )
+            return
         self._report_shortcut("Recording discarded.")
 
     def _on_overlay_dismissed(self) -> None:
@@ -4229,13 +4487,14 @@ def install_crash_log(
     `log_path` is a callable rather than a path so the location is resolved
     when an exception happens, not when the hook is installed.
 
-    `notify`, when given, also tells the user, once per distinct error. A
+    `notify`, when given, also tells the user, once per distinct failure
+    (its type and the line that raised it). A
     log alone was not enough: a snip that failed to open looked exactly like
     a hotkey that had stopped working, with nothing on screen to say
     otherwise.
     """
     already_logged: set[str] = set()
-    notified: set[type] = set()
+    notified: set[tuple[type, str, int]] = set()
 
     def log_unhandled(exc_type, exc, tb) -> None:
         text = "".join(traceback.format_exception(exc_type, exc, tb))
@@ -4254,24 +4513,37 @@ def install_crash_log(
             path.parent.mkdir(parents=True, exist_ok=True)
             _trim_crash_log(path)
             stamp = datetime.datetime.now().isoformat(timespec="seconds")
-            with path.open("a", encoding="utf-8") as log:
-                log.write(f"--- {stamp} snipux {__version__}\n{text}\n")
+            with path.open("a", encoding="utf-8") as crash_log:
+                crash_log.write(f"--- {stamp} snipux {__version__}\n{text}\n")
         except OSError:
             # A log that cannot be written must not raise from the hook:
             # that would put the error back in Qt's hands.
             pass
-        # One notice per kind of error: a message that changes each time (a
-        # position in a paint error) would otherwise be a balloon per frame.
-        if notify is not None and exc_type not in notified:
-            notified.add(exc_type)
+        # One notice per failure, where a failure is its type and the line
+        # that raised it: a message that changes each time (a position in a
+        # paint error) would otherwise be a balloon per frame. Not the type
+        # alone -- in a session lasting days the second AttributeError is
+        # almost never the first one again, and it was logged and never shown.
+        failure = (exc_type, *_raised_at(tb))
+        if notify is not None and failure not in notified:
+            notified.add(failure)
             try:
                 notify(f"Something went wrong: {exc}. Details are in {log_path()}.")
             except Exception as notify_error:  # noqa: BLE001 - must not leave the hook
                 # Raising here would put the error back in Qt's hands; the
                 # log already has the original.
-                print(f"Note: could not show the error notice: {notify_error}")
+                log.note(f"Note: could not show the error notice: {notify_error}")
 
     sys.excepthook = log_unhandled
+
+
+def _raised_at(tb) -> tuple[str, int]:
+    """The file and line an exception was raised from: the innermost frame
+    of its traceback, or nowhere for one that has none."""
+    frames = traceback.extract_tb(tb)
+    if not frames:
+        return ("", 0)
+    return (frames[-1].filename, frames[-1].lineno or 0)
 
 
 def _trim_crash_log(path: Path) -> None:
@@ -4372,12 +4644,16 @@ def _become_resident(
     # day snipux is not opened. Says nothing unless there is something to
     # say (`check_for_updates_daily`).
     controller.check_for_updates_daily()
+    controller.warm_recent_thumbnails()
     # Reading the system font list is ~120ms on Windows and the first
     # overlay needs it. Once the loop is idle, so the first snip after
     # launch is not the one that pays for it.
     QTimer.singleShot(0, design.font_families)
     if start_capture_immediately:
         controller.start_capture()
+    else:
+        # After the fonts, and never ahead of a snip already asked for.
+        QTimer.singleShot(0, controller.warm_first_snip)
     if open_settings_immediately:
         controller.open_settings()
     if open_path_immediately is not None:
@@ -4385,6 +4661,30 @@ def _become_resident(
     if open_editor_immediately is not None:
         controller.open_editor(open_editor_immediately)
     return app.exec()
+
+
+def _release_closed() -> None:
+    """Free a closed pin, review window or player now, not whenever the
+    cycle collector gets to it.
+
+    Dropping it from the controller's list does not free it. The `closed`
+    connection that got us here is a lambda holding the window, kept alive
+    by the window, and the windows wire lambdas and callbacks of their own
+    the same way -- so only the collector can free one, and with it the
+    full-size picture or decoder it holds: 59 MB for one pinned 5K desktop.
+    Left alone, the collector's full passes get rarer the longer the
+    process lives, and in a session of days a closed window stayed.
+
+    So one pass is asked for, on the next turn of the event loop -- not
+    here, which is inside the window's own `closeEvent` and no place to
+    delete it. Measured at 2.5 ms with ~35,000 objects alive.
+
+    Not `deleteLater()`: once the Qt object is gone PyQt can no longer
+    show the collector the window's connections, and the Python half --
+    the half holding the picture -- is then never freed at all. Measured,
+    and worse than what this replaces.
+    """
+    QTimer.singleShot(0, gc.collect)
 
 
 def _present(window: QWidget) -> None:
@@ -4516,6 +4816,10 @@ def _dispatch(*, may_relaunch: bool) -> int:
     instead of through a console-stub launcher.
     """
     arguments = sys.argv[1:]
+    # Ahead of the console on purpose: see the Windows implementation.
+    handed_off = platform.current.hand_off_to_stable_install(arguments)
+    if handed_off is not None:
+        return handed_off
     reattach_console(attach=bool(arguments))
     # Before anything starts a program: from inside a bundle they would
     # inherit its libraries and fail -- see snipux/hostenv.py.

@@ -159,7 +159,7 @@ bottom of the screen.
 
 The clamp puts the bar over the pixels the user just framed in order to mark
 them up. That is the report `FloatingBar.reposition`'s docstring and comments
-in `snipux/overlay.py` record: "when u select a small region the controls are
+in `snipux/toolbar.py` record: "when u select a small region the controls are
 in the region so u cant edit anything", on a 1123x74 strip. A short selection
 is the usual way to hit it, but distance to the monitor's bottom edge is what
 decides it.
@@ -335,7 +335,7 @@ an open menu paints above the hint pill beneath it and no effect-bearing
 parent can trap it.
 
 **We make them children of the overlay, or of the review window** -- not of
-the bar, and not top-level popups (`FamilyMenu` in `snipux/overlay.py`). As
+the bar, and not top-level popups (`FamilyMenu` in `snipux/popovers.py`). As
 children of the window they still paint above the bar and the strip under
 it, which is what the handoff was guarding against.
 

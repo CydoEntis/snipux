@@ -33,8 +33,8 @@ first one, so the export path must honour it.
 from __future__ import annotations
 
 import shutil
-import struct
 import subprocess
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,7 +80,15 @@ from PyQt6.QtWidgets import (
 from . import design, hostenv, output, setup_desktop
 from .design import tokens
 from .flowbars import FlowMenu, MenuReopenGuard
-from .winchrome import EmptyState, WinWindow, _mono_font, _ui_font, open_filter
+from .winchrome import (
+    Badge,
+    EmptyState,
+    WinWindow,
+    ZoomBadge,
+    _mono_font,
+    _ui_font,
+    open_filter,
+)
 
 RECORDING_FILTER = open_filter("Recordings", tokens.EDITOR_RECORDING_SUFFIXES)
 
@@ -139,6 +147,38 @@ def estimate_size_mb(format_id: str, trimmed_seconds: float) -> float:
 # --------------------------------------------------------------------------
 # Reading the file: thumbnails and peaks, each once, off to the side.
 # --------------------------------------------------------------------------
+
+
+# What a filmstrip cell can show at most: the rail's whole height, and a
+# sixteenth of a window as wide as a 4K screen.
+_THUMBNAIL_BOX = QSize(240, _M.RAIL_H)
+
+
+def _thumbnail(image: QImage) -> QImage:
+    """`image` shrunk to cover `_THUMBNAIL_BOX`, in memory of its own.
+
+    A decoded frame is the size of the recording -- 14MB for a 2560x1440
+    monitor -- and the rail draws it 44 pixels tall. Sixteen were copied
+    at full size and, when they arrived before the window had been laid
+    out, held at full size. Shrinking is cheaper than the copy it replaces
+    (measured: 0.23ms against 1.47ms for that frame), and the rail's own
+    scaling to the cell then starts from about 130KB. It does not make the
+    strip arrive sooner: sixteen seeks and decodes of that recording take
+    about 0.9s either way, spread over as many turns of the event loop.
+
+    Covering the box rather than fitting inside it, because the rail fills
+    a cell by expanding: a thumbnail any smaller on either side would be
+    stretched back up. A frame that does not cover it already is copied as
+    it is.
+    """
+    box = _THUMBNAIL_BOX
+    if image.width() <= box.width() or image.height() <= box.height():
+        return image.copy()
+    return image.scaled(
+        box,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
 
 
 class FilmstripProbe(QObject):
@@ -203,7 +243,7 @@ class FilmstripProbe(QObject):
         image = frame.toImage()
         self._wanted = None
         if not image.isNull():
-            self.cell_ready.emit(index, image.copy())
+            self.cell_ready.emit(index, _thumbnail(image))
         if index + 1 < self._cells:
             QTimer.singleShot(0, lambda: self._request(index + 1))
         else:
@@ -216,6 +256,22 @@ class FilmstripProbe(QObject):
         self._player.stop()
         self._player.setSource(QUrl())
         self.finished.emit()
+
+
+def _loudest(raw: bytes) -> float | None:
+    """The largest swing, either way, among the float samples in `raw`, or
+    None if `raw` is not a whole number of them.
+
+    `array` reads the samples and finds both extremes in C. This was a
+    Python expression evaluated once per sample -- 8,000 a second of
+    audio -- on the UI thread; measured at 36 microseconds a buffer
+    against 16 this way. `array` is native-endian, which is also what a
+    `QAudioBuffer` of floats is.
+    """
+    if not raw or len(raw) % 4:
+        return None
+    samples = array("f", raw)
+    return max(max(samples), -min(samples))
 
 
 class WaveformProbe(QObject):
@@ -262,13 +318,11 @@ class WaveformProbe(QObject):
             frames = buffer.frameCount()
             if frames <= 0:
                 continue
-            raw = buffer.constData().asstring(buffer.byteCount())
-            try:
-                values = struct.unpack(f"<{frames}f", raw)
-            except struct.error:
+            peak = _loudest(buffer.constData().asstring(buffer.byteCount()))
+            if peak is None:
                 continue
             start_s = buffer.startTime() / 1_000_000
-            self._peaks.append((start_s, max(abs(v) for v in values)))
+            self._peaks.append((start_s, peak))
 
     def _emit(self, empty: bool = False) -> None:
         if self._done:
@@ -1241,11 +1295,36 @@ class FfmpegExporter(QObject):
         # has to work around. Anything outside a plausible range is not a
         # frame rate, it is a timebase, and gets replaced.
         self._fps = fps if 1 <= fps <= 120 else float(tokens.PLAYER_FPS)
+        # Nothing cut, and the container the recording is already in: every
+        # video frame the export would hold is one the file already has.
+        # Only then -- a copy can start and end on keyframes alone, so a
+        # trim copied would not land where the handles were put. In
+        # practice this is "the same clip without its sound", since the
+        # window writes nothing at all when the sound is kept too.
+        self._copies_video = (
+            format_id in ("mp4", "webm")
+            and source.suffix.lower() == f".{format_id}"
+            and not state.trimmed
+        )
         self._process = None
         self._tail: list[str] = []
         self._diagnosis = ""
 
+    def _copy_arguments(self) -> list[str]:
+        """The whole source with its video stream untouched: no seek, no
+        filter and no frame rate, none of which a copied stream can take.
+        Seconds instead of the clip's own length, and no generation lost.
+        """
+        args = ["-hide_banner", "-nostdin", "-y", "-i", str(self._source),
+                "-c:v", "copy"]
+        args += ["-an"] if self._muted else ["-c:a", "copy"]
+        if self._format == "mp4":
+            args += ["-movflags", "+faststart"]
+        return args + ["-progress", "pipe:1", "-nostats", str(self._destination)]
+
     def _arguments(self) -> list[str]:
+        if self._copies_video:
+            return self._copy_arguments()
         # `-ss` before `-i` seeks by keyframe, which is fast; the re-encode
         # that follows is what makes the cut land on the exact frame, so
         # there is no accuracy to trade away here.
@@ -1832,10 +1911,8 @@ class PlayerWindow(WinWindow):
         # Floating children of the canvas rather than rows in the column:
         # the design has all three *over* the picture, and a layout row
         # would push the picture up instead.
-        from .review import _Badge, _ZoomBadge
-
-        self.size_badge = _Badge(self.canvas)
-        self.zoom_badge = _ZoomBadge(self.canvas)
+        self.size_badge = Badge(self.canvas)
+        self.zoom_badge = ZoomBadge(self.canvas)
         self.zoom_badge.zoomChanged.connect(self._on_zoom)
 
         self.transport = TransportBar(self.canvas)

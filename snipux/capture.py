@@ -21,15 +21,39 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-
-from jeepney import DBusAddress, MatchRule, MessageType, new_method_call
-from jeepney.io.blocking import open_dbus_connection
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSizeF, QUrl
 from PyQt6.QtGui import QGuiApplication, QImage, QPainter
 
 from snipux import platform
+
+
+def _jeepney():
+    """The jeepney module, imported the first time D-Bus is actually used.
+
+    Not at the top of the file: this module is imported on every platform
+    and jeepney speaks a bus only Linux has, so Windows paid for the import
+    (5-6ms measured, more with its blocking I/O) at every start and never
+    called it.
+    """
+    import jeepney
+
+    return jeepney
+
+
+def open_dbus_connection(bus: str = "SESSION"):
+    """jeepney's blocking `open_dbus_connection`, imported on first use for
+    the reason `_jeepney()` gives.
+
+    A function of this module's own, rather than the import it used to be,
+    so every caller still goes through one name here -- which is the name
+    the tests replace to keep a real session bus out of them.
+    """
+    from jeepney.io.blocking import open_dbus_connection as open_connection
+
+    return open_connection(bus=bus)
 
 
 @dataclass
@@ -1344,7 +1368,7 @@ class PortalScreenshotBackend(CaptureBackend):
         before `_send_request()` — the ordering the portal's documented
         failure mode depends on.
         """
-        rule = MatchRule(
+        rule = _jeepney().MatchRule(
             type="signal",
             interface=self._REQUEST_INTERFACE,
             member="Response",
@@ -1354,10 +1378,10 @@ class PortalScreenshotBackend(CaptureBackend):
 
     def _send_request(self, connection, handle_token: str) -> None:
         """Send the `Screenshot` method call. Must run after `_subscribe`."""
-        portal = DBusAddress(
+        portal = _jeepney().DBusAddress(
             self._OBJECT_PATH, bus_name=self._BUS_NAME, interface=self._INTERFACE
         )
-        message = new_method_call(
+        message = _jeepney().new_method_call(
             portal,
             "Screenshot",
             "sa{sv}",
@@ -1490,15 +1514,15 @@ class GnomeShellHelperBackend(CaptureBackend):
         except Exception as exc:  # noqa: BLE001 - availability is reported
             return f"cannot reach the session bus: {type(exc).__name__}: {exc}"
         try:
-            dbus = DBusAddress(
+            dbus = _jeepney().DBusAddress(
                 "/org/freedesktop/DBus",
                 bus_name="org.freedesktop.DBus",
                 interface="org.freedesktop.DBus",
             )
             reply = connection.send_and_get_reply(
-                new_method_call(dbus, "NameHasOwner", "s", ("org.gnome.Shell",))
+                _jeepney().new_method_call(dbus, "NameHasOwner", "s", ("org.gnome.Shell",))
             )
-            if reply.header.message_type is MessageType.error:
+            if reply.header.message_type is _jeepney().MessageType.error:
                 body = reply.body or ("unspecified D-Bus error",)
                 return f"cannot query GNOME Shell: {body[0]}"
             (owned,) = reply.body
@@ -1541,11 +1565,11 @@ class GnomeShellHelperBackend(CaptureBackend):
         connection = open_dbus_connection(bus="SESSION")
         try:
             for bus_name, object_path, interface in self._ADDRESSES:
-                shell = DBusAddress(object_path, bus_name=bus_name, interface=interface)
+                shell = _jeepney().DBusAddress(object_path, bus_name=bus_name, interface=interface)
                 reply = connection.send_and_get_reply(
-                    new_method_call(shell, "Screenshot", "bbs", (False, False, path))
+                    _jeepney().new_method_call(shell, "Screenshot", "bbs", (False, False, path))
                 )
-                if reply.header.message_type is MessageType.error:
+                if reply.header.message_type is _jeepney().MessageType.error:
                     body = reply.body or ("unspecified D-Bus error",)
                     answers.append(f"{bus_name}: {body[0]}")
                     continue
@@ -1786,11 +1810,179 @@ class Win32GdiBackend(CaptureBackend):
             gdi32.DeleteDC(mem_dc)
 
 
+def _gdi_grab_rect(x: int, y: int, width: int, height: int) -> bytes:
+    """One `BitBlt` of a physical-pixel screen rect, as top-down BGRX bytes.
+
+    Safe to call from several threads at once: every handle here is made
+    and released inside the call, and ctypes drops the GIL for the blit.
+    The prototypes are declared on private `WinDLL` instances because a
+    handle is pointer-sized and ctypes' default `c_int` conversion truncates
+    one on 64-bit Windows.
+    """
+    user32 = ctypes.WinDLL("user32")
+    gdi32 = ctypes.WinDLL("gdi32")
+    handle = ctypes.c_void_p
+    user32.GetDC.restype, user32.GetDC.argtypes = handle, [handle]
+    user32.ReleaseDC.argtypes = [handle, handle]
+    gdi32.CreateCompatibleDC.restype, gdi32.CreateCompatibleDC.argtypes = handle, [handle]
+    gdi32.CreateDIBSection.restype = handle
+    gdi32.CreateDIBSection.argtypes = [
+        handle, ctypes.c_void_p, ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_void_p), handle, ctypes.c_uint32,
+    ]
+    gdi32.SelectObject.restype, gdi32.SelectObject.argtypes = handle, [handle, handle]
+    gdi32.BitBlt.argtypes = [
+        handle, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        handle, ctypes.c_int, ctypes.c_int, ctypes.c_uint32,
+    ]
+    gdi32.DeleteObject.argtypes = [handle]
+    gdi32.DeleteDC.argtypes = [handle]
+
+    screen_dc = user32.GetDC(None)
+    if not screen_dc:
+        raise RuntimeError("win32-monitors: GetDC(0) failed")
+    mem_dc = bitmap = None
+    try:
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        header = _BitmapInfoHeader()
+        header.biSize = ctypes.sizeof(_BitmapInfoHeader)
+        header.biWidth = width
+        # Negative: top-down rows, QImage's own order.
+        header.biHeight = -height
+        header.biPlanes = 1
+        header.biBitCount = 32
+        bits = ctypes.c_void_p()
+        # A DIB section rather than CreateCompatibleBitmap + GetDIBits: the
+        # blit lands straight in memory this process can read, which is one
+        # full copy of the monitor fewer.
+        bitmap = gdi32.CreateDIBSection(
+            screen_dc, ctypes.byref(header), 0, ctypes.byref(bits), None, 0
+        )
+        if not mem_dc or not bitmap or not bits:
+            raise RuntimeError("win32-monitors: could not create a bitmap to grab into")
+        old_bitmap = gdi32.SelectObject(mem_dc, bitmap)
+        try:
+            if not gdi32.BitBlt(
+                mem_dc, 0, 0, width, height, screen_dc, x, y, _GDI_SRCCOPY_CAPTUREBLT
+            ):
+                raise RuntimeError("win32-monitors: BitBlt failed")
+            return ctypes.string_at(bits, width * height * 4)
+        finally:
+            gdi32.SelectObject(mem_dc, old_bitmap)
+    finally:
+        if bitmap:
+            gdi32.DeleteObject(bitmap)
+        if mem_dc:
+            gdi32.DeleteDC(mem_dc)
+        user32.ReleaseDC(None, screen_dc)
+
+
+# SRCCOPY | CAPTUREBLT -- what Qt's own grabWindow passes, so layered
+# windows are in the picture exactly as they are for qt-native.
+_GDI_SRCCOPY_CAPTUREBLT = 0x40CC0020
+
+
+class Win32MonitorsBackend(CaptureBackend):
+    """Every monitor grabbed at the same time, one `BitBlt` per thread.
+
+    Reading a monitor back from the compositor is the whole cost of a
+    Windows capture, and it is paid per monitor. Measured on a desk of three
+    2560x1440 monitors: qt-native's three `grabWindow` calls, one after the
+    other, 75-87 ms; one `BitBlt` of the whole virtual screen, 68 ms; three
+    blits on three threads, 34 ms. That is most of the wait between the
+    shortcut and the overlay, so this is tried first.
+
+    The grab is still one instant, before any selection -- the threads are
+    how it is taken, not when.
+
+    Needs each monitor's physical rect paired with its logical one, which
+    `WindowsWindowGeometryProvider.monitor_map` builds and verifies. When
+    that map is not available this raises, and the registry moves on to
+    qt-native rather than guessing.
+    """
+
+    def name(self) -> str:
+        return "win32-monitors"
+
+    def is_available(self) -> bool:
+        return platform.is_windows()
+
+    def unavailable_reason(self) -> str | None:
+        return None if self.is_available() else "not running on Windows"
+
+    def capture(self) -> Frame:
+        mapping = WindowsWindowGeometryProvider().monitor_map()
+        if not mapping:
+            raise RuntimeError(
+                "win32-monitors: the monitors could not be matched to Qt's screens"
+            )
+        physical_rects = [physical.toRect() for physical, _logical, _scale in mapping]
+        # Held until the frame is built: each QImage below only aliases its
+        # bytes, which saves copying every monitor a second time.
+        grabbed = self._grab_all(physical_rects)
+        shots = [
+            (
+                logical,
+                QImage(
+                    pixels, rect.width(), rect.height(), rect.width() * 4,
+                    QImage.Format.Format_RGB32,
+                ),
+            )
+            for (_physical, logical, _scale), rect, pixels in zip(
+                mapping, physical_rects, grabbed
+            )
+        ]
+        if _screens_differ_in_scale():
+            # .copy(): these images outlive `grabbed` as the screen frames.
+            return _frame_from_screen_images(
+                [(logical, image.copy()) for logical, image in shots]
+            )
+        return self._composite(shots)
+
+    def _grab_all(self, physical_rects: "list[QRect]") -> list[bytes]:
+        def grab(rect: QRect) -> bytes:
+            return _gdi_grab_rect(rect.x(), rect.y(), rect.width(), rect.height())
+
+        if len(physical_rects) == 1:
+            return [grab(physical_rects[0])]
+        with ThreadPoolExecutor(max_workers=len(physical_rects)) as pool:
+            return list(pool.map(grab, physical_rects))
+
+    @staticmethod
+    def _composite(shots: "list[tuple[QRectF, QImage]]") -> Frame:
+        """One image of the whole virtual desktop, each monitor's physical
+        pixels placed at its logical rect times the one scale they share."""
+        virtual_rect = _virtual_desktop_geometry()
+        origin = virtual_rect.topLeft()
+        ratio = QGuiApplication.primaryScreen().devicePixelRatio()
+        image = QImage(
+            round(virtual_rect.width() * ratio),
+            round(virtual_rect.height() * ratio),
+            QImage.Format.Format_RGB32,
+        )
+        # Monitors need not tile the union; what none covers stays black.
+        image.fill(0)
+        painter = QPainter(image)
+        for logical, shot in shots:
+            painter.drawImage(
+                QPointF(
+                    (logical.x() - origin.x()) * ratio,
+                    (logical.y() - origin.y()) * ratio,
+                ),
+                shot,
+            )
+        # Closed before the Frame is built, per CLAUDE.md.
+        painter.end()
+        return Frame(image=image, logical_origin=origin, logical_size=virtual_rect.size())
+
+
 def build_windows_registry() -> BackendRegistry:
-    """The real Windows `BackendRegistry`: qt-native first, then the Win32
-    GDI fallback for whenever it doesn't cover the whole virtual desktop.
+    """The real Windows `BackendRegistry`: the parallel per-monitor grab
+    first because it is the fastest, then qt-native, then the single-blit
+    GDI fallback for whenever neither covers the whole virtual desktop.
     """
     registry = BackendRegistry()
+    registry.add(Win32MonitorsBackend())
     registry.add(QtNativeWindowsBackend())
     registry.add(Win32GdiBackend())
     return registry
@@ -1843,6 +2035,46 @@ class _MonitorInfo(ctypes.Structure):
         ("rcWork", _RECT),
         ("dwFlags", ctypes.c_uint32),
     ]
+
+
+def _pair_monitors_with_screens(
+    monitors: "list[tuple[QRectF, float]]", screens: "list[QRectF]"
+) -> "list[tuple[QRectF, QRectF, float]]":
+    """Pair each Win32 monitor `(physical rect, scale)` with the logical
+    rect of the Qt screen showing it, or `[]` when a pair fails to verify.
+
+    Paired by **top-left corner** where every screen has a monitor at its
+    own: Qt scales a screen's size but leaves its origin where Windows put
+    it. That matters for two monitors of the same size, which pass the size
+    check either way round -- and Qt lists the primary first while
+    `EnumDisplayMonitors` uses the system's order, so paired by index their
+    pixels could land on each other's screens. Where the corners do not
+    line up for every screen, the lists are paired by index as before.
+
+    Either way each pair is then verified by size, rounded: a 150% scale
+    on an odd pixel count does not divide evenly and Qt rounds too, so a
+    pixel of disagreement is arithmetic, not a mismatched monitor.
+    """
+    if not monitors or len(monitors) != len(screens):
+        return []
+    by_corner = {
+        (round(physical.x()), round(physical.y())): (physical, scale)
+        for physical, scale in monitors
+    }
+    corners = [(round(screen.x()), round(screen.y())) for screen in screens]
+    if len(by_corner) == len(monitors) and all(c in by_corner for c in corners):
+        ordered = [by_corner[corner] for corner in corners]
+    else:
+        ordered = monitors
+    mapping: list[tuple[QRectF, QRectF, float]] = []
+    for (physical, scale), logical in zip(ordered, screens):
+        if (
+            round(physical.width() / scale) != round(logical.width())
+            or round(physical.height() / scale) != round(logical.height())
+        ):
+            return []
+        mapping.append((physical, logical, scale))
+    return mapping
 
 
 class WindowsWindowGeometryProvider:
@@ -2139,14 +2371,11 @@ class WindowsWindowGeometryProvider:
 
         The map is built rather than computed from a formula, and then
         checked. Qt's logical layout is not a simple global divide once
-        monitors differ in scale, so each Win32 monitor is paired with the
-        `QScreen` at the same index and the pair is *verified*: the
-        monitor's physical size divided by its own DPI scale must equal
-        that screen's logical size. Index order matching was confirmed on a
-        real three-monitor desk (`EnumDisplayMonitors` and
-        `QGuiApplication.screens()` agreed, including a monitor mounted
-        above the others at a negative y), but it is not promised by either
-        API -- so the verification is what makes relying on it safe.
+        monitors differ in scale, so each Win32 monitor is paired with a
+        `QScreen` and the pair is *verified*: the monitor's physical size
+        divided by its own DPI scale must equal that screen's logical size
+        (`_pair_monitors_with_screens`, which also says how they are
+        paired).
 
         `[]` when any pair fails to verify, when the DPI cannot be read, or
         when the counts differ. `_to_logical` then returns rects unchanged,
@@ -2178,8 +2407,8 @@ class WindowsWindowGeometryProvider:
         if not handles or len(handles) != len(screens):
             return []
 
-        mapping: list[tuple[QRectF, QRectF, float]] = []
-        for handle, screen in zip(handles, screens):
+        monitors: list[tuple[QRectF, float]] = []
+        for handle in handles:
             info = _MonitorInfoExW()
             info.cbSize = ctypes.sizeof(_MonitorInfoExW)
             if not user32.GetMonitorInfoW(handle, ctypes.byref(info)):
@@ -2191,24 +2420,14 @@ class WindowsWindowGeometryProvider:
                 return []
             if dpi_x.value <= 0:
                 return []
-            scale = dpi_x.value / 96.0
-
             rect = info.rcMonitor
-            physical = QRectF(
-                rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
-            )
-            logical = QRectF(screen.geometry())
-            # The check that makes index pairing safe. Rounded, because a
-            # 150% scale on an odd pixel count does not divide evenly and
-            # Qt rounds too -- a pixel of disagreement is arithmetic, not a
-            # mismatched monitor.
-            if (
-                round(physical.width() / scale) != round(logical.width())
-                or round(physical.height() / scale) != round(logical.height())
-            ):
-                return []
-            mapping.append((physical, logical, scale))
-        return mapping
+            monitors.append((
+                QRectF(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top),
+                dpi_x.value / 96.0,
+            ))
+        return _pair_monitors_with_screens(
+            monitors, [QRectF(screen.geometry()) for screen in screens]
+        )
 
     def _to_logical(self, physical: QRectF, mapping=None) -> QRectF:
         """A physical-pixel rect -> the absolute logical rect this class

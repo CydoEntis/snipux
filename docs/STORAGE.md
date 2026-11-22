@@ -15,19 +15,45 @@ issue that shows a problem the current approach cannot handle.
 | Hide list              | `hide-list.txt`, beside `config.json`                    |
 | Watermark image        | `watermark/`, beside `config.json`                       |
 | Unexpected errors      | `crash.log`, beside `config.json`                        |
+| Handled failures       | `snipux.log`, beside `config.json`                       |
 | Snips                  | `save_folder` setting, default `~/Pictures/snipux`       |
 | Recordings             | `recording_folder` setting, default `~/Videos/snipux`    |
 | Linux desktop entries  | `$XDG_DATA_HOME/applications` (`snipux.desktop` and the two editors' `snipux-image-editor.desktop`, `snipux-video-editor.desktop`), `$XDG_CONFIG_HOME/autostart`, `$XDG_DATA_HOME/icons/hicolor` |
 | Windows shortcuts      | `%APPDATA%\Microsoft\Windows\Start Menu\Programs` (`snipux.lnk`, `Snipux Image Editor.lnk`, `Snipux Video Editor.lnk`, + Startup) |
 | Windows Open with      | `HKCU\Software\Classes`: `Snipux.ImageEditor`, `Snipux.VideoEditor`, `Applications\<launcher>.exe`, and one value under each suffix's `OpenWithProgids` |
-| Windows exe + icon     | `%LOCALAPPDATA%\snipux`                                  |
+| Windows exe + icon     | `%LOCALAPPDATA%\snipux`: `snipux.exe`, its libraries in `_internal\`, `snipux.ico` |
 
 The settings folder is `$XDG_CONFIG_HOME/snipux`, falling back to
 `~/.config/snipux` -- on every OS, Windows included, so one folder backs up
 everything. `setup_desktop.config_path()` is the one function that knows it.
 
+`%LOCALAPPDATA%\snipux` holds the same thing whichever download put it
+there. The installer writes `snipux.exe`, `_internal\` and its own
+`unins000.*`. The portable `snipux.exe` writes the first two itself on its
+first run (`platform/windows_portable.py`), about 90 MB, and replaces them
+when a different version of the portable exe is run; there is never more
+than one version there. While it does, `.staging\` holds the copy being
+prepared and `.replaced\` the one being swapped out; both are gone when it
+finishes, and one left by a run that was killed is deleted by the next. A
+folder with `unins000.exe` in it is the installer's, and the portable exe
+writes nothing to it.
+
+A snip is written as `<name>.png.part` beside where it is going and renamed
+once it is complete (`output.write_image`), so the real name never holds
+half a picture. A `.part` file left in the save folder is a write that was
+cut off -- by a crash or a power loss -- and is safe to delete.
+
+`crash.log` holds unhandled exceptions. `snipux.log` holds the failures
+snipux dealt with and would once only have printed -- a shortcut that could
+not be written, a snip that failed with no tray to say so -- one dated line
+each, written through `log.note()`. Both are cut back to their newest half
+once they pass 256 KB, both can contain paths with the user's name in them,
+and "Report a problem" offers the end of each. Nothing else is logged, and
+neither file ever leaves the machine unless the user posts that report.
+
 **Not stored anywhere:** the tray's Copy history -- the last 10 things snipux
-copied -- lives in memory only (`output.copy_history()`) and is gone when
+copied, and no more than 128 MB of pictures among them, oldest dropped
+first -- lives in memory only (`output.copy_history()`) and is gone when
 snipux quits. That is deliberate: a copied snip can show a password or a
 private message, and saving every copy to disk without asking would keep it
 after the user thought it was gone.
@@ -95,6 +121,12 @@ last_region                 recording_audio             watermark_kind
   longer exists is dropped when the tray menu is rebuilt.
 - Temporary files (OCR input, export intermediates) go in the system temp
   directory and are removed in a `finally`.
+- A downloaded update goes in a folder of its own there, `snipux-update-*`
+  (`updates.new_download_dir`), and only after it has matched the SHA-256
+  the release published. The installer is running from that folder when
+  snipux quits, so it cannot be removed then: the next daily check and the
+  next download remove whatever earlier updates left
+  (`updates.remove_old_downloads`).
 
 ## Tests
 

@@ -168,6 +168,32 @@ class TestWhatEachStateShows:
         bar.set_done("00:27 - 11.3 MB - webm", destination="Copy")
         assert bar._action.isHidden() is False
 
+    def test_saving_says_so_and_offers_nothing_to_press(self, bar):
+        # Between Stop and the file landing the recorder is finishing the
+        # file. The bar went on reading "0:12 Stop" through all of it, so a
+        # second press looked like the thing to do.
+        bar.set_live("0:12", size="1280x720")
+
+        bar.set_saving()
+
+        assert bar.state() == RecordingBar.SAVING
+        assert bar._summary.isHidden() is False
+        assert bar._summary.text() == "Saving…"
+        for control in (bar._action, bar._pause, bar._clock, bar._discard, bar._cancel):
+            assert control.isHidden() is True
+        assert bar._action_divider.isHidden() is True
+        assert bar._tail_divider.isHidden() is True
+
+    def test_a_press_while_saving_stops_nothing(self, bar):
+        fired = []
+        bar.stopClicked.connect(lambda: fired.append("stop"))
+        bar.set_live("0:12")
+        bar.set_saving()
+
+        bar._on_action()
+
+        assert fired == []
+
     def test_a_divider_only_appears_when_it_separates_something(self, bar):
         # Two dividers with nothing between them is how a bar looks broken
         # in one state and fine in every other.
@@ -203,6 +229,15 @@ class TestTheLiveStateIsTheOnlyRedOne:
         assert live.red() > live.green() and live.red() > live.blue()
         assert live.red() > idle.red()
         assert idle.red() <= idle.green()  # the idle hairline is neutral
+
+    def test_saving_is_not_red(self, bar):
+        # Nothing is being filmed any more.
+        bar.set_live("0:12")
+        bar.set_saving()
+
+        saving = self._border_pixels(bar)
+
+        assert saving.red() <= saving.green()
 
 
 class TestAudio:

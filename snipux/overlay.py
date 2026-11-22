@@ -10,14 +10,27 @@ in this module asks for a fresh screen read while the user is dragging.
 coordinates, and converts to absolute logical virtual-desktop coordinates
 (the space `Frame` and `GeometryProvider` use) only at the edges -- see
 `_to_absolute` and `absolute_selection`.
+
+This module is the window: what the selection is, what a press or a key
+means, what gets painted and in what order. What it builds and what it
+asks live beside it, and none of them imports this module back:
+
+  toolbar.py         the floating bar, its buttons and the tool hint strip
+  popovers.py        the style popover, capture-mode popover, family menus
+  watermark.py       the watermark's choice, Settings content and menu
+  overlaychrome.py   the hint HUD, toast, close button, delay countdown
+  selectionframe.py  where handles, brackets and the chips are (geometry)
+  inklayers.py       the cached layers of frame and ink, and mark bounds
+  loupe.py           what the eyedropper magnifies and where its box goes
+  sensitivecheck.py  one Hide sensitive read: record, worker, rects to cover
 """
 
 from __future__ import annotations
 
 import math
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -35,7 +48,6 @@ from PyQt6.QtCore import (
     QSizeF,
     Qt,
     QTimer,
-    pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor,
@@ -43,66 +55,100 @@ from PyQt6.QtGui import (
     QGuiApplication,
     QFont,
     QFontMetricsF,
-    QIcon,
     QImage,
     QMouseEvent,
     QPainter,
     QPainterPath,
     QPen,
+    QRegion,
     QScreen,
-    QTransform,
 )
 from PyQt6.QtWidgets import (
-    QButtonGroup,
     QApplication,
-    QColorDialog,
     QGraphicsOpacityEffect,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
     QLineEdit,
-    QPushButton,
-    QSizePolicy,
+    QMessageBox,
     QSlider,
-    QVBoxLayout,
     QWidget,
 )
 
-from snipux import design, glass, output, platform, sensitive, setup_desktop
+from snipux import (
+    design,
+    log,
+    loupe,
+    output,
+    platform,
+    selectionframe,
+    sensitive,
+    sensitivecheck,
+    setup_desktop,
+)
 from snipux.capture import BackendRegistry, CaptureError, Frame
 from snipux.chooser import Chooser
 from snipux.flowbars import FlowMenu, MenuReopenGuard
+from snipux.inklayers import InkLayers, covered_mark_count
+from snipux.loupe import _hex_of
 from snipux.marks import (
     MarkStore,
     TextLabelEditor,
-    ToolStyle,
     ToolStyles,
     begin_stroke,
     extend_stroke,
     session_styles,
     snap_to_text,
 )
+from snipux.overlaychrome import _CloseButton, DelayCountdown, HintHUD, Toast
+from snipux.popovers import CaptureModePopover, FamilyMenu, _STEP_KEY_CODES, StylePopover
+from snipux.selectionframe import (
+    _BOTTOM_HANDLES,
+    _CORNER_HANDLES,
+    _EDGE_HANDLES,
+    Handle,
+    _HANDLE_CURSORS,
+    _LEFT_HANDLES,
+    _RIGHT_HANDLES,
+    _TOP_HANDLES,
+)
+from snipux.sensitivecheck import _SensitiveCheck, _SensitiveCheckRelay, _recognize_for_check
 from snipux.shapes import (
-    Arrow,
-    Blur,
     Callout,
     Crop,
-    Ellipse,
     Highlighter,
-    Line,
     ObscuringShape,
-    Pen,
-    Pixelate,
-    Rectangle,
     Redact,
     Shape,
-    Spotlight,
     StepMarker,
-    Text,
     Watermark,
     finalize_mark,
     next_step_number,
     render_selection,
+)
+from snipux.toolbar import FloatingBar, ToolHintStrip
+from snipux.watermark import (
+    WatermarkChoice,
+    WatermarkMenu,
+    watermark_content,
+    watermark_text_style,
+)
+
+# Re-exported: these moved out to the modules beside this one, and callers
+# and tests still reach them as `snipux.overlay.<name>`.
+from snipux.loupe import LOUPE_OFFSET
+from snipux.popovers import (
+    _CaptureModeRow,
+    _CustomColorButton,
+    _CycleButton,
+    _DelayRow,
+    _MenuSeparator,
+    _SwatchButton,
+)
+from snipux.toolbar import (
+    _Divider,
+    _Notch,
+    _PillButton,
+    _TOOL_SHORTCUT_KEYS,
+    _ToolPill,
+    _tool_label,
 )
 
 
@@ -191,125 +237,9 @@ class UnsupportedGeometryProvider(GeometryProvider):
         return None
 
 
-# The eyedropper's loupe. Its source square is in *logical* px, so it covers
-# the same real-world area whatever the monitor's scale factor, and becomes
-# image pixels only at crop time.
-LOUPE_SOURCE_LOGICAL_SIZE = 20.0
-# A fixed logical box, independent of the source's scale factor -- which is
-# what keeps the crosshair on the same logical pixel whatever the scaling.
-LOUPE_BOX_SIZE = 120
-# Off the cursor, so the box never sits on the pixel it is magnifying.
-LOUPE_OFFSET = QPointF(20.0, 20.0)
-LOUPE_CROSSHAIR_COLOR = QColor(255, 0, 0)
-
 # The flat scrim over a monitor that is not the interactive one.
 VEIL_COLOR = QColor(0, 0, 0, 120)
 
-
-class Handle(Enum):
-    """The eight drag handles around an `OverlayWindow` selection.
-
-    Corners double as their own visible chrome -- the corner brackets *are*
-    the handle, per docs/design/overlay-redesign.md's "Selection frame"
-    section -- while edges get a small rounded bar. Cursor shapes and paint
-    geometry are both keyed off these same names so the two can never drift
-    apart from each other.
-    """
-
-    TOP_LEFT = "top_left"
-    TOP_RIGHT = "top_right"
-    BOTTOM_LEFT = "bottom_left"
-    BOTTOM_RIGHT = "bottom_right"
-    TOP = "top"
-    BOTTOM = "bottom"
-    LEFT = "left"
-    RIGHT = "right"
-
-
-_CORNER_HANDLES = (
-    Handle.TOP_LEFT,
-    Handle.TOP_RIGHT,
-    Handle.BOTTOM_LEFT,
-    Handle.BOTTOM_RIGHT,
-)
-_EDGE_HANDLES = (Handle.TOP, Handle.BOTTOM, Handle.LEFT, Handle.RIGHT)
-
-# Which edge(s) a handle drags. A corner handle frees the two perpendicular
-# edges that meet at it; an edge handle frees just its own. Every other edge
-# is the anchor for that handle's drag and is never written during it -- this
-# is what "the opposite edge/corner stays anchored" (the re-framing
-# acceptance criteria) reduces to in _resize_selection below.
-_LEFT_HANDLES = (Handle.TOP_LEFT, Handle.BOTTOM_LEFT, Handle.LEFT)
-_RIGHT_HANDLES = (Handle.TOP_RIGHT, Handle.BOTTOM_RIGHT, Handle.RIGHT)
-_TOP_HANDLES = (Handle.TOP_LEFT, Handle.TOP_RIGHT, Handle.TOP)
-_BOTTOM_HANDLES = (Handle.BOTTOM_LEFT, Handle.BOTTOM_RIGHT, Handle.BOTTOM)
-
-# nwse-resize / nesw-resize on corners, ns-resize / ew-resize on edges, per
-# the README's "Selection frame" section.
-_HANDLE_CURSORS = {
-    Handle.TOP_LEFT: Qt.CursorShape.SizeFDiagCursor,
-    Handle.BOTTOM_RIGHT: Qt.CursorShape.SizeFDiagCursor,
-    Handle.TOP_RIGHT: Qt.CursorShape.SizeBDiagCursor,
-    Handle.BOTTOM_LEFT: Qt.CursorShape.SizeBDiagCursor,
-    Handle.TOP: Qt.CursorShape.SizeVerCursor,
-    Handle.BOTTOM: Qt.CursorShape.SizeVerCursor,
-    Handle.LEFT: Qt.CursorShape.SizeHorCursor,
-    Handle.RIGHT: Qt.CursorShape.SizeHorCursor,
-}
-
-
-def _l_bracket_local_path(length: float, thickness: float, radius: float) -> QPainterPath:
-    """A top-left-oriented L bracket: top and left arms meeting in a box
-    `(0, 0, length, length)`, with only the outer corner -- (0, 0), the tip
-    that points away from the selection -- rounded.
-
-    Canonical shape that `OverlayWindow._bracket_path` mirrors via
-    `QTransform` for the other three corners, rather than re-deriving the
-    same outline four times: the design is symmetric across both axes (see
-    the reference's four corner `<div>`s, which differ only in which two
-    CSS edges/border-radius corner they set).
-    """
-    path = QPainterPath()
-    path.moveTo(radius, 0)
-    path.lineTo(length, 0)
-    path.lineTo(length, thickness)
-    path.lineTo(thickness, thickness)
-    path.lineTo(thickness, length)
-    path.lineTo(0, length)
-    path.lineTo(0, radius)
-    # Quarter circle from the left-mid point (0, radius) to the top-mid
-    # point (radius, 0): QPainterPath.arcTo's angles run counterclockwise
-    # from 0 deg at 3 o'clock, so 180 deg is this rect's left-mid point and
-    # a -90 deg sweep is the short way round to the top-mid point, tracing
-    # exactly the rounded tip -- not the long way round through the bottom.
-    path.arcTo(QRectF(0, 0, 2 * radius, 2 * radius), 180, -90)
-    path.closeSubpath()
-    return path
-
-
-# ---------------------------------------------------------------------------
-# The stills bar
-# ---------------------------------------------------------------------------
-# docs/design/bars/README.md, section 2, is the authority, and
-# docs/design/bars/divergences.md overrides it wherever the two differ. Every
-# size and colour comes from `tokens.BarMetric`/`BarColor`. Two things that
-# section calls out because they are easy to get wrong: the bar's fill is a
-# 94%-alpha *paint*, never a 94%-*opacity* widget -- that would wash every
-# glyph out along with the background; and the bar's position is clamped so
-# it can never leave the selection's monitor.
-
-# Reverse of tokens.SHORTCUTS ("P" -> "pen"), so a button can look up its own
-# key by tool name instead of every button re-scanning the forward mapping.
-_TOOL_SHORTCUT_KEYS = {tool: key for key, tool in design.tokens.SHORTCUTS.items()}
-
-# tokens.SHORTCUTS keyed by Qt.Key code rather than letter (SNX-47), so a
-# QKeyEvent.key() is looked up directly instead of going through
-# event.text() -- which depends on locale/shift state in a way a letter's key
-# code never does.
-_SHORTCUT_KEY_CODES = {
-    getattr(Qt.Key, f"Key_{letter}"): tool for letter, tool in design.tokens.SHORTCUTS.items()
-}
-_REDACTION_KEY_CODE = getattr(Qt.Key, f"Key_{design.tokens.REDACTION_KEY}")
 
 # Arrow keys nudge the selection one logical pixel per press; Alt+arrow
 # resizes it from the bottom-right corner instead -- see
@@ -325,3890 +255,9 @@ _NUDGE_STEP = 1
 _NUDGE_STEP_SHIFT = 10
 
 
-def _tool_label(tool: str) -> str:
-    """Human-facing text for a `tokens.TOOLS` entry.
-
-    Mirrors editor.py's `_tool_label` (SNX-26) -- same title-casing -- over
-    the redesign's plain string tool identifiers rather than the old `Tool`
-    enum.
-    """
-    return tool.replace("_", " ").title()
-
-
-def _tool_glyph(tool: str) -> str:
-    """The glyph `tool` is drawn with: its own name, unless the handoff gave
-    it another -- Pixelate is the `mask` glyph, and has no icon of its own.
-    """
-    return design.tokens.TOOL_GLYPHS.get(tool, tool)
-
-
-def _hex_of(colour: QColor) -> str:
-    """`colour` as a lowercase `#rrggbb` string -- the eyedropper's own
-    format, spelled out explicitly rather than trusted to `QColor.name()`,
-    whose case is a Qt implementation detail this ticket's "lowercase" is
-    not.
-    """
-    return f"#{colour.red():02x}{colour.green():02x}{colour.blue():02x}"
-
-
-def _family_of(tool: str | None) -> str | None:
-    """The family slot `tool` is a sibling in, or None for a tool that has a
-    slot to itself.
-    """
-    for family, siblings in design.tokens.FAMILIES.items():
-        if tool in siblings:
-            return family
-    return None
-
-
-def _tool_tooltip(tool: str) -> str:
-    """The tool's name and the key that reaches it: "Pen — P".
-
-    A redaction sibling names the key its family shares, since that is the
-    key that gets there. A tool with no key would be named alone rather
-    than beside a dash leading nowhere.
-    """
-    name = design.tokens.TOOL_NAMES.get(tool, _tool_label(tool))
-    if _family_of(tool) == "redact":
-        key = design.tokens.REDACTION_KEY
-    else:
-        key = _TOOL_SHORTCUT_KEYS.get(tool, "")
-    return f"{name} — {key}" if key else name
-
-
-def _bar_keys() -> list[str]:
-    """Every tool key, in the order the bar's slots run -- the shapes
-    family's letters where its slot is, and the redaction family's one key
-    where that slot is.
-    """
-    keys = []
-    for slot in design.tokens.STILLS_SLOTS:
-        if slot == "redact":
-            keys.append(design.tokens.REDACTION_KEY)
-            continue
-        for tool in design.tokens.FAMILIES.get(slot, [slot]):
-            if tool in _TOOL_SHORTCUT_KEYS:
-                keys.append(_TOOL_SHORTCUT_KEYS[tool])
-    return keys
-
-
-class _Notch(QWidget):
-    """The corner of a slot that opens that slot's menu.
-
-    It means one thing -- this slot has more -- so only a slot with more
-    carries one: the two families, and the watermark, whose more is where
-    the mark goes and how strongly. A child of the slot rather than a hit
-    test inside it: a press on the notch is delivered here, so it opens the
-    menu and never also presses the slot underneath.
-
-    It answers to more of the corner than the triangle covers (#77): the
-    spec's 9px box was missed often enough that the menu seemed not to open
-    at all. It stops short of the middle of the slot, so a click aimed at
-    the glyph still reaches the slot.
-    """
-
-    clicked = pyqtSignal()
-
-    def __init__(self, tooltip: str, parent: QWidget):
-        super().__init__(parent)
-        metric = design.tokens.BarMetric
-        self.setFixedSize(metric.NOTCH, metric.NOTCH)
-        corner = metric.BTN - metric.NOTCH
-        self.move(corner, corner)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Qt's tooltip wake-up timer is driven by mouse moves over the
-        # widget, not by the enter event alone.
-        self.setMouseTracking(True)
-        self.setToolTip(tooltip)
-        self._lit = False
-
-    def set_lit(self, lit: bool) -> None:
-        """Follow the slot's own state: a lit slot's notch is lit with it."""
-        self._lit = lit
-        self.update()
-
-    def mousePressEvent(self, event) -> None:
-        event.accept()
-
-    def mouseReleaseEvent(self, event) -> None:
-        # Pressing and sliding off is how a user says no.
-        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
-            event.position().toPoint()
-        ):
-            self.clicked.emit()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.BarMetric
-        leg = metric.NOTCH_TRIANGLE
-        # Where the spec's markup lands its triangle: flush right and centred
-        # top to bottom in a NOTCH_BOX box NOTCH_INSET in from the slot's
-        # corner, the right angle pointing into the corner. The hit area
-        # around that box is bigger, and the triangle does not grow with it.
-        right = float(self.width() - metric.NOTCH_INSET)
-        bottom = self.height() - metric.NOTCH_INSET - (metric.NOTCH_BOX - leg) / 2
-        path = QPainterPath()
-        path.moveTo(right, bottom - leg)
-        path.lineTo(right, bottom)
-        path.lineTo(right - leg, bottom)
-        path.closeSubpath()
-        painter.fillPath(path, self._fill())
-        painter.end()
-
-    def _fill(self) -> QColor:
-        return design.bar_color("NOTCH_ACTIVE" if self._lit else "NOTCH_IDLE")
-
-
-class _IconButton(QPushButton):
-    rightClicked = pyqtSignal()
-    hovered = pyqtSignal(str)
-    unhovered = pyqtSignal()
-
-    """One 28px icon button in the stills bar: a tool slot, undo, redo,
-    clear or copy. A real `QPushButton`, not a rectangle painted by some
-    ancestor's paintEvent, so its tooltip and click handling come for free.
-
-    Idle/hover/active/disabled/danger-hover each recolour the glyph itself,
-    not just the background, so a state change regenerates the icon pixmap
-    via `design.icon()` rather than leaning on a stylesheet, which has no way
-    to reach into an SVG's `currentColor` stroke.
-    """
-
-    def __init__(
-        self,
-        icon_name: str,
-        tooltip: str,
-        *,
-        name: str | None = None,
-        idle_color: QColor | None = None,
-        hover_bg: QColor | None = None,
-        hover_color: QColor | None = None,
-        parent=None,
-    ):
-        super().__init__(parent)
-        # Keys belong to the overlay -- see _CloseButton.
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        metric = design.tokens.BarMetric
-        self._icon_name = icon_name
-        # What hovering reports. For a family slot that is the sibling it
-        # would arm, which is not always its glyph's name.
-        self._name = name or icon_name
-        self._idle_color = idle_color or design.bar_color("TOOL_IDLE_FG")
-        self._hover_bg = hover_bg or design.bar_color("TOOL_HOVER_BG")
-        # None (every button but Clear) means hovering leaves the glyph's
-        # own colour alone -- only Clear's danger hover recolours the icon
-        # as well as the background.
-        self._hover_color = hover_color
-        self._active = False
-        self._notch: _Notch | None = None
-
-        self.setFixedSize(metric.BTN, metric.BTN)
-        self.setIconSize(QSize(metric.ICON, metric.ICON))
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Qt's tooltip wake-up timer is driven by mouse moves over the
-        # widget, not by the enter event alone, so a button that never sees
-        # one can sit under the cursor without a tooltip ever appearing.
-        self.setMouseTracking(True)
-        self.setToolTip(tooltip)
-        self.setFlat(True)
-        self._refresh()
-
-    @property
-    def is_active(self) -> bool:
-        return self._active
-
-    @property
-    def notch(self) -> "_Notch | None":
-        return self._notch
-
-    def set_active(self, active: bool) -> None:
-        self._active = active
-        if self._notch is not None:
-            self._notch.set_lit(active)
-        self._refresh()
-
-    def setEnabled(self, enabled: bool) -> None:
-        super().setEnabled(enabled)
-        self._refresh()
-
-    def set_glyph(self, name: str, icon_name: str) -> None:
-        """Show `name`'s glyph -- a family slot follows its last-used
-        sibling, so it always shows what a drag will draw.
-        """
-        self._name = name
-        self._icon_name = icon_name
-        self._refresh()
-
-    def add_notch(self, tooltip: str) -> "_Notch":
-        self._notch = _Notch(tooltip, self)
-        self._notch.set_lit(self._active)
-        return self._notch
-
-    def mousePressEvent(self, event) -> None:
-        """A right-click is its own signal.
-
-        A family slot opens its menu from the notch, from a click once its
-        sibling is armed, and from a right-click anywhere on it -- the way
-        that menu was reached before the notch existed. `QPushButton`
-        reports only left presses, hence this.
-        """
-        if event.button() == Qt.MouseButton.RightButton:
-            self.rightClicked.emit()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def enterEvent(self, event) -> None:
-        self._refresh(hovered=True)
-        self.hovered.emit(self._name)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._refresh(hovered=False)
-        self.unhovered.emit()
-        super().leaveEvent(event)
-
-    def _colours(self, hovered: bool) -> "tuple[QColor | None, QColor]":
-        """(background, or None for none, and glyph) for the state the
-        button is in."""
-        if not self.isEnabled():
-            # Disabled is the preferred way to show an empty stack, over
-            # just recolouring a still-live button -- so this is a real
-            # QWidget.setEnabled(False), not a cosmetic-only state.
-            return None, design.bar_color("TOOL_DISABLED_FG")
-        if hovered and self._hover_color is not None:
-            return self._hover_bg, self._hover_color
-        if self._active:
-            return design.bar_color("TOOL_ACTIVE_BG"), design.bar_color("TOOL_ACTIVE_FG")
-        if hovered:
-            return self._hover_bg, self._idle_color
-        return None, self._idle_color
-
-    def _refresh(self, hovered: bool | None = None) -> None:
-        if hovered is None:
-            hovered = self.underMouse()
-        metric = design.tokens.BarMetric
-        bg, glyph = self._colours(hovered)
-
-        if bg is not None:
-            self.setStyleSheet(
-                "QPushButton { border: none; border-radius: %dpx;"
-                " background: rgba(%d, %d, %d, %s); }"
-                % (metric.BTN_RADIUS, bg.red(), bg.green(), bg.blue(), bg.alphaF())
-            )
-        else:
-            self.setStyleSheet("QPushButton { border: none; background: transparent; }")
-
-        # design.icon() only ever fills QIcon.Mode.Normal; left at that,
-        # Qt's style would auto-generate its own faded Disabled variant the
-        # moment setEnabled(False) runs above, undoing the exact disabled
-        # colour just chosen. Registering the same pixmap for both modes
-        # makes the disabled state use precisely what was asked for instead
-        # of a second, uncontrolled recolouring on top of it.
-        pixmap = design.icon(self._icon_name, glyph).pixmap(metric.ICON, metric.ICON)
-        icon = QIcon()
-        icon.addPixmap(pixmap, QIcon.Mode.Normal)
-        icon.addPixmap(pixmap, QIcon.Mode.Disabled)
-        self.setIcon(icon)
-
-
-class _PillButton(QPushButton):
-    """The two bar controls that pair an icon with a text label inside a
-    solid pill: the capture-mode chip and the review window's Done.
-
-    Built from a child layout of two `QLabel`s rather than
-    `QPushButton.setIcon`/`setText`, which always places the icon first --
-    the chip needs its chevron *after* the label, per the spec's "label +
-    14px chevron".
-    """
-
-    def __init__(
-        self,
-        icon_name: str,
-        text: str,
-        *,
-        icon_size: int,
-        text_color: QColor,
-        bg_color: QColor,
-        icon_after: bool,
-        pad_left: int,
-        pad_right: int,
-        tooltip: str,
-        parent=None,
-    ):
-        super().__init__(parent)
-        # Keys belong to the overlay -- see _CloseButton.
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        metric = design.tokens.Metric
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Qt's tooltip wake-up timer is driven by mouse moves over the
-        # widget, not by the enter event alone, so a button that never sees
-        # one can sit under the cursor without a tooltip ever appearing.
-        self.setMouseTracking(True)
-        self.setToolTip(tooltip)
-        self.setFixedHeight(metric.CHIP_H)
-        self.setStyleSheet(
-            "QPushButton { border: none; border-radius: %dpx;"
-            " background: rgba(%d, %d, %d, %s); }"
-            % (
-                design.tokens.BarMetric.BTN_RADIUS,
-                bg_color.red(),
-                bg_color.green(),
-                bg_color.blue(),
-                bg_color.alphaF(),
-            )
-        )
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(pad_left, 0, pad_right, 0)
-        layout.setSpacing(6)
-
-        icon_label = QLabel(self)
-        icon_label.setPixmap(design.icon(icon_name, text_color).pixmap(icon_size, icon_size))
-        # A click must reach the QPushButton underneath, not stop at a
-        # child QLabel sitting on top of it.
-        icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-        self._text_label = QLabel(text, self)
-        text_label = self._text_label
-        text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.CHIP_LABEL
-        font.setPixelSize(round(size))
-        font.setWeight(QFont.Weight(weight))
-        text_label.setFont(font)
-        text_label.setStyleSheet(f"color: {text_color.name()};")
-
-        for widget in (text_label, icon_label) if icon_after else (icon_label, text_label):
-            layout.addWidget(widget)
-
-    def set_text(self, text: str) -> None:
-        """Update the pill's own label -- used by the capture chip (SNX-44)
-        to name whichever mode the popover has selected. Done's own
-        `_PillButton` never calls this; its label is fixed.
-        """
-        self._text_label.setText(text)
-        self.updateGeometry()
-
-    def sizeHint(self) -> QSize:
-        # QPushButton.sizeHint() measures `self.text()`/`self.icon()` --
-        # unused here, since the icon+label pairing lives in the child
-        # QHBoxLayout instead (see class docstring), so the base
-        # implementation falls back to a placeholder "XXXX" string in the
-        # button's own default font. That placeholder is what clipped the
-        # capture chip and Save down to a few px of label regardless of the
-        # word actually on screen (SNX-59): a fixed-looking width that
-        # wasn't derived from either the real text or the real font. The
-        # child layout already knows the true width, because it was built
-        # from `pad_left`/`pad_right`/spacing plus each child's own
-        # sizeHint -- and the text label's sizeHint comes from the font
-        # it's actually rendering in, fallback or not.
-        return self.layout().sizeHint()
-
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
-
-class _Divider(QWidget):
-    """1px vertical divider between a bar's or a tray's control groups."""
-
-    def __init__(self, parent=None, *, height: int | None = None, colour: QColor | None = None):
-        super().__init__(parent)
-        self.setFixedSize(1, design.tokens.Metric.DIVIDER_H if height is None else height)
-        colour = colour or design.color("DIVIDER")
-        self.setStyleSheet(
-            "background: rgba(%d, %d, %d, %s);"
-            % (colour.red(), colour.green(), colour.blue(), colour.alphaF())
-        )
-
-
-class _Chrome(QWidget):
-    """A chrome widget that sits over the frame and swallows its own presses.
-
-    A Qt widget that leaves a mouse press unaccepted hands it to its
-    parent, and every class below is a child of `OverlayWindow` -- whose
-    press handler reads a press as ink, a resize, or the start of a fresh
-    region drag, depending on where it lands, and closes any menu that is
-    open. A click that missed a tool button by a pixel and hit the bar's own
-    background therefore threw away the selection the user had just dragged
-    out and started a new one under the bar; a press reaching it from a menu
-    row would tear the menu down before the row's click landed, so every row
-    would look dead. Chrome is opaque: a press that lands on it stops there.
-
-    Only the containers need this. The dividers, pills and separators they
-    hold are children of a container that consumes, so their presses stop
-    at the same place. The cost is that a solid strip of chrome -- the top
-    HUD, when hints are on -- can no longer be dragged through, which is
-    how a toolbar behaves everywhere else.
-
-    `chooser._Surface` is this same fix on the pre-snip chooser (SNX-108);
-    together they are the whole of the overlay's own chrome.
-
-    Each also carries its `glass` (`snipux.glass`): the blurred crop of the
-    frozen frame behind it, which a surface paints under its fill by
-    calling `self.glass.paint` from its `paintEvent`. It lives here so that
-    chrome built on this class has it without asking.
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.glass = glass.Glass(self)
-
-    def mousePressEvent(self, event) -> None:
-        event.accept()
-
-
-def _bar_font() -> QFont:
-    """The split action's label font."""
-    font = QFont(design.font_families().ui)
-    size, weight = design.tokens.BarFont.SPLIT
-    font.setPixelSize(round(size))
-    font.setWeight(QFont.Weight(weight))
-    return font
-
-
-class _SplitAction(QWidget):
-    """The bar's primary action: a destination on the face, and a caret
-    that offers the other two.
-
-    The handoff's stills bar leads with one of these rather than a row of
-    equal icon buttons -- "the chooser sets the split button's face; the
-    chevron always offers the other two", so the destination picked before
-    the snip is the one already under the cursor, and changing your mind
-    costs a menu rather than a hunt.
-
-    Two hit areas, one control: pressing the face fires the destination,
-    pressing the caret opens the menu. The seam between them is drawn, so
-    which half a click will land in is visible before the click.
-    """
-
-    activated = pyqtSignal(str)
-    menuRequested = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._destination = "Copy"
-        self._icon_name = "copy"
-        self._hovered_half = None
-        self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(design.tokens.BarMetric.BTN)
-        self._relayout()
-
-    def destination(self) -> str:
-        return self._destination
-
-    def set_destination(self, destination: str, icon_name: str) -> None:
-        self._destination = destination
-        self._icon_name = icon_name
-        self._relayout()
-
-    def _relayout(self) -> None:
-        metric = design.tokens.BarMetric
-        text = QFontMetricsF(_bar_font()).horizontalAdvance(self._destination)
-        # Rounded up: a face a fraction of a pixel narrow clips the label's
-        # last glyph, and the fallback faces this runs in are measured, not
-        # the Plex the handoff's widths assume.
-        self._face_w = math.ceil(
-            metric.SPLIT_PAD_H + metric.SPLIT_ICON + metric.SPLIT_GAP + text + metric.SPLIT_PAD_H
-        )
-        # The seam is a pixel of its own between the halves, as the spec
-        # draws it, rather than a line painted over the face's edge.
-        self.setFixedWidth(self._face_w + 1 + metric.SPLIT_CARET_W)
-        self.updateGeometry()
-        self.update()
-
-    def _half_at(self, x: float) -> str:
-        return "face" if x < self._face_w else "caret"
-
-    def mouseMoveEvent(self, event) -> None:
-        half = self._half_at(event.position().x())
-        if half != self._hovered_half:
-            self._hovered_half = half
-            self.update()
-
-    def leaveEvent(self, event) -> None:
-        self._hovered_half = None
-        self.update()
-
-    def mousePressEvent(self, event) -> None:
-        event.accept()
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        if not self.rect().contains(event.position().toPoint()):
-            return
-        if self._half_at(event.position().x()) == "caret":
-            self.menuRequested.emit()
-        else:
-            self.activated.emit(self._destination)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.BarMetric
-        radius = metric.BTN_RADIUS
-        caret_left = self._face_w + 1
-
-        shape = QPainterPath()
-        shape.addRoundedRect(QRectF(self.rect()), radius, radius)
-        fill = design.bar_color("ACCENT")
-        painter.fillPath(shape, fill)
-        if self._hovered_half is not None:
-            # Only the half under the pointer brightens: the two halves do
-            # different things, so hover has to say which one is live.
-            half = (
-                QRectF(0, 0, self._face_w, self.height())
-                if self._hovered_half == "face"
-                else QRectF(caret_left, 0, self.width() - caret_left, self.height())
-            )
-            clip = QPainterPath()
-            clip.addRect(half)
-            painter.fillPath(shape.intersected(clip), fill.lighter(106))
-
-        text_colour = design.bar_color("ACCENT_FG")
-        x = float(metric.SPLIT_PAD_H)
-        size = metric.SPLIT_ICON
-        pixmap = design.icon(self._icon_name, text_colour).pixmap(size, size)
-        painter.drawPixmap(round(x), round((self.height() - size) / 2), pixmap)
-        x += size + metric.SPLIT_GAP
-
-        painter.setFont(_bar_font())
-        painter.setPen(text_colour)
-        painter.drawText(
-            QRectF(x, 0, self._face_w - x, self.height()),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            self._destination,
-        )
-
-        # The seam: which half a click lands in has to be visible before
-        # the click, or a split button is just a button that sometimes does
-        # something else.
-        painter.fillRect(
-            QRectF(self._face_w, 0, 1, self.height()), design.bar_color("SPLIT_SEAM")
-        )
-
-        caret = metric.CHEVRON
-        pixmap = design.icon("chevron", text_colour).pixmap(caret, caret)
-        painter.drawPixmap(
-            round(caret_left + (metric.SPLIT_CARET_W - caret) / 2),
-            round((self.height() - caret) / 2),
-            pixmap,
-        )
-        painter.end()
-
-
-class _StyleDot(QWidget):
-    """The style slot: one button that is its own preview -- a dot in the
-    active tool's colour at its stroke's diameter, or a ring in that colour
-    for a shape that is outline only -- so colour, stroke and fill read
-    without opening anything. A redaction has no colour, so its dot is the
-    bar's own idle grey, at its strength.
-
-    It opens the style popover. A tool nothing on it can change
-    (`tokens.UNSTYLED_TOOLS`) dims it and it stops opening, because a
-    control that can do nothing should not look live. That dim is real
-    opacity -- one of the two places the handoff allows it -- painted here
-    rather than put on the widget as an effect.
-    """
-
-    clicked = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        metric = design.tokens.BarMetric
-        self.setFixedSize(metric.BTN, metric.BTN)
-        self.setMouseTracking(True)
-        self._style = ToolStyle(
-            colour=design.tokens.INK_SWATCHES[0][1], size=design.tokens.Metric.STROKE_DEFAULT
-        )
-        self._tool: str | None = None
-        self._open = False
-        self._refresh()
-
-    @property
-    def is_stylable(self) -> bool:
-        return self._tool is not None and self._tool not in design.tokens.UNSTYLED_TOOLS
-
-    @property
-    def is_open(self) -> bool:
-        return self._open
-
-    @property
-    def style(self) -> ToolStyle:
-        return self._style
-
-    def _sections(self) -> list[str]:
-        return design.tokens.STYLE_SECTIONS.get(self._tool, [])
-
-    @property
-    def is_ring(self) -> bool:
-        """Outline only: the fill is part of what the dot has to show."""
-        return "fill" in self._sections() and self._style.fill == "outline"
-
-    @property
-    def diameter(self) -> float:
-        metric = design.tokens.BarMetric
-        scale = (
-            metric.STYLE_DOT_SCALE_HIGHLIGHTER
-            if self._tool == "highlighter"
-            else metric.STYLE_DOT_SCALE
-        )
-        value = self._style.strength if "strength" in self._sections() else self._style.size
-        return max(metric.STYLE_DOT_MIN, min(value * scale, metric.STYLE_DOT_MAX))
-
-    def set_style(self, style: ToolStyle) -> None:
-        self._style = style
-        self._refresh()
-
-    def set_tool(self, tool: str | None) -> None:
-        self._tool = tool
-        self._refresh()
-
-    def set_open(self, open_: bool) -> None:
-        self._open = open_
-        self.update()
-
-    def _refresh(self) -> None:
-        tool = self._tool
-        name = design.tokens.TOOL_NAMES.get(tool, _tool_label(tool)) if tool else ""
-        if tool is None:
-            tooltip = "Style — pick a tool first"
-        elif not self.is_stylable:
-            tooltip = f"{name} has nothing to style"
-        elif "strength" in self._sections():
-            tooltip = f"{name} · strength {self._style.strength} — click for style"
-        else:
-            colour = QColor(self._style.colour).name()
-            tooltip = f"{name} · {colour} · {self._style.size}px — click for style"
-        self.setToolTip(tooltip)
-        self.setCursor(
-            Qt.CursorShape.PointingHandCursor if self.is_stylable else Qt.CursorShape.ArrowCursor
-        )
-        self.update()
-
-    def mousePressEvent(self, event) -> None:
-        # Accepted even when it will not open: the frame under the bar reads
-        # an unhandled press as the start of a drag.
-        event.accept()
-
-    def mouseReleaseEvent(self, event) -> None:
-        if (
-            event.button() == Qt.MouseButton.LeftButton
-            and self.is_stylable
-            and self.rect().contains(event.position().toPoint())
-        ):
-            self.clicked.emit()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.BarMetric
-        if not self.is_stylable:
-            painter.setOpacity(design.tokens.BarColor.DISABLED_OPACITY)
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.bar_color("STYLE_DOT_BG_OPEN" if self._open else "STYLE_DOT_BG"))
-        painter.drawRoundedRect(QRectF(self.rect()), metric.BTN_RADIUS, metric.BTN_RADIUS)
-
-        centre = QRectF(self.rect()).center()
-        radius = self.diameter / 2
-        colour = (
-            design.bar_color("TOOL_IDLE_FG")
-            if "strength" in self._sections()
-            else QColor(self._style.colour)
-        )
-        if self.is_ring:
-            # The spec's inset ring: drawn inside the diameter, so an outline
-            # and a filled shape at the same stroke read the same size.
-            width = metric.STYLE_DOT_OUTLINE
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(colour, width))
-            painter.drawEllipse(centre, radius - width / 2, radius - width / 2)
-            painter.end()
-            return
-        # The ring sits outside the dot, so a dot in a colour close to the
-        # bar's own still has an edge.
-        ring = radius + metric.STYLE_DOT_RING
-        painter.setBrush(design.bar_color("STYLE_DOT_RING"))
-        painter.drawEllipse(centre, ring, ring)
-        painter.setBrush(colour)
-        painter.drawEllipse(centre, radius, radius)
-        painter.end()
-
-
-class _WatermarkNotch(_Notch):
-    """The watermark slot's notch, lit in the slot's own colours: it
-    follows the watermark being on, where a family's follows a tool being
-    armed."""
-
-    _available = True
-
-    def set_available(self, available: bool) -> None:
-        self._available = available
-        self.setCursor(
-            Qt.CursorShape.PointingHandCursor if available else Qt.CursorShape.ArrowCursor
-        )
-        self.update()
-
-    def _fill(self) -> QColor:
-        if not self._available:
-            return design.bar_color("TOOL_DISABLED_FG")
-        return design.watermark_color("NOTCH_ON" if self._lit else "NOTCH_OFF")
-
-
-class _WatermarkSlot(_IconButton):
-    """The watermark toggle, beside the style dot.
-
-    Not a tool: nobody draws a watermark, so pressing it arms nothing. It
-    switches the mark on or off, and its notch opens where the mark goes and
-    how strongly. On, it wears the accent wash the handoff gives it rather
-    than the white of an armed tool, so the bar never reads as having two
-    tools armed at once.
-
-    With nothing in Settings to stamp it stays on the bar, greyed, and its
-    tooltip gives the reason. Greyed by its own state rather than by
-    `setEnabled(False)`, the way the style dot dims for a tool with nothing
-    to style, so the bar's two controls that can have nothing to do behave
-    alike.
-    """
-
-    # Class defaults: `_IconButton.__init__` paints the slot before this
-    # class's own `__init__` has had a chance to set them.
-    _on = False
-    _reason = ""
-
-    def __init__(self, parent=None):
-        super().__init__(
-            design.tokens.WATERMARK["glyph"],
-            design.tokens.WATERMARK_TOOLTIP_OFF,
-            name="watermark",
-            idle_color=design.watermark_color("OFF_FG"),
-            parent=parent,
-        )
-        self._notch = _WatermarkNotch(design.tokens.WATERMARK_NOTCH_TOOLTIP, self)
-        self._sync()
-
-    @property
-    def is_on(self) -> bool:
-        return self._on
-
-    @property
-    def unavailable_reason(self) -> str:
-        """Why there is nothing to stamp, or "" when there is."""
-        return self._reason
-
-    def set_on(self, on: bool) -> None:
-        self._on = on
-        self._sync()
-
-    def set_unavailable_reason(self, reason: str) -> None:
-        self._reason = reason
-        self._sync()
-
-    def _sync(self) -> None:
-        available = not self._reason
-        if not available:
-            tooltip = self._reason
-        elif self._on:
-            tooltip = design.tokens.WATERMARK_TOOLTIP_ON
-        else:
-            tooltip = design.tokens.WATERMARK_TOOLTIP_OFF
-        self.setToolTip(tooltip)
-        self.setCursor(
-            Qt.CursorShape.PointingHandCursor if available else Qt.CursorShape.ArrowCursor
-        )
-        self._notch.set_lit(self._on and available)
-        self._notch.set_available(available)
-        self._refresh()
-
-    def _colours(self, hovered: bool) -> "tuple[QColor | None, QColor]":
-        if self._reason:
-            return None, design.bar_color("TOOL_DISABLED_FG")
-        if self._on:
-            # The glyph keeps the accent under the pointer, so hovering a
-            # slot that is on never reads as it having switched off.
-            bg = self._hover_bg if hovered else design.watermark_color("ON_BG")
-            return bg, design.watermark_color("ON_FG")
-        return (self._hover_bg if hovered else None), self._idle_color
-
-
-class FloatingBar(_Chrome):
-    """The stills bar: one row under the selection, per
-    docs/design/bars/README.md section 2 -- the destination at the left end,
-    eight tool slots in a fixed order of consequence, the style dot and the
-    watermark, then undo and clear.
-
-    Two of the slots hold families (`tokens.FAMILIES`): shapes and
-    redaction. A family slot shows whichever sibling was used last, a notch
-    in its corner asks for the family's menu, and each sibling keeps its own
-    shortcut. The menu itself is the hosting window's, as is the popover the
-    style dot opens: they are chrome over that window, not part of this row
-    (see `FamilyMenu`).
-
-    A real child widget of the window it sits over, built from real buttons
-    -- never painted inside that window's paintEvent -- which is what gives
-    every control a tooltip and hover state for free. `paintEvent` paints the
-    glass -- the frame behind the bar blurred, under a translucent fill
-    (`snipux.glass`) -- as a *brush*, not a reduced-*opacity* widget:
-    `setWindowOpacity` would dim every glyph along with the background.
-
-    The bar can be dragged by its own surface -- the padding round the row,
-    the gaps between controls and the dividers, which is everywhere a press
-    used to do nothing -- once `reposition` has placed it over a selection
-    (#50, divergences.md 9). A press on a control is that control's, so a
-    click can never turn into a drag. The review window lays its bar out
-    itself and never calls `reposition`, so its bar does not drag: a drag
-    has nothing to be clamped to until then.
-
-    A selection that leaves the bar no room beside it keeps the bar on the
-    selection's monitor, against its bottom margin (#79). On a desk with
-    another monitor the host covers, a drag can carry it between the two
-    (#50). `current_bounds` says which usable area it is in, so the host can
-    keep what hangs off it there too.
-    """
-
-    # A drag of the bar itself crossed the drag threshold, and moved the
-    # bar. What hangs off the bar is the host's, so it follows on these
-    # rather than the bar reaching for it.
-    dragStarted = pyqtSignal()
-    dragMoved = pyqtSignal()
-    # A drag ended somewhere the bar should go again the next time a
-    # selection leaves it no room: which monitor, relative to the
-    # selection's (`setup_desktop.BAR_ON_OWN_MONITOR` or
-    # `BAR_ON_OTHER_MONITOR`), and the `spot` it ended on there, as (x, y).
-    positionRemembered = pyqtSignal(str, float, float)
-
-    toolSelected = pyqtSignal(str)
-    # A tool picked with the pointer on this row, emitted just before the
-    # `toolSelected` it causes. Clicking a tool closes whatever menu is open;
-    # a key that changes the tool does not have to, and only this tells the
-    # two apart.
-    toolPicked = pyqtSignal(str)
-    # "shapes" or "redact": the notch was pressed, or the slot right-clicked.
-    familyMenuRequested = pyqtSignal(str)
-    styleRequested = pyqtSignal()
-    # The watermark slot pressed, or its notch -- only while there is a mark
-    # to stamp. Whether the watermark is on is the hosting window's to say.
-    watermarkToggled = pyqtSignal()
-    watermarkMenuRequested = pyqtSignal()
-    undoRequested = pyqtSignal()
-    redoRequested = pyqtSignal()
-    clearRequested = pyqtSignal()
-    copyRequested = pyqtSignal()
-    saveRequested = pyqtSignal()
-    openRequested = pyqtSignal()
-    # SNX-83: the destination menu's fourth ending, alongside the three
-    # above -- see `OverlayWindow._open_destination_menu`.
-    pinRequested = pyqtSignal()
-    destinationMenuRequested = pyqtSignal()
-    captureChipClicked = pyqtSignal()
-    # Which tool the cursor is over, so a window can name it without relying
-    # on Qt's tooltip timer -- see `ToolHintStrip`.
-    toolHovered = pyqtSignal(str)
-    toolUnhovered = pyqtSignal()
-
-    UNDO_SHORTCUT = "Ctrl+Z"
-    REDO_SHORTCUT = "Ctrl+Shift+Z"
-
-    # The spec's own wording for each family's two ways in.
-    _NOTCH_TOOLTIPS = {"shapes": "Choose a shape", "redact": "Redaction mode"}
-    _FAMILY_TOOLTIP_TAILS = {
-        "shapes": "click again for more shapes",
-        "redact": "click again to switch",
-    }
-
-    def __init__(self, parent=None, *, capture_chip: bool = True, trailing: str = "save"):
-        """`capture_chip` and `trailing` exist for the review window, which
-        instantiates this very widget rather than growing a second one --
-        see `docs/design/handoff-windows.md`, "Annotate mode".
-
-        There is nothing left to capture in that window, so its bar has no
-        capture-mode chip; and its footer already owns Copy and Save As, so
-        its trailing action is `Done` instead. Those are the only two
-        differences the design allows, which is why they are the only two
-        parameters.
-
-        The watermark slot goes with `Done`. The snip a review window opens
-        is one the overlay has already exported, stamped with the watermark
-        if it was on, so a slot there could only stamp it a second time.
-        """
-        super().__init__(parent)
-        self._has_capture_chip = capture_chip
-        self._trailing = trailing
-        # The widget's own backdrop is transparent so paintEvent's alpha
-        # fill is the only thing establishing a background colour --
-        # without this attribute Qt composites the widget as opaque and the
-        # "94% alpha, not 94% opacity" distinction has nothing to paint
-        # against.
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        metric = design.tokens.BarMetric
-        layout = QHBoxLayout(self)
-        inset = metric.PAD + metric.BORDER
-        layout.setContentsMargins(inset, inset, inset, inset)
-        layout.setSpacing(metric.GAP)
-
-        self._active_tool: str | None = None
-        # The sibling each family slot shows, and arms when clicked: the one
-        # used last, starting from the first.
-        self._family_choice = {
-            family: siblings[0] for family, siblings in design.tokens.FAMILIES.items()
-        }
-        self._tool_buttons: dict[str, _IconButton] = {}
-        # SNX-68: the last (selection, bounds) pair handed to `reposition`
-        # -- `set_capture_mode` replays them through it whenever the chip's
-        # label changes width, so the bar re-centres itself instead of just
-        # growing from its own top-left corner. `None` until the first
-        # `reposition` call, which is what lets a bare `FloatingBar()` fall
-        # back to a plain resize.
-        self._last_selection: QRect | None = None
-        self._last_bounds: QRectF | None = None
-        # The usable area of the monitor a drag can carry the bar to when
-        # the selection leaves it no room on its own (#50), in the parent's
-        # logical coordinates like `_last_bounds`, or None on a desk with no
-        # such monitor -- and which of the two the bar is on now.
-        self._last_elsewhere: QRectF | None = None
-        self._monitor = setup_desktop.BAR_ON_OWN_MONITOR
-
-        # A press on the bar's own surface that may become a drag (#50):
-        # where it landed and where the bar's top-left was then, both in the
-        # parent's logical coordinates. The bar's own coordinates move with
-        # the bar, so a drag measured in them would chase itself. None while
-        # no press is open.
-        self._drag_press: QPointF | None = None
-        self._drag_origin: QPoint | None = None
-        self._dragging = False
-        # Where a drag put the bar for the selection it was made over --
-        # which monitor, and the `spot` on it -- kept until that selection
-        # changes, so a re-sync for the same selection does not snap the
-        # bar back.
-        self._dragged: setup_desktop.BarPosition | None = None
-        self._dragged_for: QRect | None = None
-        # Where the bar goes when neither side of a selection has room, or
-        # None for the automatic answer.
-        self._remembered: setup_desktop.BarPosition | None = None
-
-        # The primary action sits at the LEFT end, before a divider, and
-        # picking a tool never changes anything to its left. It used to
-        # trail the bar, so the one control that finishes the snip was the
-        # last thing read and moved every time the tool group changed width.
-        #
-        # The overlay leads with a split button -- "the chooser sets the
-        # split button's face; the chevron always offers the other two" --
-        # so the destination chosen before the snip is already under the
-        # cursor. The review window keeps its pair: its footer already owns
-        # the exports, and a second destination control on the bar above
-        # them would be two answers to one question.
-        self._action: _SplitAction | None = None
-        self._copy_button: _IconButton | None = None
-        self._save_button: _PillButton | None = None
-        if self._trailing == "done":
-            self._copy_button = _IconButton(
-                "copy", "Copy", idle_color=design.color("ICON_NEUTRAL")
-            )
-            self._copy_button.clicked.connect(self.copyRequested)
-            layout.addWidget(self._copy_button)
-
-            self._save_button = self._build_save_button()
-            self._save_button.clicked.connect(self.saveRequested)
-            layout.addWidget(self._save_button)
-        else:
-            self._action = _SplitAction(self)
-            self._action.activated.connect(self._on_destination_activated)
-            self._action.menuRequested.connect(self.destinationMenuRequested)
-            layout.addWidget(self._action)
-        self._add_divider(layout)
-
-        # The chip is built but not placed on the overlay's bar: the
-        # handoff's post-selection bar carries no mode control, and the way
-        # back to one is Space, which reopens the chooser with the mode
-        # still on it.
-        self._chip = self._build_capture_chip()
-        self._chip.clicked.connect(self.captureChipClicked)
-        if capture_chip and self._trailing == "done":
-            layout.addWidget(self._chip)
-            self._add_divider(layout)
-        else:
-            self._chip.hide()
-
-        for slot in design.tokens.STILLS_SLOTS:
-            tool = self._family_choice.get(slot, slot)
-            button = _IconButton(_tool_glyph(tool), self._slot_tooltip(slot, tool), name=tool)
-            button.clicked.connect(lambda checked=False, s=slot: self._on_slot_clicked(s))
-            if slot in design.tokens.FAMILIES:
-                notch = button.add_notch(self._NOTCH_TOOLTIPS[slot])
-                notch.clicked.connect(lambda s=slot: self.familyMenuRequested.emit(s))
-                button.rightClicked.connect(lambda s=slot: self.familyMenuRequested.emit(s))
-            button.hovered.connect(self.toolHovered)
-            button.unhovered.connect(self.toolUnhovered)
-            self._tool_buttons[slot] = button
-            layout.addWidget(button)
-        self._add_divider(layout)
-
-        self._style_dot = _StyleDot(self)
-        self._style_dot.clicked.connect(self.styleRequested)
-        layout.addWidget(self._style_dot)
-
-        # The watermark shares the style dot's group, where the handoff puts
-        # it: the two slots that set how the snip looks, rather than what is
-        # drawn on it. The window it sits over decides what a press means.
-        self._watermark = _WatermarkSlot(self)
-        self._watermark.clicked.connect(self._on_watermark_pressed)
-        self._watermark.notch.clicked.connect(self._on_watermark_menu_pressed)
-        self._watermark.rightClicked.connect(self._on_watermark_menu_pressed)
-        if self._trailing == "done":
-            self._watermark.hide()
-        else:
-            layout.addWidget(self._watermark)
-        self._add_divider(layout)
-
-        self._undo_button = _IconButton("undo", f"Undo — {self.UNDO_SHORTCUT}")
-        self._undo_button.clicked.connect(self.undoRequested)
-        self._undo_button.setEnabled(False)
-        layout.addWidget(self._undo_button)
-
-        # Undo and clear only, per the handoff's bar. Redo keeps its
-        # keyboard shortcut and its place in the review window; on the
-        # overlay it was a button pressed far less often than the tools it
-        # was widening the bar for.
-        self._redo_button = _IconButton("redo", f"Redo — {self.REDO_SHORTCUT}")
-        self._redo_button.clicked.connect(self.redoRequested)
-        self._redo_button.setEnabled(False)
-        if self._trailing == "done":
-            layout.addWidget(self._redo_button)
-        else:
-            self._redo_button.hide()
-
-        self._clear_button = _IconButton(
-            "trash",
-            "Clear ink",
-            hover_bg=design.bar_color("DANGER_BG"),
-            hover_color=design.bar_color("DANGER_FG"),
-        )
-        self._clear_button.clicked.connect(self.clearRequested)
-        layout.addWidget(self._clear_button)
-
-    def set_destination(self, destination: str) -> None:
-        """Put `destination` on the split button's face.
-
-        A no-op on the review window's bar, which has no split button --
-        its footer owns the exports.
-        """
-        if self._action is None:
-            return
-        icon = {"Copy": "copy", "Save": "save", "Open": "eye", "Pin": "pin"}.get(
-            destination, "copy"
-        )
-        self._action.set_destination(destination, icon)
-
-    def destination(self) -> str:
-        return self._action.destination() if self._action is not None else "Copy"
-
-    def _on_destination_activated(self, destination: str) -> None:
-        {
-            "Copy": self.copyRequested,
-            "Save": self.saveRequested,
-            "Open": self.openRequested,
-            "Pin": self.pinRequested,
-        }.get(destination, self.copyRequested).emit()
-
-    # -- construction helpers ------------------------------------------------
-
-    def _add_divider(self, layout: QHBoxLayout) -> None:
-        metric = design.tokens.BarMetric
-        layout.addSpacing(metric.DIVIDER_MARGIN)
-        layout.addWidget(
-            _Divider(self, height=metric.DIVIDER_H, colour=design.bar_color("DIVIDER"))
-        )
-        layout.addSpacing(metric.DIVIDER_MARGIN)
-
-    def _slot_tooltip(self, slot: str, tool: str) -> str:
-        tail = self._FAMILY_TOOLTIP_TAILS.get(slot)
-        return f"{_tool_tooltip(tool)} · {tail}" if tail else _tool_tooltip(tool)
-
-    def _build_capture_chip(self) -> _PillButton:
-        label, _icon, _note = design.tokens.CAPTURE_MODES[0]  # "Region", the bar's default
-        metric = design.tokens.Metric
-        chip = _PillButton(
-            "chevron",
-            label,
-            icon_size=14,
-            # Neutral, not accent: the primary action is the *only*
-            # accent-filled control in the bar.
-            text_color=design.color("TEXT_PRIMARY"),
-            bg_color=design.color("BAR_BORDER"),
-            icon_after=True,
-            pad_left=metric.CHIP_PAD_L,
-            pad_right=metric.CHIP_PAD_R,
-            tooltip="Capture mode",
-        )
-        chip.setFixedHeight(design.tokens.BarMetric.BTN)
-        return chip
-
-    def _build_save_button(self) -> _PillButton:
-        """The review window's primary action, `Done`: its footer already
-        owns the exports.
-
-        It leads the bar rather than trailing it, and carries the accent --
-        the one control in the bar that may.
-        """
-        metric = design.tokens.BarMetric
-        done = self._trailing == "done"
-        button = _PillButton(
-            "check" if done else "save",
-            "Done" if done else "Save",
-            icon_size=metric.SPLIT_ICON,
-            text_color=design.bar_color("ACCENT_FG"),
-            bg_color=design.bar_color("ACCENT"),
-            icon_after=False,
-            pad_left=metric.SPLIT_PAD_H,
-            pad_right=metric.SPLIT_PAD_H,
-            tooltip="Done" if done else "Save",
-        )
-        button.setFixedHeight(metric.BTN)
-        return button
-
-    # -- capture mode (SNX-44) --------------------------------------------
-
-    def set_capture_mode(self, label: str) -> None:
-        """Update the chip's own label to `label`, and re-centre the bar for
-        its new width.
-
-        SNX-68: `_PillButton.sizeHint` (SNX-59) already measures the new
-        label correctly, but nothing re-read it after construction, so the
-        bar itself stayed at its old width and clipped whichever label
-        didn't fit in it. Replaying the last `reposition` call redoes both
-        the sizing *and* the centring in one place. Falls back to a plain
-        resize when `reposition` was never called at all -- a bare
-        `FloatingBar()` with no selection yet.
-        """
-        self._chip.set_text(label)
-        if self._last_selection is not None and self._last_bounds is not None:
-            self.reposition(self._last_selection, self._last_bounds, self._last_elsewhere)
-        else:
-            self.resize(self.sizeHint())
-
-    # -- tools -------------------------------------------------------------
-
-    def _on_slot_clicked(self, slot: str) -> None:
-        """Arm the slot's tool: for a family, the sibling it is showing. A
-        family slot whose sibling is already armed asks for the family's
-        menu instead, so a second click opens it and a third closes it (#77).
-
-        A click never moves on to the next sibling. The menu is how to reach
-        another, and each has its key; a click that sometimes changed what
-        the slot draws would make the one gesture used most the one that
-        cannot be trusted. A click on an armed slot changed nothing at all,
-        so opening the menu costs the first click none of its certainty --
-        and the pointer is no longer sent to the notch alone to find it.
-        No pick is reported either: a pick closes the bar's menus, this one
-        included.
-        """
-        tool = self._family_choice.get(slot, slot)
-        if slot in design.tokens.FAMILIES and tool == self._active_tool:
-            self.familyMenuRequested.emit(slot)
-            return
-        self.toolPicked.emit(tool)
-        self.select_tool(tool)
-
-    def select_tool(self, tool: str) -> None:
-        """Make `tool` the active tool, the one place that happens -- a
-        click, a family menu pick and a shortcut key all arrive here, so
-        none of them is a copy of the others that could drift.
-
-        A family sibling also becomes the one its slot shows, and so the
-        one a plain click on that slot arms next.
-        """
-        family = _family_of(tool)
-        if family is not None:
-            self._family_choice[family] = tool
-            button = self._tool_buttons[family]
-            button.set_glyph(tool, _tool_glyph(tool))
-            button.setToolTip(self._slot_tooltip(family, tool))
-        self.set_active_tool(tool)
-        self.toolSelected.emit(tool)
-
-    def handle_tool_key(self, key: int) -> bool:
-        """Arm whatever `key` reaches, as `select_tool` would, and say
-        whether it was a tool key at all. The redaction family's one key
-        cycles its siblings.
-        """
-        tool = _SHORTCUT_KEY_CODES.get(key)
-        if tool is not None:
-            self.select_tool(tool)
-            return True
-        if key == _REDACTION_KEY_CODE:
-            self.cycle_redaction()
-            return True
-        return False
-
-    def cycle_redaction(self) -> None:
-        """The redaction key: arm the sibling the slot shows, or, when a
-        redaction tool is already armed, the next one after it.
-        """
-        siblings = design.tokens.FAMILIES["redact"]
-        tool = self._family_choice["redact"]
-        if self._active_tool in siblings:
-            tool = siblings[(siblings.index(self._active_tool) + 1) % len(siblings)]
-        self.select_tool(tool)
-
-    def family_choice(self, family: str) -> str:
-        """The sibling `family`'s slot shows."""
-        return self._family_choice[family]
-
-    def set_active_tool(self, tool: str | None) -> None:
-        """Mark `tool`'s slot active and every other slot idle -- a family
-        slot reads active for any of its siblings.
-        """
-        self._active_tool = tool
-        family = _family_of(tool)
-        for slot, button in self._tool_buttons.items():
-            button.set_active(slot in (tool, family))
-        self._style_dot.set_tool(tool)
-
-    @property
-    def active_tool(self) -> str | None:
-        return self._active_tool
-
-    def slot_rect(self, slot: str, host: QWidget) -> QRect:
-        """`slot`'s button, in `host`'s coordinates -- where a menu for it is
-        anchored.
-        """
-        button = self._tool_buttons[slot]
-        return QRect(button.mapTo(host, QPoint(0, 0)), button.size())
-
-    # -- style -------------------------------------------------------------
-
-    def set_style_preview(self, style: ToolStyle) -> None:
-        """What the style dot shows: the active tool's style."""
-        self._style_dot.set_style(style)
-
-    def set_style_open(self, open_: bool) -> None:
-        self._style_dot.set_open(open_)
-
-    def style_dot_rect(self, host: QWidget) -> QRect:
-        """The style dot, in `host`'s coordinates -- where its popover is
-        anchored.
-        """
-        return QRect(self._style_dot.mapTo(host, QPoint(0, 0)), self._style_dot.size())
-
-    # -- watermark ---------------------------------------------------------
-
-    def set_watermark_on(self, on: bool) -> None:
-        self._watermark.set_on(on)
-
-    def set_watermark_unavailable(self, reason: str) -> None:
-        """Grey the watermark slot with `reason` for why, or pass "" when
-        there is a mark to stamp."""
-        self._watermark.set_unavailable_reason(reason)
-
-    def watermark_rect(self, host: QWidget) -> QRect:
-        """The watermark slot, in `host`'s coordinates -- where its menu is
-        anchored."""
-        return QRect(self._watermark.mapTo(host, QPoint(0, 0)), self._watermark.size())
-
-    def _on_watermark_pressed(self) -> None:
-        if not self._watermark.unavailable_reason:
-            self.watermarkToggled.emit()
-
-    def _on_watermark_menu_pressed(self) -> None:
-        if not self._watermark.unavailable_reason:
-            self.watermarkMenuRequested.emit()
-
-    # -- undo / redo -------------------------------------------------------
-
-    def set_undo_enabled(self, enabled: bool) -> None:
-        self._undo_button.setEnabled(enabled)
-
-    def set_redo_enabled(self, enabled: bool) -> None:
-        self._redo_button.setEnabled(enabled)
-
-    # -- fill ----------------------------------------------------------------
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.BarMetric
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        path = glass.rounded(rect, metric.RADIUS)
-
-        # design.bar_color("BAR_BG") already carries its 94% alpha --
-        # painted here as a translucent *fill* over the blurred frame, never
-        # as reduced *widget* opacity, so every child painted after this
-        # stays fully opaque.
-        self.glass.paint(painter, path, design.bar_color("BAR_BG"))
-
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.bar_color("BAR_BORDER"))
-        painter.drawPath(path)
-        painter.end()
-
-    # -- dragging (#50) ----------------------------------------------------
-
-    @property
-    def is_dragging(self) -> bool:
-        """A press on the bar's own surface is open, whether or not it has
-        moved far enough to be a drag yet.
-        """
-        return self._drag_press is not None
-
-    def set_remembered_position(self, position: "setup_desktop.BarPosition | None") -> None:
-        """Where the bar goes when a selection leaves it no room on either
-        side -- which monitor, and the `spot` on it -- or None to leave that
-        to `placement`.
-        """
-        self._remembered = position
-
-    @property
-    def current_bounds(self) -> "QRectF | None":
-        """The usable area the bar is on now, in the parent's logical
-        coordinates: the selection's own monitor's, or the other monitor's
-        once a drag, or a place remembered from one, has put the bar there.
-        None until `reposition` has placed it.
-
-        What hangs off the bar is clamped into this. Clamped into the
-        selection's monitor on behalf of a bar on the next one, a menu would
-        open across the gap between the two, where nothing is drawn.
-        """
-        return self._bounds_on(self._monitor)
-
-    def _bounds_on(self, monitor: str) -> "QRectF | None":
-        if monitor == setup_desktop.BAR_ON_OTHER_MONITOR and self._last_elsewhere is not None:
-            return self._last_elsewhere
-        return self._last_bounds
-
-    def _has_room(self) -> bool:
-        """Whether the selection leaves a bar of this one's size room beside
-        it on its own monitor. Only asked once `reposition` has run.
-        """
-        return (
-            self._beside(QRectF(self._last_selection), self._last_bounds, self.size())
-            is not None
-        )
-
-    def _monitor_under(self, pointer: QPointF) -> str:
-        """Which monitor a drag with the pointer at `pointer` (the parent's
-        logical coordinates) puts the bar on: the one whose usable area is
-        nearest the pointer, or the one it is already on when both are as
-        near.
-
-        Nearest, not "the one under the pointer": the pointer can be on
-        neither, in the gap beside a staggered monitor, over a dock, or on a
-        third monitor the bar is never sent to. The bar is then clamped into
-        whichever usable area is closest, so it is never drawn where no
-        monitor shows it.
-
-        The other monitor is a choice only while the selection leaves no
-        room on its own. Beside a selection with room a drag moves the bar
-        for that snip alone, and taking it to another monitor would send it
-        away from a selection it can sit beside.
-        """
-        own = setup_desktop.BAR_ON_OWN_MONITOR
-        if self._last_elsewhere is None or self._has_room():
-            return own
-
-        def distance(bounds: QRectF) -> float:
-            across = max(bounds.left() - pointer.x(), 0.0, pointer.x() - bounds.right())
-            down = max(bounds.top() - pointer.y(), 0.0, pointer.y() - bounds.bottom())
-            return math.hypot(across, down)
-
-        to_own = distance(self._last_bounds)
-        to_other = distance(self._last_elsewhere)
-        if to_own == to_other:
-            return self._monitor
-        return own if to_own < to_other else setup_desktop.BAR_ON_OTHER_MONITOR
-
-    def _is_grip(self, pos: QPointF) -> bool:
-        """Whether a press at `pos` (this bar's own coordinates) takes hold
-        of the bar rather than of a control.
-
-        Asked of the widget under the press rather than left to which
-        widget accepts it. A press reaches the bar whenever the widget under
-        the pointer declines it, and a label or a plainly painted widget
-        declines every press -- so a slot built from one would be a grip in
-        the middle of the row. Only the bar's own surface and its dividers
-        take hold of it, whatever the row comes to hold.
-        """
-        child = self.childAt(pos.toPoint())
-        return child is None or isinstance(child, _Divider)
-
-    def mousePressEvent(self, event) -> None:
-        # Accepted whatever happens next, as every piece of chrome's press
-        # is -- see `_Chrome`.
-        event.accept()
-        # A press while one is still open means its release was lost.
-        self.end_drag()
-        if (
-            event.button() != Qt.MouseButton.LeftButton
-            or self._last_bounds is None
-            or not self._is_grip(event.position())
-        ):
-            return
-        self._drag_press = self.mapToParent(event.position())
-        self._drag_origin = self.pos()
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._drag_press is None or self._last_bounds is None:
-            return
-        if not event.buttons() & Qt.MouseButton.LeftButton:
-            self.end_drag()
-            return
-        pointer = self.mapToParent(event.position())
-        travel = pointer - self._drag_press
-        if not self._dragging:
-            # A press on the padding is usually a click that missed a
-            # button by a pixel or two, and must leave the bar where it is.
-            if travel.manhattanLength() < QApplication.startDragDistance():
-                return
-            self._dragging = True
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            self.dragStarted.emit()
-        # The pointer picks the monitor and the bar is clamped inside it, so
-        # carrying it over a bezel moves it across in one step rather than
-        # letting it hang half over the gap.
-        self._monitor = self._monitor_under(pointer)
-        self.move(
-            self.clamped(QPointF(self._drag_origin) + travel, self.current_bounds, self.size())
-        )
-        self.dragMoved.emit()
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.end_drag()
-
-    def end_drag(self) -> None:
-        """End an open press on the bar, leaving the bar where its last move
-        put it.
-
-        A release is only one way that happens. The host calls this too for
-        a move with no button held, a press elsewhere and the window losing
-        focus -- the same guards `OverlayWindow._end_drags` keeps for a
-        mark, so a lost release cannot leave the bar following the pointer.
-
-        A drag made while the selection has no room beside it is
-        remembered (`positionRemembered`): the monitor it ended on, relative
-        to the selection's, and the spot on it. From then on it is the
-        answer whenever a selection leaves no room, over the placement at the
-        foot of the selection's monitor, so the two never take turns. One
-        made beside a selection with room is kept for that selection only:
-        it moved the bar for this snip, and remembering it would change
-        where the bar goes for a whole-monitor snip that it was never about.
-        """
-        dragged = self._dragging
-        self._drag_press = None
-        self._drag_origin = None
-        self._dragging = False
-        if not dragged or self._last_bounds is None or self._last_selection is None:
-            return
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        monitor = (
-            self._monitor if self._last_elsewhere is not None else setup_desktop.BAR_ON_OWN_MONITOR
-        )
-        position = setup_desktop.BarPosition(
-            monitor, self.spot(QPointF(self.pos()), self._bounds_on(monitor), self.size())
-        )
-        self._dragged = position
-        self._dragged_for = QRect(self._last_selection)
-        if not self._has_room():
-            self._remembered = position
-            self.positionRemembered.emit(position.monitor, *position.spot)
-
-    # -- positioning -----------------------------------------------------
-
-    def reposition(
-        self, selection: QRect, bounds: QRectF, elsewhere: "QRectF | None" = None
-    ) -> None:
-        """Put the bar where it belongs for `selection`: where a drag put it
-        for this same selection, and otherwise where `placement` says.
-
-        `bounds` is the usable area of the selection's own monitor.
-        `elsewhere` is the usable area of the monitor a drag can carry the
-        bar to when the selection leaves it no room there, or None on a desk
-        with no such monitor. All three are in the parent's logical
-        coordinates.
-
-        Kept apart from `placement` so the rule and applying it stay two
-        things: a position the user chose replaces the one, not the other.
-        """
-        if self._dragged_for is not None and QRect(selection) != self._dragged_for:
-            self._dragged = None
-            self._dragged_for = None
-        # SNX-68: remembered so `set_capture_mode` can replay this same
-        # call when the chip's width changes.
-        self._last_selection = selection
-        self._last_bounds = bounds
-        self._last_elsewhere = elsewhere
-        # Placed over a selection, the bar has bounds a drag can be clamped
-        # to, and its surface says it can be taken hold of. The controls
-        # keep their own pointing hand.
-        self.setCursor(
-            Qt.CursorShape.ClosedHandCursor if self._dragging else Qt.CursorShape.OpenHandCursor
-        )
-        if self._dragging:
-            # Mid-drag the pointer owns the bar's position.
-            return
-        size = self.sizeHint()
-        if self._dragged is not None:
-            self._monitor, top_left = self.resolve(self._dragged, bounds, elsewhere, size)
-        else:
-            self._monitor, top_left = self.placement(
-                QRectF(selection), bounds, size, self._remembered, elsewhere
-            )
-        self.setGeometry(QRect(top_left, size))
-
-    @staticmethod
-    def placement(
-        selection: QRectF,
-        bounds: QRectF,
-        size: QSize,
-        remembered: "setup_desktop.BarPosition | None" = None,
-        elsewhere: "QRectF | None" = None,
-    ) -> "tuple[str, QPoint]":
-        """Where a bar of `size` belongs for `selection`: the monitor it is
-        on (`setup_desktop.BAR_ON_OWN_MONITOR` or `BAR_ON_OTHER_MONITOR`)
-        and its top-left, in the space `selection`, `bounds` and `elsewhere`
-        share.
-
-        `bounds` is the selection's own monitor, less whatever the desktop
-        reserves on it (`OverlayWindow._chrome_bounds`) -- never the window.
-        On a desk whose monitors are staggered vertically, clamping to the
-        window put the bar for a selection low on a short monitor into the
-        gap below it: inside the window, on no monitor at all.
-
-        Centred on the selection, `BAR_OFFSET_Y` below it, and at least
-        `BAR_EDGE_MARGIN` inside `bounds` on every side.
-
-        Where there is no room below, the bar goes inside the foot of a
-        tall selection, or above a short one rather than being clamped back
-        up over it, as the handoff's `BAR_BOTTOM_ROOM` would put it
-        (divergences.md 8). That clamp covers the very pixels the user
-        framed in order to mark them up -- reported as "when u select a
-        small region the controls are in the region so u cant edit
-        anything", on a 1123x74 strip. See `_beside`.
-
-        With room on none of those the selection is essentially the whole
-        monitor, and anywhere on it covers some of it (#50). Then, in turn:
-
-        - A `remembered` drag wins, on the monitor it names (`resolve`) --
-          `elsewhere`, when that drag ended on another monitor. Were the
-          placement below allowed to override it, the user's correction and
-          the rule would take turns on every snip.
-        - Otherwise the bar is held inside the foot of the selection, just
-          clear of its bottom edge so the edge can still be dragged, and
-          inside `bounds`.
-          It once went to `elsewhere` on its own, just across the bezel
-          (#50), and that put the controls a monitor away from the work they
-          were for (#79). Only a drag takes it there now.
-
-        None of that is consulted while there is room beside the selection,
-        so neither a remembered place nor another monitor can take the bar
-        away from a selection it could sit beside.
-        """
-        metric = design.tokens.BarMetric
-        margin = metric.BAR_EDGE_MARGIN
-        own = setup_desktop.BAR_ON_OWN_MONITOR
-        left = selection.center().x() - size.width() / 2
-        left = max(bounds.left() + margin, min(left, bounds.right() - margin - size.width()))
-        top = FloatingBar._beside(selection, bounds, size)
-        if top is not None:
-            return own, QPoint(round(left), round(top))
-        if remembered is not None:
-            return FloatingBar.resolve(remembered, bounds, elsewhere, size)
-        # Inside the selection's foot, clear of its bottom edge so that edge
-        # can still be dragged -- or the monitor's foot, when the selection
-        # runs on under the taskbar.
-        top = min(bounds.bottom(), selection.bottom()) - margin - size.height()
-        top = max(bounds.top() + margin, top)
-        return own, QPoint(round(left), round(top))
-
-    @staticmethod
-    def resolve(
-        position: "setup_desktop.BarPosition",
-        bounds: QRectF,
-        elsewhere: "QRectF | None",
-        size: QSize,
-    ) -> "tuple[str, QPoint]":
-        """The monitor and top-left that a remembered or dragged `position`
-        names for a bar of `size`, given the selection's own usable area
-        `bounds` and the other monitor's `elsewhere`. Same space in and out.
-
-        A position on the other monitor, on a desk that now has none, keeps
-        its spot on the selection's own monitor: it is still the last place
-        the user put the bar, and any place there covers something.
-        """
-        monitor, spot = position
-        if monitor == setup_desktop.BAR_ON_OTHER_MONITOR and elsewhere is not None:
-            return monitor, FloatingBar.from_spot(spot, elsewhere, size)
-        return setup_desktop.BAR_ON_OWN_MONITOR, FloatingBar.from_spot(spot, bounds, size)
-
-    # How many bar-heights tall a selection must be before the bar may sit
-    # inside it: at three, the bar covers at most a third of it.
-    _INSIDE_MIN_BARS = 3
-
-    @staticmethod
-    def _beside(selection: QRectF, bounds: QRectF, size: QSize) -> "float | None":
-        """The top that puts a bar of `size` beside `selection` inside
-        `bounds` -- below it, or above it when below does not fit and the
-        selection is short -- or None otherwise.
-
-        A tall selection never sends the bar above it: with no room below
-        it reaches the bottom of the screen, and above it puts the bar far
-        from where the user is working. It gets `placement`'s no-room
-        answer instead -- inside its own foot, or where the user dragged
-        the bar last time. Above is for a short strip, which the bar inside
-        it would cover.
-        """
-        metric = design.tokens.BarMetric
-        below = selection.bottom() + metric.BAR_OFFSET_Y
-        if below <= bounds.bottom() - metric.BAR_EDGE_MARGIN - size.height():
-            return below
-        if selection.height() >= FloatingBar._INSIDE_MIN_BARS * size.height():
-            return None
-        above = selection.top() - metric.BAR_OFFSET_Y - size.height()
-        if above >= bounds.top() + metric.BAR_EDGE_MARGIN:
-            return above
-        return None
-
-    @staticmethod
-    def _travel(bounds: QRectF, size: QSize) -> QRectF:
-        """Every top-left that keeps a bar of `size` `BAR_EDGE_MARGIN` inside
-        `bounds`, as a rect of top-left points in `bounds`' own space.
-
-        Empty along an axis the bar does not fit on at all, and pinned to
-        that axis's near margin, which is where `placement` has always put a
-        bar wider than its monitor.
-        """
-        margin = design.tokens.BarMetric.BAR_EDGE_MARGIN
-        return QRectF(
-            bounds.left() + margin,
-            bounds.top() + margin,
-            max(0.0, bounds.width() - 2 * margin - size.width()),
-            max(0.0, bounds.height() - 2 * margin - size.height()),
-        )
-
-    @staticmethod
-    def clamped(top_left: QPointF, bounds: QRectF, size: QSize) -> QPoint:
-        """`top_left` moved the least distance that keeps a bar of `size`
-        `BAR_EDGE_MARGIN` inside `bounds`. Same space in and out.
-        """
-        travel = FloatingBar._travel(bounds, size)
-        return QPoint(
-            round(max(travel.left(), min(top_left.x(), travel.right()))),
-            round(max(travel.top(), min(top_left.y(), travel.bottom()))),
-        )
-
-    @staticmethod
-    def spot(top_left: QPointF, bounds: QRectF, size: QSize) -> "tuple[float, float]":
-        """Where a bar of `size` at `top_left` sits in `bounds`, as a
-        fraction of the room it can travel along each axis: (0, 0) is its
-        top-left position and (1, 1) its bottom-right.
-
-        That is the form a position is remembered in, because it means the
-        same place on any monitor. Pixels -- absolute or monitor-local --
-        point off a smaller monitor, or under a dock added since, and a
-        fraction of the monitor itself would still push a bar remembered
-        against the right edge off one narrower than it was. A fraction of
-        the room the bar has is inside the usable area on every monitor by
-        construction, whatever the bar's own width has become.
-
-        The middle, 0.5, along an axis the bar cannot move on at all.
-        """
-        travel = FloatingBar._travel(bounds, size)
-
-        def fraction(offset: float, room: float) -> float:
-            return 0.5 if room <= 0 else max(0.0, min(offset / room, 1.0))
-
-        return (
-            fraction(top_left.x() - travel.left(), travel.width()),
-            fraction(top_left.y() - travel.top(), travel.height()),
-        )
-
-    @staticmethod
-    def from_spot(spot: "tuple[float, float]", bounds: QRectF, size: QSize) -> QPoint:
-        """The top-left, in `bounds`' own space, that `spot` names for a bar
-        of `size` -- the inverse of `spot`, clamped on the way in so a
-        value from anywhere lands inside `bounds`.
-        """
-        travel = FloatingBar._travel(bounds, size)
-        x, y = (max(0.0, min(float(value), 1.0)) for value in spot)
-        return FloatingBar.clamped(
-            QPointF(travel.left() + x * travel.width(), travel.top() + y * travel.height()),
-            bounds,
-            size,
-        )
-
-
-# ---------------------------------------------------------------------------
-# The tool hint strip
-# ---------------------------------------------------------------------------
-# What hangs under the bar while the style popover is closed: the active
-# tool's name and what it does. It used to lead the colour-and-stroke tray,
-# and it is the part of that tray that was always worth having up.
-
-
-class _ToolPill(QWidget):
-    """The tool hint strip's pill: a static (non-clickable) pill naming
-    the active tool -- glyph + label, per the old tray spec's "Active-tool
-    pill" bullet. A plain QWidget, not a QPushButton: nothing here is clickable,
-    only its translucent fill and its two child QLabels change when the
-    tool does.
-    """
-
-    # Not a tokens.Color entry -- no other control in the design uses this
-    # exact 8% white fill, so it lives here as a class constant the same
-    # way FloatingBar's own _TOP_MAX_FROM_BOTTOM keeps a README literal
-    # that isn't a token.
-    _BG_ALPHA = 0.08
-    _RADIUS = 8
-    _ICON_SIZE = 14
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        # Padding "3/9/3/6" per the spec -- CSS top/right/bottom/left --
-        # asymmetric because the glyph sits close to the pill's own rounded
-        # left edge while the label needs more room on the right.
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 3, 9, 3)
-        layout.setSpacing(6)
-
-        self._icon_label = QLabel(self)
-        layout.addWidget(self._icon_label)
-
-        self._text_label = QLabel(self)
-        font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.TRAY_LABEL
-        font.setPixelSize(round(size))
-        font.setWeight(QFont.Weight(weight))
-        self._text_label.setFont(font)
-        self._text_label.setStyleSheet(f"color: {design.color('TEXT_PRIMARY').name()};")
-        layout.addWidget(self._text_label)
-
-    def set_tool(self, tool: str) -> None:
-        pixmap = design.icon(_tool_glyph(tool), design.color("TEXT_PRIMARY")).pixmap(
-            self._ICON_SIZE, self._ICON_SIZE
-        )
-        self._icon_label.setPixmap(pixmap)
-        self._text_label.setText(_tool_label(tool))
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        bg = QColor("#ffffff")
-        bg.setAlphaF(self._BG_ALPHA)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        painter.drawRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
-        painter.end()
-
-
-class ToolHintStrip(_Chrome):
-    """Names the active tool and says what it does.
-
-    A glyph is not self-explanatory at 15px and a tooltip is a hover away
-    at best: when only the old colour tray named a tool, the eraser -- with
-    nothing to configure -- was the one tool nobody could identify. The
-    strip is up for every tool whenever the bar is and the style popover is
-    not: the pill, and the hint from `tokens.TOOL_HINTS`.
-    """
-
-    _BG_ALPHA = 0.93
-    _RADIUS = 12
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 12, 6)
-        layout.setSpacing(9)
-
-        self._pill = _ToolPill(self)
-        layout.addWidget(self._pill)
-
-        self._hint = QLabel(self)
-        font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.TRAY_HINT
-        font.setPixelSize(round(size))
-        font.setWeight(QFont.Weight(weight))
-        self._hint.setFont(font)
-        self._hint.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
-        layout.addWidget(self._hint)
-
-    def set_tool(self, tool: str) -> None:
-        self._pill.set_tool(tool)
-        self._hint.setText(design.tokens.TOOL_HINTS.get(tool, ""))
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        bg = design.color("BAR_BG")
-        bg.setAlphaF(self._BG_ALPHA)
-        self.glass.paint(painter, glass.rounded(QRectF(self.rect()), self._RADIUS), bg)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.color("BAR_BORDER"))
-        painter.drawRoundedRect(
-            QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self._RADIUS, self._RADIUS
-        )
-        painter.end()
-
-
-# ---------------------------------------------------------------------------
-# The style popover
-# ---------------------------------------------------------------------------
-# docs/design/bars/README.md, "Style dot + popover" and "11a is conditional on
-# the keyboard", is the authority, and docs/design/bars/divergences.md
-# overrides it wherever the two differ. One 216px popover over the style dot
-# replaces the colour-and-stroke tray and the blur tray that used to hang
-# under the bar. It renders only the sections the active tool can use
-# (`tokens.STYLE_SECTIONS`), and every change goes into that tool's own style
-# (`marks.ToolStyles`).
-#
-# The handoff is plain that one row with a popover is only better than a
-# visible tray if the keyboard is behind it: 1-7 pick a swatch, [ and ] step
-# the stroke, D cycles the line style, and a pick never closes the popover.
-# So nothing in it takes the keyboard focus -- a focused slider swallows
-# every one of those keys (`OverlayWindow._shortcuts_suppressed`) -- and it
-# is a child of the window the bar sits over rather than a popup, for the
-# reasons `FamilyMenu` gives.
-
-# The swatch keys, by Qt key code: 1 is the first of `tokens.INK_SWATCHES`.
-_SWATCH_KEY_CODES = {
-    getattr(Qt.Key, f"Key_{number}"): number - 1
-    for number in range(1, len(design.tokens.INK_SWATCHES) + 1)
-}
-# [ thinner, ] thicker -- or, for a redaction, weaker and stronger.
-_STEP_KEY_CODES = {Qt.Key.Key_BracketLeft: -1, Qt.Key.Key_BracketRight: 1}
-_LINE_STYLE_KEY_CODE = Qt.Key.Key_D
-_LINE_STYLE_KEY = "D"
-_STEP_KEYS = "[ ]"
-
-
-def _cycle_step(cycle: list[tuple], name: str) -> tuple[tuple, tuple]:
-    """The entry `name` is in a click-through `cycle`, and the one a click
-    moves on to. A name the cycle does not know reads as its first entry.
-    """
-    names = [entry[0] for entry in cycle]
-    index = names.index(name) if name in names else 0
-    return cycle[index], cycle[(index + 1) % len(cycle)]
-
-
-class _SwatchButton(QPushButton):
-    """One ink swatch in the popover's colour row, and its key.
-
-    A real `QPushButton` for its click handling and tooltip, with the colour
-    and ring hand-painted. The spec rings the picked swatch outward -- "0 0 0
-    2px #1a1c18, 0 0 0 3.5px #f1f3e8" -- and a child widget cannot paint past
-    its own bounds, so the same two rings are drawn inward: the light ring at
-    the edge, the dark gap inside it, the colour inside that.
-    """
-
-    def __init__(self, name: str, hex_colour: str, key: str, parent=None):
-        super().__init__(parent)
-        # Keys belong to the overlay -- see _CloseButton.
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self._colour = QColor(hex_colour)
-        self._selected = False
-        _fit_to_the_colour_row(self)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMouseTracking(True)
-        self.setToolTip(f"{name} — {key}")
-        self.setFlat(True)
-        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
-
-    def sizeHint(self) -> QSize:
-        # The row shares its width out between the swatches, so this only
-        # has to be small enough never to push the row past the popover.
-        return QSize(design.tokens.BarMetric.SWATCH_H // 2, design.tokens.BarMetric.SWATCH_H)
-
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
-    @property
-    def hex_colour(self) -> str:
-        return self._colour.name()
-
-    @property
-    def is_selected(self) -> bool:
-        return self._selected
-
-    def set_selected(self, selected: bool) -> None:
-        self._selected = selected
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        metric = design.tokens.BarMetric
-        rect = QRectF(self.rect())
-        radius = metric.SWATCH_RADIUS
-
-        if self._selected:
-            painter.setBrush(design.bar_color("SWATCH_RING"))
-            painter.drawRoundedRect(rect, radius, radius)
-            ring = metric.SWATCH_RING
-            painter.setBrush(design.bar_color("SWATCH_RING_GAP"))
-            inner = max(radius - ring, 0)
-            painter.drawRoundedRect(rect.adjusted(ring, ring, -ring, -ring), inner, inner)
-            inset = ring + metric.SWATCH_RING_GAP
-            painter.setBrush(self._colour)
-            inner = max(radius - inset, 0)
-            painter.drawRoundedRect(rect.adjusted(inset, inset, -inset, -inset), inner, inner)
-        else:
-            # The spec's border lies over the colour, not beside it, so a
-            # swatch the colour of the popover still has an edge.
-            painter.setBrush(self._colour)
-            painter.drawRoundedRect(rect, radius, radius)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(design.bar_color("SWATCH_BORDER"), 1))
-            painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-        painter.end()
-
-
-class _CustomColorButton(QPushButton):
-    """The colour row's `+`: a swatch's box with a dashed border and a plus,
-    that opens `QColorDialog`. Whether a colour picked here should join the
-    swatches for good is still open on #63, so it does what it always has.
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        # Keys belong to the overlay -- see _CloseButton.
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        metric = design.tokens.BarMetric
-        _fit_to_the_colour_row(self)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMouseTracking(True)
-        self.setToolTip("Custom colour")
-        self.setFlat(True)
-        border = design.bar_color("CUSTOM_BORDER")
-        # One border in one state, so a stylesheet can draw it.
-        self.setStyleSheet(
-            "QPushButton { border: 1px dashed rgba(%d, %d, %d, %s);"
-            " border-radius: %dpx; background: transparent; }"
-            % (border.red(), border.green(), border.blue(), border.alphaF(), metric.SWATCH_RADIUS)
-        )
-        self.setIcon(design.icon("plus", design.bar_color("CUSTOM_FG")))
-        self.setIconSize(QSize(metric.CUSTOM_ICON, metric.CUSTOM_ICON))
-
-    def sizeHint(self) -> QSize:
-        # `QPushButton`'s own hint is wide enough for placeholder text this
-        # button never has, which would take the row's width from the
-        # swatches.
-        return QSize(design.tokens.BarMetric.SWATCH_H // 2, design.tokens.BarMetric.SWATCH_H)
-
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
-
-def _fit_to_the_colour_row(button: QPushButton) -> None:
-    """The spec's `flex: 1`: every box in the colour row the same width, the
-    row's width shared between them, and none of them taking keyboard focus.
-    """
-    button.setFixedHeight(design.tokens.BarMetric.SWATCH_H)
-    button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-
-
-def _cycle_of(kind: str) -> list[tuple]:
-    """The click-through cycle a `_CycleButton` of `kind` steps through."""
-    return {
-        "fill": design.tokens.FILL_CYCLE,
-        "dash": design.tokens.DASH_CYCLE,
-        "snap": design.tokens.SNAP_CYCLE,
-    }[kind]
-
-
-class _CycleButton(QPushButton):
-    """Fill, line or snap: one click-through button that shows the state it is in.
-
-    A click moves on to the next state, the way the chooser's destination and
-    delay do -- one behaviour to learn, and what took the popover from three
-    rows to two. The glyph is the state; the tooltip names it, and what a
-    click changes it to.
-    """
-
-    def __init__(self, kind: str, parent=None):
-        super().__init__(parent)
-        metric = design.tokens.BarMetric
-        self.kind = kind
-        self._state = _cycle_of(kind)[0][0]
-        self._hovered = False
-        self.setFixedSize(metric.CYCLE_W, metric.CYCLE_H)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMouseTracking(True)
-        self.setFlat(True)
-        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
-
-    @property
-    def state(self) -> str:
-        return self._state
-
-    def set_state(self, state: str, tooltip: str) -> None:
-        self._state = state
-        self.setToolTip(tooltip)
-        self.update()
-
-    def enterEvent(self, event) -> None:
-        self._hovered = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.BarMetric
-        rect = QRectF(self.rect())
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.bar_color("CYCLE_HOVER_BG" if self._hovered else "CYCLE_BG"))
-        painter.drawRoundedRect(rect, metric.CYCLE_RADIUS, metric.CYCLE_RADIUS)
-        if self.kind == "fill":
-            self._paint_fill_glyph(painter, rect.center())
-        elif self.kind == "snap":
-            self._paint_snap_glyph(painter, rect.center())
-        else:
-            self._paint_dash_glyph(painter, rect.center())
-        painter.end()
-
-    def _paint_snap_glyph(self, painter: QPainter, centre: QPointF) -> None:
-        """Two lines of type with a highlight fitted over the top one, or a
-        loose freehand swash over them when the sweep is left as drawn.
-        """
-        metric = design.tokens.BarMetric
-        glyph = design.bar_color("CYCLE_GLYPH")
-        half = metric.SNAP_GLYPH_W / 2
-        top_y = centre.y() - metric.SNAP_GLYPH_LINE_GAP / 2
-        bottom_y = centre.y() + metric.SNAP_GLYPH_LINE_GAP / 2
-        if self._state == "text":
-            band = QRectF(0, 0, metric.SNAP_GLYPH_W + 2, metric.SNAP_GLYPH_BAND_H)
-            band.moveCenter(QPointF(centre.x(), top_y))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(design.bar_color("CYCLE_GLYPH_WASH"))
-            painter.drawRoundedRect(band, 2, 2)
-        pen = QPen(glyph, metric.DASH_GLYPH_STROKE)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawLine(QPointF(centre.x() - half, top_y), QPointF(centre.x() + half, top_y))
-        painter.drawLine(
-            QPointF(centre.x() - half, bottom_y), QPointF(centre.x() + half * 0.4, bottom_y)
-        )
-        if self._state != "text":
-            swash = QPainterPath(QPointF(centre.x() - half, top_y + 2))
-            swash.cubicTo(
-                QPointF(centre.x() - half * 0.3, top_y - 5),
-                QPointF(centre.x() + half * 0.3, bottom_y + 3),
-                QPointF(centre.x() + half, top_y - 1),
-            )
-            wash = QPen(design.bar_color("CYCLE_GLYPH_WASH"), metric.SNAP_GLYPH_BAND_H - 2)
-            wash.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(wash)
-            painter.drawPath(swash)
-
-    def _paint_fill_glyph(self, painter: QPainter, centre: QPointF) -> None:
-        """A small box drawn the way the state fills a shape: an outline, a
-        solid box, or an outline round a wash.
-        """
-        metric = design.tokens.BarMetric
-        box = QRectF(0, 0, metric.FILL_GLYPH_W, metric.FILL_GLYPH_H)
-        box.moveCenter(centre)
-        radius = metric.FILL_GLYPH_RADIUS
-        glyph = design.bar_color("CYCLE_GLYPH")
-        if self._state != "outline":
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(
-                glyph if self._state == "filled" else design.bar_color("CYCLE_GLYPH_WASH")
-            )
-            painter.drawRoundedRect(box, radius, radius)
-        if self._state != "filled":
-            border = metric.FILL_GLYPH_BORDER
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(glyph, border))
-            # Inside the box, as a CSS border is.
-            half = border / 2
-            inner = max(radius - half, 0)
-            painter.drawRoundedRect(box.adjusted(half, half, -half, -half), inner, inner)
-
-    def _paint_dash_glyph(self, painter: QPainter, centre: QPointF) -> None:
-        """A short line in the state's own dash pattern."""
-        metric = design.tokens.BarMetric
-        width = metric.DASH_GLYPH_STROKE
-        pen = QPen(design.bar_color("CYCLE_GLYPH"), width)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        (_name, pattern, _label), _next = _cycle_step(design.tokens.DASH_CYCLE, self._state)
-        if pattern:
-            # The spec's SVG dash array is in pixels, a QPen's in widths.
-            pen.setDashPattern([length / width for length in pattern])
-        painter.setPen(pen)
-        half = metric.DASH_GLYPH_W / 2
-        painter.drawLine(
-            QPointF(centre.x() - half, centre.y()), QPointF(centre.x() + half, centre.y())
-        )
-
-
-def _style_slider(bounds: tuple[int, int], parent: QWidget) -> QSlider:
-    """A slider in the spec's look that never takes the keyboard focus: a
-    focused slider would keep [ and ] and the swatch keys from the window.
-    """
-    metric = design.tokens.BarMetric
-    slider = QSlider(Qt.Orientation.Horizontal, parent)
-    slider.setRange(*bounds)
-    slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-    slider.setCursor(Qt.CursorShape.PointingHandCursor)
-    slider.setMouseTracking(True)
-    track = design.bar_color("SLIDER_TRACK")
-    # A stylesheet counts in whole pixels, so the thumb's overhang either
-    # side of the track rounds up, and the thumb is a pixel over the spec's.
-    overhang = math.ceil((metric.SLIDER_THUMB - metric.SLIDER_TRACK) / 2)
-    thumb = metric.SLIDER_TRACK + 2 * overhang
-    slider.setStyleSheet(
-        "QSlider { background: transparent; min-height: %dpx; }"
-        " QSlider::groove:horizontal { height: %dpx; border-radius: %dpx;"
-        " background: rgba(%d, %d, %d, %s); }"
-        " QSlider::handle:horizontal { width: %dpx; margin: -%dpx 0;"
-        " border-radius: %dpx; background: %s; }"
-        % (
-            thumb,
-            metric.SLIDER_TRACK,
-            metric.SLIDER_TRACK // 2,
-            track.red(),
-            track.green(),
-            track.blue(),
-            track.alphaF(),
-            thumb,
-            overhang,
-            thumb // 2,
-            design.bar_color("SLIDER_THUMB").name(),
-        )
-    )
-    return slider
-
-
-def _style_readout(min_width: int, parent: QWidget) -> QLabel:
-    """A slider's mono number, wide enough that the row never reflows as it
-    changes.
-    """
-    readout = QLabel(parent)
-    readout.setMinimumWidth(min_width)
-    readout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-    font = QFont(design.font_families().mono)
-    size, weight = design.tokens.BarFont.READOUT
-    font.setPixelSize(round(size))
-    font.setWeight(QFont.Weight(weight))
-    readout.setFont(font)
-    readout.setStyleSheet(f"color: {design.bar_color('READOUT_FG').name()};")
-    return readout
-
-
-class StylePopover(_Chrome):
-    """The style dot's popover: the active tool's style, and only the parts
-    of it that tool can use.
-
-    Two rows at most. The seven swatches and `+`, across one row; then fill
-    and line, each one click-through button, and a strength or a stroke
-    slider with its readout. A section the tool cannot use is hidden, never
-    shown and inert.
-
-    It is also where a tool's style changes from the keyboard, open or
-    closed (`handle_key`), so a key and a click can never disagree about
-    what they did. Every change goes into the `marks.ToolStyles` it was
-    given, and `styleChanged` names the tool it changed.
-    """
-
-    styleChanged = pyqtSignal(str)
-    # Shown or hidden -- the style dot reads as pressed while it is open.
-    openChanged = pyqtSignal(bool)
-
-    SECTIONS = ("color", "fill", "dash", "snap", "strength", "size")
-
-    def __init__(self, styles: ToolStyles, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        metric = design.tokens.BarMetric
-        tokens = design.tokens
-        self._styles = styles
-        self._tool: str | None = None
-
-        # Border-box, as the handoff insists: the width is the popover's
-        # whole outside edge, padding and border included.
-        self.setFixedWidth(metric.MENU_W_STYLE)
-        layout = QVBoxLayout(self)
-        inset_h = metric.STYLE_PAD_H + metric.BORDER
-        inset_v = metric.STYLE_PAD_V + metric.BORDER
-        layout.setContentsMargins(inset_h, inset_v, inset_h, inset_v)
-        layout.setSpacing(metric.STYLE_ROW_GAP)
-        self._layout = layout
-
-        self._colour_row = QWidget(self)
-        colours = QHBoxLayout(self._colour_row)
-        colours.setContentsMargins(0, 0, 0, 0)
-        colours.setSpacing(metric.SWATCH_GAP)
-        self._swatch_buttons: dict[str, _SwatchButton] = {}
-        for index, (name, hex_colour) in enumerate(tokens.INK_SWATCHES):
-            button = _SwatchButton(name, hex_colour, str(index + 1), self._colour_row)
-            button.clicked.connect(lambda checked=False, c=hex_colour: self._apply(colour=c))
-            self._swatch_buttons[hex_colour] = button
-            colours.addWidget(button)
-        self._custom_button = _CustomColorButton(self._colour_row)
-        self._custom_button.clicked.connect(self._pick_custom_colour)
-        colours.addWidget(self._custom_button)
-        layout.addWidget(self._colour_row)
-
-        self._controls_row = QWidget(self)
-        controls = QHBoxLayout(self._controls_row)
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(metric.STYLE_CONTROL_GAP)
-        self._fill_button = _CycleButton("fill", self._controls_row)
-        self._fill_button.clicked.connect(lambda: self._cycle("fill"))
-        self._dash_button = _CycleButton("dash", self._controls_row)
-        self._dash_button.clicked.connect(lambda: self._cycle("dash"))
-        self._snap_button = _CycleButton("snap", self._controls_row)
-        self._snap_button.clicked.connect(lambda: self._cycle("snap"))
-        self._strength_slider = _style_slider(tokens.STRENGTH_RANGE, self._controls_row)
-        self._strength_slider.setToolTip(f"Redaction strength — {_STEP_KEYS}")
-        self._strength_slider.valueChanged.connect(lambda value: self._apply(strength=value))
-        self._strength_readout = _style_readout(metric.READOUT_W_STRENGTH, self._controls_row)
-        self._size_slider = _style_slider(tokens.STROKE_RANGE, self._controls_row)
-        self._size_slider.valueChanged.connect(lambda value: self._apply(size=value))
-        self._size_readout = _style_readout(metric.READOUT_W_SIZE, self._controls_row)
-        for widget in (
-            self._fill_button,
-            self._dash_button,
-            self._snap_button,
-            self._strength_slider,
-            self._strength_readout,
-            self._size_slider,
-            self._size_readout,
-        ):
-            controls.addWidget(widget)
-        layout.addWidget(self._controls_row)
-
-        self._section_widgets = {
-            "color": (self._colour_row,),
-            "fill": (self._fill_button,),
-            "dash": (self._dash_button,),
-            "snap": (self._snap_button,),
-            "strength": (self._strength_slider, self._strength_readout),
-            "size": (self._size_slider, self._size_readout),
-        }
-        self.refresh()
-
-    @property
-    def tool(self) -> str | None:
-        return self._tool
-
-    def set_tool(self, tool: str | None) -> None:
-        """Style `tool` from here on: its sections, holding its style."""
-        self._tool = tool
-        self.refresh()
-
-    def sections(self) -> list[str]:
-        """The sections showing, in the order they are laid out."""
-        return [
-            name for name in self.SECTIONS if not self._section_widgets[name][0].isHidden()
-        ]
-
-    def setVisible(self, visible: bool) -> None:
-        # Every way a popover opens or closes -- the dot, Esc, a press on the
-        # frame, the window hiding -- ends here, so the dot cannot be left
-        # looking pressed over a popover that is gone.
-        was_hidden = self.isHidden()
-        super().setVisible(visible)
-        if self.isHidden() != was_hidden:
-            self.openChanged.emit(not self.isHidden())
-
-    def refresh(self) -> None:
-        """Show the tool's sections and nothing else, each holding what the
-        tool's style is now.
-        """
-        tool = self._tool
-        wanted = design.tokens.STYLE_SECTIONS.get(tool, [])
-        for name, widgets in self._section_widgets.items():
-            for widget in widgets:
-                widget.setHidden(name not in wanted)
-        self._controls_row.setHidden(not any(name in wanted for name in self.SECTIONS[1:]))
-
-        style = self._styles.of(tool)
-        for hex_colour, button in self._swatch_buttons.items():
-            button.set_selected(hex_colour.lower() == style.colour.lower())
-        self._fill_button.set_state(style.fill, self._cycle_tooltip("fill", style.fill))
-        self._dash_button.set_state(style.dash, self._cycle_tooltip("dash", style.dash))
-        self._snap_button.set_state(style.snap, self._cycle_tooltip("snap", style.snap))
-        for slider, value in (
-            (self._strength_slider, style.strength),
-            (self._size_slider, style.size),
-        ):
-            # Quietly: this is the popover catching up with the style, not
-            # the user moving the slider.
-            blocked = slider.blockSignals(True)
-            slider.setValue(value)
-            slider.blockSignals(blocked)
-        self._strength_readout.setText(str(style.strength))
-        self._size_readout.setText(f"{style.size}px")
-        size_name = "Text size" if tool == "text" else "Stroke"
-        self._size_slider.setToolTip(f"{size_name} — {_STEP_KEYS}")
-
-        # Hiding a row, or a control inside one, changes the popover's
-        # height, and Qt only settles a layout around a child shown or hidden
-        # when it next gets round to it -- invalidating is not enough, the
-        # cached sizes are still the last tool's. Activated inside out here,
-        # so the height below is this tool's: the first open after switching
-        # from the pen to a rectangle came up sized for the pen, with the fill
-        # and line buttons cut off at the bottom.
-        for row in (self._colour_row, self._controls_row):
-            row.layout().activate()
-        self._layout.activate()
-        self.resize(self.width(), self.sizeHint().height())
-
-    @staticmethod
-    def _cycle_tooltip(kind: str, state: str) -> str:
-        if kind == "fill":
-            (_name, label), (_next, next_label) = _cycle_step(design.tokens.FILL_CYCLE, state)
-            return f"Fill · {label} → click for {next_label}"
-        if kind == "snap":
-            (_name, label), (_next, next_label) = _cycle_step(design.tokens.SNAP_CYCLE, state)
-            return f"{label} → click for {next_label}"
-        (_name, _pattern, label), (_next, _next_pattern, next_label) = _cycle_step(
-            design.tokens.DASH_CYCLE, state
-        )
-        return f"Line · {label} → click for {next_label} — {_LINE_STYLE_KEY}"
-
-    def _apply(self, **changes) -> None:
-        if self._tool is None:
-            return
-        self._styles.update(self._tool, **changes)
-        self.refresh()
-        self.styleChanged.emit(self._tool)
-
-    def _cycle(self, kind: str) -> None:
-        _now, then = _cycle_step(_cycle_of(kind), getattr(self._styles.of(self._tool), kind))
-        self._apply(**{kind: then[0]})
-
-    def _pick_custom_colour(self) -> None:
-        # QColorDialog.getColor() returns an invalid QColor on Cancel rather
-        # than raising or returning None, so isValid() is the "did the user
-        # choose something" check.
-        colour = QColorDialog.getColor(
-            QColor(self._styles.of(self._tool).colour), self, "Custom Colour"
-        )
-        if colour.isValid():
-            self._apply(colour=colour.name())
-
-    def handle_key(self, key: int) -> bool:
-        """Apply a style key to the tool, and say whether it did anything.
-
-        1-7 pick a swatch, [ and ] step the stroke -- or a redaction's
-        strength, the one slider it has -- and D cycles the line style. A
-        key the tool has no section for does nothing, and is left for
-        whatever else wants it.
-        """
-        sections = design.tokens.STYLE_SECTIONS.get(self._tool, [])
-        if key in _SWATCH_KEY_CODES:
-            if "color" not in sections:
-                return False
-            _name, hex_colour = design.tokens.INK_SWATCHES[_SWATCH_KEY_CODES[key]]
-            self._apply(colour=hex_colour)
-            return True
-        if key in _STEP_KEY_CODES:
-            step = _STEP_KEY_CODES[key]
-            style = self._styles.of(self._tool)
-            if "size" in sections:
-                self._apply(size=style.size + step)
-            elif "strength" in sections:
-                self._apply(strength=style.strength + step)
-            else:
-                return False
-            return True
-        if key == _LINE_STYLE_KEY_CODE and "dash" in sections:
-            self._cycle("dash")
-            return True
-        return False
-
-    def reposition(self, anchor: QRect, bar: QRect, bounds: QRectF) -> None:
-        """Open over `anchor` -- the style dot -- the way a family menu opens
-        over its slot: above `bar`, below it when there is no room above
-        inside `bounds`. All three are in the parent's coordinates.
-        """
-        size = QSize(self.width(), self.sizeHint().height())
-        self.setGeometry(_menu_geometry(size, anchor, bar, bounds))
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.BarMetric
-        path = glass.rounded(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), metric.MENU_RADIUS)
-        self.glass.paint(painter, path, design.bar_color("MENU_BG"))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.bar_color("MENU_BORDER"))
-        painter.drawPath(path)
-        painter.end()
-
-
-# ---------------------------------------------------------------------------
-# Capture-mode popover (SNX-44)
-# ---------------------------------------------------------------------------
-# docs/design/overlay-redesign.md's "Capture-mode popover" section is the
-# authority here, cross-checked against the reference's own `renderVals()`
-# (`menuUp = barTop > 300`, `cycleDelay`, `modes.map`) for anything the prose
-# leaves implicit -- e.g. that the chip's own label follows `st.mode`, not
-# just its "Region" construction default. The chip is a mode selector, not
-# an action: picking a row only records `OverlayWindow._capture_mode` and
-# updates the chip's label here; `_dispatch_capture_mode` is what actually
-# reads it back to drive Window/Full screen picking.
-
-
-class _CaptureModeRow(QPushButton):
-    """One row of the popover: glyph, a two-line label/note, and a check
-    mark for whichever mode is currently selected, per the spec's rows
-    bullet. Hand-painted background -- like `_SwatchButton`'s ring -- since
-    a hovered *and* selected row needs the hover fill to win, which a
-    stylesheet's static rule can't express.
-    """
-
-    _ICON_SIZE = 16
-    _CHECK_SIZE = 15
-    _GAP = 10
-    _LABEL_GAP = 2
-    # Prose-only literals from the spec's "hover `#ffffff` at 9%" /
-    # "Selected row background `#ffffff` at 8%" -- not tokens.Color entries,
-    # same convention `_ToolPill._BG_ALPHA` already follows for a one-off
-    # fill no other control shares.
-    _HOVER_BG_ALPHA = 0.09
-    _SELECTED_BG_ALPHA = 0.08
-
-    def __init__(self, mode_label: str, icon_name: str, note: str, parent=None):
-        super().__init__(parent)
-        # Keys belong to the overlay -- see _CloseButton.
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFlat(True)
-        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
-
-        self._icon_name = icon_name
-        self._selected = False
-        self._bg_alpha: float | None = None
-
-        metric = design.tokens.Metric
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(
-            metric.MENU_ROW_PAD_H,
-            metric.MENU_ROW_PAD_V,
-            metric.MENU_ROW_PAD_H,
-            metric.MENU_ROW_PAD_V,
-        )
-        layout.setSpacing(self._GAP)
-
-        self._icon_label = QLabel(self)
-        self._icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self._icon_label)
-
-        text_column = QVBoxLayout()
-        text_column.setContentsMargins(0, 0, 0, 0)
-        text_column.setSpacing(self._LABEL_GAP)
-
-        self._label = QLabel(mode_label, self)
-        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        label_font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.MENU_LABEL
-        label_font.setPixelSize(round(size))
-        label_font.setWeight(QFont.Weight(weight))
-        self._label.setFont(label_font)
-        text_column.addWidget(self._label)
-
-        note_label = QLabel(note, self)
-        note_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        note_font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.MENU_NOTE
-        note_font.setPixelSize(round(size))
-        note_font.setWeight(QFont.Weight(weight))
-        note_label.setFont(note_font)
-        note_label.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
-        text_column.addWidget(note_label)
-
-        layout.addLayout(text_column, 1)
-
-        self._check = QLabel(self)
-        self._check.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._check.setPixmap(
-            design.icon("check", design.color("ACCENT")).pixmap(
-                self._CHECK_SIZE, self._CHECK_SIZE
-            )
-        )
-        self._check.setVisible(False)
-        layout.addWidget(self._check)
-
-        self._refresh()
-
-    @property
-    def is_selected(self) -> bool:
-        return self._selected
-
-    def set_selected(self, selected: bool) -> None:
-        """Mark this row as the current capture mode -- the check glyph and
-        the `ICON_ACTIVE` label/icon colour both follow `_selected`, per
-        the spec's "a check glyph... for the selected row."
-        """
-        self._selected = selected
-        self._refresh()
-
-    def _refresh(self, hovered: bool | None = None) -> None:
-        if hovered is None:
-            hovered = self.underMouse()
-        # Hover wins over the selected fill when both apply -- every row,
-        # including the current mode's own, still needs to read as
-        # clickable while the pointer is over it.
-        if hovered:
-            self._bg_alpha = self._HOVER_BG_ALPHA
-        elif self._selected:
-            self._bg_alpha = self._SELECTED_BG_ALPHA
-        else:
-            self._bg_alpha = None
-
-        fg = design.color("ICON_ACTIVE") if self._selected else design.color("ICON_IDLE")
-        self._label.setStyleSheet(f"color: {fg.name()};")
-        self._icon_label.setPixmap(
-            design.icon(self._icon_name, fg).pixmap(self._ICON_SIZE, self._ICON_SIZE)
-        )
-        self._check.setVisible(self._selected)
-        self.update()
-
-    def enterEvent(self, event) -> None:
-        self._refresh(hovered=True)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._refresh(hovered=False)
-        super().leaveEvent(event)
-
-    def sizeHint(self) -> QSize:
-        # QPushButton.sizeHint() sizes off `self.text()`/`self.icon()` --
-        # both unused here, since the glyph/label/note/check pairing lives
-        # in the child QHBoxLayout instead (see class docstring), so the
-        # base implementation falls back to a near-empty placeholder height
-        # regardless of the two-line label actually painted. That's what
-        # SNX-75 found: a row measured 48x12 against the ~45px a 12.5px
-        # name over an 11px note plus 8px top/bottom padding actually needs,
-        # so the popover's QVBoxLayout gave it almost no height and the
-        # whole menu collapsed -- the same class of bug SNX-59 fixed for
-        # `_PillButton` (see its own sizeHint docstring). The child layout
-        # already knows the true height, because it was built from
-        # MENU_ROW_PAD_V plus the icon/text column's own sizeHint, and the
-        # label/note sizeHints come from the fonts they actually render in.
-        return self.layout().sizeHint()
-
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
-    def paintEvent(self, event) -> None:
-        if self._bg_alpha is None:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        bg = QColor("#ffffff")
-        bg.setAlphaF(self._bg_alpha)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        metric = design.tokens.Metric
-        painter.drawRoundedRect(
-            QRectF(self.rect()), metric.MENU_ROW_RADIUS, metric.MENU_ROW_RADIUS
-        )
-        painter.end()
-
-
-class _DelayRow(QPushButton):
-    """The popover's delay row: a timer glyph, the word "Delay", and the
-    current value right-aligned -- per the spec's "Delay" paragraph. No
-    selected state (unlike `_CaptureModeRow`): the row itself *is* the
-    control, and there is nothing else in the popover it could read as
-    selected relative to.
-    """
-
-    _ICON_SIZE = 16
-    _GAP = 10
-    _HOVER_BG_ALPHA = 0.09  # same one-off fill _CaptureModeRow's hover uses
-    # "mono 11.5px `#8f9689`" -- the closest tokens.Font entry, MENU_NOTE,
-    # is 11.0px and already spoken for by the mode rows' own notes, so this
-    # stays a local literal.
-    _VALUE_PX = 11.5
-    _VALUE_WEIGHT = 400
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        # Keys belong to the overlay -- see _CloseButton.
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFlat(True)
-        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
-
-        self._hovered = False
-
-        metric = design.tokens.Metric
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(
-            metric.MENU_ROW_PAD_H,
-            metric.MENU_ROW_PAD_V,
-            metric.MENU_ROW_PAD_H,
-            metric.MENU_ROW_PAD_V,
-        )
-        layout.setSpacing(self._GAP)
-
-        icon_label = QLabel(self)
-        icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        icon_label.setPixmap(
-            design.icon("timer", design.color("ICON_IDLE")).pixmap(
-                self._ICON_SIZE, self._ICON_SIZE
-            )
-        )
-        layout.addWidget(icon_label)
-
-        label = QLabel("Delay", self)
-        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        label_font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.MENU_LABEL
-        label_font.setPixelSize(round(size))
-        label_font.setWeight(QFont.Weight(weight))
-        label.setFont(label_font)
-        label.setStyleSheet(f"color: {design.color('ICON_IDLE').name()};")
-        layout.addWidget(label, 1)
-
-        self._value = QLabel(self)
-        self._value.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        value_font = QFont(design.font_families().mono)
-        value_font.setPixelSize(round(self._VALUE_PX))
-        value_font.setWeight(QFont.Weight(self._VALUE_WEIGHT))
-        self._value.setFont(value_font)
-        self._value.setStyleSheet(f"color: {design.color('TEXT_MUTED').name()};")
-        layout.addWidget(self._value)
-
-    def set_value(self, text: str) -> None:
-        self._value.setText(text)
-
-    def enterEvent(self, event) -> None:
-        self._hovered = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def sizeHint(self) -> QSize:
-        # Same fix as `_CaptureModeRow.sizeHint` and for the same reason:
-        # this is a QPushButton whose real content lives in a child layout,
-        # so the base sizeHint() -- keyed off the unused text()/icon() --
-        # under-reports it. The popover's own height is the sum of its
-        # rows' sizeHints (AC), so a delay row that still collapsed would
-        # undersize the popover even with every mode row already fixed.
-        return self.layout().sizeHint()
-
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
-    def paintEvent(self, event) -> None:
-        if not self._hovered:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        bg = QColor("#ffffff")
-        bg.setAlphaF(self._HOVER_BG_ALPHA)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        metric = design.tokens.Metric
-        painter.drawRoundedRect(
-            QRectF(self.rect()), metric.MENU_ROW_RADIUS, metric.MENU_ROW_RADIUS
-        )
-        painter.end()
-
-
-class _MenuSeparator(QWidget):
-    """The 1px rule between the mode rows and the delay row, per the
-    spec's "a 1px `#ffffff` 10% separator with 5px/4px margins." A fixed-
-    height widget that paints its line inset from its own edges, mirroring
-    how `_Divider` fixes its own size rather than leaning on layout
-    margins for a hairline.
-    """
-
-    _MARGIN_V = 5
-    _MARGIN_H = 4
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(self._MARGIN_V * 2 + 1)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        # BAR_BORDER is the same #ffffff/10% pair the spec's separator
-        # uses -- reused rather than re-typed, the same precedent
-        # FloatingBar._build_save_button already sets for BAR_BORDER.
-        painter.fillRect(
-            self._MARGIN_H,
-            self._MARGIN_V,
-            self.width() - 2 * self._MARGIN_H,
-            1,
-            design.color("BAR_BORDER"),
-        )
-        painter.end()
-
-
-class CaptureModePopover(_Chrome):
-    """The overlay redesign's capture-mode popover: `tokens.CAPTURE_MODES`
-    as a list of rows, a separator, then the delay row -- per
-    docs/design/overlay-redesign.md's "Capture-mode popover" section.
-
-    A real child widget of `OverlayWindow`, built the same way
-    `FloatingBar`/`StylePopover` are -- opened and positioned by
-    `OverlayWindow._toggle_capture_popover`, never painted in its own
-    `paintEvent`. Picking a row only records the choice and closes the
-    popover; Window and Full screen don't do anything past that
-    yet -- they're separate tickets in the same arc `_bar`'s tool buttons
-    already follow (see `OverlayWindow._on_tool_selected`'s docstring).
-    """
-
-    modeSelected = pyqtSignal(str)
-    delayChanged = pyqtSignal(str)
-
-    # The README gives this literal directly ("if bar top > 300px") rather
-    # than as a tokens.Metric entry -- same convention FloatingBar's own
-    # _TOP_MAX_FROM_BOTTOM already follows for a prose-only constant.
-    _UP_THRESHOLD = 300
-
-    # Same #1a1c18 BAR_BG already names, at the popover's own 97% rather
-    # than the bar's 93% -- no tokens.Color entry carries that exact alpha,
-    # so it's a local literal rather than a one-off *_ALPHA sibling added
-    # for a single caller.
-    _BG_ALPHA = 0.97
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        metric = design.tokens.Metric
-        # Fixed, not just flowed from its rows' natural width -- the spec
-        # gives the popover an exact "262px wide," and `reposition` below
-        # positions off that same literal rather than a sizeHint that could
-        # drift from what actually gets painted.
-        self.setFixedWidth(metric.MENU_W)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(
-            metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD, metric.MENU_PAD
-        )
-        layout.setSpacing(0)
-
-        self._mode: str = design.tokens.CAPTURE_MODES[0][0]
-        self._delay: str = design.tokens.DELAYS[0]
-
-        self._rows: dict[str, _CaptureModeRow] = {}
-        for label, icon_name, note in design.tokens.CAPTURE_MODES:
-            row = _CaptureModeRow(label, icon_name, note, self)
-            row.clicked.connect(lambda checked=False, m=label: self._on_row_clicked(m))
-            self._rows[label] = row
-            layout.addWidget(row)
-
-        layout.addWidget(_MenuSeparator(self))
-
-        self._delay_row = _DelayRow(self)
-        self._delay_row.clicked.connect(self._on_delay_clicked)
-        layout.addWidget(self._delay_row)
-
-        self._select_row(self._mode)
-        self._delay_row.set_value(self._delay)
-
-    @property
-    def mode(self) -> str:
-        return self._mode
-
-    @property
-    def delay(self) -> str:
-        return self._delay
-
-    def set_mode(self, mode: str) -> None:
-        """Mark `mode`'s row checked without emitting `modeSelected` or
-        closing the popover -- for a future caller seeding the popover from
-        elsewhere, mirroring the split `FloatingBar.set_active_tool` keeps
-        from its own `_on_tool_clicked`.
-        """
-        self._mode = mode
-        self._select_row(mode)
-
-    def set_delay(self, delay: str) -> None:
-        """Show `delay` without emitting `delayChanged` -- the chooser row
-        sets the same delay, and this popover has to agree with it (#73).
-        """
-        if delay not in design.tokens.DELAYS:
-            return
-        self._delay = delay
-        self._delay_row.set_value(delay)
-
-    def _select_row(self, mode: str) -> None:
-        for label, row in self._rows.items():
-            row.set_selected(label == mode)
-
-    def _on_row_clicked(self, mode: str) -> None:
-        """Record `mode` and close the popover, per the spec's "picking a
-        row records that mode and closes the popover." Modes past Region
-        are separate tickets -- this never itself starts a window hover-
-        highlight, only the recording.
-        """
-        self.set_mode(mode)
-        self.modeSelected.emit(mode)
-        self.hide()
-
-    def _on_delay_clicked(self) -> None:
-        """Cycle to the next `tokens.DELAYS` value, wrapping past the last
-        back to the first -- per the spec's "Clicking cycles Off -> 3s ->
-        5s -> 10s -> Off." Unlike a mode row, this leaves the popover open,
-        mirroring the reference's own `cycleDelay`, which never touches
-        `modeOpen`.
-        """
-        delays = design.tokens.DELAYS
-        index = delays.index(self._delay)
-        self._delay = delays[(index + 1) % len(delays)]
-        self._delay_row.set_value(self._delay)
-        self.delayChanged.emit(self._delay)
-
-    def reposition(self, bar_geometry: QRect, bounds: QRectF) -> None:
-        """Position the popover against `bar_geometry` (`FloatingBar`'s own
-        geometry, already in this widget's parent's coordinate space), per
-        the spec's rule: "if bar top > 300px, place the popover at
-        bar_top - popover_height - 8; otherwise place it below the bar."
-        Horizontally centred on the bar and clamped inside `bounds`,
-        mirroring `OverlayWindow._reposition_tool_hint`'s own centring.
-
-        `bounds` is the selection's own monitor, in parent coordinates --
-        see `FloatingBar.reposition`, which this deliberately mirrors. The
-        spec's "300px" is a distance from the top of the *screen* the user
-        is looking at, so it is measured from `bounds.top()` rather than
-        read as an absolute parent coordinate: a monitor mounted 201px down
-        the virtual desktop would otherwise flip the popover upward 201px
-        too early, into a gap no monitor displays.
-        """
-        metric = design.tokens.Metric
-        width = metric.MENU_W
-        height = self.sizeHint().height()
-
-        center_x = bar_geometry.center().x()
-        left = center_x - width / 2
-        left = max(bounds.left(), min(left, bounds.right() - width))
-
-        if bar_geometry.top() - bounds.top() > self._UP_THRESHOLD:
-            top = bar_geometry.top() - height - metric.MENU_OFFSET
-        else:
-            top = bar_geometry.bottom() + metric.MENU_OFFSET
-        top = max(bounds.top(), min(top, bounds.bottom() - height))
-
-        self.setGeometry(round(left), round(top), width, height)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.Metric
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-
-        bg = QColor(design.tokens.Color.BAR_BG)
-        bg.setAlphaF(self._BG_ALPHA)
-        self.glass.paint(painter, glass.rounded(rect, metric.MENU_RADIUS), bg)
-
-        # DIVIDER is the same #ffffff/12% pair the spec's popover border
-        # uses -- reused rather than re-typed, the same precedent
-        # FloatingBar._build_save_button sets for BAR_BORDER.
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.color("DIVIDER"))
-        painter.drawRoundedRect(rect, metric.MENU_RADIUS, metric.MENU_RADIUS)
-        painter.end()
-
-
-# ---------------------------------------------------------------------------
-# Family menus
-# ---------------------------------------------------------------------------
-# A family slot's notch opens one of these: every sibling in the family, the
-# one the slot shows ticked. Shapes carry each sibling's key, since the menu
-# is for discovering a shape rather than for reaching it; redaction rows
-# carry what each one guarantees instead, because blur on small text is
-# famously recoverable and a user choosing between the three needs to know.
-
-
-def _menu_geometry(size: QSize, anchor: QRect, bar: QRect, bounds: QRectF) -> QRect:
-    """Where a menu of `size` opens for the control at `anchor` on `bar`:
-    centred over it and `MENU_OFFSET` above the bar, or below the bar when
-    there is no room above inside `bounds`. All in the parent's coordinates.
-
-    Shared by the family menus and the style popover, so every menu off the
-    bar opens the same way.
-    """
-    metric = design.tokens.BarMetric
-    width, height = size.width(), size.height()
-    left = anchor.center().x() - width / 2
-    left = max(bounds.left(), min(left, bounds.right() - width))
-    bar_rect = QRectF(bar)
-    top = bar_rect.top() - metric.MENU_OFFSET - height
-    if top < bounds.top():
-        top = min(bar_rect.bottom() + metric.MENU_OFFSET, bounds.bottom() - height)
-    return QRect(round(left), round(top), width, height)
-
-
-class _FamilyRow(QPushButton):
-    """One sibling in a family menu: glyph, label, then its key or its note,
-    and a tick for the sibling the slot is showing.
-
-    Painted rather than laid out from child labels, and sized from the fonts
-    it actually draws in -- so it cannot collapse to `QPushButton`'s
-    placeholder height the way `_CaptureModeRow.sizeHint` documents.
-    """
-
-    def __init__(
-        self,
-        tool: str,
-        glyph: str,
-        label: str,
-        shortcut: str,
-        note: str,
-        width: int,
-        parent=None,
-    ):
-        super().__init__(parent)
-        # Keys belong to the overlay -- see _CloseButton.
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.tool = tool
-        self._glyph = glyph
-        self._label = label
-        self._shortcut = shortcut
-        self._note = note
-        self._selected = False
-        self._hovered = False
-        self.setFlat(True)
-        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(width, self._height())
-
-    def sizeHint(self) -> QSize:
-        # The size it is fixed at. `QPushButton`'s own hint measures a text
-        # and an icon this row never sets.
-        return QSize(self.minimumWidth(), self.minimumHeight())
-
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
-    @staticmethod
-    def _font(spec: tuple[float, int], mono: bool = False) -> QFont:
-        families = design.font_families()
-        font = QFont(families.mono if mono else families.ui)
-        size, weight = spec
-        font.setPixelSize(round(size))
-        font.setWeight(QFont.Weight(weight))
-        return font
-
-    def _height(self) -> int:
-        metric = design.tokens.BarMetric
-        pad_v, _pad_h = metric.MENU_ROW_PAD
-        content = QFontMetricsF(self._font(design.tokens.BarFont.MENU_LABEL)).height()
-        if self._note:
-            content += metric.MENU_NOTE_GAP + QFontMetricsF(
-                self._font(design.tokens.BarFont.MENU_NOTE)
-            ).height()
-        return math.ceil(pad_v * 2 + max(metric.MENU_ROW_ICON, content))
-
-    @property
-    def is_selected(self) -> bool:
-        return self._selected
-
-    def set_selected(self, selected: bool) -> None:
-        self._selected = selected
-        self.update()
-
-    def enterEvent(self, event) -> None:
-        self._hovered = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.BarMetric
-        fonts = design.tokens.BarFont
-        rect = QRectF(self.rect())
-        pad_v, pad_h = metric.MENU_ROW_PAD
-
-        # Hover wins over the selected fill, so the ticked row still reads as
-        # something that can be pressed.
-        if self._hovered or self._selected:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(
-                design.bar_color("ROW_HOVER_BG" if self._hovered else "ROW_SELECTED_BG")
-            )
-            painter.drawRoundedRect(rect, metric.MENU_ROW_RADIUS, metric.MENU_ROW_RADIUS)
-
-        fg = design.bar_color("ROW_SELECTED_FG" if self._selected else "ROW_IDLE_FG")
-        icon = metric.MENU_ROW_ICON
-        left = float(pad_h)
-        design.icon(self._glyph, fg).paint(
-            painter, round(left), round((rect.height() - icon) / 2), icon, icon
-        )
-        left += icon + metric.MENU_ROW_GAP
-
-        tick = metric.MENU_TICK
-        right = rect.width() - pad_h - tick
-        if self._selected:
-            design.icon("check", design.bar_color("ACCENT")).paint(
-                painter, round(right), round((rect.height() - tick) / 2), tick, tick
-            )
-        right -= metric.MENU_ROW_GAP
-
-        if self._shortcut:
-            font = self._font(fonts.MENU_SHORTCUT, mono=True)
-            painter.setFont(font)
-            painter.setPen(design.bar_color("SHORTCUT_FG"))
-            width = QFontMetricsF(font).horizontalAdvance(self._shortcut)
-            painter.drawText(
-                QRectF(right - width, 0, width, rect.height()),
-                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                self._shortcut,
-            )
-            right -= width + metric.MENU_ROW_GAP
-
-        label_font = self._font(fonts.MENU_LABEL)
-        painter.setFont(label_font)
-        painter.setPen(fg)
-        if not self._note:
-            painter.drawText(
-                QRectF(left, 0, right - left, rect.height()),
-                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                self._label,
-            )
-            painter.end()
-            return
-
-        label_h = QFontMetricsF(label_font).height()
-        painter.drawText(
-            QRectF(left, pad_v, right - left, label_h),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            self._label,
-        )
-        note_font = self._font(fonts.MENU_NOTE)
-        painter.setFont(note_font)
-        painter.setPen(design.bar_color("ROW_NOTE_FG"))
-        painter.drawText(
-            QRectF(
-                left,
-                pad_v + label_h + metric.MENU_NOTE_GAP,
-                right - left,
-                QFontMetricsF(note_font).height(),
-            ),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            self._note,
-        )
-        painter.end()
-
-
-class FamilyMenu(_Chrome):
-    """A family slot's menu: every sibling, the one the slot shows ticked,
-    and a pick that arms the sibling picked.
-
-    A child of the window the bar sits over -- not of the bar, and not a
-    top-level popup either, though the handoff draws one. Not the bar's,
-    because a menu paints outside the bar's rect and above the strip that
-    hangs under it. Not a popup, because a popup takes the keyboard while it
-    is open, so a sibling's key and Esc would stop reaching the window, and
-    a press outside a popup is replayed underneath or swallowed depending on
-    the platform. As a child, the window's own press handler decides what a
-    press outside the menu means -- close it, and nothing else -- and
-    `_Chrome` keeps a press on the menu from ever reaching that handler.
-    """
-
-    siblingPicked = pyqtSignal(str)
-
-    def __init__(self, family: str, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.family = family
-        metric = design.tokens.BarMetric
-        tokens = design.tokens
-        if family == "shapes":
-            width = metric.MENU_W_SHAPES
-            entries = [(tool, tool, label, key, "") for tool, label, key in tokens.SHAPES]
-        else:
-            width = metric.MENU_W_REDACT
-            entries = [
-                (tool, glyph, label, "", note) for tool, glyph, label, note in tokens.REDACTIONS
-            ]
-        # Border-box, as the handoff insists: the width is the menu's whole
-        # outside edge, padding and border included.
-        self.setFixedWidth(width)
-        inset = metric.MENU_PAD + metric.BORDER
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(inset, inset, inset, inset)
-        layout.setSpacing(0)
-
-        self._rows: dict[str, _FamilyRow] = {}
-        for tool, glyph, label, key, note in entries:
-            row = _FamilyRow(tool, glyph, label, key, note, width - 2 * inset, self)
-            row.clicked.connect(lambda checked=False, t=tool: self._on_row_clicked(t))
-            self._rows[tool] = row
-            layout.addWidget(row)
-
-        self._current = entries[0][0]
-        self.set_current(self._current)
-        self.resize(self.sizeHint())
-
-    @property
-    def current(self) -> str:
-        return self._current
-
-    def set_current(self, tool: str) -> None:
-        """Tick `tool` without arming anything -- for seeding the menu with
-        the sibling its slot shows before it opens.
-        """
-        self._current = tool
-        for name, row in self._rows.items():
-            row.set_selected(name == tool)
-
-    def _on_row_clicked(self, tool: str) -> None:
-        self.set_current(tool)
-        self.hide()
-        self.siblingPicked.emit(tool)
-
-    def reposition(self, slot: QRect, bar: QRect, bounds: QRectF) -> None:
-        """Centre over `slot` and open above `bar`, `MENU_OFFSET` clear of
-        it -- below the bar instead when there is no room above inside
-        `bounds`. All three are in the parent's coordinates.
-
-        Above first, as the spec opens every menu: the bar sits below the
-        selection whenever it can, so a menu opening downward would hang off
-        the bottom of the monitor more often than not.
-        """
-        size = QSize(self.width(), self.sizeHint().height())
-        self.setGeometry(_menu_geometry(size, slot, bar, bounds))
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.BarMetric
-        path = glass.rounded(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), metric.MENU_RADIUS)
-        self.glass.paint(painter, path, design.bar_color("MENU_BG"))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.bar_color("MENU_BORDER"))
-        painter.drawPath(path)
-        painter.end()
-
-
-# ---------------------------------------------------------------------------
-# The watermark (#69)
-# ---------------------------------------------------------------------------
-# docs/design/bars/README.md, "Watermark is not a tool": a toggle on the
-# stills bar, a notch for where the mark goes and how strongly, and what the
-# mark is in Settings. The mark itself is `shapes.Watermark`, which the live
-# preview and the export both paint.
-
-
-@dataclass
-class WatermarkChoice:
-    """The stills bar's watermark: on or off, which corner, what opacity.
-
-    A session's, not a preference's. It carries from one snip to the next
-    for as long as snipux runs, and a fresh launch starts it off, in the
-    bottom-right corner at 70% (#69). What the mark is lives in Settings --
-    see `watermark_content`.
-    """
-
-    enabled: bool = False
-    corner: str = design.tokens.WATERMARK["default_corner"]
-    opacity: int = design.tokens.WATERMARK["default_opacity"]
-
-
 # The running session's choice. The module's rather than a window's:
 # every snip builds a new `OverlayWindow`, and this is what outlives them.
 watermark_session = WatermarkChoice()
-
-
-def watermark_content(config_dir: Path | None = None) -> "tuple[str | QImage | None, str]":
-    """What Settings says the watermark stamps: `(text or image, "")`, or
-    `(None, reason)` when there is nothing it can stamp.
-
-    Read at the start of every snip, so a change in Settings reaches the
-    very next one. Nothing here raises: a value that cannot be used is a
-    reason for the slot to grey with, never a capture that fails.
-    """
-    tokens = design.tokens
-    if setup_desktop.load_watermark_kind(config_dir) == "image":
-        if setup_desktop.load_watermark_image_name(config_dir) is None:
-            return None, tokens.WATERMARK_UNSET
-        path = setup_desktop.load_watermark_image(config_dir)
-        if path is None:
-            return None, tokens.WATERMARK_IMAGE_MISSING
-        image = QImage(str(path))
-        if image.isNull():
-            return None, tokens.WATERMARK_IMAGE_UNREADABLE
-        return image, ""
-    text = setup_desktop.load_watermark_text(config_dir)
-    return (text, "") if text else (None, tokens.WATERMARK_UNSET)
-
-
-@dataclass(frozen=True)
-class WatermarkTextStyle:
-    """How a text mark looks, as Settings has it: read with the content at
-    the start of every snip, so the preview and the export share one."""
-
-    color: QColor
-    font_family: str
-    backing: bool
-
-
-def watermark_text_style(config_dir: Path | None = None) -> WatermarkTextStyle:
-    return WatermarkTextStyle(
-        color=QColor(setup_desktop.load_watermark_color(config_dir)),
-        font_family=setup_desktop.load_watermark_font(config_dir),
-        backing=setup_desktop.load_watermark_backing(config_dir),
-    )
-
-
-def _watermark_menu_font(spec: tuple[float, int], mono: bool = False) -> QFont:
-    families = design.font_families()
-    font = QFont(families.mono if mono else families.ui)
-    size, weight = spec
-    font.setPixelSize(round(size))
-    font.setWeight(QFont.Weight(weight))
-    return font
-
-
-class _CornerButton(QPushButton):
-    """One of the watermark menu's four corners: a small capture with the
-    mark drawn in that corner, so the choice is shown rather than spelled
-    out. Its name is the tooltip.
-    """
-
-    def __init__(self, corner: str, name: str, parent=None):
-        super().__init__(parent)
-        # Keys belong to the overlay -- see _CloseButton.
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.corner = corner
-        self._selected = False
-        self._hovered = False
-        self.setFlat(True)
-        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMouseTracking(True)
-        self.setToolTip(name)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(design.tokens.WatermarkMetric.CORNER_H)
-
-    def sizeHint(self) -> QSize:
-        # `QPushButton`'s own hint measures a text and an icon this button
-        # never sets. The grid shares the menu's width between the two.
-        metric = design.tokens.WatermarkMetric
-        return QSize(metric.CORNER_FRAME[0] + 2 * metric.CORNER_DOT_INSET, metric.CORNER_H)
-
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
-    @property
-    def is_selected(self) -> bool:
-        return self._selected
-
-    def set_selected(self, selected: bool) -> None:
-        self._selected = selected
-        self.update()
-
-    def enterEvent(self, event) -> None:
-        self._hovered = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.WatermarkMetric
-        colour = design.watermark_color
-
-        if self._selected:
-            fill = colour("CORNER_ON_BG")
-        elif self._hovered:
-            fill = colour("CORNER_HOVER_BG")
-        else:
-            fill = None
-        painter.setPen(QPen(colour("CORNER_ON_BORDER" if self._selected else "CORNER_BORDER"), 1))
-        painter.setBrush(fill if fill is not None else Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(
-            QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
-            metric.CORNER_RADIUS,
-            metric.CORNER_RADIUS,
-        )
-
-        frame_w, frame_h = metric.CORNER_FRAME
-        frame = QRectF(
-            (self.width() - frame_w) / 2, (self.height() - frame_h) / 2, frame_w, frame_h
-        )
-        painter.setPen(QPen(colour("CORNER_FRAME"), 1))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(
-            frame.adjusted(0.5, 0.5, -0.5, -0.5),
-            metric.CORNER_FRAME_RADIUS,
-            metric.CORNER_FRAME_RADIUS,
-        )
-
-        dot_w, dot_h = metric.CORNER_DOT
-        # Measured inside the frame's 1px edge, where the spec's markup
-        # positions it.
-        inset = metric.CORNER_DOT_INSET + 1
-        left = frame.left() + inset if self.corner in ("tl", "bl") else frame.right() - inset - dot_w
-        top = frame.top() + inset if self.corner in ("tl", "tr") else frame.bottom() - inset - dot_h
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(colour("CORNER_DOT_ON" if self._selected else "CORNER_DOT"))
-        painter.drawRoundedRect(
-            QRectF(left, top, dot_w, dot_h), metric.CORNER_DOT_RADIUS, metric.CORNER_DOT_RADIUS
-        )
-        painter.end()
-
-
-class WatermarkMenu(_Chrome):
-    """The watermark slot's menu: which corner the mark goes in, and how
-    strongly it shows.
-
-    It stays open while either changes -- watching the preview move behind
-    it is the point of changing them -- and closes the way the family menus
-    do: a press outside it, Esc, or another of the bar's menus opening. A
-    child of the window the bar sits over, for the reasons `FamilyMenu`
-    gives.
-    """
-
-    cornerPicked = pyqtSignal(str)
-    opacityChanged = pyqtSignal(int)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        tokens = design.tokens
-        metric = tokens.WatermarkMetric
-        fonts = tokens.WatermarkFont
-        pad_v, pad_h = metric.MENU_PAD
-        border = tokens.BarMetric.BORDER
-        # Border-box, as the handoff insists: the width is the menu's whole
-        # outside edge, padding and border included.
-        self.setFixedWidth(metric.MENU_W)
-        content_w = metric.MENU_W - 2 * (pad_h + border)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(pad_h + border, pad_v + border, pad_h + border, pad_v + border)
-        layout.setSpacing(metric.MENU_SECTION_GAP)
-
-        corners = QVBoxLayout()
-        corners.setContentsMargins(0, 0, 0, 0)
-        corners.setSpacing(metric.MENU_LABEL_GAP)
-        heading = QLabel("Corner".upper(), self)
-        heading_font = _watermark_menu_font(fonts.SECTION)
-        heading_font.setLetterSpacing(
-            QFont.SpacingType.AbsoluteSpacing, fonts.SECTION_TRACKING * fonts.SECTION[0]
-        )
-        heading.setFont(heading_font)
-        heading.setStyleSheet(f"color: {design.watermark_color('SECTION_FG').name()};")
-        corners.addWidget(heading)
-
-        grid = QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(metric.CORNER_GAP)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        self._corner_buttons: dict[str, _CornerButton] = {}
-        for index, (corner, name) in enumerate(tokens.WATERMARK_CORNERS):
-            button = _CornerButton(corner, name, self)
-            button.clicked.connect(lambda checked=False, c=corner: self._on_corner_clicked(c))
-            self._corner_buttons[corner] = button
-            grid.addWidget(button, index // 2, index % 2)
-        corners.addLayout(grid)
-        layout.addLayout(corners)
-
-        opacity = QHBoxLayout()
-        opacity.setContentsMargins(0, 0, 0, 0)
-        opacity.setSpacing(metric.OPACITY_GAP)
-        label = QLabel("Opacity", self)
-        label.setFont(_watermark_menu_font(fonts.LABEL))
-        label.setStyleSheet(f"color: {design.watermark_color('LABEL_FG').name()};")
-        opacity.addWidget(label)
-        self._slider = QSlider(Qt.Orientation.Horizontal, self)
-        low, high = tokens.WATERMARK["opacity_range"]
-        self._slider.setRange(low, high)
-        self._slider.setValue(tokens.WATERMARK["default_opacity"])
-        self._slider.setToolTip("Watermark opacity")
-        self._slider.valueChanged.connect(self._on_slider_moved)
-        opacity.addWidget(self._slider, 1)
-        self._readout = QLabel(self)
-        self._readout.setFont(_watermark_menu_font(fonts.READOUT, mono=True))
-        self._readout.setStyleSheet(f"color: {design.watermark_color('READOUT_FG').name()};")
-        self._readout.setMinimumWidth(metric.READOUT_MIN_W)
-        self._readout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        opacity.addWidget(self._readout)
-        layout.addLayout(opacity)
-
-        self._note = QLabel(tokens.WATERMARK_MENU_NOTE, self)
-        self._note.setWordWrap(True)
-        self._note.setFont(_watermark_menu_font(fonts.NOTE))
-        self._note.setStyleSheet(f"color: {design.watermark_color('NOTE_FG').name()};")
-        # Fixed at the height its wrapped lines take at the menu's own width:
-        # a wrapping label reports one line's height to a layout that has not
-        # given it a width yet, and the menu would come out a line short.
-        self._note.setFixedWidth(content_w)
-        self._note.setFixedHeight(self._note.heightForWidth(content_w))
-        layout.addWidget(self._note)
-
-        self._corner = tokens.WATERMARK["default_corner"]
-        self.set_corner(self._corner)
-        self._refresh_readout()
-        self.resize(self.sizeHint())
-
-    @property
-    def corner(self) -> str:
-        return self._corner
-
-    @property
-    def opacity(self) -> int:
-        return self._slider.value()
-
-    def set_corner(self, corner: str) -> None:
-        """Mark `corner` chosen without reporting it -- for seeding the menu
-        from the session before it opens."""
-        self._corner = corner
-        for name, button in self._corner_buttons.items():
-            button.set_selected(name == corner)
-
-    def set_opacity(self, opacity: int) -> None:
-        """Set the slider without reporting it, as `set_corner` does."""
-        self._slider.blockSignals(True)
-        self._slider.setValue(opacity)
-        self._slider.blockSignals(False)
-        self._refresh_readout()
-
-    def _on_corner_clicked(self, corner: str) -> None:
-        self.set_corner(corner)
-        self.cornerPicked.emit(corner)
-
-    def _on_slider_moved(self, value: int) -> None:
-        self._refresh_readout()
-        self.opacityChanged.emit(value)
-
-    def _refresh_readout(self) -> None:
-        self._readout.setText(f"{self._slider.value()}%")
-
-    def reposition(self, slot: QRect, bar: QRect, bounds: QRectF) -> None:
-        """Right-aligned to `slot`, `MENU_OVERHANG` past its right edge, and
-        above `bar`, `MENU_OFFSET` clear of it -- below the bar instead when
-        there is no room above inside `bounds`. All three are in the
-        parent's coordinates.
-
-        Right-aligned where the family menus centre, because the spec
-        anchors this one to its slot's right edge.
-        """
-        metric = design.tokens.WatermarkMetric
-        offset = design.tokens.BarMetric.MENU_OFFSET
-        height = self.sizeHint().height()
-        width = self.width()
-        left = QRectF(slot).right() + metric.MENU_OVERHANG - width
-        left = max(bounds.left(), min(left, bounds.right() - width))
-        bar_rect = QRectF(bar)
-        top = bar_rect.top() - offset - height
-        if top < bounds.top():
-            top = min(bar_rect.bottom() + offset, bounds.bottom() - height)
-        self.setGeometry(round(left), round(top), width, height)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        radius = design.tokens.WatermarkMetric.MENU_RADIUS
-        path = glass.rounded(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius)
-        self.glass.paint(painter, path, design.bar_color("MENU_BG"))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(design.bar_color("MENU_BORDER"))
-        painter.drawPath(path)
-        painter.end()
-
-
-# ---------------------------------------------------------------------------
-# Top hint HUD (SNX-46)
-# ---------------------------------------------------------------------------
-# docs/design/overlay-redesign.md's "Top hint HUD" section is the authority
-# here. It's a first-run affordance, behind a preference (`hints`) --
-# see `OverlayWindow.set_hints_enabled` -- and the spec's own "Re-framing"
-# section already reserves the room for it: `OverlayWindow._TOP_CLEARANCE`
-# (52) is 8px clear of `tokens.Metric.HUD_H` (44), so the two have agreed
-# since SNX-33 landed and this ticket only has to paint into the space
-# already held open.
-#
-# SNX-65: the preference now defaults *off*. Read as a banner across the
-# whole top of every capture rather than help, it was the first thing the
-# eye landed on and competed with the snip it sits above -- exactly the
-# "first-run affordance worth hiding after N successful captures" this
-# section already called it out as. `_resize_selection` stops reserving
-# `_TOP_CLEARANCE` the moment hints are off, so the selection gets the room
-# back rather than keeping a dead strip held open for a bar nobody is
-# shown; press `?` to bring it up for the session (`keyPressEvent` below).
-
-
-class HintHUD(_Chrome):
-    """The overlay's full-width top hint bar, per docs/design/overlay-
-    redesign.md's "Top hint HUD" section: `Esc discard ink · Enter copy &
-    dismiss · P H R O L A S T B E pick a tool · drag any edge to re-frame ·
-    arrows nudge · Alt+arrows resize -- the ink stays where you put it`. The
-    last two segments are this file's own addition (#88) -- the spec
-    predates the feature and never named it.
-
-    A real child widget of `OverlayWindow` -- built from real `QLabel`
-    segments, not painted inside `OverlayWindow.paintEvent` -- the same
-    reasoning `Toast` documents for itself: `OverlayWindow.rendered_image`
-    flattens `_marks` onto the frame via `shapes.render_selection` and never
-    touches this window's chrome at all, so the HUD can't leak into an
-    export regardless of whether it happens to be on screen at the moment
-    `copy`/`save` is called.
-
-    Key names (`Esc`, `Enter`, the eight tool shortcuts) are their own
-    labels in the mono family at `HUD_KEY` (pure white); the surrounding
-    prose is the UI family at the muted `HUD_TEXT` -- per the spec's "Key
-    names are mono in pure white," so a key reads as a key at a glance
-    rather than blending into the sentence around it.
-    """
-
-    # (text, is_key) in reading order. The key segment for the tool
-    # shortcuts is built from the bar's own slots (`_bar_keys`) rather than
-    # typed out -- if a shortcut or the slot order ever changes, this line
-    # follows it instead of silently drifting out of sync the way a
-    # hand-typed copy of the same letters could.
-    def _segments(self) -> list[tuple[str, bool]]:
-        keys = " ".join(_bar_keys())
-        return [
-            ("Esc", True),
-            (" discard ink · ", False),
-            ("Enter", True),
-            (" copy & dismiss · ", False),
-            (keys, True),
-            (" pick a tool · drag any edge to re-frame · ", False),
-            ("arrows", True),
-            (" nudge · ", False),
-            ("Alt+arrows", True),
-            (" resize — the ink stays where you put it", False),
-        ]
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedHeight(design.tokens.Metric.HUD_H)
-
-        # Full-width and centred, per "Full width... contents centred" --
-        # a stretch on both sides of the segment labels is what centres a
-        # variable-width run of text without this widget needing to measure
-        # it itself the way OverlayWindow's own chips do.
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addStretch(1)
-        for text, is_key in self._segments():
-            layout.addWidget(self._segment_label(text, is_key))
-        layout.addStretch(1)
-
-    def _segment_label(self, text: str, is_key: bool) -> QLabel:
-        label = QLabel(text, self)
-        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        family = design.font_families().mono if is_key else design.font_families().ui
-        font = QFont(family)
-        size, weight = design.tokens.Font.HUD
-        font.setPixelSize(round(size))
-        font.setWeight(QFont.Weight(weight))
-        label.setFont(font)
-        colour = design.color("HUD_KEY" if is_key else "HUD_TEXT")
-        label.setStyleSheet(f"color: {colour.name()};")
-        return label
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        # A flat, translucent fill with no glass under it. The redesign's
-        # spec gives the HUD a 3px backdrop blur, but the glass (#70) is the
-        # bars handoff's, for its bars and menus; this banner predates it
-        # and is off unless asked for.
-        painter.fillRect(QRectF(self.rect()), design.color("HUD_BG"))
-        painter.end()
-
-
-# ---------------------------------------------------------------------------
-# Toast (SNX-45)
-# ---------------------------------------------------------------------------
-
-
-class Toast(_Chrome):
-    """The overlay redesign's toast: bottom centre, above everything, per
-    docs/design/overlay-redesign.md's "Toast" section.
-
-    A real child widget of `OverlayWindow`, built and positioned the same
-    way `FloatingBar`/`StylePopover`/`CaptureModePopover` are -- never
-    painted inside `OverlayWindow.paintEvent`, which is what the spec means
-    by "chrome painted over the overlay rather than something drawn into
-    the frame": `OverlayWindow.rendered_image` flattens `_marks` onto the
-    frame's own pixmap via `shapes.render_selection` and never touches this
-    widget (or any other chrome) at all, so a toast can never end up in an
-    export regardless of whether it happens to be on screen at the moment
-    `copy`/`save` is called.
-
-    There is only ever one toast, per the spec's "a new toast replaces the
-    old one and restarts the timer" -- `show_message` overwrites whatever
-    the previous call was showing and restarts `_timer` rather than a
-    caller stacking a second widget, since this class is itself the single
-    instance `OverlayWindow` keeps as `_toast`.
-    """
-
-    _ICON_SIZE = 15
-    # Prose-only spacing between the glyph and the message, like
-    # `_ToolPill`/`_FROZEN_INNER_GAP`'s own un-tokenized gaps elsewhere in
-    # this file.
-    _GAP = 8
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        metric = design.tokens.Metric
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(
-            metric.TOAST_PAD_H, metric.TOAST_PAD_V, metric.TOAST_PAD_H, metric.TOAST_PAD_V
-        )
-        layout.setSpacing(self._GAP)
-
-        self._icon_label = QLabel(self)
-        self._icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self._icon_label)
-
-        self._text_label = QLabel(self)
-        self._text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        font = QFont(design.font_families().ui)
-        size, weight = design.tokens.Font.TOAST
-        font.setPixelSize(round(size))
-        font.setWeight(QFont.Weight(weight))
-        self._text_label.setFont(font)
-        self._text_label.setStyleSheet(f"color: {design.color('TOAST_FG').name()};")
-        layout.addWidget(self._text_label)
-
-        # Single-shot, restarted (not re-created) by every show_message
-        # call -- QTimer.start() on an already-running timer resets its
-        # remaining time, which is exactly the spec's "restarts the timer"
-        # rather than letting an earlier call's dismissal fire early.
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(metric.TOAST_MS)
-        self._timer.timeout.connect(self.hide)
-
-        self.hide()
-
-    def show_message(self, icon_name: str, text: str, bounds: QRectF) -> None:
-        """Show `text` next to `icon_name`'s glyph, positioned at the
-        bottom centre of `bounds`, and (re)start the `TOAST_MS`
-        auto-dismiss timer.
-
-        Updates this same widget's content rather than creating a new one
-        -- there is only ever one toast on screen, per the class docstring
-        -- so a second call while the first is still showing both replaces
-        the message and restarts the timer in one step.
-
-        `bounds` is the selection's own monitor rather than the parent's
-        size, for the reason `FloatingBar.reposition` sets out at length:
-        "the bottom centre of the window" is the bottom centre of the whole
-        virtual desktop once one window spans every monitor, which is both
-        the wrong monitor to confirm a snip on and, where monitor heights
-        differ, potentially a gap that displays nothing at all.
-        """
-        metric = design.tokens.Metric
-        pixmap = design.icon(icon_name, design.color("TOAST_FG")).pixmap(
-            self._ICON_SIZE, self._ICON_SIZE
-        )
-        self._icon_label.setPixmap(pixmap)
-        self._text_label.setText(text)
-
-        size = self.sizeHint()
-        left = bounds.left() + (bounds.width() - size.width()) / 2
-        top = bounds.bottom() - metric.TOAST_BOTTOM - size.height()
-        self.setGeometry(round(left), round(top), size.width(), size.height())
-
-        self.show()
-        self.raise_()  # "above everything" -- including the bar and trays
-        self._timer.start()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        metric = design.tokens.Metric
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(design.color("TOAST_BG"))
-        painter.drawRoundedRect(QRectF(self.rect()), metric.TOAST_RADIUS, metric.TOAST_RADIUS)
-        painter.end()
-
-
-# ---------------------------------------------------------------------------
-# Close button (SNX-80)
-# ---------------------------------------------------------------------------
-# `_bar` and the per-selection chips (the dimension chip, the frozen pill)
-# all only ever exist once a selection does -- `_sync_bar_visibility`,
-# `OverlayWindow.paintEvent`'s own `if self._selection is not None` guard --
-# but a user who opens the overlay and decides, before dragging anything at
-# all, that they don't want to snip anything has exactly as much right to a
-# visible way out as one who's already mid-annotation. SNX-65 turned off the
-# only thing (the hint HUD) that ever told anyone Escape was that way out,
-# so this is its own small piece of chrome, independent of both: shown for
-# as long as `OverlayWindow` itself is (`showEvent`/`hideEvent`, the same
-# pairing `_toast`/`_hud` already use), never gated on `_selection`,
-# `_bar.active_tool` or `_marks` the way everything else in this file is.
-
-
-class _CloseButton(QPushButton):
-    """A small round button pinned to a fixed corner of the overlay: the
-    one control guaranteed to be on screen, and clickable, from the moment
-    the overlay opens to the moment it closes.
-
-    Unlike `_IconButton` (idle-transparent, relying on the bar's own glass
-    fill for contrast against the frozen desktop underneath), this button
-    has no bar behind it -- it sits directly over whatever pixels happen to
-    be there, which could be any colour at all -- so its background is
-    always painted, not just on hover, using the same `BAR_BG`/
-    `BAR_BG_ALPHA` glass the floating bar itself uses. A plain QSS
-    `:hover` rule is enough for the hover state (no custom paintEvent
-    needed, unlike `_SwatchButton`'s two-colour ring): there is only ever
-    one fill to swap.
-    """
-
-    _SIZE = design.tokens.Metric.BTN
-    _ICON_SIZE = design.tokens.Metric.ICON
-    # How much brighter the fill reads on hover -- enough to register as a
-    # state change without a dedicated token for a control this small, the
-    # same un-tokenized-literal convention `OverlayWindow`'s own
-    # `_CORNER_BRACKET_OFFSET` and friends already follow.
-    _HOVER_ALPHA_BOOST = 0.07
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        # No keyboard focus, for this and every other button over the
-        # overlay: its keys -- Enter, Space, the tool letters -- are the
-        # overlay's own (`keyPressEvent`). A push button that can take
-        # focus is handed it as the window opens, and then Enter and Space
-        # press the button instead. Measured on GNOME 46 Wayland: this
-        # button held focus, so Enter closed the snip rather than copying.
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setFixedSize(self._SIZE, self._SIZE)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Names Escape by its full word, not the "Esc" abbreviation every
-        # other tooltip in this file uses for a shortcut -- this is the
-        # one place a user with the hint HUD off (SNX-65's new default)
-        # learns the keyboard route exists at all, so it spells the key
-        # out rather than assuming the abbreviation is already familiar.
-        self.setToolTip("Close — Escape")
-        self.setFlat(True)
-
-        bg = design.color("BAR_BG")
-        hover_bg = QColor(bg)
-        hover_bg.setAlphaF(min(1.0, bg.alphaF() + self._HOVER_ALPHA_BOOST))
-        self.setStyleSheet(
-            "QPushButton { border: none; border-radius: %dpx;"
-            " background: rgba(%d, %d, %d, %s); }"
-            "QPushButton:hover { background: rgba(%d, %d, %d, %s); }"
-            % (
-                self._SIZE // 2,
-                bg.red(), bg.green(), bg.blue(), bg.alphaF(),
-                hover_bg.red(), hover_bg.green(), hover_bg.blue(), hover_bg.alphaF(),
-            )
-        )
-        self.setIcon(design.icon("close", design.color("TEXT_PRIMARY")))
-        self.setIconSize(QSize(self._ICON_SIZE, self._ICON_SIZE))
-
-
-# ---------------------------------------------------------------------------
-# Delay countdown (SNX-50)
-# ---------------------------------------------------------------------------
-# docs/design/overlay-redesign.md's "Capture modes" entry for Delay is the
-# authority: "the overlay dismisses, waits, re-grabs and re-opens. Show a
-# countdown." The prototype never simulates Delay (Region is the only mode it
-# simulates, per that same section's opening line), so there is no reference
-# markup for the countdown's own look -- styled here from the same BAR_BG
-# glass and TEXT_PRIMARY/mono readout the rest of this file's chrome already
-# uses, rather than inventing a one-off palette for a single widget.
-
-
-class DelayCountdown(QWidget):
-    """A small, top-level countdown shown while `OverlayWindow` is hidden
-    for a delayed re-capture (`OverlayWindow._start_delayed_capture`).
-
-    Deliberately *not* a child of `OverlayWindow`, unlike every other piece
-    of chrome in this file: the entire reason the overlay hides for the
-    delay is so it isn't in its own screenshot (per the spec: "the overlay
-    dismisses... so it is not in its own screenshot" is the point of Delay
-    in the first place), and a child widget goes invisible the instant its
-    parent does -- see `OverlayWindow.hideEvent`, which relies on exactly
-    that to take `_bar`/`_style_popover`/`_popover`/`_toast`/`_hud` down with it. A
-    countdown built the same way would vanish along with the window it is
-    supposed to be standing in for, which is the one thing it must not do.
-    """
-
-    _SIZE = 96
-    _BG_ALPHA = 0.72  # the same "glass over the desktop" treatment as the bar
-
-    def __init__(self):
-        # No parent, ever -- see the class docstring.
-        super().__init__(None)
-        # Frameless/always-on-top so it reads as a HUD rather than a window
-        # a user could accidentally click into and lose focus of, as
-        # `OverlayWindow`'s own `setWindowFlags` call does.
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(self._SIZE, self._SIZE)
-
-        self._label = QLabel(self)
-        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setGeometry(0, 0, self._SIZE, self._SIZE)
-        font = QFont(design.font_families().mono)
-        font.setPixelSize(36)
-        font.setWeight(QFont.Weight(600))
-        self._label.setFont(font)
-        self._label.setStyleSheet(f"color: {design.color('TEXT_PRIMARY').name()};")
-
-    def set_seconds_remaining(self, seconds: int) -> None:
-        self._label.setText(str(seconds))
-
-    def show_centered_on(self, geometry: QRect) -> None:
-        """Position centred over `geometry` -- the monitor the hidden
-        `OverlayWindow` was being worked on, in absolute coordinates -- and
-        show.
-        """
-        center = QRectF(geometry).center()
-        self.move(round(center.x() - self._SIZE / 2), round(center.y() - self._SIZE / 2))
-        self.show()
-        self.raise_()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        bg = QColor(design.tokens.Color.BAR_BG)
-        bg.setAlphaF(self._BG_ALPHA)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        painter.drawEllipse(QRectF(self.rect()))
-        painter.end()
 
 
 @dataclass(frozen=True)
@@ -4312,15 +361,17 @@ class OverlayWindow(QWidget):
     # triggers a repaint.
     _ANTS_TIMER_INTERVAL_MS = 33
 
-    # Straddle offsets and corner radii the design specifies by pixel value
-    # in the README's prose (and the HTML reference) rather than as a named
-    # `tokens.Metric` constant -- unlike arm length/thickness and handle
-    # dimensions, which *are* tokenized and read from there below.
-    _CORNER_BRACKET_OFFSET = 2
-    _CORNER_BRACKET_RADIUS = 3
-    _EDGE_HANDLE_OFFSET = 5
-    _EDGE_HANDLE_RADIUS = 5
-    _CORNER_HIT_OFFSET = 7
+    # Antialiased edges and a pen's half-width reach a pixel or two past
+    # the geometry they are drawn from; a partial repaint is padded by this.
+    _CHROME_REPAINT_MARGIN = 4
+    # The frame's straddle offsets and radii. `selectionframe` owns the
+    # values and the geometry built from them; these are the names this
+    # class and its tests read them by.
+    _CORNER_BRACKET_OFFSET = selectionframe.CORNER_BRACKET_OFFSET
+    _CORNER_BRACKET_RADIUS = selectionframe.CORNER_BRACKET_RADIUS
+    _EDGE_HANDLE_OFFSET = selectionframe.EDGE_HANDLE_OFFSET
+    _EDGE_HANDLE_RADIUS = selectionframe.EDGE_HANDLE_RADIUS
+    _CORNER_HIT_OFFSET = selectionframe.CORNER_HIT_OFFSET
 
     # Re-framing clamps (SNX-33), likewise given by the README's "Re-framing"
     # prose as plain pixel values rather than a tokens.Metric entry -- the
@@ -4347,7 +398,9 @@ class OverlayWindow(QWidget):
     _FROZEN_INNER_GAP = 7  # frozen pill: gap between the pin icon and its label
     _FROZEN_ICON_SIZE = 13
     _FROZEN_LABEL = "Frozen"
-    _EYEDROPPER_READOUT_GAP = 6  # eyedropper: gap between the loupe box and its hex chip
+    _CHIP_GAP = selectionframe.CHIP_GAP
+    # eyedropper: gap between the loupe box and its hex chip
+    _EYEDROPPER_READOUT_GAP = loupe.READOUT_GAP
 
     def __init__(
         self,
@@ -4364,7 +417,7 @@ class OverlayWindow(QWidget):
         on_dismissed: Callable[[], None] | None = None,
         on_captured: "Callable[[QImage, Path | None], None] | None" = None,
         on_pin_requested: "Callable[[QImage, QRect], None] | None" = None,
-        on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
+        on_recording_requested: "Callable[[QRectF | None, str, str], bool | None] | None" = None,
         on_recording_start: "Callable[[], None] | None" = None,
         on_recording_reframed: "Callable[[QRectF], None] | None" = None,
         interaction_gate: "Callable[[OverlayWindow, bool], bool] | None" = None,
@@ -4394,7 +447,8 @@ class OverlayWindow(QWidget):
         # `tokens.RECORDING_AFTER`'s ids) -- app.py owns starting/stopping the actual
         # recorder, per CLAUDE.md's split between this file (widget/
         # painting) and app.py (subprocess/filesystem/stateful side
-        # effects).
+        # effects). It answers False when it refuses the recording, which
+        # un-arms this window; anything else is taken as armed.
         self._on_recording_requested = on_recording_requested
         self._on_recording_start = on_recording_start
         # Fired with the new absolute rect whenever the selection changes
@@ -4431,6 +485,58 @@ class OverlayWindow(QWidget):
             else [QRectF(frame.logical_origin, frame.logical_size)]
         )
 
+        # The rest is built in the order below, and the order matters: each
+        # step's own comments say what it needs to exist before it. The
+        # steps are methods only so that this reads as a list; none is
+        # called from anywhere else.
+        self._configure_window(frame)
+        self._init_interaction_state()
+        self._build_bar()
+        self._build_style_popover_and_tool_hint()
+        self._build_chooser()
+        self._build_bar_menus()
+
+        # The delayed re-capture (SNX-50): `_registry` is what
+        # `_finish_delayed_capture` re-grabs through -- an empty
+        # `BackendRegistry` by default, the same "an inert default degrades
+        # instead of needing a None-check everywhere" shape
+        # `UnsupportedGeometryProvider` already gives `_geometry_provider`
+        # above (an empty registry's own `capture()` raises `CaptureError`
+        # with its own "no capture backend is available" message, which
+        # `_finish_delayed_capture` already has to handle for a real,
+        # non-empty registry that simply fails). `_countdown`/`_delay_timer`
+        # are built lazily, on the first delay actually confirmed, rather
+        # than unconditionally here -- unlike `_toast`/`_hud`, `_countdown`
+        # is not a child of this window (see its own docstring for why) and
+        # every `OverlayWindow` this file's tests build would otherwise
+        # leave a real, if hidden, extra top-level widget behind it.
+        # `_pending_capture_mode` is the mode `_on_capture_mode_selected`
+        # was confirming when the delay started, re-dispatched once the
+        # fresh frame is in.
+        self._registry = registry if registry is not None else BackendRegistry()
+        self._countdown: DelayCountdown | None = None
+        self._delay_timer: QTimer | None = None
+        self._delay_remaining = 0
+        self._pending_capture_mode: str | None = None
+
+        self._build_notices_and_close_button(hints_enabled)
+
+        # Last, once every piece of chrome above exists to react to it: the
+        # overlay opens on the previous snip's rectangle when the
+        # preference asks for it. Region is the mode a fresh overlay starts
+        # in (`tokens.CAPTURE_MODES[0]`), so this is that mode's opening
+        # state rather than a separate step -- and it is a no-op for
+        # everyone who has left the preference off.
+        #
+        # `_sync_bar_visibility` is gated on `self.isVisible()`, which is
+        # still false here, so the bar catches up in `showEvent` -- which
+        # already handles exactly this case for the same reason.
+        self._preselect_last_region()
+
+    def _configure_window(self, frame: Frame) -> None:
+        """`__init__`, step one: window flags, opaque painting, and a geometry
+        pinned to `frame`'s span of the virtual desktop.
+        """
         # Deliberately NOT X11BypassWindowManagerHint, tempting though it
         # is: an override-redirect window is not the window manager's to
         # stage, so it would skip Mutter's scale-up-on-map animation --
@@ -4493,6 +599,11 @@ class OverlayWindow(QWidget):
         # not just while a button is held.
         self.setMouseTracking(True)
 
+    def _init_interaction_state(self) -> None:
+        """`__init__`, step two: everything this window tracks about the
+        selection, the pointer, the picking modes, drags, ink and the tools
+        -- all at rest. No chrome yet.
+        """
         # Window coordinates, per the class docstring -- None until
         # set_selection is called.
         self._selection: QRect | None = None
@@ -4580,15 +691,11 @@ class OverlayWindow(QWidget):
         # and hit-testing sites read exactly as they did.
         self._mark_store = MarkStore(self)
         self._mark_store.changed.connect(self._on_marks_changed)
-        # SNX-63: cached output of `_base_layer_image` -- `(key, image)`,
-        # or None before the first paint -- so a repaint triggered by
-        # something unrelated to any committed `ObscuringShape` (an
-        # in-progress pen stroke elsewhere, a resize drag, marching ants)
-        # does not redo blur/pixelate's scale-down-then-up sampling every
-        # single frame. See that method's own docstring for what `key`
-        # covers and why equality against it is enough to know the cached
-        # image is still correct.
-        self._base_layer_cache: tuple[tuple, QImage] | None = None
+        # What a repaint composes from the frame and the committed marks,
+        # cached: the base layer with obscuring marks baked in (SNX-63),
+        # ink an obscuring mark covers, the ink layer, and each mark's
+        # bounds. See `inklayers.InkLayers` for what each is keyed on.
+        self._ink_layers = InkLayers()
         # Undo/redo history (SNX-39; SNX-70 folds the eraser into it): a
         # stack of `_MarkAction`s, one per `add_mark`/`erase_at` call, in
         # the order they happened. `undo()` pops `_undo`, inverts the
@@ -4648,6 +755,10 @@ class OverlayWindow(QWidget):
         self._ants_timer.setInterval(self._ANTS_TIMER_INTERVAL_MS)
         self._ants_timer.timeout.connect(self._advance_ants)
 
+    def _build_bar(self) -> None:
+        """`__init__`, step three: the floating bar, hidden, and what each of
+        its signals does.
+        """
         # The floating bar (SNX-40): a real child widget, positioned under
         # the selection by `_sync_bar` below rather than drawn in this
         # class's own paintEvent. Starts hidden -- shown only once this
@@ -4681,6 +792,10 @@ class OverlayWindow(QWidget):
         self._bar.dragMoved.connect(self._on_bar_dragged)
         self._bar.positionRemembered.connect(self._remember_bar_position)
 
+    def _build_style_popover_and_tool_hint(self) -> None:
+        """`__init__`, step four: the session's tool styles, the popover that
+        edits them and the strip that names the active tool.
+        """
         # Each tool's style -- the session's, so what was set on the last
         # snip is still set on this one -- and the popover the style dot
         # opens to change it. Its keys work whether it is open or not; see
@@ -4701,6 +816,11 @@ class OverlayWindow(QWidget):
         self._tool_hint = ToolHintStrip(self)
         self._tool_hint.hide()
 
+    def _build_chooser(self) -> None:
+        """`__init__`, step five: the pre-snip chooser, seeded from what is
+        stored and from what this desktop can do. The order of seeding and
+        connecting inside is deliberate; see the comments.
+        """
         # The pre-snip chooser: what to capture, and what should happen to
         # it. Shown while there is no selection, which is exactly when the
         # floating bar is not -- the two never share the screen. See
@@ -4774,6 +894,9 @@ class OverlayWindow(QWidget):
         # that started filming because the session before had been a
         # recording (bars/divergences.md 25). The chooser's own default is
         # `tokens.KIND_DEFAULT`, so there is nothing to set here.
+        # Not remembered, but acted on: the switch is on a row that reopens
+        # over a selection.
+        self._chooser.kindChanged.connect(self._on_chooser_kind_changed)
         # Last region is a mode (#66). What it would restore is worked out
         # against this frame. The stored reuse-last-region preference was a
         # toggle meaning "open on the last region", and is now that mode
@@ -4784,6 +907,11 @@ class OverlayWindow(QWidget):
         self._chooser.reuseLastRegionChanged.connect(setup_desktop.save_reuse_last_region)
         self._chooser.hide_all()
 
+    def _build_bar_menus(self) -> None:
+        """`__init__`, step six: the capture-mode popover with the capture
+        state it reads back, then the family menus and the watermark menu.
+        After the bar and the chooser, which it connects to.
+        """
         # The capture-mode popover: opened from the bar's chip click via
         # `_toggle_capture_popover`, positioned by the popover's own
         # `reposition` against `_bar`'s geometry. `_capture_mode`/`_delay`
@@ -4796,6 +924,17 @@ class OverlayWindow(QWidget):
         # the backend: the window stays up so the region can still be
         # reframed, with the stills bar suppressed. See `_commit_selection`.
         self._armed_for_recording = False
+        # The Hide sensitive read still out with the recogniser, if any --
+        # see `_hide_sensitive_text`. Queued on purpose: the worker emits
+        # from its own thread and the result must land on this one.
+        self._sensitive_check: _SensitiveCheck | None = None
+        self._sensitive_relay = _SensitiveCheckRelay()
+        self._sensitive_relay.finished.connect(
+            self._on_sensitive_check_finished, Qt.ConnectionType.QueuedConnection
+        )
+        # A "nothing was hidden" notice raised while this window was not
+        # on screen to show it -- see `_say_nothing_was_hidden`.
+        self._unsaid_hide_notice: Callable[[], None] | None = None
         # None during normal interaction. Recording startup briefly fades
         # the painted selection chrome away while the frozen desktop stays
         # put, so closing this monitor-sized surface cannot look like a
@@ -4859,29 +998,10 @@ class OverlayWindow(QWidget):
         self._bar.toolHovered.connect(self._preview_tool)
         self._bar.toolUnhovered.connect(self._sync_tool_hint)
 
-        # The delayed re-capture (SNX-50): `_registry` is what
-        # `_finish_delayed_capture` re-grabs through -- an empty
-        # `BackendRegistry` by default, the same "an inert default degrades
-        # instead of needing a None-check everywhere" shape
-        # `UnsupportedGeometryProvider` already gives `_geometry_provider`
-        # above (an empty registry's own `capture()` raises `CaptureError`
-        # with its own "no capture backend is available" message, which
-        # `_finish_delayed_capture` already has to handle for a real,
-        # non-empty registry that simply fails). `_countdown`/`_delay_timer`
-        # are built lazily, on the first delay actually confirmed, rather
-        # than unconditionally here -- unlike `_toast`/`_hud`, `_countdown`
-        # is not a child of this window (see its own docstring for why) and
-        # every `OverlayWindow` this file's tests build would otherwise
-        # leave a real, if hidden, extra top-level widget behind it.
-        # `_pending_capture_mode` is the mode `_on_capture_mode_selected`
-        # was confirming when the delay started, re-dispatched once the
-        # fresh frame is in.
-        self._registry = registry if registry is not None else BackendRegistry()
-        self._countdown: DelayCountdown | None = None
-        self._delay_timer: QTimer | None = None
-        self._delay_remaining = 0
-        self._pending_capture_mode: str | None = None
-
+    def _build_notices_and_close_button(self, hints_enabled: bool) -> None:
+        """`__init__`, last of the chrome: the toast, the destination menu's
+        slot and guard, the hint HUD and the close button.
+        """
         # The toast (SNX-45): the single `Toast` instance `copy`/`save`/
         # `clear`/`discard` below all share -- see `_show_toast` for the
         # `self.isVisible()` gate that keeps it from painting into this
@@ -4933,18 +1053,6 @@ class OverlayWindow(QWidget):
         self._close_button.hide()
         self._reposition_close_button()
 
-        # Last, once every piece of chrome above exists to react to it: the
-        # overlay opens on the previous snip's rectangle when the
-        # preference asks for it. Region is the mode a fresh overlay starts
-        # in (`tokens.CAPTURE_MODES[0]`), so this is that mode's opening
-        # state rather than a separate step -- and it is a no-op for
-        # everyone who has left the preference off.
-        #
-        # `_sync_bar_visibility` is gated on `self.isVisible()`, which is
-        # still false here, so the bar catches up in `showEvent` -- which
-        # already handles exactly this case for the same reason.
-        self._preselect_last_region()
-
     def _remember_destination(self, after: str) -> None:
         """Persist the destination the user just picked, so the next snip
         opens on it.
@@ -4973,6 +1081,7 @@ class OverlayWindow(QWidget):
 
     def set_selection(self, rect: QRect | None) -> None:
         """Set the current selection (window coordinates) and repaint."""
+        chrome_before = self._selection_chrome_region()
         if rect is None:
             self._selection_anchor = None
         # Every other route to a selection is one the user asked for, so
@@ -4998,6 +1107,9 @@ class OverlayWindow(QWidget):
             if not clamped.isEmpty():
                 rect = clamped
         self._selection = rect
+        if rect is None:
+            # Nothing left for a read still out to hide anything in.
+            self._discard_sensitive_check()
         self._sync_bar_visibility()
         self._sync_chooser_visibility()
         if (
@@ -5009,7 +1121,18 @@ class OverlayWindow(QWidget):
         # Follows the selection onto its monitor, like every other piece of
         # chrome -- see `_reposition_close_button`.
         self._reposition_close_button()
-        self.update()
+        if chrome_before.isEmpty() or rect is None or self._picking_window:
+            # Into or out of having a selection at all: the scrim, the
+            # hover previews and the eyedropper all change with that, so
+            # everything is repainted. So is a window being hovered in
+            # Window mode: its title chip sits outside the chrome region,
+            # and a hover is a handful of repaints, not one per mouse move.
+            self.update()
+        else:
+            # One selection to another -- every step of a drag. Repainting
+            # the whole window here pushed every monitor's pixels to the
+            # screen on each mouse move.
+            self.update(chrome_before + self._selection_chrome_region())
 
     def _on_tool_selected(self, tool: str) -> None:
         """Wire the bar's tool buttons to the eraser's hit-testing
@@ -5475,7 +1598,7 @@ class OverlayWindow(QWidget):
         except CaptureError as exc:
             if self._on_session_restore is not None:
                 self._on_session_restore(self, None)
-            self.show()
+            self._show_again()
             self._show_toast("timer", str(exc))
             return
 
@@ -5496,8 +1619,22 @@ class OverlayWindow(QWidget):
             )
 
         self.replace_frame(frame)
-        self.show()
+        self._show_again()
         self._dispatch_capture_mode(mode)
+
+    def _show_again(self) -> None:
+        """Back on screen after the delay, in front and with the keyboard.
+
+        A plain `show()` put the window back and no more. The countdown is
+        for setting something up in another window, so that window has the
+        foreground by now, and on Windows it kept every key: Esc, Enter and
+        the tool letters did nothing until the overlay was clicked. The same
+        three steps `show_on_screen` ends on, for the same reason.
+        """
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        platform.current.take_keyboard_focus(self)
 
     def replace_frame(self, frame: Frame) -> None:
         """Replace the frozen pixels while preserving this surface's state."""
@@ -5625,30 +1762,33 @@ class OverlayWindow(QWidget):
                 # `tokens.RECORDING_AFTER`'s ids here -- `_land_recording` is what
                 # actually acts on it, once the file is real; this branch
                 # only ever hands the choice along.
-                self._on_recording_requested(record_rect, self._delay, self.outcome)
+                armed = self._on_recording_requested(record_rect, self._delay, self.outcome)
+                if armed is False:
+                    # Refused, and app.py has said why: no recorder here,
+                    # or one already running. Armed with no recording bar
+                    # coming, this window showed a selection and nothing to
+                    # do with it -- no toolbar, no chooser, and an Esc that
+                    # closed the snip. Un-armed, the chooser's tab is back
+                    # and Esc steps back to the row.
+                    self._armed_for_recording = False
+                    self._sync_chooser_visibility()
             return
         self._hide_sensitive_text()
         if self.outcome == "instant":
+            # Both of these wait for a Hide sensitive read that is still
+            # out -- see `_held_for_sensitive_check` -- so an instant snip
+            # stays up, saying it is checking, until its boxes are on.
             if setup_desktop.load_instant_saves():
                 self._on_bar_save()
             else:
                 self._on_bar_copy()
 
-    # Logical pixels added around each hidden value. OCR's word boxes sit
-    # tight on the glyphs, and the anti-aliased edges, descenders and
-    # accents that fall just outside them are exactly the slivers that
-    # make a covered value guessable.
-    _HIDE_PADDING = 2.0
-
-    # A found value already this much covered by an existing solid box is
-    # not boxed again -- selecting a second region over the same text must
-    # not stack a duplicate of every box, each needing its own erase.
-    _HIDE_ALREADY_COVERED = 0.9
-
-    # Two found boxes overlapping this much (of the smaller) are one value
-    # found twice -- recognition reads small selections at two sizes, and
-    # both reads usually find the same words -- and become one box.
-    _HIDE_SAME_VALUE = 0.5
+    # Hide sensitive's padding and overlap thresholds are `sensitivecheck`'s,
+    # with the reasoning for each; these are the names this class and its
+    # tests read them by.
+    _HIDE_PADDING = sensitivecheck.HIDE_PADDING
+    _HIDE_ALREADY_COVERED = sensitivecheck.HIDE_ALREADY_COVERED
+    _HIDE_SAME_VALUE = sensitivecheck.HIDE_SAME_VALUE
 
     def _selection_crop(self) -> "tuple[QRectF, Frame] | None":
         """The current selection, in window coordinates, and its own pixels
@@ -5665,38 +1805,81 @@ class OverlayWindow(QWidget):
             return None
         return selection, cropped
 
-    def _hide_sensitive_text(self) -> None:
-        """Black out sensitive text inside the current selection, when Hide
-        sensitive is on.
+    _UNHIDDEN_NOTICE_MS = 8000
+
+    def _finish_unhidden_snip_anyway(self, reason: str) -> bool:
+        """Ask whether an instant snip should still be copied or saved when
+        Hide sensitive is on and its text could not be read."""
+        verb = "Save" if setup_desktop.load_instant_saves() else "Copy"
+        answer = QMessageBox.warning(
+            self,
+            "Sensitive text was not hidden",
+            f"Snipux could not check this snip for sensitive text: {reason}.\n\n"
+            f"Nothing in it has been hidden. {verb} it anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _say_nothing_was_hidden(self, reason: str) -> None:
+        """Tell the user Hide sensitive did nothing for this selection, and
+        why -- before anything is copied or saved."""
+        notice = f"Sensitive text was not hidden: {reason}"
+        log.note(f"Note: {notice}")
+
+        def warn() -> None:
+            self._show_toast("blur", notice)
+            # Longer than a confirmation stays up: this one has to be read
+            # and acted on before the snip is copied.
+            self._toast._timer.start(self._UNHIDDEN_NOTICE_MS)
+
+        warn()
+        if not self.isVisible():
+            # The read can come back while the overlay is still being
+            # built, or hidden for a delayed capture, when a toast has
+            # nowhere to show. `showEvent` says it again once it has.
+            self._unsaid_hide_notice = warn
+
+    _CHECKING_NOTICE = "Checking for sensitive text\u2026"
+
+    def _hide_sensitive_text(self) -> bool:
+        """Start blacking out sensitive text inside the current selection,
+        when Hide sensitive is on. True while a read is out for it.
 
         Reads the selection's pixels out of the frozen frame -- never the
-        live screen, per CLAUDE.md's one rule -- asks the platform for the
-        words in them, and puts a solid `Redact` over each value
-        `sensitive.find_sensitive` flags -- including whatever the user
-        added to their own hide list. The boxes are ordinary marks,
-        added as one step of history: the user can erase any one of them,
-        and a single undo takes the whole batch away.
+        live screen, per CLAUDE.md's one rule -- and asks the platform for
+        the words in them on a worker thread: on Windows that is a
+        PowerShell process, about 0.4 s when it is healthy and up to its
+        5 s timeout when it is not, and this window is fullscreen and
+        topmost for all of it. `_on_sensitive_check_finished` puts the
+        boxes on when the answer comes back.
 
-        Coordinates: recognition happens on `Frame.crop`'s image, so every
-        rect comes back in *cropped-image pixels*. Marks live in window
-        coordinates. The mapping is the exact inverse of the one
-        `shapes.render_selection` applies at export -- divide by that crop's
-        own per-axis image-pixels-per-logical-unit ratio, then add the
-        selection's origin -- which is what keeps a box over its word on a
-        scaled display, where the two spaces differ by that ratio.
+        Until then nothing may leave: Copy, Save, Open, Pin and an instant
+        snip are held by `_held_for_sensitive_check` and run afterwards.
+
+        One recognition at a time. A selection committed while a read for
+        another is still out does not start a second; it marks the first
+        to be thrown away and read again for whatever is selected then.
         """
         if self._selection is None or not self._chooser.hide_sensitive:
-            return
+            return False
         current = platform.current
         if not current.recognizes_text():
-            return
+            return False
 
         crop = self._selection_crop()
         if crop is None:
-            return
+            return False
         selection, cropped = crop
-        scale_x = cropped.image.width() / cropped.logical_size.width()
-        scale_y = cropped.image.height() / cropped.logical_size.height()
+
+        running = self._sensitive_check
+        if running is not None:
+            if running.discarded or running.selection != selection:
+                running.discarded = True
+                running.recheck = True
+                running.then = None
+            self._show_checking_notice()
+            return True
 
         # Read per capture, not once at start-up: editing the list in
         # Settings takes effect on the next capture, with no restart.
@@ -5707,77 +1890,136 @@ class OverlayWindow(QWidget):
         except OSError:
             mine = sensitive.custom_list(None)
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            lines = current.recognize_text(cropped.image)
-        finally:
-            QApplication.restoreOverrideCursor()
+        check = _SensitiveCheck(
+            selection=selection,
+            scale_x=cropped.image.width() / cropped.logical_size.width(),
+            scale_y=cropped.image.height() / cropped.logical_size.height(),
+            custom=mine,
+        )
+        self._sensitive_check = check
+        threading.Thread(
+            target=_recognize_for_check,
+            # A deep copy: the worker reads it while this thread goes on
+            # painting from the frame it was cut out of.
+            args=(current.recognize_text, cropped.image.copy(), check, self._sensitive_relay),
+            name="snipux-hide-sensitive",
+            # A PowerShell that never answers must not keep a quit waiting.
+            daemon=True,
+        ).start()
+        self._show_checking_notice()
+        return True
 
+    def _awaiting_sensitive_check(self) -> bool:
+        """Whether the current selection is still waiting to be read."""
+        check = self._sensitive_check
+        return check is not None and (not check.discarded or check.recheck)
+
+    def _held_for_sensitive_check(self, finish: "Callable[[], None]") -> bool:
+        """Keep `finish` -- a Copy, Save, Open or Pin -- until the read
+        that is out has come back, and say whether it was kept.
+
+        The one rule Hide sensitive cannot break: a picture never leaves
+        with its check still pending, because the boxes it would have
+        carried are exactly what the check is about to add.
+        """
+        if not self._awaiting_sensitive_check():
+            return False
+        self._sensitive_check.then = finish
+        self._show_checking_notice()
+        return True
+
+    def _discard_sensitive_check(self) -> None:
+        """Stop waiting on the read that is out. Its thread cannot be
+        stopped, so its answer is thrown away when it arrives."""
+        check = self._sensitive_check
+        if check is None:
+            return
+        check.discarded = True
+        check.recheck = False
+        check.then = None
+        self._hide_checking_notice()
+
+    def _show_checking_notice(self) -> None:
+        """Say a read is out, for as long as it is: the toast's own timer
+        is stopped, and what the read comes back with replaces it."""
+        if not self.isVisible():
+            return
+        self._show_toast("blur", self._CHECKING_NOTICE)
+        self._toast._timer.stop()
+
+    def _hide_checking_notice(self) -> None:
+        if self._toast._text_label.text() == self._CHECKING_NOTICE:
+            self._toast.hide()
+
+    def _on_sensitive_check_finished(
+        self, check: _SensitiveCheck, lines: "list | None", reason: "str | None"
+    ) -> None:
+        """A read came back: `lines` of words, or the `reason` there are
+        none. On the UI thread -- see `_SensitiveCheckRelay`."""
+        if check is not self._sensitive_check:
+            return
+        self._sensitive_check = None
+        held = check.then
+        if check.discarded:
+            # Read for a selection that has gone. If another was committed
+            # since, it is that one's turn, and what was held waits on.
+            if check.recheck and self._hide_sensitive_text():
+                self._sensitive_check.then = held
+            else:
+                self._hide_checking_notice()
+                if check.recheck and held is not None:
+                    held()
+            return
+
+        if reason is not None:
+            self._say_nothing_was_hidden(reason)
+            if held is None:
+                return
+            if self.outcome != "instant":
+                # The bar is still here and so is the notice: what was
+                # pressed is dropped, and pressing it again is the yes.
+                return
+            # Instant finishes and closes in one step, with no bar and no
+            # time to read a toast -- so a snip that could not be checked
+            # waits for a yes rather than leaving unredacted and unseen.
+            if not self._finish_unhidden_snip_anyway(reason):
+                self.set_selection(None)
+                return
+        else:
+            self._hide_checking_notice()
+            self._add_hidden_boxes(check, lines)
+        if held is not None:
+            held()
+
+    def _add_hidden_boxes(self, check: _SensitiveCheck, lines: list) -> None:
+        """Put a solid `Redact` over each value `sensitive.find_sensitive`
+        flags in `lines` -- including whatever the user added to their own
+        hide list. The boxes are ordinary marks, added as one step of
+        history: the user can erase any one of them, and a single undo
+        takes the whole batch away.
+
+        Which rects, and how a word's place in the recognised image maps
+        back to this window, is `sensitivecheck.rects_to_hide`.
+        """
         existing = [
             QRectF(mark.start, mark.end).normalized()
             for mark in self._marks
             if isinstance(mark, Redact)
         ]
-        pad = self._HIDE_PADDING
-        found = [
-            QRectF(
-                selection.x() + image_rect.x() / scale_x - pad,
-                selection.y() + image_rect.y() / scale_y - pad,
-                image_rect.width() / scale_x + 2 * pad,
-                image_rect.height() / scale_y + 2 * pad,
-            )
-            for image_rect in (finding.image_rect for finding in sensitive.find_sensitive(lines, mine))
-        ]
-        boxes = []
-        for window_rect in self._merge_same_values(found):
-            if self._already_covered(window_rect, existing):
-                continue
-            existing.append(window_rect)
-            boxes.append(Redact(
+        boxes = [
+            Redact(
                 colour=QColor("#000000"),
                 stroke_width=design.tokens.Metric.STROKE_DEFAULT,
                 start=window_rect.topLeft(),
                 end=window_rect.bottomRight(),
-            ))
+            )
+            for window_rect in sensitivecheck.rects_to_hide(check, lines, existing)
+        ]
 
         self._mark_store.add_all(boxes)
         if boxes:
             count = len(boxes)
             self._show_toast("blur", f"Hid {count} item{'' if count == 1 else 's'}")
-
-    @classmethod
-    def _merge_same_values(cls, rects: list[QRectF]) -> list[QRectF]:
-        """`rects` with every pair that is the same value found twice
-        replaced by their union. The union, not either one: the two reads
-        rarely agree to the pixel, and covering both is what guarantees
-        neither leaves an edge of the value showing."""
-        merged: list[QRectF] = []
-        for rect in rects:
-            rect = QRectF(rect)
-            joined = True
-            while joined:
-                joined = False
-                for other in merged:
-                    overlap = rect.intersected(other)
-                    smaller = min(rect.width() * rect.height(), other.width() * other.height())
-                    if smaller > 0 and overlap.width() * overlap.height() >= smaller * cls._HIDE_SAME_VALUE:
-                        merged.remove(other)
-                        rect = rect.united(other)
-                        joined = True
-                        break
-            merged.append(rect)
-        return merged
-
-    @classmethod
-    def _already_covered(cls, rect: QRectF, covers: list[QRectF]) -> bool:
-        area = rect.width() * rect.height()
-        if area <= 0:
-            return True
-        for cover in covers:
-            overlap = rect.intersected(cover)
-            if overlap.width() * overlap.height() >= area * cls._HIDE_ALREADY_COVERED:
-                return True
-        return False
 
     def absolute_selection(self) -> QRectF | None:
         """The current selection in absolute virtual-desktop coordinates,
@@ -6266,7 +2508,16 @@ class OverlayWindow(QWidget):
         selection = self._to_absolute_rect(QRectF(self._selection))
         size = self._bar.sizeHint()
         margin = design.tokens.BarMetric.BAR_EDGE_MARGIN
-        for other in other_screens_nearest_first(own, self._monitor_geometries, selection):
+        # Where each monitor has a window of its own, this one is still
+        # handed every monitor's geometry and draws on one. A bar sent to
+        # another was placed outside this window, where nothing shows it.
+        pictured = QRectF(self._frame.logical_origin, self._frame.logical_size)
+        covered = [
+            geometry
+            for geometry in self._monitor_geometries
+            if pictured.contains(geometry.center())
+        ]
+        for other in other_screens_nearest_first(own, covered, selection):
             usable = self._usable_area(other)
             if (
                 usable.width() >= size.width() + 2 * margin
@@ -6449,6 +2700,37 @@ class OverlayWindow(QWidget):
     def _on_chooser_after_changed(self, _after: str) -> None:
         self._sync_bar_destination()
 
+    def _on_chooser_kind_changed(self, kind: str) -> None:
+        """The stills/record switch flipped.
+
+        Over a selection that is already made, Record is the user choosing
+        to film it, so it is committed the way a drag on the record side
+        is: armed, with the stills bar away. Nothing listened for the flip
+        before, so the toolbar stayed up, nothing was armed and Enter took
+        a screenshot of the region a recording had just been asked for.
+
+        Only a selection the user made. A rectangle this window recalled
+        by itself is an offer, and arming a recording of it because the
+        side was flipped is not something anyone asked for
+        (`_preselect_last_region`). Nor on a surface the session is not on:
+        `adopt_preselection_state` seeds the kind on one, and seeding must
+        not arm anything.
+        """
+        if (
+            kind == "record"
+            and self._session_active
+            and self._selection is not None
+            and not self._recalled_selection
+            and not self._picking_window
+            and self._region_drag_anchor is None
+        ):
+            self._commit_selection(self._selection)
+            return
+        # The stills bar is gated on the kind, and the size chip words
+        # itself by it.
+        self._sync_bar_visibility()
+        self.update()
+
     def _on_chooser_mode(self, mode: str) -> None:
         """A mode armed from the chooser. One piece of state, two surfaces:
         the bar's own chip is seeded from the same value.
@@ -6508,12 +2790,25 @@ class OverlayWindow(QWidget):
         """
         if self is other:
             return
+        # A rectangle this window recalled as it opened is the one thing
+        # here that is not `other`'s to replace: it is on this screen
+        # because the last snip was, and it used to vanish the moment the
+        # pointer arrived to use it. It gives way only to something the
+        # user has since armed on the other screen.
+        keeps_recalled = (
+            self._recalled_selection
+            and self._selection is not None
+            and other._chooser.kind == "stills"
+            and not other._picking_window
+            and not other._picking_monitor
+        )
         self._capture_mode = other._capture_mode
         self._delay = other._delay
         self._chooser.set_kind(other._chooser.kind)
         self._chooser.set_after(other._chooser.after)
         self._chooser.set_delay(other._chooser.delay)
-        self._chooser.set_mode(other._chooser.mode, announce=False)
+        if not keeps_recalled:
+            self._chooser.set_mode(other._chooser.mode, announce=False)
         self._chooser.set_hide_sensitive(other._chooser.hide_sensitive)
         self._chooser.set_record_cursor(other._chooser.record_cursor)
         self._bar.set_capture_mode(other._capture_mode)
@@ -6522,8 +2817,9 @@ class OverlayWindow(QWidget):
         self._picking_monitor = other._picking_monitor
         self._hovered_window = None
         self._hovered_monitor = None
-        self.set_selection(None)
-        self._chooser.reopen()
+        if not keeps_recalled:
+            self.set_selection(None)
+            self._chooser.reopen()
         self._sync_chooser_visibility()
         self._apply_idle_cursor()
 
@@ -6550,9 +2846,13 @@ class OverlayWindow(QWidget):
         # a pen for a snip that is already on its way to the clipboard. What
         # the user asked to see is the region they are cutting, which is
         # what is left once the bar goes.
+        # A hovered window in Window mode is a preview, not a selection:
+        # the bar came up under each one, jumped to the next, and armed the
+        # pen while the mode was still asking which window.
         if (
             not self._session_active
             or self._armed_for_recording
+            or self._picking_window
             or self._chooser.kind == "record"
             or self.outcome == "instant"
         ):
@@ -6838,11 +3138,26 @@ class OverlayWindow(QWidget):
         """
         return self._mark_store.marks
 
+    def _marks_in_selection(self) -> list[Shape]:
+        """The marks that can show inside the current selection: what the
+        size chip counts and what Escape's first stage is for.
+
+        Not all of `_marks`. They live in window coordinates and are left
+        where they were drawn when the selection is redrawn elsewhere, so
+        that selecting the old area again brings them back -- which leaves
+        ink in the store that is nowhere on screen.
+        """
+        if self._selection is None:
+            return []
+        selection = QRectF(self._selection)
+        return self._ink_layers.marks_in(self._marks, selection)
+
     def _on_marks_changed(self) -> None:
         """The single place anything reacts to the ink layer changing --
         the bar's undo/redo buttons and a repaint, once, however the change
         arrived.
         """
+        self._ink_layers.marks_changed()
         self._sync_bar_undo_redo()
         self.update()
 
@@ -7172,12 +3487,61 @@ class OverlayWindow(QWidget):
 
     def _on_bar_copy(self) -> None:
         """The floating bar's Copy button: copy, then dismiss."""
+        if self._held_for_sensitive_check(self._on_bar_copy):
+            return
         self.copy()
         self.close()
 
     def _on_bar_save(self) -> None:
         """The floating bar's Save button: save, then dismiss."""
-        self.save()
+        if self._held_for_sensitive_check(self._on_bar_save):
+            return
+        self._save_after_closing()
+
+    def _save_after_closing(self) -> None:
+        """Save as `save()` does, but take this window off the screen
+        before the file is written rather than after.
+
+        `save()` encodes the PNG before it returns -- 130-190 ms for a 4K
+        selection, over 300 ms for a 5120x2880 desktop -- and with the
+        close behind it, the frozen frame sat there for all of that after
+        the user had let go. Here the name is chosen, the window closes,
+        and `output.save_image_later` writes the file on a worker thread.
+
+        The caller's `on_captured` is told only once the write has landed,
+        never at the close: the Recent list, the review window and the
+        "Saved to" notice all take the path as a file that exists. So it
+        arrives after `on_dismissed`, and brings `outcome` and `save_error`
+        with it -- by then the caller can no longer ask a window that has
+        gone, and may already have another one open.
+
+        A write that fails ends the way `save()`'s does: the picture goes
+        to the clipboard and is reported with no path.
+        """
+        directory = setup_desktop.load_save_folder()
+        # A copy this window has no part in: the worker thread encodes it
+        # and the report carries it, both after this window has closed.
+        image = self.rendered_image().copy()
+        on_captured, outcome = self._on_captured, self.outcome
+        self._remember_last_region()
+
+        def report(path: "Path | None", error: "OSError | None") -> None:
+            if error is not None:
+                output.copy_image_to_clipboard(image)
+            if on_captured is not None:
+                on_captured(
+                    image,
+                    None if error is not None else path,
+                    outcome=outcome,
+                    save_error=None if error is None else str(error),
+                )
+
+        try:
+            output.save_image_later(image, directory, on_written=report)
+        except OSError as exc:
+            # The folder itself could not be made, so nothing was started.
+            self.save_error = str(exc)
+            report(None, exc)
         self.close()
 
     def _on_bar_open(self) -> None:
@@ -7191,9 +3555,10 @@ class OverlayWindow(QWidget):
         destination is "Review window -- annotate, crop, export", less the
         crop, which that window does not do (#78).
         """
+        if self._held_for_sensitive_check(self._on_bar_open):
+            return
         self._chooser.set_after("review")
-        self.save()
-        self.close()
+        self._save_after_closing()
 
     def _on_bar_pin(self) -> None:
         """Pin (SNX-83): hand the render and the selection's own absolute
@@ -7207,6 +3572,8 @@ class OverlayWindow(QWidget):
         not also trigger `app.py`'s `_on_captured` (which opens a *review*
         window keyed on `outcome`, a value Pin never sets).
         """
+        if self._held_for_sensitive_check(self._on_bar_pin):
+            return
         image = self.rendered_image()
         rect = self._to_absolute_rect(QRectF(self._selection)).toRect()
         self._remember_last_region()
@@ -7337,6 +3704,13 @@ class OverlayWindow(QWidget):
         self._reposition_close_button()
         self._close_button.show()
         self._sync_chooser_visibility()
+        if self._awaiting_sensitive_check():
+            # Last region is read while this window is still being built,
+            # when a toast has nowhere to show.
+            self._show_checking_notice()
+        elif self._unsaid_hide_notice is not None:
+            self._unsaid_hide_notice()
+        self._unsaid_hide_notice = None
         # A crosshair from the first frame: a drag works before any mode is
         # picked, and the move handler only takes over once the pointer moves.
         self._apply_idle_cursor()
@@ -7344,6 +3718,8 @@ class OverlayWindow(QWidget):
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
         self._ants_timer.stop()
+        # A window-sized image; not worth holding while nothing shows it.
+        self._ink_layers.release_ink_layer()
         self._bar.hide()
         self._style_popover.hide()
         self._tool_hint.hide()
@@ -7378,6 +3754,10 @@ class OverlayWindow(QWidget):
         # in place a moment later. Only an actual close() means the session
         # itself is over.
         self._remember_last_tool()
+        # A read still out comes back to a window that has gone: its answer
+        # is dropped, and nothing it was holding runs.
+        self._discard_sensitive_check()
+        self._unsaid_hide_notice = None
         super().closeEvent(event)
         if self._on_dismissed is not None:
             self._on_dismissed()
@@ -7479,17 +3859,20 @@ class OverlayWindow(QWidget):
         is None until it does -- so `setScreen` has something to act on.
         """
         if screen is None:
-            # Rendered once before mapping: `grab()` runs a full paintEvent
-            # into an offscreen pixmap, so the backing store already holds
-            # the frozen frame when the window appears rather than being
-            # filled on the first exposure.
-            self.grab()
             if self._map_animation_skipped:
                 # A window type the compositor maps without animating
                 # (`Platform.skip_map_animation`): nothing to wait out, so
-                # nothing to hide.
+                # nothing to hide. And nothing rendered beforehand: `grab()`
+                # paints into a pixmap of its own, not this window's
+                # backing store, so the exposure paints the whole frame
+                # again regardless. Measured on Windows, the frozen screen
+                # appears about 8 ms sooner without it.
                 self.show()
             else:
+                # Rendered once before mapping, so everything the first
+                # paint needs is already built by the time the window is
+                # revealed.
+                self.grab()
                 # Mapped transparent, then revealed. Mutter stages a newly
                 # mapped window by scaling it up into place, and over a frozen
                 # desktop that reads as a page expanding across the very area
@@ -7601,7 +3984,11 @@ class OverlayWindow(QWidget):
             # The row reopened over a selection: stepping back is folding it
             # away again, before anything is discarded.
             self._chooser.collapse()
-        elif self._marks:
+        elif self._marks_in_selection():
+            # Only ink that is showing. Marks a redrawn selection left
+            # behind are kept on purpose (`mousePressEvent`), and stopping
+            # here to "discard" what nobody can see cost a press that
+            # appeared to do nothing.
             self.discard()
         elif self._selection is not None and not self._armed_for_recording:
             # Back a stage, not out. The handoff's post-selection bars carry
@@ -7653,11 +4040,21 @@ class OverlayWindow(QWidget):
         key = event.key()
         modifiers = event.modifiers()
 
+        # Esc while Hide sensitive is still reading cancels the snip
+        # outright. Stepping back a stage, as Esc does otherwise, would
+        # leave a way to carry on with a selection nothing had checked.
+        if key == Qt.Key.Key_Escape and self._awaiting_sensitive_check():
+            self.close()
+            return
+
         # Ahead of the chooser, which reads a bare Escape as cancelling the
         # snip: with Full screen armed it leaves the mode instead -- see
         # `_leave_monitor_mode`.
         if key == Qt.Key.Key_Escape and self._picking_monitor:
             self._leave_monitor_mode()
+            return
+        if key == Qt.Key.Key_Escape and self._region_drag_anchor is not None:
+            self._cancel_region_drag()
             return
 
         # The chooser's shortcuts are live whenever its row is: while
@@ -7771,20 +4168,36 @@ class OverlayWindow(QWidget):
                 if self._on_recording_start is not None:
                     self._on_recording_start()
                 return
-            # Nothing to copy (and dismiss) without a selection yet.
-            if self._selection is not None:
-                self.copy()
-                self.close()
+            if self._selection is None:
+                # Nothing to copy (and dismiss) without a selection yet.
+                return
+            if self._chooser.kind == "record":
+                # On the record side and not armed: the recording was
+                # refused, or the region is one this window recalled. Enter
+                # asks for the recording; it never means a screenshot here.
+                # A drag still open commits on its own release.
+                if self._region_drag_anchor is None:
+                    self._commit_selection(self._selection)
+                return
+            self._on_bar_copy()
             return
 
         # Ctrl+C means copy everywhere else on the desktop, and Snipping Tool
         # users press it by habit. Without this it fell through to C, the
         # Callout letter: the snip armed a tool and the clipboard kept
         # whatever it held before.
+        #
+        # Nothing on the record side, armed or not: a still of the region a
+        # recording is being set up around is the wrong capture, exactly as
+        # it was for Enter above. The handoff gives Ctrl+C no meaning there,
+        # so it has none.
         if key == Qt.Key.Key_C and modifiers == Qt.KeyboardModifier.ControlModifier:
-            if self._selection is not None and not self._armed_for_recording:
-                self.copy()
-                self.close()
+            if (
+                self._selection is not None
+                and not self._armed_for_recording
+                and self._chooser.kind != "record"
+            ):
+                self._on_bar_copy()
             return
 
         # The tool and style letters are bare keys. A chord that happens to
@@ -7840,10 +4253,61 @@ class OverlayWindow(QWidget):
         cycle = sum(metric.ANTS_DASH)
         step = cycle * self._ANTS_TIMER_INTERVAL_MS / metric.ANTS_PERIOD_MS
         self._dash_offset = (self._dash_offset + step) % cycle
-        self.update()
+        if self._selection is None:
+            # No stroke, so nothing on screen changed. This tick used to
+            # repaint every monitor 30 times a second for as long as the
+            # overlay was open.
+            return
+        self.update(self._selection_stroke_region())
+
+    def _selection_stroke_region(self) -> QRegion:
+        """The band the selection's stroke is drawn in, window-local --
+        all a marching-ants tick changes."""
+        reach = math.ceil(design.tokens.Metric.SEL_STROKE_W) + 1
+        selection = QRectF(self._selection).toAlignedRect()
+        return QRegion(selection.adjusted(-reach, -reach, reach, reach)) - QRegion(
+            selection.adjusted(reach, reach, -reach, -reach)
+        )
+
+    def _selection_chrome_region(self) -> QRegion:
+        """Everything `paintEvent` draws because of the current selection,
+        window-local: the undimmed hole, the stroke, the handles and
+        brackets that overhang it, and the two chips above it. Empty with
+        no selection.
+
+        What a change of selection has to repaint is this region before the
+        change joined with this region after it. The rest of the window --
+        most of several monitors -- is the same dimmed frame either way.
+        """
+        if self._selection is None:
+            return QRegion()
+        reach = (
+            max(
+                self._CORNER_BRACKET_OFFSET,
+                self._EDGE_HANDLE_OFFSET,
+                self._CORNER_HIT_OFFSET,
+            )
+            + self._CHROME_REPAINT_MARGIN
+        )
+        region = QRegion(
+            QRectF(self._selection).toAlignedRect().adjusted(-reach, -reach, reach, reach)
+        )
+        margin = self._CHROME_REPAINT_MARGIN
+        for chip in (self._dimension_chip_rect(), self._frozen_pill_rect()):
+            region += chip.toAlignedRect().adjusted(-margin, -margin, margin, margin)
+        return region
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if not self._accept_session_interaction(replace_selection=True):
+            return
+        if (
+            event.button() == Qt.MouseButton.RightButton
+            and self._region_drag_anchor is not None
+        ):
+            # Ahead of `_end_drags`, which reads any press as a lost release
+            # and commits the box as it stands -- with Instant, a right-click
+            # meant to call the drag off captured it and closed instead.
+            self._cancel_region_drag()
             return
         # A press while a drag is still open means that drag's release never
         # arrived. It ends here, as it stands, before this press can start
@@ -8097,6 +4561,7 @@ class OverlayWindow(QWidget):
         # "which display is the cursor on" from -- see its own docstring
         # for why this beats `QCursor.pos()`. Before the eraser's branch,
         # which returns early, so its sweep can fade the chrome it crosses.
+        previous_cursor = self._cursor_pos
         self._cursor_pos = event.position()
         if self._erasing:
             self.erase_at(event.position())
@@ -8110,8 +4575,12 @@ class OverlayWindow(QWidget):
             # Nothing else here already repaints on a plain hover (no
             # button held) -- the loupe (`_paint_eyedropper`) needs one on
             # every move to actually follow the cursor, and to disappear
-            # the instant it leaves the selection.
-            self.update()
+            # the instant it leaves the selection. Only where the loupe was
+            # and where it is now: the rest of the desktop has not changed.
+            self.update(
+                self._eyedropper_region(previous_cursor)
+                + self._eyedropper_region(self._cursor_pos)
+            )
 
         if self._picking_window:
             # Live preview while armed: a hit sets `_selection` to that
@@ -8295,6 +4764,17 @@ class OverlayWindow(QWidget):
             self.set_selection(None)
             return
         self._commit_selection(rect)
+
+    def _cancel_region_drag(self) -> None:
+        """Call off a Region drag-to-create: no selection, and back to the
+        chooser, as if the press had never happened.
+
+        The anchor goes with the box. Clearing the box alone left the drag
+        armed, and the next mouse move drew it again.
+        """
+        self._region_drag_anchor = None
+        self.set_selection(None)
+        self._apply_idle_cursor()
 
     def _nudge_selection(self, key: int, modifiers) -> None:
         """One arrow-key press (#88): move the selection by one logical
@@ -8562,99 +5042,34 @@ class OverlayWindow(QWidget):
             self._frame.image.height() / widget_rect.height(),
         )
 
+    # The three images below are built and cached by `inklayers.InkLayers`,
+    # which also holds the reasoning for each; these hand it this window's
+    # frame, marks and size.
+
     def _base_layer_image(self) -> QImage:
         """Layer 1's own source pixels: `self._frame.image` with every
-        committed `ObscuringShape` mark's blur/pixelate effect actually
-        baked in, in list order -- each one sampling the output of every
-        obscuring mark before it, the same left-to-right composition
-        `shapes.render()` uses for export, via repeated `apply()` calls
-        rather than `render()` itself (which would also flatten every
-        *non*-obscuring mark permanently into the image, losing the
-        live, undo-able painter drawing `_paint_marks` below still wants
-        for those).
-
-        Fixes SNX-63: `_paint_marks` used to skip every `ObscuringShape`
-        outright with a "later ticket" comment that no later ticket ever
-        picked up, so a committed blur/pixelate was invisible until
-        export. Baking it into Layer 1 here instead of painting it inside
-        `_paint_marks` is what keeps it aligned across a re-frame for
-        free -- this method never reads `_selection` at all, only
-        `_marks` and `_frame`, so the obscured patch sits over exactly
-        the pixels it was drawn on regardless of where the selection
-        rect (and its clip) currently is.
-
-        Cached against `key` -- each obscuring mark's class, geometry and
-        `strength`, plus the frame's own identity -- and only recomputed
-        when that key actually changes, per this ticket's "does not
-        visibly stall" acceptance criterion: a repaint triggered by
-        something unrelated (an in-progress stroke elsewhere, marching
-        ants, a resize drag) must not redo the scale-down/scale-up
-        sampling for every obscuring mark on every single frame. Keying
-        on `strength` rather than just object identity is also what
-        makes an already-committed mark's on-screen look track a change
-        to its own `strength` (e.g. a direct write to the mark) on the
-        very next repaint, instead of it staying stuck at whatever this
-        method last cached.
-
-        A mark's `start`/`end` are in this widget's own window-local
-        coordinates (see the class docstring) and need converting into
-        `self._frame.image`'s own, larger-under-HiDPI pixel space before
-        `apply()` -- which expects both its rect and the image it samples
-        to share one coordinate space -- can sample the right pixels; see
-        `_window_to_frame_scale`.
-
-        Every `Spotlight` among `obscuring` is combined into one
-        `Spotlight.apply_all()` call instead of taking its own turn in the
-        loop -- shapes.render()'s own docstring gives the reasoning, which
-        applies here unchanged: several holes in one dim, not one dim per
-        spotlight redimming the last one's.
+        committed `ObscuringShape` mark's blur/pixelate effect baked in, in
+        list order. Never reads `_selection`, so an obscured patch stays
+        over the pixels it was drawn on across a re-frame. Cached; see
+        `InkLayers.base_layer_image`.
         """
-        obscuring = [shape for shape in self._marks if isinstance(shape, ObscuringShape)]
-        key = (
-            id(self._frame),
-            tuple(
-                (
-                    type(shape).__name__,
-                    shape.start.x(),
-                    shape.start.y(),
-                    shape.end.x(),
-                    shape.end.y(),
-                    shape.strength,
-                )
-                for shape in obscuring
-            ),
+        return self._ink_layers.base_layer_image(
+            self._frame, self._marks, self._window_to_frame_scale()
         )
-        if self._base_layer_cache is not None and self._base_layer_cache[0] == key:
-            return self._base_layer_cache[1]
 
-        image = self._frame.image
-        if obscuring:
-            scale_x, scale_y = self._window_to_frame_scale()
-            scaled = [
-                replace(
-                    shape,
-                    start=QPointF(shape.start.x() * scale_x, shape.start.y() * scale_y),
-                    end=QPointF(shape.end.x() * scale_x, shape.end.y() * scale_y),
-                )
-                for shape in obscuring
-            ]
-            # Spotlight is combined rather than applied one at a time, the
-            # same special case shapes.render() makes for export -- see
-            # Spotlight's own docstring for why stacking each one's apply()
-            # would leave only their rects' intersection lit.
-            spotlights = [shape for shape in scaled if isinstance(shape, Spotlight)]
-            spotlights_done = False
-            for shape in scaled:
-                if isinstance(shape, Spotlight):
-                    if spotlights_done:
-                        continue
-                    image = Spotlight.apply_all(image, spotlights)
-                    spotlights_done = True
-                    continue
-                image = shape.apply(image)
+    def _covered_mark_count(self) -> int:
+        """How many leading marks have to be flattened together because an
+        obscuring mark was drawn over ink, or 0 -- the ordinary case --
+        when no ink comes before one. See `inklayers.covered_mark_count`.
+        """
+        return covered_mark_count(self._marks)
 
-        self._base_layer_cache = (key, image)
-        return image
+    def _covered_ink_image(self, count: int) -> QImage:
+        """The frame with the first `count` marks flattened onto it in the
+        order they were drawn, in the frame's own pixels. Cached; see
+        `InkLayers.covered_ink_image`.
+        """
+        return self._ink_layers.covered_ink_image(self._frame, self._marks, count)
 
     def _paint_marks(self, painter: QPainter) -> None:
         """The ink layer: `_marks`, clipped to the selection.
@@ -8680,23 +5095,32 @@ class OverlayWindow(QWidget):
         # list order on every repaint, and `Shape` is a plain dataclass, so
         # the write stuck: `rendered_image()` exported the renumbered badges
         # and the documented behaviour did not survive its own paint.
-        for shape in self._marks:
-            if isinstance(shape, ObscuringShape):
-                # Already baked into Layer 1 by `_base_layer_image` above,
-                # in list order alongside every other obscuring mark --
-                # painting it again here would double its effect, and
-                # `draw()` isn't a real implementation to call anyway (see
-                # its own docstring). An *in-progress* blur/pixelate drag
-                # still gets a lightweight marquee instead -- see
-                # `_paint_in_progress_shape` below -- baking a live preview
-                # into Layer 1 on every mouse-move would be the exact
-                # per-frame cost this ticket's performance criterion rules
-                # out.
-                continue
-            shape.draw(painter)
+        covered = self._covered_mark_count()
+        if covered:
+            # Ink an obscuring mark was drawn over, already flattened in
+            # order with it. Inside the selection's clip, like the ink it
+            # stands in for.
+            painter.drawImage(QRectF(self.rect()), self._covered_ink_image(covered))
+        # Obscuring marks are not in this layer: `_base_layer_image` baked
+        # them into Layer 1, in list order, and `draw()` is not a real
+        # implementation for them anyway. An *in-progress* blur/pixelate
+        # drag gets a lightweight marquee instead -- see
+        # `_paint_in_progress_shape` below.
+        ink = self._ink_layer_image(covered)
+        if ink is not None:
+            painter.drawImage(QPointF(0, 0), ink)
         if self._in_progress_shape is not None:
             self._paint_in_progress_shape(painter, self._in_progress_shape)
         painter.restore()
+
+    def _ink_layer_image(self, covered: int) -> QImage | None:
+        """Every committed mark from `covered` on that draws itself, on a
+        transparent image the size of this window. None when there is
+        nothing to draw. Cached; see `InkLayers.ink_layer_image`.
+        """
+        return self._ink_layers.ink_layer_image(
+            self._marks, covered, self.width(), self.height(), self.devicePixelRatioF()
+        )
 
     def _paint_in_progress_shape(self, painter: QPainter, shape: Shape) -> None:
         """Live preview of the mark `_start_stroke`/`_extend_stroke` are
@@ -8782,97 +5206,40 @@ class OverlayWindow(QWidget):
 
     # -- selection frame: corner brackets / handles ------------------------
 
+    # The geometry itself is `selectionframe`'s; these put this window's
+    # selection into it, and are what the paint and press handlers call.
+
     def _bracket_path(self, handle: Handle) -> QPainterPath:
         """The filled L-bracket for one corner, in this widget's local
-        (window) coordinates.
-
-        Built by mirroring the canonical top-left bracket from
-        `_l_bracket_local_path` with a `QTransform`, rather than re-deriving
-        each corner's outline by hand -- the four corners are the same
-        shape reflected across one or both axes and anchored to that
-        corner's point on the selection rect, offset outward by
-        `_CORNER_BRACKET_OFFSET` so the bracket straddles the 1px stroke.
+        (window) coordinates. See `selectionframe.bracket_path`.
         """
         # QRectF, not the raw QRect `self._selection` -- QRect.right()/
         # bottom() are inclusive (left + width - 1), which would throw every
         # offset below off by one pixel against the QRectF math everywhere
         # else in this class.
-        sel = QRectF(self._selection)
-        metric = design.tokens.Metric
-        local = _l_bracket_local_path(
-            metric.CORNER_LEN, metric.CORNER_W, self._CORNER_BRACKET_RADIUS
-        )
-
-        flip_x = handle in (Handle.TOP_RIGHT, Handle.BOTTOM_RIGHT)
-        flip_y = handle in (Handle.BOTTOM_LEFT, Handle.BOTTOM_RIGHT)
-        off = self._CORNER_BRACKET_OFFSET
-        anchor_x = sel.right() + off if flip_x else sel.left() - off
-        anchor_y = sel.bottom() + off if flip_y else sel.top() - off
-
-        transform = QTransform()
-        transform.translate(anchor_x, anchor_y)
-        transform.scale(-1 if flip_x else 1, -1 if flip_y else 1)
-        return transform.map(local)
+        return selectionframe.bracket_path(QRectF(self._selection), handle)
 
     def _edge_handle_rect(self, handle: Handle) -> QRectF:
         """The rounded bar for one edge handle, in local (window)
-        coordinates: `HANDLE_LONG x HANDLE_SHORT` (or transposed for a
-        vertical edge), centred on the edge and offset outward by
-        `_EDGE_HANDLE_OFFSET` so it overhangs the stroke.
+        coordinates. See `selectionframe.edge_handle_rect`.
         """
-        sel = QRectF(self._selection)  # see the QRectF note in _bracket_path
-        metric = design.tokens.Metric
-        long_, short = metric.HANDLE_LONG, metric.HANDLE_SHORT
-        off = self._EDGE_HANDLE_OFFSET
-        center = sel.center()
-
-        if handle is Handle.TOP:
-            return QRectF(center.x() - long_ / 2, sel.top() - off, long_, short)
-        if handle is Handle.BOTTOM:
-            return QRectF(center.x() - long_ / 2, sel.bottom() - (short - off), long_, short)
-        if handle is Handle.LEFT:
-            return QRectF(sel.left() - off, center.y() - long_ / 2, short, long_)
-        if handle is Handle.RIGHT:
-            return QRectF(sel.right() - (short - off), center.y() - long_ / 2, short, long_)
-        raise ValueError(f"not an edge handle: {handle!r}")
+        # see the QRectF note in _bracket_path
+        return selectionframe.edge_handle_rect(QRectF(self._selection), handle)
 
     def _corner_hit_rect(self, handle: Handle) -> QRectF:
-        """The invisible `HANDLE_HIT`-square hit target for one corner, in
-        local (window) coordinates -- offset outward by
-        `_CORNER_HIT_OFFSET` and centred on the corner point, same as the
-        bracket it sits under. No chrome of its own: the bracket is the
-        visible handle, per the README.
+        """The invisible hit target for one corner, in local (window)
+        coordinates. See `selectionframe.corner_hit_rect`.
         """
-        sel = QRectF(self._selection)  # see the QRectF note in _bracket_path
-        size = design.tokens.Metric.HANDLE_HIT
-        off = self._CORNER_HIT_OFFSET
-
-        if handle is Handle.TOP_LEFT:
-            return QRectF(sel.left() - off, sel.top() - off, size, size)
-        if handle is Handle.TOP_RIGHT:
-            return QRectF(sel.right() - size + off, sel.top() - off, size, size)
-        if handle is Handle.BOTTOM_LEFT:
-            return QRectF(sel.left() - off, sel.bottom() - size + off, size, size)
-        if handle is Handle.BOTTOM_RIGHT:
-            return QRectF(sel.right() - size + off, sel.bottom() - size + off, size, size)
-        raise ValueError(f"not a corner handle: {handle!r}")
+        # see the QRectF note in _bracket_path
+        return selectionframe.corner_hit_rect(QRectF(self._selection), handle)
 
     def _handle_at(self, pos: QPointF) -> Handle | None:
-        """Which handle (if any) a local-coordinate point falls in.
-
-        Corners checked first: a very small selection could bring a corner
-        hit target and an edge handle's rect into overlap, and the corner
-        bracket is the more specific, visually on-top target of the two.
+        """Which handle (if any) a local-coordinate point falls in. See
+        `selectionframe.handle_at`.
         """
         if self._selection is None:
             return None
-        for handle in _CORNER_HANDLES:
-            if self._corner_hit_rect(handle).contains(pos):
-                return handle
-        for handle in _EDGE_HANDLES:
-            if self._edge_handle_rect(handle).contains(pos):
-                return handle
-        return None
+        return selectionframe.handle_at(QRectF(self._selection), pos)
 
     def _paint_corner_brackets(self, painter: QPainter) -> None:
         painter.setPen(Qt.PenStyle.NoPen)
@@ -8933,7 +5300,7 @@ class OverlayWindow(QWidget):
         # until that exists, the size alone is the honest half.
         if self._chooser.kind == "record":
             return f"{width} × {height}", ""
-        count = len(self._marks)
+        count = len(self._marks_in_selection())
         unit = "mark" if count == 1 else "marks"
         return f"{width} × {height}", f"{count} {unit}"
 
@@ -8941,12 +5308,33 @@ class OverlayWindow(QWidget):
         """Bounding rect of the dimension chip, in window coordinates:
         left-aligned to the selection's left edge, its own top edge
         `CHIP_OFFSET_Y` above the selection's top edge -- per the README's
-        "left:0; top:-38px" -- sized to fit its current text exactly, the
-        same way `_bracket_path`/`_edge_handle_rect` above expose their
-        geometry separately from painting it.
+        "left:0; top:-38px" -- wherever the selection's monitor has room for
+        that. See `_chip_rects`.
         """
-        metric = design.tokens.Metric
+        return self._chip_rects()[0]
+
+    def _frozen_pill_rect(self) -> QRectF:
+        """Bounding rect of the Frozen pill, in window coordinates:
+        right-aligned to the selection's right edge, level with the
+        dimension chip -- per the README's "right:0; top:-38px" -- wherever
+        there is room for that. See `_chip_rects`.
+        """
+        return self._chip_rects()[1]
+
+    def _chip_rects(self) -> tuple[QRectF, QRectF]:
+        """Where the dimension chip and the Frozen pill go, in window
+        coordinates (logical), held inside `_chrome_bounds`, the usable area
+        of the selection's monitor. See `selectionframe.chip_rects` for the
+        placement and why it is what it is.
+        """
         sel = QRectF(self._selection)
+        bounds = self._chrome_bounds()
+        chip_size = self._dimension_chip_size()
+        pill_size = self._frozen_pill_size()
+        return selectionframe.chip_rects(sel, bounds, chip_size, pill_size)
+
+    def _dimension_chip_size(self) -> QSizeF:
+        """The dimension chip's size, fitted to its current text exactly."""
         size_text, mark_text = self._dimension_chip_texts()
         mono = design.font_families().mono
         size_fm = QFontMetricsF(self._chip_font(design.tokens.Font.DIM_CHIP, mono))
@@ -8966,16 +5354,10 @@ class OverlayWindow(QWidget):
         content_height = max(size_fm.height(), mute_fm.height())
         width = content_width + 2 * self._CHIP_PAD_H
         height = content_height + 2 * self._CHIP_PAD_V
-        return QRectF(sel.left(), sel.top() - metric.CHIP_OFFSET_Y, width, height)
+        return QSizeF(width, height)
 
-    def _frozen_pill_rect(self) -> QRectF:
-        """Bounding rect of the Frozen pill, in window coordinates:
-        right-aligned to the selection's right edge, its own top edge
-        `CHIP_OFFSET_Y` above the selection's top edge -- per the README's
-        "right:0; top:-38px" -- sized to fit the pin icon and its label.
-        """
-        metric = design.tokens.Metric
-        sel = QRectF(self._selection)
+    def _frozen_pill_size(self) -> QSizeF:
+        """The Frozen pill's size, fitted to the pin icon and its label."""
         ui = design.font_families().ui
         fm = QFontMetricsF(self._chip_font(design.tokens.Font.FROZEN, ui))
 
@@ -8987,8 +5369,7 @@ class OverlayWindow(QWidget):
         content_height = max(self._FROZEN_ICON_SIZE, fm.height())
         width = content_width + 2 * self._CHIP_PAD_H
         height = content_height + 2 * self._CHIP_PAD_V
-        top = sel.top() - metric.CHIP_OFFSET_Y
-        return QRectF(sel.right() - width, top, width, height)
+        return QSizeF(width, height)
 
     def _paint_dimension_chip(self, painter: QPainter) -> None:
         """The left-hand chip: `WIDTH × HEIGHT`, a muted middot, then the
@@ -9076,44 +5457,36 @@ class OverlayWindow(QWidget):
         if self._selection is None or not QRectF(self._selection).contains(self._cursor_pos):
             return
 
-        image = self._frame.image
-        scale_x, scale_y = self._window_to_frame_scale()
-
-        image_cursor_x = self._cursor_pos.x() * scale_x
-        image_cursor_y = self._cursor_pos.y() * scale_y
-
-        half_width = (LOUPE_SOURCE_LOGICAL_SIZE / 2) * scale_x
-        half_height = (LOUPE_SOURCE_LOGICAL_SIZE / 2) * scale_y
-
-        width = min(round(half_width * 2), image.width())
-        height = min(round(half_height * 2), image.height())
-        if width <= 0 or height <= 0:
-            return
-
-        left = round(image_cursor_x - half_width)
-        top = round(image_cursor_y - half_height)
-        left = max(0, min(left, image.width() - width))
-        top = max(0, min(top, image.height() - height))
-
-        cropped = image.copy(QRect(left, top, width, height))
-        zoomed = cropped.scaled(
-            LOUPE_BOX_SIZE,
-            LOUPE_BOX_SIZE,
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            # Smoothing would hide the exact pixel this tool exists to read.
-            Qt.TransformationMode.FastTransformation,
+        zoomed = loupe.magnified(
+            self._frame.image, self._cursor_pos, self._window_to_frame_scale()
         )
+        if zoomed is None:
+            return
 
         colour = self.color_at(self._cursor_pos)
         box_rect, readout_rect = self._eyedropper_rects(self._cursor_pos, colour)
         painter.drawImage(box_rect, zoomed)
 
         center = box_rect.center()
-        painter.setPen(LOUPE_CROSSHAIR_COLOR)
+        painter.setPen(loupe.LOUPE_CROSSHAIR_COLOR)
         painter.drawLine(QPointF(box_rect.left(), center.y()), QPointF(box_rect.right(), center.y()))
         painter.drawLine(QPointF(center.x(), box_rect.top()), QPointF(center.x(), box_rect.bottom()))
 
         self._paint_eyedropper_readout(painter, readout_rect, colour)
+
+    def _eyedropper_region(self, cursor: QPointF | None) -> QRegion:
+        """What `_paint_eyedropper` draws with the pointer at `cursor`,
+        window-local: the loupe and its readout chip. Empty wherever it
+        draws nothing."""
+        if cursor is None or self._selection is None:
+            return QRegion()
+        if not QRectF(self._selection).contains(cursor):
+            return QRegion()
+        margin = self._CHROME_REPAINT_MARGIN
+        region = QRegion()
+        for rect in self._eyedropper_rects(cursor, self.color_at(cursor)):
+            region += rect.toAlignedRect().adjusted(-margin, -margin, margin, margin)
+        return region
 
     def _eyedropper_readout_font(self) -> QFont:
         return self._chip_font(design.tokens.Font.FROZEN, design.font_families().ui)
@@ -9129,62 +5502,15 @@ class OverlayWindow(QWidget):
 
     def _eyedropper_rects(self, cursor: QPointF, colour: QColor) -> tuple[QRectF, QRectF]:
         """Where the loupe box and its hex chip go for a pointer at `cursor`,
-        both as window-local logical rects (#106).
-
-        The loupe used to open below-right of the pointer, always, and near
-        the bottom of a selection that is exactly where the bar sits -- a
-        child widget, so it painted over the loupe the user was reading.
-        Now the corners are tried in order -- below-right, below-left,
-        above-right, above-left, each `LOUPE_OFFSET` from the pointer --
-        and the first whose box *and* chip clear every piece of showing
-        chrome and fit inside the monitor under the pointer wins. The
-        monitor, not this window: the window spans the whole desk, and
-        clamping to it can hang the loupe across a bezel or into the gap of
-        a staggered layout. If no corner is clear, above-left, clamped into
-        that monitor.
-
-        The chip goes on the far side of the box from the pointer -- under a
-        box below it, over a box above it -- so it never sits on the spot
-        being read.
+        both as window-local logical rects (#106): clear of every piece of
+        showing chrome and inside the monitor under the pointer -- the
+        monitor, not this window, which spans the whole desk. See
+        `loupe.rects` for the order the corners are tried in and why.
         """
-        box_size = LOUPE_BOX_SIZE
-        offset = LOUPE_OFFSET
         readout_size = self._eyedropper_readout_size(colour)
         monitor = self._to_local_rect(self._monitor_at(self._to_absolute(cursor)))
         chrome = self._chrome_to_keep_clear()
-
-        def box_at(right: bool, below: bool) -> QRectF:
-            x = cursor.x() + offset.x() if right else cursor.x() - offset.x() - box_size
-            y = cursor.y() + offset.y() if below else cursor.y() - offset.y() - box_size
-            return QRectF(x, y, box_size, box_size)
-
-        for right, below in ((True, True), (False, True), (True, False), (False, False)):
-            box = box_at(right, below)
-            readout = self._eyedropper_readout_rect(box, readout_size, below, monitor)
-            if (
-                monitor.contains(box)
-                and monitor.contains(readout)
-                and not any(box.intersects(c) or readout.intersects(c) for c in chrome)
-            ):
-                return box, readout
-
-        box = box_at(False, False)
-        box.moveLeft(max(monitor.left(), min(box.left(), monitor.right() - box_size)))
-        box.moveTop(max(monitor.top(), min(box.top(), monitor.bottom() - box_size)))
-        # Under the box when the clamp pushed it below the pointer.
-        below = box.top() > cursor.y()
-        return box, self._eyedropper_readout_rect(box, readout_size, below, monitor)
-
-    def _eyedropper_readout_rect(
-        self, box: QRectF, size: QSizeF, below: bool, monitor: QRectF
-    ) -> QRectF:
-        """The hex chip attached to `box` -- under it when the box is below
-        the pointer, over it otherwise -- left-aligned with it and kept
-        inside `monitor` sideways. All window-local logical."""
-        gap = self._EYEDROPPER_READOUT_GAP
-        x = max(monitor.left(), min(box.left(), monitor.right() - size.width()))
-        y = box.bottom() + gap if below else box.top() - gap - size.height()
-        return QRectF(QPointF(x, y), size)
+        return loupe.rects(cursor, readout_size, monitor, chrome)
 
     def _chrome_to_keep_clear(self) -> list[QRectF]:
         """Every piece of this window's chrome that is showing, as
@@ -9234,7 +5560,7 @@ class OverlayWindow(QWidget):
         ):
             # At least the pixels the loupe magnifies, and never less room
             # than a stroke gets.
-            half = max(LOUPE_SOURCE_LOGICAL_SIZE / 2, reach)
+            half = max(loupe.LOUPE_SOURCE_LOGICAL_SIZE / 2, reach)
             spot = QRectF(cursor.x() - half, cursor.y() - half, 2 * half, 2 * half)
             box, readout = self._eyedropper_rects(cursor, self.color_at(cursor))
             return [spot, box, readout]
@@ -9405,7 +5731,7 @@ def open_overlay(
     # rect, delay, and the chooser's after-capture destination (one of
     # `tokens.RECORDING_AFTER`'s ids) -- see `OverlayWindow.__init__`'s own comment on the same
     # parameter.
-    on_recording_requested: "Callable[[QRectF | None, str, str], None] | None" = None,
+    on_recording_requested: "Callable[[QRectF | None, str, str], bool | None] | None" = None,
     # Enter, while a recording is armed. Fires the stage's primary action,
     # which on the record side is Record -- see `OverlayWindow`'s own
     # keyPressEvent, where the alternative was copying a screenshot of the

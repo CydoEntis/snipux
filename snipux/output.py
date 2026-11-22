@@ -16,12 +16,15 @@ import datetime
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QUrl
+from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, QObject, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QImage
+
+from . import log
 
 
 def _settle_clipboard() -> None:
@@ -47,6 +50,11 @@ def _settle_clipboard() -> None:
 # copy to disk without being asked would keep it long after the user
 # thought it was gone. Quitting snipux forgets all of it.
 COPY_HISTORY_MAX = 10
+# And no more pixels than this, whatever the count. Each picture is kept at
+# full resolution -- 33 MB for a 4K desktop, 59 MB for a 5K one -- so ten of
+# them was most of a gigabyte held until quit. This is room for a few
+# full-desktop copies or a great many ordinary region snips.
+COPY_HISTORY_MAX_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True, eq=False)
@@ -104,12 +112,59 @@ def _remember(kind: str, value: QImage | str | Path) -> None:
             break
     _copy_history.insert(0, CopiedItem(kind, value, datetime.datetime.now()))
     del _copy_history[COPY_HISTORY_MAX:]
+    # The newest is kept whatever its size: it is what was just copied, and
+    # a history that cannot give back the last copy is not one.
+    while _copy_history_bytes() > COPY_HISTORY_MAX_BYTES:
+        older_pictures = [item for item in _copy_history[1:] if item.kind == "image"]
+        if not older_pictures:
+            break
+        _copy_history.remove(older_pictures[-1])
     _notify_copy_history()
+
+
+def _copy_history_bytes() -> int:
+    """What the kept pictures weigh. Text and file references are not
+    counted: next to one picture they are nothing."""
+    return sum(
+        item.value.sizeInBytes() for item in _copy_history if item.kind == "image"
+    )
 
 
 def _notify_copy_history() -> None:
     if _copy_history_listener is not None:
         _copy_history_listener()
+
+
+# `wl-copy` hands the data to a child of its own and returns in a few
+# milliseconds. It runs on the UI thread, straight after a copy, so one that
+# never returns -- a compositor that will not take the selection -- froze
+# Snipux for good. Long enough for a loaded machine, short enough to sit
+# through once.
+WL_COPY_TIMEOUT_SECONDS = 3.0
+
+
+def _pipe_to_wl_copy(mime_type: str, data: bytes) -> None:
+    """Hand `data` to `wl-copy` so the copy outlives this process. Best
+    effort: the Qt clipboard already holds it, so a failure here is noted
+    and never raised."""
+    try:
+        subprocess.run(
+            ["wl-copy", "--type", mime_type],
+            input=data,
+            check=True,
+            timeout=WL_COPY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        log.note(
+            f"Note: wl-copy did not finish within {WL_COPY_TIMEOUT_SECONDS:g} "
+            "seconds and was stopped. The copy is on the clipboard now, but "
+            "may not still be there after Snipux quits."
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        log.note(
+            f"Note: wl-copy could not take the copy ({exc}). It is on the "
+            "clipboard now, but may not still be there after Snipux quits."
+        )
 
 
 def copy_image_to_clipboard(image: QImage) -> None:
@@ -138,14 +193,7 @@ def copy_image_to_clipboard(image: QImage) -> None:
     buffer = QBuffer()
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     image.save(buffer, "PNG")
-    png_bytes = buffer.data().data()
-
-    try:
-        subprocess.run(
-            ["wl-copy", "--type", "image/png"], input=png_bytes, check=True
-        )
-    except (OSError, subprocess.CalledProcessError):
-        pass  # Qt clipboard already holds the image; this sink is best-effort
+    _pipe_to_wl_copy("image/png", buffer.data().data())
 
 
 def copy_text_to_clipboard(text: str) -> None:
@@ -161,12 +209,7 @@ def copy_text_to_clipboard(text: str) -> None:
     if shutil.which("wl-copy") is None:
         return
 
-    try:
-        subprocess.run(
-            ["wl-copy", "--type", "text/plain"], input=text.encode("utf-8"), check=True
-        )
-    except (OSError, subprocess.CalledProcessError):
-        pass  # Qt clipboard already holds the text; this sink is best-effort
+    _pipe_to_wl_copy("text/plain", text.encode("utf-8"))
 
 
 def copy_file_to_clipboard(path: Path) -> None:
@@ -210,17 +253,9 @@ def copy_file_to_clipboard(path: Path) -> None:
     if shutil.which("wl-copy") is None:
         return
 
-    try:
-        subprocess.run(
-            ["wl-copy", "--type", "text/uri-list"],
-            # Percent-encoded, for the same reason the GNOME flavour
-            # above is: text/uri-list carries URIs, and a raw space is
-            # not one.
-            input=bytes(url.toEncoded()) + b"\n",
-            check=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        pass  # Qt clipboard already holds the file reference; best-effort sink
+    # Percent-encoded, for the same reason the GNOME flavour above is:
+    # text/uri-list carries URIs, and a raw space is not one.
+    _pipe_to_wl_copy("text/uri-list", bytes(url.toEncoded()) + b"\n")
 
 
 def display_path(path: Path | None) -> str:
@@ -264,6 +299,22 @@ def save_image(
     a user's own may not count at all, so two saves could land on one name
     and the second silently replaced the first; a later one gets " (2)".
     """
+    path = _unused_path(directory, pattern)
+    write_image(image, path)
+    return path
+
+
+# Names promised to a `save_image_later` whose file is not written yet. A
+# second save inside the same second would otherwise be given the same
+# name -- nothing is on disk under it to say it is taken -- and replace
+# the first when it landed.
+_promised_paths: set[Path] = set()
+
+
+def _unused_path(directory: Path | str | None, pattern: str | None) -> Path:
+    """Where the next save into `directory` goes: the Settings pattern's
+    name, or that name with " (2)", " (3)"... when it is taken. Makes the
+    folder, and so raises `OSError` where it cannot be made."""
     if directory is None:
         directory = Path.home() / "Pictures"
     directory = Path(directory)
@@ -281,18 +332,115 @@ def save_image(
             setup_desktop.preview_filename(directory, setup_desktop.tokens.FILENAME_DEFAULT)
         )
     stem, number = path.stem, 2
-    while path.exists():
+    while path.exists() or path in _promised_paths:
         path = path.with_name(f"{stem} ({number}){path.suffix}")
         number += 1
     # A pattern may name a folder of its own ("%Y-%m/snip %H%M%S").
     path.parent.mkdir(parents=True, exist_ok=True)
-    # QImage.save() reports failure by returning False, not by raising, and a
-    # disk that is full or a folder that has been made read-only both land
-    # here. Ignoring it returned a path to a file that was never written, and
-    # every caller believed it: the overlay toasted "Saved to ~/Pictures",
-    # and app.py added the missing file to the Recent list. Raising is what
-    # gives the caller something to tell the user -- `review.py` already
-    # checks the same boolean for its own writes.
-    if not image.save(str(path), "PNG"):
-        raise OSError(f"could not write {path}")
     return path
+
+
+def write_image(image: QImage, path: Path) -> None:
+    """Write `image` to `path` as a PNG, whole or not at all.
+
+    Encoded under a temporary name beside it and renamed once complete, so
+    the real name never holds half a picture: quitting, a crash or a full
+    disk part-way through leaves no file there, rather than one that opens
+    as a broken image. Safe to call off the UI thread with an image no
+    other thread is using.
+    """
+    part = path.with_name(f"{path.name}.part")
+    try:
+        # QImage.save() reports failure by returning False, not by raising,
+        # and a disk that is full or a folder that has been made read-only
+        # both land here. Ignoring it returned a path to a file that was
+        # never written, and every caller believed it: the overlay toasted
+        # "Saved to ~/Pictures", and app.py added the missing file to the
+        # Recent list. Raising is what gives the caller something to tell
+        # the user -- `review.py` already checks the same boolean for its
+        # own writes.
+        if not image.save(str(part), "PNG"):
+            raise OSError(f"could not write {path}")
+        os.replace(part, path)
+    except OSError:
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            # The write is what failed and what the caller is told about;
+            # a leftover that cannot be removed either changes nothing.
+            pass
+        raise
+
+
+class _SaveJob(QObject):
+    """Carries one background write's result back to the UI thread."""
+
+    written = pyqtSignal(object)  # OSError | None
+
+
+# Held until each lands: nothing else refers to a job once its caller's
+# window has closed, and a collected one never delivers its signal.
+_save_jobs: set[_SaveJob] = set()
+
+
+def _write_for_job(job: _SaveJob, image: QImage, path: Path) -> None:
+    try:
+        write_image(image, path)
+    except OSError as exc:
+        job.written.emit(exc)
+    except Exception as exc:  # noqa: BLE001 -- the thread's outer boundary
+        # Left uncaught, this ends the thread with nothing reported: no
+        # file, no clipboard copy and no notice, and the snip is simply
+        # gone. Reported as the failed write it amounts to.
+        log.note(f"Note: saving {path.name} stopped unexpectedly: {exc!r}")
+        job.written.emit(OSError(f"could not write {path}"))
+    else:
+        job.written.emit(None)
+
+
+def save_image_later(
+    image: QImage,
+    directory: Path | str | None = None,
+    *,
+    on_written: Callable[[Path, OSError | None], None],
+    pattern: str | None = None,
+) -> Path:
+    """`save_image`, with the PNG encoded on a worker thread: returns the
+    path at once and calls `on_written(path, error)` on the UI thread when
+    the file is there, or with the `OSError` when it could not be written.
+
+    For a caller with a window to get out of the way first. Encoding
+    measures 14 ms for a 1200x800 snip but 130-190 ms at 4K and over 300 ms
+    for a 5120x2880 desktop, and the overlay used to stay frozen on screen
+    for all of it.
+
+    `image` must be the caller's to give away: the worker reads it while
+    the UI thread carries on. The name is chosen here, up front, and kept
+    for this write -- see `_promised_paths`. Raises `OSError` only where
+    `save_image` would before writing anything: the folder cannot be made.
+
+    The worker is not a daemon thread, so quitting waits for a write in
+    progress instead of abandoning the picture; `on_written` is not called
+    for one that finishes that late.
+    """
+    path = _unused_path(directory, pattern)
+    _promised_paths.add(path)
+    job = _SaveJob()
+    _save_jobs.add(job)
+
+    def landed(error: OSError | None) -> None:
+        _promised_paths.discard(path)
+        _save_jobs.discard(job)
+        on_written(path, error)
+
+    # Queued: emitted from the worker, delivered here.
+    job.written.connect(landed, Qt.ConnectionType.QueuedConnection)
+    threading.Thread(
+        target=_write_for_job, args=(job, image, path), name="snipux-save"
+    ).start()
+    return path
+
+
+def saves_in_flight() -> int:
+    """How many `save_image_later` writes have not reported back yet."""
+    return len(_save_jobs)
