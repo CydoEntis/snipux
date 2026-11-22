@@ -7501,7 +7501,9 @@ class TestADelayPickedOnTheChooserRowDelaysTheCapture:
         assert overlay._picking_window
 
 
-def _mark(start=(10, 10), end=(20, 20)):
+def _mark(start=(150, 210), end=(170, 230)):
+    # Inside the selection of every test that counts it: the chip counts
+    # the ink that shows, and ink is only ever drawn inside a selection.
     return Rectangle(
         colour=QColor(255, 0, 0), stroke_width=4, start=QPointF(*start), end=QPointF(*end)
     )
@@ -15164,3 +15166,76 @@ class TestOneWindowPerScreenKeepsToItsOwnScreen:
         _send_move(second, QPoint(900, 900))
 
         assert second._selection is None
+
+
+class TestInkOutsideTheSelectionIsNotCounted:
+    """Marks stay where they were drawn when the selection is redrawn
+    somewhere else, on purpose: selecting the old area again brings them
+    back. But ink nobody can see was still counted in the size chip, and
+    still cost an Escape press to "discard" before Escape would step back.
+    """
+
+    RED = QColor(255, 0, 0)
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    def _overlay_with_ink_at_the_top_left(self):
+        frame = make_frame(image_size=(800, 600), logical_size=(800, 600))
+        overlay = OverlayWindow(frame)
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        overlay.set_selection(QRect(0, 100, 300, 200))
+        overlay.add_mark(
+            Rectangle(
+                colour=self.RED, stroke_width=4, start=QPointF(40, 140), end=QPointF(120, 200)
+            )
+        )
+        return overlay
+
+    def test_the_chip_counts_ink_inside_the_selection(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+
+        assert overlay._dimension_chip_texts()[1] == "1 mark"
+
+    def test_the_chip_does_not_count_ink_the_new_selection_left_behind(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+
+        overlay.set_selection(QRect(500, 350, 200, 150))
+
+        assert overlay._dimension_chip_texts()[1] == "0 marks"
+
+    def test_ink_only_partly_inside_still_counts(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+
+        overlay.set_selection(QRect(100, 150, 300, 200))
+
+        assert overlay._dimension_chip_texts()[1] == "1 mark"
+
+    def test_escape_steps_back_without_stopping_for_ink_nobody_can_see(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+        overlay.set_selection(QRect(500, 350, 200, 150))
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay._selection is None
+        assert not overlay._toast.isVisible()
+
+    def test_the_ink_left_behind_comes_back_with_its_area(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+        overlay.set_selection(QRect(500, 350, 200, 150))
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        overlay.set_selection(QRect(0, 100, 300, 200))
+
+        assert overlay._dimension_chip_texts()[1] == "1 mark"
+
+    def test_escape_still_discards_ink_that_is_showing(self):
+        overlay = self._overlay_with_ink_at_the_top_left()
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert overlay.marks == ()
+        assert overlay._selection == QRect(0, 100, 300, 200)

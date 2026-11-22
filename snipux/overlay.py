@@ -6945,6 +6945,20 @@ class OverlayWindow(QWidget):
         """
         return self._mark_store.marks
 
+    def _marks_in_selection(self) -> list[Shape]:
+        """The marks that can show inside the current selection: what the
+        size chip counts and what Escape's first stage is for.
+
+        Not all of `_marks`. They live in window coordinates and are left
+        where they were drawn when the selection is redrawn elsewhere, so
+        that selecting the old area again brings them back -- which leaves
+        ink in the store that is nowhere on screen.
+        """
+        if self._selection is None:
+            return []
+        selection = QRectF(self._selection)
+        return [shape for shape in self._marks if _mark_reaches(shape, selection)]
+
     def _on_marks_changed(self) -> None:
         """The single place anything reacts to the ink layer changing --
         the bar's undo/redo buttons and a repaint, once, however the change
@@ -7708,7 +7722,11 @@ class OverlayWindow(QWidget):
             # The row reopened over a selection: stepping back is folding it
             # away again, before anything is discarded.
             self._chooser.collapse()
-        elif self._marks:
+        elif self._marks_in_selection():
+            # Only ink that is showing. Marks a redrawn selection left
+            # behind are kept on purpose (`mousePressEvent`), and stopping
+            # here to "discard" what nobody can see cost a press that
+            # appeared to do nothing.
             self.discard()
         elif self._selection is not None and not self._armed_for_recording:
             # Back a stage, not out. The handoff's post-selection bars carry
@@ -9177,7 +9195,7 @@ class OverlayWindow(QWidget):
         # until that exists, the size alone is the honest half.
         if self._chooser.kind == "record":
             return f"{width} × {height}", ""
-        count = len(self._marks)
+        count = len(self._marks_in_selection())
         unit = "mark" if count == 1 else "marks"
         return f"{width} × {height}", f"{count} {unit}"
 
@@ -9622,6 +9640,40 @@ class OverlayWindow(QWidget):
         painter.setFont(font)
         painter.setPen(design.color("CHIP_DARK_FG"))
         painter.drawText(QPointF(text_x, baseline), hex_text)
+
+
+def _mark_reaches(shape: Shape, selection: QRectF) -> bool:
+    """Whether any of `shape` can show inside `selection`, both in the same
+    space.
+
+    Judged from the mark's own points, widened by what it paints around
+    them, so it errs toward yes: the question is only ever whether ink is
+    certainly out of sight. Dispatches on field name, as
+    `shapes._transformed` does.
+    """
+    if isinstance(shape, Spotlight):
+        # Dims everything outside its own rect, so it shows wherever the
+        # selection is.
+        return True
+    if isinstance(shape, Text):
+        return shape.chip_rect().intersects(selection)
+    reach = shape.stroke_width
+    if hasattr(shape, "points"):
+        xs = [point.x() for point in shape.points]
+        ys = [point.y() for point in shape.points]
+        bounds = QRectF(QPointF(min(xs), min(ys)), QPointF(max(xs), max(ys))) if xs else QRectF()
+        for band in getattr(shape, "bands", None) or ():
+            bounds = bounds.united(band)
+        if isinstance(shape, Highlighter):
+            reach *= design.tokens.Metric.HIGHLIGHT_MULT
+    elif hasattr(shape, "start") and hasattr(shape, "end"):
+        bounds = QRectF(shape.start, shape.end).normalized()
+    else:
+        bounds = QRectF(shape.point, shape.point)
+        reach = StepMarker.RADIUS
+    # At least a pixel: a rect with no width intersects nothing.
+    reach = max(reach, 1.0)
+    return bounds.adjusted(-reach, -reach, reach, reach).intersects(selection)
 
 
 def _screen_for_geometry(geometry: QRectF) -> QScreen | None:

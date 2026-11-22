@@ -49,6 +49,10 @@ use it; the commit history has the detail.
   once dragged to the next monitor could be placed off screen, and a
   last region recalled on the other monitor disappeared as the pointer
   reached it.
+- **Marks you can no longer see are not counted.** After drawing a new
+  selection somewhere else, the size label still counted the marks left
+  behind in the old one, and Esc spent a press "discarding" them before
+  it would step back.
 
 ## 1.3.1 — 2026-11-20
 
