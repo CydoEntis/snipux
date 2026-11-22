@@ -15,6 +15,7 @@ coordinates, and converts to absolute logical virtual-desktop coordinates
 from __future__ import annotations
 
 import math
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -27,6 +28,7 @@ from PyQt6.QtCore import (
     QEventLoop,
     QMargins,
     QMarginsF,
+    QObject,
     QPoint,
     QPointF,
     QRect,
@@ -4235,6 +4237,63 @@ class _MarkAction:
     shape: Shape | tuple[Shape, ...]
 
 
+@dataclass(eq=False)
+class _SensitiveCheck:
+    """One Hide sensitive read that is still out with the recogniser.
+
+    Compared by identity: it is also the token its own result comes back
+    with, which is how a late answer is told from the current one.
+    """
+
+    # The selection that was read, in window coordinates, and that crop's
+    # image pixels per logical unit on each axis -- what turns a word's
+    # rect in the recognised image back into a place on this window.
+    selection: QRectF
+    scale_x: float
+    scale_y: float
+    custom: "sensitive.CustomList"
+    # What Copy, Save, Open, Pin or an instant snip asked for while this
+    # was out. Run once the boxes are on, never before.
+    then: "Callable[[], None] | None" = None
+    # The selection this read was for is gone or was replaced: its answer
+    # is thrown away...
+    discarded: bool = False
+    # ...and, when another selection was committed meanwhile, that one is
+    # read as soon as this comes back. One recognition at a time.
+    recheck: bool = False
+
+
+class _SensitiveCheckRelay(QObject):
+    """Carries a recognition result from its worker thread to the UI thread.
+
+    Its own object with no parent, not a signal on the overlay: a worker
+    can outlive the window it read for, and emitting through a window Qt
+    has already deleted raises in the worker. This one lives as long as
+    anything still refers to it, and a connection to a deleted overlay is
+    simply gone.
+    """
+
+    finished = pyqtSignal(object, object, object)  # check, lines | None, reason | None
+
+
+def _recognize_for_check(recognize, image: QImage, check: _SensitiveCheck, relay) -> None:
+    """The worker thread's whole job: read `image`, and say what came of it.
+
+    `image` is this thread's own copy and nothing here touches a widget;
+    the result goes back as a queued signal.
+    """
+    try:
+        lines, reason = recognize(image), None
+    except sensitive.RecognitionFailed as failure:
+        lines, reason = None, str(failure)
+    except Exception as exc:  # noqa: BLE001 -- the thread's outer boundary
+        # Anything left uncaught would end the thread with no answer, and
+        # the overlay would wait for one for ever with the snip held.
+        log.note(f"Note: text recognition stopped unexpectedly: {exc!r}")
+        lines, reason = None, "text recognition stopped unexpectedly"
+    relay.finished.emit(check, lines, reason)
+
+
 class OverlayWindow(QWidget):
     """The overlay redesign's shell: one frameless window spanning the whole
     virtual desktop, per docs/design/overlay-redesign.md.
@@ -4817,6 +4876,17 @@ class OverlayWindow(QWidget):
         # the backend: the window stays up so the region can still be
         # reframed, with the stills bar suppressed. See `_commit_selection`.
         self._armed_for_recording = False
+        # The Hide sensitive read still out with the recogniser, if any --
+        # see `_hide_sensitive_text`. Queued on purpose: the worker emits
+        # from its own thread and the result must land on this one.
+        self._sensitive_check: _SensitiveCheck | None = None
+        self._sensitive_relay = _SensitiveCheckRelay()
+        self._sensitive_relay.finished.connect(
+            self._on_sensitive_check_finished, Qt.ConnectionType.QueuedConnection
+        )
+        # A "nothing was hidden" notice raised while this window was not
+        # on screen to show it -- see `_say_nothing_was_hidden`.
+        self._unsaid_hide_notice: Callable[[], None] | None = None
         # None during normal interaction. Recording startup briefly fades
         # the painted selection chrome away while the frozen desktop stays
         # put, so closing this monitor-sized surface cannot look like a
@@ -5020,6 +5090,9 @@ class OverlayWindow(QWidget):
             if not clamped.isEmpty():
                 rect = clamped
         self._selection = rect
+        if rect is None:
+            # Nothing left for a read still out to hide anything in.
+            self._discard_sensitive_check()
         self._sync_bar_visibility()
         self._sync_chooser_visibility()
         if (
@@ -5681,16 +5754,11 @@ class OverlayWindow(QWidget):
                     self._armed_for_recording = False
                     self._sync_chooser_visibility()
             return
-        unhidden_because = self._hide_sensitive_text()
+        self._hide_sensitive_text()
         if self.outcome == "instant":
-            # Instant finishes and closes in one step, with no bar and no
-            # time to read a toast -- so a snip that could not be checked
-            # waits for a yes rather than leaving unredacted and unseen.
-            if unhidden_because is not None and not self._finish_unhidden_snip_anyway(
-                unhidden_because
-            ):
-                self.set_selection(None)
-                return
+            # Both of these wait for a Hide sensitive read that is still
+            # out -- see `_held_for_sensitive_check` -- so an instant snip
+            # stays up, saying it is checking, until its boxes are on.
             if setup_desktop.load_instant_saves():
                 self._on_bar_save()
             else:
@@ -5757,47 +5825,51 @@ class OverlayWindow(QWidget):
 
         warn()
         if not self.isVisible():
-            # Last region is read while the overlay is still being built,
-            # when a toast has nowhere to show. Said again once it has.
-            QTimer.singleShot(0, warn)
+            # The read can come back while the overlay is still being
+            # built, or hidden for a delayed capture, when a toast has
+            # nowhere to show. `showEvent` says it again once it has.
+            self._unsaid_hide_notice = warn
 
-    def _hide_sensitive_text(self) -> "str | None":
-        """Black out sensitive text inside the current selection, when Hide
-        sensitive is on.
+    _CHECKING_NOTICE = "Checking for sensitive text\u2026"
 
-        Returns None, or -- when the text could not be read at all, so that
-        nothing was checked and nothing hidden -- the reason, having
-        already told the user (`_say_nothing_was_hidden`). Finding nothing
-        to hide is not that: it returns None like any other success.
+    def _hide_sensitive_text(self) -> bool:
+        """Start blacking out sensitive text inside the current selection,
+        when Hide sensitive is on. True while a read is out for it.
 
         Reads the selection's pixels out of the frozen frame -- never the
-        live screen, per CLAUDE.md's one rule -- asks the platform for the
-        words in them, and puts a solid `Redact` over each value
-        `sensitive.find_sensitive` flags -- including whatever the user
-        added to their own hide list. The boxes are ordinary marks,
-        added as one step of history: the user can erase any one of them,
-        and a single undo takes the whole batch away.
+        live screen, per CLAUDE.md's one rule -- and asks the platform for
+        the words in them on a worker thread: on Windows that is a
+        PowerShell process, about 0.4 s when it is healthy and up to its
+        5 s timeout when it is not, and this window is fullscreen and
+        topmost for all of it. `_on_sensitive_check_finished` puts the
+        boxes on when the answer comes back.
 
-        Coordinates: recognition happens on `Frame.crop`'s image, so every
-        rect comes back in *cropped-image pixels*. Marks live in window
-        coordinates. The mapping is the exact inverse of the one
-        `shapes.render_selection` applies at export -- divide by that crop's
-        own per-axis image-pixels-per-logical-unit ratio, then add the
-        selection's origin -- which is what keeps a box over its word on a
-        scaled display, where the two spaces differ by that ratio.
+        Until then nothing may leave: Copy, Save, Open, Pin and an instant
+        snip are held by `_held_for_sensitive_check` and run afterwards.
+
+        One recognition at a time. A selection committed while a read for
+        another is still out does not start a second; it marks the first
+        to be thrown away and read again for whatever is selected then.
         """
         if self._selection is None or not self._chooser.hide_sensitive:
-            return None
+            return False
         current = platform.current
         if not current.recognizes_text():
-            return None
+            return False
 
         crop = self._selection_crop()
         if crop is None:
-            return None
+            return False
         selection, cropped = crop
-        scale_x = cropped.image.width() / cropped.logical_size.width()
-        scale_y = cropped.image.height() / cropped.logical_size.height()
+
+        running = self._sensitive_check
+        if running is not None:
+            if running.discarded or running.selection != selection:
+                running.discarded = True
+                running.recheck = True
+                running.then = None
+            self._show_checking_notice()
+            return True
 
         # Read per capture, not once at start-up: editing the list in
         # Settings takes effect on the next capture, with no restart.
@@ -5808,17 +5880,123 @@ class OverlayWindow(QWidget):
         except OSError:
             mine = sensitive.custom_list(None)
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        # On the UI thread: the commit that follows needs the boxes before
-        # it copies. Bounded by the platform's own timeout.
-        try:
-            lines = current.recognize_text(cropped.image)
-        except sensitive.RecognitionFailed as failure:
-            self._say_nothing_was_hidden(str(failure))
-            return str(failure)
-        finally:
-            QApplication.restoreOverrideCursor()
+        check = _SensitiveCheck(
+            selection=selection,
+            scale_x=cropped.image.width() / cropped.logical_size.width(),
+            scale_y=cropped.image.height() / cropped.logical_size.height(),
+            custom=mine,
+        )
+        self._sensitive_check = check
+        threading.Thread(
+            target=_recognize_for_check,
+            # A deep copy: the worker reads it while this thread goes on
+            # painting from the frame it was cut out of.
+            args=(current.recognize_text, cropped.image.copy(), check, self._sensitive_relay),
+            name="snipux-hide-sensitive",
+            # A PowerShell that never answers must not keep a quit waiting.
+            daemon=True,
+        ).start()
+        self._show_checking_notice()
+        return True
 
+    def _awaiting_sensitive_check(self) -> bool:
+        """Whether the current selection is still waiting to be read."""
+        check = self._sensitive_check
+        return check is not None and (not check.discarded or check.recheck)
+
+    def _held_for_sensitive_check(self, finish: "Callable[[], None]") -> bool:
+        """Keep `finish` -- a Copy, Save, Open or Pin -- until the read
+        that is out has come back, and say whether it was kept.
+
+        The one rule Hide sensitive cannot break: a picture never leaves
+        with its check still pending, because the boxes it would have
+        carried are exactly what the check is about to add.
+        """
+        if not self._awaiting_sensitive_check():
+            return False
+        self._sensitive_check.then = finish
+        self._show_checking_notice()
+        return True
+
+    def _discard_sensitive_check(self) -> None:
+        """Stop waiting on the read that is out. Its thread cannot be
+        stopped, so its answer is thrown away when it arrives."""
+        check = self._sensitive_check
+        if check is None:
+            return
+        check.discarded = True
+        check.recheck = False
+        check.then = None
+        self._hide_checking_notice()
+
+    def _show_checking_notice(self) -> None:
+        """Say a read is out, for as long as it is: the toast's own timer
+        is stopped, and what the read comes back with replaces it."""
+        if not self.isVisible():
+            return
+        self._show_toast("blur", self._CHECKING_NOTICE)
+        self._toast._timer.stop()
+
+    def _hide_checking_notice(self) -> None:
+        if self._toast._text_label.text() == self._CHECKING_NOTICE:
+            self._toast.hide()
+
+    def _on_sensitive_check_finished(
+        self, check: _SensitiveCheck, lines: "list | None", reason: "str | None"
+    ) -> None:
+        """A read came back: `lines` of words, or the `reason` there are
+        none. On the UI thread -- see `_SensitiveCheckRelay`."""
+        if check is not self._sensitive_check:
+            return
+        self._sensitive_check = None
+        held = check.then
+        if check.discarded:
+            # Read for a selection that has gone. If another was committed
+            # since, it is that one's turn, and what was held waits on.
+            if check.recheck and self._hide_sensitive_text():
+                self._sensitive_check.then = held
+            else:
+                self._hide_checking_notice()
+                if check.recheck and held is not None:
+                    held()
+            return
+
+        if reason is not None:
+            self._say_nothing_was_hidden(reason)
+            if held is None:
+                return
+            if self.outcome != "instant":
+                # The bar is still here and so is the notice: what was
+                # pressed is dropped, and pressing it again is the yes.
+                return
+            # Instant finishes and closes in one step, with no bar and no
+            # time to read a toast -- so a snip that could not be checked
+            # waits for a yes rather than leaving unredacted and unseen.
+            if not self._finish_unhidden_snip_anyway(reason):
+                self.set_selection(None)
+                return
+        else:
+            self._hide_checking_notice()
+            self._add_hidden_boxes(check, lines)
+        if held is not None:
+            held()
+
+    def _add_hidden_boxes(self, check: _SensitiveCheck, lines: list) -> None:
+        """Put a solid `Redact` over each value `sensitive.find_sensitive`
+        flags in `lines` -- including whatever the user added to their own
+        hide list. The boxes are ordinary marks, added as one step of
+        history: the user can erase any one of them, and a single undo
+        takes the whole batch away.
+
+        Coordinates: recognition happened on `Frame.crop`'s image, so every
+        rect comes back in *cropped-image pixels*. Marks live in window
+        coordinates. The mapping is the exact inverse of the one
+        `shapes.render_selection` applies at export -- divide by that crop's
+        own per-axis image-pixels-per-logical-unit ratio, then add the
+        selection's origin -- which is what keeps a box over its word on a
+        scaled display, where the two spaces differ by that ratio.
+        """
+        selection, scale_x, scale_y = check.selection, check.scale_x, check.scale_y
         existing = [
             QRectF(mark.start, mark.end).normalized()
             for mark in self._marks
@@ -5832,7 +6010,9 @@ class OverlayWindow(QWidget):
                 image_rect.width() / scale_x + 2 * pad,
                 image_rect.height() / scale_y + 2 * pad,
             )
-            for image_rect in (finding.image_rect for finding in sensitive.find_sensitive(lines, mine))
+            for image_rect in (
+                finding.image_rect for finding in sensitive.find_sensitive(lines, check.custom)
+            )
         ]
         boxes = []
         for window_rect in self._merge_same_values(found):
@@ -5850,7 +6030,6 @@ class OverlayWindow(QWidget):
         if boxes:
             count = len(boxes)
             self._show_toast("blur", f"Hid {count} item{'' if count == 1 else 's'}")
-        return None
 
     @classmethod
     def _merge_same_values(cls, rects: list[QRectF]) -> list[QRectF]:
@@ -7364,11 +7543,15 @@ class OverlayWindow(QWidget):
 
     def _on_bar_copy(self) -> None:
         """The floating bar's Copy button: copy, then dismiss."""
+        if self._held_for_sensitive_check(self._on_bar_copy):
+            return
         self.copy()
         self.close()
 
     def _on_bar_save(self) -> None:
         """The floating bar's Save button: save, then dismiss."""
+        if self._held_for_sensitive_check(self._on_bar_save):
+            return
         self.save()
         self.close()
 
@@ -7383,6 +7566,8 @@ class OverlayWindow(QWidget):
         destination is "Review window -- annotate, crop, export", less the
         crop, which that window does not do (#78).
         """
+        if self._held_for_sensitive_check(self._on_bar_open):
+            return
         self._chooser.set_after("review")
         self.save()
         self.close()
@@ -7399,6 +7584,8 @@ class OverlayWindow(QWidget):
         not also trigger `app.py`'s `_on_captured` (which opens a *review*
         window keyed on `outcome`, a value Pin never sets).
         """
+        if self._held_for_sensitive_check(self._on_bar_pin):
+            return
         image = self.rendered_image()
         rect = self._to_absolute_rect(QRectF(self._selection)).toRect()
         self._remember_last_region()
@@ -7529,6 +7716,13 @@ class OverlayWindow(QWidget):
         self._reposition_close_button()
         self._close_button.show()
         self._sync_chooser_visibility()
+        if self._awaiting_sensitive_check():
+            # Last region is read while this window is still being built,
+            # when a toast has nowhere to show.
+            self._show_checking_notice()
+        elif self._unsaid_hide_notice is not None:
+            self._unsaid_hide_notice()
+        self._unsaid_hide_notice = None
         # A crosshair from the first frame: a drag works before any mode is
         # picked, and the move handler only takes over once the pointer moves.
         self._apply_idle_cursor()
@@ -7572,6 +7766,10 @@ class OverlayWindow(QWidget):
         # in place a moment later. Only an actual close() means the session
         # itself is over.
         self._remember_last_tool()
+        # A read still out comes back to a window that has gone: its answer
+        # is dropped, and nothing it was holding runs.
+        self._discard_sensitive_check()
+        self._unsaid_hide_notice = None
         super().closeEvent(event)
         if self._on_dismissed is not None:
             self._on_dismissed()
@@ -7854,6 +8052,13 @@ class OverlayWindow(QWidget):
         key = event.key()
         modifiers = event.modifiers()
 
+        # Esc while Hide sensitive is still reading cancels the snip
+        # outright. Stepping back a stage, as Esc does otherwise, would
+        # leave a way to carry on with a selection nothing had checked.
+        if key == Qt.Key.Key_Escape and self._awaiting_sensitive_check():
+            self.close()
+            return
+
         # Ahead of the chooser, which reads a bare Escape as cancelling the
         # snip: with Full screen armed it leaves the mode instead -- see
         # `_leave_monitor_mode`.
@@ -7986,8 +8191,7 @@ class OverlayWindow(QWidget):
                 if self._region_drag_anchor is None:
                     self._commit_selection(self._selection)
                 return
-            self.copy()
-            self.close()
+            self._on_bar_copy()
             return
 
         # Ctrl+C means copy everywhere else on the desktop, and Snipping Tool
@@ -8005,8 +8209,7 @@ class OverlayWindow(QWidget):
                 and not self._armed_for_recording
                 and self._chooser.kind != "record"
             ):
-                self.copy()
-                self.close()
+                self._on_bar_copy()
             return
 
         # The tool and style letters are bare keys. A chord that happens to

@@ -1,6 +1,8 @@
 import ctypes
 import os
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -6511,6 +6513,20 @@ class TestPopoverChildrenAreNeverClippedBelowSizeHint:
             self._assert_no_child_is_clipped(popover)
 
 
+def _wait_until(condition, timeout_ms: int = 10_000) -> None:
+    """Run the event loop until `condition()` holds -- bounded, so a wait
+    for something that never happens fails instead of hanging the run."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while not condition():
+        assert time.monotonic() < deadline, "waited too long"
+        QTest.qWait(1)
+
+
+def _settle_sensitive_check(overlay) -> None:
+    """Let a Hide sensitive read that is out come back and be applied."""
+    _wait_until(lambda: overlay._sensitive_check is None)
+
+
 def _close_stray_toplevel_windows() -> None:
     """Close every top-level widget still alive from an earlier test.
 
@@ -9467,16 +9483,28 @@ class TestHideSensitiveText:
             ("Email:", 0, 20, 30, 30),
             ("bob.smith@gmail.com", 40, 20, 200, 30),
         ])
+        # Recognition runs on a worker thread. It answers at once unless a
+        # test calls `hold()`, and then not until that test calls
+        # `release()` -- which is how "while the read is out" is made a
+        # state a test can stand in rather than a race it has to win.
+        state.answer = threading.Event()
+        state.answer.set()
+        state.hold = state.answer.clear
+        state.release = state.answer.set
+        state.wait_for_answer = lambda: state.answer.wait(10)
         current = overlay_module.platform.current
 
         def recognize_text(image):
             state.calls.append(QImage(image))
+            assert state.wait_for_answer(), "the test never released the recogniser"
             return [[RecognizedWord(text, QRectF(x, y, w, h)) for text, x, y, w, h in state.words]]
 
         monkeypatch.setattr(current, "recognizes_text", lambda: state.available)
         monkeypatch.setattr(current, "text_recognition_unavailable_reason", lambda: "")
         monkeypatch.setattr(current, "recognize_text", recognize_text)
-        return state
+        yield state
+        # No worker is left waiting on a test that has ended.
+        state.release()
 
     def _overlay(self, *, hide=True):
         size = self.LOGICAL
@@ -9494,6 +9522,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         [box] = overlay._marks
         assert isinstance(box, Redact)
         # Image rect (40, 20, 200x30) at 2x, offset by the selection's
@@ -9510,12 +9540,16 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert len(overlay._marks) == 1
 
     def test_the_recognizer_reads_the_selection_at_full_resolution(self, recognizer):
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         [image] = recognizer.calls
         assert (image.width(), image.height()) == (800, 600)
@@ -9529,6 +9563,8 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
         assert len(overlay._marks) == 3
 
         overlay.undo()
@@ -9544,6 +9580,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         [image] = copied
         # Centre of the value, in exported pixels: the recognised rect's own.
         assert image.pixelColor(140, 35) == QColor(0, 0, 0)
@@ -9552,6 +9590,7 @@ class TestHideSensitiveText:
     def _failing(self, recognizer, monkeypatch, reason="text recognition took longer than 5 seconds"):
         def fails(image):
             recognizer.calls.append(QImage(image))
+            assert recognizer.wait_for_answer(), "the test never released the recogniser"
             raise RecognitionFailed(reason)
 
         monkeypatch.setattr(overlay_module.platform.current, "recognize_text", fails)
@@ -9566,6 +9605,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert overlay._marks == ()
         assert said == [
             "Sensitive text was not hidden: text recognition took longer than 5 seconds"
@@ -9579,6 +9620,7 @@ class TestHideSensitiveText:
         self._failing(recognizer, monkeypatch)
         overlay = self._overlay()
         overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
         said = []
         monkeypatch.setattr(overlay, "_show_toast", lambda icon, text: said.append(text))
 
@@ -9609,6 +9651,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert asked == ["text recognition took longer than 5 seconds"]
         assert copied == []
         assert overlay._selection is None
@@ -9627,6 +9671,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert len(copied) == 1
 
     def test_an_instant_snip_that_was_checked_is_never_questioned(self, recognizer, monkeypatch):
@@ -9644,12 +9690,16 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert len(copied) == 1
 
     def test_nothing_is_read_when_the_toggle_is_off(self, recognizer):
         overlay = self._overlay(hide=False)
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         assert recognizer.calls == []
         assert overlay._marks == ()
@@ -9660,6 +9710,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert recognizer.calls == []
 
     def test_nothing_is_read_when_the_platform_cannot(self, recognizer):
@@ -9667,6 +9719,8 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         assert recognizer.calls == []
         assert overlay._marks == ()
@@ -9677,6 +9731,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert overlay._marks == ()
         assert not overlay._mark_store.can_undo
 
@@ -9684,7 +9740,10 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
         overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
 
         assert len(overlay._marks) == 1
 
@@ -9698,6 +9757,8 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         [box] = overlay._marks
         rect = QRectF(box.start, box.end).normalized()
@@ -9714,6 +9775,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert len(overlay._marks) == 2
 
     def test_it_says_how_many_it_hid(self, recognizer):
@@ -9727,6 +9790,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert said == ["Hid 2 items"]
 
     def test_a_recalled_last_region_is_scanned_too(self, recognizer):
@@ -9737,6 +9802,7 @@ class TestHideSensitiveText:
         overlay._chooser.set_reuse_last_region(True)
 
         overlay._preselect_last_region()
+        _settle_sensitive_check(overlay)
 
         assert overlay._selection == self.SELECTION
         assert len(overlay._marks) == 1
@@ -9750,6 +9816,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         assert len(overlay._marks) == 1
 
     def test_a_label_from_the_users_own_list_hides_its_value(self, recognizer):
@@ -9761,6 +9829,8 @@ class TestHideSensitiveText:
 
         overlay._commit_selection(self.SELECTION)
 
+        _settle_sensitive_check(overlay)
+
         [box] = overlay._marks
         # The value only: 190/2 + the selection's own x, less the padding.
         assert QRectF(box.start, box.end).normalized().left() == pytest.approx(
@@ -9771,11 +9841,13 @@ class TestHideSensitiveText:
         recognizer.words = [("Acme", 40, 20, 90, 30)]
         overlay = self._overlay()
         overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
         assert overlay._marks == ()
 
         setup_desktop.save_hide_list(["Acme"], [], [])
         again = self._overlay()
         again._commit_selection(self.SELECTION)
+        _settle_sensitive_check(again)
 
         assert len(again._marks) == 1
 
@@ -9784,6 +9856,8 @@ class TestHideSensitiveText:
         overlay = self._overlay()
 
         overlay._commit_selection(self.SELECTION)
+
+        _settle_sensitive_check(overlay)
 
         # The fixture's own words: the built-in email rule, and nothing else.
         assert len(overlay._marks) == 1
@@ -9800,6 +9874,7 @@ class TestHideSensitiveText:
         # The capture itself must still finish: the loader is the only thing
         # allowed to know the file is broken.
         overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
 
     def test_the_toggle_is_seeded_from_and_saved_to_config(self, recognizer):
         setup_desktop.save_hide_sensitive(True)
@@ -9820,6 +9895,239 @@ class TestHideSensitiveText:
         assert overlay._chooser.hide_sensitive_available is False
         overlay._chooser._on_control_hovered(overlay._chooser.row.hide_flag, True)
         assert overlay._chooser.hint.text == "Windows only for now"
+
+    # -- the read happens off the UI thread ---------------------------------
+
+    def _shown(self, overlay):
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def _copies(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(output_module, "copy_image_to_clipboard", copied.append)
+        monkeypatch.setattr(setup_desktop, "load_instant_saves", lambda: False)
+        return copied
+
+    def test_committing_does_not_wait_for_the_text_to_be_read(self, recognizer):
+        recognizer.hold()
+        overlay = self._overlay()
+
+        # Returning at all is the point: the recogniser has not answered.
+        overlay._commit_selection(self.SELECTION)
+
+        assert overlay._marks == ()
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert len(overlay._marks) == 1
+
+    def test_it_says_it_is_checking_until_the_read_comes_back(self, recognizer):
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert overlay._toast.isVisible()
+        assert overlay._toast._text_label.text() == "Checking for sensitive text\u2026"
+        # It stays for as long as the read does, not for a toast's few seconds.
+        assert not overlay._toast._timer.isActive()
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert overlay._toast._text_label.text() == "Hid 1 item"
+        overlay.close()
+
+    def test_the_checking_notice_goes_when_nothing_needed_hiding(self, recognizer):
+        recognizer.words = [("Deploy", 10, 10, 60, 20)]
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._commit_selection(self.SELECTION)
+        assert overlay._toast.isVisible()
+
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+
+        assert not overlay._toast.isVisible()
+        overlay.close()
+
+    def test_a_check_begun_before_the_overlay_is_on_screen_is_said_once_it_is(
+        self, recognizer
+    ):
+        recognizer.hold()
+        overlay = self._overlay()
+        overlay._commit_selection(self.SELECTION)
+
+        self._shown(overlay)
+
+        assert overlay._toast._text_label.text() == "Checking for sensitive text\u2026"
+        overlay.close()
+
+    def test_an_instant_snip_is_not_copied_until_its_check_comes_back(
+        self, recognizer, monkeypatch
+    ):
+        copied = self._copies(monkeypatch)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._on_captured = lambda image, path: None
+        overlay._chooser.set_after("instant")
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert copied == []
+        assert overlay.isVisible()
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        [image] = copied
+        assert image.pixelColor(140, 35) == QColor(0, 0, 0)
+        assert not overlay.isVisible()
+
+    @pytest.mark.parametrize("press", ["copy button", "enter", "ctrl+c"])
+    def test_a_copy_asked_for_during_the_check_waits_for_the_boxes(
+        self, recognizer, monkeypatch, press
+    ):
+        copied = self._copies(monkeypatch)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._on_captured = lambda image, path: None
+        overlay._commit_selection(self.SELECTION)
+
+        if press == "copy button":
+            overlay._bar.copyRequested.emit()
+        elif press == "enter":
+            QTest.keyClick(overlay, Qt.Key.Key_Return)
+        else:
+            QTest.keyClick(overlay, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+
+        assert copied == []
+        assert overlay.isVisible()
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        [image] = copied
+        assert image.pixelColor(140, 35) == QColor(0, 0, 0)
+        assert not overlay.isVisible()
+
+    def test_a_save_asked_for_during_the_check_waits_for_the_boxes(
+        self, recognizer, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(setup_desktop, "load_save_folder", lambda *a, **k: tmp_path)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        saved = []
+        overlay._on_captured = lambda image, path, **facts: saved.append((image, path))
+        overlay._commit_selection(self.SELECTION)
+
+        overlay._bar.saveRequested.emit()
+
+        assert saved == [] and list(tmp_path.iterdir()) == []
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        _wait_until(lambda: saved)
+        [(image, path)] = saved
+        assert path is not None and path.exists()
+        assert image.pixelColor(140, 35) == QColor(0, 0, 0)
+
+    def test_a_pin_asked_for_during_the_check_waits_for_the_boxes(self, recognizer):
+        recognizer.hold()
+        pinned = []
+        overlay = self._shown(self._overlay())
+        overlay._on_pin_requested = lambda image, rect: pinned.append(QImage(image))
+        overlay._commit_selection(self.SELECTION)
+
+        overlay._bar.pinRequested.emit()
+
+        assert pinned == []
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        [image] = pinned
+        assert image.pixelColor(140, 35) == QColor(0, 0, 0)
+
+    def test_a_copy_held_for_a_check_that_fails_is_not_made(self, recognizer, monkeypatch):
+        # The bar is still there with the notice above it: pressing Copy
+        # again, having read why nothing was hidden, is the user's yes.
+        self._failing(recognizer, monkeypatch)
+        copied = self._copies(monkeypatch)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._commit_selection(self.SELECTION)
+        overlay._bar.copyRequested.emit()
+
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+
+        assert copied == []
+        assert overlay.isVisible()
+        assert "was not hidden" in overlay._toast._text_label.text()
+        overlay._bar.copyRequested.emit()
+        assert len(copied) == 1
+
+    def test_escape_during_the_check_cancels_the_snip(self, recognizer, monkeypatch):
+        copied = self._copies(monkeypatch)
+        recognizer.hold()
+        overlay = self._shown(self._overlay())
+        overlay._on_captured = lambda image, path: pytest.fail("a cancelled snip was captured")
+        overlay._chooser.set_after("instant")
+        overlay._commit_selection(self.SELECTION)
+
+        QTest.keyClick(overlay, Qt.Key.Key_Escape)
+
+        assert not overlay.isVisible()
+        # The read comes back to a window that has gone, and changes nothing.
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert copied == []
+        assert overlay._marks == ()
+
+    def test_a_second_commit_during_a_check_starts_no_second_recognition(self, recognizer):
+        recognizer.hold()
+        overlay = self._overlay()
+        overlay._commit_selection(self.SELECTION)
+        _wait_until(lambda: len(recognizer.calls) == 1)
+
+        overlay._commit_selection(self.SELECTION)
+
+        assert len(recognizer.calls) == 1
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert len(recognizer.calls) == 1
+        assert len(overlay._marks) == 1
+
+    def test_another_selection_committed_during_a_check_is_read_after_it(self, recognizer):
+        recognizer.hold()
+        overlay = self._overlay()
+        overlay._commit_selection(self.SELECTION)
+        _wait_until(lambda: len(recognizer.calls) == 1)
+        elsewhere = QRect(600, 400, 400, 300)
+
+        overlay._commit_selection(elsewhere)
+
+        # Never two at once: the second waits for the first to come back.
+        assert len(recognizer.calls) == 1
+        recognizer.release()
+        _settle_sensitive_check(overlay)
+        assert len(recognizer.calls) == 2
+        # Only the selection still on screen got boxes: the first read's
+        # answer was for pixels nobody is looking at any more.
+        [box] = overlay._marks
+        assert QRectF(elsewhere).contains(QRectF(box.start, box.end).normalized())
+
+    def test_a_recogniser_that_breaks_is_reported_like_one_that_fails(
+        self, recognizer, monkeypatch
+    ):
+        # An answer has to come back whatever happens in the worker, or the
+        # overlay would hold the snip waiting for one for ever.
+        def breaks(image):
+            raise ValueError("not what recognition is supposed to raise")
+
+        monkeypatch.setattr(overlay_module.platform.current, "recognize_text", breaks)
+        monkeypatch.setattr(overlay_module.log, "note", lambda text: None)
+        overlay = self._overlay()
+        said = []
+        monkeypatch.setattr(overlay, "_show_toast", lambda icon, text: said.append(text))
+
+        overlay._commit_selection(self.SELECTION)
+        _settle_sensitive_check(overlay)
+
+        assert overlay._marks == ()
+        assert said == ["Sensitive text was not hidden: text recognition stopped unexpectedly"]
 
 
 class _FakeBrowserProvider(UnsupportedGeometryProvider):

@@ -36,6 +36,12 @@ use it; the commit history has the detail.
   portable file as well wrote it over the installed program. It now runs
   from where it is and leaves the installed one alone, and
   `snipux --remove` leaves it for the uninstaller.
+- **Hide sensitive no longer freezes the screen while it reads.** The
+  overlay used to lock up, with nothing to say why, for as long as the
+  text in a selection took to read -- several seconds when that went
+  badly. It now says "Checking for sensitive text…" and stays usable:
+  Esc cancels the snip, and a Copy, Save, Open or Pin pressed meanwhile
+  waits for the boxes rather than sending the picture off without them.
 - **Ctrl+C no longer takes a screenshot while you are setting up a
   recording.** With the chooser on Record and a region the recorder had
   turned down, Ctrl+C copied a still of it and closed the snip. It now
