@@ -93,6 +93,8 @@ snipux/
                 marks baked in, ink an obscuring mark covers, the ink
                 layer, and mark bounds -- built when the marks or the
                 frame change, not on every repaint
+  loupe.py      the eyedropper's loupe: which pixels it magnifies and
+                where the box and its hex chip go around the pointer
   chooser.py    the docked pre-snip chooser row: what to capture, and what
                 happens to it afterwards
   flowbars.py   the post-selection bars from the locked capture-flow handoff
