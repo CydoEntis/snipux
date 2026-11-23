@@ -5,6 +5,17 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **Hide sensitive works on Linux.** With `tesseract` installed, the switch
+  on the capture row blacks out passwords, API keys, card numbers and email
+  addresses on Linux the way it already did on Windows. Snipux never
+  installs it for you: without it the switch is greyed and says what to
+  run -- `sudo pacman -S tesseract tesseract-data-eng` on Arch and Omarchy,
+  `sudo apt install tesseract-ocr` on Ubuntu -- and it works from the next
+  snip, with no restart. If a snip cannot be read within five seconds you
+  are told nothing was hidden, exactly as on Windows.
+
 ## 1.4.0 — 2026-11-22
 
 ### Changed

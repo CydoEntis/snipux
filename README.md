@@ -38,7 +38,8 @@ free, on Linux too — and a slightly better one back on Windows.
 - **Annotate in place** — pen, highlighter, arrows, boxes, numbered steps, text
   and blur, drawn straight onto the frozen screen. No separate editor to open.
 - **Hide sensitive** — one switch blacks out passwords, API keys, card numbers
-  and email addresses before the snip leaves your screen *(Windows)*.
+  and email addresses before the snip leaves your screen *(built in on
+  Windows; on Linux it needs [tesseract](#about-tesseract))*.
 - **Record the same selection** — to MP4 on Windows or WebM on GNOME, with an
   optional countdown.
 - **Trim and export** — a player with a filmstrip and waveform, exporting MP4,
@@ -785,6 +786,26 @@ mystery.
   **Windows 10 2004+ / 11**
 - **`ffmpeg`** — genuinely optional, never installed. See
   [About ffmpeg](#about-ffmpeg).
+- **`tesseract`** — genuinely optional, never installed. Hide sensitive on
+  Linux uses it. See [About tesseract](#about-tesseract).
+
+### About tesseract
+
+Windows can read the text in a picture by itself. Linux cannot, so on Linux
+**Hide sensitive** uses `tesseract` if it is installed. Snipux does not
+depend on it, does not bundle it, and never installs it. Without it the
+switch is greyed and says what to run:
+
+```sh
+sudo pacman -S tesseract tesseract-data-eng   # Arch, Omarchy
+sudo apt install tesseract-ocr                # Ubuntu, Debian
+```
+
+It takes effect on the next snip, with no restart. Text is read on your
+machine and nothing is sent anywhere. Snipux reads in English, and in your
+desktop's language as well if that language's tesseract data is installed.
+If a snip cannot be read within five seconds, Snipux says the sensitive
+text was not hidden rather than letting it go out unchecked.
 
 ## Development
 

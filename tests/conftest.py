@@ -70,6 +70,7 @@ import pytest
 
 from snipux import ffmpeg, setup_desktop
 from snipux.marks import session_styles
+from snipux.platform import tesseract_ocr
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +116,32 @@ def _no_system_ffmpeg():
         yield
     finally:
         ffmpeg.reset()
+
+
+@pytest.fixture(autouse=True)
+def _no_system_tesseract():
+    """Every test starts on a machine with no system tesseract.
+
+    The same rule as `_no_system_ffmpeg`: on Linux, Hide sensitive is live
+    wherever a `tesseract` is on `PATH`, so an overlay built by a test on a
+    machine that has one would start the real engine, and the suite would
+    answer differently here and on CI. A test that needs one says so, by
+    monkeypatching `tesseract_ocr.find_binary` and passing a fake runner.
+
+    Nor a package manager to name in the greyed switch's reason: looking
+    for one is a `PATH` search every overlay built here would otherwise
+    make, under whatever `sys.platform` its test has faked.
+
+    Restored by hand for the reason `_isolated_config` gives.
+    """
+    real = tesseract_ocr.find_binary
+    tesseract_ocr.find_binary = lambda: None
+    tesseract_ocr._manager = None
+    try:
+        yield
+    finally:
+        tesseract_ocr.find_binary = real
+        tesseract_ocr.reset()
 
 
 @pytest.fixture(autouse=True)

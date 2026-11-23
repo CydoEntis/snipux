@@ -545,16 +545,16 @@ class Platform(ABC):
 
         Decides whether automatic hiding of sensitive text is offered live
         or greyed with `text_recognition_unavailable_reason()`. Defaults to
-        False: only Windows ships an OCR engine that needs no install, and a
-        platform without one should say so rather than silently hide
-        nothing.
+        False: a platform that has no engine to ask should say so rather
+        than silently hide nothing. Windows ships one; Linux answers for
+        whether a system `tesseract` is installed.
         """
         return False
 
     def text_recognition_unavailable_reason(self) -> str:
         """Why `recognizes_text()` is False, for the greyed control to
         carry. Empty when recognition is available."""
-        return "Windows only for now"
+        return "Not supported on this platform yet"
 
     def recognize_text(self, image) -> list:
         """The words in `image` (a `QImage`), as a list of lines, each a

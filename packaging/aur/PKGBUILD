@@ -11,6 +11,8 @@ optdepends=(
     'grim: native Wayland screenshots'
     'slurp: Wayland region selection tools'
     'gpu-screen-recorder: recording on Hyprland and wlroots compositors'
+    'tesseract: Hide sensitive (reading the text in a snip)'
+    'tesseract-data-eng: English data for tesseract'
 )
 provides=('snipux')
 conflicts=('snipux')

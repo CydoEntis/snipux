@@ -1366,6 +1366,47 @@ class TestCanPin:
         assert platform_impl.pin_unavailable_reason() != ""
 
 
+class TestTextRecognition:
+    """Hide sensitive is live wherever the platform can read text, and
+    greyed with what to do about it where it cannot."""
+
+    def test_linux_reads_text_where_tesseract_is_installed(self, monkeypatch):
+        monkeypatch.setattr(linux.tesseract_ocr, "find_binary", lambda: "/usr/bin/tesseract")
+
+        platform_impl = linux.LinuxPlatform()
+
+        assert platform_impl.recognizes_text() is True
+        assert platform_impl.text_recognition_unavailable_reason() == ""
+
+    def test_linux_without_tesseract_says_what_to_install(self, monkeypatch):
+        monkeypatch.setattr(linux.tesseract_ocr, "find_binary", lambda: None)
+        monkeypatch.setattr(linux.tesseract_ocr, "_manager", "apt")
+
+        platform_impl = linux.LinuxPlatform()
+
+        assert platform_impl.recognizes_text() is False
+        assert platform_impl.text_recognition_unavailable_reason() == (
+            "Needs tesseract: sudo apt install tesseract-ocr"
+        )
+
+    def test_linux_hands_the_image_to_tesseract(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            linux.tesseract_ocr, "recognize", lambda image: seen.append(image) or [["a line"]]
+        )
+
+        assert linux.LinuxPlatform().recognize_text("an image") == [["a line"]]
+        assert seen == ["an image"]
+
+    def test_a_platform_with_no_engine_does_not_blame_another_os(self):
+        stub = darwin.DarwinPlatform()
+
+        assert stub.recognizes_text() is False
+        assert "Windows" not in stub.text_recognition_unavailable_reason()
+        assert stub.text_recognition_unavailable_reason() != ""
+        assert stub.recognize_text(None) == []
+
+
 class _FakeUser32Hotkey:
     """Stand-in for `ctypes.windll.user32`, covering only what
     `WindowsPlatform.bind_shortcut`/`unbind_shortcut` call:
