@@ -273,8 +273,36 @@ class Platform(ABC):
         every route here ends with this process exiting so its own file can
         be written, and with the new one started in its place. False means
         nothing happened and snipux carries on as it was.
+
+        Raises `UpdateError` instead of returning False when it knows what
+        went wrong and what the user should do about it -- a full disk, a
+        folder it cannot write to. Its message is shown as it is.
         """
         return False
+
+    def relaunch_after_update(self) -> bool | None:
+        """Start the snipux `install_update` just put in place, and say
+        whether it started. Called after `install_update` returned True and
+        after this process has stopped listening for requests, so the new
+        one finds nobody answering and becomes the resident itself.
+
+        None -- the default -- means this is not the application's job
+        here: whatever `install_update` started (Windows' installer) closes
+        this process and brings the new one up on its own. False means the
+        new version is installed and could not be started, so this process
+        stays and tells the user to restart it.
+        """
+        return None
+
+    def manual_update_hint(self, version: str) -> str:
+        """One sentence telling the user how to install `version` over this
+        build by hand -- what the tray says when `update_asset_name` has no
+        answer. The command differs for every way of installing snipux, so
+        a platform with more than one names the right one.
+        """
+        if getattr(sys, "frozen", False):
+            return "Download it from the Releases page."
+        return "Run `snipux --update` to install it."
 
     def take_keyboard_focus(self, widget) -> bool:
         """Make `widget` the window the keyboard is actually talking to, and
@@ -568,6 +596,13 @@ class Platform(ABC):
         recognition at all (`recognizes_text()` False) returns no lines.
         """
         return []
+
+
+class UpdateError(Exception):
+    """`Platform.install_update` could not install the update, and nothing
+    was changed. The message is a sentence for the user: what happened and
+    what to do instead.
+    """
 
 
 class UnimplementedPlatformError(NotImplementedError):

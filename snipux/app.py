@@ -747,7 +747,7 @@ def _print_backends(registry, heading: str | None = None) -> None:
 UPDATE_TARGET = "snipux"
 
 
-def run_update(runner=None) -> int:
+def run_update(runner=None, *, opener=None, temp_dir: Path | None = None) -> int:
     """`snipux --update`: install the newest Snipux over this one.
 
     Exists because the alternative was asking people to keep a
@@ -774,10 +774,18 @@ def run_update(runner=None) -> int:
     something unreadable, and a frozen build is replaced by downloading a
     new one, not by pip.
 
+    An AppImage in a folder it can write to is the exception among the
+    frozen builds: it replaces itself (`_update_appimage`), the same way
+    the tray's Update item does.
+
     `runner` is the subprocess call, injected so the tests can assert on
     the command without this actually reaching the network or the
-    filesystem.
+    filesystem; `opener` and `temp_dir` are the same for the AppImage
+    route's two requests and its download folder.
     """
+    if platform.is_linux() and platform.current.update_asset_name(__version__):
+        return _update_appimage(opener, temp_dir)
+
     if getattr(sys, "frozen", False):
         # Three standalone builds now, and each is replaced differently --
         # telling a Linux user to download snipux.exe is worse than saying
@@ -786,9 +794,12 @@ def run_update(runner=None) -> int:
         # reason); anything else frozen on Linux came from the .deb, which
         # is the one route with a package manager to hand the file to.
         if os.environ.get("APPIMAGE"):
+            # Reached only by an AppImage that cannot replace itself: one
+            # in a folder this user may not write to.
             replacement = (
-                "Download the newest Snipux AppImage and run it -- it "
-                "replaces this copy."
+                "This AppImage is in a folder Snipux cannot write to, so "
+                "update it the way it was installed, or download the newest "
+                "Snipux AppImage from the Releases page."
             )
         elif platform.is_linux():
             replacement = (
@@ -822,6 +833,72 @@ def run_update(runner=None) -> int:
     print(
         "Updated. Quit Snipux from the tray and press your capture shortcut "
         "to start the new version."
+    )
+    return 0
+
+
+def _update_appimage(opener=None, temp_dir: Path | None = None) -> int:
+    """`snipux --update` from an AppImage: the tray's Update item, from a
+    terminal. Asks what the newest release is, downloads its AppImage,
+    checks it against the SHA-256 the release published, and puts it where
+    this one is.
+
+    It does not restart the snipux that is running. That one is a
+    different process, it may be in the middle of a recording, and nothing
+    in its protocol asks it to quit -- so this says to restart it, exactly
+    as the pip route below does.
+    """
+    release = updates.fetch_latest_release(opener)
+    if release is None:
+        print("Could not check for updates. Try again when you are online.")
+        return 1
+    if not updates.is_newer(release.version, __version__):
+        print(f"Snipux {__version__} is the newest version.")
+        return 0
+
+    asset = platform.current.update_asset_name(release.version)
+    url = release.asset(asset) if asset else None
+    if url is None:
+        print(
+            f"Snipux {release.version} is available, but it has no AppImage "
+            "for this machine. "
+            f"{platform.current.manual_update_hint(release.version)}"
+        )
+        return 1
+    sha256 = release.sha256(asset)
+    if sha256 is None:
+        print(
+            f"Snipux {release.version} cannot be verified from here, so it "
+            "was not downloaded. Install it from the Releases page."
+        )
+        return 1
+
+    print(f"Downloading Snipux {release.version}…")
+    updates.remove_old_downloads(temp_dir)
+    destination = updates.new_download_dir(temp_dir) / asset
+    result = updates.download(url, destination, opener, sha256=sha256)
+    if result is updates.DownloadResult.MISMATCHED:
+        print(
+            "The update that was downloaded is not the file Snipux published, "
+            "so it was not installed. Try again, or install it from the "
+            "Releases page."
+        )
+        return 1
+    if result is not updates.DownloadResult.WRITTEN:
+        print("Could not download the update. Try again when you are online.")
+        return 1
+
+    try:
+        installed = platform.current.install_update(destination)
+    except platform.UpdateError as exc:
+        print(exc)
+        return 1
+    if not installed:
+        print("Could not install the update. Install it from the Releases page.")
+        return 1
+    print(
+        f"Updated to Snipux {release.version}. Quit Snipux from the tray and "
+        "open it again to start the new version."
     )
     return 0
 
@@ -1079,6 +1156,17 @@ class Transport(ABC):
         """
 
 
+    def release(self) -> None:
+        """Primary-instance only: stop being it, so the next launch finds
+        nobody answering and becomes the resident itself. What an update
+        does just before starting the new version, which would otherwise
+        hand this process a request and exit.
+
+        Not abstract: a transport with nothing to let go of does nothing.
+        `try_claim()` takes the role back.
+        """
+
+
 class ClaimError(RuntimeError):
     """No snipux answered, and this launch could not listen either, so
     nothing would ever hear a request. The message is for the user."""
@@ -1166,6 +1254,14 @@ class QLocalSocketTransport(Transport):
             # nothing, with nothing said anywhere.
             raise ClaimError(_cannot_listen_message(self._server_name))
         return True
+
+    def release(self) -> None:
+        if self._server is None:
+            return
+        # close() also removes the socket file, so the next launch does
+        # not have to work out that it is stale.
+        self._server.close()
+        self._server = None
 
     def _answers(self) -> bool:
         probe = QLocalSocket()
@@ -2623,10 +2719,7 @@ class AppController:
                 "tray menu to install it."
             )
             return
-        if getattr(sys, "frozen", False):
-            how = "Download it from the Releases page."
-        else:
-            how = "Run `snipux --update` to install it."
+        how = platform.current.manual_update_hint(release.version)
         self._report_shortcut(f"Snipux {release.version} is available. {how}")
 
     def install_available_update(self, opener=None, *, temp_dir: Path | None = None) -> None:
@@ -2644,6 +2737,11 @@ class AppController:
         `opener` and `temp_dir` are passed only by tests, which must reach
         neither the network nor the real temp directory.
         """
+        if self._update_download is not None:
+            # A second click while the first is still arriving: two
+            # downloads would race to replace the same file.
+            self._report_shortcut("Still downloading the update…")
+            return
         release = self._available_update
         asset = (
             platform.current.update_asset_name(release.version) if release else None
@@ -2675,8 +2773,9 @@ class AppController:
 
         `install_update` returning True means this process is about to be
         replaced -- an installer cannot write over an exe that is still
-        running -- so quitting is the last step of the update rather than
-        something left for the user to work out.
+        running, and an AppImage that has been replaced is still the old
+        version until it is started again -- so restarting is the last step
+        of the update rather than something left for the user to work out.
         """
         download, self._update_download = self._update_download, None
         if path is None:
@@ -2691,12 +2790,61 @@ class AppController:
                 "Could not download the update. Try again when you are online."
             )
             return
-        if not platform.current.install_update(Path(path)):
+        try:
+            going_ahead = platform.current.install_update(Path(path))
+        except platform.UpdateError as exc:
+            # The platform's own sentence: it knows whether this was a full
+            # disk or a folder it may not write to, and what to do about it.
+            self._report_shortcut(str(exc))
+            return
+        if not going_ahead:
             self._report_shortcut(
                 "Could not start the update. Install it from the Releases page."
             )
             return
-        self._report_shortcut("Updating Snipux…")
+        self._restart_into_update()
+
+    def _restart_into_update(self) -> None:
+        """Hand over to the version that was just installed.
+
+        Stops listening *first*. A snipux started while this one still
+        answers would do what every second launch does -- pass its request
+        to the resident and exit -- and this one quits a moment later, so
+        the update would end with nothing running at all. With the socket
+        released the new one finds nobody home and becomes the resident,
+        and there is never a moment with two.
+        """
+        release = self._available_update
+        version = release.version if release is not None else ""
+        self._transport.release()
+        relaunched = platform.current.relaunch_after_update()
+        if relaunched is None:
+            # Not ours to restart: the installer that is now running closes
+            # this process and starts the new one itself.
+            self._report_shortcut("Updating Snipux…")
+            self._quit()
+            return
+        if not relaunched:
+            # Installed, and still running the old version. Listening
+            # again, because otherwise the shortcut would start a second
+            # snipux beside this one.
+            try:
+                if self._transport.try_claim():
+                    self._transport.listen(
+                        self.start_capture, self.open_settings,
+                        self.open_path, self.open_editor,
+                    )
+            except ClaimError as exc:
+                log.note(f"Note: {exc}")
+            self._available_update = None
+            if self.update_action is not None:
+                self.update_action.setText("Check for updates")
+            self._report_shortcut(
+                f"Snipux {version} is installed but could not start on its "
+                "own. Quit Snipux from the tray and open it again to use it."
+            )
+            return
+        self._report_shortcut(f"Updated to Snipux {version}, restarting…")
         self._quit()
 
     def _open_player(self, path: Path) -> None:
