@@ -9986,14 +9986,16 @@ class TestOneClickUpdate:
         controller._available_update = release
         controller._update_download = object()   # one already on its way
         asked = []
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
 
         controller.install_available_update(
-            opener=lambda url: asked.append(url) or b"", temp_dir=tmp_path
+            opener=lambda url: asked.append(url) or b"", temp_dir=temp_dir
         )
 
         assert asked == []
         assert "Still downloading" in said[-1]
-        assert list(tmp_path.iterdir()) == []
+        assert list(temp_dir.iterdir()) == []
 
     def test_a_build_that_cannot_is_told_how_in_its_own_terms(
         self, make_controller, monkeypatch
