@@ -1366,6 +1366,47 @@ class TestCanPin:
         assert platform_impl.pin_unavailable_reason() != ""
 
 
+class TestTextRecognition:
+    """Hide sensitive is live wherever the platform can read text, and
+    greyed with what to do about it where it cannot."""
+
+    def test_linux_reads_text_where_tesseract_is_installed(self, monkeypatch):
+        monkeypatch.setattr(linux.tesseract_ocr, "find_binary", lambda: "/usr/bin/tesseract")
+
+        platform_impl = linux.LinuxPlatform()
+
+        assert platform_impl.recognizes_text() is True
+        assert platform_impl.text_recognition_unavailable_reason() == ""
+
+    def test_linux_without_tesseract_says_what_to_install(self, monkeypatch):
+        monkeypatch.setattr(linux.tesseract_ocr, "find_binary", lambda: None)
+        monkeypatch.setattr(linux.tesseract_ocr, "_manager", "apt")
+
+        platform_impl = linux.LinuxPlatform()
+
+        assert platform_impl.recognizes_text() is False
+        assert platform_impl.text_recognition_unavailable_reason() == (
+            "Needs tesseract: sudo apt install tesseract-ocr"
+        )
+
+    def test_linux_hands_the_image_to_tesseract(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            linux.tesseract_ocr, "recognize", lambda image: seen.append(image) or [["a line"]]
+        )
+
+        assert linux.LinuxPlatform().recognize_text("an image") == [["a line"]]
+        assert seen == ["an image"]
+
+    def test_a_platform_with_no_engine_does_not_blame_another_os(self):
+        stub = darwin.DarwinPlatform()
+
+        assert stub.recognizes_text() is False
+        assert "Windows" not in stub.text_recognition_unavailable_reason()
+        assert stub.text_recognition_unavailable_reason() != ""
+        assert stub.recognize_text(None) == []
+
+
 class _FakeUser32Hotkey:
     """Stand-in for `ctypes.windll.user32`, covering only what
     `WindowsPlatform.bind_shortcut`/`unbind_shortcut` call:
@@ -3433,6 +3474,70 @@ class TestUpdatingItself:
 
         assert windows.WindowsPlatform().install_update(tmp_path / "setup.exe") is False
         assert "could not start the update installer" in capsys.readouterr().out
+
+
+class TestLinuxUpdatesAnAppImage:
+    """What `LinuxPlatform` answers the update seam with. The file work is
+    tested in test_linux_appimage.py; this is only the routing.
+    """
+
+    @pytest.fixture
+    def appimage(self, monkeypatch, tmp_path):
+        path = tmp_path / "Snipux.AppImage"
+        path.write_bytes(b"running")
+        monkeypatch.setenv("APPIMAGE", str(path))
+        monkeypatch.setattr(linux.linux_appimage, "_machine", lambda: "x86_64")
+        return path
+
+    def test_an_appimage_updates_from_the_releases_appimage(self, appimage):
+        assert (
+            linux.LinuxPlatform().update_asset_name("1.5.0")
+            == "Snipux-1.5.0-x86_64.AppImage"
+        )
+
+    def test_anything_else_does_not_update_itself(self, monkeypatch):
+        # pip, pipx and the .deb: each has a command of its own.
+        monkeypatch.delenv("APPIMAGE", raising=False)
+        platform = linux.LinuxPlatform()
+
+        assert platform.update_asset_name("1.5.0") is None
+        assert platform.install_update(pathlib.Path("x.AppImage")) is False
+        assert platform.relaunch_after_update() is None
+
+    def test_an_appimage_it_cannot_replace_does_not_offer_to(self, appimage, monkeypatch):
+        # /opt/snipux, from the AUR package: root's to update, not ours.
+        monkeypatch.setattr(linux.linux_appimage, "can_replace", lambda path: False)
+
+        assert linux.LinuxPlatform().update_asset_name("1.5.0") is None
+
+    def test_installing_keeps_this_version_as_the_backup(self, appimage, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            linux.linux_appimage, "install",
+            lambda downloaded, target, version: calls.append((downloaded, target, version)),
+        )
+        downloaded = pathlib.Path("new.AppImage")
+
+        assert linux.LinuxPlatform().install_update(downloaded) is True
+        assert calls == [(downloaded, appimage.resolve(), linux.__version__)]
+
+    def test_restarting_starts_the_same_path(self, appimage, monkeypatch):
+        started = []
+        monkeypatch.setattr(
+            linux.linux_appimage, "relaunch", lambda path: started.append(path) or True
+        )
+
+        assert linux.LinuxPlatform().relaunch_after_update() is True
+        assert started == [appimage.resolve()]
+
+    def test_the_base_platform_leaves_restarting_to_the_installer(self):
+        assert Platform.relaunch_after_update(object()) is None
+
+    def test_the_base_hint_is_the_command_or_the_page(self, monkeypatch):
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        assert "snipux --update" in Platform.manual_update_hint(object(), "1.5.0")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        assert "Releases page" in Platform.manual_update_hint(object(), "1.5.0")
 
 
 class TestWindowsSkipsTheOverlaysOpeningAnimation:

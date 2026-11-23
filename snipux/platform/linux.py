@@ -39,9 +39,9 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QGuiApplication
 
-from snipux import capture, ffmpeg, recording, setup_desktop
+from snipux import __version__, capture, ffmpeg, recording, setup_desktop
 
-from . import Platform
+from . import Platform, linux_appimage, tesseract_ocr
 
 # Type-only: `capture.py`/`recording.py` import this package at their top, so
 # a name imported out of either here could still be undefined when
@@ -87,6 +87,42 @@ class LinuxPlatform(Platform):
     # is seconds away at the soonest -- so a fraction of a second is the
     # whole lifetime.
     _HYPRLAND_MONITORS_MAX_AGE_S = 0.5
+
+    def update_asset_name(self, version: str) -> str | None:
+        """The AppImage for `version`, for a snipux running from an
+        AppImage it is able to replace.
+
+        Nothing for the rest: pip and pipx have a command of their own, the
+        `.deb` needs root, and an AppImage in a folder this user cannot
+        write to was put there by something else, which is what updates it
+        (`manual_update_hint` says which).
+        """
+        appimage = linux_appimage.running_appimage()
+        if appimage is None or not linux_appimage.can_replace(appimage):
+            return None
+        return linux_appimage.asset_name(version)
+
+    def install_update(self, downloaded: Path) -> bool:
+        """Put the downloaded AppImage where the running one is, keeping
+        the old one beside it as `<name>.<version>.bak`.
+
+        The path does not change, so the app menu entry, autostart and the
+        shortcut are left exactly as they are -- see linux_appimage.py.
+        """
+        appimage = linux_appimage.running_appimage()
+        if appimage is None:
+            return False
+        linux_appimage.install(downloaded, appimage, __version__)
+        return True
+
+    def relaunch_after_update(self) -> bool | None:
+        appimage = linux_appimage.running_appimage()
+        if appimage is None:
+            return None
+        return linux_appimage.relaunch(appimage)
+
+    def manual_update_hint(self, version: str) -> str:
+        return linux_appimage.manual_update_hint(version)
 
     def _hyprland_monitors(self) -> list:
         """``hyprctl monitors -j`` parsed, shared by every caller within
@@ -999,6 +1035,22 @@ class LinuxPlatform(Platform):
             "" if self.can_pin() else
             "Wayland doesn't let an app place its own window or keep it on top."
         )
+
+    def recognizes_text(self) -> bool:
+        """True where a system `tesseract` is on `PATH`.
+
+        Found, never required -- the same rule as `ffmpeg`. Only a `PATH`
+        lookup, because the overlay asks every time it opens; it is also
+        why installing tesseract takes effect on the next snip, with no
+        restart.
+        """
+        return tesseract_ocr.available()
+
+    def text_recognition_unavailable_reason(self) -> str:
+        return "" if tesseract_ocr.available() else tesseract_ocr.install_hint()
+
+    def recognize_text(self, image) -> list:
+        return tesseract_ocr.recognize(image)
 
     def records_audio(self) -> bool:
         """Whether the selected Linux recording route can carry sound."""

@@ -5,6 +5,39 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.4.1 — 2026-11-23
+
+### Added
+
+- **Hide sensitive works on Linux.** With `tesseract` installed, the switch
+  on the capture row blacks out passwords, API keys, card numbers and email
+  addresses on Linux the way it already did on Windows. Snipux never
+  installs it for you: without it the switch is greyed and says what to
+  run -- `sudo pacman -S tesseract tesseract-data-eng` on Arch and Omarchy,
+  `sudo apt install tesseract-ocr` on Ubuntu -- and it works from the next
+  snip, with no restart. If a snip cannot be read within five seconds you
+  are told nothing was hidden, exactly as on Windows.
+- **The AppImage updates itself.** When a newer release is out, the tray
+  item becomes **Update to 1.5.0**, and one click now does the rest on
+  Linux too: it downloads the new AppImage, checks it against the SHA-256
+  the release published, puts it where the old one was, and restarts
+  Snipux on it. Your shortcut, autostart entry and app menu entry keep
+  working untouched, because the file is still at the same path. The
+  version you were on is kept beside it as `Snipux.AppImage.<version>.bak`
+  (only the most recent one; older `.bak` files are removed), so going
+  back is renaming a file. `snipux --update` does the same from a
+  terminal. Nothing is installed without the click, and a download that
+  does not match is thrown away. An AppImage in a folder you cannot write
+  to (`/opt`, from the AUR package) is not touched: Snipux says so and
+  names what to do instead.
+
+### Changed
+
+- **"A newer version is available" names the right command.** It used to
+  say `snipux --update` or "the Releases page" whatever you had installed.
+  It now says `pipx upgrade snipux` for a pipx install, and for the `.deb`
+  names the file to download and the `apt` command to install it.
+
 ## 1.4.0 — 2026-11-22
 
 ### Changed

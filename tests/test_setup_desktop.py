@@ -14,6 +14,7 @@ install.sh put it back.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from conftest import REAL_HOME
 from snipux import handoff, setup_desktop
 from snipux.design import tokens
 
@@ -2502,3 +2504,54 @@ class TestWatermarkContentPersistence:
 
         assert setup_desktop.load_watermark_kind(tmp_path) == "image"
         assert setup_desktop.load_watermark_text(tmp_path) == "acme"
+
+
+class TestNoTestCanReachTheRealHome:
+    """Every place `setup_desktop` falls back to when a caller names no
+    directory is inside a folder made for this test (conftest's
+    `_isolated_home`). A run of this suite once removed the developer's
+    Hyprland shortcut through one of these fallbacks; this is the check
+    that it cannot again, whatever a test forgets to pass.
+    """
+
+    @pytest.fixture
+    def home(self, _isolated_home) -> Path:
+        return _isolated_home
+
+    def _outside_the_real_home(self, path: Path, home: Path) -> None:
+        resolved = path.resolve()
+        assert resolved.is_relative_to(home.resolve()), resolved
+        assert resolved != REAL_HOME.resolve()
+
+    def test_home_itself_is_a_folder_of_this_tests(self, home):
+        self._outside_the_real_home(Path.home(), home)
+        self._outside_the_real_home(Path(os.path.expanduser("~")), home)
+
+    def test_the_hyprland_bindings_are_not_this_machines(self, home):
+        self._outside_the_real_home(setup_desktop._hyprland_config_dir(), home)
+
+    def test_the_config_file_is_not_this_machines(self, tmp_path):
+        # `_isolated_config` already sends this one to the test's own
+        # `tmp_path`, ahead of any home.
+        self._outside_the_real_home(setup_desktop.config_path(), tmp_path)
+
+    def test_the_save_folders_are_not_this_machines(self, home):
+        self._outside_the_real_home(setup_desktop.default_save_folder(), home)
+
+    def test_removing_the_shortcut_with_no_folder_named_edits_nothing_real(
+        self, home, monkeypatch
+    ):
+        # The call that did the damage, made the way it was made: no
+        # directory passed, in a Hyprland session.
+        monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "test")
+        bindings = setup_desktop._hyprland_config_dir() / "bindings.lua"
+        bindings.parent.mkdir(parents=True)
+        bindings.write_text(
+            f"{setup_desktop._HYPR_LUA_BEGIN}\nbind\n{setup_desktop._HYPR_LUA_END}\n"
+        )
+        monkeypatch.setattr(setup_desktop.subprocess, "run", Mock())
+
+        setup_desktop.unbind_linux_shortcut()
+
+        self._outside_the_real_home(bindings, home)
+        assert setup_desktop._HYPR_LUA_BEGIN not in bindings.read_text()
