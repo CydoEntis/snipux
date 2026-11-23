@@ -1113,8 +1113,9 @@ class TestSkipMapAnimation:
 
         platform_impl.prefetch_snip_state(["DP-1", "DP-2"], provider)
 
-        assert [c[1] for c in calls] == ["monitors", "eval"]
+        assert [c[1] for c in calls] == ["monitors", "eval", "clients"]
         assert asked == [1]
+        calls.pop()  # the maximised windows: its own tests are further down
 
         # What the overlay then asks for is already there: no more spawns.
         monkeypatch.setattr(linux.QGuiApplication, "screens", lambda: [
@@ -1160,6 +1161,280 @@ class TestSkipMapAnimation:
             is False
         )
         assert widget.windowTitle() == ""
+
+
+class TestHyprlandKeepsOtherWindowsMaximised:
+    """Omarchy's floating workspaces un-maximise a window when another one
+    opens beside it, the overlay included. `hyprctl` is faked throughout:
+    what is tested is what Snipux asks for, and when."""
+
+    OVERLAY = "snipux-capture-overlay-HDMI_A_2"
+
+    @pytest.fixture(autouse=True)
+    def _app(self):
+        from PyQt6.QtWidgets import QApplication
+
+        return QApplication.instance() or QApplication([])
+
+    @staticmethod
+    def _client(address, *, fullscreen=0, workspace=11, title="", pid=1):
+        return {
+            "address": address,
+            "fullscreen": fullscreen,
+            "workspace": {"id": workspace},
+            "title": title,
+            "pid": pid,
+            "mapped": True,
+        }
+
+    def _rig(self, monkeypatch, *, hyprland=True):
+        """A Hyprland platform whose `hyprctl clients -j` answers with
+        whatever `desk` holds at the time, whose dispatches are recorded,
+        and whose watcher threads are queued instead of started."""
+        monkeypatch.setattr(linux.capture, "detect_session_type", lambda: "wayland")
+        monkeypatch.setattr(
+            linux.QGuiApplication, "platformName", staticmethod(lambda: "wayland")
+        )
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: hyprland)
+        desk, evals, threads = [], [], []
+
+        def run(argv, **kwargs):
+            if argv[:2] == ["hyprctl", "clients"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(desk), stderr="")
+            evals.append(argv[2])
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(linux.subprocess, "run", run)
+        monkeypatch.setattr(
+            linux.threading,
+            "Thread",
+            lambda target, args, **kwargs: SimpleNamespace(
+                start=lambda: threads.append((target, args))
+            ),
+        )
+        # The watcher's waits: no test should take real time over them.
+        monkeypatch.setattr(linux.time, "sleep", lambda seconds: None)
+        monkeypatch.setattr(linux.LinuxPlatform, "_MAXIMISED_SETTLE_S", 0.0)
+        return linux.LinuxPlatform(), desk, evals, threads
+
+    @staticmethod
+    def _surface(title):
+        return SimpleNamespace(windowTitle=lambda: title)
+
+    def test_a_window_the_overlay_un_maximised_is_maximised_again(self, monkeypatch):
+        platform_impl, desk, evals, threads = self._rig(monkeypatch)
+        desk[:] = [
+            self._client("0xaaa", fullscreen=1),
+            self._client("0xbbb"),
+        ]
+
+        platform_impl.keep_others_maximised(self._surface(self.OVERLAY))
+        assert len(threads) == 1 and evals == []
+
+        # The overlay maps, and Omarchy drops the maximised window back to
+        # its own size.
+        desk[:] = [
+            self._client("0xaaa", fullscreen=0),
+            self._client("0xbbb"),
+            self._client("0xccc", title=self.OVERLAY, pid=os.getpid()),
+        ]
+        target, args = threads.pop()
+        target(*args)
+
+        assert len(evals) == 1
+        assert "mode = 'maximized'" in evals[0] and "action = 'set'" in evals[0]
+        assert '"address:0xaaa"' in evals[0]
+        # And only that one: a window that was never maximised stays so.
+        assert "0xbbb" not in evals[0]
+
+    def test_nothing_is_touched_until_the_overlay_has_mapped(self, monkeypatch):
+        platform_impl, desk, evals, _ = self._rig(monkeypatch)
+        before = {"0xaaa": 11}
+        # Not maximised, and the overlay not there yet: maximising now would
+        # only be undone when it arrives.
+        desk[:] = [self._client("0xaaa", fullscreen=0)]
+
+        assert platform_impl._restore_maximised(before, {self.OVERLAY}) is False
+        assert evals == []
+
+        desk.append(self._client("0xccc", title=self.OVERLAY, pid=os.getpid()))
+        assert platform_impl._restore_maximised(before, {self.OVERLAY}) is True
+        assert len(evals) == 1
+
+    def test_another_programs_window_of_that_title_is_not_the_overlay(self, monkeypatch):
+        platform_impl, desk, evals, _ = self._rig(monkeypatch)
+        desk[:] = [
+            self._client("0xaaa", fullscreen=0),
+            self._client("0xccc", title=self.OVERLAY, pid=os.getpid() + 1),
+        ]
+
+        assert platform_impl._restore_maximised({"0xaaa": 11}, {self.OVERLAY}) is False
+        assert evals == []
+
+    def test_a_window_moved_or_closed_meanwhile_is_left_alone(self, monkeypatch):
+        platform_impl, desk, evals, _ = self._rig(monkeypatch)
+        desk[:] = [
+            # Carried to another workspace since: no longer the overlay's doing.
+            self._client("0xaaa", fullscreen=0, workspace=4),
+            self._client("0xccc", title=self.OVERLAY, pid=os.getpid()),
+        ]
+
+        assert platform_impl._restore_maximised(
+            {"0xaaa": 11, "0xgone": 11}, {self.OVERLAY}
+        ) is True
+        assert evals == []
+
+    def test_the_overlays_of_one_snip_share_one_watch(self, monkeypatch):
+        platform_impl, desk, evals, threads = self._rig(monkeypatch)
+        desk[:] = [self._client("0xaaa", fullscreen=1)]
+        titles = [
+            "snipux-capture-overlay-DP_1",
+            "snipux-capture-overlay-DP_2",
+            self.OVERLAY,
+        ]
+
+        for title in titles:
+            platform_impl.keep_others_maximised(self._surface(title))
+
+        assert len(threads) == 1
+        watch = threads[0][1][0]
+        assert watch["titles"] == set(titles)
+
+        # Two of the three mapped is not yet all of them.
+        desk[:] = [self._client("0xaaa", fullscreen=0)] + [
+            self._client(f"0x{n}", title=title, pid=os.getpid())
+            for n, title in enumerate(titles[:2])
+        ]
+        assert platform_impl._restore_maximised(watch["before"], watch["titles"]) is False
+        assert evals == []
+
+    def test_the_list_read_beside_the_screenshot_is_used_once(self, monkeypatch):
+        platform_impl, desk, evals, threads = self._rig(monkeypatch)
+        platform_impl._hyprland_overlay_rule_ready = False
+        desk[:] = [self._client("0xaaa", fullscreen=1)]
+        platform_impl.prefetch_snip_state([], SimpleNamespace())
+
+        # By the time the overlay shows the window is already un-maximised
+        # -- say a slow machine -- so asking again now would miss it.
+        desk[:] = [self._client("0xaaa", fullscreen=0)]
+        platform_impl.keep_others_maximised(self._surface(self.OVERLAY))
+
+        assert threads[0][1][0]["before"] == {"0xaaa": 11}
+        # Used up: the next show reads the desk afresh.
+        assert platform_impl._prefetched_maximised is None
+
+    def test_a_finished_watch_makes_way_for_the_next_show(self, monkeypatch):
+        platform_impl, desk, evals, threads = self._rig(monkeypatch)
+        mapped = self._client("0xccc", title=self.OVERLAY, pid=os.getpid())
+        desk[:] = [self._client("0xaaa", fullscreen=1)]
+        platform_impl.keep_others_maximised(self._surface(self.OVERLAY))
+        desk.append(mapped)
+        target, args = threads.pop()
+        target(*args)
+        assert platform_impl._maximised_watch is None
+
+        # A delayed snip hides the overlay and shows it again.
+        desk[:] = [self._client("0xaaa", fullscreen=1)]
+        platform_impl.keep_others_maximised(self._surface(self.OVERLAY))
+        assert len(threads) == 1
+
+    def test_a_surface_that_never_maps_is_given_up_on(self, monkeypatch):
+        platform_impl, desk, evals, threads = self._rig(monkeypatch)
+        desk[:] = [self._client("0xaaa", fullscreen=1)]
+        clock = [0.0]
+
+        def tick():
+            clock[0] += 0.1
+            return clock[0]
+
+        monkeypatch.setattr(linux.time, "monotonic", tick)
+        platform_impl.keep_others_maximised(self._surface(self.OVERLAY))
+        target, args = threads.pop()
+        target(*args)  # returns: the wait is bounded
+
+        assert evals == [] and platform_impl._maximised_watch is None
+
+    def test_no_watch_is_started_when_nothing_is_maximised(self, monkeypatch):
+        platform_impl, desk, evals, threads = self._rig(monkeypatch)
+        desk[:] = [self._client("0xaaa"), self._client("0xbbb", fullscreen=2)]
+
+        platform_impl.keep_others_maximised(self._surface(self.OVERLAY))
+
+        # True fullscreen (2) is not maximised, and Omarchy leaves it be.
+        assert threads == [] and platform_impl._maximised_watch is None
+
+    def test_hyprctl_failing_is_not_an_error(self, monkeypatch):
+        platform_impl, desk, evals, threads = self._rig(monkeypatch)
+        monkeypatch.setattr(
+            linux.subprocess, "run", Mock(side_effect=subprocess.TimeoutExpired("hyprctl", 2))
+        )
+
+        platform_impl.keep_others_maximised(self._surface(self.OVERLAY))
+
+        assert threads == []
+        assert platform_impl._restore_maximised({"0xaaa": 11}, {self.OVERLAY}) is False
+
+    def test_nothing_is_asked_off_hyprland(self, monkeypatch):
+        platform_impl, desk, evals, threads = self._rig(monkeypatch, hyprland=False)
+        monkeypatch.setattr(
+            linux.subprocess, "run", Mock(side_effect=AssertionError("must not run"))
+        )
+
+        platform_impl.keep_others_maximised(self._surface(self.OVERLAY))
+
+        assert threads == []
+
+    def test_other_platforms_do_nothing(self):
+        surface = self._surface(self.OVERLAY)
+
+        assert windows.WindowsPlatform().keep_others_maximised(surface) is None
+        assert darwin.DarwinPlatform().keep_others_maximised(surface) is None
+
+    def test_every_show_of_the_overlay_asks(self, monkeypatch):
+        from PyQt6.QtCore import QPointF, QSizeF
+        from PyQt6.QtGui import QImage
+
+        from snipux import overlay as overlay_module
+        from snipux.capture import Frame
+
+        asked = []
+        monkeypatch.setattr(
+            overlay_module.platform.current,
+            "keep_others_maximised",
+            lambda widget: asked.append(widget),
+        )
+        image = QImage(64, 64, QImage.Format.Format_RGB32)
+        image.fill(0)
+        window = overlay_module.OverlayWindow(
+            Frame(image=image, logical_origin=QPointF(0, 0), logical_size=QSizeF(64, 64)),
+            hints_enabled=False,
+        )
+        try:
+            window.show()
+            window.hide()
+            window.show()  # what a delayed snip does
+        finally:
+            window.close()
+
+        assert asked == [window, window]
+
+    def test_the_delay_countdown_asks_too(self, monkeypatch):
+        from snipux import overlaychrome
+
+        asked = []
+        monkeypatch.setattr(
+            overlaychrome.platform.current,
+            "keep_others_maximised",
+            lambda widget: asked.append(widget.windowTitle()),
+        )
+        countdown = overlaychrome.DelayCountdown()
+        try:
+            countdown.show_centered_on(QRect(0, 0, 800, 600))
+        finally:
+            countdown.close()
+
+        # Named, because the windows are found again by title.
+        assert asked == ["snipux-countdown"]
 
 
 class TestStubPlatforms:

@@ -18,7 +18,7 @@ from PyQt6.QtCore import QRect, QRectF, QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
-from snipux import design
+from snipux import design, platform
 from snipux.toolbar import _Chrome, _bar_keys
 
 
@@ -355,6 +355,9 @@ class DelayCountdown(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFixedSize(self._SIZE, self._SIZE)
+        # A name of its own, so the desktop's record of this window can be
+        # told from any other of Snipux's (`keep_others_maximised`).
+        self.setWindowTitle("snipux-countdown")
 
         self._label = QLabel(self)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -375,6 +378,10 @@ class DelayCountdown(QWidget):
         """
         center = QRectF(geometry).center()
         self.move(round(center.x() - self._SIZE / 2), round(center.y() - self._SIZE / 2))
+        # The delay is for arranging the screen, and the screenshot that
+        # ends it must find the windows as they were arranged: a desktop
+        # that un-maximises one because this opened has to put it back.
+        platform.current.keep_others_maximised(self)
         self.show()
         self.raise_()
 

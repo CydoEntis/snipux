@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -404,8 +405,8 @@ class LinuxPlatform(Platform):
         return bool(getattr(widget, "_hyprland_maximised", False))
 
     @staticmethod
-    def _hyprland_own_clients() -> list[dict]:
-        """Every window Hyprland has for this process; empty on failure."""
+    def _hyprland_clients() -> list[dict] | None:
+        """Every window Hyprland has; None when it could not be asked."""
         try:
             result = subprocess.run(
                 ["hyprctl", "clients", "-j"],
@@ -415,16 +416,169 @@ class LinuxPlatform(Platform):
             )
             clients = json.loads(result.stdout)
         except (OSError, ValueError, subprocess.SubprocessError):
-            return []
+            return None
         if not isinstance(clients, list):
-            return []
+            return None
         return [
             client
             for client in clients
-            if isinstance(client, dict)
-            and client.get("pid") == os.getpid()
-            and client.get("address")
+            if isinstance(client, dict) and client.get("address")
         ]
+
+    @classmethod
+    def _hyprland_own_clients(cls) -> list[dict]:
+        """Every window Hyprland has for this process; empty on failure."""
+        return [
+            client
+            for client in cls._hyprland_clients() or []
+            if client.get("pid") == os.getpid()
+        ]
+
+    # -- Keeping other people's windows maximised -----------------------
+    #
+    # Omarchy's floating workspaces (workspace-modes.lua,
+    # `unmaximize_others`) give a maximised window the workspace to itself
+    # only until another window opens there, then drop it back to its own
+    # size so the two can share. That is right for an application and wrong
+    # for the overlay, which is a picture of the desktop rather than a
+    # window on it: every snip shrank whatever was maximised on a floating
+    # workspace, on every monitor, and left it shrunk. The script asks no
+    # question a window rule could answer -- it leaves out neither pinned
+    # nor floating windows -- so the windows are put back instead, behind
+    # the overlay, before anyone can see they moved.
+
+    # How long a list of maximised windows read beside the screenshot stays
+    # good for the overlays shown straight after it.
+    _MAXIMISED_SNAPSHOT_TTL_S = 1.0
+    # How often Hyprland is asked whether the surfaces have mapped, how
+    # long to go on asking, and how long to keep watching once they have.
+    _MAXIMISED_POLL_S = 0.02
+    _MAXIMISED_WAIT_S = 1.5
+    _MAXIMISED_SETTLE_S = 0.2
+    _maximised_lock = threading.Lock()
+    _maximised_watch: dict | None = None
+    _prefetched_maximised: tuple[float, dict[str, int]] | None = None
+
+    @staticmethod
+    def _workspace_id(client: dict) -> int | None:
+        workspace = client.get("workspace")
+        return workspace.get("id") if isinstance(workspace, dict) else None
+
+    def _maximised_windows(self) -> dict[str, int] | None:
+        """The address of every maximised window and the workspace it is
+        on; None when Hyprland could not be asked. Maximised is fullscreen
+        mode 1 -- a window in true fullscreen is left alone by Omarchy."""
+        clients = self._hyprland_clients()
+        if clients is None:
+            return None
+        return {
+            client["address"]: self._workspace_id(client)
+            for client in clients
+            if client.get("fullscreen") == 1
+        }
+
+    def keep_others_maximised(self, widget) -> None:
+        """Hyprland: put back any window the desktop un-maximises because
+        `widget` opened. Called as each overlay or recording surface is
+        about to map, with its title already set.
+
+        The windows are noted before the surface maps and looked at again
+        once Hyprland lists it; whichever of them is no longer maximised is
+        maximised again. Asking and waiting happen on a thread: each
+        question is a ~4ms `hyprctl` spawn, and there are several. Nothing
+        is started when nothing is maximised, which is most snips.
+        """
+        if not self._on_hyprland_wayland():
+            return
+        title = widget.windowTitle()
+        if not title:
+            return
+        with self._maximised_lock:
+            watch = self._maximised_watch
+            if watch is not None:
+                # The overlays of one snip are shown back to back: they
+                # share the list read before the first of them mapped.
+                watch["titles"].add(title)
+                return
+            before = None
+            prefetched, self._prefetched_maximised = self._prefetched_maximised, None
+            if (
+                prefetched is not None
+                and time.monotonic() - prefetched[0] < self._MAXIMISED_SNAPSHOT_TTL_S
+            ):
+                before = prefetched[1]
+            if before is None:
+                before = self._maximised_windows()
+            if not before:
+                return
+            watch = {"before": before, "titles": {title}}
+            self._maximised_watch = watch
+        threading.Thread(
+            target=self._watch_maximised,
+            args=(watch,),
+            name="snipux-keep-maximised",
+            daemon=True,
+        ).start()
+
+    def _watch_maximised(self, watch: dict) -> None:
+        """Until every surface of `watch` has mapped, and for a moment
+        after, re-maximise what their opening un-maximised."""
+        deadline = time.monotonic() + self._MAXIMISED_WAIT_S
+        settled_at = None
+        try:
+            while True:
+                with self._maximised_lock:
+                    titles = set(watch["titles"])
+                mapped = self._restore_maximised(watch["before"], titles)
+                now = time.monotonic()
+                with self._maximised_lock:
+                    if mapped and titles == watch["titles"]:
+                        settled_at = settled_at or now
+                    else:
+                        settled_at = None
+                    if now >= deadline or (
+                        settled_at is not None
+                        and now - settled_at >= self._MAXIMISED_SETTLE_S
+                    ):
+                        # Cleared under the lock that adds a title, so a
+                        # surface shown now starts a watch of its own.
+                        self._maximised_watch = None
+                        return
+                time.sleep(self._MAXIMISED_POLL_S)
+        except Exception:  # noqa: BLE001 - tidying the desktop must never take a snip down
+            with self._maximised_lock:
+                self._maximised_watch = None
+
+    def _restore_maximised(self, before: dict[str, int], titles: set[str]) -> bool:
+        """One look: True once Hyprland lists every surface in `titles`,
+        having re-maximised each window of `before` that no longer is.
+
+        Nothing is touched until then -- Omarchy un-maximises as a surface
+        maps, so maximising any sooner would only be undone. A window that
+        has since closed or moved to another workspace is left as it is.
+        """
+        clients = self._hyprland_clients()
+        if clients is None:
+            return False
+        mapped = {
+            client.get("title")
+            for client in clients
+            if client.get("pid") == os.getpid() and client.get("mapped", True)
+        }
+        if not titles <= mapped:
+            return False
+        for client in clients:
+            address = client["address"]
+            if (
+                address in before
+                and client.get("fullscreen") == 0
+                and self._workspace_id(client) == before[address]
+            ):
+                self._hyprctl_eval(
+                    "hl.dispatch(hl.dsp.window.fullscreen({ mode = 'maximized', "
+                    f"action = 'set', window = {json.dumps('address:' + address)} }}))"
+                )
+        return True
 
     def _hyprland_window_of(self, widget) -> dict | None:
         """Hyprland's record of `widget`, or None when it cannot be told
@@ -590,6 +744,11 @@ class LinuxPlatform(Platform):
             active_window = getattr(geometry_provider, "active_window", None)
             if callable(active_window):
                 active_window()
+            # Read here because nothing of Snipux's is on screen yet: once
+            # an overlay maps, Omarchy has already un-maximised them.
+            maximised = self._maximised_windows()
+            if maximised is not None:
+                self._prefetched_maximised = (time.monotonic(), maximised)
         except Exception:  # noqa: BLE001 - a head start, never worth failing a snip for
             pass
 
@@ -874,6 +1033,9 @@ class LinuxPlatform(Platform):
         flags |= Qt.WindowType.Window
         widget.setWindowFlags(flags)
         widget.setWindowTitle(title)
+        # The outline and the bar are surfaces like the overlay: opening
+        # one must not resize the windows about to be filmed.
+        self.keep_others_maximised(widget)
         return True
 
     def uses_single_recording_frame_window(self) -> bool:

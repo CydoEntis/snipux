@@ -3681,6 +3681,10 @@ class OverlayWindow(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        # Every show, not only the first: a delayed snip hides the overlay
+        # and maps it again, and the desktop reacts to that as it did to
+        # the first.
+        platform.current.keep_others_maximised(self)
         if not self._session_active:
             self.set_session_active(False)
             return
