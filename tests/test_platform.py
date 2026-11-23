@@ -1023,6 +1023,11 @@ class TestSkipMapAnimation:
             return SimpleNamespace(returncode=0, stdout=replies.pop(0), stderr="")
 
         monkeypatch.setattr(linux.subprocess, "run", run)
+        # Qt's own word on whether a key focus arrived; the offscreen
+        # platform has no compositor to hand one out.
+        monkeypatch.setattr(
+            linux.LinuxPlatform, "_has_keyboard", staticmethod(lambda: True)
+        )
         return platform_impl, timers, calls
 
     def _overlay_widget(self, title):
@@ -1065,8 +1070,76 @@ class TestSkipMapAnimation:
         timers.pop()()
         assert len(timers) == 1
         timers.pop()()  # mapped: focused, so no further retry
+        timers.pop()()  # and the keyboard arrived: nothing more to ask
 
         assert len(calls) == 3 and timers == []
+
+    def test_hyprland_asks_again_once_another_programs_menu_lets_go(self, monkeypatch):
+        platform_impl, timers, calls = self._focus_rig(monkeypatch, ["ok"] * 4)
+        has_keyboard = [False]
+        monkeypatch.setattr(
+            linux.LinuxPlatform, "_has_keyboard", staticmethod(lambda: has_keyboard[0])
+        )
+        platform_impl.take_keyboard_focus(self._overlay_widget("snipux-capture-overlay-DP_1"))
+        timers.pop()()  # Hyprland says "ok" -- and the open menu keeps the keys
+
+        # No key focus has reached Qt, so it is asked for again, and again.
+        timers.pop()()
+        timers.pop()()
+        assert len(calls) == 3 and len(timers) == 1
+        assert all("hl.dsp.focus" in argv[2] and "DP_1$" in argv[2] for argv in calls)
+
+        # The menu closes; this ask is the one that lands.
+        has_keyboard[0] = True
+        timers.pop()()
+
+        # Then it stops, so a window the user turns to keeps the keyboard.
+        assert len(calls) == 3 and timers == []
+
+    def test_hyprland_stops_asking_when_the_overlay_closes(self, monkeypatch):
+        platform_impl, timers, calls = self._focus_rig(monkeypatch, ["ok"] * 4)
+        monkeypatch.setattr(
+            linux.LinuxPlatform, "_has_keyboard", staticmethod(lambda: False)
+        )
+        widget = self._overlay_widget("snipux-capture-overlay-DP_1")
+        platform_impl.take_keyboard_focus(widget)
+        timers.pop()()
+        timers.pop()()
+        assert len(calls) == 2
+
+        widget.hide()
+        timers.pop()()
+
+        assert len(calls) == 2 and timers == []
+
+    def test_hyprland_does_not_ask_for_the_keyboard_for_ever(self, monkeypatch):
+        platform_impl, timers, calls = self._focus_rig(monkeypatch, ["ok"] * 1000)
+        monkeypatch.setattr(
+            linux.LinuxPlatform, "_has_keyboard", staticmethod(lambda: False)
+        )
+        platform_impl.take_keyboard_focus(self._overlay_widget("snipux-capture-overlay-DP_1"))
+
+        while timers:
+            timers.pop()()
+
+        assert len(calls) == 1 + linux.LinuxPlatform._FOCUS_RETAKE_TRIES
+
+    def test_a_second_snip_starts_its_own_asking(self, monkeypatch):
+        platform_impl, timers, calls = self._focus_rig(monkeypatch, ["ok"] * 4)
+        first = self._overlay_widget("snipux-capture-overlay-DP_1")
+        platform_impl.take_keyboard_focus(first)
+        while timers:
+            timers.pop()()
+        first.hide()
+
+        monkeypatch.setattr(
+            linux.LinuxPlatform, "_has_keyboard", staticmethod(lambda: False)
+        )
+        platform_impl.take_keyboard_focus(self._overlay_widget("snipux-capture-overlay-DP_2"))
+        timers.pop()()
+        timers.pop()()
+
+        assert "DP_2$" in calls[-1][2] and len(calls) == 3
 
     def test_hyprland_gives_up_asking_for_a_window_that_never_maps(self, monkeypatch):
         replies = ["warning: hl.focus: window not found"] * 40

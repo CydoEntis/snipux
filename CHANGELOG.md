@@ -5,6 +5,15 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **The keyboard works after snipping an open menu.** On Omarchy, taking a
+  snip while another program had a menu or dropdown open left every key
+  going to that program: Esc closed its menu, then nothing Snipux listens
+  for did anything until you clicked on the snip. Snipux now takes the
+  keyboard as soon as that menu closes. The first key still goes to the
+  menu -- nothing can take the keyboard from an open one.
+
 ## 1.4.1 — 2026-11-23
 
 ### Added
