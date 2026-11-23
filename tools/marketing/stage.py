@@ -89,7 +89,10 @@ def isolate_snipux(stage: Stage, replace=setattr) -> None:
     # this probe; Linux asks GNOME by name, stubbed on the next line.
     if hasattr(platform.current, "find_shortcut_conflict"):
         replace(platform.current, "find_shortcut_conflict", lambda shortcut: None)
-    replace(setup_desktop, "find_shortcut_conflicts_named", lambda shortcut: [])
+    replace(setup_desktop, "find_shortcut_conflicts_named", lambda shortcut, own_slot=None: [])
+    # And never Hyprland's check, which reads the person's own bindings
+    # file: a shot taken on a Hyprland desk must look like any other.
+    replace(setup_desktop, "is_hyprland_session", lambda: False)
     # A shot's Copy must not land on the person's clipboard (wl-copy on
     # Linux reaches the real one even from an offscreen Qt). These three
     # are every clipboard write snipux makes; app.py imports them by name,

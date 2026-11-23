@@ -68,11 +68,15 @@ class Platform(ABC):
     """
 
     @abstractmethod
-    def install_desktop_integration(self, *, shortcut: str | None = None) -> int:
+    def install_desktop_integration(
+        self, *, shortcut: str | None = None, record_shortcut: str | None = None
+    ) -> int:
         """Set up whatever makes an installed snipux launchable and
         discoverable outside a terminal. `shortcut`, if given, is bound
-        (and remembered) instead of whatever default applies. Returns a
-        process exit code: 0 on success.
+        (and remembered) instead of whatever default applies;
+        `record_shortcut` is the same for the shortcut that starts a
+        recording, and "off" turns that one off. Returns a process exit
+        code: 0 on success.
         """
 
     @abstractmethod
@@ -103,6 +107,22 @@ class Platform(ABC):
     @abstractmethod
     def unbind_shortcut(self) -> str:
         """The counterpart to `bind_shortcut()`. Returns a one-line,
+        human-readable report; never raises.
+        """
+
+    @abstractmethod
+    def bind_record_shortcut(self, shortcut: str | None = None) -> str:
+        """(Re)bind the global shortcut that opens the overlay on its
+        record side -- `bind_shortcut()`'s twin, held separately so
+        neither can replace the other. `shortcut` defaults to whatever is
+        remembered; when that is nothing (the user turned it off), whatever
+        was bound for it is released. Returns a one-line, human-readable
+        report; never raises.
+        """
+
+    @abstractmethod
+    def unbind_record_shortcut(self) -> str:
+        """The counterpart to `bind_record_shortcut()`. Returns a one-line,
         human-readable report; never raises.
         """
 

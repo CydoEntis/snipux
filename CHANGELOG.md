@@ -5,6 +5,28 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Added
+
+- **A shortcut that goes straight to recording.** **Ctrl+Alt+R** opens the
+  same overlay as Ctrl+Alt+S with the row at the top already switched to
+  Record: drag a region and it is armed to record, instead of being taken
+  as a screenshot. Nothing records until you press Record, the same as
+  when you flip the switch yourself, and while a recording is running
+  either shortcut stops it. Pressed over an overlay that is already open,
+  it flips that overlay to Record. Change the key under **Record shortcut**
+  in Settings, or press **Clear** there to have no record shortcut at all;
+  `snipux --setup --record-shortcut 'Super+Shift+V'` (or `off`) does the
+  same from a terminal, and `snipux --record` is what the key runs. The two
+  shortcuts cannot be the same combination, and Snipux will not bind the
+  record shortcut over a key something else already holds -- your own
+  Hyprland bindings, one of Omarchy's defaults, another GNOME shortcut --
+  it tells you and leaves that binding alone. **If you already have Snipux
+  installed, updating does not bind the new key by itself** on Linux: open
+  Settings and press Save, or run `snipux --setup`, and Ctrl+Alt+R works
+  from then on. On Windows it is registered the next time Snipux starts;
+  on a keyboard layout with AltGr, AltGr+R fires it too, so pick another
+  combination or clear it if that gets in the way of typing.
+
 ## 1.4.1 — 2026-11-23
 
 ### Added

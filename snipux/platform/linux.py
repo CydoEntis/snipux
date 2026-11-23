@@ -52,8 +52,12 @@ if TYPE_CHECKING:
 
 
 class LinuxPlatform(Platform):
-    def install_desktop_integration(self, *, shortcut: str | None = None) -> int:
-        return setup_desktop.run_setup(shortcut=shortcut)
+    def install_desktop_integration(
+        self, *, shortcut: str | None = None, record_shortcut: str | None = None
+    ) -> int:
+        if record_shortcut is None:
+            return setup_desktop.run_setup(shortcut=shortcut)
+        return setup_desktop.run_setup(shortcut=shortcut, record_shortcut=record_shortcut)
 
     def install_editor_integration(self) -> int:
         return setup_desktop.install_editor_entries()
@@ -76,6 +80,20 @@ class LinuxPlatform(Platform):
 
     def unbind_shortcut(self) -> str:
         return setup_desktop.unbind_linux_shortcut()
+
+    def bind_record_shortcut(self, shortcut: str | None = None) -> str:
+        exec_path = setup_desktop.find_console_script()
+        if exec_path is None:
+            return (
+                "Settings saved, but the snipux console script could not be "
+                "found, so the record shortcut was not re-bound."
+            )
+        return setup_desktop.bind_linux_shortcut(
+            exec_path, shortcut, action=setup_desktop.RECORD
+        )
+
+    def unbind_record_shortcut(self) -> str:
+        return setup_desktop.unbind_linux_shortcut(action=setup_desktop.RECORD)
 
     def default_save_folder(self) -> Path:
         return setup_desktop.default_save_folder()

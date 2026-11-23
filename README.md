@@ -50,7 +50,8 @@ free, on Linux too — and a slightly better one back on Windows.
 - **Watermark** — stamp text or an image in a corner of every capture.
 - **Keep the pointer out of a recording** — or in it, decided on the same row
   you pick the region on *(Linux; Windows' recorder has no cursor option)*.
-- **One shortcut** — Ctrl+Alt+S, on both platforms.
+- **Two shortcuts** — Ctrl+Alt+S to snip and Ctrl+Alt+R to record, on both
+  platforms. Change either, or turn the second one off.
 
 MIT licensed. Install it with the Windows installer, a `.deb`, an
 AppImage, or `pip install snipux` — see [Install](#install). What changed in
@@ -443,6 +444,44 @@ it. That warning only sees GNOME's own shortcuts — an application that grabs a
 key directly owns it just as effectively and can't be detected, so "No GNOME
 shortcut uses this" is not a promise the key is free.
 
+#### The record shortcut
+
+A second shortcut, **Ctrl+Alt+R** by default, opens the same overlay with the
+chooser row already switched to Record: drag a region and it is armed to record
+instead of being taken as a screenshot. Nothing starts recording until you press
+Record, exactly as when you flip the switch yourself. While a recording is
+running, either shortcut stops it.
+
+| | Default | What it runs |
+|---|---|---|
+| Snip | Ctrl+Alt+S | `snipux --snip` |
+| Record | Ctrl+Alt+R | `snipux --record` |
+
+Change it under **Record shortcut** in Settings, or turn it off with **Clear**
+— recording is still one click away on the overlay. From a terminal:
+
+```sh
+snipux --setup --record-shortcut 'Super+Shift+V'
+snipux --setup --record-shortcut off
+```
+
+It is held separately from the snip shortcut — its own block in Hyprland's
+`bindings.lua`, its own GNOME custom-keybinding slot, its own registration on
+Windows — so changing or removing one never touches the other. The two cannot
+share a combination, and Snipux will not bind the record shortcut over a key
+something else already holds: a line of your own in the Hyprland config, one of
+Omarchy's default bindings, or another GNOME shortcut. It says so and leaves
+that binding alone.
+
+**Upgrading from a version without it:** an update does not bind a new key on
+its own. Open Settings and press Save, or run `snipux --setup`, and the record
+shortcut is bound from then on. On Windows it is registered the next time
+Snipux starts.
+
+On Windows, keyboard layouts with AltGr (German, French, Polish and others)
+type AltGr as Ctrl+Alt, so AltGr+R fires Ctrl+Alt+R. If that gets in the way of
+typing, pick another combination or clear it.
+
 No tray icon? `snipux --settings` opens the same window.
 
 ## Using Snipux
@@ -524,7 +563,8 @@ empty, with an Open… button and a place to drop a file.
 
 ## Recording
 
-Switch the chooser row from snipping to recording and the same selection you'd
+Switch the chooser row from snipping to recording — or press **Ctrl+Alt+R**,
+which opens the overlay with that switch already flipped — and the same selection you'd
 have screenshotted becomes the thing that gets filmed. Region, Window and Full
 screen all record.
 
@@ -665,12 +705,14 @@ before adding the log.
 | `snipux` | Start the resident/tray instance (or forward a snip request to one already running) |
 | `snipuxw` | The same, with no console window. On Windows this is what the Start Menu and Startup entries run, and what a bare `snipux` starts before giving the terminal back — so closing the terminal does not close Snipux |
 | `snipux --snip` | Ask the running instance to start a capture, starting one first if needed. This is what the shortcut runs |
+| `snipux --record` | The same, with the overlay already switched to Record. This is what the record shortcut runs |
 | `snipux --settings` | Open Settings — the way in on a machine with no tray icon |
 | `snipux FILE` | Open FILE in its editor: a recording (`.mp4`, `.webm`, `.mkv`, `.mov`) in the player, an image in the review window |
 | `snipux --image-editor` | Open the image editor empty, to open or drop an image into |
 | `snipux --video-editor` | Open the video editor (the player) empty, to open or drop a recording into |
 | `snipux --setup` | Install desktop integration — including the two editors' app-menu entries and "Open with" — without setting Snipux as the default app for anything. Safe to re-run |
 | `snipux --setup --shortcut '…'` | Same, binding a specific accelerator and remembering it |
+| `snipux --setup --record-shortcut '…'` | Same, for the record shortcut. `off` leaves recording without one |
 | `snipux --remove` | Undo everything `--setup` wrote |
 | `snipux --update` | Fetch and install the newest Snipux from PyPI, then say what to restart. `py -m snipux --update` is the same thing where `PATH` has no `snipux` on it |
 | `snipux --list-backends` | Print every capture *and* recording backend, its availability, and why the unavailable ones aren't |

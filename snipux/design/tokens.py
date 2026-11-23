@@ -632,6 +632,8 @@ GNOME_KNOWN = {
 }
 
 SHORTCUT_DEFAULT = "Control+Alt+S"
+# The second global shortcut: the same overlay, opened on the record side.
+RECORD_SHORTCUT_DEFAULT = "Control+Alt+R"
 
 # Delay: the trigger's label when nothing is set, which is also the stored
 # value. It was "No delay" on the trigger and "Off" in `DELAYS`, so the

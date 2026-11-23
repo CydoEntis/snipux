@@ -1177,6 +1177,8 @@ class TestStubPlatforms:
         "remove_desktop_integration",
         "bind_shortcut",
         "unbind_shortcut",
+        "bind_record_shortcut",
+        "unbind_record_shortcut",
         "default_save_folder",
         "build_recording_registry",
     )
@@ -3717,3 +3719,396 @@ class TestHyprlandTreatsSnipuxWindowsAsItsOwn:
 
         assert platform_impl.minimise(widget) is True
         assert calls[-1] == ["omarchy-hyprland-window-minimize", "0xabc"]
+
+
+
+class TestLinuxRecordShortcut:
+    """`LinuxPlatform` hands the record shortcut to `setup_desktop` with
+    its own action, so it lands in its own Hyprland block or GNOME slot.
+    """
+
+    def test_bind_delegates_with_the_record_action(self, monkeypatch):
+        monkeypatch.setattr(
+            setup_desktop, "find_console_script", lambda: Path("/opt/snipux/bin/snipux")
+        )
+        calls = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "bind_linux_shortcut",
+            lambda exec_path, shortcut=None, **kwargs: calls.append(
+                (exec_path, shortcut, kwargs)
+            ) or "bound",
+        )
+
+        assert linux.LinuxPlatform().bind_record_shortcut("Control+Alt+V") == "bound"
+        assert calls == [
+            (Path("/opt/snipux/bin/snipux"), "Control+Alt+V", {"action": setup_desktop.RECORD})
+        ]
+
+    def test_bind_with_no_shortcut_leaves_the_remembered_one_to_be_looked_up(self, monkeypatch):
+        monkeypatch.setattr(
+            setup_desktop, "find_console_script", lambda: Path("/opt/snipux/bin/snipux")
+        )
+        calls = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "bind_linux_shortcut",
+            lambda exec_path, shortcut=None, **kwargs: calls.append(shortcut) or "bound",
+        )
+
+        linux.LinuxPlatform().bind_record_shortcut()
+
+        assert calls == [None]
+
+    def test_bind_says_so_when_snipux_cannot_find_itself(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "find_console_script", lambda: None)
+        monkeypatch.setattr(
+            setup_desktop,
+            "bind_linux_shortcut",
+            lambda *args, **kwargs: pytest.fail("bound with nothing to run"),
+        )
+
+        message = linux.LinuxPlatform().bind_record_shortcut()
+
+        assert "record shortcut was not re-bound" in message
+
+    def test_unbind_delegates_with_the_record_action(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "unbind_linux_shortcut",
+            lambda **kwargs: calls.append(kwargs) or "unbound",
+        )
+
+        assert linux.LinuxPlatform().unbind_record_shortcut() == "unbound"
+        assert calls == [{"action": setup_desktop.RECORD}]
+
+    def test_the_snip_shortcut_is_still_bound_the_way_it_was(self, monkeypatch):
+        monkeypatch.setattr(
+            setup_desktop, "find_console_script", lambda: Path("/opt/snipux/bin/snipux")
+        )
+        calls = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "bind_linux_shortcut",
+            lambda *args, **kwargs: calls.append((args, kwargs)) or "bound",
+        )
+
+        linux.LinuxPlatform().bind_shortcut("Alt+Print")
+
+        [(args, kwargs)] = calls
+        assert "action" not in kwargs
+
+    def test_setup_passes_a_record_shortcut_only_when_one_was_given(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            setup_desktop, "run_setup", lambda **kwargs: calls.append(kwargs) or 0
+        )
+
+        linux.LinuxPlatform().install_desktop_integration()
+        linux.LinuxPlatform().install_desktop_integration(record_shortcut="off")
+
+        assert calls == [
+            {"shortcut": None},
+            {"shortcut": None, "record_shortcut": "off"},
+        ]
+
+
+class TestWindowsRecordShortcut:
+    """The second `RegisterHotKey`, under an id of its own, so the two
+    shortcuts are held, rebound and released independently.
+    """
+
+    _MOD_CONTROL = 0x0002
+    _MOD_ALT = 0x0001
+    _MOD_NOREPEAT = 0x4000
+    _SNIP_ID = 1
+    _PROBE_ID = 2
+    _RECORD_ID = 3
+
+    def test_its_id_is_neither_the_snip_shortcuts_nor_the_probes(self):
+        assert windows._RECORD_HOTKEY_ID == self._RECORD_ID
+        assert windows._HOTKEY_ID == self._SNIP_ID
+        assert windows._CONFLICT_PROBE_ID == self._PROBE_ID
+
+    def test_binds_the_default_under_its_own_id(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+
+        result = platform_.bind_record_shortcut()
+
+        assert result == "Bound Control+Alt+R to start a recording."
+        assert user32.registered == [
+            (self._RECORD_ID, self._MOD_CONTROL | self._MOD_ALT | self._MOD_NOREPEAT, ord("R"))
+        ]
+        assert platform_.registered_record_shortcut == "Control+Alt+R"
+        # The snip shortcut's own record is untouched by it.
+        assert platform_.registered_shortcut is None
+
+    def test_both_are_held_at_once(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+
+        platform_.bind_shortcut()
+        platform_.bind_record_shortcut()
+
+        assert [(id_, vk) for id_, _mod, vk in user32.registered] == [
+            (self._SNIP_ID, ord("S")),
+            (self._RECORD_ID, ord("R")),
+        ]
+        assert user32.unregistered == []
+
+    def test_rebinding_releases_only_its_own_registration(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_shortcut()
+        platform_.bind_record_shortcut()
+
+        platform_.bind_record_shortcut("Control+Alt+V")
+
+        assert user32.unregistered == [self._RECORD_ID]
+        assert platform_.registered_record_shortcut == "Control+Alt+V"
+        assert platform_.registered_shortcut == "Control+Alt+S"
+
+    def test_rebinding_the_snip_shortcut_leaves_it_alone(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_shortcut()
+        platform_.bind_record_shortcut()
+
+        platform_.bind_shortcut("Control+Alt+X")
+
+        assert user32.unregistered == [self._SNIP_ID]
+        assert platform_.registered_record_shortcut == "Control+Alt+R"
+
+    def test_unbind_releases_it_and_only_it(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_shortcut()
+        platform_.bind_record_shortcut()
+
+        result = platform_.unbind_record_shortcut()
+
+        assert result == "Released Control+Alt+R."
+        assert user32.unregistered == [self._RECORD_ID]
+        assert platform_.registered_record_shortcut is None
+        assert platform_.registered_shortcut == "Control+Alt+S"
+
+    def test_unbind_when_nothing_is_registered_does_not_touch_the_dll(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+
+        result = windows.WindowsPlatform().unbind_record_shortcut()
+
+        assert "No Snipux record shortcut is currently registered" in result
+        assert user32.unregistered == []
+
+    def test_unbind_failure_is_reported_rather_than_raised(self, monkeypatch):
+        user32 = _FakeUser32Hotkey(fail_unregister=True)
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_record_shortcut()
+
+        assert "Could not release" in platform_.unbind_record_shortcut()
+
+    def test_off_releases_what_was_held_and_registers_nothing(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_record_shortcut()
+        setup_desktop.save_record_shortcut(None)
+
+        result = platform_.bind_record_shortcut()
+
+        assert result == "The record shortcut is off."
+        assert user32.unregistered == [self._RECORD_ID]
+        assert len(user32.registered) == 1
+        assert platform_.registered_record_shortcut is None
+
+    def test_a_key_another_application_holds_is_reported(self, monkeypatch):
+        modifiers = self._MOD_CONTROL | self._MOD_ALT | self._MOD_NOREPEAT
+        user32 = _FakeUser32Hotkey(clashing={(modifiers, ord("R"))})
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+
+        result = platform_.bind_record_shortcut()
+
+        assert "Control+Alt+R is already in use by another application" in result
+        assert platform_.registered_record_shortcut is None
+
+    def test_the_snip_shortcuts_key_is_refused_by_name_without_asking_windows(
+        self, monkeypatch
+    ):
+        # Asked, Windows would say "already registered" -- true of our own
+        # registration, and read as somebody else's.
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_shortcut()
+        registered = list(user32.registered)
+
+        result = platform_.bind_record_shortcut("Control+Alt+S")
+
+        assert result == (
+            "Control+Alt+S is already the Snipux shortcut. "
+            "The record shortcut was not bound."
+        )
+        assert user32.registered == registered
+        assert platform_.registered_record_shortcut is None
+
+    def test_a_refused_rebind_does_not_leave_the_old_key_held(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_shortcut()
+        platform_.bind_record_shortcut()
+
+        platform_.bind_record_shortcut("Control+Alt+S")
+
+        assert user32.unregistered == [self._RECORD_ID]
+        assert platform_.registered_record_shortcut is None
+
+    def test_the_key_the_snip_shortcut_actually_holds_counts_not_only_the_stored_one(
+        self, monkeypatch
+    ):
+        # Bound this run to something the config does not say yet.
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_shortcut("Control+Alt+X")
+
+        result = platform_.bind_record_shortcut("Control+Alt+X")
+
+        assert "already the Snipux shortcut" in result
+        assert platform_.registered_record_shortcut is None
+
+    @pytest.mark.parametrize(
+        "shortcut,said",
+        [("R", "Could not bind the record shortcut"), ("Control+Alt+NotAKey", "not a key combination")],
+    )
+    def test_what_cannot_be_registered_is_reported_without_touching_the_dll(
+        self, monkeypatch, shortcut, said
+    ):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+
+        result = windows.WindowsPlatform().bind_record_shortcut(shortcut)
+
+        assert said in result
+        assert user32.registered == []
+
+    def test_the_record_shortcut_it_holds_is_not_a_conflict_with_itself(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_record_shortcut()
+        registered = list(user32.registered)
+
+        assert platform_.find_shortcut_conflict("Control+Alt+R") is None
+        # No probe was even attempted against our own registration.
+        assert user32.registered == registered
+
+    def test_probing_another_key_never_releases_it(self, monkeypatch):
+        user32 = _FakeUser32Hotkey()
+        _patch_windows_hotkey_dll(monkeypatch, user32)
+        platform_ = windows.WindowsPlatform()
+        platform_.bind_record_shortcut()
+
+        platform_.find_shortcut_conflict("Shift+F9")
+
+        assert user32.unregistered == [self._PROBE_ID]
+        assert platform_.registered_record_shortcut == "Control+Alt+R"
+
+    def test_setup_refuses_the_snip_shortcuts_key_before_doing_anything(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            windows,
+            "_launcher_for_integration",
+            lambda: pytest.fail("setup went on past a refused shortcut"),
+        )
+
+        exit_code = windows.WindowsPlatform().install_desktop_integration(
+            record_shortcut="Control+Alt+S"
+        )
+
+        assert exit_code == 1
+        assert "already the Snipux shortcut" in capsys.readouterr().err
+        assert setup_desktop.load_record_shortcut() == "Control+Alt+R"
+
+    def test_setup_remembers_off(self, monkeypatch):
+        # Stopped at the launcher, which is all this needs: what was asked
+        # for is remembered before anything is written.
+        monkeypatch.setattr(windows, "_launcher_for_integration", lambda: None)
+
+        windows.WindowsPlatform().install_desktop_integration(record_shortcut="off")
+
+        assert setup_desktop.load_record_shortcut() is None
+
+
+class TestHotkeyEventFilterTellsTheTwoApart:
+    """`WM_HOTKEY` carries the id a combination was registered under in
+    `wParam`. That is the only thing telling a record press from a snip.
+    """
+
+    @staticmethod
+    def _fire(filter_, w_param: int, message: int | None = None):
+        msg = windows._MSG(
+            message=windows._WM_HOTKEY if message is None else message, wParam=w_param
+        )
+        # `msg` stays referenced until the call returns, which is as long
+        # as its address has to mean anything.
+        return filter_.nativeEventFilter(b"windows_generic_MSG", ctypes.addressof(msg))
+
+    @staticmethod
+    def _filter():
+        calls = []
+        filter_ = windows.HotkeyEventFilter(
+            lambda: calls.append("snip"), lambda: calls.append("record")
+        )
+        return filter_, calls
+
+    def test_the_record_id_starts_a_recording(self):
+        filter_, calls = self._filter()
+
+        result = self._fire(filter_, windows._RECORD_HOTKEY_ID)
+
+        assert calls == ["record"]
+        # Never consumed, the same as a snip.
+        assert result == (False, 0)
+
+    def test_the_snip_id_starts_a_snip(self):
+        filter_, calls = self._filter()
+
+        self._fire(filter_, windows._HOTKEY_ID)
+
+        assert calls == ["snip"]
+
+    def test_any_other_id_is_a_snip_as_it_always_was(self):
+        filter_, calls = self._filter()
+
+        self._fire(filter_, 0)
+        self._fire(filter_, 99)
+
+        assert calls == ["snip", "snip"]
+
+    def test_with_no_record_callback_the_record_id_is_a_snip(self):
+        # A filter built the old way, with one callback.
+        calls = []
+        filter_ = windows.HotkeyEventFilter(lambda: calls.append("snip"))
+
+        self._fire(filter_, windows._RECORD_HOTKEY_ID)
+
+        assert calls == ["snip"]
+
+    def test_another_message_with_the_record_id_in_wparam_is_ignored(self):
+        filter_, calls = self._filter()
+
+        self._fire(filter_, windows._RECORD_HOTKEY_ID, message=0x0010)  # WM_CLOSE
+
+        assert calls == []

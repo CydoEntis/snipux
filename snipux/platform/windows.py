@@ -158,9 +158,9 @@ _WDA_EXCLUDEFROMCAPTURE = 0x00000011
 _WM_HOTKEY = 0x0312
 _ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 
-# snipux only ever holds one hotkey registration at a time, so a single,
-# fixed id is enough -- RegisterHotKey's id only has to be unique within
-# this process, not system-wide.
+# One fixed id per shortcut snipux holds -- RegisterHotKey's id only has to
+# be unique within this process, not system-wide. WM_HOTKEY carries the id
+# back in wParam, which is how the two are told apart when one fires.
 _HOTKEY_ID = 1
 
 # find_shortcut_conflict()'s own id, distinct from _HOTKEY_ID above: the
@@ -168,6 +168,10 @@ _HOTKEY_ID = 1
 # whether Windows refuses it, and must never touch the real, held
 # registration bind_shortcut() already owns under _HOTKEY_ID while doing so.
 _CONFLICT_PROBE_ID = 2
+
+# The record shortcut's registration, held beside the snip one's. Not 2:
+# that is the probe's, and the probe registers and releases at will.
+_RECORD_HOTKEY_ID = 3
 
 # dwmapi.h's DWMWINDOWATTRIBUTE value for "never animate this window".
 _DWMWA_TRANSITIONS_FORCEDISABLED = 3
@@ -1145,9 +1149,14 @@ class HotkeyEventFilter(QAbstractNativeEventFilter):
     start_capture`) has anywhere else to `connect()` it from.
     """
 
-    def __init__(self, on_triggered: Callable[[], None]):
+    def __init__(
+        self,
+        on_triggered: Callable[[], None],
+        on_record_triggered: Callable[[], None] | None = None,
+    ):
         super().__init__()
         self._on_triggered = on_triggered
+        self._on_record_triggered = on_record_triggered
 
     @staticmethod
     def is_available() -> bool:
@@ -1158,7 +1167,13 @@ class HotkeyEventFilter(QAbstractNativeEventFilter):
             return False, 0
         msg = ctypes.cast(int(message), ctypes.POINTER(_MSG)).contents
         if msg.message == _WM_HOTKEY:
-            self._on_triggered()
+            # wParam is the id the combination was registered under. Only
+            # the record shortcut's own id is singled out, so anything else
+            # stays what it always was: a snip.
+            if msg.wParam == _RECORD_HOTKEY_ID and self._on_record_triggered is not None:
+                self._on_record_triggered()
+            else:
+                self._on_triggered()
         # Never consumes the message (False): WM_HOTKEY has no other
         # handler in this process, but deciding that is not this filter's
         # job -- Qt (and whatever else might also be filtering) still gets
@@ -1173,8 +1188,12 @@ class WindowsPlatform(Platform):
         # rebind (Settings' Save button) knows to release the old
         # combination first rather than leaving it also held.
         self.registered_shortcut: str | None = None
+        # The same record for the record shortcut, under its own id.
+        self.registered_record_shortcut: str | None = None
 
-    def install_desktop_integration(self, *, shortcut: str | None = None) -> int:
+    def install_desktop_integration(
+        self, *, shortcut: str | None = None, record_shortcut: str | None = None
+    ) -> int:
         """`snipux --setup` on Windows (SNX-92): a Start Menu shortcut, a
         second copy of it in the per-user Startup folder, and a `.ico`
         built from the vendored PNGs for both to point at -- the Windows
@@ -1253,6 +1272,10 @@ class WindowsPlatform(Platform):
                     "it will be bound this run, but a future --setup will revert it.",
                     to_stderr=True,
                 )
+        problem = setup_desktop.remember_record_shortcut(record_shortcut)
+        if problem is not None:
+            print(f"error: {problem}", file=sys.stderr)
+            return 1
 
         exec_path = _launcher_for_integration()
         if exec_path is None:
@@ -1461,6 +1484,73 @@ class WindowsPlatform(Platform):
             return f"Could not release {setup_desktop.human_shortcut(shortcut)}."
         return f"Released {setup_desktop.human_shortcut(shortcut)}."
 
+    def bind_record_shortcut(self, shortcut: str | None = None) -> str:
+        """`bind_shortcut()` for the shortcut that starts a recording: a
+        second `RegisterHotKey`, under `_RECORD_HOTKEY_ID`, so the two are
+        held, rebound and released independently.
+
+        `shortcut` defaults to what `setup_desktop.load_record_shortcut()`
+        remembers; when that is nothing -- the user turned it off -- the
+        registration is released and nothing new is made. A combination
+        that is already the snip shortcut is refused here by name: asked,
+        Windows would only say "already registered", which is true of our
+        own registration and reads as somebody else's.
+        """
+        if shortcut is None:
+            shortcut = setup_desktop.load_record_shortcut()
+        if shortcut is None:
+            self.unbind_record_shortcut()
+            return "The record shortcut is off."
+
+        problem = setup_desktop.validate_shortcut(shortcut)
+        if problem is not None:
+            return f"Could not bind the record shortcut: {problem}"
+        readable = setup_desktop.human_shortcut(shortcut)
+
+        clash = setup_desktop.shortcut_clash(shortcut, setup_desktop.RECORD)
+        if clash is None and self.registered_shortcut is not None:
+            if setup_desktop.normalise_shortcut(
+                self.registered_shortcut
+            ) == setup_desktop.normalise_shortcut(shortcut):
+                clash = f"{readable} is already the Snipux shortcut."
+        if clash is not None:
+            self.unbind_record_shortcut()
+            return f"{clash} The record shortcut was not bound."
+
+        translated = _accelerator_to_win32(shortcut)
+        if translated is None:
+            return (
+                f"'{readable}' is not a key combination Snipux can register "
+                "on Windows."
+            )
+
+        self.unbind_record_shortcut()
+
+        modifiers, vk = translated
+        if not ctypes.windll.user32.RegisterHotKey(None, _RECORD_HOTKEY_ID, modifiers, vk):
+            error = ctypes.GetLastError()
+            if error == _ERROR_HOTKEY_ALREADY_REGISTERED:
+                return (
+                    f"{readable} is already in use by another application -- "
+                    "Snipux cannot use it to start a recording."
+                )
+            return f"Could not bind {readable} (Windows error {error})."
+
+        self.registered_record_shortcut = shortcut
+        return f"Bound {readable} to start a recording."
+
+    def unbind_record_shortcut(self) -> str:
+        """Release the record shortcut's registration, if there is one --
+        `unbind_shortcut()` for `_RECORD_HOTKEY_ID`."""
+        if self.registered_record_shortcut is None:
+            return "No Snipux record shortcut is currently registered."
+
+        shortcut = self.registered_record_shortcut
+        self.registered_record_shortcut = None
+        if not ctypes.windll.user32.UnregisterHotKey(None, _RECORD_HOTKEY_ID):
+            return f"Could not release {setup_desktop.human_shortcut(shortcut)}."
+        return f"Released {setup_desktop.human_shortcut(shortcut)}."
+
     def set_app_identity(self) -> None:
         """`SetCurrentProcessExplicitAppUserModelID`, so the taskbar shows
         Snipux's window icon instead of pythonw.exe's. Must run before the
@@ -1500,11 +1590,12 @@ class WindowsPlatform(Platform):
             return None
         if normalised == _SNIPPING_TOOL_SHORTCUT:
             return "the Windows Snipping Tool"
-        if (
-            self.registered_shortcut is not None
-            and setup_desktop.normalise_shortcut(self.registered_shortcut) == normalised
-        ):
-            return None
+        # Either of the two: the probe would find our own registration
+        # and call it another application's. Whether the two clash with
+        # each other is Settings' question, asked before this one.
+        for held in (self.registered_shortcut, self.registered_record_shortcut):
+            if held is not None and setup_desktop.normalise_shortcut(held) == normalised:
+                return None
 
         translated = _accelerator_to_win32(shortcut)
         if translated is None:

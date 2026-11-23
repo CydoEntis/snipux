@@ -260,11 +260,64 @@ def disconnect_quit_time_unbind() -> None:
     application = QCoreApplication.instance()
     if application is None:
         return
-    while True:
-        try:
-            application.aboutToQuit.disconnect(platform.current.unbind_shortcut)
-        except (TypeError, RuntimeError):
-            return   # not connected (any more)
+    # Both: the record shortcut's unbind is connected beside the snip one's.
+    for name in ("unbind_shortcut", "unbind_record_shortcut"):
+        while True:
+            try:
+                application.aboutToQuit.disconnect(getattr(platform.current, name))
+            except (TypeError, RuntimeError, AttributeError):
+                break   # not connected (any more)
+
+
+@pytest.fixture(autouse=True)
+def _no_omarchy_defaults():
+    """Every test starts on a machine with no Omarchy default bindings.
+
+    A Hyprland bind is refused when one of Omarchy's own binds already
+    holds the key, and those are read from `/usr/share/omarchy`, which an
+    Omarchy desk has and CI does not. A test that is about them points
+    `_OMARCHY_BINDINGS_DIR` at a folder of its own.
+    """
+    real = setup_desktop._OMARCHY_BINDINGS_DIR
+    setup_desktop._OMARCHY_BINDINGS_DIR = Path("no-omarchy-bindings-here")
+    try:
+        yield
+    finally:
+        setup_desktop._OMARCHY_BINDINGS_DIR = real
+
+
+@pytest.fixture(autouse=True)
+def _no_real_record_shortcut():
+    """Every test starts with the record shortcut's bind and unbind inert
+    on `platform.current`.
+
+    The controller binds it wherever it binds the snip shortcut -- at
+    startup on Windows, on Save in Settings, on an upgrade -- and the many
+    tests that stub `bind_shortcut` to keep off the real OS were written
+    before there was a second one to stub. Left real, each of them would
+    make a genuine `RegisterHotKey` on a Windows runner, or write a
+    Hyprland bind and reload the compositor on a developer's desk.
+
+    Only the instance `platform.current`: a test of the real thing builds
+    its own `LinuxPlatform()`/`WindowsPlatform()`, as test_platform.py
+    does, or sets its own stub over this one. By hand rather than through
+    `monkeypatch`, for the teardown-ordering reason `_isolated_config`
+    gives.
+    """
+    from snipux import platform
+
+    current = platform.current
+    names = ("bind_record_shortcut", "unbind_record_shortcut", "registered_record_shortcut")
+    before = {name: current.__dict__[name] for name in names if name in current.__dict__}
+    current.bind_record_shortcut = lambda shortcut=None: ""
+    current.unbind_record_shortcut = lambda: ""
+    current.registered_record_shortcut = setup_desktop.DEFAULT_RECORD_SHORTCUT
+    try:
+        yield
+    finally:
+        for name in names:
+            current.__dict__.pop(name, None)
+        current.__dict__.update(before)
 
 
 @pytest.fixture(autouse=True)

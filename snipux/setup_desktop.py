@@ -35,6 +35,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -63,6 +64,11 @@ EDITOR_ENTRIES = {
 _MEDIA_KEYS_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
 _SLOT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/"
 _SLOT_SCHEMA = f"{_MEDIA_KEYS_SCHEMA}.custom-keybinding:{_SLOT_PATH}"
+# The record shortcut's own slot, beside the snip one, so neither bind can
+# overwrite the other and each is removed alone.
+_RECORD_SLOT_PATH = (
+    "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux-record/"
+)
 
 # The canonical form everywhere in snipux is the design's readable one --
 # "Control+Alt+S" -- not gsettings' "<Control><Alt>s". It is what Settings
@@ -72,6 +78,66 @@ _SLOT_SCHEMA = f"{_MEDIA_KEYS_SCHEMA}.custom-keybinding:{_SLOT_PATH}"
 # Control, Alt, Shift, Super, because a permutation would quietly miss a
 # real clash.
 DEFAULT_SHORTCUT = tokens.SHORTCUT_DEFAULT
+DEFAULT_RECORD_SHORTCUT = tokens.RECORD_SHORTCUT_DEFAULT
+
+
+@dataclass(frozen=True)
+class ShortcutAction:
+    """One of the two global shortcuts, and everything that differs
+    between them. Binding, unbinding and remembering are the same code for
+    both; this is the part that is not.
+    """
+
+    name: str
+    # What messages call it: "shortcut", "record shortcut".
+    noun: str
+    # What pressing it does, for "Bound X to ...".
+    does: str
+    config_key: str
+    flag: str
+    # The byte the resident reads for it -- see `handoff`.
+    request: bytes
+    # Between "-- <marker> begin" and "-- <marker> end" in a Hyprland
+    # config. Neither marker is a prefix of the other's line, so removing
+    # one block can never take the other with it.
+    hypr_marker: str
+    hypr_label: str
+    gnome_slot: str
+    gnome_name: str
+
+
+SNIP = ShortcutAction(
+    name="snip",
+    noun="shortcut",
+    does="start a snip",
+    config_key="shortcut",
+    flag="--snip",
+    request=handoff.SNIP_REQUEST,
+    hypr_marker="snipux shortcut",
+    hypr_label="Snipux snip",
+    gnome_slot=_SLOT_PATH,
+    gnome_name="snipux",
+)
+RECORD = ShortcutAction(
+    name="record",
+    noun="record shortcut",
+    does="start a recording",
+    config_key="record_shortcut",
+    flag="--record",
+    request=handoff.RECORD_REQUEST,
+    hypr_marker="snipux record shortcut",
+    hypr_label="Snipux record",
+    gnome_slot=_RECORD_SLOT_PATH,
+    gnome_name="snipux record",
+)
+# The snip block's own markers, by name.
+_HYPR_LUA_BEGIN = f"-- {SNIP.hypr_marker} begin"
+_HYPR_LUA_END = f"-- {SNIP.hypr_marker} end"
+_HYPR_CONF_BEGIN = f"# {SNIP.hypr_marker} begin"
+_HYPR_CONF_END = f"# {SNIP.hypr_marker} end"
+
+# What `--record-shortcut` and a hand-edited config may say for "none".
+RECORD_SHORTCUT_OFF_WORDS = ("", "off", "none")
 
 _MODIFIER_ORDER = ("Control", "Alt", "Shift", "Super")
 _GSETTINGS_MODIFIERS = {
@@ -95,10 +161,18 @@ _GSETTINGS_MODIFIERS = {
 # anything with whitespace in it.
 _SHORTCUT_RE = re.compile(r"^(<[A-Za-z]+>)*[A-Za-z0-9_]+$")
 
-_HYPR_LUA_BEGIN = "-- snipux shortcut begin"
-_HYPR_LUA_END = "-- snipux shortcut end"
-_HYPR_CONF_BEGIN = "# snipux shortcut begin"
-_HYPR_CONF_END = "# snipux shortcut end"
+# Where Omarchy keeps the binds every Omarchy desk starts with. They are
+# loaded ahead of the user's own bindings.lua and are not in it, so a key
+# one of them holds has to be looked for here.
+_OMARCHY_BINDINGS_DIR = Path("/usr/share/omarchy/default/hypr/bindings")
+
+
+def _hypr_markers(action: ShortcutAction, *, lua: bool) -> tuple[str, str]:
+    comment = "--" if lua else "#"
+    return (
+        f"{comment} {action.hypr_marker} begin",
+        f"{comment} {action.hypr_marker} end",
+    )
 
 # Same reasoning as _TEMPLATE_PATH above: derived from PACKAGE_DIR so this
 # resolves correctly inside a PyInstaller bundle too, not just a checkout.
@@ -404,19 +478,37 @@ def _hypr_shortcut(shortcut: str) -> tuple[str, str]:
     return " + ".join(modifiers.get(field, field.upper()) for field in fields), fields[-1].upper()
 
 
+def _hypr_keys(spec: str) -> tuple[frozenset[str], str] | None:
+    """`"SUPER + CTRL + r"` -> its modifiers and its key, both upper-cased,
+    so two spellings of one combination compare equal.
+    """
+    parts = [part.strip().upper() for part in spec.split("+")]
+    if not parts or not parts[-1]:
+        return None
+    return frozenset(parts[:-1]), parts[-1]
+
+
+def _lua_without_comments(text: str) -> str:
+    # A bind that has been commented out binds nothing. Omarchy's stock
+    # bindings.lua ships with examples commented out, and those were being
+    # read as taken: the shortcut was refused over a line that does nothing.
+    text = re.sub(r"--\[\[.*?\]\]", "", text, flags=re.S)
+    return "\n".join(
+        line for line in text.split("\n") if not line.lstrip().startswith("--")
+    )
+
+
+# `o.bind`, `o.rebind`, `o.bind_toggle`, `o.bind_hold` and Hyprland's own
+# `hl.bind` all take the combination as their first argument.
+_LUA_BIND_RE = re.compile(r'''(?:\bo\.(?:re)?bind\w*|\bhl\.bind)\(\s*["\']([^"\']+)["\']''')
+_LUA_UNBIND_RE = re.compile(r'''\bhl\.unbind\(\s*["\']([^"\']+)["\']''')
+
+
 def _hypr_binding_conflict(text: str, shortcut: str, *, lua: bool) -> str | None:
     wanted_mods, wanted_key = _hypr_shortcut(shortcut)
-    wanted = {part.strip() for part in wanted_mods.split("+")[:-1]}
+    wanted = _hypr_keys(wanted_mods)
     if lua:
-        # A bind that has been commented out binds nothing. Omarchy's
-        # stock bindings.lua ships with examples commented out, and those
-        # were being read as taken: the shortcut was refused over a line
-        # that does nothing.
-        text = re.sub(r"--\[\[.*?\]\]", "", text, flags=re.S)
-        text = "\n".join(
-            line for line in text.split("\n") if not line.lstrip().startswith("--")
-        )
-        matches = re.finditer(r'o\.bind\(\s*["\']([^"\']+)["\']', text)
+        matches = _LUA_BIND_RE.finditer(_lua_without_comments(text))
         candidates = ((match.group(1), match.group(0)) for match in matches)
     else:
         matches = re.finditer(
@@ -427,11 +519,59 @@ def _hypr_binding_conflict(text: str, shortcut: str, *, lua: bool) -> str | None
             for match in matches
         )
     for candidate, line in candidates:
-        parts = [part.strip().upper() for part in candidate.split("+")]
-        if not parts:
-            continue
-        if parts[-1] == wanted_key and set(parts[:-1]) == wanted:
+        if _hypr_keys(candidate) == wanted:
             return line.strip()
+    return None
+
+
+def _omarchy_binding_conflict(user_text: str, shortcut: str) -> str | None:
+    """The Omarchy default bind that already holds `shortcut`, or None.
+
+    One the user's own bindings.lua has taken off with `hl.unbind` is free
+    again, which is how Omarchy says a default is to be replaced.
+    """
+    try:
+        files = sorted(_OMARCHY_BINDINGS_DIR.glob("*.lua"))
+    except OSError:
+        return None
+    released = {
+        _hypr_keys(match.group(1))
+        for match in _LUA_UNBIND_RE.finditer(_lua_without_comments(user_text))
+    }
+    wanted_mods, _key = _hypr_shortcut(shortcut)
+    if _hypr_keys(wanted_mods) in released:
+        return None
+    for path in files:
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeError):
+            continue
+        conflict = _hypr_binding_conflict(text, shortcut, lua=True)
+        if conflict is not None:
+            return f"{conflict} ({path})"
+    return None
+
+
+def find_hyprland_conflict(
+    shortcut: str,
+    action: ShortcutAction = SNIP,
+    *,
+    config_dir: Path | None = None,
+) -> str | None:
+    """Where `shortcut` is already bound in this Hyprland config, as a short
+    phrase for Settings -- or None when nothing found holds it. The block
+    `action` itself wrote is not a clash; the other action's is.
+    """
+    path, lua = _hyprland_binding_path(_hyprland_config_dir(config_dir))
+    try:
+        text = path.read_text() if path.exists() else ""
+    except OSError:
+        return None
+    without_ours, _found = _without_marked_block(text, *_hypr_markers(action, lua=lua))
+    if _hypr_binding_conflict(without_ours, shortcut, lua=lua) is not None:
+        return f"bound in {path}"
+    if lua and _omarchy_binding_conflict(without_ours, shortcut) is not None:
+        return "one of Omarchy's own bindings"
     return None
 
 
@@ -468,15 +608,15 @@ def _reload_hyprland(run=subprocess.run) -> str:
     return " Hyprland reloaded with no config errors."
 
 
-def _hyprland_snip_command(exec_path: Path) -> str:
-    """What Hyprland runs when the snip shortcut fires.
+def _hyprland_command(exec_path: Path, action: ShortcutAction = SNIP) -> str:
+    """What Hyprland runs when one of the two shortcuts fires.
 
     The obvious command, ``<AppImage> --snip``, starts the whole AppImage
     (mount, bundled interpreter, imports) just to pass one byte to the
     snipux that is already running: ~90ms of a snip that takes ~330ms from
     key press to first paint, measured on Omarchy. This writes that byte to
     the resident's socket directly, which is what `handoff.forward` does,
-    and takes ~3ms.
+    and takes ~3ms. The record shortcut sends its own byte the same way.
 
     ``nc`` failing for any reason -- not installed, a netcat without ``-U``,
     no resident listening, a stale socket -- falls through to the full
@@ -490,14 +630,18 @@ def _hyprland_snip_command(exec_path: Path) -> str:
     purpose: this string is written into a Linux compositor config even
     when the helper runs on a Windows test runner.
     """
-    request = handoff.SNIP_REQUEST.decode("ascii")
+    request = action.request.decode("ascii")
     socket = posixpath.join(os.environ.get("TMPDIR") or "/tmp", handoff.SERVER_NAME)
     script = (
         f"printf {shlex.quote(request)} | "
         f"nc -U {shlex.quote(socket)} 2>/dev/null"
-        f" || exec {shlex.quote(exec_path.as_posix())} --snip"
+        f" || exec {shlex.quote(exec_path.as_posix())} {action.flag}"
     )
     return f"sh -c {shlex.quote(script)}"
+
+
+def _hyprland_snip_command(exec_path: Path) -> str:
+    return _hyprland_command(exec_path, SNIP)
 
 
 def bind_hyprland_shortcut(
@@ -506,14 +650,22 @@ def bind_hyprland_shortcut(
     *,
     config_dir: Path | None = None,
     run=subprocess.run,
+    action: ShortcutAction = SNIP,
 ) -> str:
-    shortcut = shortcut or load_shortcut()
+    """Write `action`'s bind into the Hyprland config, inside its own
+    marked block. The snip and record binds each have one, so writing or
+    removing either leaves the other exactly as it was.
+
+    Refused, and nothing written, when the combination is already bound:
+    by a line of the user's own, by the other Snipux shortcut, or by one of
+    Omarchy's defaults.
+    """
+    shortcut = shortcut or load_action_shortcut(action)
+    if shortcut is None:
+        return unbind_hyprland_shortcut(config_dir=config_dir, run=run, action=action)
     config_root = _hyprland_config_dir(config_dir)
     path, lua = _hyprland_binding_path(config_root)
-    begin, end = (
-        (_HYPR_LUA_BEGIN, _HYPR_LUA_END)
-        if lua else (_HYPR_CONF_BEGIN, _HYPR_CONF_END)
-    )
+    begin, end = _hypr_markers(action, lua=lua)
     try:
         original = path.read_text() if path.exists() else ""
     except OSError as exc:
@@ -525,31 +677,38 @@ def bind_hyprland_shortcut(
             f"{human_shortcut(shortcut)} is already bound in {path}; "
             "Snipux left it unchanged."
         )
+    if lua:
+        conflict = _omarchy_binding_conflict(without_ours, shortcut)
+        if conflict is not None:
+            return (
+                f"{human_shortcut(shortcut)} is already one of Omarchy's own "
+                f"bindings -- {conflict}; Snipux left it unchanged."
+            )
 
     hypr_shortcut, key = _hypr_shortcut(shortcut)
     # This string is written into a Linux compositor config even when the
     # helper is exercised by the Windows test runner. Keep its path syntax
     # POSIX instead of letting WindowsPath introduce backslashes.
-    command = _hyprland_snip_command(exec_path)
+    command = _hyprland_command(exec_path, action)
     if lua:
         escaped = command.replace("\\", "\\\\").replace('"', '\\"')
         block = (
             f'{begin}\n'
-            f'o.bind("{hypr_shortcut}", "Snipux snip", "{escaped}")\n'
+            f'o.bind("{hypr_shortcut}", "{action.hypr_label}", "{escaped}")\n'
             f'{end}\n'
         )
     else:
         modifiers = " ".join(part.strip() for part in hypr_shortcut.split("+")[:-1])
         block = f"{begin}\nbind = {modifiers}, {key}, exec, {command}\n{end}\n"
     updated = without_ours + ("\n" if without_ours else "") + block
-    if updated == original:
+    if _same_but_for_block_order(updated, original, begin, end):
         return f"{human_shortcut(shortcut)} is already bound by Snipux in {path}."
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         backup = _backup_before_edit(path)
         path.write_text(updated)
     except OSError as exc:
-        return f"Note: could not write the Hyprland shortcut to {path}: {exc}"
+        return f"Note: could not write the Hyprland {action.noun} to {path}: {exc}"
     backed_up = f" (backup: {backup})" if backup is not None else ""
     return (
         f"Bound {human_shortcut(shortcut)} to run: {command} in {path}{backed_up}."
@@ -557,13 +716,36 @@ def bind_hyprland_shortcut(
     )
 
 
+def _same_but_for_block_order(updated: str, original: str, begin: str, end: str) -> bool:
+    """Whether writing `updated` would change nothing that matters.
+
+    A block is always re-added at the end of the file, so with two of them
+    a rebind of the upper one to the key it already has would otherwise
+    swap their order, and with that write a file, a backup and a reload
+    for no change at all.
+    """
+    if updated == original:
+        return True
+    pattern = re.compile(
+        rf"(?m)^\s*{re.escape(begin)}\s*$.*?^\s*{re.escape(end)}\s*$\n?", re.DOTALL
+    )
+    ours_now = pattern.search(original)
+    ours_next = pattern.search(updated)
+    if ours_now is None or ours_next is None:
+        return False
+    return ours_now.group(0).strip() == ours_next.group(0).strip()
+
+
 def unbind_hyprland_shortcut(
-    *, config_dir: Path | None = None, run=subprocess.run
+    *,
+    config_dir: Path | None = None,
+    run=subprocess.run,
+    action: ShortcutAction = SNIP,
 ) -> str:
     config_root = _hyprland_config_dir(config_dir)
     candidates = [
-        (config_root / "bindings.lua", _HYPR_LUA_BEGIN, _HYPR_LUA_END),
-        (config_root / "hyprland.conf", _HYPR_CONF_BEGIN, _HYPR_CONF_END),
+        (config_root / "bindings.lua", *_hypr_markers(action, lua=True)),
+        (config_root / "hyprland.conf", *_hypr_markers(action, lua=False)),
     ]
     changed = []
     backups = []
@@ -578,16 +760,33 @@ def unbind_hyprland_shortcut(
             backup = _backup_before_edit(path)
             path.write_text(updated)
         except OSError as exc:
-            return f"Note: could not remove the Hyprland shortcut from {path}: {exc}"
+            return f"Note: could not remove the Hyprland {action.noun} from {path}: {exc}"
         changed.append(path)
         if backup is not None:
             backups.append(backup)
     if not changed:
-        return "The Snipux Hyprland shortcut was not set -- nothing to remove."
-    message = "Removed the Snipux shortcut from " + ", ".join(map(str, changed)) + "."
+        return f"The Snipux Hyprland {action.noun} was not set -- nothing to remove."
+    message = f"Removed the Snipux {action.noun} from " + ", ".join(map(str, changed)) + "."
     if backups:
         message += " Backups: " + ", ".join(map(str, backups)) + "."
     return message + _reload_hyprland(run)
+
+
+def shortcut_clash(
+    shortcut: str, action: ShortcutAction, config_dir: Path | None = None
+) -> str | None:
+    """Why `shortcut` cannot be `action`'s: it is the other Snipux
+    shortcut. None when it is not.
+
+    One key cannot mean both. GNOME would take the pair without a word and
+    fire whichever it liked, and Windows would refuse the second with
+    "already in use by another application", which is true and no help.
+    """
+    other = RECORD if action is SNIP else SNIP
+    theirs = load_action_shortcut(other, config_dir)
+    if theirs is None or normalise_shortcut(shortcut) != normalise_shortcut(theirs):
+        return None
+    return f"{human_shortcut(shortcut)} is already the Snipux {other.noun}."
 
 
 def bind_linux_shortcut(
@@ -595,18 +794,45 @@ def bind_linux_shortcut(
     shortcut: str | None = None,
     *,
     hypr_config_dir: Path | None = None,
+    action: ShortcutAction = SNIP,
+    config_dir: Path | None = None,
 ) -> str:
+    """Bind `action`'s shortcut in whichever desktop this is. For the
+    record shortcut, no `shortcut` and none remembered means it is off, and
+    whatever was bound for it is removed.
+    """
+    if action is SNIP:
+        # Called as it always was: nothing named that the snip shortcut
+        # never needed, and no shortcut left for the binder to look up.
+        if is_hyprland_session():
+            return bind_hyprland_shortcut(exec_path, shortcut, config_dir=hypr_config_dir)
+        return bind_gnome_shortcut(exec_path, shortcut)
+    if shortcut is None:
+        shortcut = load_action_shortcut(action, config_dir)
+    if shortcut is None:
+        return unbind_linux_shortcut(hypr_config_dir=hypr_config_dir, action=action)
+    # Only this way round: the snip shortcut is the one that was there
+    # first, and a clash is the record shortcut's to give way on.
+    clash = shortcut_clash(shortcut, action, config_dir)
+    if clash is not None:
+        return f"{clash} The {action.noun} was not bound."
     if is_hyprland_session():
         return bind_hyprland_shortcut(
-            exec_path, shortcut, config_dir=hypr_config_dir
+            exec_path, shortcut, config_dir=hypr_config_dir, action=action
         )
-    return bind_gnome_shortcut(exec_path, shortcut)
+    return bind_gnome_shortcut(exec_path, shortcut, action=action)
 
 
-def unbind_linux_shortcut(*, hypr_config_dir: Path | None = None) -> str:
+def unbind_linux_shortcut(
+    *, hypr_config_dir: Path | None = None, action: ShortcutAction = SNIP
+) -> str:
+    if action is SNIP:
+        if is_hyprland_session():
+            return unbind_hyprland_shortcut(config_dir=hypr_config_dir)
+        return unbind_gnome_shortcut()
     if is_hyprland_session():
-        return unbind_hyprland_shortcut(config_dir=hypr_config_dir)
-    return unbind_gnome_shortcut()
+        return unbind_hyprland_shortcut(config_dir=hypr_config_dir, action=action)
+    return unbind_gnome_shortcut(action=action)
 
 
 def config_path(config_dir: Path | None = None) -> Path:
@@ -1692,6 +1918,46 @@ def save_shortcut(shortcut: str, config_dir: Path | None = None) -> bool:
     return _write_config("shortcut", shortcut, config_dir)
 
 
+def load_record_shortcut(config_dir: Path | None = None) -> str | None:
+    """The record shortcut, or None when there is none.
+
+    Never set means `DEFAULT_RECORD_SHORTCUT` -- unless that is the very
+    combination the snip shortcut already uses, which someone who rebound
+    snipping to it before this existed would have. Their key keeps meaning
+    what they made it mean, and the record shortcut starts off.
+
+    Stored empty (or null) is the user turning it off, and stays off. A
+    value that no longer validates falls back the way `load_shortcut` does.
+    """
+    document = _read_config(config_dir)
+    stored = document.get("record_shortcut", DEFAULT_RECORD_SHORTCUT)
+    if stored is None or stored == "":
+        return None
+    if not isinstance(stored, str) or validate_shortcut(stored) is not None:
+        stored = DEFAULT_RECORD_SHORTCUT
+    if "record_shortcut" not in document and normalise_shortcut(
+        stored
+    ) == normalise_shortcut(load_shortcut(config_dir)):
+        return None
+    return stored
+
+
+def save_record_shortcut(shortcut: str | None, config_dir: Path | None = None) -> bool:
+    """Remember the record shortcut; None or empty turns it off. Written
+    as an empty string then, so "off" survives where a missing key would
+    read as the default again.
+    """
+    return _write_config("record_shortcut", shortcut or "", config_dir)
+
+
+def load_action_shortcut(
+    action: ShortcutAction, config_dir: Path | None = None
+) -> str | None:
+    if action is RECORD:
+        return load_record_shortcut(config_dir)
+    return load_shortcut(config_dir)
+
+
 def forget_shortcut(config_dir: Path | None = None) -> bool:
     """Delete the remembered shortcut. True if a file was removed."""
     path = config_path(config_dir)
@@ -1758,7 +2024,9 @@ _CONFLICT_NAMES = {
 }
 
 
-def find_shortcut_conflicts_named(shortcut: str) -> list[tuple[str, str]]:
+def find_shortcut_conflicts_named(
+    shortcut: str, own_slot: str = _SLOT_PATH
+) -> list[tuple[str, str]]:
     """Every GNOME setting already bound to `shortcut`, as (key, owner name).
 
     The check that would have saved the trouble this whole feature exists
@@ -1768,8 +2036,10 @@ def find_shortcut_conflicts_named(shortcut: str) -> list[tuple[str, str]]:
 
     Compares *normalised* forms, so a binding GNOME stores as
     `<Primary><Alt>t` is recognised as the same thing the user just recorded
-    as `Control+Alt+T`. snipux's own slot is excluded -- rebinding to what
-    is already bound is not a conflict.
+    as `Control+Alt+T`. The slot being bound (`own_slot`) is excluded --
+    rebinding to what is already bound is not a conflict. Snipux's other
+    slot is not: the snip and record shortcuts clash with each other like
+    any two bindings do.
 
     Blind to anything that is not a GNOME setting: an application that grabs
     a key directly owns it just as effectively and cannot be seen from here,
@@ -1805,7 +2075,7 @@ def find_shortcut_conflicts_named(shortcut: str) -> list[tuple[str, str]]:
     # The custom-keybindings slots, which list-recursively above does not
     # reach: they live at paths, not in a fixed schema.
     for path in _custom_keybinding_paths():
-        if path == _SLOT_PATH:
+        if path == own_slot:
             continue
         binding = _custom_keybinding_value(path, "binding")
         if binding and normalise_shortcut(binding) == wanted:
@@ -1840,8 +2110,8 @@ def _custom_keybinding_value(path: str, key: str) -> str:
     return raw.strip("'")
 
 
-def _append_slot(current_keybindings: str) -> str:
-    """Splice `_SLOT_PATH` into gsettings' `custom-keybindings` list value,
+def _append_slot(current_keybindings: str, slot_path: str = _SLOT_PATH) -> str:
+    """Splice `slot_path` into gsettings' `custom-keybindings` list value,
     keeping whatever was already there.
 
     `current_keybindings` is a GVariant array-of-strings rendered as text,
@@ -1850,15 +2120,18 @@ def _append_slot(current_keybindings: str) -> str:
     present is what makes running `--setup` twice safe; splicing rather
     than replacing is what keeps a shortcut the user bound by hand.
     """
-    if f"'{_SLOT_PATH}'" in current_keybindings:
+    if f"'{slot_path}'" in current_keybindings:
         return current_keybindings
     if current_keybindings == "@as []":
-        return f"['{_SLOT_PATH}']"
-    return current_keybindings.rstrip().rstrip("]") + f", '{_SLOT_PATH}']"
+        return f"['{slot_path}']"
+    return current_keybindings.rstrip().rstrip("]") + f", '{slot_path}']"
 
 
-def bind_gnome_shortcut(exec_path: Path, shortcut: str | None = None) -> str:
-    """Bind `shortcut` to `exec_path --snip` via GNOME's
+def bind_gnome_shortcut(
+    exec_path: Path, shortcut: str | None = None, *, action: ShortcutAction = SNIP
+) -> str:
+    """Bind `shortcut` to `exec_path --snip` (or `--record`, for the record
+    shortcut, in a slot of its own) via GNOME's
     custom-keybindings mechanism, the same slot `packaging/install.sh` used
     to set up by hand -- see `docs/gnome-shortcut.md` for what this
     does and how to undo it.
@@ -1875,7 +2148,10 @@ def bind_gnome_shortcut(exec_path: Path, shortcut: str | None = None) -> str:
     command fails because of it.
     """
     if shortcut is None:
-        shortcut = load_shortcut()
+        shortcut = load_action_shortcut(action)
+    if shortcut is None:
+        return unbind_gnome_shortcut(action=action)
+    slot_schema = f"{_MEDIA_KEYS_SCHEMA}.custom-keybinding:{action.gnome_slot}"
 
     if shutil.which("gsettings") is None:
         return (
@@ -1897,18 +2173,31 @@ def bind_gnome_shortcut(exec_path: Path, shortcut: str | None = None) -> str:
             "docs/gnome-shortcut.md to bind it by hand."
         )
 
-    new_keybindings = _append_slot(current)
-    launcher_cmd = f"{exec_path} --snip"
+    if action is RECORD:
+        # GNOME takes a second owner for a combination without a word and
+        # then fires whichever it likes. The snip shortcut has always been
+        # bound regardless, with Settings' banner as the warning; a second
+        # shortcut that nobody may have asked for by name does not get to
+        # take a key from whatever holds it.
+        conflicts = find_shortcut_conflicts_named(shortcut, action.gnome_slot)
+        if conflicts:
+            return (
+                f"{human_shortcut(shortcut)} is already {conflicts[0][1]}; "
+                f"Snipux left it unchanged and the {action.noun} was not bound."
+            )
+
+    new_keybindings = _append_slot(current, action.gnome_slot)
+    launcher_cmd = f"{exec_path} {action.flag}"
 
     try:
         subprocess.run(
             ["gsettings", "set", _MEDIA_KEYS_SCHEMA, "custom-keybindings", new_keybindings],
             check=True,
         )
-        subprocess.run(["gsettings", "set", _SLOT_SCHEMA, "name", "snipux"], check=True)
-        subprocess.run(["gsettings", "set", _SLOT_SCHEMA, "command", launcher_cmd], check=True)
+        subprocess.run(["gsettings", "set", slot_schema, "name", action.gnome_name], check=True)
+        subprocess.run(["gsettings", "set", slot_schema, "command", launcher_cmd], check=True)
         subprocess.run(
-            ["gsettings", "set", _SLOT_SCHEMA, "binding", to_gsettings(shortcut)],
+            ["gsettings", "set", slot_schema, "binding", to_gsettings(shortcut)],
             check=True,
         )
     except (OSError, subprocess.CalledProcessError):
@@ -1921,8 +2210,8 @@ def bind_gnome_shortcut(exec_path: Path, shortcut: str | None = None) -> str:
     return f"Bound {human_shortcut(shortcut)} to run: {launcher_cmd}"
 
 
-def _remove_slot(current_keybindings: str) -> str:
-    """The inverse of `_append_slot()`: splice `_SLOT_PATH` out of
+def _remove_slot(current_keybindings: str, slot_path: str = _SLOT_PATH) -> str:
+    """The inverse of `_append_slot()`: splice `slot_path` out of
     gsettings' `custom-keybindings` list value, keeping every other entry
     exactly as it was and in the same order.
 
@@ -1932,18 +2221,18 @@ def _remove_slot(current_keybindings: str) -> str:
     way in, per the ticket, is what keeps a shortcut the user bound by hand
     intact here.
     """
-    if f"'{_SLOT_PATH}'" not in current_keybindings:
+    if f"'{slot_path}'" not in current_keybindings:
         return current_keybindings
     remaining = [
-        path for path in re.findall(r"'([^']*)'", current_keybindings) if path != _SLOT_PATH
+        path for path in re.findall(r"'([^']*)'", current_keybindings) if path != slot_path
     ]
     if not remaining:
         return "@as []"
     return "[" + ", ".join(f"'{path}'" for path in remaining) + "]"
 
 
-def unbind_gnome_shortcut() -> str:
-    """Remove the Snipux GNOME custom-keybinding slot
+def unbind_gnome_shortcut(*, action: ShortcutAction = SNIP) -> str:
+    """Remove the Snipux GNOME custom-keybinding slot (`action`'s own)
     `bind_gnome_shortcut()` set up -- see `docs/gnome-shortcut.md` for
     what this undoes.
 
@@ -1961,10 +2250,11 @@ def unbind_gnome_shortcut() -> str:
     be done (or has nothing to do) is reported plainly, not that the whole
     command fails because of it.
     """
+    slot_schema = f"{_MEDIA_KEYS_SCHEMA}.custom-keybinding:{action.gnome_slot}"
     if shutil.which("gsettings") is None:
         return (
             "Note: gsettings not found -- nothing to remove for the "
-            "Snipux shortcut."
+            f"Snipux {action.noun}."
         )
 
     try:
@@ -1977,28 +2267,28 @@ def unbind_gnome_shortcut() -> str:
     except (OSError, subprocess.CalledProcessError):
         return (
             "Note: could not read GNOME's custom-keybindings list -- cannot "
-            "remove the Snipux shortcut automatically. See "
+            f"remove the Snipux {action.noun} automatically. See "
             "docs/gnome-shortcut.md to remove it by hand."
         )
 
-    if f"'{_SLOT_PATH}'" not in current:
-        return "The Snipux shortcut was not set -- nothing to remove."
+    if f"'{action.gnome_slot}'" not in current:
+        return f"The Snipux {action.noun} was not set -- nothing to remove."
 
-    new_keybindings = _remove_slot(current)
+    new_keybindings = _remove_slot(current, action.gnome_slot)
 
     try:
         subprocess.run(
             ["gsettings", "set", _MEDIA_KEYS_SCHEMA, "custom-keybindings", new_keybindings],
             check=True,
         )
-        subprocess.run(["gsettings", "reset-recursively", _SLOT_SCHEMA], check=True)
+        subprocess.run(["gsettings", "reset-recursively", slot_schema], check=True)
     except (OSError, subprocess.CalledProcessError):
         return (
-            "Note: removing the GNOME shortcut failed. See "
+            f"Note: removing the GNOME {action.noun} failed. See "
             "docs/gnome-shortcut.md to remove it by hand."
         )
 
-    return "Removed the Snipux shortcut."
+    return f"Removed the Snipux {action.noun}."
 
 
 def install_icons(hicolor_dir: Path | None = None) -> bool:
@@ -2115,6 +2405,7 @@ def run_setup(
     config_dir: Path | None = None,
     hypr_config_dir: Path | None = None,
     shortcut: str | None = None,
+    record_shortcut: str | None = None,
 ) -> int:
     """The body of `snipux --setup`: desktop entry, the two editors' entries,
     autostart entry, desktop shortcut -- everything `packaging/install.sh` used to do by hand after
@@ -2174,6 +2465,11 @@ def run_setup(
                 to_stderr=True,
             )
 
+    problem = remember_record_shortcut(record_shortcut, config_dir)
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
+
     _write_entry(
         applications_dir, render_desktop_entry(exec_path), exec_path, "desktop"
     )
@@ -2189,8 +2485,50 @@ def run_setup(
             hypr_config_dir=hypr_config_dir,
         )
     )
+    # After the snip shortcut, so a clash between the two is the record
+    # shortcut's to lose. One that is off is unbound, and says so only when
+    # there was something to remove.
+    record = load_record_shortcut(config_dir)
+    if record is not None or record_shortcut is not None:
+        print(
+            bind_linux_shortcut(
+                exec_path,
+                record,
+                hypr_config_dir=hypr_config_dir,
+                action=RECORD,
+                config_dir=config_dir,
+            )
+        )
 
     return 0
+
+
+def remember_record_shortcut(
+    record_shortcut: str | None, config_dir: Path | None = None
+) -> str | None:
+    """Validate and store what `--setup --record-shortcut` was given. None
+    when there is nothing wrong (or nothing given), else the reason, with
+    nothing written -- for the same reason a bad `--shortcut` stops
+    `--setup` before it has done half of it.
+    """
+    if record_shortcut is None:
+        return None
+    if record_shortcut.strip().lower() in RECORD_SHORTCUT_OFF_WORDS:
+        save_record_shortcut(None, config_dir)
+        return None
+    problem = validate_shortcut(record_shortcut)
+    if problem is None:
+        problem = shortcut_clash(record_shortcut, RECORD, config_dir)
+    if problem is not None:
+        return problem
+    if not save_record_shortcut(record_shortcut, config_dir):
+        log.note(
+            f"Note: could not write {config_path(config_dir)} -- "
+            f"{human_shortcut(record_shortcut)} will be bound now, but the next "
+            "--setup will revert it.",
+            to_stderr=True,
+        )
+    return None
 
 
 def install_editor_entries(
@@ -2282,6 +2620,7 @@ def run_remove(
     _remove_entry(autostart_dir, "autostart")
     remove_icons(hicolor_dir)
     print(unbind_linux_shortcut(hypr_config_dir=hypr_config_dir))
+    print(unbind_linux_shortcut(hypr_config_dir=hypr_config_dir, action=RECORD))
     # The remembered shortcut is something --setup wrote outside the
     # package too, so leaving it behind would be the same "dead leftover"
     # SNX-83 exists to prevent.

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 
 import pytest
@@ -58,6 +59,9 @@ def _default_to_the_gnome_conflict_check(monkeypatch):
     below that want the Windows path override it back to `True`.
     """
     monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: False))
+    # And off Hyprland, whose own check reads the bindings file: this
+    # suite is run on a Hyprland desk as well as on CI, which has none.
+    monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: False)
 
 
 @pytest.fixture(autouse=True)
@@ -2061,3 +2065,395 @@ class TestReportAProblem:
         window = SettingsWindow(config_dir=tmp_path)
 
         assert window.report_button.isHidden()
+
+
+class TestAClearableShortcutRecorder:
+    """The record shortcut's field: the same recorder, plus a way to have
+    no combination at all.
+    """
+
+    def test_the_snip_field_has_no_clear_button(self):
+        recorder = ShortcutRecorder("Control+Alt+S")
+
+        assert recorder._clear is None
+        assert recorder._button.text() == "Record"
+
+    def test_a_clearable_field_says_set_not_record(self):
+        # "Record" beside a field about recording reads as the thing it binds.
+        recorder = ShortcutRecorder("Control+Alt+R", clearable=True)
+
+        assert recorder._button.text() == "Set"
+        assert recorder._clear.text() == "Clear"
+        assert recorder._clear.isEnabled()
+
+    def test_clear_empties_the_field_and_says_so(self):
+        recorder = ShortcutRecorder("Control+Alt+R", clearable=True)
+        recorded = []
+        recorder.recorded.connect(recorded.append)
+
+        recorder._clear.click()
+
+        assert recorder.shortcut_value() == ""
+        assert recorded == [""]
+        assert "No shortcut" in recorder._field.text()
+        # Nothing left to clear.
+        assert not recorder._clear.isEnabled()
+
+    def test_clearing_an_empty_field_is_not_a_change(self):
+        recorder = ShortcutRecorder("", clearable=True)
+        recorded = []
+        recorder.recorded.connect(recorded.append)
+
+        recorder.clear()
+
+        assert recorded == []
+        assert "No shortcut" in recorder._field.text()
+
+    def test_an_empty_field_can_be_given_a_combination_again(self):
+        recorder = ShortcutRecorder("", clearable=True)
+        recorder._start()
+
+        recorder.keyPressEvent(
+            press(
+                Qt.Key.Key_R,
+                Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier,
+            )
+        )
+
+        assert recorder.shortcut_value() == "Control+Alt+R"
+        assert recorder._clear.isEnabled()
+        assert recorder._button.text() == "Set"
+
+    def test_clear_while_recording_stops_the_recording(self):
+        recorder = ShortcutRecorder("Control+Alt+R", clearable=True)
+        recorder._start()
+        assert not recorder._clear.isEnabled()
+
+        recorder.clear()
+
+        assert not recorder.is_recording()
+        assert recorder.shortcut_value() == ""
+
+    def test_escape_keeps_what_was_there(self):
+        recorder = ShortcutRecorder("Control+Alt+R", clearable=True)
+        recorder._start()
+
+        recorder.keyPressEvent(press(Qt.Key.Key_Escape))
+
+        assert recorder.shortcut_value() == "Control+Alt+R"
+        assert recorder._button.text() == "Set"
+
+
+class TestTheRecordShortcutsBanner:
+    def test_the_same_key_for_both_is_called_out_before_any_desktop_is_asked(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            setup_desktop,
+            "find_shortcut_conflicts_named",
+            lambda *args: pytest.fail("asked GNOME about a clash Snipux can see itself"),
+        )
+        banner = ConflictBanner()
+
+        banner.show_for("Control+Alt+S", setup_desktop.RECORD, "<Primary><Alt>s")
+
+        assert "used by both shortcuts" in banner.text()
+        assert banner.text().startswith("✕")
+
+    def test_no_shortcut_says_recording_is_still_reachable(self):
+        banner = ConflictBanner()
+
+        banner.show_for("", setup_desktop.RECORD, "Control+Alt+S")
+
+        assert banner.text() == (
+            "No shortcut. Recording still starts from the overlay's Record switch."
+        )
+
+    def test_on_gnome_its_own_slot_is_the_one_left_out(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "find_shortcut_conflicts_named",
+            lambda shortcut, own_slot=None: asked.append((shortcut, own_slot)) or [],
+        )
+        banner = ConflictBanner()
+
+        banner.show_for("Control+Alt+R", setup_desktop.RECORD, "Control+Alt+S")
+
+        assert asked == [("Control+Alt+R", setup_desktop._RECORD_SLOT_PATH)]
+        assert banner.text() == "✓  No GNOME shortcut uses Control+Alt+R."
+
+    def test_on_gnome_a_taken_key_is_one_snipux_will_not_bind_over(self, monkeypatch):
+        monkeypatch.setattr(
+            setup_desktop,
+            "find_shortcut_conflicts_named",
+            lambda shortcut, own_slot=None: [("screenreader", "GNOME’s screen reader")],
+        )
+        banner = ConflictBanner()
+
+        banner.show_for("Control+Alt+R", setup_desktop.RECORD, "Control+Alt+S")
+
+        assert "GNOME’s screen reader" in banner.text()
+        # Not the snip shortcut's "GNOME will not warn you": this one is
+        # refused rather than bound regardless.
+        assert "Snipux will not bind over it" in banner.text()
+
+    @pytest.mark.parametrize("action", [setup_desktop.SNIP, setup_desktop.RECORD])
+    def test_on_hyprland_it_reads_the_bindings_not_gnome(self, monkeypatch, action):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(
+            setup_desktop,
+            "find_shortcut_conflicts_named",
+            lambda *args: pytest.fail("asked GNOME in a Hyprland session"),
+        )
+        asked = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "find_hyprland_conflict",
+            lambda shortcut, action: asked.append((shortcut, action.name)) or None,
+        )
+        banner = ConflictBanner()
+
+        banner.show_for("Control+Alt+K", action, "Control+Alt+J")
+
+        assert asked == [("Control+Alt+K", action.name)]
+        assert banner.text() == "✓  No Hyprland binding uses Control+Alt+K."
+
+    def test_on_hyprland_a_taken_key_names_where(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop, "is_hyprland_session", lambda: True)
+        monkeypatch.setattr(
+            setup_desktop,
+            "find_hyprland_conflict",
+            lambda shortcut, action: "one of Omarchy's own bindings",
+        )
+        banner = ConflictBanner()
+
+        banner.show_for("Control+Alt+R", setup_desktop.RECORD, "Control+Alt+S")
+
+        assert banner.text() == (
+            "✕  Control+Alt+R is already one of Omarchy's own bindings. "
+            "Snipux will not bind over it."
+        )
+
+    def test_on_windows_the_probe_is_asked(self, monkeypatch):
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current, "find_shortcut_conflict", lambda s: None, raising=False
+        )
+        banner = ConflictBanner()
+
+        banner.show_for("Control+Alt+R", setup_desktop.RECORD, "Control+Alt+S")
+
+        assert banner.text() == "✓  Control+Alt+R is free to register."
+
+
+class TestTheRecordShortcutInSettings:
+    @pytest.fixture(autouse=True)
+    def _gnome_holds_nothing(self, monkeypatch):
+        monkeypatch.setattr(
+            setup_desktop, "find_shortcut_conflicts_named", lambda shortcut, own_slot=None: []
+        )
+
+    @staticmethod
+    def _window(tmp_path, **kwargs):
+        return SettingsWindow(config_dir=tmp_path, **kwargs)
+
+    @staticmethod
+    def _warnings(monkeypatch):
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox, "warning", lambda parent, title, text: warnings.append(text)
+        )
+        return warnings
+
+    @staticmethod
+    def _record(recorder, key, modifiers):
+        recorder._start()
+        recorder.keyPressEvent(press(key, modifiers))
+
+    _CTRL_ALT = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+
+    def test_it_opens_on_the_default(self, tmp_path):
+        window = self._window(tmp_path)
+
+        assert window._record_recorder.shortcut_value() == "Control+Alt+R"
+        assert window._record_conflict.text() == "✓  No GNOME shortcut uses Control+Alt+R."
+
+    def test_it_opens_on_the_stored_one(self, tmp_path):
+        setup_desktop.save_record_shortcut("Super+Shift+V", tmp_path)
+
+        assert self._window(tmp_path)._record_recorder.shortcut_value() == "Super+Shift+V"
+
+    def test_one_that_is_off_opens_empty(self, tmp_path):
+        setup_desktop.save_record_shortcut(None, tmp_path)
+
+        window = self._window(tmp_path)
+
+        assert window._record_recorder.shortcut_value() == ""
+        assert window._record_conflict.text().startswith("No shortcut.")
+
+    def test_it_sits_under_its_own_heading(self, tmp_path):
+        window = self._window(tmp_path)
+
+        # Headings are shown in capitals; the wording is what matters.
+        headings = [label.text().lower() for label in window.findChildren(QLabel)]
+        assert "record shortcut" in headings
+
+    def test_the_altgr_note_is_only_shown_where_it_is_true(self, tmp_path, monkeypatch):
+        def notes(window):
+            return [
+                label.text()
+                for label in window.findChildren(QLabel)
+                if "already switched to Record" in label.text()
+            ]
+
+        [linux_note] = notes(self._window(tmp_path))
+        assert "AltGr" not in linux_note
+
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current, "find_shortcut_conflict", lambda s: None, raising=False
+        )
+        [windows_note] = notes(self._window(tmp_path))
+        assert "AltGr" in windows_note
+
+    def test_nothing_applies_until_save(self, tmp_path):
+        window = self._window(tmp_path)
+
+        self._record(window._record_recorder, Qt.Key.Key_V, self._CTRL_ALT)
+
+        assert window._dirty
+        assert setup_desktop.load_record_shortcut(tmp_path) == "Control+Alt+R"
+
+    def test_save_remembers_a_new_one_and_calls_back_to_bind_it(self, tmp_path):
+        called = []
+        window = self._window(tmp_path, on_saved=lambda: called.append(True))
+        self._record(window._record_recorder, Qt.Key.Key_V, self._CTRL_ALT)
+
+        window._save()
+
+        assert setup_desktop.load_record_shortcut(tmp_path) == "Control+Alt+V"
+        assert setup_desktop.load_shortcut(tmp_path) == "Control+Alt+S"
+        assert called == [True]
+
+    def test_clear_then_save_turns_it_off(self, tmp_path):
+        called = []
+        window = self._window(tmp_path, on_saved=lambda: called.append(True))
+
+        window._record_recorder._clear.click()
+        assert window._dirty
+        window._save()
+
+        assert setup_desktop.load_record_shortcut(tmp_path) is None
+        assert json.loads(setup_desktop.config_path(tmp_path).read_text())[
+            "record_shortcut"
+        ] == ""
+        assert called == [True]
+
+    def test_recording_either_field_refreshes_both_banners(self, tmp_path):
+        window = self._window(tmp_path)
+
+        self._record(window._recorder, Qt.Key.Key_R, self._CTRL_ALT)
+
+        assert "used by both shortcuts" in window._conflict.text()
+        assert "used by both shortcuts" in window._record_conflict.text()
+
+        self._record(window._record_recorder, Qt.Key.Key_V, self._CTRL_ALT)
+
+        assert window._conflict.text() == "✓  No GNOME shortcut uses Control+Alt+R."
+        assert window._record_conflict.text() == "✓  No GNOME shortcut uses Control+Alt+V."
+
+    def test_save_refuses_one_key_for_both(self, tmp_path, monkeypatch):
+        called = []
+        window = self._window(tmp_path, on_saved=lambda: called.append(True))
+        warnings = self._warnings(monkeypatch)
+        window._record_recorder.set_shortcut("Control+Alt+S")
+
+        window._save()
+
+        assert len(warnings) == 1
+        assert "set for both snipping and recording" in warnings[0]
+        # A refusal, not a save: nothing written and nothing rebound.
+        assert called == []
+        assert not setup_desktop.config_path(tmp_path).exists()
+
+    def test_the_refusal_sees_through_another_spelling(self, tmp_path, monkeypatch):
+        window = self._window(tmp_path)
+        warnings = self._warnings(monkeypatch)
+        window._recorder.set_shortcut("Alt+Control+R")
+
+        window._save()
+
+        assert len(warnings) == 1
+
+    def test_no_record_shortcut_never_clashes_with_the_snip_one(self, tmp_path, monkeypatch):
+        window = self._window(tmp_path)
+        warnings = self._warnings(monkeypatch)
+        window._record_recorder.clear()
+        window._recorder.set_shortcut("Control+Alt+R")
+
+        window._save()
+
+        assert warnings == []
+        assert setup_desktop.load_shortcut(tmp_path) == "Control+Alt+R"
+        assert setup_desktop.load_record_shortcut(tmp_path) is None
+
+    def test_saving_something_else_does_not_write_an_untouched_record_shortcut(
+        self, tmp_path
+    ):
+        # Off only because the snip shortcut already had its default key.
+        # Saving another setting must not turn that into a stored "off"
+        # that outlives the snip shortcut moving away again.
+        setup_desktop.save_shortcut("Control+Alt+R", tmp_path)
+        window = self._window(tmp_path)
+        assert window._record_recorder.shortcut_value() == ""
+        window._filename.setText("shot-%Y")
+
+        window._save()
+
+        stored = json.loads(setup_desktop.config_path(tmp_path).read_text())
+        assert "record_shortcut" not in stored
+        assert stored["filename_pattern"] == "shot-%Y"
+
+    def test_on_windows_save_refuses_a_new_one_another_application_holds(
+        self, tmp_path, monkeypatch
+    ):
+        called = []
+        window = self._window(tmp_path, on_saved=lambda: called.append(True))
+        window._record_recorder.set_shortcut("Control+Alt+V")
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current,
+            "find_shortcut_conflict",
+            lambda s: "another application" if s == "Control+Alt+V" else None,
+            raising=False,
+        )
+        warnings = self._warnings(monkeypatch)
+
+        window._save()
+
+        assert len(warnings) == 1
+        assert "Control+Alt+V is already used by another application" in warnings[0]
+        assert called == []
+        assert setup_desktop.load_record_shortcut(tmp_path) == "Control+Alt+R"
+
+    def test_on_windows_an_unchanged_one_never_blocks_the_other_settings(
+        self, tmp_path, monkeypatch
+    ):
+        # The probe cannot tell the saved combination from a registration
+        # this process failed to make at startup.
+        window = self._window(tmp_path)
+        monkeypatch.setattr(HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(
+            platform.current,
+            "find_shortcut_conflict",
+            lambda s: "another application",
+            raising=False,
+        )
+        warnings = self._warnings(monkeypatch)
+        window._filename.setText("shot-%Y")
+
+        window._save()
+
+        assert warnings == []
+        assert setup_desktop.load_filename_pattern(tmp_path) == "shot-%Y"

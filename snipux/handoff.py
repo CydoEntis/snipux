@@ -1,7 +1,8 @@
 """Hand a request to the resident snipux without loading Qt first.
 
-Pressing the shortcut runs `snipux --snip`, a fresh process whose only job is
-to tell the snipux already running to take a snip. Through `app.py` that
+Pressing the shortcut runs `snipux --snip` (or `--record`, for the record
+shortcut), a fresh process whose only job is to tell the snipux already
+running to take a snip. Through `app.py` that
 process imported the whole application, PyQt6 included, and built a
 `QApplication` before it could send a single byte: about 160ms of a snip's
 roughly 475ms, measured from the key press on an X11 GNOME desk. This module
@@ -37,6 +38,10 @@ import sys
 SERVER_NAME = "snipux-resident"
 SNIP_REQUEST = b"S"
 SETTINGS_REQUEST = b"T"
+# The overlay, opened on the record side -- what the record shortcut sends.
+# A resident from before it drops the byte without a word, like any other
+# it does not know; only a new snipux ever binds the key that sends it.
+RECORD_REQUEST = b"R"
 OPEN_REQUEST_PREFIX = b"O"
 EDITOR_REQUESTS = {"image": b"I", "video": b"V"}
 # A path to open in the editor its type calls for. Not `O`: a resident from
@@ -53,6 +58,7 @@ _EDITOR_FLAGS = {"--image-editor": "image", "--video-editor": "video"}
 _REQUESTS = {
     "--snip": SNIP_REQUEST,
     "--settings": SETTINGS_REQUEST,
+    "--record": RECORD_REQUEST,
     **{flag: EDITOR_REQUESTS[editor] for flag, editor in _EDITOR_FLAGS.items()},
 }
 
@@ -111,7 +117,7 @@ def forward(arguments: list[str], server_name: str = SERVER_NAME) -> bool:
     """Send the request `arguments` names to a running resident, and say
     whether it was delivered.
 
-    Only a lone `--snip`, `--settings`, `--image-editor`,
+    Only a lone `--snip`, `--record`, `--settings`, `--image-editor`,
     `--video-editor`, or the path of an existing file an editor opens
     (alone, or after one of the editor flags) is a request; anything else
     belongs to the full CLI. False whenever the

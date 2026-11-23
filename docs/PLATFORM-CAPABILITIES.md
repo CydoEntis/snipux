@@ -12,7 +12,7 @@ and only for something the user just asked for.
 | Facility | Used for | Notes |
 | --- | --- | --- |
 | Clipboard (`QClipboard`) | Copy, player copy | Written only when the user clicks Copy. Never read in the background; no clipboard history. |
-| Local socket (`QLocalServer`/`QLocalSocket`) | a second `snipux --snip` (or `--settings`, `--image-editor`, `--video-editor`, `snipux FILE`) hands its request to the running one | Local only, fixed server name. Carries a command or a file's path, never pixels. |
+| Local socket (`QLocalServer`/`QLocalSocket`) | a second `snipux --snip` (or `--record`, `--settings`, `--image-editor`, `--video-editor`, `snipux FILE`) hands its request to the running one | Local only, fixed server name. Carries a command or a file's path, never pixels. |
 | Files | saving captures, `config.json` and friends | Only the save/recording folders, the config folder, and a file the user opened. |
 | `pip` (subprocess) | `snipux --update` | Only when the user runs it. Refused in the standalone exe; an AppImage replaces itself instead (see Linux). |
 | `ffmpeg` (subprocess) | H.264 and GIF export | Optional, found on `PATH`, never installed by us. |
@@ -41,8 +41,9 @@ global hotkey registers one chord; snipux does not see other keystrokes.
 | `xprop` | window geometry on X11 (Window/Browser modes) | Nothing. |
 | `$APPIMAGE`, a rename in its folder, a detached relaunch (`subprocess`, new session) | the AppImage replacing itself after the user clicks Update | "Updated to Snipux X, restarting…", then the tray icon comes back. Only for an AppImage in a folder the user can write to; the file is replaced atomically and the old one kept as `<name>.<version>.bak`. No `.desktop` file or keybinding is rewritten. |
 | `wl-copy` | clipboard on Wayland when Qt's is not enough | Nothing. |
-| `gsettings` (`org.gnome.settings-daemon.plugins.media-keys` custom keybindings; `shell`/`mutter`/`desktop.wm` keybindings to find clashes) | binding the global shortcut and clearing chords that clash | Written by `--setup`; undone by `--remove`. |
-| Hyprland `bindings.lua` / `hyprland.conf`, `hyprctl` | binding and validating the global shortcut on Hyprland | A backed-up, delimited block is written by `--setup` and removed exactly by `--remove`; existing bindings are not overwritten. |
+| `gsettings` (`org.gnome.settings-daemon.plugins.media-keys` custom keybindings; `shell`/`mutter`/`desktop.wm` keybindings to find clashes) | binding the two global shortcuts, each in a custom-keybinding slot of its own (`snipux`, `snipux-record`), and finding chords that clash | Written by `--setup` and by Save in Settings; undone by `--remove`. The record shortcut is not bound over a chord GNOME already uses. |
+| Hyprland `bindings.lua` / `hyprland.conf`, `hyprctl` | binding and validating the two global shortcuts on Hyprland | A backed-up, delimited block per shortcut (`snipux shortcut`, `snipux record shortcut`) is written by `--setup` and by Save in Settings, and removed exactly by `--remove`; existing bindings are not overwritten. |
+| `/usr/share/omarchy/default/hypr/bindings/*.lua` | finding a chord one of Omarchy's default bindings already holds | Read only, and only on Hyprland with a Lua config. A default the user's own `bindings.lua` releases with `hl.unbind` counts as free. |
 | `.desktop` files, autostart, hicolor icons | app launcher and start at login | Written by `--setup`; undone by `--remove`. |
 | `MimeType=` in the editors' `.desktop` files | "Snipux Image Editor" / "Snipux Video Editor" under "Open With" for images and recordings | Listed; Snipux does not set itself as the default -- nothing writes `mimeapps.list`. But where no default is configured for a type, XDG/GLib may pick the first entry claiming it, and user entries are searched first, so on a bare system Snipux could end up opening that type. Not yet checked: on a bare Hyprland system, run `xdg-mime query default image/png` (and `video/mp4`) after `--setup`. The `.deb` also installs both system-wide. |
 
@@ -56,7 +57,7 @@ top there.
 | `QScreenCapture` (QtMultimedia) | the one-shot grab | Nothing. |
 | `QScreenCapture` -> `QMediaRecorder` | recording, pause/resume | Windows' own recording indicator. H.264 video. No cursor option -- the pointer is never in the file, so the chooser row's pointer flag and the Settings switch are both greyed with that reason. |
 | `QAudioInput` (default input device) | Mic audio in a recording | Only when the user picks Mic; each recording starts Muted. Windows may ask for microphone access. System (desktop) sound is greyed: Qt cannot capture it. |
-| `user32.RegisterHotKey` / `UnregisterHotKey` | the global shortcut | One chord (`MOD_NOREPEAT`). |
+| `user32.RegisterHotKey` / `UnregisterHotKey` | the two global shortcuts | One chord each (`MOD_NOREPEAT`), under ids 1 (snip) and 3 (record); `WM_HOTKEY`'s `wParam` tells them apart. Id 2 is the probe Settings uses to ask whether a chord is free. AltGr is Ctrl+Alt to Windows, so AltGr+R fires the default record chord. |
 | `user32.SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` | keeping snipux's own bars out of a recording | Nothing. Windows 10 2004+. |
 | `kernel32.AttachConsole` | printing `--help`/`--update` output from the windowless launcher | Nothing. |
 | COM `IShellLinkW` / `IPersistFile` (raw `ctypes`) | Start Menu and Startup shortcuts, and the two editors' Start Menu shortcuts (`SetArguments` carries their flag) | Written by `--setup` / first run of the exe; undone by `--remove`. |

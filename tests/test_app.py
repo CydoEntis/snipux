@@ -840,6 +840,12 @@ class FakeTransport(Transport):
         if primary_on_request is not None:
             primary_on_request()
 
+    def send_record_request(self) -> None:
+        self._state["forwarded_record_requests"] += 1
+        primary_on_record_request = self._state["primary_on_record_request"]
+        if primary_on_record_request is not None:
+            primary_on_record_request()
+
     def send_settings_request(self) -> None:
         self._state["forwarded_settings_requests"] += 1
         primary_on_settings_request = self._state["primary_on_settings_request"]
@@ -860,7 +866,11 @@ class FakeTransport(Transport):
             primary_on_editor_request(editor)
         return self._state["acknowledges"]
 
-    def listen(self, on_request, on_settings_request, on_open_request, on_editor_request) -> None:
+    def listen(
+        self, on_request, on_settings_request, on_open_request, on_editor_request,
+        on_record_request=None,
+    ) -> None:
+        self._state["primary_on_record_request"] = on_record_request
         self._state["primary_on_request"] = on_request
         self._state["primary_on_settings_request"] = on_settings_request
         self._state["primary_on_open_request"] = on_open_request
@@ -871,6 +881,8 @@ def make_transport_state() -> dict:
     return {
         "claimed": False,
         "forwarded_requests": 0,
+        "forwarded_record_requests": 0,
+        "primary_on_record_request": None,
         "forwarded_settings_requests": 0,
         "forwarded_open_paths": [],
         "forwarded_editor_requests": [],
@@ -10211,3 +10223,557 @@ class TestARefusedRecordingAnswersNo:
         assert overlay._armed_for_recording is False
         assert overlay._chooser.tab.isVisible()
         overlay.close()
+
+
+class TestRecordFlag:
+    """`--record` is `--snip` with the overlay opened on its record side:
+    what the record shortcut runs.
+    """
+
+    def test_forwards_a_record_request_to_an_already_running_instance(self):
+        state = make_transport_state()
+        state["claimed"] = True
+
+        exit_code = main(["--record"], transport=FakeTransport(state))
+
+        assert exit_code == 0
+        assert state["forwarded_record_requests"] == 1
+        # Its own request, not a snip that happens to be relabelled.
+        assert state["forwarded_requests"] == 0
+
+    def test_starts_a_resident_with_the_overlay_on_record_when_nothing_is_running(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+        created = []
+
+        class TrackingAppController(AppController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+        monkeypatch.setattr(app, "AppController", TrackingAppController)
+        # main() goes on to install_hotkey_listener(), a genuine
+        # RegisterHotKey on Windows -- see TestSnipFlag's own note.
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: "Bound Control+Alt+S to start a snip.",
+        )
+        monkeypatch.setattr(
+            app.platform.current, "registered_shortcut", "Control+Alt+S", raising=False
+        )
+        registry = BackendRegistry([FakeCaptureBackend(make_capture_frame())])
+        state = make_transport_state()
+
+        try:
+            exit_code = main(["--record"], registry=registry, transport=FakeTransport(state))
+
+            assert exit_code == 0
+            assert state["forwarded_record_requests"] == 0
+            assert len(created) == 1
+            # Resident, and listening for the next press of either key.
+            assert state["primary_on_request"] is not None
+            assert state["primary_on_record_request"] is not None
+            assert isinstance(created[0]._overlay, OverlayWindow)
+            assert created[0]._overlay._chooser.kind == "record"
+        finally:
+            if created and created[0]._overlay is not None:
+                created[0]._overlay.close()
+            if created:
+                created[0]._tray_icon.hide()
+
+    def test_mutually_exclusive_with_snip(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--record", "--snip"])
+
+        assert excinfo.value.code != 0
+
+    def test_it_takes_no_path(self, tmp_path):
+        with pytest.raises(SystemExit):
+            main(["--record", str(tmp_path / "shot.png")])
+
+
+class TestRecordShortcutFlag:
+    """`--record-shortcut` modifies `--setup`, the way `--shortcut` does."""
+
+    def test_is_passed_through_to_install_desktop_integration(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: seen.update(kwargs) or 0,
+        )
+
+        assert main(["--setup", "--record-shortcut", "Control+Alt+V"]) == 0
+        assert seen["record_shortcut"] == "Control+Alt+V"
+        assert seen["shortcut"] is None
+
+    def test_off_is_passed_through_as_given(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: seen.update(kwargs) or 0,
+        )
+
+        assert main(["--setup", "--record-shortcut", "off"]) == 0
+        assert seen["record_shortcut"] == "off"
+
+    def test_setup_alone_does_not_mention_it(self, monkeypatch):
+        # So the stored value wins, and a platform whose setup has never
+        # heard of a record shortcut is called exactly as it always was.
+        seen = {}
+        monkeypatch.setattr(
+            app.platform.current,
+            "install_desktop_integration",
+            lambda **kwargs: seen.update(kwargs) or 0,
+        )
+
+        main(["--setup"])
+
+        assert seen == {"shortcut": None}
+
+    def test_is_rejected_without_setup(self, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--record-shortcut", "Control+Alt+V"])
+
+        assert excinfo.value.code != 0
+        assert (
+            "--record-shortcut only means anything alongside --setup"
+            in capsys.readouterr().err
+        )
+
+
+class TestTheRecordRequestOnTheWire:
+    """The record shortcut's byte: sent without Qt by `handoff`, and told
+    apart from a snip by the resident.
+    """
+
+    def test_record_has_a_byte_of_its_own(self):
+        assert handoff.RECORD_REQUEST == b"R"
+        assert handoff._REQUESTS["--record"] == handoff.RECORD_REQUEST
+        others = [
+            handoff.SNIP_REQUEST,
+            handoff.SETTINGS_REQUEST,
+            handoff.OPEN_REQUEST_PREFIX,
+            *handoff.EDITOR_REQUESTS.values(),
+        ]
+        # One byte decides what the resident does, so none may be shared.
+        assert handoff.RECORD_REQUEST not in others
+
+    def test_record_with_anything_after_it_is_left_to_the_full_cli(self, tmp_path):
+        # Not a request, so nothing is sent whether or not anyone listens.
+        name = f"snipux-nobody-{tmp_path.name}"
+
+        assert handoff.forward(["--record", "extra"], server_name=name) is False
+
+    def test_nobody_listening_means_not_delivered(self, tmp_path):
+        name = f"snipux-nobody-{tmp_path.name}"
+
+        assert handoff.forward(["--record"], server_name=name) is False
+
+    @staticmethod
+    def _callbacks():
+        return {
+            "snip": lambda: None,
+            "settings": lambda: None,
+            "open": lambda path: None,
+            "editor": lambda editor: None,
+            "record": lambda: None,
+        }
+
+    def test_the_resident_reads_r_as_a_record_request(self, tmp_path):
+        transport = app.QLocalSocketTransport(f"snipux-recognise-{tmp_path.name}")
+        on = self._callbacks()
+
+        handle = transport._recognise(
+            b"R", on["snip"], on["settings"], on["open"], on["editor"], on["record"]
+        )
+
+        assert handle is on["record"]
+
+    def test_the_snip_and_settings_bytes_still_mean_what_they_did(self, tmp_path):
+        transport = app.QLocalSocketTransport(f"snipux-recognise-{tmp_path.name}")
+        on = self._callbacks()
+        arguments = (on["snip"], on["settings"], on["open"], on["editor"], on["record"])
+
+        assert transport._recognise(b"S", *arguments) is on["snip"]
+        assert transport._recognise(b"T", *arguments) is on["settings"]
+
+    def test_a_listener_with_no_record_callback_drops_the_byte(self, tmp_path):
+        # What a caller written before the record shortcut gets: nothing
+        # acted on and nothing acked, never a snip in its place.
+        transport = app.QLocalSocketTransport(f"snipux-recognise-{tmp_path.name}")
+        on = self._callbacks()
+
+        handle = transport._recognise(
+            b"R", on["snip"], on["settings"], on["open"], on["editor"]
+        )
+
+        assert handle is None
+
+    @skip_on_windows(_NO_SOCKET_FILE)
+    def test_handoff_delivers_it_to_a_running_resident(self, tmp_path):
+        name = f"snipux-handoff-rec-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        # Held for the whole test -- see TestHandoff._resident.
+        self._server = server
+        heard = []
+        server.listen(
+            lambda: heard.append("snip"),
+            lambda: heard.append("settings"),
+            lambda path: heard.append(("open", path)),
+            lambda editor: heard.append(("editor", editor)),
+            on_record_request=lambda: heard.append("record"),
+        )
+
+        assert handoff.forward(["--record"], server_name=name) is True
+        QApplication.processEvents()
+        QTest.qWait(50)
+        QApplication.processEvents()
+
+        assert heard == ["record"]
+
+    @skip_on_windows(
+        "Client and server in one process -- see "
+        "TestSnipRequestProtocol.test_a_real_request_is_delivered."
+    )
+    def test_the_transport_delivers_it_and_never_fires_a_snip(self, tmp_path):
+        name = f"snipux-test-rec-{tmp_path.name}"
+        server = app.QLocalSocketTransport(name)
+        assert server.try_claim()
+        snips, records = [], []
+        server.listen(
+            lambda: snips.append(True),
+            lambda: None,
+            lambda path: None,
+            lambda editor: None,
+            on_record_request=lambda: records.append(True),
+        )
+
+        app.QLocalSocketTransport(name).send_record_request()
+        for _ in range(20):
+            QApplication.processEvents()
+            QTest.qWait(20)
+            if records:
+                break
+
+        assert records == [True]
+        assert snips == []
+
+
+class TestTheRecordShortcutOpensOnRecord:
+    """`start_capture(kind="record")`: the same overlay, its chooser's
+    switch already on Record.
+    """
+
+    def _controller(self, make_controller):
+        return make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(make_transport_state()),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+    def test_a_fresh_overlay_opens_on_record(self, make_controller):
+        controller = self._controller(make_controller)
+
+        controller.start_capture(kind="record")
+
+        assert controller._overlay._chooser.kind == "record"
+
+    def test_start_recording_capture_is_that_call(self, make_controller):
+        controller = self._controller(make_controller)
+
+        controller.start_recording_capture()
+
+        assert controller._overlay._chooser.kind == "record"
+
+    def test_nothing_is_armed_or_recorded_merely_by_opening(self, make_controller):
+        controller = self._controller(make_controller)
+
+        controller.start_recording_capture()
+
+        assert controller._overlay._selection is None
+        assert controller._overlay._armed_for_recording is False
+        assert controller._armed_recording is None
+
+    def test_it_does_not_open_on_a_recalled_rectangle(self, make_controller):
+        # Last region opens a snip on the rectangle the last one came from.
+        # For a recording that would be an offer to film something nobody
+        # framed this time.
+        setup_desktop.save_last_region((10, 20, 200, 150))
+        setup_desktop.save_reuse_last_region(True)
+        controller = self._controller(make_controller)
+
+        controller.start_recording_capture()
+
+        assert controller._overlay._chooser.kind == "record"
+        assert controller._overlay._selection is None
+        assert controller._overlay._recalled_selection is False
+
+    def test_the_snip_after_it_opens_on_stills_again(self, make_controller):
+        controller = self._controller(make_controller)
+        controller.start_recording_capture()
+        controller._overlay.close()
+
+        controller.start_capture()
+
+        assert controller._overlay._chooser.kind == "stills"
+
+    def test_over_an_overlay_already_up_it_flips_the_switch(self, make_controller):
+        controller = self._controller(make_controller)
+        controller.start_capture()
+        first = controller._overlay
+        assert first._chooser.kind == "stills"
+
+        controller.start_recording_capture()
+
+        # The same overlay, not a second one.
+        assert controller._overlay is first
+        assert first._chooser.kind == "record"
+
+    def test_the_snip_shortcut_over_a_record_overlay_leaves_it_on_record(
+        self, make_controller
+    ):
+        # A second press only brings the overlay forward. It never undoes
+        # a choice already made on it.
+        controller = self._controller(make_controller)
+        controller.start_recording_capture()
+
+        controller.start_capture()
+
+        assert controller._overlay._chooser.kind == "record"
+
+    def test_kind_can_only_be_given_by_name(self, make_controller):
+        # `start_capture` is connected to `QAction.triggered`, which
+        # carries a `checked` argument of its own. Keyword-only, so that
+        # can never land in `kind`.
+        controller = self._controller(make_controller)
+
+        with pytest.raises(TypeError):
+            controller.start_capture(False)
+
+    def test_the_resident_listens_for_record_requests(self, make_controller):
+        state = make_transport_state()
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(state),
+            monitor_geometries=[QRectF(0, 0, 400, 300)],
+        )
+
+        state["primary_on_record_request"]()
+
+        assert controller._overlay._chooser.kind == "record"
+
+
+class TestTheRecordShortcutIsBoundWithTheSnipOne:
+    def _tray_messages(self, monkeypatch):
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        messages = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: messages.append(message),
+        )
+        return messages
+
+    def test_saving_settings_rebinds_both_and_reports_once(
+        self, make_controller, monkeypatch
+    ):
+        order = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: order.append("snip") or "Bound the snip shortcut.",
+        )
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_record_shortcut",
+            lambda shortcut=None: order.append("record") or "Bound the record shortcut.",
+        )
+        messages = self._tray_messages(monkeypatch)
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller._on_settings_saved()
+
+        # The snip shortcut first: a clash is the record shortcut's to lose.
+        assert order == ["snip", "record"]
+        # One balloon. A second would replace the first before it was read.
+        assert messages == ["Bound the snip shortcut.\nBound the record shortcut."]
+
+    def test_a_platform_with_no_record_shortcut_still_reports_the_snip_one(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(
+            app.platform.current, "bind_shortcut", lambda shortcut=None: "Bound the snip shortcut."
+        )
+
+        def unimplemented(shortcut=None):
+            raise app.platform.UnimplementedPlatformError("macOS", "bind_record_shortcut")
+
+        monkeypatch.setattr(app.platform.current, "bind_record_shortcut", unimplemented)
+        messages = self._tray_messages(monkeypatch)
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller._on_settings_saved()
+
+        assert messages == ["Bound the snip shortcut."]
+
+    def test_an_upgrade_does_not_bind_it(self, make_controller, monkeypatch):
+        # A new global shortcut is something the user turns on -- by
+        # saving Settings or running --setup -- not something an update
+        # writes into their compositor config on the next launch.
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: False))
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: True)
+        monkeypatch.setattr(
+            app.setup_desktop, "find_console_script", lambda name="snipux": Path("/here/snipux")
+        )
+        monkeypatch.setattr(
+            app.setup_desktop, "load_integration_target", lambda cd=None: str(Path("/here/snipux"))
+        )
+        monkeypatch.setattr(app.setup_desktop, "load_integration_revision", lambda cd=None: 1)
+        monkeypatch.setattr(
+            app.setup_desktop, "save_integration_revision", lambda revision, cd=None: True
+        )
+        monkeypatch.setattr(app.platform.current, "install_editor_integration", lambda: 0)
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: pytest.fail("an upgrade re-bound the snip shortcut"),
+        )
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_record_shortcut",
+            lambda shortcut=None: pytest.fail("an upgrade bound the record shortcut"),
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()
+
+    def test_the_first_launch_message_names_both_shortcuts(
+        self, make_controller, monkeypatch
+    ):
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: False)
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", lambda **kwargs: 0
+        )
+        messages = self._tray_messages(monkeypatch)
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()
+
+        assert len(messages) == 1
+        assert "Control+Alt+S starts a snip" in messages[0]
+        assert "Control+Alt+R a recording" in messages[0]
+
+    def test_the_first_launch_message_leaves_out_a_record_shortcut_that_is_off(
+        self, make_controller, monkeypatch
+    ):
+        setup_desktop.save_record_shortcut(None)
+        monkeypatch.setattr(app.setup_desktop, "load_setup_complete", lambda cd=None: False)
+        monkeypatch.setattr(
+            app.platform.current, "install_desktop_integration", lambda **kwargs: 0
+        )
+        messages = self._tray_messages(monkeypatch)
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+
+        controller.run_first_launch_setup()
+
+        assert len(messages) == 1
+        assert "recording" not in messages[0]
+        assert "Control+Alt+S starts a snip" in messages[0]
+
+
+class TestWindowsRecordHotkeyIntegration:
+    """The second `RegisterHotKey`, through `install_hotkey_listener()`,
+    with the real calls stubbed as `TestWindowsHotkeyIntegration` does.
+    """
+
+    def _install(self, make_controller, monkeypatch, *, record_message, registered):
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(QApplication, "installNativeEventFilter", lambda self, f: None)
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_shortcut",
+            lambda shortcut=None: "Bound Control+Alt+S to start a snip.",
+        )
+        monkeypatch.setattr(
+            app.platform.current, "registered_shortcut", "Control+Alt+S", raising=False
+        )
+        record_calls = []
+        monkeypatch.setattr(
+            app.platform.current,
+            "bind_record_shortcut",
+            lambda shortcut=None: record_calls.append(shortcut) or record_message,
+        )
+        monkeypatch.setattr(
+            app.platform.current, "registered_record_shortcut", registered, raising=False
+        )
+        monkeypatch.setattr(
+            QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+        )
+        messages = []
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "showMessage",
+            lambda self, title, message, *a, **k: messages.append(message),
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+        controller.install_hotkey_listener()
+        return controller, record_calls, messages
+
+    def test_it_is_registered_at_startup_and_a_routine_bind_says_nothing(
+        self, make_controller, monkeypatch
+    ):
+        _controller, record_calls, messages = self._install(
+            make_controller,
+            monkeypatch,
+            record_message="Bound Control+Alt+R to start a recording.",
+            registered="Control+Alt+R",
+        )
+
+        assert record_calls == [None]
+        assert messages == []
+
+    def test_a_clash_at_startup_is_reported(self, make_controller, monkeypatch):
+        clash = (
+            "Control+Alt+R is already in use by another application -- "
+            "Snipux cannot use it to start a recording."
+        )
+        _controller, _calls, messages = self._install(
+            make_controller, monkeypatch, record_message=clash, registered=None
+        )
+
+        assert messages == [clash]
+
+    def test_one_that_is_off_is_not_reported_as_a_failure(self, make_controller, monkeypatch):
+        setup_desktop.save_record_shortcut(None)
+
+        _controller, _calls, messages = self._install(
+            make_controller,
+            monkeypatch,
+            record_message="The record shortcut is off.",
+            registered=None,
+        )
+
+        assert messages == []
+
+    def test_the_filter_is_given_both_callbacks(self, make_controller, monkeypatch):
+        controller, _calls, _messages = self._install(
+            make_controller,
+            monkeypatch,
+            record_message="Bound Control+Alt+R to start a recording.",
+            registered="Control+Alt+R",
+        )
+
+        # Bound methods compare equal when they are the same method of the
+        # same object, which is all that is being asked.
+        assert controller.hotkey_filter._on_triggered == controller.start_capture
+        assert (
+            controller.hotkey_filter._on_record_triggered
+            == controller.start_recording_capture
+        )

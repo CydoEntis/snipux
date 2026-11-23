@@ -66,16 +66,23 @@ One flat JSON object. Keys in use today:
 after_capture               last_tool                   save_folder
 bar_position                native_resolution           setup_complete
 default_ink                 recent_captures             shortcut
-default_tool                recording_after             tool_defaults
-filename_pattern            recording_draw_cursor       tray_toggles
-hide_sensitive              recording_filename_pattern  update_checked_on
-hints_enabled               recording_folder            watermark_backing
-instant_saves               recording_frame_rate        watermark_color
-integration_revision        remember_tool               watermark_font
-integration_target          reuse_last_region           watermark_image
-last_region                 recording_audio             watermark_kind
-                                                        watermark_text
+default_tool                record_shortcut             tool_defaults
+filename_pattern            recording_after             tray_toggles
+hide_sensitive              recording_draw_cursor       update_checked_on
+hints_enabled               recording_filename_pattern  watermark_backing
+instant_saves               recording_folder            watermark_color
+integration_revision        recording_frame_rate        watermark_font
+integration_target          remember_tool               watermark_image
+last_region                 reuse_last_region           watermark_kind
+                            recording_audio             watermark_text
 ```
+
+`record_shortcut` is the one key where "empty" and "missing" mean different
+things. Missing is the default, `Control+Alt+R` -- unless `shortcut` already
+holds that very combination, in which case the record shortcut starts off
+rather than taking a key the user gave to snipping. An empty string (or
+`null`) is the user turning it off, and is written rather than removed so
+that it stays off. `load_record_shortcut()` returns `None` for off.
 
 ### Rules
 

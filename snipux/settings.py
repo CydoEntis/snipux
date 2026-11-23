@@ -148,8 +148,16 @@ class ShortcutRecorder(QWidget):
     recorded = pyqtSignal(str)
 
     _PULSE_MS = 550  # half of the design's 1.1s opacity cycle
+    # What the field says when it holds no combination at all.
+    _NONE_TEXT = "No shortcut"
 
-    def __init__(self, shortcut: str, parent: QWidget | None = None):
+    def __init__(
+        self, shortcut: str, parent: QWidget | None = None, *, clearable: bool = False
+    ):
+        """`clearable` adds a Clear button, for a shortcut that is allowed
+        to be none at all. The value is then the empty string, and
+        `recorded` carries it like any other.
+        """
         super().__init__(parent)
         self._shortcut = shortcut
         self._recording = False
@@ -165,9 +173,18 @@ class ShortcutRecorder(QWidget):
         self._field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         row.addWidget(self._field, 1)
 
-        self._button = SecondaryButton("Record")
+        # "Set", not "Record", where the field itself is about recording:
+        # "Record" beside "Start a recording" reads as the thing it binds.
+        self._idle_label = "Set" if clearable else "Record"
+        self._button = SecondaryButton(self._idle_label)
         self._button.clicked.connect(self._toggle)
         row.addWidget(self._button)
+
+        self._clear: SecondaryButton | None = None
+        if clearable:
+            self._clear = SecondaryButton("Clear")
+            self._clear.clicked.connect(self.clear)
+            row.addWidget(self._clear)
 
         # Rendered only while recording, per the design -- not a permanently
         # present dot faded in and out.
@@ -197,6 +214,11 @@ class ShortcutRecorder(QWidget):
                 "Press a combination…</span>"
             )
             border, fill = tokens.Color.ACCENT, "#22262d"
+        elif not self._shortcut:
+            self._field.setText(
+                f'<span style="color:{win.TEXT_MUTED};">{self._NONE_TEXT}</span>'
+            )
+            border, fill = win.FIELD_BORDER, win.FIELD_BG
         else:
             self._field.setText(
                 f'<span style="color:{win.TEXT_PRIMARY};">{self._shortcut}</span>'
@@ -206,7 +228,19 @@ class ShortcutRecorder(QWidget):
             f"background: {fill}; border: 1px solid {border};"
             f" border-radius: {tokens.WinMetric.CONTROL_RADIUS}px; padding: 0 11px;"
         )
-        self._button.setText("Cancel" if self._recording else "Record")
+        self._button.setText("Cancel" if self._recording else self._idle_label)
+        if self._clear is not None:
+            self._clear.setEnabled(bool(self._shortcut) and not self._recording)
+
+    def clear(self) -> None:
+        """Leave the field with no combination, and say so."""
+        if self._recording:
+            self._stop()
+        if not self._shortcut:
+            return
+        self._shortcut = ""
+        self._refresh()
+        self.recorded.emit("")
 
     def _blink(self) -> None:
         self._dot_on = not self._dot_on
@@ -281,32 +315,74 @@ class ConflictBanner(QLabel):
         self.setWordWrap(True)
         self.setFont(_ui_font(11.5, 400))
 
-    def show_for(self, shortcut: str) -> None:
+    def show_for(
+        self,
+        shortcut: str,
+        action: setup_desktop.ShortcutAction = setup_desktop.SNIP,
+        other: str | None = None,
+    ) -> None:
+        """Say whether `shortcut` is clear for `action`. `other` is the
+        combination the window currently holds for the other Snipux
+        shortcut, which no desktop's own check knows about until it is
+        saved.
+        """
         win = tokens.Win
-        if HotkeyEventFilter.is_available():
+        clash = False
+        if not shortcut:
+            text = "No shortcut. Recording still starts from the overlay's Record switch."
+        elif other and setup_desktop.normalise_shortcut(
+            shortcut
+        ) == setup_desktop.normalise_shortcut(other):
+            clash = True
+            text = (
+                f"✕  {shortcut} is used by both shortcuts here. One "
+                "combination cannot start a snip and a recording."
+            )
+        elif HotkeyEventFilter.is_available():
             holder = platform.current.find_shortcut_conflict(shortcut)
             if holder is not None:
+                clash = True
                 text = f"✕  {shortcut} is already used by {holder}."
-                fg = win.ERR_FG
-                bg, border = _rgba("ERR_BG"), _rgba("ERR_BORDER")
             else:
                 text = f"✓  {shortcut} is free to register."
-                fg = win.OK_FG
-                bg, border = _rgba("OK_BG"), _rgba("OK_BORDER")
-        else:
-            conflicts = setup_desktop.find_shortcut_conflicts_named(shortcut)
-            if conflicts:
-                owner = conflicts[0][1]
+        elif setup_desktop.is_hyprland_session():
+            holder = setup_desktop.find_hyprland_conflict(shortcut, action)
+            if holder is not None:
+                clash = True
                 text = (
-                    f"✕  {shortcut} is already {owner}. GNOME will not warn "
-                    "you — it will just fire the wrong one."
+                    f"✕  {shortcut} is already {holder}. Snipux will not "
+                    "bind over it."
                 )
-                fg = win.ERR_FG
-                bg, border = _rgba("ERR_BG"), _rgba("ERR_BORDER")
+            else:
+                text = f"✓  No Hyprland binding uses {shortcut}."
+        else:
+            if action is setup_desktop.SNIP:
+                conflicts = setup_desktop.find_shortcut_conflicts_named(shortcut)
+            else:
+                conflicts = setup_desktop.find_shortcut_conflicts_named(
+                    shortcut, action.gnome_slot
+                )
+            if conflicts:
+                clash = True
+                owner = conflicts[0][1]
+                if action is setup_desktop.SNIP:
+                    text = (
+                        f"✕  {shortcut} is already {owner}. GNOME will not warn "
+                        "you — it will just fire the wrong one."
+                    )
+                else:
+                    text = (
+                        f"✕  {shortcut} is already {owner}. Snipux will not "
+                        "bind over it."
+                    )
             else:
                 text = f"✓  No GNOME shortcut uses {shortcut}."
-                fg = win.OK_FG
-                bg, border = _rgba("OK_BG"), _rgba("OK_BORDER")
+        if clash:
+            fg = win.ERR_FG
+            bg, border = _rgba("ERR_BG"), _rgba("ERR_BORDER")
+        else:
+            fg = win.OK_FG
+            bg, border = _rgba("OK_BG"), _rgba("OK_BORDER")
         self.setText(text)
         self.setStyleSheet(
             f"color: {fg}; background: {bg}; border: 1px solid {border};"
@@ -1638,7 +1714,34 @@ class SettingsWindow(WinWindow):
         self._recorder.recorded.connect(self._on_recorded)
 
         self._conflict = ConflictBanner()
-        self._conflict.show_for(self._recorder.shortcut_value())
+
+        # The second shortcut: the same overlay, opened on Record. The
+        # same recorder, plus a way to have none -- recording is reachable
+        # without it, so unlike the snip shortcut it may be left empty.
+        self._record_recorder = ShortcutRecorder(
+            setup_desktop.load_record_shortcut(self._config_dir) or "", clearable=True
+        )
+        self._record_recorder.recorded.connect(self._on_recorded)
+        self._record_conflict = ConflictBanner()
+        self._refresh_conflicts()
+        record_note = QLabel(
+            "Opens the same overlay already switched to Record: drag a region "
+            "and it is armed to record. While a recording is running, either "
+            "shortcut stops it."
+            + (
+                # AltGr is Ctrl+Alt to Windows, so on a layout that types
+                # with it (German, French, Polish, ...) AltGr+R would fire
+                # this. Said here because the default is exactly that shape.
+                " On keyboard layouts with AltGr, Windows treats AltGr as "
+                "Ctrl+Alt, so AltGr and the same letter fires it too; choose "
+                "another combination if that gets in the way of typing."
+                if HotkeyEventFilter.is_available()
+                else ""
+            )
+        )
+        record_note.setWordWrap(True)
+        record_note.setFont(_ui_font(11.5, 400))
+        record_note.setStyleSheet(f"color: {tokens.Win.TEXT_FAINT};")
 
         if HotkeyEventFilter.is_available():
             why_text = (
@@ -1690,6 +1793,11 @@ class SettingsWindow(WinWindow):
             self._recorder,
             self._conflict,
             why,
+            None,
+            SectionHeading("Record shortcut"),
+            self._record_recorder,
+            self._record_conflict,
+            record_note,
             None,
             SectionHeading("After capture"),
             *cards,
@@ -2595,9 +2703,16 @@ class SettingsWindow(WinWindow):
         if self._on_report_problem is not None:
             self._on_report_problem()
 
-    def _on_recorded(self, accelerator: str) -> None:
-        self._conflict.show_for(accelerator)
+    def _on_recorded(self, _accelerator: str) -> None:
+        # Both banners: each shortcut is what the other must not be.
+        self._refresh_conflicts()
         self._mark_dirty()
+
+    def _refresh_conflicts(self) -> None:
+        snip = self._recorder.shortcut_value()
+        record = self._record_recorder.shortcut_value()
+        self._conflict.show_for(snip, setup_desktop.SNIP, record)
+        self._record_conflict.show_for(record, setup_desktop.RECORD, snip)
 
     def _choose_folder(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "Save snips to", self._folder.text())
@@ -2661,6 +2776,37 @@ class SettingsWindow(WinWindow):
         unchanged = setup_desktop.normalise_shortcut(shortcut) == setup_desktop.normalise_shortcut(
             setup_desktop.load_shortcut(self._config_dir)
         )
+        record_shortcut = self._record_recorder.shortcut_value()
+        if record_shortcut and setup_desktop.normalise_shortcut(
+            record_shortcut
+        ) == setup_desktop.normalise_shortcut(shortcut):
+            # Refused on every platform, not only where the OS can tell:
+            # GNOME would take both and fire whichever it liked.
+            QMessageBox.warning(
+                self,
+                "One shortcut, two jobs",
+                f"{shortcut} is set for both snipping and recording. Choose a "
+                "different combination for one of them, or clear the record "
+                "shortcut.",
+            )
+            return
+        record_unchanged = setup_desktop.normalise_shortcut(
+            record_shortcut
+        ) == setup_desktop.normalise_shortcut(
+            setup_desktop.load_record_shortcut(self._config_dir) or ""
+        )
+        if HotkeyEventFilter.is_available() and record_shortcut and not record_unchanged:
+            # The same refusal the snip shortcut gets just below, for the
+            # same reason.
+            holder = platform.current.find_shortcut_conflict(record_shortcut)
+            if holder is not None:
+                QMessageBox.warning(
+                    self,
+                    "Shortcut already in use",
+                    f"{record_shortcut} is already used by {holder} -- Snipux "
+                    "cannot register it too. Choose a different combination.",
+                )
+                return
         # Only a *new* combination is checked. The probe cannot tell the
         # saved one apart from a registration this process failed to make
         # at startup, and refusing it then blocked every other setting too.
@@ -2698,6 +2844,12 @@ class SettingsWindow(WinWindow):
         # saved nothing, which is the one outcome worse than an error.
         written = [
             setup_desktop.save_shortcut(shortcut, self._config_dir),
+            # Written only when it differs from what is in effect, so a
+            # record shortcut that is off because the snip shortcut already
+            # had its default key is not turned into a stored "off" by
+            # saving some other setting.
+            record_unchanged
+            or setup_desktop.save_record_shortcut(record_shortcut, self._config_dir),
             setup_desktop.save_after_capture(
                 tokens.AFTER_CAPTURE[self._after_group.checkedId()][0], self._config_dir
             ),

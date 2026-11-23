@@ -47,7 +47,9 @@ _PLATFORM_NAME = "macOS"
 
 
 class DarwinPlatform(Platform):
-    def install_desktop_integration(self, *, shortcut: str | None = None) -> int:
+    def install_desktop_integration(
+        self, *, shortcut: str | None = None, record_shortcut: str | None = None
+    ) -> int:
         raise UnimplementedPlatformError(_PLATFORM_NAME, "install_desktop_integration")
 
     def install_editor_integration(self) -> int:
@@ -61,6 +63,12 @@ class DarwinPlatform(Platform):
 
     def unbind_shortcut(self) -> str:
         raise UnimplementedPlatformError(_PLATFORM_NAME, "unbind_shortcut")
+
+    def bind_record_shortcut(self, shortcut: str | None = None) -> str:
+        raise UnimplementedPlatformError(_PLATFORM_NAME, "bind_record_shortcut")
+
+    def unbind_record_shortcut(self) -> str:
+        raise UnimplementedPlatformError(_PLATFORM_NAME, "unbind_record_shortcut")
 
     def default_save_folder(self) -> Path:
         raise UnimplementedPlatformError(_PLATFORM_NAME, "default_save_folder")
