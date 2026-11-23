@@ -5,6 +5,8 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+## 1.4.1 — 2026-11-23
+
 ### Added
 
 - **Hide sensitive works on Linux.** With `tesseract` installed, the switch
