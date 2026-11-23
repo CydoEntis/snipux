@@ -14,7 +14,7 @@ and only for something the user just asked for.
 | Clipboard (`QClipboard`) | Copy, player copy | Written only when the user clicks Copy. Never read in the background; no clipboard history. |
 | Local socket (`QLocalServer`/`QLocalSocket`) | a second `snipux --snip` (or `--settings`, `--image-editor`, `--video-editor`, `snipux FILE`) hands its request to the running one | Local only, fixed server name. Carries a command or a file's path, never pixels. |
 | Files | saving captures, `config.json` and friends | Only the save/recording folders, the config folder, and a file the user opened. |
-| `pip` (subprocess) | `snipux --update` | Only when the user runs it. Refused in the standalone exe. |
+| `pip` (subprocess) | `snipux --update` | Only when the user runs it. Refused in the standalone exe; an AppImage replaces itself instead (see Linux). |
 | `ffmpeg` (subprocess) | H.264 and GIF export | Optional, found on `PATH`, never installed by us. |
 | GitHub Releases API (`urllib`, HTTPS) | the update check, and the download behind Update | One unauthenticated GET, at most once a day plus whenever the tray asks; a second GET of the release file only if the user clicks Update. No token, no identifiers, nothing sent about the machine. |
 | Default browser (`QDesktopServices.openUrl`) | Report a problem | Opens a prefilled GitHub new-issue page. Snipux makes no request itself; the user reads the report in the browser and posts it or not. The crash log goes in only if they say yes. |
@@ -39,6 +39,7 @@ global hotkey registers one chord; snipux does not see other keystrokes.
 | system `tesseract` (optional, subprocess) | Hide sensitive | On-device. Found on `PATH`, never installed by us; without it the switch is greyed with the command that installs it (`sudo pacman -S tesseract tesseract-data-eng`, `sudo apt install tesseract-ocr`). The selection goes to temp `.bmp` files, cut into bands read by one process each, and the folder is deleted after the call. Reads in the desktop's language where its data is installed, and English. Gives up after 5 seconds and says nothing was hidden. |
 | `grim`, `scrot`, ImageMagick `import` | capture backends when present | Nothing. Each is one backend among several. |
 | `xprop` | window geometry on X11 (Window/Browser modes) | Nothing. |
+| `$APPIMAGE`, a rename in its folder, a detached relaunch (`subprocess`, new session) | the AppImage replacing itself after the user clicks Update | "Updated to Snipux X, restarting…", then the tray icon comes back. Only for an AppImage in a folder the user can write to; the file is replaced atomically and the old one kept as `<name>.<version>.bak`. No `.desktop` file or keybinding is rewritten. |
 | `wl-copy` | clipboard on Wayland when Qt's is not enough | Nothing. |
 | `gsettings` (`org.gnome.settings-daemon.plugins.media-keys` custom keybindings; `shell`/`mutter`/`desktop.wm` keybindings to find clashes) | binding the global shortcut and clearing chords that clash | Written by `--setup`; undone by `--remove`. |
 | Hyprland `bindings.lua` / `hyprland.conf`, `hyprctl` | binding and validating the global shortcut on Hyprland | A backed-up, delimited block is written by `--setup` and removed exactly by `--remove`; existing bindings are not overwritten. |

@@ -127,6 +127,14 @@ last_region                 recording_audio             watermark_kind
   snipux quits, so it cannot be removed then: the next daily check and the
   next download remove whatever earlier updates left
   (`updates.remove_old_downloads`).
+- An AppImage that updates itself writes beside itself, and nowhere else
+  (`platform/linux_appimage.py`). The new file is staged as
+  `.<name>.new` in the same folder and renamed over the running one, never
+  written into it. The version it replaces stays as
+  `<name>.<version>.bak`; any older `<name>.*.bak` is deleted, so there is
+  one backup, not one per update. Nothing that points at the AppImage --
+  the `.desktop` and autostart entries, the shortcut -- is rewritten,
+  because the path does not change.
 
 ## Tests
 

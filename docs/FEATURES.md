@@ -90,6 +90,11 @@ only once its scope, acceptance criteria and how to verify it are clear.
       (packaging/winget/) but have never been submitted to winget-pkgs
 - [x] `done` A `.deb` and an AppImage, built and attached for every release
 - [x] `done` "Check for updates" in the tray -- asked for, never automatic
+- [ ] `dev` The AppImage updates itself from the tray's Update item (and
+      `snipux --update`): verified against the release's SHA-256, replaced
+      in place, previous version kept as a `.bak`, restarted
+- [ ] `next` The portable `snipux.exe` updating itself -- still told to
+      download the new one
 - [x] `declined` Code signing -- recurring cost out of proportion for a free tool, for now (docs/releasing.md)
 
 ## Platforms

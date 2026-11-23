@@ -191,7 +191,8 @@ the model do not import it: a recorder is handed what it needs as
   running one. What reaches the internet is `updates.py`: a check against
   the GitHub Releases API, at most once a day plus whenever the tray asks,
   and the release file itself only after the user clicks Update. Plus
-  `snipux --update`, which runs `pip`. Nothing is installed without a
+  `snipux --update`, which runs `pip` (or, from an AppImage, the same
+  download the tray's Update makes). Nothing is installed without a
   click.
 - Pixels leave memory only when the user chooses Copy, Save, Pin or Record.
 - OCR (Hide sensitive) runs on the device. On Windows the image goes to a

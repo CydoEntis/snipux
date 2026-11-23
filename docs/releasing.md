@@ -169,6 +169,43 @@ to the `.AppImage` file itself. Moving that file therefore breaks the
 shortcut until Snipux is run once from the new location, which is why the
 README says to keep it somewhere it will stay.
 
+**The AppImage's filename is part of the update.** A running AppImage
+finds its replacement on the release by name:
+`Snipux-<version>-<uname -m>.AppImage` (`linux_appimage.asset_name`), which
+is what `build_appimage.sh` writes. Rename the asset and every installed
+AppImage stops offering the one-click update and falls back to "download it
+from the Releases page". It also needs the SHA-256 GitHub attaches to an
+uploaded asset (`digest` in the Releases API): an asset with none is never
+downloaded. Nothing has to be published by hand for either -- the release
+workflow's upload does both -- but an asset re-uploaded under another name,
+or attached by a tool that bypasses the API, breaks it.
+
+**Trying the update without making a release.** Never against the
+installed copy. What worked, on Hyprland:
+
+1. Build an AppImage from the branch and copy it to a scratch folder
+   (`/tmp/x/apps/Snipux.AppImage`). A second copy with a few bytes appended
+   is the "new release": it still runs, and its SHA-256 differs.
+2. Stand in for GitHub with a local HTTPS proxy that answers `CONNECT`
+   itself, using a certificate for `api.github.com` signed by a throwaway
+   CA, and serves `/repos/CydoEntis/snipux/releases/latest` (a `tag_name`
+   of `v99.0.0`, the asset's name, URL and `digest`) and the file. The
+   certificate needs the extensions Python's strict verification wants
+   (`basicConstraints`, `keyUsage`, `authorityKeyIdentifier`).
+3. Run the scratch copy with `https_proxy` pointing at the proxy,
+   `SSL_CERT_FILE` at the CA, and `HOME`, `XDG_CONFIG_HOME`,
+   `XDG_DATA_HOME` and `TMPDIR` in the scratch folder. `TMPDIR` is what
+   keeps it off the real resident's socket. Seed its `config.json` with
+   `setup_complete`, `integration_target` (its own path) and
+   `integration_revision`, or its first launch binds a shortcut.
+4. `Snipux.AppImage --update` exercises download, check and replace. For
+   the restart, start it with no arguments, then click its tray item over
+   D-Bus: `com.canonical.dbusmenu.GetLayout` on its `/MenuBar` finds
+   "Update to 99.0.0", and `Event <id> clicked` presses it.
+5. Check the file's SHA-256 is the served one, the `.bak` is the old one,
+   the old PID is gone and exactly one new process has the scratch path
+   as its `$APPIMAGE`. Stop it by that PID.
+
 ## Building the Windows exe
 
 SNX-96 produces a standalone `snipux.exe` that runs with no Python

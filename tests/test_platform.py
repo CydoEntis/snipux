@@ -3476,6 +3476,70 @@ class TestUpdatingItself:
         assert "could not start the update installer" in capsys.readouterr().out
 
 
+class TestLinuxUpdatesAnAppImage:
+    """What `LinuxPlatform` answers the update seam with. The file work is
+    tested in test_linux_appimage.py; this is only the routing.
+    """
+
+    @pytest.fixture
+    def appimage(self, monkeypatch, tmp_path):
+        path = tmp_path / "Snipux.AppImage"
+        path.write_bytes(b"running")
+        monkeypatch.setenv("APPIMAGE", str(path))
+        monkeypatch.setattr(linux.linux_appimage, "_machine", lambda: "x86_64")
+        return path
+
+    def test_an_appimage_updates_from_the_releases_appimage(self, appimage):
+        assert (
+            linux.LinuxPlatform().update_asset_name("1.5.0")
+            == "Snipux-1.5.0-x86_64.AppImage"
+        )
+
+    def test_anything_else_does_not_update_itself(self, monkeypatch):
+        # pip, pipx and the .deb: each has a command of its own.
+        monkeypatch.delenv("APPIMAGE", raising=False)
+        platform = linux.LinuxPlatform()
+
+        assert platform.update_asset_name("1.5.0") is None
+        assert platform.install_update(pathlib.Path("x.AppImage")) is False
+        assert platform.relaunch_after_update() is None
+
+    def test_an_appimage_it_cannot_replace_does_not_offer_to(self, appimage, monkeypatch):
+        # /opt/snipux, from the AUR package: root's to update, not ours.
+        monkeypatch.setattr(linux.linux_appimage, "can_replace", lambda path: False)
+
+        assert linux.LinuxPlatform().update_asset_name("1.5.0") is None
+
+    def test_installing_keeps_this_version_as_the_backup(self, appimage, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            linux.linux_appimage, "install",
+            lambda downloaded, target, version: calls.append((downloaded, target, version)),
+        )
+        downloaded = pathlib.Path("new.AppImage")
+
+        assert linux.LinuxPlatform().install_update(downloaded) is True
+        assert calls == [(downloaded, appimage.resolve(), linux.__version__)]
+
+    def test_restarting_starts_the_same_path(self, appimage, monkeypatch):
+        started = []
+        monkeypatch.setattr(
+            linux.linux_appimage, "relaunch", lambda path: started.append(path) or True
+        )
+
+        assert linux.LinuxPlatform().relaunch_after_update() is True
+        assert started == [appimage.resolve()]
+
+    def test_the_base_platform_leaves_restarting_to_the_installer(self):
+        assert Platform.relaunch_after_update(object()) is None
+
+    def test_the_base_hint_is_the_command_or_the_page(self, monkeypatch):
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        assert "snipux --update" in Platform.manual_update_hint(object(), "1.5.0")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        assert "Releases page" in Platform.manual_update_hint(object(), "1.5.0")
+
+
 class TestWindowsSkipsTheOverlaysOpeningAnimation:
     """Windows has no GNOME zoom-in to hide, so the overlay should show at
     once instead of waiting out the reveal delay -- but only when DWM
