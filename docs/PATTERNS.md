@@ -89,7 +89,7 @@ point at a temp directory and never at the real one.
 
 ## Single instance
 
-`handoff.py` is the console entry point. For a lone `--snip`, `--settings`,
+`handoff.py` is the console entry point. For a lone `--snip`, `--record`, `--settings`,
 `--image-editor`, `--video-editor`, or the path of an image or recording,
 it connects to the running snipux over a `QLocalSocket` and forwards the
 request **without importing the app**, which is what makes the shortcut

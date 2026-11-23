@@ -423,9 +423,14 @@ class OverlayWindow(QWidget):
         interaction_gate: "Callable[[OverlayWindow, bool], bool] | None" = None,
         on_session_hide: "Callable[[OverlayWindow], None] | None" = None,
         on_session_restore: "Callable[[OverlayWindow, Frame | None], Frame | None] | None" = None,
+        kind: str = design.tokens.KIND_DEFAULT,
     ):
         super().__init__(parent)
         self._frame = frame
+        # Which side of the chooser this snip opens on: "record" when it
+        # was asked for with the record shortcut. `_build_chooser` applies
+        # it.
+        self._opening_kind = kind
         # The window itself can take keyboard focus -- the buttons over it
         # cannot (see _CloseButton) -- so a label the text tool hides hands
         # focus back here. Hiding a focused field is what commits it
@@ -893,7 +898,16 @@ class OverlayWindow(QWidget):
         # not at all. It used to persist, and the cost of that was a snip
         # that started filming because the session before had been a
         # recording (bars/divergences.md 25). The chooser's own default is
-        # `tokens.KIND_DEFAULT`, so there is nothing to set here.
+        # `tokens.KIND_DEFAULT`, so there is nothing to set for a snip.
+        #
+        # The record shortcut is recording chosen on purpose, before the
+        # overlay is up rather than on it: the same switch, already
+        # flipped, and nothing else. Flipped before the connection below
+        # and before Last region is seeded, so nothing is armed by it and
+        # the overlay does not open on a recalled rectangle, which would be
+        # an offer to film something nobody framed.
+        if self._opening_kind == "record":
+            self._chooser.set_kind("record")
         # Not remembered, but acted on: the switch is on a row that reopens
         # over a selection.
         self._chooser.kindChanged.connect(self._on_chooser_kind_changed)
@@ -2699,6 +2713,13 @@ class OverlayWindow(QWidget):
 
     def _on_chooser_after_changed(self, _after: str) -> None:
         self._sync_bar_destination()
+
+    def set_kind(self, kind: str) -> None:
+        """Flip the chooser's stills/record switch from outside -- the
+        record shortcut pressed while this overlay is already up. Exactly
+        the click on the switch, with everything that follows from one.
+        """
+        self._chooser.set_kind(kind)
 
     def _on_chooser_kind_changed(self, kind: str) -> None:
         """The stills/record switch flipped.
@@ -5745,6 +5766,9 @@ def open_overlay(
     # pointer chose so app.py always parents recording chrome to the active
     # widget and reads the outcome from the right chooser.
     on_active_changed: "Callable[[OverlayWindow], None] | None" = None,
+    # "record" opens every surface on the chooser's record side -- see
+    # `OverlayWindow.__init__`'s own comment on the same parameter.
+    kind: str = design.tokens.KIND_DEFAULT,
 ) -> OverlayWindow:
     """Build and show the overlay for one snip, positioned for the
     caller's already-detected session type (`wayland`) rather than assumed
@@ -5800,6 +5824,7 @@ def open_overlay(
             on_recording_requested=on_recording_requested,
             on_recording_start=on_recording_start,
             on_recording_reframed=on_recording_reframed,
+            kind=kind,
         )
         overlay.show_on_screen(
             _screen_for_geometry(primary_geometry) if wayland else None
@@ -5891,6 +5916,7 @@ def open_overlay(
             interaction_gate=_may_interact,
             on_session_hide=_hide_group,
             on_session_restore=_restore_group,
+            kind=kind,
         )
         overlays.append(member)
 

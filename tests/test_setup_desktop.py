@@ -1268,13 +1268,17 @@ class TestRunSetupWithAShortcut:
         monkeypatch.setattr(
             setup_desktop,
             "bind_gnome_shortcut",
-            lambda exec_path, shortcut=None: bound.append(shortcut) or "bound",
+            lambda exec_path, shortcut=None, action=setup_desktop.SNIP: bound.append(
+                (action.name, shortcut)
+            ) or "bound",
         )
 
         exit_code = self._setup(tmp_path, shortcut="Super+Shift+X")
 
         assert exit_code == 0
-        assert bound == ["Super+Shift+X"]
+        # The snip shortcut as given, then the record shortcut, which
+        # nobody mentioned and so is its default.
+        assert bound == [("snip", "Super+Shift+X"), ("record", "Control+Alt+R")]
         assert setup_desktop.load_shortcut(tmp_path / "config") == "Super+Shift+X"
 
     def test_a_later_setup_keeps_it_instead_of_reverting(self, tmp_path, monkeypatch):
@@ -1285,7 +1289,9 @@ class TestRunSetupWithAShortcut:
         monkeypatch.setattr(
             setup_desktop,
             "bind_gnome_shortcut",
-            lambda exec_path, shortcut=None: bound.append(shortcut) or "bound",
+            lambda exec_path, shortcut=None, action=setup_desktop.SNIP: (
+                bound.append(shortcut) if action is setup_desktop.SNIP else None
+            ) or "bound",
         )
         self._setup(tmp_path, shortcut="Alt+Print")
 
@@ -1302,7 +1308,7 @@ class TestRunSetupWithAShortcut:
         assert not setup_desktop.config_path(tmp_path / "config").exists()
 
     def test_remove_forgets_the_stored_shortcut(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(setup_desktop, "unbind_gnome_shortcut", lambda: "unbound")
+        monkeypatch.setattr(setup_desktop, "unbind_gnome_shortcut", lambda **kwargs: "unbound")
         setup_desktop.save_shortcut("Alt+Print", tmp_path / "config")
 
         setup_desktop.run_remove(
@@ -1318,7 +1324,7 @@ class TestRunSetupWithAShortcut:
         # SNX-95: so a later launch sets up again rather than assuming this
         # install is still set up, the same way it must not keep assuming a
         # shortcut is still bound once --remove has unbound it.
-        monkeypatch.setattr(setup_desktop, "unbind_gnome_shortcut", lambda: "unbound")
+        monkeypatch.setattr(setup_desktop, "unbind_gnome_shortcut", lambda **kwargs: "unbound")
         setup_desktop.save_setup_complete(True, tmp_path / "config")
         assert setup_desktop.load_setup_complete(tmp_path / "config") is True
 
@@ -1517,8 +1523,8 @@ class TestHyprlandShortcut:
         monkeypatch.setattr(
             setup_desktop,
             "bind_hyprland_shortcut",
-            lambda path, shortcut=None, config_dir=None: seen.append(
-                (path, shortcut, config_dir)
+            lambda path, shortcut=None, config_dir=None, action=setup_desktop.SNIP: seen.append(
+                (action.name, path, shortcut, config_dir)
             ) or "bound",
         )
 
@@ -1532,7 +1538,8 @@ class TestHyprlandShortcut:
         )
 
         assert seen == [
-            (Path("/opt/snipux"), "Control+Alt+S", tmp_path / "hypr")
+            ("snip", Path("/opt/snipux"), "Control+Alt+S", tmp_path / "hypr"),
+            ("record", Path("/opt/snipux"), "Control+Alt+R", tmp_path / "hypr"),
         ]
 
 
@@ -2555,3 +2562,773 @@ class TestNoTestCanReachTheRealHome:
 
         self._outside_the_real_home(bindings, home)
         assert setup_desktop._HYPR_LUA_BEGIN not in bindings.read_text()
+
+
+class TestRecordShortcutConfig:
+    """The second remembered shortcut. Unlike the snip one it may be none
+    at all, and "none" has to survive being written down.
+    """
+
+    def test_defaults_when_nothing_is_stored(self, tmp_path):
+        assert setup_desktop.DEFAULT_RECORD_SHORTCUT == "Control+Alt+R"
+        assert setup_desktop.load_record_shortcut(tmp_path) == "Control+Alt+R"
+
+    def test_a_saved_shortcut_round_trips(self, tmp_path):
+        assert setup_desktop.save_record_shortcut("Super+Shift+V", tmp_path)
+
+        assert setup_desktop.load_record_shortcut(tmp_path) == "Super+Shift+V"
+
+    @pytest.mark.parametrize("off", [None, ""])
+    def test_off_round_trips_as_off(self, tmp_path, off):
+        assert setup_desktop.save_record_shortcut(off, tmp_path)
+
+        assert setup_desktop.load_record_shortcut(tmp_path) is None
+        # Written, not removed: a missing key would read as the default
+        # again and the shortcut would come back on its own.
+        stored = json.loads(setup_desktop.config_path(tmp_path).read_text())
+        assert stored["record_shortcut"] == ""
+
+    def test_a_stored_null_is_off_too(self, tmp_path):
+        path = setup_desktop.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"record_shortcut": null}')
+
+        assert setup_desktop.load_record_shortcut(tmp_path) is None
+
+    def test_turning_it_back_on_is_not_stuck_off(self, tmp_path):
+        setup_desktop.save_record_shortcut(None, tmp_path)
+        setup_desktop.save_record_shortcut("Control+Alt+R", tmp_path)
+
+        assert setup_desktop.load_record_shortcut(tmp_path) == "Control+Alt+R"
+
+    @pytest.mark.parametrize("junk", ['"R"', "17", '"Control+Alt+R now"', "[]"])
+    def test_a_value_that_is_not_a_shortcut_falls_back_to_the_default(self, tmp_path, junk):
+        path = setup_desktop.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'{{"record_shortcut": {junk}}}')
+
+        assert setup_desktop.load_record_shortcut(tmp_path) == "Control+Alt+R"
+
+    def test_it_starts_off_when_the_snip_shortcut_already_has_its_default_key(self, tmp_path):
+        # Someone who rebound snipping to Ctrl+Alt+R before there was a
+        # record shortcut keeps a key that means what they made it mean.
+        setup_desktop.save_shortcut("Control+Alt+R", tmp_path)
+
+        assert setup_desktop.load_record_shortcut(tmp_path) is None
+        assert setup_desktop.load_shortcut(tmp_path) == "Control+Alt+R"
+
+    def test_another_spelling_of_the_same_key_counts(self, tmp_path):
+        setup_desktop.save_shortcut("<Primary><Alt>r", tmp_path)
+
+        assert setup_desktop.load_record_shortcut(tmp_path) is None
+
+    def test_one_the_user_set_is_kept_whatever_the_snip_shortcut_is(self, tmp_path):
+        setup_desktop.save_shortcut("Control+Alt+R", tmp_path)
+        setup_desktop.save_record_shortcut("Control+Alt+V", tmp_path)
+
+        assert setup_desktop.load_record_shortcut(tmp_path) == "Control+Alt+V"
+
+    def test_saving_it_leaves_the_snip_shortcut_alone(self, tmp_path):
+        setup_desktop.save_shortcut("Super+Shift+X", tmp_path)
+
+        setup_desktop.save_record_shortcut("Control+Alt+V", tmp_path)
+
+        assert setup_desktop.load_shortcut(tmp_path) == "Super+Shift+X"
+
+    def test_each_action_loads_its_own(self, tmp_path):
+        setup_desktop.save_shortcut("Super+Shift+X", tmp_path)
+        setup_desktop.save_record_shortcut("Control+Alt+V", tmp_path)
+
+        assert setup_desktop.load_action_shortcut(setup_desktop.SNIP, tmp_path) == "Super+Shift+X"
+        assert setup_desktop.load_action_shortcut(setup_desktop.RECORD, tmp_path) == "Control+Alt+V"
+
+
+class TestShortcutClash:
+    """One combination cannot be both shortcuts."""
+
+    def test_the_record_shortcut_cannot_be_the_snip_one(self, tmp_path):
+        setup_desktop.save_shortcut("Super+Shift+X", tmp_path)
+
+        problem = setup_desktop.shortcut_clash("Super+Shift+X", setup_desktop.RECORD, tmp_path)
+
+        assert problem == "Shift+Super+X is already the Snipux shortcut."
+
+    def test_the_snip_shortcut_cannot_be_the_record_one(self, tmp_path):
+        problem = setup_desktop.shortcut_clash("Control+Alt+R", setup_desktop.SNIP, tmp_path)
+
+        assert problem == "Control+Alt+R is already the Snipux record shortcut."
+
+    def test_spelling_does_not_hide_a_clash(self, tmp_path):
+        problem = setup_desktop.shortcut_clash("<Alt><Primary>s", setup_desktop.RECORD, tmp_path)
+
+        assert problem is not None
+
+    def test_two_different_combinations_do_not_clash(self, tmp_path):
+        assert setup_desktop.shortcut_clash("Control+Alt+V", setup_desktop.RECORD, tmp_path) is None
+        assert setup_desktop.shortcut_clash("Control+Alt+V", setup_desktop.SNIP, tmp_path) is None
+
+    def test_nothing_clashes_with_a_record_shortcut_that_is_off(self, tmp_path):
+        setup_desktop.save_record_shortcut(None, tmp_path)
+
+        assert setup_desktop.shortcut_clash("Control+Alt+R", setup_desktop.SNIP, tmp_path) is None
+
+
+class TestHyprlandRecordShortcut:
+    """The record bind lives in a marked block of its own, beside the snip
+    one, so writing or removing either leaves the other as it was.
+    """
+
+    APPIMAGE = Path("/home/me/Applications/Snipux.AppImage")
+    RECORD_LINE = (
+        'o.bind("CTRL + ALT + R", "Snipux record", "sh -c \'printf R | '
+        "nc -U /tmp/snipux-resident 2>/dev/null || "
+        "exec /home/me/Applications/Snipux.AppImage --record'\")"
+    )
+
+    @staticmethod
+    def _run_ok():
+        return Mock(return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
+
+    @pytest.fixture(autouse=True)
+    def _a_lua_config(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TMPDIR", "/tmp")
+        # No hyprctl: nothing here may reload a compositor.
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+        self.hypr = tmp_path / "hypr"
+        self.hypr.mkdir()
+        (self.hypr / "hyprland.lua").write_text('require("hypr.bindings")\n')
+        self.bindings = self.hypr / "bindings.lua"
+
+    def _bind(self, action, shortcut=None, exec_path=None):
+        return setup_desktop.bind_hyprland_shortcut(
+            exec_path or self.APPIMAGE,
+            shortcut,
+            config_dir=self.hypr,
+            run=self._run_ok(),
+            action=action,
+        )
+
+    def _unbind(self, action):
+        return setup_desktop.unbind_hyprland_shortcut(
+            config_dir=self.hypr, run=self._run_ok(), action=action
+        )
+
+    def test_it_writes_exactly_the_documented_block(self):
+        message = self._bind(setup_desktop.RECORD)
+
+        assert self.bindings.read_text() == (
+            "-- snipux record shortcut begin\n"
+            f"{self.RECORD_LINE}\n"
+            "-- snipux record shortcut end\n"
+        )
+        assert message.startswith("Bound Control+Alt+R to run: ")
+
+    def test_both_blocks_live_side_by_side(self):
+        self.bindings.write_text('o.bind("SUPER + B", "Browser", "chromium")\n')
+
+        self._bind(setup_desktop.SNIP)
+        self._bind(setup_desktop.RECORD)
+
+        text = self.bindings.read_text()
+        assert text.count("-- snipux shortcut begin\n") == 1
+        assert text.count("-- snipux shortcut end\n") == 1
+        assert text.count("-- snipux record shortcut begin\n") == 1
+        assert text.count("-- snipux record shortcut end\n") == 1
+        assert 'o.bind("CTRL + ALT + S", "Snipux snip", ' in text
+        assert self.RECORD_LINE in text
+        assert 'o.bind("SUPER + B", "Browser", "chromium")' in text
+
+    def test_binding_either_twice_writes_each_once(self):
+        for _ in range(2):
+            self._bind(setup_desktop.SNIP)
+            self._bind(setup_desktop.RECORD)
+
+        text = self.bindings.read_text()
+        assert text.count('"Snipux snip"') == 1
+        assert text.count('"Snipux record"') == 1
+
+    def test_rebinding_the_upper_block_to_the_same_key_rewrites_nothing(self):
+        # A block is re-added at the end of the file, so without care a
+        # no-op rebind of the first one swaps them: a write, a backup and
+        # a compositor reload for no change.
+        self._bind(setup_desktop.SNIP)
+        self._bind(setup_desktop.RECORD)
+        before = self.bindings.read_text()
+        backups = sorted(self.hypr.glob("*.snipux.bak*"))
+
+        message = self._bind(setup_desktop.SNIP)
+
+        assert "already bound by Snipux" in message
+        assert self.bindings.read_text() == before
+        assert sorted(self.hypr.glob("*.snipux.bak*")) == backups
+
+    def test_removing_the_record_block_leaves_the_snip_block(self):
+        self._bind(setup_desktop.SNIP)
+        snip_only = self.bindings.read_text()
+        self._bind(setup_desktop.RECORD)
+
+        message = self._unbind(setup_desktop.RECORD)
+
+        assert self.bindings.read_text() == snip_only
+        assert "Removed the Snipux record shortcut" in message
+
+    def test_removing_the_snip_block_leaves_the_record_block(self):
+        self._bind(setup_desktop.RECORD)
+        record_only = self.bindings.read_text()
+        self._bind(setup_desktop.SNIP)
+
+        message = self._unbind(setup_desktop.SNIP)
+
+        assert self.bindings.read_text() == record_only
+        assert "Removed the Snipux shortcut" in message
+
+    def test_removing_one_that_was_never_set_says_so_and_writes_nothing(self):
+        self._bind(setup_desktop.SNIP)
+        before = self.bindings.read_text()
+
+        message = self._unbind(setup_desktop.RECORD)
+
+        assert "record shortcut was not set" in message
+        assert self.bindings.read_text() == before
+
+    def test_changing_the_record_key_replaces_its_block_only(self):
+        self._bind(setup_desktop.SNIP)
+        self._bind(setup_desktop.RECORD)
+
+        self._bind(setup_desktop.RECORD, "Super+Shift+V")
+
+        text = self.bindings.read_text()
+        assert text.count('"Snipux record"') == 1
+        assert 'o.bind("SHIFT + SUPER + V", "Snipux record", ' in text
+        assert 'o.bind("CTRL + ALT + S", "Snipux snip", ' in text
+
+    def test_a_record_shortcut_that_is_off_removes_its_block(self):
+        self._bind(setup_desktop.SNIP)
+        snip_only = self.bindings.read_text()
+        self._bind(setup_desktop.RECORD)
+        setup_desktop.save_record_shortcut(None)
+
+        self._bind(setup_desktop.RECORD)
+
+        assert self.bindings.read_text() == snip_only
+
+    def test_it_will_not_take_the_snip_blocks_key(self):
+        self._bind(setup_desktop.SNIP)
+        before = self.bindings.read_text()
+
+        message = self._bind(setup_desktop.RECORD, "Control+Alt+S")
+
+        assert "already bound" in message
+        assert self.bindings.read_text() == before
+
+    def test_it_will_not_take_a_key_the_user_bound_themselves(self):
+        original = 'o.bind("CTRL + ALT + R", "Reload waybar", "waybar-reload")\n'
+        self.bindings.write_text(original)
+
+        message = self._bind(setup_desktop.RECORD)
+
+        assert "already bound" in message
+        assert self.bindings.read_text() == original
+        assert list(self.hypr.glob("*.snipux.bak*")) == []
+
+    def test_hyprlands_own_bind_call_counts_as_taken_too(self):
+        original = 'hl.bind("CTRL + ALT + R", hl.dsp.exec_cmd("something"))\n'
+        self.bindings.write_text(original)
+
+        assert "already bound" in self._bind(setup_desktop.RECORD)
+        assert self.bindings.read_text() == original
+
+    def _omarchy_defaults(self, monkeypatch, tmp_path, text):
+        defaults = tmp_path / "omarchy-bindings"
+        defaults.mkdir()
+        (defaults / "utilities.lua").write_text(text)
+        monkeypatch.setattr(setup_desktop, "_OMARCHY_BINDINGS_DIR", defaults)
+        return defaults
+
+    def test_a_key_one_of_omarchys_defaults_holds_is_refused(self, monkeypatch, tmp_path):
+        # Omarchy's own binds are loaded ahead of the user's bindings.lua
+        # and are not in it, so the file alone would call the key free.
+        self._omarchy_defaults(
+            monkeypatch, tmp_path, 'o.bind("CTRL + ALT + R", "Something", "omarchy-thing")\n'
+        )
+        self.bindings.write_text('o.bind("SUPER + B", "Browser", "chromium")\n')
+        before = self.bindings.read_text()
+
+        message = self._bind(setup_desktop.RECORD)
+
+        assert "already one of Omarchy's own bindings" in message
+        assert "Snipux left it unchanged" in message
+        assert self.bindings.read_text() == before
+        assert list(self.hypr.glob("*.snipux.bak*")) == []
+
+    def test_an_omarchy_default_under_another_spelling_is_still_found(
+        self, monkeypatch, tmp_path
+    ):
+        self._omarchy_defaults(
+            monkeypatch, tmp_path, 'o.bind("ALT + CTRL + r", "Something", "omarchy-thing")\n'
+        )
+
+        assert "Omarchy's own bindings" in self._bind(setup_desktop.RECORD)
+        assert not self.bindings.exists()
+
+    def test_an_omarchy_default_the_user_unbound_is_free_again(self, monkeypatch, tmp_path):
+        # `hl.unbind` in the user's own file is how Omarchy says a default
+        # is to be replaced.
+        self._omarchy_defaults(
+            monkeypatch, tmp_path, 'o.bind("CTRL + ALT + R", "Something", "omarchy-thing")\n'
+        )
+        self.bindings.write_text('hl.unbind("CTRL + ALT + R")\n')
+
+        message = self._bind(setup_desktop.RECORD)
+
+        assert message.startswith("Bound Control+Alt+R")
+        text = self.bindings.read_text()
+        assert 'hl.unbind("CTRL + ALT + R")' in text
+        assert self.RECORD_LINE in text
+
+    def test_a_commented_out_unbind_releases_nothing(self, monkeypatch, tmp_path):
+        self._omarchy_defaults(
+            monkeypatch, tmp_path, 'o.bind("CTRL + ALT + R", "Something", "omarchy-thing")\n'
+        )
+        self.bindings.write_text('-- hl.unbind("CTRL + ALT + R")\n')
+
+        assert "Omarchy's own bindings" in self._bind(setup_desktop.RECORD)
+
+    def test_a_commented_out_omarchy_default_is_not_a_clash(self, monkeypatch, tmp_path):
+        self._omarchy_defaults(
+            monkeypatch, tmp_path, '-- o.bind("CTRL + ALT + R", "Example", "omarchy-thing")\n'
+        )
+
+        assert self._bind(setup_desktop.RECORD).startswith("Bound ")
+
+    def test_the_snip_shortcut_is_checked_against_omarchys_defaults_too(
+        self, monkeypatch, tmp_path
+    ):
+        self._omarchy_defaults(
+            monkeypatch, tmp_path, 'o.bind("CTRL + ALT + S", "Something", "omarchy-thing")\n'
+        )
+
+        assert "Omarchy's own bindings" in self._bind(setup_desktop.SNIP)
+        assert not self.bindings.exists()
+
+    def test_no_omarchy_on_this_machine_is_not_an_error(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(setup_desktop, "_OMARCHY_BINDINGS_DIR", tmp_path / "not-there")
+
+        assert self._bind(setup_desktop.RECORD).startswith("Bound ")
+
+    def test_settings_is_told_where_a_key_is_taken(self, monkeypatch, tmp_path):
+        self.bindings.write_text('o.bind("SUPER + B", "Browser", "chromium")\n')
+        self._bind(setup_desktop.SNIP)
+        self._bind(setup_desktop.RECORD)
+        self._omarchy_defaults(
+            monkeypatch, tmp_path, 'o.bind("SUPER + SHIFT + V", "Paste", "omarchy-paste")\n'
+        )
+
+        def conflict(shortcut, action):
+            return setup_desktop.find_hyprland_conflict(shortcut, action, config_dir=self.hypr)
+
+        # Its own block is not a clash; the other shortcut's is.
+        assert conflict("Control+Alt+R", setup_desktop.RECORD) is None
+        assert conflict("Control+Alt+S", setup_desktop.SNIP) is None
+        assert conflict("Control+Alt+S", setup_desktop.RECORD) == f"bound in {self.bindings}"
+        assert conflict("Control+Alt+R", setup_desktop.SNIP) == f"bound in {self.bindings}"
+        assert conflict("Super+B", setup_desktop.RECORD) == f"bound in {self.bindings}"
+        assert conflict("Super+Shift+V", setup_desktop.RECORD) == "one of Omarchy's own bindings"
+        assert conflict("Control+Alt+K", setup_desktop.RECORD) is None
+
+    def test_the_classic_config_gets_its_own_block_too(self, tmp_path):
+        classic = tmp_path / "classic"
+        classic.mkdir()
+        config = classic / "hyprland.conf"
+        config.write_text("$terminal = kitty\n")
+        for action in (setup_desktop.SNIP, setup_desktop.RECORD):
+            setup_desktop.bind_hyprland_shortcut(
+                Path("/usr/bin/snipux"), config_dir=classic, run=self._run_ok(), action=action
+            )
+
+        text = config.read_text()
+        assert "# snipux shortcut begin\n" in text
+        assert "# snipux record shortcut begin\n" in text
+        record = next(l for l in text.splitlines() if l.startswith("bind = CTRL ALT, R"))
+        assert "exec /usr/bin/snipux --record" in record
+        assert "$" not in record
+
+        setup_desktop.unbind_hyprland_shortcut(
+            config_dir=classic, run=self._run_ok(), action=setup_desktop.RECORD
+        )
+
+        text = config.read_text()
+        assert "snipux record shortcut" not in text
+        assert "# snipux shortcut begin\n" in text
+        assert "$terminal = kitty" in text
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs /bin/sh stand-ins")
+    def test_the_command_sends_the_record_byte_to_the_resident(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        said = tmp_path / "said"
+        nc = tmp_path / "bin" / "nc"
+        nc.parent.mkdir()
+        nc.write_text(f'#!/bin/sh\necho "nc $*" >> {said}\ncat >> {said}\n')
+        appimage = tmp_path / "Snipux.AppImage"
+        appimage.write_text(f'#!/bin/sh\necho "appimage $*" >> {said}\n')
+        nc.chmod(0o755)
+        appimage.chmod(0o755)
+
+        command = setup_desktop._hyprland_command(appimage, setup_desktop.RECORD)
+        subprocess.run(
+            command, shell=True, check=True, env={"PATH": f"{nc.parent}:/usr/bin:/bin"}
+        )
+
+        text = said.read_text()
+        assert f"nc -U {tmp_path.as_posix()}/{handoff.SERVER_NAME}" in text
+        assert text.rstrip().endswith("R")
+        assert "appimage" not in text
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs /bin/sh stand-ins")
+    def test_the_command_falls_back_to_record_on_the_appimage(self, tmp_path):
+        said = tmp_path / "said"
+        nc = tmp_path / "bin" / "nc"
+        nc.parent.mkdir()
+        nc.write_text("#!/bin/sh\nexit 1\n")
+        appimage = tmp_path / "Snipux.AppImage"
+        appimage.write_text(f'#!/bin/sh\necho "appimage $*" >> {said}\n')
+        nc.chmod(0o755)
+        appimage.chmod(0o755)
+
+        subprocess.run(
+            setup_desktop._hyprland_command(appimage, setup_desktop.RECORD),
+            shell=True, check=True, env={"PATH": f"{nc.parent}:/usr/bin:/bin"},
+        )
+
+        assert said.read_text() == "appimage --record\n"
+
+
+class TestBindLinuxRecordShortcut:
+    """`bind_linux_shortcut(action=RECORD)`: what the platform seam calls."""
+
+    @pytest.fixture(autouse=True)
+    def _on_hyprland(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "Hyprland")
+        monkeypatch.setenv("TMPDIR", "/tmp")
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: None)
+        self.hypr = tmp_path / "hypr"
+        self.hypr.mkdir()
+        (self.hypr / "hyprland.lua").write_text("")
+        self.config = tmp_path / "config"
+
+    def _bind(self, shortcut=None):
+        return setup_desktop.bind_linux_shortcut(
+            Path("/opt/snipux"),
+            shortcut,
+            hypr_config_dir=self.hypr,
+            action=setup_desktop.RECORD,
+            config_dir=self.config,
+        )
+
+    def test_it_binds_the_remembered_shortcut(self):
+        setup_desktop.save_record_shortcut("Control+Alt+V", self.config)
+
+        message = self._bind()
+
+        assert message.startswith("Bound Control+Alt+V")
+        assert 'o.bind("CTRL + ALT + V", "Snipux record", ' in (
+            self.hypr / "bindings.lua"
+        ).read_text()
+
+    def test_the_snip_shortcuts_key_is_refused_by_name(self):
+        message = self._bind("Control+Alt+S")
+
+        assert message == (
+            "Control+Alt+S is already the Snipux shortcut. "
+            "The record shortcut was not bound."
+        )
+        assert not (self.hypr / "bindings.lua").exists()
+
+    def test_off_removes_what_was_bound(self):
+        self._bind()
+        assert "Snipux record" in (self.hypr / "bindings.lua").read_text()
+        setup_desktop.save_record_shortcut(None, self.config)
+
+        message = self._bind()
+
+        assert "Removed the Snipux record shortcut" in message
+        assert "Snipux record" not in (self.hypr / "bindings.lua").read_text()
+
+    def test_unbinding_it_leaves_the_snip_bind(self):
+        setup_desktop.bind_linux_shortcut(Path("/opt/snipux"), hypr_config_dir=self.hypr)
+        self._bind()
+
+        setup_desktop.unbind_linux_shortcut(
+            hypr_config_dir=self.hypr, action=setup_desktop.RECORD
+        )
+
+        text = (self.hypr / "bindings.lua").read_text()
+        assert '"Snipux snip"' in text
+        assert '"Snipux record"' not in text
+
+
+class _GsettingsWithBindings(FakeGsettingsStore):
+    """`FakeGsettingsStore`, plus the `list-recursively` the conflict check
+    runs over GNOME's own binding schemas. `listed` is what it prints.
+    """
+
+    def __init__(self, listed: str = ""):
+        super().__init__()
+        self.listed = listed
+
+    def run(self, argv, **kwargs):
+        if argv[1] == "list-recursively":
+            self.calls.append(argv)
+            return SimpleNamespace(stdout=self.listed)
+        return super().run(argv, **kwargs)
+
+
+class TestGnomeRecordShortcut:
+    """The record shortcut's own custom-keybindings slot, beside the snip
+    one's.
+    """
+
+    EXEC = Path("/opt/snipux/bin/snipux")
+    RECORD_SCHEMA = (
+        f"{setup_desktop._MEDIA_KEYS_SCHEMA}.custom-keybinding:"
+        f"{setup_desktop._RECORD_SLOT_PATH}"
+    )
+
+    @pytest.fixture
+    def store(self, monkeypatch):
+        monkeypatch.setattr(setup_desktop.shutil, "which", lambda name: "/usr/bin/gsettings")
+        store = _GsettingsWithBindings()
+        monkeypatch.setattr(setup_desktop.subprocess, "run", store.run)
+        return store
+
+    def _keybindings(self, store) -> str:
+        return store.values[(setup_desktop._MEDIA_KEYS_SCHEMA, "custom-keybindings")]
+
+    def test_the_two_slots_are_different_paths(self):
+        assert setup_desktop._RECORD_SLOT_PATH != setup_desktop._SLOT_PATH
+        assert setup_desktop._RECORD_SLOT_PATH.endswith("/custom-keybindings/snipux-record/")
+
+    def test_it_is_bound_in_a_slot_of_its_own(self, store):
+        message = setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+
+        assert message == f"Bound Control+Alt+R to run: {self.EXEC} --record"
+        assert store.values[(self.RECORD_SCHEMA, "command")] == f"{self.EXEC} --record"
+        assert store.values[(self.RECORD_SCHEMA, "name")] == "snipux record"
+        assert store.values[(self.RECORD_SCHEMA, "binding")] == setup_desktop.to_gsettings(
+            "Control+Alt+R"
+        )
+
+    def test_both_slots_are_listed_and_neither_overwrites_the_other(self, store):
+        setup_desktop.bind_gnome_shortcut(self.EXEC)
+        setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+        setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+
+        listed = self._keybindings(store)
+        assert listed.count(f"'{setup_desktop._SLOT_PATH}'") == 1
+        assert listed.count(f"'{setup_desktop._RECORD_SLOT_PATH}'") == 1
+        assert store.values[(setup_desktop._SLOT_SCHEMA, "command")] == f"{self.EXEC} --snip"
+        assert store.values[(self.RECORD_SCHEMA, "command")] == f"{self.EXEC} --record"
+
+    def test_a_key_gnome_already_uses_is_refused_and_nothing_is_written(self, store):
+        # GNOME takes a second owner for a key without a word and then
+        # fires whichever it likes.
+        store.listed = (
+            "org.gnome.settings-daemon.plugins.media-keys screenreader ['<Alt><Control>r']\n"
+        )
+
+        message = setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+
+        assert message.startswith("Control+Alt+R is already ")
+        assert "the record shortcut was not bound" in message
+        assert not any(call[1] == "set" for call in store.calls)
+
+    def test_a_key_another_custom_shortcut_uses_is_refused_by_its_name(self, store):
+        other = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/"
+        other_schema = f"{setup_desktop._MEDIA_KEYS_SCHEMA}.custom-keybinding:{other}"
+        store.values[(setup_desktop._MEDIA_KEYS_SCHEMA, "custom-keybindings")] = f"['{other}']"
+        store.values[(other_schema, "binding")] = "'<Primary><Alt>r'"
+        store.values[(other_schema, "name")] = "'Run thing'"
+
+        message = setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+
+        assert "Run thing" in message
+        assert not any(call[1] == "set" for call in store.calls)
+
+    def test_the_snip_slots_key_is_a_clash_like_any_other(self, store):
+        setup_desktop.bind_gnome_shortcut(self.EXEC)
+        writes = [call for call in store.calls if call[1] == "set"]
+
+        message = setup_desktop.bind_gnome_shortcut(
+            self.EXEC, "Control+Alt+S", action=setup_desktop.RECORD
+        )
+
+        assert "was not bound" in message
+        assert [call for call in store.calls if call[1] == "set"] == writes
+
+    def test_rebinding_it_to_the_key_it_already_has_is_not_a_clash(self, store):
+        setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+
+        message = setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+
+        assert message.startswith("Bound Control+Alt+R")
+
+    def test_the_snip_shortcut_is_still_bound_whatever_gnome_holds(self, store):
+        # Unchanged on purpose: Settings' banner is that shortcut's warning.
+        store.listed = (
+            "org.gnome.settings-daemon.plugins.media-keys screenreader ['<Alt><Control>s']\n"
+        )
+
+        message = setup_desktop.bind_gnome_shortcut(self.EXEC)
+
+        assert message.startswith("Bound Control+Alt+S")
+
+    def test_removing_it_leaves_the_snip_slot(self, store):
+        setup_desktop.bind_gnome_shortcut(self.EXEC)
+        setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+
+        message = setup_desktop.unbind_gnome_shortcut(action=setup_desktop.RECORD)
+
+        assert message == "Removed the Snipux record shortcut."
+        assert self._keybindings(store) == f"['{setup_desktop._SLOT_PATH}']"
+        assert (self.RECORD_SCHEMA, "command") not in store.values
+        assert store.values[(setup_desktop._SLOT_SCHEMA, "command")] == f"{self.EXEC} --snip"
+
+    def test_removing_the_snip_slot_leaves_it(self, store):
+        setup_desktop.bind_gnome_shortcut(self.EXEC)
+        setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+
+        setup_desktop.unbind_gnome_shortcut()
+
+        assert self._keybindings(store) == f"['{setup_desktop._RECORD_SLOT_PATH}']"
+        assert store.values[(self.RECORD_SCHEMA, "command")] == f"{self.EXEC} --record"
+
+    def test_removing_one_that_was_never_set_says_so(self, store):
+        message = setup_desktop.unbind_gnome_shortcut(action=setup_desktop.RECORD)
+
+        assert message == "The Snipux record shortcut was not set -- nothing to remove."
+        assert not any(call[1] == "set" for call in store.calls)
+
+    def test_off_removes_the_slot(self, store):
+        setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+        setup_desktop.save_record_shortcut(None)
+
+        message = setup_desktop.bind_gnome_shortcut(self.EXEC, action=setup_desktop.RECORD)
+
+        assert message == "Removed the Snipux record shortcut."
+        assert self._keybindings(store) == "@as []"
+
+
+class TestRunSetupWithARecordShortcut:
+    """`--setup` binds both shortcuts; `--setup --record-shortcut` chooses
+    the second, or turns it off.
+    """
+
+    @pytest.fixture
+    def bound(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            setup_desktop,
+            "bind_gnome_shortcut",
+            lambda exec_path, shortcut=None, action=setup_desktop.SNIP: calls.append(
+                ("bind", action.name, shortcut)
+            ) or "bound",
+        )
+        monkeypatch.setattr(
+            setup_desktop,
+            "unbind_gnome_shortcut",
+            lambda action=setup_desktop.SNIP: calls.append(("unbind", action.name)) or "unbound",
+        )
+        return calls
+
+    @staticmethod
+    def _setup(tmp_path, **kwargs):
+        return setup_desktop.run_setup(
+            exec_path=Path("/opt/snipux/bin/snipux"),
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+            config_dir=tmp_path / "config",
+            **kwargs,
+        )
+
+    def test_the_one_given_is_bound_and_remembered(self, tmp_path, bound):
+        assert self._setup(tmp_path, record_shortcut="Super+Shift+V") == 0
+
+        assert bound == [
+            ("bind", "snip", "Control+Alt+S"),
+            ("bind", "record", "Super+Shift+V"),
+        ]
+        assert setup_desktop.load_record_shortcut(tmp_path / "config") == "Super+Shift+V"
+
+    def test_a_later_setup_keeps_it(self, tmp_path, bound):
+        self._setup(tmp_path, record_shortcut="Super+Shift+V")
+        bound.clear()
+
+        self._setup(tmp_path)
+
+        assert ("bind", "record", "Super+Shift+V") in bound
+
+    @pytest.mark.parametrize("word", ["off", "OFF", "none", ""])
+    def test_off_unbinds_it_and_stays_off(self, tmp_path, bound, word):
+        assert self._setup(tmp_path, record_shortcut=word) == 0
+
+        assert bound == [("bind", "snip", "Control+Alt+S"), ("unbind", "record")]
+        assert setup_desktop.load_record_shortcut(tmp_path / "config") is None
+
+        bound.clear()
+        self._setup(tmp_path)
+
+        # Off, and a plain --setup has nothing to say about it.
+        assert bound == [("bind", "snip", "Control+Alt+S")]
+
+    def test_the_snip_shortcuts_key_is_refused_before_anything_is_written(
+        self, tmp_path, bound, capsys
+    ):
+        assert self._setup(tmp_path, record_shortcut="Control+Alt+S") == 1
+
+        assert "already the Snipux shortcut" in capsys.readouterr().err
+        assert bound == []
+        assert not (tmp_path / "applications").exists()
+        assert setup_desktop.load_record_shortcut(tmp_path / "config") == "Control+Alt+R"
+
+    def test_the_key_given_for_snipping_in_the_same_run_is_refused_too(
+        self, tmp_path, bound, capsys
+    ):
+        exit_code = self._setup(
+            tmp_path, shortcut="Super+Shift+X", record_shortcut="Super+Shift+X"
+        )
+
+        assert exit_code == 1
+        assert "already the Snipux shortcut" in capsys.readouterr().err
+        assert bound == []
+
+    def test_one_that_is_not_a_shortcut_is_refused(self, tmp_path, bound, capsys):
+        assert self._setup(tmp_path, record_shortcut="R") == 1
+
+        assert capsys.readouterr().err.startswith("error: ")
+        assert bound == []
+
+    def test_a_snip_shortcut_on_its_default_key_leaves_it_unbound(self, tmp_path, bound):
+        # Nothing was asked for by name, and the key is spoken for.
+        assert self._setup(tmp_path, shortcut="Control+Alt+R") == 0
+
+        assert bound == [("bind", "snip", "Control+Alt+R")]
+
+    def test_remove_unbinds_both(self, tmp_path, bound):
+        setup_desktop.run_remove(
+            applications_dir=tmp_path / "applications",
+            autostart_dir=tmp_path / "autostart",
+            hicolor_dir=tmp_path / "icons",
+            config_dir=tmp_path / "config",
+        )
+
+        assert bound == [("unbind", "snip"), ("unbind", "record")]
+
+
+class TestAnUpgradeLeavesTheRecordShortcutToTheUser:
+    def test_the_integration_revision_did_not_move_for_it(self):
+        # A newer revision makes the next launch write something on its
+        # own. The record shortcut is bound by saving Settings or running
+        # --setup, never by an update.
+        assert setup_desktop.INTEGRATION_REVISION == 3
+        assert not hasattr(setup_desktop, "RECORD_SHORTCUT_REVISION")

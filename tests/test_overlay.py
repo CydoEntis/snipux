@@ -15896,3 +15896,88 @@ class TestInkOutsideTheSelectionIsNotCounted:
 
         assert overlay.marks == ()
         assert overlay._selection == QRect(0, 100, 300, 200)
+
+
+class TestOpeningOnRecord:
+    """`OverlayWindow(kind="record")`: what the record shortcut opens. The
+    chooser's stills/record switch already flipped, and nothing else.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_slate(self):
+        _close_stray_toplevel_windows()
+
+    @staticmethod
+    def _overlay(**kwargs) -> OverlayWindow:
+        overlay = OverlayWindow(
+            make_frame(image_size=(800, 600), logical_size=(800, 600)),
+            monitor_geometries=[QRectF(0, 0, 800, 600)],
+            **kwargs,
+        )
+        overlay.setGeometry(0, 0, 800, 600)
+        overlay.show()
+        QTest.qWaitForWindowExposed(overlay)
+        return overlay
+
+    def test_an_overlay_opens_on_stills_unless_told_otherwise(self):
+        assert self._overlay()._chooser.kind == tokens.KIND_DEFAULT == "stills"
+
+    def test_record_opens_with_the_switch_on_record(self):
+        assert self._overlay(kind="record")._chooser.kind == "record"
+
+    def test_opening_on_record_selects_and_arms_nothing(self):
+        overlay = self._overlay(kind="record")
+
+        assert overlay._selection is None
+        assert overlay._armed_for_recording is False
+
+    def test_it_does_not_open_on_the_recalled_last_region(self):
+        # With the preference on a snip opens on the rectangle the last one
+        # came from. Opening a recording on it would offer to film
+        # something nobody framed this time.
+        setup_desktop.save_last_region((100, 120, 300, 200))
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay(kind="record")
+
+        assert overlay._chooser.kind == "record"
+        assert overlay._selection is None
+        assert overlay._recalled_selection is False
+
+    def test_a_snip_with_the_same_preference_still_opens_on_it(self):
+        # The control for the test above: the rectangle is there to recall.
+        setup_desktop.save_last_region((100, 120, 300, 200))
+        setup_desktop.save_reuse_last_region(True)
+
+        overlay = self._overlay()
+
+        assert overlay._selection == QRect(100, 120, 300, 200)
+        assert overlay._recalled_selection is True
+
+    def test_opening_on_record_does_not_change_the_stored_preference(self):
+        setup_desktop.save_last_region((100, 120, 300, 200))
+        setup_desktop.save_reuse_last_region(True)
+
+        self._overlay(kind="record")
+
+        assert setup_desktop.load_reuse_last_region() is True
+        assert setup_desktop.load_last_region() == (100, 120, 300, 200)
+
+    def test_set_kind_flips_an_open_overlay_like_a_click_on_the_switch(self):
+        overlay = self._overlay()
+        heard = []
+        overlay._chooser.kindChanged.connect(heard.append)
+
+        overlay.set_kind("record")
+
+        assert overlay._chooser.kind == "record"
+        assert heard == ["record"]
+
+    def test_set_kind_to_what_it_already_is_changes_nothing(self):
+        overlay = self._overlay(kind="record")
+        heard = []
+        overlay._chooser.kindChanged.connect(heard.append)
+
+        overlay.set_kind("record")
+
+        assert heard == []

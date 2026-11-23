@@ -582,6 +582,7 @@ def build_default_geometry_provider() -> GeometryProvider:
 _ACTION_FLAGS = (
     ("list_backends", "--list-backends"),
     ("snip", "--snip"),
+    ("record", "--record"),
     ("settings", "--settings"),
     ("setup", "--setup"),
     ("remove", "--remove"),
@@ -634,6 +635,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="ask an already-running Snipux instance to start a capture, "
         "starting one first if none is running yet (for binding to a "
         "key such as Print Screen)",
+    )
+    group.add_argument(
+        "--record",
+        action="store_true",
+        help="the same as --snip, with the overlay already switched to "
+        "Record: drag a region and it is armed for recording rather than "
+        "taken as a screenshot (for binding to a second key)",
     )
     group.add_argument(
         "--settings",
@@ -707,6 +715,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "spelling is accepted -- the readable 'Super+Shift+X' or "
         "gsettings' '<Super><Shift>x' -- since normalise_shortcut() "
         "reduces both to the same canonical form",
+    )
+    parser.add_argument(
+        "--record-shortcut",
+        metavar="ACCELERATOR",
+        help="with --setup, bind this accelerator to --record instead of "
+        f"the default {setup_desktop.DEFAULT_RECORD_SHORTCUT}, and remember "
+        "it; 'off' leaves recording without a shortcut. It cannot be the "
+        "combination the snip shortcut uses",
     )
     return parser
 
@@ -935,6 +951,8 @@ def main(
 
     if args.shortcut is not None and not args.setup:
         parser.error("--shortcut only means anything alongside --setup")
+    if args.record_shortcut is not None and not args.setup:
+        parser.error("--record-shortcut only means anything alongside --setup")
 
     if args.path is not None:
         for dest, flag in _ACTION_FLAGS:
@@ -957,7 +975,11 @@ def main(
         # naming itself and the operation -- the documented, intended
         # behaviour for a platform seam with nothing behind it yet (see
         # `snipux/platform/__init__.py`), not a regression this introduces.
-        return platform.current.install_desktop_integration(shortcut=args.shortcut)
+        if args.record_shortcut is None:
+            return platform.current.install_desktop_integration(shortcut=args.shortcut)
+        return platform.current.install_desktop_integration(
+            shortcut=args.shortcut, record_shortcut=args.record_shortcut
+        )
 
     if args.remove:
         # Same reasoning as --setup above: --remove only deletes what
@@ -969,6 +991,19 @@ def main(
         # Display-free, like --setup/--remove above, and handled before any
         # registry or transport is built.
         return run_update()
+
+    if args.record:
+        # --snip's own shape, below, with the one difference that the
+        # overlay opens on its record side.
+        if transport is None:
+            transport = QLocalSocketTransport()
+        _ensure_qapplication()
+        if transport.try_claim():
+            if registry is None:
+                registry = build_default_registry()
+            return _become_resident(registry, transport, start_recording_immediately=True)
+        transport.send_record_request()
+        return 0
 
     if args.snip:
         # Forward to an already-resident instance when there is one. When
@@ -1117,6 +1152,12 @@ class Transport(ABC):
         """
 
     @abstractmethod
+    def send_record_request(self) -> None:
+        """Ask the primary instance to open the overlay on its record side
+        -- `send_snip_request` for the record shortcut.
+        """
+
+    @abstractmethod
     def send_settings_request(self) -> None:
         """Ask the primary instance to raise its Settings window (SNX-78).
         Same shape as `send_snip_request`, and for the same reason: a
@@ -1147,12 +1188,15 @@ class Transport(ABC):
         on_settings_request: Callable[[], None],
         on_open_request: Callable[[Path], None],
         on_editor_request: Callable[[str], None],
+        on_record_request: Callable[[], None] | None = None,
     ) -> None:
         """Primary-instance only: call `on_snip_request` for every snip
         request, `on_settings_request` for every Settings request,
-        `on_open_request` for every path, and `on_editor_request` for every
-        editor ("image" or "video"), that a later, non-primary launch
-        forwards.
+        `on_open_request` for every path, `on_editor_request` for every
+        editor ("image" or "video"), and `on_record_request` for every
+        record request, that a later, non-primary launch forwards. With no
+        `on_record_request` a record request is dropped like any byte this
+        does not know.
         """
 
 
@@ -1196,7 +1240,8 @@ class QLocalSocketTransport(Transport):
     reaches `QtGui` without declaring it separately.
 
     The protocol is one byte, or one byte plus a path: `_REQUEST_BYTE` means
-    "take a snip", `_SETTINGS_REQUEST_BYTE` (SNX-78) means "raise the
+    "take a snip", `_RECORD_REQUEST_BYTE` means "open the overlay ready to
+    record", `_SETTINGS_REQUEST_BYTE` (SNX-78) means "raise the
     Settings window", `_OPEN_REQUEST_PREFIX` followed by a path (as
     `os.fsencode` gives it) means "open that path", and a connection that
     sends nothing is only asking whether anyone is home.
@@ -1213,6 +1258,7 @@ class QLocalSocketTransport(Transport):
     _CONNECT_TIMEOUT_MS = 200
     _REQUEST_BYTE = handoff.SNIP_REQUEST
     _SETTINGS_REQUEST_BYTE = handoff.SETTINGS_REQUEST
+    _RECORD_REQUEST_BYTE = handoff.RECORD_REQUEST
     _OPEN_REQUEST_PREFIX = handoff.OPEN_REQUEST_PREFIX
     # Long enough that a request is never lost to scheduling, short enough
     # that a probe (which sends nothing) doesn't hold the handler up.
@@ -1274,6 +1320,9 @@ class QLocalSocketTransport(Transport):
     def send_snip_request(self) -> None:
         self._send(self._REQUEST_BYTE)
 
+    def send_record_request(self) -> None:
+        self._send(self._RECORD_REQUEST_BYTE)
+
     def send_settings_request(self) -> None:
         self._send(self._SETTINGS_REQUEST_BYTE)
 
@@ -1323,6 +1372,7 @@ class QLocalSocketTransport(Transport):
         on_settings_request: Callable[[], None],
         on_open_request: Callable[[Path], None],
         on_editor_request: Callable[[str], None],
+        on_record_request: Callable[[], None] | None = None,
     ) -> None:
         if self._server is None:
             raise RuntimeError("listen() called before a successful try_claim()")
@@ -1354,7 +1404,12 @@ class QLocalSocketTransport(Transport):
                 timeout.timeout.disconnect(answer)
                 received = connection.readAll().data()
                 handle = self._recognise(
-                    received, on_snip_request, on_settings_request, on_open_request, on_editor_request
+                    received,
+                    on_snip_request,
+                    on_settings_request,
+                    on_open_request,
+                    on_editor_request,
+                    on_record_request,
                 )
                 # Acked once recognised and before it is acted on: the
                 # launcher is waiting, and opening a window takes a moment.
@@ -1389,11 +1444,14 @@ class QLocalSocketTransport(Transport):
         on_settings_request: Callable[[], None],
         on_open_request: Callable[[Path], None],
         on_editor_request: Callable[[str], None],
+        on_record_request: Callable[[], None] | None = None,
     ) -> Callable[[], None] | None:
         """What `received` asks for, ready to run, or None for a probe or
         anything malformed -- which is then neither acted on nor acked."""
         if received.startswith(self._REQUEST_BYTE):
             return on_snip_request
+        if received.startswith(self._RECORD_REQUEST_BYTE):
+            return on_record_request
         if received.startswith(self._SETTINGS_REQUEST_BYTE):
             return on_settings_request
         # `O` is what a launcher from before the editors sends.
@@ -1728,7 +1786,11 @@ class AppController:
             self._tray_watch.start()
 
         self._transport.listen(
-            self.start_capture, self.open_settings, self.open_path, self.open_editor
+            self.start_capture,
+            self.open_settings,
+            self.open_path,
+            self.open_editor,
+            on_record_request=self.start_recording_capture,
         )
 
     def _rebuild_recent_menu(self, *, thumbnails: bool = True) -> None:
@@ -1998,7 +2060,14 @@ class AppController:
         made Settings try GNOME even in a Hyprland session.
         """
         message = platform.current.bind_shortcut()
-        self._report_shortcut(message)
+        # The record shortcut after it, so a clash between the two is the
+        # record shortcut's to lose. One report for both: a second balloon
+        # replaces the first before it has been read.
+        try:
+            record_message = platform.current.bind_record_shortcut()
+        except platform.UnimplementedPlatformError:
+            record_message = ""
+        self._report_shortcut("\n".join(part for part in (message, record_message) if part))
 
     # How often to look for a tray that was not there at startup. A panel
     # can also be restarted at any time, so this never gives up; the check
@@ -2049,17 +2118,30 @@ class AppController:
         if not HotkeyEventFilter.is_available():
             return
 
-        self.hotkey_filter = HotkeyEventFilter(self.start_capture)
+        self.hotkey_filter = HotkeyEventFilter(
+            self.start_capture, self.start_recording_capture
+        )
         QApplication.instance().installNativeEventFilter(self.hotkey_filter)
         # Best-effort: Windows already releases the registration itself the
         # moment this process's thread goes away, clean exit or not (see
         # WindowsPlatform.unbind_shortcut), so this is tidiness for a clean
         # Quit, not the mechanism a restart's re-registration depends on.
         QApplication.instance().aboutToQuit.connect(platform.current.unbind_shortcut)
+        QApplication.instance().aboutToQuit.connect(platform.current.unbind_record_shortcut)
 
         message = platform.current.bind_shortcut()
         if platform.current.registered_shortcut is None:
             self._report_shortcut(message)
+
+        # The record shortcut, under an id of its own. Said only when it
+        # was wanted and could not be had: off is the user's own choice,
+        # and a routine bind is no more worth a balloon than the snip's.
+        record_message = platform.current.bind_record_shortcut()
+        if (
+            setup_desktop.load_record_shortcut() is not None
+            and platform.current.registered_record_shortcut is None
+        ):
+            self._report_shortcut(record_message)
 
     def run_first_launch_setup(self) -> None:
         """Install desktop integration once, the first time this process is
@@ -2118,10 +2200,18 @@ class AppController:
         setup_desktop.save_integration_target(self._integration_target())
         setup_desktop.save_integration_revision(setup_desktop.INTEGRATION_REVISION)
         shortcut = setup_desktop.human_shortcut(setup_desktop.load_shortcut())
-        self._report_shortcut(
-            f"Snipux is set up: it starts at login, and {shortcut} starts a "
-            "snip. Change the shortcut any time in Settings."
-        )
+        record = setup_desktop.load_record_shortcut()
+        if record is None:
+            self._report_shortcut(
+                f"Snipux is set up: it starts at login, and {shortcut} starts a "
+                "snip. Change the shortcut any time in Settings."
+            )
+        else:
+            self._report_shortcut(
+                f"Snipux is set up: it starts at login, {shortcut} starts a "
+                f"snip and {setup_desktop.human_shortcut(record)} a recording. "
+                "Change either shortcut any time in Settings."
+            )
 
     @staticmethod
     def _integration_target() -> str:
@@ -2178,7 +2268,19 @@ class AppController:
     def _real_monitor_geometries(self) -> list[QRectF]:
         return [QRectF(screen.geometry()) for screen in QGuiApplication.screens()]
 
-    def start_capture(self) -> None:
+    def start_recording_capture(self) -> None:
+        """The record shortcut, `--record`, and a forwarded record request:
+        `start_capture`, with the overlay opened on its record side. One
+        funnel on purpose -- everything the snip shortcut means while a
+        recording is running, starting or armed, this means too.
+        """
+        self.start_capture(kind="record")
+
+    def start_capture(self, *, kind: str = "stills") -> None:
+        # `kind` is keyword-only because this is connected to signals that
+        # carry an argument of their own (`QAction.triggered`'s `checked`),
+        # which must never land in it.
+        #
         # SNX-123 ticket 8: the capture hotkey (and every other caller of
         # this single funnel -- the tray's own Snip action, --snip's
         # transport listener, a forwarded request from a second launch)
@@ -2265,6 +2367,10 @@ class AppController:
                 self._overlay._reveal()
                 self._overlay.raise_()
                 self._overlay.activateWindow()
+                # The record shortcut over an overlay that is already up is
+                # the switch on its chooser, pressed from the keyboard.
+                if kind == "record" and not self._overlay.counting_down:
+                    self._overlay.set_kind("record")
                 return
             # Hidden and not waiting out a delay: whatever was meant to show
             # it again failed. There is nothing to bring back, and returning
@@ -2361,6 +2467,9 @@ class AppController:
             # stationary per-output surfaces. Keep the controller pointed
             # at that widget for outcome, recording chrome and cleanup.
             on_active_changed=self._on_overlay_activated,
+            # The record shortcut's one difference: the chooser's own
+            # switch, already on Record.
+            kind=kind,
         )
         # Stored on self, not left as a local: a parentless widget is fair
         # game for Python's GC to collect out from under the still-open
@@ -4715,6 +4824,7 @@ def _become_resident(
     open_settings_immediately: bool = False,
     open_path_immediately: Path | None = None,
     open_editor_immediately: str | None = None,
+    start_recording_immediately: bool = False,
 ) -> int:
     """Build the `QApplication`/`AppController` and run the event loop.
 
@@ -4733,7 +4843,8 @@ def _become_resident(
     `snipux PATH` run with no resident to hand it to.
     `start_capture_immediately`/`open_settings_immediately`/
     `open_path_immediately` are what tell the four callers apart -- a bare
-    launch opens idle to the tray, `--snip` opens the overlay right away,
+    launch opens idle to the tray, `--snip` opens the overlay right away
+    (`--record`, `start_recording_immediately`, opens it on its record side),
     `--settings` opens Settings right away, `PATH` opens it in its editor
     right away, and `--image-editor`/`--video-editor`
     (`open_editor_immediately`) open that editor empty, each the same as if
@@ -4797,7 +4908,9 @@ def _become_resident(
     # overlay needs it. Once the loop is idle, so the first snip after
     # launch is not the one that pays for it.
     QTimer.singleShot(0, design.font_families)
-    if start_capture_immediately:
+    if start_recording_immediately:
+        controller.start_recording_capture()
+    elif start_capture_immediately:
         controller.start_capture()
     else:
         # After the fonts, and never ahead of a snip already asked for.

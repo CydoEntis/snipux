@@ -60,6 +60,31 @@ gsettings reset org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/
 gsettings reset org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux/ binding
 ```
 
+## The record shortcut
+
+`snipux --setup` binds a second shortcut the same way, in a slot of its own:
+`/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/snipux-record/`,
+named `snipux record`, with `command` set to the same absolute path plus
+`--record` and `binding` set to `<Control><Alt>r`. `--record` is `--snip` with
+the overlay already switched to Record.
+
+The two slots are independent: binding, changing or removing one leaves the
+other as it was. Two things differ from the snip shortcut:
+
+- **It is not bound over a key GNOME already uses.** GNOME accepts a second
+  owner for a combination without a word and then fires whichever it likes, so
+  when something else holds the key `--setup` says what, and leaves both
+  alone. Pick another with `snipux --setup --record-shortcut 'Super+Shift+V'`
+  or in Settings.
+- **It can be off.** `snipux --setup --record-shortcut off`, or **Clear** in
+  Settings, removes the slot and keeps it removed.
+
+An install that predates the record shortcut does not gain it by updating:
+save Settings once, or run `snipux --setup`.
+
+To undo it by hand, drop `'/org/.../custom-keybindings/snipux-record/'` from
+the list and reset that slot's `name`, `command` and `binding`, as above.
+
 The rest of this page describes the same mechanism by hand, for other
 desktops or if you'd rather not have install.sh touch GNOME settings at all.
 

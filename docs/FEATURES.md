@@ -78,6 +78,7 @@ only once its scope, acceptance criteria and how to verify it are clear.
 
 - [x] `done` Tray app, start at login, one-command setup and removal
 - [x] `done` Global shortcut (Ctrl+Alt+S), rebindable in Settings
+- [x] `done` Record shortcut (Ctrl+Alt+R): the overlay opened on Record; rebindable, or off
 - [x] `done` Fast shortcut handoff to the running instance
 - [x] `done` Standalone Windows exe that installs itself on first run
 - [x] `done` `snipux --update`
