@@ -338,6 +338,18 @@ class Platform(ABC):
         wherever a frameless window is left alone.
         """
 
+    def keep_others_maximised(self, widget) -> None:
+        """Called each time a capture overlay, or the countdown that stands
+        in for one, is about to be mapped, with its title already set.
+
+        Chrome only. The overlay is a picture of the desktop, not a window
+        on it, and a desktop that rearranges its windows whenever one opens
+        -- un-maximising whatever had the workspace to itself -- does so
+        for the overlay too, leaving the real desktop different from the
+        picture of it. A platform where that happens puts the windows
+        back. The default does nothing.
+        """
+
     def toggle_maximised(self, widget) -> bool:
         """Maximise or restore `widget` where Qt's own `showMaximized()`
         is not listened to, and say whether this did it. False -- the

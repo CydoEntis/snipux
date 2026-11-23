@@ -5,6 +5,14 @@ use it; the commit history has the detail.
 
 ## Unreleased
 
+### Fixed
+
+- **A snip no longer shrinks your maximised windows.** On Omarchy, a window
+  maximised on a workspace in the floating layout dropped back to its small
+  size the moment a snip started, on every monitor, and stayed that way
+  after the snip. It now looks the same after a snip as before it. The same
+  goes for starting a recording.
+
 ## 1.4.1 — 2026-11-23
 
 ### Added
