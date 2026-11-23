@@ -668,6 +668,12 @@ class LinuxPlatform(Platform):
     # has committed its first frame, a few milliseconds after `show()`.
     _FOCUS_RETRY_MS = 12
     _FOCUS_MAX_TRIES = 15
+    # When to check that the keyboard really arrived, how often to ask
+    # again while it has not, and for how long: a minute, by which time the
+    # snip is over or the user has clicked on it, which focuses it too.
+    _FOCUS_RETAKE_FIRST_MS = 50
+    _FOCUS_RETAKE_MS = 250
+    _FOCUS_RETAKE_TRIES = 240
 
     def take_keyboard_focus(self, widget) -> bool:
         """Hyprland: focus the overlay, because asking nicely does not.
@@ -728,6 +734,49 @@ class LinuxPlatform(Platform):
             return
         self._focus_scheduled = False
         self._focus_widget = None
+        if not missing:
+            self._retake_widget = widget
+            self._retake_tries = 0
+            if not getattr(self, "_retake_scheduled", False):
+                self._retake_scheduled = True
+                QTimer.singleShot(
+                    self._FOCUS_RETAKE_FIRST_MS, self._retake_keyboard_step
+                )
+
+    @staticmethod
+    def _has_keyboard() -> bool:
+        """Whether any Snipux window has the keyboard, as Qt was told."""
+        return QGuiApplication.focusWindow() is not None
+
+    def _retake_keyboard_step(self) -> None:
+        """Ask for the keyboard again until the overlay really has it.
+
+        A menu or dropdown open in another program holds the keyboard for
+        as long as it is open: Hyprland names the overlay the active window
+        and goes on sending every key to the menu. So Esc closed the menu
+        under the frozen picture of it, Hyprland handed the keyboard back
+        to that menu's window, and the overlay never heard a key until it
+        was clicked: the second Esc went to the program behind.
+
+        Nothing takes the keyboard from an open menu, so the first key
+        still goes to it. Once it has closed the next ask succeeds, so the
+        asking goes on until Qt reports a key focus -- and stops there, so
+        a window the user turns to afterwards on purpose keeps it.
+        """
+        widget = getattr(self, "_retake_widget", None)
+        if (
+            widget is None
+            or not widget.isVisible()
+            or self._has_keyboard()
+            or self._retake_tries >= self._FOCUS_RETAKE_TRIES
+        ):
+            self._retake_scheduled = False
+            self._retake_widget = None
+            return
+        self._retake_tries += 1
+        selector = json.dumps(f"title:^{re.escape(widget.windowTitle())}$")
+        self._hyprctl_eval(f"hl.dispatch(hl.dsp.focus({{window={selector}}}))")
+        QTimer.singleShot(self._FOCUS_RETAKE_MS, self._retake_keyboard_step)
 
     def places_windows(self) -> bool:
         """True under X11. Under Wayland a client cannot place its own
