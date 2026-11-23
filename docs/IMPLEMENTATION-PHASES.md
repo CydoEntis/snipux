@@ -72,8 +72,8 @@ anything new lands on top.
 
 ## Phase 3: Linux parity
 
-1. #92 Read text on Linux with a system tesseract -- adds an optional
-   system tool; the same rules as `ffmpeg` apply (found, never required)
+(#92, reading text on Linux with a system tesseract, is done: an optional
+system tool under the same rules as `ffmpeg` -- found, never required.)
 
 (#93, pause and resume on Linux, shipped in 1.0.0.)
 

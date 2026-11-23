@@ -23,7 +23,7 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` Active window (A) and Full screen following the pointer across monitors
 - [x] `done` Browser mode: the page area of the browser in front, and full-page scroll-and-stitch
 - [x] `done` Delay before capture, chosen on the chooser row
-- [x] `done` Hide sensitive: black out passwords and keys found by OCR (Windows)
+- [x] `done` Hide sensitive: black out passwords and keys found by OCR (Windows; Linux with a system tesseract)
 - [x] `done` Nudge the selection with the arrow keys
 - [x] `done` Open an image you already have (`snipux shot.png`, or drop it on the review window)
 - [ ] `now` Find the page inside a browser window on Linux X11 (#81, needs a real desktop)
@@ -56,7 +56,7 @@ only once its scope, acceptance criteria and how to verify it are clear.
 - [x] `done` The image and video editors as apps of their own: `snipux FILE`
       by type, `--image-editor`/`--video-editor`, an empty state, Open… and
       drag-and-drop, launcher entries and "Open with" on Linux and Windows
-- [ ] `now` Read text on Linux with a system tesseract (#92)
+- [x] `done` Read text on Linux with a system tesseract (#92): optional, found on `PATH`, never installed by us
 - [ ] `now` Recent captures as thumbnails in a window (#107)
 - [ ] `idea` The stills destination model -- open product question, see TODO.md
 

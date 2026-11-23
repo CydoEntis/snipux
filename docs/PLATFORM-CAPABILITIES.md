@@ -36,6 +36,7 @@ global hotkey registers one chord; snipux does not see other keystrokes.
 | `org.gnome.Shell.Screencast` / `ScreencastArea` | recording | GNOME's recording indicator. WebM; the interface has no audio and no pause. |
 | `gpu-screen-recorder` | region/full-desktop recording on Wayland compositors such as Hyprland | MP4. Started only after the frozen-frame selection; stopped with SIGINT so the container is finalized. Can record the default output or input when selected. Pause and resume are SIGUSR2, in place in the one file. |
 | system `ffmpeg` (optional), PulseAudio input | recording sound, and joining a paused recording's pieces | Nothing. Without it, Pause and the System/Mic sources are greyed and say why. |
+| system `tesseract` (optional, subprocess) | Hide sensitive | On-device. Found on `PATH`, never installed by us; without it the switch is greyed with the command that installs it (`sudo pacman -S tesseract tesseract-data-eng`, `sudo apt install tesseract-ocr`). The selection goes to temp `.bmp` files, cut into bands read by one process each, and the folder is deleted after the call. Reads in the desktop's language where its data is installed, and English. Gives up after 5 seconds and says nothing was hidden. |
 | `grim`, `scrot`, ImageMagick `import` | capture backends when present | Nothing. Each is one backend among several. |
 | `xprop` | window geometry on X11 (Window/Browser modes) | Nothing. |
 | `wl-copy` | clipboard on Wayland when Qt's is not enough | Nothing. |
@@ -60,7 +61,7 @@ top there.
 | COM `IShellLinkW` / `IPersistFile` (raw `ctypes`) | Start Menu and Startup shortcuts, and the two editors' Start Menu shortcuts (`SetArguments` carries their flag) | Written by `--setup` / first run of the exe; undone by `--remove`. |
 | `winreg`, `HKCU\Software\Classes` | "Open with" for images and recordings: a ProgID per editor, `OpenWithProgids` on each suffix, `Applications\<launcher>.exe` for the name | Per user, no elevation. Does not set itself as the default -- that is `UserChoice`, which nothing here writes. Written by `--setup`; undone by `--remove`, which leaves other apps' values on the same suffixes alone. |
 | `shell32.SHChangeNotify(SHCNE_ASSOCCHANGED)` | telling Explorer the associations changed | "Open with" updates at once rather than after sign-in. |
-| `Windows.Media.Ocr` via `powershell.exe` | Hide sensitive, text snapping | On-device. The image goes to a temp `.bmp`, which is deleted after the call. Needs an OCR language installed; greyed with the reason if not. |
+| `Windows.Media.Ocr` via `powershell.exe` | Hide sensitive | On-device. The image goes to a temp `.bmp`, which is deleted after the call. Needs an OCR language installed; greyed with the reason if not. |
 | Self-relocation to `%LOCALAPPDATA%\snipux` | the standalone exe survives a Downloads cleanup | First run only. |
 
 The exe is unsigned, so SmartScreen warns on first run (see

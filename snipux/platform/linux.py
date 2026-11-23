@@ -41,7 +41,7 @@ from PyQt6.QtGui import QGuiApplication
 
 from snipux import capture, ffmpeg, recording, setup_desktop
 
-from . import Platform
+from . import Platform, tesseract_ocr
 
 # Type-only: `capture.py`/`recording.py` import this package at their top, so
 # a name imported out of either here could still be undefined when
@@ -999,6 +999,22 @@ class LinuxPlatform(Platform):
             "" if self.can_pin() else
             "Wayland doesn't let an app place its own window or keep it on top."
         )
+
+    def recognizes_text(self) -> bool:
+        """True where a system `tesseract` is on `PATH`.
+
+        Found, never required -- the same rule as `ffmpeg`. Only a `PATH`
+        lookup, because the overlay asks every time it opens; it is also
+        why installing tesseract takes effect on the next snip, with no
+        restart.
+        """
+        return tesseract_ocr.available()
+
+    def text_recognition_unavailable_reason(self) -> str:
+        return "" if tesseract_ocr.available() else tesseract_ocr.install_hint()
+
+    def recognize_text(self, image) -> list:
+        return tesseract_ocr.recognize(image)
 
     def records_audio(self) -> bool:
         """Whether the selected Linux recording route can carry sound."""
