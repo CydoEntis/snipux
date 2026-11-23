@@ -38,7 +38,8 @@ free, on Linux too — and a slightly better one back on Windows.
 - **Annotate in place** — pen, highlighter, arrows, boxes, numbered steps, text
   and blur, drawn straight onto the frozen screen. No separate editor to open.
 - **Hide sensitive** — one switch blacks out passwords, API keys, card numbers
-  and email addresses before the snip leaves your screen *(Windows)*.
+  and email addresses before the snip leaves your screen *(built in on
+  Windows; on Linux it needs [tesseract](#about-tesseract))*.
 - **Record the same selection** — to MP4 on Windows or WebM on GNOME, with an
   optional countdown.
 - **Trim and export** — a player with a filmstrip and waveform, exporting MP4,
@@ -120,8 +121,11 @@ there is no second command to run. Two things worth knowing:
 - **Keep the AppImage somewhere it will stay.** The shortcut points at the
   file itself, so if you move it later, run it once from its new home to
   re-point the shortcut.
-- **Updating is downloading the newer file**, not `snipux --update`: the
-  `.deb` installs over the old one, and the AppImage replaces it.
+- **The AppImage updates itself**: pick **Update** in the tray when it
+  offers one, or run `snipux --update`. It replaces the file where it is
+  and keeps the previous version beside it as
+  `Snipux.AppImage.<version>.bak`. The `.deb` is updated by downloading
+  the newer one and installing it over the old.
 - **Uninstalling the `.deb` wants `snipux --remove` first.** `apt remove`
   clears what the package installed, but the desktop entry, autostart entry,
   icons and Ctrl+Alt+S shortcut that the first launch wrote live in your own
@@ -364,14 +368,18 @@ change between versions.
 **Snipux checks once a day and offers one click.** The first time you open it
 on a new day it asks GitHub whether there is a newer release. If there is, the
 tray says so and its menu item becomes **Update to 1.2.0** — which downloads
-the new installer, runs it, and starts Snipux again.
+the new version, checks it against the SHA-256 the release published,
+installs it, and starts Snipux again. On Windows that is the installer; on
+Linux it is the AppImage, replaced where it is, with the version you were on
+kept beside it as `Snipux.AppImage.<version>.bak`.
 
 Nothing installs itself. The check can only put a sentence in the tray; every
 update is a click.
 
 Where that one click is not possible, it tells you what is: `snipux --update`
-for a pip install, and the Releases page for a `.deb` (installing a package
-needs root, which a tray app should not be asking for).
+for a pip install, `pipx upgrade snipux` for a pipx one, and the file to
+download for a `.deb` or for an AppImage in a folder Snipux cannot write to
+(installing a package needs root, which a tray app should not be asking for).
 
 Those are the only times Snipux touches the network, and nothing is sent but
 the request: no token, no identifiers, nothing about the machine.
@@ -785,6 +793,26 @@ mystery.
   **Windows 10 2004+ / 11**
 - **`ffmpeg`** — genuinely optional, never installed. See
   [About ffmpeg](#about-ffmpeg).
+- **`tesseract`** — genuinely optional, never installed. Hide sensitive on
+  Linux uses it. See [About tesseract](#about-tesseract).
+
+### About tesseract
+
+Windows can read the text in a picture by itself. Linux cannot, so on Linux
+**Hide sensitive** uses `tesseract` if it is installed. Snipux does not
+depend on it, does not bundle it, and never installs it. Without it the
+switch is greyed and says what to run:
+
+```sh
+sudo pacman -S tesseract tesseract-data-eng   # Arch, Omarchy
+sudo apt install tesseract-ocr                # Ubuntu, Debian
+```
+
+It takes effect on the next snip, with no restart. Text is read on your
+machine and nothing is sent anywhere. Snipux reads in English, and in your
+desktop's language as well if that language's tesseract data is installed.
+If a snip cannot be read within five seconds, Snipux says the sensitive
+text was not hidden rather than letting it go out unchecked.
 
 ## Development
 

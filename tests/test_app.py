@@ -37,7 +37,7 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
-from conftest import skip_on_windows
+from conftest import disconnect_quit_time_unbind, skip_on_windows
 from snipux import app
 from snipux import handoff
 from snipux import overlay as overlay_module
@@ -6558,6 +6558,38 @@ class TestShortcutFlag:
         assert "only means anything alongside --setup" in capsys.readouterr().err
 
 
+class TestTheQuitTimeUnbindDoesNotOutliveItsTest:
+    """`install_hotkey_listener()` leaves `unbind_shortcut` connected to the
+    one `QApplication` every test shares. conftest takes it off again after
+    each test; without that, the next test to quit the application ran the
+    real unbind -- which on a Hyprland desk rewrote the developer's own
+    bindings.
+    """
+
+    def test_a_later_quit_does_not_run_it(self, make_controller, monkeypatch):
+        ran = []
+        monkeypatch.setattr(
+            type(app.platform.current), "unbind_shortcut",
+            lambda self: ran.append(1) or "", raising=False,
+        )
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(QApplication, "installNativeEventFilter", lambda self, f: None)
+        monkeypatch.setattr(app.platform.current, "bind_shortcut", lambda shortcut=None: "")
+        monkeypatch.setattr(
+            app.platform.current, "registered_shortcut", "Control+Alt+S", raising=False
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+        controller.install_hotkey_listener()
+
+        QApplication.instance().aboutToQuit.emit()
+        assert ran == [1], "the listener connects it; that is what must be undone"
+
+        disconnect_quit_time_unbind()   # what conftest does after every test
+        QApplication.instance().aboutToQuit.emit()
+
+        assert ran == [1]
+
+
 class TestWindowsHotkeyIntegration:
     """SNX-91: the resident app registers a global hotkey on Windows and
     starts a capture when it fires, even while another application has
@@ -9248,6 +9280,152 @@ class TestTheUpdateCommand:
         assert calls == []
         assert "snipux.exe" in capsys.readouterr().out
 
+
+class TestTheUpdateCommandFromAnAppImage:
+    """`snipux --update` from an AppImage that can replace itself does what
+    the tray's Update item does. The platform, both requests and the
+    download folder are fakes: no network, no AppImage.
+    """
+
+    ASSET = "Snipux-99.0.0-x86_64.AppImage"
+    URL = "https://example/Snipux-99.0.0-x86_64.AppImage"
+    BODY = b"the published AppImage"
+
+    @pytest.fixture
+    def appimage(self, monkeypatch):
+        """A platform that says this is a replaceable AppImage, recording
+        what it is asked to install."""
+        installed = []
+        monkeypatch.setattr(app.platform, "is_linux", lambda: True)
+        monkeypatch.setattr(
+            app.platform.current, "update_asset_name",
+            lambda version: f"Snipux-{version}-x86_64.AppImage",
+        )
+        monkeypatch.setattr(
+            app.platform.current, "install_update",
+            lambda path: installed.append(Path(path).read_bytes()) or True,
+        )
+        monkeypatch.setattr(
+            app.platform.current, "manual_update_hint", lambda version: "Do it by hand."
+        )
+        return installed
+
+    def _opener(self, *, version="99.0.0", body=None, digest=None, assets=True):
+        import hashlib
+
+        body = self.BODY if body is None else body
+        if digest is None:
+            digest = "sha256:" + hashlib.sha256(self.BODY).hexdigest()
+        release = {"tag_name": f"v{version}", "assets": []}
+        if assets:
+            release["assets"].append(
+                {"name": self.ASSET, "browser_download_url": self.URL, "digest": digest}
+            )
+        asked = []
+
+        def opener(url):
+            asked.append(url)
+            if url == updates.LATEST_RELEASE_URL:
+                return json.dumps(release).encode()
+            return body
+
+        return opener, asked
+
+    def test_it_downloads_checks_and_installs(self, appimage, tmp_path, capsys):
+        opener, asked = self._opener()
+
+        assert app.run_update(opener=opener, temp_dir=tmp_path) == 0
+
+        assert asked == [updates.LATEST_RELEASE_URL, self.URL]
+        assert appimage == [self.BODY]
+        out = capsys.readouterr().out
+        assert "Updated to Snipux 99.0.0" in out
+        # It replaced a file; the snipux in the tray is still the old one.
+        assert "Quit Snipux from the tray" in out
+
+    def test_pip_is_never_run(self, appimage, tmp_path):
+        opener, _asked = self._opener()
+        ran = []
+
+        app.run_update(runner=lambda c: ran.append(c) or 0, opener=opener, temp_dir=tmp_path)
+
+        assert ran == []
+
+    def test_a_file_that_is_not_the_published_one_is_not_installed(
+        self, appimage, tmp_path, capsys
+    ):
+        opener, _asked = self._opener(body=b"something else entirely")
+
+        assert app.run_update(opener=opener, temp_dir=tmp_path) == 1
+
+        assert appimage == []
+        assert "not the file Snipux published" in capsys.readouterr().out
+        # Never written anywhere, not even to the download folder.
+        assert list(tmp_path.rglob("*.AppImage*")) == []
+
+    def test_a_release_with_no_digest_is_not_downloaded(self, appimage, tmp_path, capsys):
+        opener, asked = self._opener(digest="")
+
+        assert app.run_update(opener=opener, temp_dir=tmp_path) == 1
+
+        assert asked == [updates.LATEST_RELEASE_URL]
+        assert appimage == []
+        assert "cannot be verified" in capsys.readouterr().out
+
+    def test_offline_says_so(self, appimage, tmp_path, capsys):
+        def offline(url):
+            raise OSError("Network is unreachable")
+
+        assert app.run_update(opener=offline, temp_dir=tmp_path) == 1
+
+        assert appimage == []
+        assert "Try again when you are online" in capsys.readouterr().out
+
+    def test_a_download_that_fails_says_so(self, appimage, tmp_path, capsys):
+        opener, _asked = self._opener()
+
+        def cut_off(url):
+            if url == updates.LATEST_RELEASE_URL:
+                return opener(url)
+            raise OSError("Connection reset by peer")
+
+        assert app.run_update(opener=cut_off, temp_dir=tmp_path) == 1
+
+        assert appimage == []
+        assert "Could not download the update" in capsys.readouterr().out
+
+    def test_already_newest_downloads_nothing(self, appimage, tmp_path, capsys):
+        opener, asked = self._opener(version=__version__)
+
+        assert app.run_update(opener=opener, temp_dir=tmp_path) == 0
+
+        assert asked == [updates.LATEST_RELEASE_URL]
+        assert "is the newest version" in capsys.readouterr().out
+
+    def test_a_release_without_this_machines_appimage_says_how_instead(
+        self, appimage, tmp_path, capsys
+    ):
+        opener, asked = self._opener(assets=False)
+
+        assert app.run_update(opener=opener, temp_dir=tmp_path) == 1
+
+        assert asked == [updates.LATEST_RELEASE_URL]
+        out = capsys.readouterr().out
+        assert "no AppImage for this machine" in out and "Do it by hand." in out
+
+    def test_a_disk_that_refuses_is_reported_in_the_platforms_words(
+        self, appimage, monkeypatch, tmp_path, capsys
+    ):
+        opener, _asked = self._opener()
+
+        def full(path):
+            raise app.platform.UpdateError("Not enough free space. Free some.")
+
+        monkeypatch.setattr(app.platform.current, "install_update", full)
+
+        assert app.run_update(opener=opener, temp_dir=tmp_path) == 1
+        assert "Not enough free space. Free some." in capsys.readouterr().out
+
     def test_the_flag_reaches_it(self, monkeypatch):
         seen = []
         monkeypatch.setattr(app, "run_update", lambda: seen.append(1) or 0)
@@ -9810,6 +9988,165 @@ class TestOneClickUpdate:
 
         assert "Could not start the update" in said[-1]
         assert quit_calls == [], "nothing was replaced, so nothing should close"
+
+    def test_a_platform_that_says_why_is_quoted(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # A full disk and a read-only folder need different things done
+        # about them, and only the platform knows which this was.
+        controller, said, _release = self._controller(make_controller, monkeypatch)
+
+        def full(path):
+            raise app.platform.UpdateError("There is not enough free space. Free some.")
+
+        monkeypatch.setattr(app.platform.current, "install_update", full)
+        quit_calls = []
+        monkeypatch.setattr(controller, "_quit", lambda: quit_calls.append(1))
+
+        controller._on_update_downloaded(str(tmp_path / "Snipux.AppImage"))
+
+        assert said[-1] == "There is not enough free space. Free some."
+        assert quit_calls == []
+
+    def test_a_second_click_does_not_start_a_second_download(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, said, release = self._controller(
+            make_controller, monkeypatch,
+            asset="Snipux-99.0.0-x86_64.AppImage", url="https://example/a.AppImage",
+        )
+        controller._available_update = release
+        controller._update_download = object()   # one already on its way
+        asked = []
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+
+        controller.install_available_update(
+            opener=lambda url: asked.append(url) or b"", temp_dir=temp_dir
+        )
+
+        assert asked == []
+        assert "Still downloading" in said[-1]
+        assert list(temp_dir.iterdir()) == []
+
+    def test_a_build_that_cannot_is_told_how_in_its_own_terms(
+        self, make_controller, monkeypatch
+    ):
+        controller, said, release = self._controller(make_controller, monkeypatch)
+        monkeypatch.setattr(
+            app.platform.current, "manual_update_hint",
+            lambda version: f"Run `pipx upgrade snipux` for {version}.",
+        )
+
+        controller._on_update_checked(release)
+
+        assert said[0] == (
+            "Snipux 99.0.0 is available. Run `pipx upgrade snipux` for 99.0.0."
+        )
+
+
+class TestRestartingIntoTheUpdate:
+    """An AppImage is replaced while it runs, so the last step is this
+    process handing over to the new file -- and never two at once.
+    """
+
+    def _installed(self, make_controller, monkeypatch, *, relaunched):
+        state = make_transport_state()
+        controller = make_controller(
+            BackendRegistry([FakeCaptureBackend(make_capture_frame())]),
+            FakeTransport(state),
+        )
+        events = []
+        monkeypatch.setattr(controller, "_report_shortcut", lambda m: events.append(("said", m)))
+        monkeypatch.setattr(controller, "_quit", lambda: events.append(("quit",)))
+        monkeypatch.setattr(app.platform.current, "install_update", lambda path: True)
+        monkeypatch.setattr(
+            controller._transport, "release", lambda: events.append(("released",))
+        )
+
+        def relaunch():
+            events.append(("relaunched",))
+            return relaunched
+
+        monkeypatch.setattr(app.platform.current, "relaunch_after_update", relaunch)
+        controller._available_update = updates.Release(version="99.0.0")
+        return controller, events
+
+    def test_it_stops_listening_before_the_new_one_starts(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        # The other order ends with nothing running: the new snipux finds
+        # this one answering, hands it a request and exits, and this one
+        # quits a moment later.
+        controller, events = self._installed(make_controller, monkeypatch, relaunched=True)
+
+        controller._on_update_downloaded(str(tmp_path / "Snipux.AppImage"))
+
+        assert events == [
+            ("released",),
+            ("relaunched",),
+            ("said", "Updated to Snipux 99.0.0, restarting…"),
+            ("quit",),
+        ]
+
+    def test_an_installer_that_restarts_snipux_itself_is_left_to(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, events = self._installed(make_controller, monkeypatch, relaunched=None)
+
+        controller._on_update_downloaded(str(tmp_path / "setup.exe"))
+
+        assert events[-2:] == [("said", "Updating Snipux…"), ("quit",)]
+
+    def test_one_that_will_not_start_leaves_this_one_running_and_listening(
+        self, make_controller, monkeypatch, tmp_path
+    ):
+        controller, events = self._installed(make_controller, monkeypatch, relaunched=False)
+        reclaimed = []
+        monkeypatch.setattr(
+            controller._transport, "try_claim", lambda: reclaimed.append("claim") or True
+        )
+        monkeypatch.setattr(
+            controller._transport, "listen", lambda *callbacks: reclaimed.append(callbacks)
+        )
+
+        controller._on_update_downloaded(str(tmp_path / "Snipux.AppImage"))
+
+        assert ("quit",) not in events
+        assert reclaimed[0] == "claim"
+        # Answering the shortcut again, with the same handlers as before.
+        assert reclaimed[1] == (
+            controller.start_capture, controller.open_settings,
+            controller.open_path, controller.open_editor,
+        )
+        said = events[-1][1]
+        assert "99.0.0 is installed" in said and "Quit Snipux" in said
+        # The update is done; the menu must not offer to install it again.
+        assert controller._available_update is None
+
+    def test_releasing_the_real_socket_lets_the_next_launch_claim_it(self, qapp):
+        name = f"snipux-test-release-{os.getpid()}-{id(self)}"
+        old = app.QLocalSocketTransport(name)
+        assert old.try_claim()
+        try:
+            assert not app.QLocalSocketTransport(name).try_claim()
+
+            old.release()
+
+            new = app.QLocalSocketTransport(name)
+            try:
+                assert new.try_claim(), "the released name must be free to claim"
+            finally:
+                new.release()
+        finally:
+            old.release()
+            QLocalServer.removeServer(name)
+
+    def test_releasing_twice_is_harmless(self, qapp):
+        transport = app.QLocalSocketTransport(f"snipux-test-release-twice-{os.getpid()}")
+
+        transport.release()
+        transport.release()
 
 
 class TestARefusedRecordingAnswersNo:

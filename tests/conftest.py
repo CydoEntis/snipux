@@ -26,6 +26,7 @@ the other.
 import os
 import sys
 import time
+from pathlib import Path
 
 # CLAUDE.md requires this suite to pass headless -- a build machine has no
 # display, and neither does an agent's worktree -- so the QPA platform is
@@ -70,6 +71,7 @@ import pytest
 
 from snipux import ffmpeg, setup_desktop
 from snipux.marks import session_styles
+from snipux.platform import tesseract_ocr
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +120,32 @@ def _no_system_ffmpeg():
 
 
 @pytest.fixture(autouse=True)
+def _no_system_tesseract():
+    """Every test starts on a machine with no system tesseract.
+
+    The same rule as `_no_system_ffmpeg`: on Linux, Hide sensitive is live
+    wherever a `tesseract` is on `PATH`, so an overlay built by a test on a
+    machine that has one would start the real engine, and the suite would
+    answer differently here and on CI. A test that needs one says so, by
+    monkeypatching `tesseract_ocr.find_binary` and passing a fake runner.
+
+    Nor a package manager to name in the greyed switch's reason: looking
+    for one is a `PATH` search every overlay built here would otherwise
+    make, under whatever `sys.platform` its test has faked.
+
+    Restored by hand for the reason `_isolated_config` gives.
+    """
+    real = tesseract_ocr.find_binary
+    tesseract_ocr.find_binary = lambda: None
+    tesseract_ocr._manager = None
+    try:
+        yield
+    finally:
+        tesseract_ocr.find_binary = real
+        tesseract_ocr.reset()
+
+
+@pytest.fixture(autouse=True)
 def _isolated_config(tmp_path):
     """Point every test at a throwaway `config.json`, never this machine's
     real `~/.config/snipux/` (or `%APPDATA%`/`XDG_CONFIG_HOME` equivalent) --
@@ -158,6 +186,93 @@ def _isolated_config(tmp_path):
         yield
     finally:
         setup_desktop.config_path = real_config_path
+
+
+# What a test must never be able to reach: this machine's own home. Read
+# before any test runs, so the check in test_setup_desktop.py compares
+# against the real one rather than against a fixture's.
+REAL_HOME = Path.home()
+
+# `USERPROFILE` is what `Path.home()` reads on Windows.
+_HOME_VARIABLES = ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path_factory):
+    """Give every test a home of its own, so nothing it runs can write to
+    this machine's.
+
+    `_isolated_config` above covers `config.json` and nothing else.
+    Everything else `setup_desktop` writes falls back to the real home
+    when a caller passes no directory: the Hyprland bindings
+    (`_hyprland_config_dir`), the `.desktop` and autostart entries, the
+    icons, `~/Pictures/snipux`. A test that reached one of those by
+    accident edited the developer's own desktop -- and one did: with
+    `HYPRLAND_INSTANCE_SIGNATURE` set, a run of this suite took the
+    Snipux shortcut out of `~/.config/hypr/bindings.lua` and reloaded
+    Hyprland. CI has no Hyprland, so it never showed there.
+
+    All three variables, because `XDG_*` unset means "under `$HOME`" and
+    set means "here, whatever `$HOME` is". Not `XDG_CACHE_HOME`: nothing
+    snipux writes goes there, and fontconfig would rebuild its cache.
+
+    By hand rather than through `monkeypatch`, for the teardown-ordering
+    reason `_isolated_config` gives.
+    """
+    # A folder beside the test's `tmp_path`, not inside it: plenty of tests
+    # count what is in theirs.
+    home = tmp_path_factory.mktemp("home")
+    values = {
+        "HOME": home,
+        "USERPROFILE": home,
+        "XDG_CONFIG_HOME": home / ".config",
+        "XDG_DATA_HOME": home / ".local" / "share",
+    }
+    before = {name: os.environ.get(name) for name in _HOME_VARIABLES}
+    for name, value in values.items():
+        value.mkdir(parents=True, exist_ok=True)
+        os.environ[name] = str(value)
+    try:
+        yield home
+    finally:
+        for name, value in before.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def disconnect_quit_time_unbind() -> None:
+    """Take `platform.current.unbind_shortcut` off the application's
+    `aboutToQuit`, however many times it was connected.
+
+    `AppController.install_hotkey_listener()` connects it, and the
+    `QApplication` is one object for the whole run -- so a test that
+    installed the listener left the real unbind waiting on it, and the
+    next test anywhere to quit the application ran it. That is how the
+    shortcut above was removed: by a recording test that quits mid-stop,
+    thousands of tests after the one that made the connection.
+    """
+    from PyQt6.QtCore import QCoreApplication
+
+    from snipux import platform
+
+    application = QCoreApplication.instance()
+    if application is None:
+        return
+    while True:
+        try:
+            application.aboutToQuit.disconnect(platform.current.unbind_shortcut)
+        except (TypeError, RuntimeError):
+            return   # not connected (any more)
+
+
+@pytest.fixture(autouse=True)
+def _no_unbind_outlives_its_test():
+    try:
+        yield
+    finally:
+        disconnect_quit_time_unbind()
 
 
 class FakeRegistry:

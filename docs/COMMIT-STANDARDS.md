@@ -46,7 +46,7 @@ The scope is the area the change is about, usually the module name without
 | `player`     | `player.py` -- the trim editor and export                     |
 | `review`     | `review.py` -- the review window                              |
 | `pin`        | `pin.py` -- pinned snips                                      |
-| `ocr`        | `sensitive.py`, `textsnap.py`, `platform/windows_ocr.py`      |
+| `ocr`        | `sensitive.py`, `textsnap.py`, `platform/windows_ocr.py`, `platform/tesseract_ocr.py` |
 | `settings`   | `settings.py` and the config it edits                         |
 | `tray`       | `app.py`'s tray menu and controller                           |
 | `cli`        | `handoff.py` and `app.py`'s command line                      |
