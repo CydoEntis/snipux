@@ -228,7 +228,8 @@ face by accident. It is now spelled out with the reason.
 Written up from the Linux side on 2026-08-28 and worked on the Windows box
 the same day. Jobs 1, 2 and 4 are built and measured. **Job 3 cannot be
 done from a terminal at all** -- it is watching the flow with your eyes,
-and it is the only one left.
+and it was the only one left until job 5 (below, added 2026-10-23) listed
+what the Hyprland work found that Windows has not yet been asked about.
 
 ### 1 · The recorder always records the primary screen -- FIXED
 
@@ -346,6 +347,61 @@ same wall the player's exporter hit. It also has no need for it: the
 delay that change fixes is GNOME's ~500ms D-Bus round trip, which Qt's
 local objects do not pay. **Do not flip that flag without measuring that
 Windows is slow, and confirming stop() still works from the UI thread.**
+
+### 5 · Does Windows have what the Hyprland work found? -- NOT CHECKED
+
+Written 2026-10-23, from a session on Linux/Hyprland that fixed several
+things no test could see (release 1.2.2). Nothing below has been run on
+Windows. Each item says what was wrong there and what the Windows version of
+the question is. **Test the installed `snipux.exe` / installer build, not a
+checkout** -- the biggest Linux bug (below, "bundle environment") only existed
+inside the packaged AppImage, and every number measured from a checkout was
+blind to it.
+
+Already shared with Windows by 1.2.2, no action: the daily update check no
+longer raises (`UpdateCheck` now emits a `Release`), and icons and resolved
+fonts are cached, which cut the overlay build from ~62ms to ~37ms on Linux.
+The Windows size of that win is unmeasured.
+
+- **How long a snip takes.** Linux went from ~336ms (key press to first
+  paint, real keybind) to ~125-150ms. Find the Windows number: stamp the
+  hotkey press, `start_capture`, the end of `capture()`, `show_on_screen` and
+  the first `paintEvent`, and report each step. Check `/proc/loadavg`'s
+  Windows equivalent first -- the Linux measurements were ruined for hours by
+  other projects' test runs; a timing taken under load means nothing.
+- **Bundle environment leaking into children.** On Linux the AppImage's
+  `LD_LIBRARY_PATH` made every `hyprctl` die, which is what made the desktop
+  shrink on every snip (see `snipux/hostenv.py`). A PyInstaller build on
+  Windows has its own version of this: a `_MEIPASS` directory on `PATH` that
+  a child program can load DLLs from. The thing to try is a child that
+  ships its own libraries -- export a video from the packaged exe with a
+  system `ffmpeg` on PATH, and confirm it is the system one that runs and
+  that it works. `hostenv.py` does nothing on Windows today; if this fails
+  it needs a Windows branch.
+- **Keyboard focus on open.** Press the hotkey and press Esc or Enter at once,
+  without clicking, ten times. On Linux the snip held the keyboard in 0 of 8
+  tries before the fix. `take_keyboard_focus` already exists on Windows
+  (`platform/windows.py`), so this is a check, not a known bug; the
+  foreground-lock rule is the way it would fail.
+- **Window open animation / flash.** On Linux the compositor animated the
+  snip window opening, so the whole desktop appeared to shrink and spring
+  back. Look at the Windows open and close for any scale or fade, and for a
+  hard dim on a bright window. Record the screen at 60fps and look at the
+  frames if the eye cannot tell.
+- **Copies that vanish.** The Linux cause was another project's tests
+  (`cargo test` in seshi, through `arboard`) overwriting the clipboard, and
+  on Linux a clipboard dies with the program that set it. Windows keeps the
+  data, so the same cause would show as the *wrong* thing pasting (the
+  tests' text) rather than nothing. When it happens, write down which:
+  empty, or something else. Then copy a snip, run the seshi (or any other
+  project's) test suite, and paste.
+- **The update notice.** Needs a newer release than the running build. Run an
+  older build and confirm the tray says an update is available.
+
+Left as it is on purpose: the Hyprland-only work (the `nc` shortcut fast
+path, `grim` over a pipe, `hyprctl` batching and prefetch, the overlay rule
+and explicit focus) has no Windows counterpart, because Windows captures
+with `QScreenCapture` and has no compositor to ask.
 
 ## The recording flow was fixed, and so was the recorder underneath it
 
