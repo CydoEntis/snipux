@@ -37,7 +37,7 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
-from conftest import skip_on_windows
+from conftest import disconnect_quit_time_unbind, skip_on_windows
 from snipux import app
 from snipux import handoff
 from snipux import overlay as overlay_module
@@ -6556,6 +6556,38 @@ class TestShortcutFlag:
             main(["--shortcut", "<Super><Shift>x"])
 
         assert "only means anything alongside --setup" in capsys.readouterr().err
+
+
+class TestTheQuitTimeUnbindDoesNotOutliveItsTest:
+    """`install_hotkey_listener()` leaves `unbind_shortcut` connected to the
+    one `QApplication` every test shares. conftest takes it off again after
+    each test; without that, the next test to quit the application ran the
+    real unbind -- which on a Hyprland desk rewrote the developer's own
+    bindings.
+    """
+
+    def test_a_later_quit_does_not_run_it(self, make_controller, monkeypatch):
+        ran = []
+        monkeypatch.setattr(
+            type(app.platform.current), "unbind_shortcut",
+            lambda self: ran.append(1) or "", raising=False,
+        )
+        monkeypatch.setattr(app.HotkeyEventFilter, "is_available", staticmethod(lambda: True))
+        monkeypatch.setattr(QApplication, "installNativeEventFilter", lambda self, f: None)
+        monkeypatch.setattr(app.platform.current, "bind_shortcut", lambda shortcut=None: "")
+        monkeypatch.setattr(
+            app.platform.current, "registered_shortcut", "Control+Alt+S", raising=False
+        )
+        controller = make_controller(BackendRegistry(), FakeTransport(make_transport_state()))
+        controller.install_hotkey_listener()
+
+        QApplication.instance().aboutToQuit.emit()
+        assert ran == [1], "the listener connects it; that is what must be undone"
+
+        disconnect_quit_time_unbind()   # what conftest does after every test
+        QApplication.instance().aboutToQuit.emit()
+
+        assert ran == [1]
 
 
 class TestWindowsHotkeyIntegration:
